@@ -1,7 +1,7 @@
 const std = @import("std");
 const horos = @import("horos");
 const equality = @import("protean").value_equality;
-const kronos = @import("kronos");
+const kosmos = @import("kosmos");
 const Id = horos.source.Id;
 
 fn observe(program: horos.data.activation.Program, left: []const u8, right: []const u8, expected: bool) !void {
@@ -10,7 +10,7 @@ fn observe(program: horos.data.activation.Program, left: []const u8, right: []co
     const storage = try std.testing.allocator.alloc(u8, try horos.data.program_image.encodedLength(program));
     defer std.testing.allocator.free(storage);
     const image = try horos.data.program_image.encode(std.testing.allocator, program, storage);
-    var outcome = try kronos.invocation.invoke(std.testing.allocator, .{ .image = image, .instance = .{ .initial_args = args } });
+    var outcome = try kosmos.invocation.invoke(std.testing.allocator, .{ .image = image, .instance = .{ .initial_args = args } });
     defer outcome.deinit();
     try std.testing.expect(outcome.record == .completed);
     try std.testing.expectEqualSlices(u8, &.{@intFromBool(expected)}, outcome.record.completed);
@@ -28,7 +28,7 @@ fn check(b: *horos.source.Builder, schema: Id, left: []const u8, right: []const 
     try observe(compiled.program, right, left, false);
 }
 
-test "unchanged native Kronos executes structural equality including recursive values" {
+test "unchanged native Kosmos executes structural equality including recursive values" {
     var b = horos.source.Builder.init(std.testing.allocator);
     defer b.deinit();
     const unit = try b.scalar(void);

@@ -1,4 +1,4 @@
-//! Ordinary, versioned environmental records. Kronos continuations remain the
+//! Ordinary, versioned environmental records. Kosmos continuations remain the
 //! existing BPI3/PST3/PKO3 artifacts, never native pointers or application phases.
 const contracts = @import("protean_contracts");
 const std = @import("std");

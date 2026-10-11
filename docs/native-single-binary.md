@@ -2,7 +2,7 @@
 
 `protean` is the supported application. Its human CLI and `agent-host/2.0`
 stdio interface use one native task owner and one authored Horos program.
-Kronos evaluates the program and its saved continuation. Read-only snapshot work,
+Kosmos evaluates the program and its saved continuation. Read-only snapshot work,
 Responses I/O, and generated pure tools are native environmental capabilities.
 
 ## Native acquisition and construction
@@ -19,10 +19,10 @@ zig build protean -Doptimize=safe
 ```
 
 The approved development successor tuple is Horos at
-`8db152d174ff2d844872cbc132db5be010b174e5`, Kronos at
-`4d5dbe037820e3e95074155474508bde3a236dc5`, and SQLite 3.53.4. The versioned
+`a7e7c48211cafcb79598819591a7da87cc8428a1`, Kosmos at
+`0a590a668e75b73953be3e75ee47e13529cc5691`, and SQLite 3.53.4. The versioned
 `agent-native-source-lock/v2` binds exact archives and complete source/package
-inventories. It intentionally contains no WASM delivery contract. Kronos owns
+inventories. It intentionally contains no WASM delivery contract. Kosmos owns
 its optional JS/WASM release descriptor, which this build never rewrites.
 
 Setup performs bounded HTTPS acquisition, authenticates before invoking `tar`
@@ -32,8 +32,8 @@ normal package cache from verified Horos source. Append `--offline` to use
 cached transport bytes only. A mismatched existing input rejects; choose a new
 output directory rather than overwriting a previous pinned build's inputs.
 
-The default native inputs are `.protean-native/inputs/kronos` and
-`.protean-native/inputs/sqlite`. Explicit `-Dkronos-source`, `-Dsqlite-source`, and
+The default native inputs are `.protean-native/inputs/kosmos` and
+`.protean-native/inputs/sqlite`. Explicit `-Dkosmos-source`, `-Dsqlite-source`, and
 `-Dhoros-source` overrides receive the same admission checks. Pure authoring
 consumers can select `-Dnative=false`; they still authenticate Horos.
 
@@ -57,7 +57,7 @@ See `test/consumers/adaptive/build.zig` for a complete downstream recipe:
 protean_root="$PWD"
 cd test/consumers/adaptive
 zig build -Doptimize=safe \
-  -Dkronos-source="$protean_root/.protean-native/inputs/kronos" \
+  -Dkosmos-source="$protean_root/.protean-native/inputs/kosmos" \
   -Dsqlite-source="$protean_root/.protean-native/inputs/sqlite"
 ```
 
@@ -65,7 +65,7 @@ The product targets are macOS arm64 and Linux x86-64 musl. The Linux executable
 is statically linked; macOS uses system libSystem. Native manifests contain no
 build paths and do not claim to authenticate their enclosing binary. At runtime,
 `describe-build` separately hashes the executing artifact. `licenses` exposes
-the required Protean, Horos, Kronos, Zig, SQLite, and applicable musl notices.
+the required Protean, Horos, Kosmos, Zig, SQLite, and applicable musl notices.
 
 ## Operate a task
 
@@ -143,5 +143,5 @@ construction/reuse, and independently altered archives. No paid model calls run.
 stays outside the product boundary; absolute Node/Python launches are denied
 inside it. Setup, package acquisition, emission, `addNativeSystem`, install,
 `describe-build`, and the offline demo execute there using native tools.
-Kronos's independent source oracle agreement and optional JS/WASM embedding are
-qualified in Kronos's existing roots, not reimplemented in Protean.
+Kosmos's independent source oracle agreement and optional JS/WASM embedding are
+qualified in Kosmos's existing roots, not reimplemented in Protean.

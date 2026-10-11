@@ -1,7 +1,7 @@
 # Protean verification
 
 The current product is the native adaptive application plus reusable Protean
-construction and host APIs. Horos owns compilation/linking; Kronos owns
+construction and host APIs. Horos owns compilation/linking; Kosmos owns
 execution and continuation. The adaptive application and supplied tool-construction
 skill are retained from the accepted tool-construction implementation.
 
@@ -40,5 +40,5 @@ The complete CI workflow retains its 300-second target and 360-second maximum,
 including downstream qualification. No new platform matrix is required. Native
 C/SQLite/libc are admitted dependencies; remaining JavaScript is an external
 verification controller or wire support. A small shell source check reports
-missing tracked inputs early. Kronos retains
+missing tracked inputs early. Kosmos retains
 its own optional JS/WASM embedding and independent source-agreement checks.

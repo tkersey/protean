@@ -1,4 +1,4 @@
-// External fixture controller for the copied native Kronos host. Fixture indexes
+// External fixture controller for the copied native Kosmos host. Fixture indexes
 // choose prescribed provider replies, never the agent's policy or continuation.
 import assert from 'node:assert/strict';
 import {createServer} from 'node:https';

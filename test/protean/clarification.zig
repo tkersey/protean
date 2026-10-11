@@ -1,8 +1,8 @@
-//! Independent numeric decision oracle executed by unchanged native Kronos.
+//! Independent numeric decision oracle executed by unchanged native Kosmos.
 const std = @import("std");
 const protean = @import("protean");
 const horos = @import("horos");
-const kronos = @import("kronos");
+const kosmos = @import("kosmos");
 const source = horos.source;
 const clarification = protean.clarification;
 const a = std.testing.allocator;
@@ -52,7 +52,7 @@ const Fixture = struct {
         const invocation_image_0 = try a.alloc(u8, try horos.data.program_image.encodedLength(f.compiled.program));
         defer a.free(invocation_image_0);
         _ = try horos.data.program_image.encode(a, f.compiled.program, invocation_image_0);
-        var outcome = try kronos.invocation.invoke(a, .{
+        var outcome = try kosmos.invocation.invoke(a, .{
             .image = invocation_image_0,
             .instance = .{ .initial_args = args },
         });
@@ -364,7 +364,7 @@ fn call(b: *source.Builder, function: Id, arguments: []const Id) !Id {
     return b.term(.{ .call = .{ .function = function, .arguments = arguments } });
 }
 
-fn respond(outcome: *kronos.invocation.Outcome, program: horos.data.activation.Program, comptime T: type, value: T, statistics: ?*kronos.Statistics) !void {
+fn respond(outcome: *kosmos.invocation.Outcome, program: horos.data.activation.Program, comptime T: type, value: T, statistics: ?*kosmos.Statistics) !void {
     const protocol = horos.data.invocation;
     var request_owner_0 = try protocol.decode(protocol.Request, a, outcome.record.requested.request);
     defer request_owner_0.deinit();
@@ -385,14 +385,14 @@ fn respond(outcome: *kronos.invocation.Outcome, program: horos.data.activation.P
     const next = observed: {
         const instance: horos.data.invocation.Instance = .{ .state = outcome.record.requested.state.? };
         var session = switch (instance) {
-            .initial_args => |initial| try kronos.Session.initImage(a, invocation_image_1, initial),
-            .state => |state| try kronos.Session.restoreImage(a, invocation_image_1, state),
+            .initial_args => |initial| try kosmos.Session.initImage(a, invocation_image_1, initial),
+            .state => |state| try kosmos.Session.restoreImage(a, invocation_image_1, state),
         };
         defer session.deinit();
         session.statistics = statistics;
         if (statistics) |observed_statistics| session.store.statistics = &observed_statistics.storage;
-        _ = try kronos.invocation.advance(&session, .{ .reply = encoded }, null);
-        break :observed try kronos.invocation.finish(a, &session, true);
+        _ = try kosmos.invocation.advance(&session, .{ .reply = encoded }, null);
+        break :observed try kosmos.invocation.finish(a, &session, true);
     };
     outcome.deinit();
     outcome.* = next;
@@ -405,21 +405,21 @@ test "protected composition resumes captured futures, groups non-tail results, a
     const args = try protean.contracts.encodeOwned(Initial, a, .{ .context = 77, .ids = &.{ 1, 2 } });
     defer a.free(args);
     for ([_]bool{ false, true }) |divergent| {
-        var statistics: kronos.Statistics = .{};
+        var statistics: kosmos.Statistics = .{};
         const invocation_image_2 = try a.alloc(u8, try horos.data.program_image.encodedLength(f.compiled.program));
         defer a.free(invocation_image_2);
         _ = try horos.data.program_image.encode(a, f.compiled.program, invocation_image_2);
         var outcome = observed: {
             const instance: horos.data.invocation.Instance = .{ .initial_args = args };
             var session = switch (instance) {
-                .initial_args => |initial| try kronos.Session.initImage(a, invocation_image_2, initial),
-                .state => |state| try kronos.Session.restoreImage(a, invocation_image_2, state),
+                .initial_args => |initial| try kosmos.Session.initImage(a, invocation_image_2, initial),
+                .state => |state| try kosmos.Session.restoreImage(a, invocation_image_2, state),
             };
             defer session.deinit();
             session.statistics = &statistics;
             session.store.statistics = &statistics.storage;
-            _ = try kronos.invocation.advance(&session, .none, null);
-            break :observed try kronos.invocation.finish(a, &session, true);
+            _ = try kosmos.invocation.advance(&session, .none, null);
+            break :observed try kosmos.invocation.finish(a, &session, true);
         };
         defer outcome.deinit();
         for (1..3) |id| {
@@ -553,21 +553,21 @@ fn growingDomain(count: usize) !void {
     const Initial = struct { context: u64, ids: []const u64 };
     const args = try protean.contracts.encodeOwned(Initial, a, .{ .context = 99, .ids = ids });
     defer a.free(args);
-    var statistics: kronos.Statistics = .{};
+    var statistics: kosmos.Statistics = .{};
     const invocation_image_3 = try a.alloc(u8, try horos.data.program_image.encodedLength(f.compiled.program));
     defer a.free(invocation_image_3);
     _ = try horos.data.program_image.encode(a, f.compiled.program, invocation_image_3);
     var outcome = observed: {
         const instance: horos.data.invocation.Instance = .{ .initial_args = args };
         var session = switch (instance) {
-            .initial_args => |initial| try kronos.Session.initImage(a, invocation_image_3, initial),
-            .state => |state| try kronos.Session.restoreImage(a, invocation_image_3, state),
+            .initial_args => |initial| try kosmos.Session.initImage(a, invocation_image_3, initial),
+            .state => |state| try kosmos.Session.restoreImage(a, invocation_image_3, state),
         };
         defer session.deinit();
         session.statistics = &statistics;
         session.store.statistics = &statistics.storage;
-        _ = try kronos.invocation.advance(&session, .none, null);
-        break :observed try kronos.invocation.finish(a, &session, true);
+        _ = try kosmos.invocation.advance(&session, .none, null);
+        break :observed try kosmos.invocation.finish(a, &session, true);
     };
     defer outcome.deinit();
     var calls: usize = 0;

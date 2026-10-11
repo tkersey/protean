@@ -8,7 +8,7 @@ selects among approved models and reasoning settings, loads approved skills,
 asks questions, and constructs and reuses bounded pure tools.
 
 The application is authored in Zig. Horos checks and compiles its control
-flow into BPI3; native Kronos owns execution and continuation. Protean supplies
+flow into BPI3; native Kosmos owns execution and continuation. Protean supplies
 provider I/O, tools, task storage, and CLI/stdio clients. The host does not
 interpret a recipe or run a second application policy loop.
 
@@ -29,7 +29,7 @@ zig build protean -Doptimize=safe
 ```
 
 Setup authenticates complete source inventories, seeds Zig's pinned Horos
-package, and retains only native Kronos source and SQLite inputs. Append
+package, and retains only native Kosmos source and SQLite inputs. Append
 `--offline` to setup to require previously cached archives. Existing dependency
 directories are rechecked and never silently replaced.
 
@@ -90,6 +90,6 @@ removed. See [migration notes](docs/migration_from_3.md). Distributed adaptive
 mobility is future work. Checkpoint export/import preserves local continuation
 and compatibility checks; it does not establish exclusive distributed custody.
 
-Horos's independent source oracle and Kronos's source-agreement tests remain
-outside this product. Kronos's optional JS/WASM embedding remains supported by
-Kronos and is not a native Protean prerequisite.
+Horos's independent source oracle and Kosmos's source-agreement tests remain
+outside this product. Kosmos's optional JS/WASM embedding remains supported by
+Kosmos and is not a native Protean prerequisite.

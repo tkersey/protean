@@ -1,4 +1,4 @@
-//! Native semantic checks with one shared Kronos/Protean module graph.
+//! Native semantic checks with one shared Kosmos/Protean module graph.
 test {
     _ = @import("adaptive_controls.zig");
     _ = @import("adaptive_responses.zig");

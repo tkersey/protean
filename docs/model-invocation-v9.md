@@ -4,7 +4,7 @@
 `protean.model_invocation.Profile`. The shared invocation is v7 and inline replay is v8. Earlier saved contracts
 require their original compatible build. Native reference replay uses v9
 because provider history must remain in immutable environmental storage rather
-than grow inside the Kronos continuation.
+than grow inside the Kosmos continuation.
 
 `P.ReferenceRequest` contains the existing `P.Request` invocation, an optional
 `ContextReference`, the ordinary tool results, and a 32-byte frozen

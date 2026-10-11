@@ -30,7 +30,7 @@ pub const Product = struct {
     manifest: std.Build.LazyPath,
 };
 
-/// The dependency must select its admitted Kronos source and SQLite with the normal
+/// The dependency must select its admitted Kosmos source and SQLite with the normal
 /// Protean build options. Pure authoring consumers never need those options.
 pub fn addNativeSystem(b: *std.Build, dependency: *std.Build.Dependency, options: Options) Product {
     const product = addWithModules(b, .{
@@ -101,8 +101,8 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
     manifest.addFileArg2(assets.application, .{});
     manifest.addFileArg2(modules.root.path(b, "conformance/protean/dependencies.lock.json"), .{});
     manifest.addFileArg2(modules.root.path(b, "LICENSE"), .{});
-    const kronos = modules.native.import_table.get("kronos") orelse @panic("missing admitted Kronos module");
-    manifest.addFileArg2(kronos.root_source_file.?.dirname().dirname().path(b, "LICENSE"), .{});
+    const kosmos = modules.native.import_table.get("kosmos") orelse @panic("missing admitted Kosmos module");
+    manifest.addFileArg2(kosmos.root_source_file.?.dirname().dirname().path(b, "LICENSE"), .{});
     manifest.addFileArg2(modules.native_data.root_source_file.?.dirname().dirname().dirname().path(b, "LICENSE"), .{});
     manifest.addDirectoryArg2(modules.sqlite_source, .{ .make_absolute = true });
     manifest.addArg("system");

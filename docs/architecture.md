@@ -3,8 +3,8 @@
 The application emitter constructs one Horos source module. Protean checks its
 catalogs and protected construction, then calls Horos's compiler once. Horos
 owns type/effect/capture/use checking, direct stable-activation lowering, and
-BPI3/PST3/ERQ3/ERS3/PKI3/PKO3. Kronos owns execution. The native source lock
-selects an explicit development successor tuple for Horos and Kronos.
+BPI3/PST3/ERQ3/ERS3/PKI3/PKO3. Kosmos owns execution. The native source lock
+selects an explicit development successor tuple for Horos and Kosmos.
 Published 3.0.0 / 6.0.0 artifacts retain their original identities. The adaptive
 agent is the supported application; reusable authoring and native-host owners remain.
 
@@ -13,7 +13,7 @@ agent is the supported application; reusable authoring and native-host owners re
 | Application | Control topology, declared policies, data retention and context projection |
 | Protean | Typed domain constructions, semantic contracts, protected source admission |
 | Horos | Source calculus, portable values, checking, compilation and pure codecs |
-| Kronos | Program-relative state admission, interpretation, protocol framing and binding |
+| Kosmos | Program-relative state admission, interpretation, protocol framing and binding |
 | Environment | Faithful typed results, credentials, authentication, atomic external operations |
 
 `protean.system` binds InitialArgs, Result, Failure, optional descriptor catalogs and
@@ -67,7 +67,7 @@ instead of trusting a list of helper names. Native application authors choose po
 and are trusted not to mutate Builder internals or forge admission metadata. Raw
 Horos authoring without the same Protean gate carries no protected-system claim.
 
-The native host delegates to Kronos and returns original canonical outcomes. Inspection
+The native host delegates to Kosmos and returns original canonical outcomes. Inspection
 is a non-authoritative view. Missing input stays parked; cleanup can itself park.
 Killing an execution worker produces no authoritative successor or cleanup proof.
 Content identity, conversation identity and delivery occurrence are distinct; whole

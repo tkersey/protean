@@ -1,4 +1,4 @@
-//! Transactional environmental state. Kronos bytes are opaque objects; every
+//! Transactional environmental state. Kosmos bytes are opaque objects; every
 //! acknowledged mutation publishes its receipt, records and events together.
 const std = @import("std");
 const contracts = @import("protean_contracts");

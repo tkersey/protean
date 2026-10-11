@@ -2,7 +2,7 @@ const std = @import("std");
 const protean = @import("protean");
 const horos = @import("horos");
 const native = @import("protean_native");
-const kronos = @import("kronos");
+const kosmos = @import("kosmos");
 const protocol = horos.data.invocation;
 const Inbox = protean.inbox.Profile(u32);
 const T = struct {
@@ -133,7 +133,7 @@ pub fn ownerManifest(a: std.mem.Allocator, image: []const u8, identity: [32]u8, 
         .program_sha256 = @as([]const u8, &image_hex),
         .program_identity = @as([]const u8, &identity_hex),
         .application_assets_sha256 = @as([]const u8, &assets_hex),
-        .dependencies = .{ .world = "unit-kronos", .boundary = "unit-horos" },
+        .dependencies = .{ .world = "unit-kosmos", .boundary = "unit-horos" },
         .compiler = .{ .version = "0.17.0" },
     }, .{});
 }
@@ -477,7 +477,7 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
     try std.testing.expectEqual(1, calls);
     try std.testing.expectEqual(@as(u32, if (captured) 2 else 1), try namespace.store.capabilityAttempts(accepted.receipt.task, "task-owner.increment.v1"));
     try std.testing.expectEqual(@as(u32, 0), try namespace.store.capabilityAttempts(accepted.receipt.task, "another-capability"));
-    // Restart at durable acquisition, before Kronos consumes the reply.
+    // Restart at durable acquisition, before Kosmos consumes the reply.
     try service.close(frame);
     service_live = false;
     try namespace.close();
@@ -516,7 +516,7 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
     _ = try service.resumeTask(frame, "resume", accepted.receipt.task, status.value.revision);
     if (captured) {
         // Recover/interpret the raw acquisition, then test the settled boundary
-        // before Kronos consumes it, using the non-inference adapter fixture.
+        // before Kosmos consumes it, using the non-inference adapter fixture.
         try std.testing.expect(try service.pump(frame) == .progressed);
         try checkCaptureImport(a, frame, io, &service, &namespace, &service_live, &namespace_live, path, path_buffer[0..length], accepted.receipt.task, "settled-capture");
     }
@@ -979,7 +979,7 @@ fn largeArtifactBatch(service: *native.tasks.Service(T), task_id: [16]u8) !void 
 
     // Test-local allocation pressure proves bounded chunk reads. These bytes
     // are not a production SQLite, worker, or host heap policy.
-    var budget: kronos.AllocationBudget = .{ .parent = a, .limit = 64 * 1024 * 1024 };
+    var budget: kosmos.AllocationBudget = .{ .parent = a, .limit = 64 * 1024 * 1024 };
     const bounded = budget.allocator();
     const reservation = try bounded.alloc(u8, 32 * 1024 * 1024);
     defer bounded.free(reservation);
@@ -1116,7 +1116,7 @@ fn largeResultWitness(comptime Types: type) !void {
 
     // Authoring/image bytes above model build-time work and embedded read-only
     // assets. All runtime owners below share the real 64MiB allocation budget.
-    var budget: kronos.AllocationBudget = .{ .parent = harness, .limit = 64 * 1024 * 1024 };
+    var budget: kosmos.AllocationBudget = .{ .parent = harness, .limit = 64 * 1024 * 1024 };
     const a = budget.allocator();
     // SQLite is charged by Namespace.open. Reserve only the absent process
     // worker and input framer, then actually admit the large resource set.
@@ -1599,7 +1599,7 @@ test "completed result beyond the former wire-read ceiling remains publicly retr
     var params = native.json.object();
     try native.json.put(a, &params, "task_id", native.json.string(try a.dupe(u8, &std.fmt.bytesToHex(accepted.receipt.task, .lower))));
     // The response view must fit independently of the multi-megabyte wire value.
-    var response_budget: kronos.AllocationBudget = .{ .parent = parent, .limit = 256 * 1024 };
+    var response_budget: kosmos.AllocationBudget = .{ .parent = parent, .limit = 256 * 1024 };
     var response_arena = std.heap.ArenaAllocator.init(response_budget.allocator());
     defer response_arena.deinit();
     const result = try client.call(response_arena.allocator(), .@"task.result", params);

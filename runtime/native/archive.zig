@@ -1,4 +1,4 @@
-//! Environmental archives. Canonical Kronos objects and ordinary Protean
+//! Environmental archives. Canonical Kosmos objects and ordinary Protean
 //! records travel as data; namespace locks, grants and subscriptions do not.
 const std = @import("std");
 const contracts = @import("protean_contracts");
@@ -491,7 +491,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         var decoded = try contracts.decodeOwned(state.Receipt, store.allocator, bytes);
         defer decoded.deinit();
         if (!same(&decoded.value.task, &value.id) or !same(&decoded.value.request_digest, &row.request) or decoded.value.revision == 0 or decoded.value.revision > value.revision) return error.CorruptState;
-        // Kronos cannot attest control which the host acknowledged but has not
+        // Kosmos cannot attest control which the host acknowledged but has not
         // applied yet. A nonterminal task must retain that durable intent.
         // A cancellation requested after termination need not create intent.
         if (decoded.value.method == .cancel and !value.terminal() and value.cancellation == null) return error.InvalidArchive;

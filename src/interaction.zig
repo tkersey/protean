@@ -77,7 +77,7 @@ pub fn define(builder: *source.Builder, contract: Contract) Error!Definition {
 }
 
 /// Source value IDs, in the fixed semantic payload order. This constructs a
-/// perform term; Kronos supplies the one outstanding ERQ2/ERS2 interaction.
+/// perform term; Kosmos supplies the one outstanding ERQ2/ERS2 interaction.
 pub const Outgoing = struct { channel: Id, purpose: Id, presentation: Id, outgoing: Id };
 
 pub fn exchange(builder: *source.Builder, definition: Definition, values: Outgoing) Error!Id {
@@ -92,7 +92,7 @@ pub fn exchange(builder: *source.Builder, definition: Definition, values: Outgoi
 }
 
 /// Helpers construct ordinary source values for authored interpretations/tests.
-/// An environment instead encodes the declared reply and binds it with Kronos.
+/// An environment instead encodes the declared reply and binds it with Kosmos.
 pub fn value(builder: *source.Builder, definition: Definition, input: Id) Error!Id {
     try expectValue(builder, input, definition.contract.input);
     return builder.primitive(definition.reply, .variant, &.{input}, 0);
