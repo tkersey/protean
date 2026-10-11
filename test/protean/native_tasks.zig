@@ -977,8 +977,8 @@ fn largeArtifactBatch(service: *native.tasks.Service(T), task_id: [16]u8) !void 
         try service.namespace.commit("test.publish-large-artifact");
     }
 
-    // The fixture's existing SQLite is outside this allocator. Reserve its
-    // 16MiB plus the production worker's 16MiB inside the same host-sized budget.
+    // Test-local allocation pressure proves bounded chunk reads. These bytes
+    // are not a production SQLite, worker, or host heap policy.
     var budget: kronos.AllocationBudget = .{ .parent = a, .limit = 64 * 1024 * 1024 };
     const bounded = budget.allocator();
     const reservation = try bounded.alloc(u8, 32 * 1024 * 1024);
@@ -1530,4 +1530,98 @@ test "terminal cleanup failures retain bounded shutdown ownership without runnab
     defer retained.deinit();
     try std.testing.expect(!try service.taskCleanupComplete(frame, retained.value));
     try std.testing.expect(try service.pump(frame) == .idle);
+}
+
+test "completed result beyond the former wire-read ceiling remains publicly retrievable" {
+    const Large = struct {
+        pub const application_id = "large-result-test";
+        pub const input_schema_id = "large-result.input.v1";
+        pub const output_schema_id = "large-result.output.v1";
+        pub const failure_schema_id = "large-result.failure.v1";
+        pub const message_schema_id = "large-result.message.v1";
+        pub const Input = protean.contracts.Utf8;
+        pub const Output = Input;
+        pub const Failure = void;
+        pub const Message = void;
+    };
+    const Identity = struct {
+        pub fn emit(c: protean.Context) !horos.source.Module {
+            const b = c.builder;
+            const input_schema = try c.schema(Large.Input);
+            const entry = try b.declare(&.{input_schema}, input_schema, &.{}, &.{});
+            try b.define(entry, try b.pure(try b.reference(b.parameter(entry, 0))));
+            return b.module(entry, try c.schema(void));
+        }
+    };
+    const parent = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(parent);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var compiled = try protean.compile(a, protean.system(.{ .InitialArgs = Large.Input, .Result = Large.Output, .Failure = void, .application = Identity }));
+    defer compiled.deinit();
+    const image = try a.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
+    _ = try compiled.encode(a, image);
+    const admitted_image = try horos.data.program_image.Admitted.decode(a, image);
+    defer admitted_image.deinit();
+    const manifest = try ownerManifest(a, image, admitted_image.identity(), "large-result-test");
+    const assets: native.discovery.Assets = .{ .image = image, .application = "large-result-test", .manifest = manifest };
+    var application: native.discovery.Application = .{ .arena = .init(parent), .metadata = .null, .manifest = .null, .manifest_id = "unit", .image_identity = admitted_image.identity() };
+    defer application.deinit();
+    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
+    var handlers = try native.Registry.init(parent, &.{});
+    defer handlers.deinit();
+    const profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "large-result-profile", .authority = .{ .grants = &.{}, .principal = "test", .tenant = "test" } };
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(io, &path);
+    var namespace = try native.Namespace.open(parent, io, try std.fmt.allocPrint(a, "{s}/state", .{path[0..length]}));
+    defer namespace.close() catch unreachable;
+    var service = try native.tasks.Service(Large).init(parent, io, &namespace, assets, &application, handlers, profile);
+    defer service.close(a) catch unreachable;
+    const text = try a.alloc(u8, 4 * 1024 * 1024 + 1);
+    @memset(text, 'x');
+    const accepted = try service.submit(a, "large-result", .{ .bytes = text });
+    while (true) {
+        var frame = std.heap.ArenaAllocator.init(parent);
+        defer frame.deinit();
+        const step = try service.pump(frame.allocator());
+        try std.testing.expect(step != .work);
+        var task = try service.task(frame.allocator(), accepted.receipt.task);
+        defer task.deinit();
+        if (task.value.terminal()) {
+            try std.testing.expect(task.value.result.?.bytes > 4 * 1024 * 1024);
+            break;
+        }
+    }
+    var client: native.client.Client(Large) = .{ .service = &service };
+    var params = native.json.object();
+    try native.json.put(a, &params, "task_id", native.json.string(try a.dupe(u8, &std.fmt.bytesToHex(accepted.receipt.task, .lower))));
+    // The response view must fit independently of the multi-megabyte wire value.
+    var response_budget: kronos.AllocationBudget = .{ .parent = parent, .limit = 256 * 1024 };
+    var response_arena = std.heap.ArenaAllocator.init(response_budget.allocator());
+    defer response_arena.deinit();
+    const result = try client.call(response_arena.allocator(), .@"task.result", params);
+    try std.testing.expect(result.object.get("ready").?.bool);
+    const outcome = result.object.get("outcome").?;
+    try std.testing.expect(outcome.object.get("value") == null);
+    const ref = outcome.object.get("value_ref").?;
+    var expected_hash = std.crypto.hash.sha2.Sha256.init(.{});
+    expected_hash.update("\"");
+    expected_hash.update(text);
+    expected_hash.update("\"");
+    var expected: [32]u8 = undefined;
+    expected_hash.final(&expected);
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(expected, .lower), ref.object.get("sha256").?.string);
+    try native.json.put(a, &params, "artifact_id", ref.object.get("artifact_id").?);
+    try native.json.put(a, &params, "length", native.json.string("32768"));
+    for ([_]usize{ 0, text.len + 2 - 32768 }) |offset| {
+        try native.json.put(a, &params, "offset", native.json.string(try std.fmt.allocPrint(a, "{d}", .{offset})));
+        const chunk = try client.call(a, .@"artifact.read", params);
+        var decoded: [32768]u8 = undefined;
+        try std.base64.url_safe_no_pad.Decoder.decode(&decoded, chunk.object.get("data").?.string);
+        try std.testing.expectEqual(text.len + 2, try native.json.decimal(usize, chunk.object.get("total_bytes").?));
+        for (decoded, 0..) |byte, index| try std.testing.expectEqual(@as(u8, if (offset + index == 0 or offset + index == text.len + 1) '"' else 'x'), byte);
+    }
 }

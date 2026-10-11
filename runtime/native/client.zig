@@ -199,14 +199,18 @@ pub fn Client(comptime Types: type) type {
             const task = decoded.value;
             try json.put(a, &output, "ready", .{ .bool = task.terminal() });
             if (!task.terminal()) return output;
-            const bytes = try self.service.namespace.store.object(a, task.result orelse return error.CorruptState, 4 * 1024 * 1024);
-            defer a.free(bytes);
+            const result = task.result orelse return error.CorruptState;
             var outcome = json.object();
             try json.put(a, &outcome, "type", json.string(@tagName(task.outcome_kind)));
             if (task.outcome_kind == .completed) {
+                // Keep integrity/missing-object checks without materializing a
+                // large wire result just to return its existing public reference.
+                try self.service.namespace.store.objectRange(result, 0, &.{});
                 try json.put(a, &outcome, "schema_id", json.string(try a.dupe(u8, task.output_schema_id.bytes)));
                 try self.resultValue(a, &outcome, task);
             } else {
+                const bytes = try self.service.namespace.store.object(a, result, null);
+                defer a.free(bytes);
                 var saved = try data.invocation.decode(data.invocation.Outcome, a, bytes);
                 defer saved.deinit();
                 switch (saved.value) {
