@@ -69,10 +69,10 @@ fn extend(a: std.mem.Allocator, original: json.Value, properties: []const Proper
     }
     return result;
 }
-fn array(a: std.mem.Allocator, child: json.Value, maximum: usize) !json.Value {
+fn array(a: std.mem.Allocator, child: json.Value, maximum: ?usize) !json.Value {
     var result = try literal(a, "{\"type\":\"array\"}");
     try json.put(a, &result, "items", child);
-    try json.put(a, &result, "maxItems", try json.number(a, maximum));
+    if (maximum) |limit| try json.put(a, &result, "maxItems", try json.number(a, limit));
     return result;
 }
 fn nullable(a: std.mem.Allocator, child: json.Value) !json.Value {
@@ -405,7 +405,7 @@ pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.
     const schema_asset = try shape(a, &.{ .{ "schema_id", try text(a, 1, 128) }, .{ "wire_sha256", digest }, .{ "wire_base64url", try text(a, 0, limits.frame_bytes) }, .{ "json", try literal(a, "{\"type\":\"object\"}") } }, &.{});
     for ([_][]const u8{ "input", "output", "failure", "answer", "message" }) |key| try app_properties.append(.{ key, schema_asset });
     const capability = try shape(a, &.{ .{ "identity", try text(a, 1, 128) }, .{ "resource_role", try text(a, 1, 128) }, .{ "payload_sha256", digest }, .{ "resume_sha256", digest } }, &.{});
-    try app_properties.append(.{ "capabilities", try array(a, capability, 64) });
+    try app_properties.append(.{ "capabilities", try array(a, capability, null) });
     const launch_profile = try nullable(a, try shape(a, &.{ .{ "id", try text(a, 1, 128) }, .{ "sha256", digest }, .{ "resource_identity", digest } }, &.{}));
     var description = try shape(a, &.{ .{ "methods", try array(a, method_description, 16) }, .{ "next_cursor", try nullable(a, count) }, .{ "application", try oneOf(a, &.{ try shape(a, app_properties.items, &.{}), app_reference }) }, .{ "execution_mode", try enumeration(a, &.{ "offline", "live" }) }, .{ "profile", launch_profile }, .{ "protocol_schema", try literal(a, "{\"type\":\"object\"}") }, .{ "protocol_schema_ref", schema_reference } }, &.{ "protocol_schema", "protocol_schema_ref" });
     try json.put(a, &description, "oneOf", try literal(a, "[{\"required\":[\"protocol_schema\"]},{\"required\":[\"protocol_schema_ref\"]}]"));

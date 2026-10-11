@@ -400,6 +400,76 @@ test "nested authored schemas remain available beyond the peer frame depth" {
     }
 }
 
+test "discovery preserves admitted capability counts in inline and referenced metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Handler = struct {
+        fn run(_: registry.Context, value: u32) !u32 {
+            return value;
+        }
+    };
+    for ([_]usize{ 65, 513 }) |count| {
+        const declarations = try a.alloc(registry.Declaration, count);
+        for (declarations, 0..) |*declaration, i| {
+            declaration.* = registry.leaf(u32, u32, .{ .identity = "capability", .resource_role = "local" }, Handler.run);
+            declaration.identity = try std.fmt.allocPrint(a, "capability-{d}", .{i});
+        }
+        var handlers = try registry.Registry.init(a, declarations);
+        defer handlers.deinit();
+        var capabilities: std.array_list.Managed(json.Value) = .init(a);
+        for (handlers.entries) |entry| {
+            var capability = json.object();
+            try json.put(a, &capability, "identity", json.string(entry.declaration.identity));
+            try json.put(a, &capability, "resource_role", json.string(entry.declaration.resource_role));
+            try json.put(a, &capability, "payload_sha256", json.string(try digest(a, entry.payload_schema)));
+            try json.put(a, &capability, "resume_sha256", json.string(try digest(a, entry.resume_schema)));
+            try capabilities.append(capability);
+        }
+        for (handlers.entries) |entry| try validateCapability(a, capabilities.items, entry);
+        var metadata = json.object();
+        try json.put(a, &metadata, "application_id", json.string("many-capabilities"));
+        try json.put(a, &metadata, "application_version", json.string("1"));
+        try json.put(a, &metadata, "client_mapping", json.string("agent-client-values/1.0"));
+        const wire = try values.schemaBytes(u32, a);
+        const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(wire.len));
+        var schema = json.object();
+        try json.put(a, &schema, "schema_id", json.string("number.v1"));
+        try json.put(a, &schema, "wire_sha256", json.string(try digest(a, wire)));
+        try json.put(a, &schema, "wire_base64url", json.string(std.base64.url_safe_no_pad.Encoder.encode(encoded, wire)));
+        try json.put(a, &schema, "json", (try json.parseAsset(a, &values.schemas.ClientSchema(u32).value, values.schemas.ClientSchema(u32).value.len)).value);
+        for ([_][]const u8{ "input", "output", "failure", "answer", "message" }) |key| try json.put(a, &metadata, key, schema);
+        try json.put(a, &metadata, "capabilities", .{ .array = capabilities });
+        const protocol_schema = try @import("schemas.zig").document(a, metadata, .{});
+        const artifacts = [2]?Artifact{ try Artifact.freeze(a, metadata, "application"), try Artifact.freeze(a, protocol_schema, "protocol") };
+        const app: Application = .{ .arena = .init(a), .metadata = metadata, .manifest = .null, .manifest_id = "test", .image_identity = @splat(0), .public_metadata = metadata, .protocol_schema = protocol_schema, .schema_artifacts = artifacts };
+        const description = try app.describe(a, json.object(), null);
+        try std.testing.expect(try fitsDescription(a, description));
+        const projected = description.object.get("application").?;
+        if (count == 65) {
+            try std.testing.expectEqual(count, projected.object.get("capabilities").?.array.items.len);
+        } else {
+            const reference_value = projected.object.get("metadata_ref").?;
+            const request = try artifactRequest(blk: {
+                var params = json.object();
+                try json.put(a, &params, "artifact_id", reference_value.object.get("artifact_id").?);
+                try json.put(a, &params, "offset", json.string("0"));
+                try json.put(a, &params, "length", json.string("32768"));
+                break :blk params;
+            });
+            const artifact = try app.schemaArtifact(request.id);
+            const retained = (try json.parseAsset(a, artifact.bytes, artifact.bytes.len)).value;
+            try std.testing.expectEqual(count, retained.object.get("capabilities").?.array.items.len);
+        }
+        const description_schema = protocol_schema.object.get("$defs").?.object.get("describe.result").?;
+        const inline_schema = description_schema.object.get("properties").?.object.get("application").?.object.get("oneOf").?.array.items[0];
+        const capability_schema = inline_schema.object.get("properties").?.object.get("capabilities").?;
+        try std.testing.expect(capability_schema.object.get("maxItems") == null);
+        try std.testing.expectEqualStrings("array", capability_schema.object.get("type").?.string);
+        try std.testing.expect(capability_schema.object.get("items") != null);
+    }
+}
+
 test "discovery matches the complete schema specialization rather than its family name" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
