@@ -1,9 +1,9 @@
-//! Admission of the protected Agent authoring path. This is an author-time
-//! inspection of Boundary's source, never another executable representation.
+//! Admission of the protected Protean authoring path. This is an author-time
+//! inspection of Horos's source, never another executable representation.
 const std = @import("std");
-const boundary = @import("boundary");
-const source = boundary.source;
-const p = boundary.data.program;
+const horos = @import("horos");
+const source = horos.source;
+const p = horos.data.program;
 const Id = p.Id;
 
 pub const Role = enum { internal, model, interaction, read, simulation, approval, commit, write, mobility };
@@ -32,10 +32,10 @@ pub const CompiledImport = struct {
     effects: []const CompiledEffect,
     functions: []const @import("participant.zig").FunctionBinding = &.{},
     participant: bool = false,
-    borrows: @import("boundary").data.borrow_contract.Summary = .{ .function = 0 },
+    borrows: @import("horos").data.borrow_contract.Summary = .{ .function = 0 },
 };
 
-/// Metadata is private to the trusted Agent constructions during authoring.
+/// Metadata is private to the trusted Protean constructions during authoring.
 /// Native Zig that forges this registry or mutates source is outside the public
 /// authoring-path claim. Records never enter BPI3 or PST3.
 pub const Registry = struct {
@@ -419,7 +419,7 @@ const Walker = struct {
     }
 
     fn participant(self: *Walker, item: CompiledImport) Error!void {
-        var decoded = @import("boundary").data.component.decode(self.allocator, item.object) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidSource;
+        var decoded = @import("horos").data.component.decode(self.allocator, item.object) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidSource;
         defer decoded.deinit();
         @import("participant.zig").inspect(self.allocator, decoded.object, item, self.registry, self.speculative) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,

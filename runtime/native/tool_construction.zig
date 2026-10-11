@@ -1,9 +1,9 @@
-//! Data-only Boundary construction and pure native World execution.
+//! Data-only Horos construction and pure native Kronos execution.
 //! Callers own task admission, occurrence accounting, and durable publication.
 const std = @import("std");
-const data = @import("boundary_data");
-const world = @import("world");
-const contracts = @import("agent_contracts");
+const data = @import("horos_data");
+const kronos = @import("kronos");
+const contracts = @import("protean_contracts");
 const json = @import("json.zig");
 const values = @import("values.zig");
 
@@ -109,7 +109,7 @@ fn acyclic(recipe: Recipe) !void {
 }
 
 /// No external effects, even unreachable ones, and only ordinary public values
-/// may cross the generated invocation boundary. Boundary owns schema meaning.
+/// may cross the generated invocation boundary. Horos owns schema meaning.
 pub fn interfaceOf(a: std.mem.Allocator, program: data.activation.Program) !Interface {
     for (program.effects) |effect| if (effect.external) return error.ForbiddenEffect;
     const entry = program.functions[@intCast(program.roots.entry)];
@@ -131,7 +131,7 @@ pub fn interfaceOf(a: std.mem.Allocator, program: data.activation.Program) !Inte
 }
 
 pub fn build(output: std.mem.Allocator, scratch: std.mem.Allocator, catalog: Catalog, proposal: []const u8) !Built {
-    var budget: world.AllocationBudget = .{ .parent = scratch, .limit = 16 * 1024 * 1024 };
+    var budget: kronos.AllocationBudget = .{ .parent = scratch, .limit = 16 * 1024 * 1024 };
     const bounded = budget.allocator();
     var parsed = try json.parse(bounded, proposal, .{ .bytes = maximum_recipe_bytes, .depth = 6, .tokens = 2048, .members = 64 });
     defer parsed.deinit();
@@ -185,11 +185,11 @@ pub fn run(output: std.mem.Allocator, parent: std.mem.Allocator, io: std.Io, can
     if (built.image.bytes.len > maximum_asset_bytes or input.len > maximum_value_bytes) return error.Capacity;
     const start = std.Io.Clock.awake.now(io).toMilliseconds();
     if (cancellation) |flag| if (flag.load(.acquire)) return error.Canceled;
-    var budget: world.AllocationBudget = .{ .parent = parent, .limit = limits.working_bytes };
+    var budget: kronos.AllocationBudget = .{ .parent = parent, .limit = limits.working_bytes };
     const a = budget.allocator();
-    var prepared = try world.Prepared.init(a, built.image.bytes);
+    var prepared = try kronos.Prepared.init(a, built.image.bytes);
     defer prepared.deinit();
-    var session = try world.Session.start(a, &prepared, input);
+    var session = try kronos.Session.start(a, &prepared, input);
     defer session.deinit();
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();

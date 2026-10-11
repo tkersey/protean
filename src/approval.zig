@@ -1,8 +1,8 @@
 //! Approval and consumption are one ordinary staged computation. Only this
 //! computation owns its protected effects and its non-cloneable internal grant.
 const std = @import("std");
-const source = @import("boundary").source;
-const typed = @import("boundary").authoring;
+const source = @import("horos").source;
+const typed = @import("horos").authoring;
 const authoring = @import("authoring.zig");
 const interaction = @import("interaction.zig");
 const equality = @import("value_equality.zig");
@@ -422,7 +422,7 @@ fn emptyResult(b: *source.Builder, d: Definition, tag: Id) !Id {
 }
 
 fn textValue(b: *source.Builder, value: []const u8) !Id {
-    const contracts = @import("agent_contracts");
+    const contracts = @import("protean_contracts");
     return b.literal(.{
         .schema = try b.schema(.text),
         .bytes = try contracts.encodeOwned(contracts.Utf8, b.allocator(), .{ .bytes = value }),

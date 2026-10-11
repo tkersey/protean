@@ -1,10 +1,10 @@
 # Referenced provider context
 
 `agent.model.invoke.v5` is an additive ordinary model effect in
-`agent.model_invocation.Profile`. Existing v3 and inline-replay v4 formats and
+`protean.model_invocation.Profile`. Existing v3 and inline-replay v4 formats and
 consumers retain their exact meaning. The native fixed-profile product uses v5
 because provider history must remain in immutable environmental storage rather
-than grow inside the World continuation.
+than grow inside the Kronos continuation.
 
 `P.ReferenceRequest` contains the existing `P.Request` invocation, an optional
 `ContextReference`, the existing bounded tool results, and a 32-byte frozen
@@ -32,7 +32,7 @@ subject/range bindings, a source-capture reference, an optional parent-context
 reference and bounded JSON replay items. The digest covers the bindings as well
 as the items. The native core checks the context/capture chain before use.
 
-`agent.responders.defineReferenceModelObserved` uses the same checked responder
+`protean.responders.defineReferenceModelObserved` uses the same checked responder
 generator as v3/v4. It replaces the invocation's tools with the declarations
 selected by the exact request-time offered set, preserves the supplied profile,
 reference and results, and checks returned proposals against that retained set.

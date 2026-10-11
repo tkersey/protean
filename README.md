@@ -1,12 +1,14 @@
-# Agent
+# Protean
 
-Agent builds agents as typed, resumable programs. Its supported application is
-**Adaptive Agent**: a native executable that investigates a read-only snapshot,
+Formerly Agent; see the [rename notes](docs/rename.md).
+
+Protean builds agents as typed, resumable programs. Its supported application is
+**Protean**: a native executable that investigates a read-only snapshot,
 selects among approved models and reasoning settings, loads approved skills,
 asks questions, and constructs and reuses bounded pure tools.
 
-The application is authored in Zig. Boundary checks and compiles its control
-flow into BPI3; native World owns execution and continuation. Agent supplies
+The application is authored in Zig. Horos checks and compiles its control
+flow into BPI3; native Kronos owns execution and continuation. Protean supplies
 provider I/O, tools, task storage, and CLI/stdio clients. The host does not
 interpret a recipe or run a second application policy loop.
 
@@ -18,21 +20,21 @@ From this checkout:
 
 ```sh
 zig run tools/native/dependencies.zig -- setup \
-  conformance/agent4/dependencies.lock.json \
-  conformance/agent4/native-dependencies.lock.json \
-  .agent4-native/inputs "$(command -v zig)"
-zig build adaptive-agent -Doptimize=safe
-./zig-out/bin/adaptive-agent describe-build
-./zig-out/bin/adaptive-agent demo --offline --state-dir ./adaptive-demo
+  conformance/protean/dependencies.lock.json \
+  conformance/protean/native-dependencies.lock.json \
+  .protean-native/inputs "$(command -v zig)"
+zig build protean -Doptimize=safe
+./zig-out/bin/protean describe-build
+./zig-out/bin/protean demo --offline --state-dir ./adaptive-demo
 ```
 
-Setup authenticates complete source inventories, seeds Zig's pinned Boundary
-package, and retains only native World source and SQLite inputs. Append
+Setup authenticates complete source inventories, seeds Zig's pinned Horos
+package, and retains only native Kronos source and SQLite inputs. Append
 `--offline` to setup to require previously cached archives. Existing dependency
 directories are rechecked and never silently replaced.
 
 The offline demo uses recorded replies through the actual authored program.
-For configured operation, see [Adaptive Agent](examples/adaptive-agent/README.md)
+For configured operation, see [Protean](examples/adaptive/README.md)
 and the [native build and operations guide](docs/native-single-binary.md).
 Inference requires explicit configuration, authorization, and a credential file;
 there is no credential discovery or paid call in ordinary qualification.
@@ -43,8 +45,8 @@ installed agent needs no compiler, JS/WASM runtime, or adjacent source tree.
 
 ## Reusable authoring and embedding
 
-Agent remains a library. `agent.system`, `Context`, and `compile` construct
-ordinary Boundary programs. Checked model responders retain request-time offers;
+Protean remains a library. `protean.system`, `Context`, and `compile` construct
+ordinary Horos programs. Checked model responders retain request-time offers;
 adaptive controls, inboxes, prompts, skills, compiled tools, and the generic
 interaction/approval constructions remain available to downstream authors.
 Model calls, choices, and continuations belong to the program.
@@ -63,8 +65,8 @@ builds the adaptive application through that public API.
 ## Qualification
 
 ```sh
-zig build check-agent4 check-native -Doptimize=safe
-node test/agent4/installations.mjs .agent4-native/inputs zig-out/bin/adaptive-agent
+zig build check-protean check-native -Doptimize=safe
+node test/protean/installations.mjs .protean-native/inputs zig-out/bin/protean
 ```
 
 Node is an external verification controller only. The independent native peer
@@ -88,6 +90,6 @@ removed. See [migration notes](docs/migration_from_3.md). Distributed adaptive
 mobility is future work. Checkpoint export/import preserves local continuation
 and compatibility checks; it does not establish exclusive distributed custody.
 
-Boundary's independent source oracle and World's source-agreement tests remain
-outside this product. World's optional JS/WASM embedding remains supported by
-World and is not a native Agent prerequisite.
+Horos's independent source oracle and Kronos's source-agreement tests remain
+outside this product. Kronos's optional JS/WASM embedding remains supported by
+Kronos and is not a native Protean prerequisite.

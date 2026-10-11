@@ -1,8 +1,8 @@
 # Native Responses core
 
-`agent_native.responses.Adapter(Profile)` implements the shared
+`protean_native.responses.Adapter(Profile)` implements the shared
 `agent.model.invoke.v5` contract. `Profile` is the existing
-`agent.model_invocation.Profile`, including its derived argument codecs and
+`protean.model_invocation.Profile`, including its derived argument codecs and
 checked responder. Native code renders requests and returns proposed values;
 the authored responder retains tool selection and authorization.
 
@@ -66,7 +66,7 @@ Returned usage preserves absent counters, including absent versus zero cached
 tokens, and successful interpretation updates the task's output-token total.
 
 The versioned independent corpus is
-[`native-responses-v1.json`](../test/agent4/native-responses-v1.json). It includes
+[`native-responses-v1.json`](../test/protean/native-responses-v1.json). It includes
 reasoning/phase, exact integers, refusal, duplicate keys, invalid Unicode,
 missing call IDs, invalid batches, malformed arguments, unsupported output and
 incomplete responses. Native tests compare complete normalized bytes against
@@ -75,7 +75,7 @@ retired JS normalizer is no longer executed or shipped. Native whole-batch,
 Unicode and missing-call-ID behavior retain explicit independent expectations.
 The controlled HTTPS peer checks chain, hostname and expiry rejection, response
 size and truncation, deadlines, exact bodies and no retries/redirects.
-[Adaptive Agent](../examples/adaptive-agent/README.md) uses the native v6 adapter
+[Protean](../examples/adaptive/README.md) uses the native v6 adapter
 and the same capture, recovery and transport owners. Current exact-head proof
 surfaces are listed in the [acceptance map](adaptive-responses-acceptance.md).
 Live inference requires separate authorization and is not claimed here.

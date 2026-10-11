@@ -5,8 +5,8 @@ pub fn taggedOptional(comptime T: type) bool {
 }
 
 fn containsTaggedOptional(comptime T: type) bool {
-    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "agent_value_kind")) {
-        return if (T.agent_value_kind == .vector) containsTaggedOptional(T.Child) else false;
+    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "protean_value_kind")) {
+        return if (T.protean_value_kind == .vector) containsTaggedOptional(T.Child) else false;
     }
     return switch (@typeInfo(T)) {
         .optional => |info| taggedOptional(T) or containsTaggedOptional(info.child),
@@ -25,12 +25,12 @@ pub fn clientMapping(comptime types: anytype) []const u8 {
     return "agent-client-values/1.0";
 }
 pub fn isText(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and @hasDecl(T, "agent_value_kind") and
-        T.agent_value_kind == .text;
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "protean_value_kind") and
+        T.protean_value_kind == .text;
 }
 
 pub fn maximumTextBytes(comptime T: type) usize {
-    if (T.max_length == null) @compileError("Agent model JSON requires bounded Text");
+    if (T.max_length == null) @compileError("Protean model JSON requires bounded Text");
     return @intCast(T.max_length.?);
 }
 
@@ -52,21 +52,21 @@ fn FixedWriter(comptime capacity: usize) type {
         cursor: usize = 0,
 
         fn byte(self: *@This(), value: u8) void {
-            if (self.cursor >= capacity) @compileError("agent JSON writer overflow");
+            if (self.cursor >= capacity) @compileError("protean JSON writer overflow");
             self.bytes[self.cursor] = value;
             self.cursor += 1;
         }
 
         fn raw(self: *@This(), value: []const u8) void {
             if (value.len > capacity - self.cursor) {
-                @compileError("agent JSON writer overflow");
+                @compileError("protean JSON writer overflow");
             }
             @memcpy(self.bytes[self.cursor..][0..value.len], value);
             self.cursor += value.len;
         }
 
         fn finish(self: @This()) [capacity]u8 {
-            if (self.cursor != capacity) @compileError("agent JSON writer underflow");
+            if (self.cursor != capacity) @compileError("protean JSON writer underflow");
             return self.bytes;
         }
     };
@@ -74,7 +74,7 @@ fn FixedWriter(comptime capacity: usize) type {
 
 fn writeString(writer: anytype, comptime value: []const u8) void {
     if (!std.unicode.utf8ValidateSlice(value)) {
-        @compileError("agent JSON source string must be valid UTF-8");
+        @compileError("protean JSON source string must be valid UTF-8");
     }
     const hex = "0123456789abcdef";
     writer.byte('"');
@@ -129,7 +129,7 @@ fn writeSchema(comptime T: type, writer: anytype) void {
         },
         .@"struct" => |info| {
             if (info.is_tuple) {
-                @compileError("agent JSON tuple schemas are not implemented yet");
+                @compileError("protean JSON tuple schemas are not implemented yet");
             }
             writer.raw("{\"type\":\"object\",\"properties\":{");
             inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, index| {
@@ -145,7 +145,7 @@ fn writeSchema(comptime T: type, writer: anytype) void {
             }
             writer.raw("],\"additionalProperties\":false}");
         },
-        else => @compileError("agent JSON schema does not support " ++ @typeName(T)),
+        else => @compileError("protean JSON schema does not support " ++ @typeName(T)),
     }
 }
 
@@ -249,8 +249,8 @@ fn writeClientSchema(comptime T: type, writer: anytype) void {
         writer.byte('}');
         return;
     }
-    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "agent_value_kind")) {
-        if (T.agent_value_kind == .bytes) {
+    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "protean_value_kind")) {
+        if (T.protean_value_kind == .bytes) {
             const maximum = T.max_length orelse @compileError("client bytes must be bounded");
             writer.raw("{\"type\":\"string\",\"contentEncoding\":\"base64url\",\"maxLength\":");
             writeUnsigned(writer, std.base64.url_safe_no_pad.Encoder.calcSize(maximum));
@@ -262,7 +262,7 @@ fn writeClientSchema(comptime T: type, writer: anytype) void {
             writer.byte('}');
             return;
         }
-        if (T.agent_value_kind == .vector) {
+        if (T.protean_value_kind == .vector) {
             writer.raw("{\"type\":\"array\",\"maxItems\":");
             writeUnsigned(writer, T.max_length);
             writer.raw(",\"items\":");
@@ -368,7 +368,7 @@ fn maximumValueBytes(comptime T: type) usize {
             break :blk maximum;
         },
         else => @compileError(
-            "agent JSON value bound does not support " ++ @typeName(T),
+            "protean JSON value bound does not support " ++ @typeName(T),
         ),
     };
 }

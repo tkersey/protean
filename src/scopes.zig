@@ -1,15 +1,15 @@
 //! Lexical interpretations and explicit portable scope values. Exiting a scope
 //! restores the enclosing handler; suspension retains the installed environment.
-const boundary = @import("boundary");
-const typed = boundary.authoring;
-const source = boundary.source;
+const horos = @import("horos");
+const typed = horos.authoring;
+const source = horos.source;
 const Id = source.Id;
 const sets = @import("sets.zig");
 const decision = @import("decision.zig");
 
-/// Conversation/turn/branch memory can use Boundary's ordinary scoped state.
+/// Conversation/turn/branch memory can use Horos's ordinary scoped state.
 /// The caller supplies its region and chooses when/how to retain observations.
-pub const state = boundary.library.state;
+pub const state = horos.library.state;
 pub const Scope = decision.Scope;
 pub const Reader = struct {
     family: decision.Family,

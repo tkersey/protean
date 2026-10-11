@@ -1,6 +1,6 @@
 //! Scoped candidate evaluation: multi-shot exploration and sequential assessment.
 //! Alternatives and assessments are program values; no host snapshot is cloned.
-const source = @import("boundary").source;
+const source = @import("horos").source;
 pub const Id = source.Id;
 
 pub const Scope = struct {
@@ -23,8 +23,8 @@ pub const Deliberation = struct {
     collect: Id,
 };
 
-/// Scope rows declare the actual capture/effect domain. Boundary checks their
-/// use and lifetime; protected Agent admission additionally checks effect roles.
+/// Scope rows declare the actual capture/effect domain. Horos checks their
+/// use and lifetime; protected Protean admission additionally checks effect roles.
 /// The caller acquires approval and exclusive live resources after evaluate.
 pub fn define(
     b: *source.Builder,
@@ -156,7 +156,7 @@ fn collector(b: *source.Builder, d: Deliberation, scope: Scope) source.Error!Id 
     return collect;
 }
 
-/// Body is a Boundary computation value whose first parameter is the internal
+/// Body is a Horos computation value whose first parameter is the internal
 /// choice capability. Its result is one assessment, including non-tail work.
 pub fn evaluate(
     b: *source.Builder,
@@ -172,7 +172,7 @@ pub fn evaluate(
 }
 
 /// Register the actual function installed under this multi handler with the
-/// protected Agent context. The admitted effects are an explicit allow-list;
+/// protected Protean context. The admitted effects are an explicit allow-list;
 /// final admission inspects their roles and the transitive source computation.
 pub fn register(context: anytype, d: Deliberation, body: Id, allowed: []const Id) !void {
     try context.registry.classify(d.effect, .internal);

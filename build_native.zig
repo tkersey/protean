@@ -32,37 +32,37 @@ pub const Product = struct {
     manifest: std.Build.LazyPath,
 };
 
-/// The dependency must select its admitted World source and SQLite with the normal
-/// Agent build options. Pure authoring consumers never need those options.
+/// The dependency must select its admitted Kronos source and SQLite with the normal
+/// Protean build options. Pure authoring consumers never need those options.
 pub fn addNativeSystem(b: *std.Build, dependency: *std.Build.Dependency, options: Options) Product {
     const product = addWithModules(b, .{
         .root = dependency.path("."),
-        .agent = dependency.module("agent_host_authoring"),
-        .boundary = dependency.module("boundary_host_authoring"),
-        .data = dependency.module("boundary_data_host"),
-        .contracts = dependency.module("agent_contracts_host"),
-        .native = dependency.module("agent_native"),
-        .native_contracts = dependency.module("agent_native_contracts"),
-        .native_agent = dependency.module("agent_native_types"),
-        .native_data = dependency.module("agent_native_data"),
+        .protean = dependency.module("protean_host_authoring"),
+        .horos = dependency.module("horos_host_authoring"),
+        .data = dependency.module("horos_data_host"),
+        .contracts = dependency.module("protean_contracts_host"),
+        .native = dependency.module("protean_native"),
+        .native_contracts = dependency.module("protean_native_contracts"),
+        .native_protean = dependency.module("protean_native_types"),
+        .native_data = dependency.module("protean_native_data"),
         .sqlite_source = dependency.namedLazyPath("native-sqlite-source"),
-        .host_tool = dependency.artifact("agent-native-build"),
+        .host_tool = dependency.artifact("protean-native-build"),
     }, options);
     b.getInstallStep().dependOn(&product.install.step);
     return product;
 }
 
-// Also used by Agent's own examples so the downstream and repository recipes
+// Also used by Protean's own examples so the downstream and repository recipes
 // select the identical builder. Module identities come from one admitted graph.
 pub const Modules = struct {
     root: std.Build.LazyPath,
-    agent: *std.Build.Module,
-    boundary: *std.Build.Module,
+    protean: *std.Build.Module,
+    horos: *std.Build.Module,
     data: *std.Build.Module,
     contracts: *std.Build.Module,
     native: *std.Build.Module,
     native_contracts: *std.Build.Module,
-    native_agent: *std.Build.Module,
+    native_protean: *std.Build.Module,
     native_data: *std.Build.Module,
     sqlite_source: std.Build.LazyPath,
     host_tool: *std.Build.Step.Compile,
@@ -83,17 +83,17 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
         .root_source_file = assets.types,
         .target = target,
         .optimize = optimize,
-        .imports = &.{ .{ .name = "agent_contracts", .module = modules.native_contracts }, .{ .name = "agent", .module = modules.native_agent } },
+        .imports = &.{ .{ .name = "protean_contracts", .module = modules.native_contracts }, .{ .name = "protean", .module = modules.native_protean } },
     });
     const environment = b.createModule(.{
         .root_source_file = options.environment,
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "agent_native", .module = modules.native },
+            .{ .name = "protean_native", .module = modules.native },
             .{ .name = "application_types", .module = types },
-            .{ .name = "agent_contracts", .module = modules.native_contracts },
-            .{ .name = "boundary_data", .module = modules.native_data },
+            .{ .name = "protean_contracts", .module = modules.native_contracts },
+            .{ .name = "horos_data", .module = modules.native_data },
         },
     });
     const manifest = b.addRunArtifact(modules.host_tool);
@@ -101,10 +101,10 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
     manifest.has_side_effects = true;
     manifest.addFileArg2(assets.image, .{});
     manifest.addFileArg2(assets.application, .{});
-    manifest.addFileArg2(modules.root.path(b, "conformance/agent4/dependencies.lock.json"), .{});
+    manifest.addFileArg2(modules.root.path(b, "conformance/protean/dependencies.lock.json"), .{});
     manifest.addFileArg2(modules.root.path(b, "LICENSE"), .{});
-    const world = modules.native.import_table.get("world") orelse @panic("missing admitted World module");
-    manifest.addFileArg2(world.root_source_file.?.dirname().dirname().path(b, "LICENSE"), .{});
+    const kronos = modules.native.import_table.get("kronos") orelse @panic("missing admitted Kronos module");
+    manifest.addFileArg2(kronos.root_source_file.?.dirname().dirname().path(b, "LICENSE"), .{});
     manifest.addFileArg2(modules.native_data.root_source_file.?.dirname().dirname().dirname().path(b, "LICENSE"), .{});
     manifest.addDirectoryArg2(modules.sqlite_source, .{ .make_absolute = true });
     manifest.addArg(b.fmt("{d}", .{sqlite_heap_bytes}));
@@ -116,7 +116,7 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
     // in Zig 0.17. Distinguish the named products even on the same target so
     // concurrent manifest writers cannot overwrite one another's output.
     const manifest_file = manifest.addOutputFileArg2(b.fmt("{s}-manifest.json", .{options.name}), .{});
-    manifest.addFileArg2(modules.root.path(b, "conformance/agent4/native-dependencies.lock.json"), .{});
+    manifest.addFileArg2(modules.root.path(b, "conformance/protean/native-dependencies.lock.json"), .{});
     manifest.addFileArg2(.zig_exe, .{ .make_absolute = true });
     manifest.addDirectoryArg2(.zig_lib, .{ .make_absolute = true });
 
@@ -126,10 +126,10 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
         .optimize = optimize,
         .strip = optimize != .debug,
         .imports = &.{
-            .{ .name = "agent_native", .module = modules.native },
+            .{ .name = "protean_native", .module = modules.native },
             .{ .name = "environment", .module = environment },
             .{ .name = "application_types", .module = types },
-            .{ .name = "agent_contracts", .module = modules.native_contracts },
+            .{ .name = "protean_contracts", .module = modules.native_contracts },
         },
     });
     root.addAnonymousImport("native_image", .{ .root_source_file = assets.image });
@@ -145,27 +145,27 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
 }
 
 fn generate(b: *std.Build, modules: Modules, source: Source) Assets {
-    const optimize = modules.agent.optimize orelse .safe;
+    const optimize = modules.protean.optimize orelse .safe;
     const types = b.createModule(.{
         .root_source_file = source.types,
         .target = b.graph.host,
         .optimize = optimize,
-        .imports = &.{ .{ .name = "agent_contracts", .module = modules.contracts }, .{ .name = "agent", .module = modules.agent } },
+        .imports = &.{ .{ .name = "protean_contracts", .module = modules.contracts }, .{ .name = "protean", .module = modules.protean } },
     });
     const definition = b.createModule(.{
         .root_source_file = source.definition,
         .target = b.graph.host,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "agent", .module = modules.agent },
-            .{ .name = "boundary", .module = modules.boundary },
-            .{ .name = "boundary_data", .module = modules.data },
-            .{ .name = "agent_contracts", .module = modules.contracts },
+            .{ .name = "protean", .module = modules.protean },
+            .{ .name = "horos", .module = modules.horos },
+            .{ .name = "horos_data", .module = modules.data },
+            .{ .name = "protean_contracts", .module = modules.contracts },
             .{ .name = "application_types", .module = types },
         },
     });
     const emitter = b.addExecutable(.{
-        .name = "agent-native-assets",
+        .name = "protean-native-assets",
         .use_llvm = if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) false else null,
         .root_module = b.createModule(.{
             .root_source_file = modules.root.path(b, "tools/native/emit.zig"),
@@ -174,8 +174,8 @@ fn generate(b: *std.Build, modules: Modules, source: Source) Assets {
             .imports = &.{
                 .{ .name = "definition", .module = definition },
                 .{ .name = "application_types", .module = types },
-                .{ .name = "agent", .module = modules.agent },
-                .{ .name = "boundary", .module = modules.boundary },
+                .{ .name = "protean", .module = modules.protean },
+                .{ .name = "horos", .module = modules.horos },
             },
         }),
     });

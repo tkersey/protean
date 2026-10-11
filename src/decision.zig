@@ -1,8 +1,8 @@
 //! Typed questions interpreted by statically authored computations.
-//! These helpers emit Boundary source, never runtime Zig callbacks.
-const boundary = @import("boundary");
-const typed = boundary.authoring;
-const source = boundary.source;
+//! These helpers emit Horos source, never runtime Zig callbacks.
+const horos = @import("horos");
+const typed = horos.authoring;
+const source = horos.source;
 const Id = source.Id;
 
 pub const Family = struct { effect: Id, capability: Id, question: Id, answer: Id };
@@ -36,7 +36,7 @@ fn authoredFamily(b: *source.Builder, identity: []const u8, question: Id, answer
 }
 
 /// The responder is a reusable authored computation Q -> A. Its row and captures
-/// remain subject to Boundary admission, including effects used while answering.
+/// remain subject to Horos admission, including effects used while answering.
 /// It may be implemented with human/model effects, rules, or a delegated body.
 pub fn interpret(
     b: *source.Builder,

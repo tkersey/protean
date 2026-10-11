@@ -1,9 +1,9 @@
 //! ReAct is an ordinary authored loop, reusable with any admitted interpretation.
-//! The computations supplied to the loop are Boundary values, not native callbacks.
+//! The computations supplied to the loop are Horos values, not native callbacks.
 const std = @import("std");
-const boundary = @import("boundary");
-const source = boundary.source;
-const typed = boundary.authoring;
+const horos = @import("horos");
+const source = horos.source;
+const typed = horos.authoring;
 const Id = source.Id;
 
 /// Continue(Action) is ordinal 0; Done(Result) is ordinal 1.
@@ -33,7 +33,7 @@ pub fn step(b: *source.Builder, action: Id, result: Id) source.Error!Step {
 
 /// Produces one shared recursive function. The application's decision determines
 /// termination; this composition adds no turn count, branch count, or lifetime fuel.
-/// Boundary checks the state/capture usage and region lifetime in the final module.
+/// Horos checks the state/capture usage and region lifetime in the final module.
 pub fn define(b: *source.Builder, spec: Spec) source.Error!Loop {
     try checkStep(b, spec.step);
     try checkComputation(b, spec.decide, &.{spec.state}, spec.step.schema, spec);
@@ -127,7 +127,7 @@ fn checkComputation(
     }
 }
 
-/// All arguments are staged value IDs. Final Boundary admission checks their types.
+/// All arguments are staged value IDs. Final Horos admission checks their types.
 pub fn run(
     b: *source.Builder,
     loop: Loop,

@@ -1,8 +1,8 @@
 .{
-    .name = .agent_adaptive_consumer,
+    .name = .protean_adaptive_consumer,
     .version = "1.0.0",
     .minimum_zig_version = "0.17.0",
-    .fingerprint = 0xbc11252b93b78865,
-    .dependencies = .{ .agent = .{ .path = "../../.." } },
+    .fingerprint = 0x6504cc5493b78865,
+    .dependencies = .{ .protean = .{ .path = "../../.." } },
     .paths = .{ "build.zig", "build.zig.zon" },
 }

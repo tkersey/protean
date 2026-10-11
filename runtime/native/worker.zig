@@ -1,7 +1,7 @@
 //! One environmental I/O slot. Its private allocation region and immutable
 //! request outlive join; it never holds a Store or a Resident pointer.
 const std = @import("std");
-const data = @import("boundary_data");
+const data = @import("horos_data");
 const tasks = @import("tasks.zig");
 const registry = @import("registry.zig");
 

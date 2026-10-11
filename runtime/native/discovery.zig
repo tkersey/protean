@@ -1,11 +1,11 @@
 //! Embedded application/handler agreement and offline protocol discovery.
 const std = @import("std");
-const data = @import("boundary_data");
+const data = @import("horos_data");
 const json = @import("json.zig");
 const values = @import("values.zig");
 const protocol = @import("protocol.zig");
 const registry = @import("registry.zig");
-const contracts = @import("agent_contracts");
+const contracts = @import("protean_contracts");
 
 pub const Assets = struct { image: []const u8, application: []const u8, manifest: []const u8 };
 /// Non-secret identities derived from the currently admitted launch profile.

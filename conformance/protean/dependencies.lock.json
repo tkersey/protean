@@ -1,0 +1,123 @@
+{
+  "format": "agent-native-source-lock/v2",
+  "status": "development-integration",
+  "boundary": {
+    "repository": "tkersey/horos",
+    "commit": "8db152d174ff2d844872cbc132db5be010b174e5",
+    "gitTree": "7bb8302ef5fb87f0e63aaa4bd5a2c34beb5cac94",
+    "version": "3.0.0",
+    "source": {
+      "inventorySha256": "3bc75c3a4e50d983e18e4415e82facd365cb45d907f3c906e561672e0fd1e342",
+      "entries": 321,
+      "bytes": 8085608
+    },
+    "archive": {
+      "url": "https://github.com/tkersey/horos/archive/8db152d174ff2d844872cbc132db5be010b174e5.tar.gz",
+      "sha256": "e81e9566c1b478f33e51655a6a5311eb3bd2d4d6bff30c48712f2709cca46342",
+      "bytes": 1457273
+    },
+    "authentication": "Development successor source archive compared file-for-file and executable-bit-for-bit with the exact Git commit; complete normalized source inventory authenticated.",
+    "package": {
+      "zigHash": "horos-3.0.0-flclaLXTMwDq5BFotAjb5-nLTtY3TJr8pg-Q5JfdaWGy",
+      "defaultProfile": "zig-managed",
+      "profiles": {
+        "zig-managed": {
+          "inventorySha256": "38c6ab90766606a85c85f22b168e5a7ff43b8fd3c60b7976f89bf197967fb75f",
+          "entries": 301,
+          "bytes": 3396533
+        },
+        "archive-extracted": {
+          "inventorySha256": "38c6ab90766606a85c85f22b168e5a7ff43b8fd3c60b7976f89bf197967fb75f",
+          "entries": 301,
+          "bytes": 3396533
+        }
+      },
+      "archive": {
+        "sha256": "bb382f2e97dbc6b546a4d255753661067677f2af5f2a758fb6e4be841b237ab8",
+        "bytes": 668273
+      }
+    },
+    "api": {
+      "authoring": "src/root.zig",
+      "data": "src/data/root.zig",
+      "source": "src/source.zig",
+      "profile": "Checked structural/semantic closed compilation and final linking with mandatory P01; unchanged BMO1/BPI3/PST3 and invocation grammars",
+      "files": [
+        {
+          "path": "src/root.zig",
+          "sha256": "fefb9d7ef6bda5a1468b4e135fcdf462ecea902fd8632c555f02d19a74f8737e"
+        },
+        {
+          "path": "src/data/root.zig",
+          "sha256": "67d026d41cacde77e677802918d6c2fef054a020e3e5a806af917a6ae3f68b06"
+        },
+        {
+          "path": "src/source.zig",
+          "sha256": "a59ba66de99358b1d2eb3d4a8e44c7796c85d39fe6c2072a5c3c4826cc5c62bc"
+        },
+        {
+          "path": "docs/bpi3-wire.md",
+          "sha256": "12d1e8ddd25dca936a9fbea89bdb366678840325147e3e3e665f4624c6aee337"
+        },
+        {
+          "path": "src/data/activation.zig",
+          "sha256": "a96689f8375a3664905a7a56de86c8e2c7d34628be1dd33725475b67198dbca5"
+        },
+        {
+          "path": "src/data/graph_order.zig",
+          "sha256": "d23f420a481ee063ccc615f22b4161ffe6159039e1b231455d3b22ec07311b84"
+        },
+        {
+          "path": "src/data/invocation.zig",
+          "sha256": "2ab86f8a4cc902a1aff3b3b8766723f0097f25e46c87181d755d6f25c972a5c9"
+        },
+        {
+          "path": "src/data/closed_compilation.zig",
+          "sha256": "0fbe83cc48d5e1a86a7a4e7e1c5f7119cfdc14c96e875ccac0bf11ed67f8c578"
+        },
+        {
+          "path": "src/source/diagnostic.zig",
+          "sha256": "46066514783e83e33cdc233c011dcf5604500e00495b91e4517593586e9cec4e"
+        },
+        {
+          "path": "src/authoring.zig",
+          "sha256": "00c3c92ef411bb3b709bed4c60ca59f6375ca4047c85cd5633befae16c08e965"
+        }
+      ]
+    }
+  },
+  "world": {
+    "repository": "tkersey/kronos",
+    "commit": "4d5dbe037820e3e95074155474508bde3a236dc5",
+    "gitTree": "f8b09a49c503e96eb5c28395a68e7263b37400cb",
+    "version": "6.0.0",
+    "source": {
+      "inventorySha256": "7d178e29c44d6b5de873152176874999e8146b726acbda38299998bb1ffec33a",
+      "entries": 112,
+      "bytes": 1454812
+    },
+    "archive": {
+      "url": "https://github.com/tkersey/kronos/archive/4d5dbe037820e3e95074155474508bde3a236dc5.tar.gz",
+      "sha256": "74b6ffd3fd58315ec3cd8ee8b23e718589c2049f59da0fad31ca0fe4577c14a1",
+      "bytes": 326466
+    },
+    "authentication": "Development successor source archive compared file-for-file and executable-bit-for-bit with the exact Git commit; complete normalized source inventory authenticated."
+  },
+  "toolchain": {
+    "zig": {
+      "version": "0.17.0",
+      "executableSha256": "18fbdb9fb852846f0e91008c5b99c9c18db1115671701c2890bf84a44ddc202d"
+    },
+    "platform": "darwin",
+    "architecture": "arm64"
+  },
+  "publicationObservation": {
+    "boundarySource": "https://github.com/tkersey/horos/pull/168 at 8db152d174ff2d844872cbc132db5be010b174e5",
+    "worldSource": "https://github.com/tkersey/kronos/pull/66 at 4d5dbe037820e3e95074155474508bde3a236dc5",
+    "compatiblePublishedReleaseObserved": false
+  },
+  "limitations": [
+    "Explicit Zig 0.17.0 development successor tuple; version strings retain the public API names and do not claim new releases. Existing releases and prior task bindings remain unchanged.",
+    "Current candidate qualification is recorded in the coordinated PRs and Protean CI. No live-provider qualification is implied."
+  ]
+}

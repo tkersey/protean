@@ -21,16 +21,16 @@ pub fn literal(comptime spec: anytype) type {
     if (!@hasField(@TypeOf(spec), "role") or
         !@hasField(@TypeOf(spec), "content"))
     {
-        @compileError("agent.prompt.literal requires role and content");
+        @compileError("protean.prompt.literal requires role and content");
     }
     inline for (@typeInfo(@TypeOf(spec)).@"struct".field_names) |field_name| {
         if (!std.mem.eql(u8, field_name, "role") and
             !std.mem.eql(u8, field_name, "content"))
         {
-            @compileError("agent.prompt.literal unknown source field '" ++ field_name ++ "'");
+            @compileError("protean.prompt.literal unknown source field '" ++ field_name ++ "'");
         }
     }
     const role: Role = spec.role;
-    if (spec.content.len == 0) @compileError("agent prompt content must not be empty");
+    if (spec.content.len == 0) @compileError("protean prompt content must not be empty");
     return Descriptor(role, spec.content);
 }

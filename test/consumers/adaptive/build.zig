@@ -1,19 +1,19 @@
 //! The real downstream API, selecting the single supported application.
 const std = @import("std");
-const agent_build = @import("agent");
+const protean_build = @import("protean");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const world = b.option(std.Build.LazyPath, "world-source", "Authenticated World source") orelse @panic("provide -Dworld-source");
+    const kronos = b.option(std.Build.LazyPath, "kronos-source", "Authenticated Kronos source") orelse @panic("provide -Dkronos-source");
     const sqlite = b.option(std.Build.LazyPath, "sqlite-source", "Authenticated SQLite source") orelse @panic("provide -Dsqlite-source");
-    const dependency = b.dependency("agent", .{ .target = target, .optimize = optimize, .@"world-source" = world, .@"sqlite-source" = sqlite });
-    _ = agent_build.addNativeSystem(b, dependency, .{
-        .name = "adaptive-agent",
+    const dependency = b.dependency("protean", .{ .target = target, .optimize = optimize, .@"kronos-source" = kronos, .@"sqlite-source" = sqlite });
+    _ = protean_build.addNativeSystem(b, dependency, .{
+        .name = "protean",
         .application = .{ .source = .{
-            .definition = dependency.path("examples/adaptive-agent/definition.zig"),
-            .types = dependency.path("examples/adaptive-agent/types.zig"),
+            .definition = dependency.path("examples/adaptive/definition.zig"),
+            .types = dependency.path("examples/adaptive/types.zig"),
         } },
-        .environment = dependency.path("examples/adaptive-agent/environment.zig"),
+        .environment = dependency.path("examples/adaptive/environment.zig"),
     });
 }

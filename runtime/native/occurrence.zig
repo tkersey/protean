@@ -1,5 +1,5 @@
 //! Standalone adaptation of mobility/custody.mjs's environmental occurrence
-//! contract. Canonical World state remains opaque; no application phase lives
+//! contract. Canonical Kronos state remains opaque; no application phase lives
 //! here. The Store publishes these transitions atomically with their artifacts.
 const std = @import("std");
 pub const Digest = [32]u8;

@@ -1,13 +1,13 @@
 //! Pure authored adaptive control. These computations propose ordinary values;
 //! the application commits them only after context preparation succeeds.
 const std = @import("std");
-const boundary = @import("boundary");
+const horos = @import("horos");
 const authoring = @import("authoring.zig");
-const contracts = @import("agent_contracts");
+const contracts = @import("protean_contracts");
 const model = @import("model_invocation.zig");
 const Effort = @import("model.zig").ReasoningEffort;
-const a = boundary.authoring;
-const Id = boundary.source.Id;
+const a = horos.authoring;
+const Id = horos.source.Id;
 const V = *const a.Value;
 
 pub const InferenceSet = struct {

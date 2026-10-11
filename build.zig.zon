@@ -1,18 +1,18 @@
 .{
-    .name = .agent,
+    .name = .protean,
     .version = "4.0.0-dev.0",
     .dependencies = .{
-        .boundary = .{
-            .url = "git+https://github.com/tkersey/boundary#abc7092b96becd03e5c7792b20dafad0da17881a",
-            .hash = "boundary-3.0.0-flclaFbSMwBDSNcw9PhVPcn46Czi6LwYmXrVM1LNHhmo",
+        .horos = .{
+            .url = "git+https://github.com/tkersey/horos#8db152d174ff2d844872cbc132db5be010b174e5",
+            .hash = "horos-3.0.0-flclaLXTMwDq5BFotAjb5-nLTtY3TJr8pg-Q5JfdaWGy",
         },
     },
     .minimum_zig_version = "0.17.0",
     .paths = .{
-        "LICENSE",                               "README.md",      "build.zig",    "build_agent4.zig",         "build_native.zig",         "build.zig.zon",
-        "src",                                   "runtime/native", "tools/native", "tools/check_zig_paths.sh", "repo_zig_paths.txt",       "examples/adaptive-agent",
-        "conformance/agent4",                    "docs",           "test/agent4",  "test/support",             "test/authoring_tests.zig", "test/consumers/adaptive/build.zig",
+        "LICENSE",                               "README.md",      "build.zig",    "build_protean.zig",        "build_native.zig",         "build.zig.zon",
+        "src",                                   "runtime/native", "tools/native", "tools/check_zig_paths.sh", "repo_zig_paths.txt",       "examples/adaptive",
+        "conformance/protean",                   "docs",           "test/protean", "test/support",             "test/authoring_tests.zig", "test/consumers/adaptive/build.zig",
         "test/consumers/adaptive/build.zig.zon",
     },
-    .fingerprint = 0x268b9c9d84371874,
+    .fingerprint = 0x50216bba84371874,
 }

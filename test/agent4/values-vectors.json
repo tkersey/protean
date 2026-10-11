@@ -1,8 +1,0 @@
-{
-  "envelope": {
-    "relation": "Agent Zig encoder and public Boundary standalone schema codec/admission agree with independent wire-byte expectations; JavaScript must reproduce these bytes",
-    "schemaBytes": [0,13,12,8,1,2,3,4,5,8,10,12,1,5,19,16,20,2,7,63,13,2,6,7,0,7,17,9,2,6,15,11,3,3,18,4],
-    "valueBytes": [1,254,255,255,255,255,255,255,255,2,206,187,63,0,0,0,1,52,18,3,4,2,255,255,2,0,2,0,255],
-    "value": [true,"-2","λ",63,{"tag":1,"value":4660},[3,4],[-1,2],[0,255]]
-  }
-}

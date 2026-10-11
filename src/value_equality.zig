@@ -1,8 +1,8 @@
-//! Structural equality for portable values, emitted through typed Boundary code.
+//! Structural equality for portable values, emitted through typed Horos code.
 const std = @import("std");
-const boundary = @import("boundary");
-const source = boundary.source;
-const a = boundary.authoring;
+const horos = @import("horos");
+const source = horos.source;
+const a = horos.authoring;
 const Id = source.Id;
 pub const Error = source.Error || error{UnsupportedEqualitySchema};
 pub const TypedError = a.Error || error{UnsupportedEqualitySchema};

@@ -2,7 +2,7 @@
 //! The authored program selects profiles and skills; this owner only verifies
 //! that the exact request remains inside the frozen resource/feature universe.
 const std = @import("std");
-const contracts = @import("agent_contracts");
+const contracts = @import("protean_contracts");
 const registry = @import("registry.zig");
 const values = @import("values.zig");
 const json = @import("json.zig");

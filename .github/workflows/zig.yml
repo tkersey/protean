@@ -53,9 +53,9 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .zig-cache-upload
-          key: zig-adaptive-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/agent4/dependencies.lock.json', 'conformance/agent4/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: zig-adaptive-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            zig-adaptive-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/agent4/dependencies.lock.json', 'conformance/agent4/native-dependencies.lock.json') }}-
+            zig-adaptive-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
       - name: Prepare compiler scratch and native isolation tools
         run: |
           if [ -d .zig-cache-upload ]; then
@@ -85,45 +85,45 @@ jobs:
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
-            .agent4-native/inputs/*.tar.gz
-            .agent4-native/inputs/*.zip
-          key: agent-native-archives-v2-${{ matrix.lane }}-${{ hashFiles('conformance/agent4/dependencies.lock.json', 'conformance/agent4/native-dependencies.lock.json') }}
+            .protean-native/inputs/*.tar.gz
+            .protean-native/inputs/*.zip
+          key: protean-native-archives-v2-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}
       - name: Authenticate and provision selected native inputs
         run: |
           options=()
           if [ "${{ matrix.lane }}" = authoring ]; then options+=(--authoring-only); fi
           zig run tools/native/dependencies.zig -- setup \
-            conformance/agent4/dependencies.lock.json \
-            conformance/agent4/native-dependencies.lock.json \
-            .agent4-native/inputs "$(command -v zig)" "${options[@]}"
+            conformance/protean/dependencies.lock.json \
+            conformance/protean/native-dependencies.lock.json \
+            .protean-native/inputs "$(command -v zig)" "${options[@]}"
       - name: Run retained qualification
         run: |
           if [ "${{ matrix.lane }}" = authoring ]; then
-            zig build check-agent4 -Dnative=false -Doptimize=safe --summary all
+            zig build check-protean -Dnative=false -Doptimize=safe --summary all
           else
             zig build check-native -Doptimize=safe --summary all \
-              --prefix "$RUNNER_TEMP/agent-qualification" --prefix-exe-dir executables
-            node test/agent4/installations.mjs .agent4-native/inputs \
-              "$RUNNER_TEMP/agent-qualification/executables/adaptive-agent"
+              --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables
+            node test/protean/installations.mjs .protean-native/inputs \
+              "$RUNNER_TEMP/protean-qualification/executables/protean"
           fi
       - name: Package the executed adaptive application
         if: matrix.lane == 'native'
         run: |
-          output="$RUNNER_TEMP/agent-qualification/executables"
-          "$output/adaptive-agent" describe-build > "$output/adaptive-agent.build.json"
+          output="$RUNNER_TEMP/protean-qualification/executables"
+          "$output/protean" describe-build > "$output/protean.build.json"
           cp docs/native-single-binary.md "$output/RUNBOOK.md"
-          cp examples/adaptive-agent/README.md "$output/ADAPTIVE.md"
+          cp examples/adaptive/README.md "$output/ADAPTIVE.md"
           mkdir -p "$output/adaptive-example"
-          cp examples/adaptive-agent/adaptive.example.json "$output/adaptive-example/"
-          cp -R examples/adaptive-agent/skills "$output/adaptive-example/skills"
-          cp -R "$RUNNER_TEMP/agent-qualification/agent4/adaptive-agent" "$output/adaptive-program"
-          tar -czf "$RUNNER_TEMP/adaptive-agent-$RUNNER_OS-$RUNNER_ARCH-$GITHUB_SHA.tar.gz" \
-            -C "$output" adaptive-agent adaptive-agent.build.json RUNBOOK.md ADAPTIVE.md adaptive-program adaptive-example
+          cp examples/adaptive/adaptive.example.json "$output/adaptive-example/"
+          cp -R examples/adaptive/skills "$output/adaptive-example/skills"
+          cp -R "$RUNNER_TEMP/protean-qualification/protean/adaptive" "$output/adaptive-program"
+          tar -czf "$RUNNER_TEMP/protean-$RUNNER_OS-$RUNNER_ARCH-$GITHUB_SHA.tar.gz" \
+            -C "$output" protean protean.build.json RUNBOOK.md ADAPTIVE.md adaptive-program adaptive-example
       - name: Retain executed adaptive application
         if: matrix.lane == 'native'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          path: ${{ runner.temp }}/adaptive-agent-*.tar.gz
+          path: ${{ runner.temp }}/protean-*.tar.gz
           archive: false
           if-no-files-found: error
           retention-days: 14
@@ -148,7 +148,7 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .zig-cache-upload
-          key: zig-adaptive-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/agent4/dependencies.lock.json', 'conformance/agent4/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: zig-adaptive-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
   native:
     name: native
     needs: [source, qualify]

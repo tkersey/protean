@@ -1,7 +1,7 @@
-//! Continuing conversations are ordinary calls and recursion in Boundary source.
+//! Continuing conversations are ordinary calls and recursion in Horos source.
 //! The application owns memory, turn result, failure, and closure policy.
 const std = @import("std");
-const source = @import("boundary").source;
+const source = @import("horos").source;
 const interaction = @import("interaction.zig");
 const Id = source.Id;
 pub const Error = interaction.Error;

@@ -1,11 +1,11 @@
-//! Checked responder compositions over ordinary Boundary source.
+//! Checked responder compositions over ordinary Horos source.
 //! A model result is candidate data; this module grants no operation authority.
 const std = @import("std");
-const boundary = @import("boundary");
+const horos = @import("horos");
 const authoring = @import("authoring.zig");
 const sets = @import("sets.zig");
-const source = boundary.source;
-const typed = boundary.authoring;
+const source = horos.source;
+const typed = horos.authoring;
 const Id = source.Id;
 
 /// Normalized metadata is untrusted external evidence. Its adjacent admission
@@ -262,7 +262,7 @@ fn Generator(comptime P: type, comptime batch: bool, comptime format: Format) ty
                 .{ .name = "2", .value = try g.field(root, envelope, Request, "results") },
             }) else invocation;
             const b = g.context.builder;
-            // Agent's registry binds this exact environmental site to its owner.
+            // Protean's registry binds this exact environmental site to its owner.
             const perform = try b.term(.{ .perform = .{
                 .effect = effect,
                 .payload = try typed.interop.valueId(root, payload),

@@ -1,14 +1,14 @@
 //! A static function identity may select its own ordinary computation schema.
 //! This separates higher-order origins without changing runtime instructions,
 //! adding an evaluator, or asserting that the function's effects are safe.
-const source = @import("boundary").source;
-const p = @import("boundary").data.program;
+const source = @import("horos").source;
+const p = @import("horos").data.program;
 
 pub const Definition = struct { function: p.Id, schema: p.Id };
 
 /// Repeated installation of the same function/signature shares one declaration.
-/// Boundary checks the signature's parameters, row, captures, and ownership
-/// against actual source during compilation. Agent independently inspects code.
+/// Horos checks the signature's parameters, row, captures, and ownership
+/// against actual source during compilation. Protean independently inspects code.
 /// The returned schema is nominal within this module, using public source terms.
 pub fn define(
     builder: *source.Builder,
@@ -25,7 +25,7 @@ pub fn define(
     return instance.finish(builder, .{ .function = function, .schema = schema });
 }
 
-/// Produces an ordinary Boundary lambda value. Reusing a schema for unrelated
+/// Produces an ordinary Horos lambda value. Reusing a schema for unrelated
 /// code does not confer admission: the final source-origin scan still checks it.
 pub fn value(builder: *source.Builder, definition: Definition) source.Error!p.Id {
     if (definition.function >= builder.functions.items.len or

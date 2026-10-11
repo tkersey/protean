@@ -1,7 +1,7 @@
 //! Typed client projection of the durable owner. It owns no evaluator policy.
 const std = @import("std");
-const contracts = @import("agent_contracts");
-const data = @import("boundary_data");
+const contracts = @import("protean_contracts");
+const data = @import("horos_data");
 const state = @import("state.zig");
 const tasks = @import("tasks.zig");
 const json = @import("json.zig");

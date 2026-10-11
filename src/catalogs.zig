@@ -1,15 +1,15 @@
 //! Author-time catalogs installed before application.emit. Entries refer only
-//! to ordinary Boundary schemas, constants, values, functions, and effects.
+//! to ordinary Horos schemas, constants, values, functions, and effects.
 //! They are neither runtime registries nor a separate control representation.
 const std = @import("std");
-const boundary = @import("boundary");
-const contracts = @import("agent_contracts");
+const horos = @import("horos");
+const contracts = @import("protean_contracts");
 const models = @import("model.zig");
 const prompts = @import("prompt.zig");
 const skills = @import("skill.zig");
 const tool_library = @import("tools.zig");
 const interaction_library = @import("interaction.zig");
-const Id = boundary.source.Id;
+const Id = horos.source.Id;
 
 pub const Reasoning = struct { effort: ?models.ReasoningEffort, summary: ?models.ReasoningSummary };
 pub const Parameters = struct {
@@ -106,7 +106,7 @@ pub const SourceIssue = enum {
     UnsupportedModelProtocol,
 };
 
-/// This exact check is called by agent.system. Lists are tuples or arrays of
+/// This exact check is called by protean.system. Lists are tuples or arrays of
 /// descriptor types. Runtime values/function pointers are not declarations.
 pub fn sourceIssue(comptime spec: anytype) ?SourceIssue {
     if (@typeInfo(@TypeOf(spec)) != .@"struct") return .InvalidSystemSource;

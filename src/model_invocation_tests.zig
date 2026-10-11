@@ -1,6 +1,6 @@
 const std = @import("std");
-const boundary = @import("boundary");
-const contracts = @import("agent_contracts");
+const horos = @import("horos");
+const contracts = @import("protean_contracts");
 const invocation = @import("model_invocation.zig");
 
 const limits: invocation.Limits = .{
@@ -67,7 +67,7 @@ test "normalized Answer uses sum ordinal while enum payload keeps explicit tags"
 
 test "model effect is ordinary and a typed question requires no executable tool" {
     const Question = invocation.Question(i64, "answer", "Answer the integer question.", limits);
-    var builder = boundary.source.Builder.init(std.testing.allocator);
+    var builder = horos.source.Builder.init(std.testing.allocator);
     defer builder.deinit();
     const first = try Question.declare(&builder);
     try std.testing.expectEqual(first, try Question.declare(&builder));
@@ -77,7 +77,7 @@ test "model effect is ordinary and a typed question requires no executable tool"
     try std.testing.expectEqual(request, builder.effects.items[@intCast(first)].payload);
     try std.testing.expectEqual(result, builder.effects.items[@intCast(first)].result);
     try std.testing.expect(builder.effects.items[@intCast(first)].external);
-    const facts = try boundary.data.admission.schemas(std.testing.allocator, builder.schemas.items);
+    const facts = try horos.data.admission.schemas(std.testing.allocator, builder.schemas.items);
     defer std.testing.allocator.free(facts.minimum);
     defer std.testing.allocator.free(facts.exportable);
     try std.testing.expectEqualStrings("answer", Question.allDeclarations().items[0].name.bytes);
@@ -102,7 +102,7 @@ test "stateless replay is an additive bounded ordinary contract with exact legac
     defer restored.deinit();
     try std.testing.expectEqualStrings("[]", restored.value.replay.bytes);
     try std.testing.expectEqual(2, restored.value.usage.?.cached_input_tokens.?);
-    var builder = boundary.source.Builder.init(std.testing.allocator);
+    var builder = horos.source.Builder.init(std.testing.allocator);
     defer builder.deinit();
     const legacy = try Fixture.declare(&builder);
     const replay = try Fixture.declareReplay(&builder);
@@ -137,7 +137,7 @@ test "reference replay carries bounded bindings without copying provider history
     var decoded = try contracts.decodeOwned(Fixture.ReferenceResult, std.testing.allocator, encoded);
     defer decoded.deinit();
     try std.testing.expectEqualDeep(reference, decoded.value.replay.?);
-    var builder = boundary.source.Builder.init(std.testing.allocator);
+    var builder = horos.source.Builder.init(std.testing.allocator);
     defer builder.deinit();
     const v3 = try Fixture.declare(&builder);
     const v4 = try Fixture.declareReplay(&builder);

@@ -17,16 +17,16 @@ The source job provisions `rg`, checks `repo_zig_paths.txt`. It does not require
 acquisition. It is source accounting, not a substitute for compiling a consumer.
 
 The authoring job uses native setup with `--authoring-only`, then runs
-`zig build check-agent4 -Dnative=false -Doptimize=safe`. This retains generic
+`zig build check-protean -Dnative=false -Doptimize=safe`. This retains generic
 construction tests, compile-time rejection cases, model/value contracts, helper
 integrity tests, adaptive asset emission, formatting, and independent wire checks.
-It does not acquire World or SQLite.
+It does not acquire Kronos or SQLite.
 
-The native job authenticates World source and SQLite, runs `check-native`, and
+The native job authenticates Kronos source and SQLite, runs `check-native`, and
 then runs the public downstream installation witness. Native owners have their
 own test root because Zig does not collect test declarations from named imported
 modules. The integration root shares the actual application types/assets and
-World module. Controlled peers exercise HTTPS, actual authored adaptive control,
+Kronos module. Controlled peers exercise HTTPS, actual authored adaptive control,
 tool construction/reuse, acquisitions, restart, cancellation and archive checks.
 No paid provider calls are made.
 
@@ -34,7 +34,7 @@ No paid provider calls are made.
 reference executable. It creates a clean source package and consumer, then uses
 OS execution boundaries to exclude Node/Python from acquisition, source emission,
 public `addNativeSystem`, build/install, inspection, and offline execution. It
-also verifies that altered Boundary/World inputs reject through the public build
+also verifies that altered Horos/Kronos inputs reject through the public build
 graph. Node is the external controller. The old `--scan-only`/`--output` modes and
 `check-authoring-installation`, `check-native-host`, `check-native-consumer`, and
 `native-example` targets are removed.
@@ -61,19 +61,19 @@ sh tools/check_zig_paths.sh
 
 # Native bootstrap; append --authoring-only when only authoring is needed.
 zig run tools/native/dependencies.zig -- setup \
-  conformance/agent4/dependencies.lock.json \
-  conformance/agent4/native-dependencies.lock.json \
-  .agent4-native/inputs "$(command -v zig)"
+  conformance/protean/dependencies.lock.json \
+  conformance/protean/native-dependencies.lock.json \
+  .protean-native/inputs "$(command -v zig)"
 
-zig build check-agent4 -Dnative=false -Doptimize=safe
+zig build check-protean -Dnative=false -Doptimize=safe
 zig build check-native -Doptimize=safe
-node test/agent4/installations.mjs .agent4-native/inputs zig-out/bin/adaptive-agent
+node test/protean/installations.mjs .protean-native/inputs zig-out/bin/protean
 ```
 
 For a targeted HTTPS change, `check-native-https` selects the existing native
 probe and independent endpoint. The native product path itself needs no Node,
-Python, WASM kernel, or World JS delivery. Boundary's independent oracle and
-World's source-agreement/embedding qualification remain in their owning projects.
+Python, WASM kernel, or Kronos JS delivery. Horos's independent oracle and
+Kronos's source-agreement/embedding qualification remain in their owning projects.
 
 ## Compilation and caching
 
@@ -94,7 +94,7 @@ inputs remain part of the cache key. Setup-Zig's destructive automatic cache
 post-hook stays disabled.
 
 Transport archives are cached separately **per lane and dependency lock**.
-Authoring can publish a Boundary-only archive cache without occupying the native
+Authoring can publish a Horos-only archive cache without occupying the native
 job's cache key. Native setup verifies every restored archive/source/package;
 a cache hit is not authentication. The downstream witness starts with fresh
 sources and metadata, optionally seeding untrusted cached archives and reusing

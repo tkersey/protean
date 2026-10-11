@@ -1,6 +1,6 @@
-//! Ordinary, versioned environmental records. World continuations remain the
+//! Ordinary, versioned environmental records. Kronos continuations remain the
 //! existing BPI3/PST3/PKO3 artifacts, never native pointers or application phases.
-const contracts = @import("agent_contracts");
+const contracts = @import("protean_contracts");
 const std = @import("std");
 const json = @import("json.zig");
 const occurrence = @import("occurrence.zig");
@@ -198,7 +198,7 @@ pub const Origin = struct {
     source_revision: u64,
 };
 
-/// Environmental archive metadata uses the existing ordinary Agent codec.
+/// Environmental archive metadata uses the existing ordinary Protean codec.
 /// Its payload objects retain their canonical image/state/value bytes.
 pub const ArchiveRecord = struct { kind: RecordKind, id: Digest, body: Reference };
 pub const ArchiveEvent = struct { seq: u64, revision: u64, body: Reference };

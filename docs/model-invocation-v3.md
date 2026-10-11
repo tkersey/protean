@@ -1,6 +1,6 @@
-# Agent model invocation v3
+# Protean model invocation v3
 
-`agent.model.invoke.v3` is an ordinary external Boundary 2 effect. Its payload
+`agent.model.invoke.v3` is an ordinary external Horos 2 effect. Its payload
 and result are application-specific schemas derived by `model_invocation.Profile`.
 Its provider protocol remains `agent.model.protocol.openai-responses-v2`.
 The image selects model configuration, semantic messages, offered declarations,
@@ -21,7 +21,7 @@ implementation or commit authority. Unsupported codecs reject during authoring.
 `P.declarationsValue(allocator, offered)` returns a caller-owned selection slice;
 its nested immutable metadata is shared. `P.invocationValue` is an authoring
 convenience for constant requests. Runtime context and message construction use
-ordinary Boundary product/vector/blob terms with the same schemas.
+ordinary Horos product/vector/blob terms with the same schemas.
 
 The checked `responders` model path uses `P.templateValue(Model, messages,
 selection)` for configuration without a duplicate tool catalog. It regenerates
@@ -29,11 +29,11 @@ the actual request's declarations from the same offered set retained across
 suspension and supplied to answer admission. The generated invocation does not
 return approval or execute a proposed operation.
 
-Final Agent source admission requires model emission to occur at that checked
+Final Protean source admission requires model emission to occur at that checked
 responder's owned site. A direct `perform` followed by a caller-selected offered
-set cannot claim protected Agent custody. Custom Ask interpretations call the
-same checked responder; independently authored raw Boundary programs remain
-possible through Boundary's compiler without that Agent claim.
+set cannot claim protected Protean custody. Custom Ask interpretations call the
+same checked responder; independently authored raw Horos programs remain
+possible through Horos's compiler without that Protean claim.
 
 `responders.defineModelObserved(P, context, failure, batch)` and
 `responders.invokeModelObserved(...)` retain the complete result as
@@ -47,7 +47,7 @@ interpretation; it does not perform another model call or normalize again.
 
 ## Wire order
 
-Values use Boundary 2's documented encoding: minimal unsigned LEB128 lengths and
+Values use Horos 2's documented encoding: minimal unsigned LEB128 lengths and
 sum ordinals; fixed little-endian scalar integers and explicit u32 enumeration
 tags; ordered products; UTF-8 text. No BPI1 envelope is accepted as v3.
 
@@ -90,7 +90,7 @@ Enum order is fixed by these declarations:
 
 `P.Request`, `P.Result` and all nested public types are the concrete contract.
 ERQ2 embeds their canonical schemas and contract binding. Descriptor limits are
-explicit application representation choices, not Agent lifetime limits.
+explicit application representation choices, not Protean lifetime limits.
 
 ## Candidate admission and trust
 

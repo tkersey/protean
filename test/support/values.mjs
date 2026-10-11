@@ -1,7 +1,7 @@
 // Independent wire codec for native archive/capture peers. No JSON client mapping
 // or application execution lives here.
 // Copyright (c) 2026 Agent contributors. MIT license.
-// Pure application values. No process framing, execution, or World internals.
+// Pure application values. No process framing, execution, or Kronos internals.
 // Wire source: Boundary 2 docs/bpi3-wire.md (profile 1).
 
 const U64_MAX = (1n << 64n) - 1n;
@@ -211,7 +211,7 @@ function validateDescriptor(descriptor) {
     }
     for (const reference of children(type, name)) if (!Number.isSafeInteger(reference) || reference < 0 || reference >= types.length) schemaError('Invalid schema reference');
   }
-  // The same least fixed point as public Boundary schema admission; a zero
+  // The same least fixed point as public Horos schema admission; a zero
   // width array breaks its size dependency, while a sum needs a finite case.
   const minimum = types.map(() => U64_MAX);
   let changed = true;
@@ -273,7 +273,7 @@ function canonicalize(descriptor) {
   }) };
 }
 
-/** Canonical, unframed Boundary standalone schema bytes. Labels are not wire data. */
+/** Canonical, unframed Horos standalone schema bytes. Labels are not wire data. */
 export function encodeSchema(descriptor) {
   const canonical = canonicalize(descriptor), writer = new Writer();
   writer.nat(0); writer.nat(canonical.types.length);

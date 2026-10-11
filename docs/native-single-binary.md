@@ -1,8 +1,8 @@
-# Native Adaptive Agent
+# Native Protean
 
-`adaptive-agent` is the supported application. Its human CLI and `agent-host/1.0`
-stdio interface use one native task owner and one authored Boundary program.
-World evaluates the program and its saved continuation. Read-only snapshot work,
+`protean` is the supported application. Its human CLI and `agent-host/1.0`
+stdio interface use one native task owner and one authored Horos program.
+Kronos evaluates the program and its saved continuation. Read-only snapshot work,
 Responses I/O, and generated pure tools are native environmental capabilities.
 
 ## Native acquisition and construction
@@ -12,30 +12,30 @@ so it can authenticate sources before any dependency code is executed:
 
 ```sh
 zig run tools/native/dependencies.zig -- setup \
-  conformance/agent4/dependencies.lock.json \
-  conformance/agent4/native-dependencies.lock.json \
-  .agent4-native/inputs "$(command -v zig)"
-zig build adaptive-agent -Doptimize=safe
+  conformance/protean/dependencies.lock.json \
+  conformance/protean/native-dependencies.lock.json \
+  .protean-native/inputs "$(command -v zig)"
+zig build protean -Doptimize=safe
 ```
 
-The approved development successor tuple is Boundary at
-`abc7092b96becd03e5c7792b20dafad0da17881a`, World at
-`a55f12682638c943f06373a61ecb3cf6117100e5`, and SQLite 3.53.4. The versioned
+The approved development successor tuple is Horos at
+`8db152d174ff2d844872cbc132db5be010b174e5`, Kronos at
+`4d5dbe037820e3e95074155474508bde3a236dc5`, and SQLite 3.53.4. The versioned
 `agent-native-source-lock/v2` binds exact archives and complete source/package
-inventories. It intentionally contains no WASM delivery contract. World owns
+inventories. It intentionally contains no WASM delivery contract. Kronos owns
 its optional JS/WASM release descriptor, which this build never rewrites.
 
 Setup performs bounded HTTPS acquisition, authenticates before invoking `tar`
 or `unzip`, rejects links/special source entries, verifies complete source
 inventories, checks SQLite's SHA-256/SHA3 identities and license, and seeds Zig's
-normal package cache from verified Boundary source. Append `--offline` to use
+normal package cache from verified Horos source. Append `--offline` to use
 cached transport bytes only. A mismatched existing input rejects; choose a new
 output directory rather than overwriting a previous pinned build's inputs.
 
-The default native inputs are `.agent4-native/inputs/world` and
-`.agent4-native/inputs/sqlite`. Explicit `-Dworld-source`, `-Dsqlite-source`, and
-`-Dboundary-source` overrides receive the same admission checks. Pure authoring
-consumers can select `-Dnative=false`; they still authenticate Boundary.
+The default native inputs are `.protean-native/inputs/kronos` and
+`.protean-native/inputs/sqlite`. Explicit `-Dkronos-source`, `-Dsqlite-source`, and
+`-Dhoros-source` overrides receive the same admission checks. Pure authoring
+consumers can select `-Dnative=false`; they still authenticate Horos.
 
 `addNativeSystem(b, dependency, options)` is exported by `build.zig`. A caller
 supplies an executable name, an environment source, and either:
@@ -54,26 +54,26 @@ in-repository build share this implementation and the target's static C library.
 See `test/consumers/adaptive/build.zig` for a complete downstream recipe:
 
 ```sh
-agent_root="$PWD"
+protean_root="$PWD"
 cd test/consumers/adaptive
 zig build -Doptimize=safe \
-  -Dworld-source="$agent_root/.agent4-native/inputs/world" \
-  -Dsqlite-source="$agent_root/.agent4-native/inputs/sqlite"
+  -Dkronos-source="$protean_root/.protean-native/inputs/kronos" \
+  -Dsqlite-source="$protean_root/.protean-native/inputs/sqlite"
 ```
 
 The product targets are macOS arm64 and Linux x86-64 musl. The Linux executable
 is statically linked; macOS uses system libSystem. Native manifests contain no
 build paths and do not claim to authenticate their enclosing binary. At runtime,
 `describe-build` separately hashes the executing artifact. `licenses` exposes
-the required Agent, Boundary, World, Zig, SQLite, and applicable musl notices.
+the required Protean, Horos, Kronos, Zig, SQLite, and applicable musl notices.
 
 ## Operate a task
 
 ```sh
-./zig-out/bin/adaptive-agent describe-build
-./zig-out/bin/adaptive-agent demo --offline --state-dir ./adaptive-demo
-./zig-out/bin/adaptive-agent validate --config ./approved-adaptive.json
-./zig-out/bin/adaptive-agent serve --transport stdio \
+./zig-out/bin/protean describe-build
+./zig-out/bin/protean demo --offline --state-dir ./adaptive-demo
+./zig-out/bin/protean validate --config ./approved-adaptive.json
+./zig-out/bin/protean serve --transport stdio \
   --config ./approved-adaptive.json --state-dir ./adaptive-tasks
 ```
 
@@ -120,15 +120,15 @@ Old deployment stores and published archives are untouched by source retirement.
 
 ## Verification boundaries
 
-`check-agent4` checks reusable authoring, compile-time rejections, and independent
+`check-protean` checks reusable authoring, compile-time rejections, and independent
 wire fixtures. `check-native` checks native owners plus the adaptive and HTTPS
 peers. The peers run copied binaries under OS execution/file boundaries, using
 controlled provider replies, real transport, kills/restarts, cancellation, tool
 construction/reuse, and independently altered archives. No paid model calls run.
 
-`node test/agent4/installations.mjs` drives a clean public downstream build. Node
+`node test/protean/installations.mjs` drives a clean public downstream build. Node
 stays outside the product boundary; absolute Node/Python launches are denied
 inside it. Setup, package acquisition, emission, `addNativeSystem`, install,
 `describe-build`, and the offline demo execute there using native tools.
-World's independent source oracle agreement and optional JS/WASM embedding are
-qualified in World's existing roots, not reimplemented in Agent.
+Kronos's independent source oracle agreement and optional JS/WASM embedding are
+qualified in Kronos's existing roots, not reimplemented in Protean.

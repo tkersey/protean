@@ -1,19 +1,19 @@
-//! Agent admission over an application-owned Boundary source module.
+//! Protean admission over an application-owned Horos source module.
 const std = @import("std");
-const boundary = @import("boundary");
-const contracts = @import("agent_contracts");
+const horos = @import("horos");
+const contracts = @import("protean_contracts");
 const admission = @import("admission.zig");
 pub const catalogs = @import("catalogs.zig");
-const source = boundary.source;
-const p = boundary.data.program;
+const source = horos.source;
+const p = horos.data.program;
 
 /// Optional native authoring observations. These callbacks never enter a Module,
 /// BPI3, or PST3, and borrow their context only for the compilation call.
 pub const CompileStage = enum {
     descriptors,
     application_source,
-    agent_admission,
-    boundary_compile,
+    protean_admission,
+    horos_compile,
     complete,
 };
 pub const CompileObserver = struct {
@@ -22,7 +22,7 @@ pub const CompileObserver = struct {
 };
 pub const CompileOptions = struct {
     observer: ?CompileObserver = null,
-    boundary_options: boundary.program.CompileOptions = .{},
+    horos_options: horos.program.CompileOptions = .{},
 
     fn stage(self: CompileOptions, next: CompileStage) void {
         if (self.observer) |observer| observer.enter(observer.context, next);
@@ -64,13 +64,13 @@ pub const Context = struct {
 /// The native emitter runs once while authoring. All resulting control is source data.
 pub fn system(comptime spec: anytype) type {
     comptime {
-        if (catalogs.sourceIssue(spec)) |issue| @compileError("agent.system: " ++ @tagName(issue));
+        if (catalogs.sourceIssue(spec)) |issue| @compileError("protean.system: " ++ @tagName(issue));
         for (.{ "InitialArgs", "Result", "Failure", "application" }) |name| {
             if (!@hasField(@TypeOf(spec), name))
-                @compileError("agent.system requires " ++ name);
+                @compileError("protean.system requires " ++ name);
         }
         if (!@hasDecl(spec.application, "emit"))
-            @compileError("agent.system application must declare emit(context)");
+            @compileError("protean.system application must declare emit(context)");
     }
     return struct {
         pub const Source = spec;
@@ -91,7 +91,7 @@ pub fn compileObserved(
     comptime System: type,
     options: CompileOptions,
 ) !source.Compiled {
-    options.boundary_options.resetObservations();
+    options.horos_options.resetObservations();
     options.stage(.descriptors);
     var builder = source.Builder.init(allocator);
     defer builder.deinit();
@@ -104,7 +104,7 @@ pub fn compileObserved(
     context.catalogs = try catalogs.install(context, System.Source);
     options.stage(.application_source);
     const module = try System.Application.emit(context);
-    options.stage(.agent_admission);
+    options.stage(.protean_admission);
     if (module.entry >= module.functions.len) return error.InvalidEntry;
     const entry = module.functions[@intCast(module.entry)];
     if (entry.parameters.len != 1 or
@@ -113,11 +113,11 @@ pub fn compileObserved(
         entry.result != result or module.failure != failure)
         return error.TypeMismatch;
     try admission.verify(allocator, module, &registry);
-    options.stage(.boundary_compile);
+    options.stage(.horos_compile);
     const compiled = if (registry.compiled_imports.items.len == 0)
-        try source.lowerObserved(allocator, module, options.boundary_options)
+        try source.lowerObserved(allocator, module, options.horos_options)
     else
-        try @import("compiled_tool.zig").link(allocator, module, &registry, options.boundary_options);
+        try @import("compiled_tool.zig").link(allocator, module, &registry, options.horos_options);
     options.stage(.complete);
     return compiled;
 }

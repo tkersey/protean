@@ -1,7 +1,7 @@
-# Migration to the adaptive-first Agent product
+# Migration to the adaptive-first Protean product
 
-The supported application is now the native `adaptive-agent`. This contraction
-follows the accepted tool-construction work and does not change Boundary/World
+The supported application is now the native `protean`. This contraction
+follows the accepted tool-construction work and does not change Horos/Kronos
 language or wire semantics. The last complete pre-consolidation Agent tree is
 `9807f2a447969e43af4d25f11b5b3525bba6c28b`; prior implementations remain in Git
 history and published artifacts.
@@ -22,7 +22,7 @@ The optional stdio verification client moved to `test/support/stdio-client.mts`.
 Use the [native acquisition/build path](native-single-binary.md). The Node setup,
 dependency, manifest, and package tools are replaced by the shared Zig bootstrap
 and build graph. `-Dworld-runtime` is removed; native builds select authenticated
-World source and SQLite directly. The source lock is explicitly versioned as
+Kronos source and SQLite directly. The source lock is explicitly versioned as
 `agent-native-source-lock/v2`, retaining exact approved native identities while
 retiring the unused WASM delivery fields. Boundary 3.0.0 and World 6.0.0 release
 tags, assets and descriptor bytes remain immutable.

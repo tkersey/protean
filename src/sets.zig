@@ -1,7 +1,7 @@
 //! Descriptor-sized portable sets. Their cardinality is the declared catalog
-//! size, independent of any scalar mask width or Agent lifetime limit.
-const boundary = @import("boundary");
-const source = boundary.source;
+//! size, independent of any scalar mask width or Protean lifetime limit.
+const horos = @import("horos");
+const source = horos.source;
 const Id = source.Id;
 
 pub const Set = struct { schema: Id, length: usize };

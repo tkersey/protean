@@ -1,7 +1,7 @@
-//! Bounded environmental archives. Canonical World objects and ordinary Agent
+//! Bounded environmental archives. Canonical Kronos objects and ordinary Protean
 //! records travel as data; namespace locks, grants and subscriptions do not.
 const std = @import("std");
-const contracts = @import("agent_contracts");
+const contracts = @import("protean_contracts");
 const state = @import("state.zig");
 const occurrence = @import("occurrence.zig");
 const storage = @import("store.zig");
@@ -15,7 +15,7 @@ const maximum_object = storage.maximum_object_bytes;
 const maximum_manifest = 1024 * 1024;
 const maximum_schema = 64 * 1024;
 const magic = "AGNX0001";
-const temporary_prefix = ".agent-archive-";
+const temporary_prefix = ".protean-archive-";
 const temporary_length = temporary_prefix.len + 32;
 pub const Exported = struct { sha256: state.Digest, bytes: u64 };
 const Blob = struct { reference: state.Reference, bytes: []const u8 };
@@ -52,8 +52,8 @@ fn readAt(fd: c_int, offset: u64, bytes: []u8) !void {
     }
 }
 fn privateFile(fd: c_int) !u64 {
-    var stat: c.struct_agent_native_stat = undefined;
-    if (c.agent_native_fstat(fd, &stat) != 0) return error.StorageUnavailable;
+    var stat: c.struct_protean_native_stat = undefined;
+    if (c.protean_native_fstat(fd, &stat) != 0) return error.StorageUnavailable;
     if (stat.st_mode & c.S_IFMT != c.S_IFREG or stat.st_mode & 0o077 != 0 or stat.st_uid != c.geteuid() or stat.st_size < 0) return error.UnsafeStatePath;
     return @intCast(stat.st_size);
 }
@@ -81,9 +81,9 @@ const Output = struct {
             _ = c.close(location.fd);
             a.free(location.name);
         }
-        var source: c.struct_agent_native_stat = undefined;
-        var destination: c.struct_agent_native_stat = undefined;
-        if (c.agent_native_fstat(state_directory, &source) != 0 or c.agent_native_fstat(location.fd, &destination) != 0) return error.StorageUnavailable;
+        var source: c.struct_protean_native_stat = undefined;
+        var destination: c.struct_protean_native_stat = undefined;
+        if (c.protean_native_fstat(state_directory, &source) != 0 or c.protean_native_fstat(location.fd, &destination) != 0) return error.StorageUnavailable;
         if (source.st_dev == destination.st_dev and source.st_ino == destination.st_ino) return error.UnsafeStatePath;
         var random: [16]u8 = undefined;
         try io.randomSecure(&random);
@@ -507,7 +507,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         var decoded = try contracts.decodeOwned(state.Receipt, store.allocator, bytes);
         defer decoded.deinit();
         if (!same(&decoded.value.task, &value.id) or !same(&decoded.value.request_digest, &row.request) or decoded.value.revision == 0 or decoded.value.revision > value.revision) return error.CorruptState;
-        // World cannot attest control which the host acknowledged but has not
+        // Kronos cannot attest control which the host acknowledged but has not
         // applied yet. A nonterminal task must retain that durable intent.
         // A cancellation requested after termination need not create intent.
         if (decoded.value.method == .cancel and !value.terminal() and value.cancellation == null) return error.InvalidArchive;

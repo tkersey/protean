@@ -1,9 +1,9 @@
-//! Internal first-order components with checked Agent helper bindings.
+//! Internal first-order components with checked Protean helper bindings.
 //! Objects remain BMO1; no source reconstruction or runtime evaluator is added.
 const std = @import("std");
-const boundary = @import("boundary");
-const source = boundary.source;
-const data = boundary.data;
+const horos = @import("horos");
+const source = horos.source;
+const data = horos.data;
 const admission = @import("admission.zig");
 const Context = @import("authoring.zig").Context;
 const Id = source.Id;
@@ -39,11 +39,11 @@ fn functionBinding(items: []const FunctionBinding, name: []const u8) !Id {
     return found orelse error.InvalidParticipant;
 }
 
-/// All bindings are copied into the same owner used by Agent's final compiler.
+/// All bindings are copied into the same owner used by Protean's final compiler.
 /// Structural schemas and borrow assumptions are independently checked at link.
 pub fn declare(c: Context, spec: Specification) !Id {
     if (spec.instance.len == 0 or !std.unicode.utf8ValidateSlice(spec.instance) or
-        std.mem.eql(u8, spec.instance, "agent")) return error.InvalidParticipant;
+        std.mem.eql(u8, spec.instance, "protean")) return error.InvalidParticipant;
     var decoded = try data.component.decode(c.builder.allocator(), spec.object);
     defer decoded.deinit();
     const object = decoded.object;
@@ -164,7 +164,7 @@ pub fn inspect(allocator: std.mem.Allocator, object: data.component.Object, item
                 return error.SpeculativeCapture,
             .resumption => |r| {
                 if (r.use == .multi) return error.InvalidParticipant;
-                // Local one-shot cleanup obligations are permitted. Boundary checks
+                // Local one-shot cleanup obligations are permitted. Horos checks
                 // their capture/consumption; interfaces below exclude incoming owners.
             },
             .computation => |c| if (c.use == .multi) return error.InvalidParticipant,

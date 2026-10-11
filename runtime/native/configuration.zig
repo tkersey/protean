@@ -28,8 +28,8 @@ pub fn readFile(a: std.mem.Allocator, io: std.Io, path: []const u8, maximum: usi
     if (fd < 0) return error.ConfigurationUnavailable;
     const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
     defer file.close(io);
-    var info: c.struct_agent_native_stat = undefined;
-    if (c.agent_native_fstat(fd, &info) != 0 or info.st_mode & c.S_IFMT != c.S_IFREG or info.st_size < 0) return error.InvalidConfiguration;
+    var info: c.struct_protean_native_stat = undefined;
+    if (c.protean_native_fstat(fd, &info) != 0 or info.st_mode & c.S_IFMT != c.S_IFREG or info.st_size < 0) return error.InvalidConfiguration;
     if (secret and (info.st_uid != c.geteuid() or info.st_mode & 0o077 != 0)) return error.UnsafeCredentialFile;
     if (@as(u64, @intCast(info.st_size)) > maximum) return error.Capacity;
     var buffer: [4096]u8 = undefined;

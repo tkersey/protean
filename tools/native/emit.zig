@@ -1,8 +1,8 @@
 //! One host-side compilation emits the canonical image and its ordinary assets.
 const std = @import("std");
-const agent = @import("agent");
-const boundary = @import("boundary");
-const json_schema = agent.contracts.json;
+const protean = @import("protean");
+const horos = @import("horos");
+const json_schema = protean.contracts.json;
 const Schema = struct { schema_id: []const u8, wire_sha256: []const u8, wire_base64url: []const u8, json: std.json.Value };
 const Capability = struct { identity: []const u8, resource_role: []const u8, payload_sha256: []const u8, resume_sha256: []const u8 };
 const Resource = struct { id: []const u8, version: []const u8, media_type: []const u8, sha256: []const u8, bytes: usize, base64url: []const u8 };
@@ -17,10 +17,10 @@ fn base64(a: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     return std.base64.url_safe_no_pad.Encoder.encode(result, bytes);
 }
 fn schema(comptime T: type, a: std.mem.Allocator, id: []const u8) !Schema {
-    var b = boundary.source.Builder.init(a);
+    var b = horos.source.Builder.init(a);
     defer b.deinit();
-    const root = try agent.contracts.schema(T, &b);
-    const wire = try boundary.data.schema.encodeOwned(a, b.schemas.items, root);
+    const root = try protean.contracts.schema(T, &b);
+    const wire = try horos.data.schema.encodeOwned(a, b.schemas.items, root);
     return .{
         .schema_id = id,
         .wire_sha256 = try digest(a, wire),
@@ -30,23 +30,23 @@ fn schema(comptime T: type, a: std.mem.Allocator, id: []const u8) !Schema {
 }
 
 fn schemaWire(comptime T: type, a: std.mem.Allocator) ![]const u8 {
-    var builder = boundary.source.Builder.init(a);
+    var builder = horos.source.Builder.init(a);
     defer builder.deinit();
-    const root = try agent.contracts.schema(T, &builder);
-    return boundary.data.schema.encodeOwned(a, builder.schemas.items, root);
+    const root = try protean.contracts.schema(T, &builder);
+    return horos.data.schema.encodeOwned(a, builder.schemas.items, root);
 }
 
 /// Native roles bind the complete semantic contract. Legacy identity-only
 /// declarations remain valid when every matching declaration names the same
 /// role. Specializations with different roles supply both Payload and Reply;
 /// declaration order never selects authority.
-pub fn capabilityMetadata(comptime declarations: anytype, a: std.mem.Allocator, program: boundary.data.activation.Program) ![]Capability {
+pub fn capabilityMetadata(comptime declarations: anytype, a: std.mem.Allocator, program: horos.data.activation.Program) ![]Capability {
     var result: std.ArrayList(Capability) = .empty;
     var used: [declarations.len]bool = @splat(false);
     for (program.effects) |effect| {
         if (!effect.external) continue;
-        const payload = try boundary.data.schema.encodeOwned(a, program.schemas, effect.payload);
-        const reply = try boundary.data.schema.encodeOwned(a, program.schemas, effect.result);
+        const payload = try horos.data.schema.encodeOwned(a, program.schemas, effect.payload);
+        const reply = try horos.data.schema.encodeOwned(a, program.schemas, effect.result);
         var role: ?[]const u8 = null;
         inline for (declarations, 0..) |declaration, index| {
             const typed = @hasField(@TypeOf(declaration), "Payload");
@@ -89,9 +89,9 @@ pub fn write(comptime definition: type, comptime types: type, init: std.process.
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    var compiled = try agent.compile(a, definition.System);
+    var compiled = try protean.compile(a, definition.System);
     defer compiled.deinit();
-    const image = try a.alloc(u8, try boundary.data.program_image.encodedLength(compiled.program));
+    const image = try a.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
     _ = try compiled.encode(a, image);
 
     const capabilities = try capabilityMetadata(definition.capabilities, a, compiled.program);
@@ -116,7 +116,7 @@ pub fn write(comptime definition: type, comptime types: type, init: std.process.
         .application_id = types.application_id,
         .application_version = types.application_version,
         .program_sha256 = try digest(a, image),
-        .program_identity = try a.dupe(u8, &std.fmt.bytesToHex(try boundary.data.program_image.identity(a, compiled.program), .lower)),
+        .program_identity = try a.dupe(u8, &std.fmt.bytesToHex(try horos.data.program_image.identity(a, compiled.program), .lower)),
         .client_mapping = json_schema.clientMapping(.{ types.Input, types.Output, types.Failure, types.Answer, types.Message }),
         .input = try schema(types.Input, a, types.input_schema_id),
         .output = try schema(types.Output, a, types.output_schema_id),

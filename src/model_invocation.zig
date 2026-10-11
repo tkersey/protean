@@ -1,7 +1,7 @@
-//! Agent 4 semantic model effects. Values are constructed by authored BPI3;
+//! Protean 4 semantic model effects. Values are constructed by authored BPI3;
 //! the environment only marshals the declared provider protocol and normalizes.
 const std = @import("std");
-const contracts = @import("agent_contracts");
+const contracts = @import("protean_contracts");
 const codecs = @import("model_codec.zig");
 const models = @import("model.zig");
 
@@ -67,7 +67,7 @@ pub const AdaptiveContextReference = struct {
     watermark: u64,
     eviction_generation: u64,
 };
-/// Large immutable history stays outside World values. Adapters validate each
+/// Large immutable history stays outside Kronos values. Adapters validate each
 /// continuation against its original capture/resource closure before dispatch.
 pub const AdaptivePlan = struct {
     epoch: u64,
@@ -177,23 +177,23 @@ pub const NormalizationLimits = struct {
 fn checkDeclarations(comptime Answer: type, comptime declarations: anytype) void {
     const info = @typeInfo(Answer).@"union";
     if (declarations.len != info.field_names.len)
-        @compileError("Agent model requires one declaration per Answer variant");
+        @compileError("Protean model requires one declaration per Answer variant");
     inline for (declarations, 0..) |declaration, index| {
         inline for (@typeInfo(@TypeOf(declaration)).@"struct".field_names) |field_name| {
             if (!std.mem.eql(u8, field_name, "name") and
                 !std.mem.eql(u8, field_name, "description"))
-                @compileError("Agent model declaration has unknown field '" ++ field_name ++ "'");
+                @compileError("Protean model declaration has unknown field '" ++ field_name ++ "'");
         }
         const name: []const u8 = declaration.name;
         if (name.len == 0 or name.len > 64)
-            @compileError("Agent model declaration name must contain 1 through 64 bytes");
+            @compileError("Protean model declaration name must contain 1 through 64 bytes");
         for (name) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-')
-            @compileError("Agent model declaration name must match [A-Za-z0-9_-]{1,64}");
+            @compileError("Protean model declaration name must match [A-Za-z0-9_-]{1,64}");
         if (!std.unicode.utf8ValidateSlice(declaration.description))
-            @compileError("Agent model declaration description must be UTF-8");
+            @compileError("Protean model declaration description must be UTF-8");
         inline for (declarations, 0..) |earlier, earlier_index| {
             if (earlier_index < index and std.mem.eql(u8, earlier.name, name))
-                @compileError("Agent model declaration name is duplicated");
+                @compileError("Protean model declaration name is duplicated");
         }
     }
 }
@@ -212,7 +212,7 @@ pub fn Profile(
     comptime checkDeclarations(Answer, declarations);
     comptime for (@typeInfo(Limits).@"struct".field_names) |name| {
         if (@field(limits, name) == 0)
-            @compileError("Agent model limit must be positive: " ++ name);
+            @compileError("Protean model limit must be positive: " ++ name);
     };
     if (limits.maximum_adaptive_reply_bytes < 128)
         @compileError("adaptive reply budget must hold a capacity result and exact usage");
@@ -226,7 +226,7 @@ pub fn Profile(
             schema = @max(schema, codecs.json.ToolSchema(Variant).value.len);
             if (limits.arguments_json_bytes <
                 codecs.json.maximumToolArgumentsByteLength(Variant))
-                @compileError("Agent model arguments_json_bytes cannot represent every admitted answer");
+                @compileError("Protean model arguments_json_bytes cannot represent every admitted answer");
         }
         break :blk .{ .name = name, .description = description, .schema = schema };
     };
@@ -473,11 +473,11 @@ pub fn Profile(
 
         pub fn parametersValue(comptime Model: type) ModelParameters {
             comptime {
-                if (!models.isAdmitted(Model)) @compileError("Agent model must use agent.model");
+                if (!models.isAdmitted(Model)) @compileError("Protean model must use protean.model");
                 if (!std.mem.eql(u8, Model.protocol.semantic_identity, protocol_identity))
-                    @compileError("Agent model profile uses an unsupported provider protocol");
+                    @compileError("Protean model profile uses an unsupported provider protocol");
                 if (Model.model_id.len > limits.model_id_bytes)
-                    @compileError("Agent model identifier exceeds model_id_bytes");
+                    @compileError("Protean model identifier exceeds model_id_bytes");
             }
             const parameters = Model.parameters;
             const has = @TypeOf(parameters) != void;
@@ -486,7 +486,7 @@ pub fn Profile(
             else
                 null;
             if (temperature != null and temperature.?.len > limits.temperature_bytes)
-                @compileError("Agent model temperature exceeds temperature_bytes");
+                @compileError("Protean model temperature exceeds temperature_bytes");
             return .{
                 .max_output_tokens = if (has and @hasField(@TypeOf(parameters), "max_output_tokens"))
                     parameters.max_output_tokens

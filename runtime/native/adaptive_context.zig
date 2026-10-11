@@ -1,7 +1,7 @@
 //! Deterministic input projection. Original captures remain immutable; epochs
 //! preserve ordered replay while revising only incompatible or evicted material.
 const std = @import("std");
-const contracts = @import("agent_contracts");
+const contracts = @import("protean_contracts");
 const registry = @import("registry.zig");
 const json = @import("json.zig");
 const responses = @import("responses.zig");

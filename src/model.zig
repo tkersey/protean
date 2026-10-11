@@ -63,14 +63,14 @@ fn canonicalTemperature(comptime value: []const u8) bool {
 
 fn validateReasoning(comptime reasoning: anytype) void {
     if (@typeInfo(@TypeOf(reasoning)) != .@"struct") {
-        @compileError("agent model reasoning configuration must be a struct");
+        @compileError("protean model reasoning configuration must be a struct");
     }
     inline for (@typeInfo(@TypeOf(reasoning)).@"struct".field_names) |field_name| {
         if (!std.mem.eql(u8, field_name, "effort") and
             !std.mem.eql(u8, field_name, "summary"))
         {
             @compileError(
-                "agent model reasoning contains unsupported field '" ++
+                "protean model reasoning contains unsupported field '" ++
                     field_name ++ "'",
             );
         }
@@ -78,7 +78,7 @@ fn validateReasoning(comptime reasoning: anytype) void {
     if (!@hasField(@TypeOf(reasoning), "effort") and
         !@hasField(@TypeOf(reasoning), "summary"))
     {
-        @compileError("agent model reasoning configuration must not be empty");
+        @compileError("protean model reasoning configuration must not be empty");
     }
     if (@hasField(@TypeOf(reasoning), "effort")) {
         const effort: ReasoningEffort = reasoning.effort;
@@ -94,21 +94,21 @@ fn validateParameters(comptime parameters: anytype) void {
     if (@TypeOf(parameters) == void) return;
     inline for (@typeInfo(@TypeOf(parameters)).@"struct".field_names) |field_name| {
         if (!parameterFieldAdmitted(field_name)) {
-            @compileError("agent model parameters contain unsupported field '" ++ field_name ++ "'");
+            @compileError("protean model parameters contain unsupported field '" ++ field_name ++ "'");
         }
     }
     if (@hasField(@TypeOf(parameters), "max_output_tokens")) {
         if (@TypeOf(parameters.max_output_tokens) != u32) {
-            @compileError("agent model max_output_tokens must be u32");
+            @compileError("protean model max_output_tokens must be u32");
         }
         if (parameters.max_output_tokens == 0) {
-            @compileError("agent model max_output_tokens must be positive");
+            @compileError("protean model max_output_tokens must be positive");
         }
     }
     if (@hasField(@TypeOf(parameters), "temperature")) {
         const value: []const u8 = parameters.temperature;
         if (!canonicalTemperature(value)) {
-            @compileError("agent model temperature must be a canonical decimal from 0 through 2");
+            @compileError("protean model temperature must be a canonical decimal from 0 through 2");
         }
     }
     if (@hasField(@TypeOf(parameters), "reasoning")) {
@@ -119,20 +119,20 @@ fn validateParameters(comptime parameters: anytype) void {
 pub fn model(comptime spec: anytype) type {
     inline for (@typeInfo(@TypeOf(spec)).@"struct".field_names) |field_name| {
         if (!modelFieldAdmitted(field_name)) {
-            @compileError("agent.model unknown source field '" ++ field_name ++ "'");
+            @compileError("protean.model unknown source field '" ++ field_name ++ "'");
         }
     }
     if (!@hasField(@TypeOf(spec), "name") or
         !@hasField(@TypeOf(spec), "protocol") or
         !@hasField(@TypeOf(spec), "model"))
     {
-        @compileError("agent.model requires name, protocol, and model");
+        @compileError("protean.model requires name, protocol, and model");
     }
-    if (spec.name.len == 0) @compileError("agent model name must not be empty");
-    if (spec.model.len == 0) @compileError("agent model identifier must not be empty");
+    if (spec.name.len == 0) @compileError("protean model name must not be empty");
+    if (spec.model.len == 0) @compileError("protean model identifier must not be empty");
     const Protocol = spec.protocol;
     if (!@hasDecl(Protocol, "semantic_identity") or Protocol.semantic_identity.len == 0) {
-        @compileError("agent model protocol requires a semantic_identity");
+        @compileError("protean model protocol requires a semantic_identity");
     }
     const Parameters = if (@hasField(@TypeOf(spec), "parameters"))
         @TypeOf(spec.parameters)
@@ -146,15 +146,15 @@ pub fn model(comptime spec: anytype) type {
 }
 
 pub fn validateUnique(comptime models: anytype) void {
-    if (models.len == 0) @compileError("agent system requires at least one model");
+    if (models.len == 0) @compileError("protean system requires at least one model");
     inline for (models, 0..) |Model, index| {
         if (!isAdmitted(Model)) {
-            @compileError("agent system model must be constructed by agent.model");
+            @compileError("protean system model must be constructed by protean.model");
         }
         _ = Model.protocol.semantic_identity;
         inline for (models, 0..) |Earlier, earlier_index| {
             if (earlier_index < index and std.mem.eql(u8, Earlier.name, Model.name)) {
-                @compileError("agent model semantic name is duplicated");
+                @compileError("protean model semantic name is duplicated");
             }
         }
     }

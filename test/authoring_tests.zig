@@ -1,9 +1,9 @@
 //! Compatible public authoring contracts. Private and alternate-module roots stay separate.
 test {
-    _ = @import("agent4/authoring_tests.zig");
-    _ = @import("agent4/catalogs.zig");
-    _ = @import("agent4/participant.zig");
-    _ = @import("agent4/composed_owners.zig");
-    _ = @import("agent4/recursive_participant.zig");
-    _ = @import("agent4/selection.zig");
+    _ = @import("protean/authoring_tests.zig");
+    _ = @import("protean/catalogs.zig");
+    _ = @import("protean/participant.zig");
+    _ = @import("protean/composed_owners.zig");
+    _ = @import("protean/recursive_participant.zig");
+    _ = @import("protean/selection.zig");
 }

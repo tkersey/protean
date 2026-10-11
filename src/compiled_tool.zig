@@ -1,13 +1,13 @@
-//! Checked closed read-tool objects; Agent owns their final bindings and bytes.
+//! Checked closed read-tool objects; Protean owns their final bindings and bytes.
 const std = @import("std");
-const boundary = @import("boundary");
-const data = boundary.data;
-const source = boundary.source;
+const horos = @import("horos");
+const data = horos.data;
+const source = horos.source;
 const admission = @import("admission.zig");
 const Context = @import("authoring.zig").Context;
 const Descriptor = @import("tools.zig").Descriptor;
 const Id = source.Id;
-const wrapper_key = "agent";
+const wrapper_key = "protean";
 
 pub const Specification = struct {
     instance: []const u8,
@@ -45,7 +45,7 @@ fn descriptor(spec: Specification, function: Id) Descriptor {
 /// Admit actual code, not an alleged purity summary. This import profile has
 /// portable input/output, no function imports, no multi-shot control, and only
 /// explicitly bound read/simulation I/O and nominal internal effects. Opaque
-/// imports cannot enter speculation; closed Boundary admission follows at linking.
+/// imports cannot enter speculation; closed Horos admission follows at linking.
 pub fn declare(c: Context, spec: Specification) !Descriptor {
     if (spec.instance.len == 0 or !std.unicode.utf8ValidateSlice(spec.instance) or
         std.mem.eql(u8, spec.instance, wrapper_key) or

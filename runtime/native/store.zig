@@ -1,7 +1,7 @@
-//! Transactional environmental state. World bytes are opaque objects; every
+//! Transactional environmental state. Kronos bytes are opaque objects; every
 //! acknowledged mutation publishes its receipt, records and events together.
 const std = @import("std");
-const contracts = @import("agent_contracts");
+const contracts = @import("protean_contracts");
 const sqlite = @import("sqlite.zig");
 const state = @import("state.zig");
 const occurrence = @import("occurrence.zig");
@@ -19,10 +19,10 @@ pub fn digest(bytes: []const u8) Digest {
     // Share the optimized standard-library primitive already linked for file
     // identity. Every byte is still checked; the store owns admission and trust.
     var hash: hash_abi.State = undefined;
-    hash_abi.agent_native_sha256_init(&hash);
-    hash_abi.agent_native_sha256_update(&hash, bytes.ptr, bytes.len);
+    hash_abi.protean_native_sha256_init(&hash);
+    hash_abi.protean_native_sha256_update(&hash, bytes.ptr, bytes.len);
     var result: Digest = undefined;
-    hash_abi.agent_native_sha256_final(&hash, &result);
+    hash_abi.protean_native_sha256_final(&hash, &result);
     return result;
 }
 
@@ -206,14 +206,14 @@ pub const Store = struct {
         defer if (!closed) blob.close() catch {};
         if (blob.length() != ref.bytes) return error.CorruptState;
         var hash: hash_abi.State = undefined;
-        hash_abi.agent_native_sha256_init(&hash);
+        hash_abi.protean_native_sha256_init(&hash);
         var buffer: [64 * 1024]u8 = undefined;
         var prior: [64 * 1024]u8 = undefined;
         var offset: usize = 0;
         while (offset < ref.bytes) {
             const chunk = buffer[0..@min(buffer.len, ref.bytes - offset)];
             try source.read(chunk);
-            hash_abi.agent_native_sha256_update(&hash, chunk.ptr, chunk.len);
+            hash_abi.protean_native_sha256_update(&hash, chunk.ptr, chunk.len);
             if (inserted) {
                 try blob.write(chunk, offset);
             } else {
@@ -225,7 +225,7 @@ pub const Store = struct {
         closed = true;
         try blob.close();
         var observed: Digest = undefined;
-        hash_abi.agent_native_sha256_final(&hash, &observed);
+        hash_abi.protean_native_sha256_final(&hash, &observed);
         if (!std.mem.eql(u8, &observed, &ref.digest)) return error.InvalidObject;
     }
     pub fn object(self: *Store, a: std.mem.Allocator, ref: state.Reference, limit: usize) ![]u8 {
@@ -264,20 +264,20 @@ pub const Store = struct {
         defer if (!closed) blob.close() catch {};
         if (blob.length() != ref.bytes) return error.CorruptState;
         var hash: hash_abi.State = undefined;
-        hash_abi.agent_native_sha256_init(&hash);
+        hash_abi.protean_native_sha256_init(&hash);
         var buffer: [64 * 1024]u8 = undefined;
         var offset: usize = 0;
         while (offset < location.bytes) {
             const chunk = buffer[0..@min(buffer.len, location.bytes - offset)];
             try blob.read(chunk, offset);
-            hash_abi.agent_native_sha256_update(&hash, chunk.ptr, chunk.len);
+            hash_abi.protean_native_sha256_update(&hash, chunk.ptr, chunk.len);
             try sink.write(chunk);
             offset += chunk.len;
         }
         closed = true;
         try blob.close();
         var observed: Digest = undefined;
-        hash_abi.agent_native_sha256_final(&hash, &observed);
+        hash_abi.protean_native_sha256_final(&hash, &observed);
         if (!std.mem.eql(u8, &observed, &ref.digest)) return error.CorruptState;
     }
     /// Private occurrence lookup. Public artifact reads require a separate

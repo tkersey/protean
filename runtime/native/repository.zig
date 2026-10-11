@@ -1,7 +1,7 @@
 //! Immutable read-only repository snapshots. Filesystem capture is explicit;
 //! subsequent tools read only these frozen bytes and never execute repository code.
 const std = @import("std");
-const contracts = @import("agent_contracts");
+const contracts = @import("protean_contracts");
 const storage = @import("store.zig");
 const c = @import("native_c");
 

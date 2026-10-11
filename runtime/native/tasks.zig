@@ -1,8 +1,8 @@
 //! Sole native task/occurrence mutation owner. Front ends submit ordinary typed
-//! inputs; workers return acquired bytes. Neither can drive a World resident.
+//! inputs; workers return acquired bytes. Neither can drive a Kronos resident.
 const std = @import("std");
-const contracts = @import("agent_contracts");
-const data = @import("boundary_data");
+const contracts = @import("protean_contracts");
+const data = @import("horos_data");
 const state = @import("state.zig");
 const occurrence = @import("occurrence.zig");
 const storage = @import("store.zig");
@@ -14,7 +14,7 @@ const json = @import("json.zig");
 const values = @import("values.zig");
 const archive_api = @import("archive.zig");
 
-/// Terminal execution and settled cleanup are distinct World observations.
+/// Terminal execution and settled cleanup are distinct Kronos observations.
 pub fn cleanupComplete(outcome: data.invocation.Outcome) bool {
     return switch (outcome) {
         .completed => true,
@@ -695,7 +695,7 @@ pub fn Service(comptime Types: type) type {
             return .waiting;
         }
 
-        /// At most one bounded World quantum or one durable environmental
+        /// At most one bounded Kronos quantum or one durable environmental
         /// transition. The caller services its control channel between calls.
         pub fn pump(self: *Self, a: std.mem.Allocator) !Step {
             try self.allowed();
@@ -753,7 +753,7 @@ pub fn Service(comptime Types: type) type {
             const quantum: u64 = if (control == .reply and initial.cancellation != null and !initial.cancellation_applied) 0 else 256;
             const encoded = try driver.drive(a, control, quantum);
             defer a.free(encoded);
-            // World may now be ahead of storage. Any failure below fences all
+            // Kronos may now be ahead of storage. Any failure below fences all
             // further effects; restart uses the old checkpoint and saved reply.
             errdefer self.store().fenced = true;
             var outcome = try data.invocation.decode(data.invocation.Outcome, a, encoded);
@@ -1109,7 +1109,7 @@ pub fn Service(comptime Types: type) type {
             self.work = null;
         }
         /// A worker has returned and will no longer access this work item.
-        /// Acquisition is published before any subsequent World consumption.
+        /// Acquisition is published before any subsequent Kronos consumption.
         pub fn acquire(self: *Self, a: std.mem.Allocator, work: Work, reply: []const u8) !void {
             try self.currentWork(work);
             if (work.entry.declaration.capture != null) return self.capture(a, work, reply);
@@ -1644,8 +1644,8 @@ pub fn Service(comptime Types: type) type {
                 .failed => |failure| if (failure.cancellation == null) return error.InvalidArchive,
                 .completed => return error.InvalidArchive,
                 else => {
-                    // The imported marker claims World already received this
-                    // control. Let World establish that it is a no-op without
+                    // The imported marker claims Kronos already received this
+                    // control. Let Kronos establish that it is a no-op without
                     // executing authored steps or dispatching any native work.
                     const repeated = try driver.drive(a, .{ .cancel = .{ .text = value.cancellation.?.bytes } }, 0);
                     defer a.free(repeated);

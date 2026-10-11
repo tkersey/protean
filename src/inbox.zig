@@ -2,8 +2,8 @@
 //! data, not approval, a pending-question answer, or a host-driven new turn.
 const authoring = @import("authoring.zig");
 const std = @import("std");
-const contracts = @import("agent_contracts");
-const Id = @import("boundary").source.Id;
+const contracts = @import("protean_contracts");
+const Id = @import("horos").source.Id;
 pub const semantic_identity = contracts.inbox_semantic_identity;
 
 pub fn Profile(comptime Message: type) type {

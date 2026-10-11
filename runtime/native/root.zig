@@ -1,4 +1,4 @@
-//! Compiled native environment. Deliberately separate from Agent authoring.
+//! Compiled native environment. Deliberately separate from Protean authoring.
 pub const json = @import("json.zig");
 pub const values = @import("values.zig");
 pub const protocol = @import("protocol.zig");

@@ -1,7 +1,7 @@
 //! One declaration owns each tool's wire schema, implementation, model metadata,
-//! and role. Declaration bodies are staged Boundary functions, never callbacks.
+//! and role. Declaration bodies are staged Horos functions, never callbacks.
 const std = @import("std");
-const source = @import("boundary").source;
+const source = @import("horos").source;
 const authoring = @import("authoring.zig");
 const admission = @import("admission.zig");
 pub const Id = source.Id;

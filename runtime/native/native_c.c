@@ -1,6 +1,6 @@
 #include "native_c.h"
 
-int agent_native_fstat(int fd, struct agent_native_stat *out) {
+int protean_native_fstat(int fd, struct protean_native_stat *out) {
     struct stat value;
     if (fstat(fd, &value) != 0) return -1;
     out->st_dev = (uint64_t)value.st_dev;
@@ -16,7 +16,7 @@ int agent_native_fstat(int fd, struct agent_native_stat *out) {
 static struct sigaction prior_pipe, prior_interrupt, prior_terminate;
 static int signals_active;
 
-int agent_native_signals_begin(agent_native_signal_handler handler) {
+int protean_native_signals_begin(protean_native_signal_handler handler) {
     if (signals_active) return -1;
     struct sigaction action = {0};
     sigemptyset(&action.sa_mask);
@@ -37,7 +37,7 @@ int agent_native_signals_begin(agent_native_signal_handler handler) {
     return 0;
 }
 
-void agent_native_signals_end(void) {
+void protean_native_signals_end(void) {
     if (!signals_active) return;
     sigaction(SIGTERM, &prior_terminate, 0);
     sigaction(SIGINT, &prior_interrupt, 0);

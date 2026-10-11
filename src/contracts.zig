@@ -1,7 +1,7 @@
-//! Pure Agent value support. All bytes follow Boundary 2's public value encoding.
+//! Pure Protean value support. All bytes follow Horos 2's public value encoding.
 //! This module imports no source compiler, evaluator, or process framing codec.
 const std = @import("std");
-const data = @import("boundary_data");
+const data = @import("horos_data");
 const p = data.program;
 const wire = data.wire;
 /// Pure JSON projections share this module identity with the ordinary codecs.
@@ -44,7 +44,7 @@ pub const Descriptor = data.schema.Descriptor;
 
 pub fn Text(comptime maximum: u64) type {
     return struct {
-        pub const agent_value_kind = .text;
+        pub const protean_value_kind = .text;
         pub const max_length: ?u64 = maximum;
         bytes: []const u8,
     };
@@ -52,21 +52,21 @@ pub fn Text(comptime maximum: u64) type {
 
 pub fn Bytes(comptime maximum: u64) type {
     return struct {
-        pub const agent_value_kind = .bytes;
+        pub const protean_value_kind = .bytes;
         pub const max_length: ?u64 = maximum;
         bytes: []const u8,
     };
 }
 
 pub const Utf8 = struct {
-    pub const agent_value_kind = .text;
+    pub const protean_value_kind = .text;
     pub const max_length: ?u64 = null;
     bytes: []const u8,
 };
 
 pub fn Vector(comptime Element: type, comptime maximum: u64) type {
     return struct {
-        pub const agent_value_kind = .vector;
+        pub const protean_value_kind = .vector;
         pub const max_length = maximum;
         pub const Child = Element;
         items: []const Element,
@@ -75,7 +75,7 @@ pub fn Vector(comptime Element: type, comptime maximum: u64) type {
 
 fn wrapped(comptime T: type) bool {
     return switch (@typeInfo(T)) {
-        .@"struct" => @hasDecl(T, "agent_value_kind"),
+        .@"struct" => @hasDecl(T, "protean_value_kind"),
         else => false,
     };
 }
@@ -83,24 +83,24 @@ fn wrapped(comptime T: type) bool {
 fn requireInteger(comptime T: type) void {
     const bits = @typeInfo(T).int.bits;
     if (bits != 8 and bits != 16 and bits != 32 and bits != 64)
-        @compileError("Agent portable integers must have width 8, 16, 32, or 64");
+        @compileError("Protean portable integers must have width 8, 16, 32, or 64");
 }
 
 fn enumTags(comptime T: type) [@typeInfo(T).@"enum".field_values.len]u32 {
     const info = @typeInfo(T).@"enum";
-    if (info.mode != .exhaustive) @compileError("Agent portable enums must be exhaustive");
+    if (info.mode != .exhaustive) @compileError("Protean portable enums must be exhaustive");
     var tags: [info.field_values.len]u32 = undefined;
     inline for (info.field_values, 0..) |value, index| {
         if (value < 0 or value > std.math.maxInt(u32))
-            @compileError("Agent portable enum tags must fit u32");
+            @compileError("Protean portable enum tags must fit u32");
         tags[index] = @intCast(value);
     }
     std.mem.sort(u32, &tags, {}, std.sort.asc(u32));
     return tags;
 }
 
-/// Derive a schema through an ordinary public Boundary Builder's schema method.
-/// Recursive algebraic types may instead use explicit Boundary schema catalogs.
+/// Derive a schema through an ordinary public Horos Builder's schema method.
+/// Recursive algebraic types may instead use explicit Horos schema catalogs.
 pub fn schema(comptime T: type, builder: anytype) !p.Id {
     if (comptime wrapped(T)) return wrapperSchema(T, builder);
     return switch (@typeInfo(T)) {
@@ -121,13 +121,13 @@ pub fn schema(comptime T: type, builder: anytype) !p.Id {
         .@"struct" => |info| blk: {
             var fields: [info.field_types.len]p.Id = undefined;
             inline for (info.field_types, info.field_attrs, 0..) |FieldType, attrs, index| {
-                if (attrs.@"comptime") @compileError("Agent portable fields must be runtime values");
+                if (attrs.@"comptime") @compileError("Protean portable fields must be runtime values");
                 fields[index] = try schema(FieldType, builder);
             }
             break :blk builder.schema(.{ .product = &fields });
         },
         .@"union" => |info| blk: {
-            if (info.tag_type == null) @compileError("Agent requires tagged unions");
+            if (info.tag_type == null) @compileError("Protean requires tagged unions");
             var variants: [info.field_types.len]p.Id = undefined;
             inline for (info.field_types, 0..) |FieldType, index|
                 variants[index] = try schema(FieldType, builder);
@@ -144,20 +144,20 @@ pub fn schema(comptime T: type, builder: anytype) !p.Id {
         } }),
         .pointer => |info| blk: {
             if (info.size != .slice or info.sentinel_ptr != null)
-                @compileError("Agent portable pointers must be unsentinelled slices");
+                @compileError("Protean portable pointers must be unsentinelled slices");
             if (info.child == u8) break :blk builder.schema(.bytes);
             break :blk builder.schema(.{ .seq = try schema(info.child, builder) });
         },
-        else => @compileError("Unsupported Agent portable value type: " ++ @typeName(T)),
+        else => @compileError("Unsupported Protean portable value type: " ++ @typeName(T)),
     };
 }
 
 fn wrapperSchema(comptime T: type, builder: anytype) !p.Id {
-    if (T.agent_value_kind == .vector) return builder.schema(.{ .vector = .{
+    if (T.protean_value_kind == .vector) return builder.schema(.{ .vector = .{
         .element = try schema(T.Child, builder),
         .maximum = T.max_length,
     } });
-    if (T.agent_value_kind == .text) {
+    if (T.protean_value_kind == .text) {
         if (T.max_length == null) return builder.schema(.text);
         return builder.schema(.{ .bounded_text = T.max_length.? });
     }
@@ -222,13 +222,13 @@ fn decode(comptime T: type, allocator: std.mem.Allocator, bytes: []const u8, com
 
 fn checkBlob(comptime T: type, bytes: []const u8) Error!void {
     if (T.max_length) |maximum| if (bytes.len > maximum) return error.InvalidValue;
-    if (T.agent_value_kind == .text and !std.unicode.utf8ValidateSlice(bytes))
+    if (T.protean_value_kind == .text and !std.unicode.utf8ValidateSlice(bytes))
         return error.InvalidUtf8;
 }
 
 fn write(comptime T: type, value: T, output: *wire.Writer) Error!void {
     if (comptime wrapped(T)) {
-        if (T.agent_value_kind == .vector) {
+        if (T.protean_value_kind == .vector) {
             if (value.items.len > T.max_length) return error.InvalidValue;
             return writeSlice(T.Child, value.items, output);
         }
@@ -249,7 +249,7 @@ fn write(comptime T: type, value: T, output: *wire.Writer) Error!void {
         .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType|
             try write(FieldType, @field(value, field_name), output),
         .@"union" => |info| {
-            if (info.tag_type == null) @compileError("Agent requires tagged unions");
+            if (info.tag_type == null) @compileError("Protean requires tagged unions");
             inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, index| {
                 if (std.meta.activeTag(value) == @field(info.tag_type.?, field_name)) {
                     try output.natural(index);
@@ -265,10 +265,10 @@ fn write(comptime T: type, value: T, output: *wire.Writer) Error!void {
         .array => |info| for (value) |element| try write(info.child, element, output),
         .pointer => |info| {
             if (info.size != .slice or info.sentinel_ptr != null)
-                @compileError("Agent portable pointers must be unsentinelled slices");
+                @compileError("Protean portable pointers must be unsentinelled slices");
             try writeSlice(info.child, value, output);
         },
-        else => @compileError("Unsupported Agent portable value type: " ++ @typeName(T)),
+        else => @compileError("Unsupported Protean portable value type: " ++ @typeName(T)),
     }
 }
 
@@ -294,13 +294,13 @@ fn minimumSize(comptime T: type) usize {
         },
         .array => |info| info.len * minimumSize(info.child),
         .optional, .@"union", .pointer => 1,
-        else => @compileError("Unsupported Agent portable value type: " ++ @typeName(T)),
+        else => @compileError("Unsupported Protean portable value type: " ++ @typeName(T)),
     };
 }
 
 fn read(comptime T: type, allocator: std.mem.Allocator, input: *wire.Reader, comptime borrow_bytes: bool) Error!T {
     if (comptime wrapped(T)) {
-        if (T.agent_value_kind == .vector) {
+        if (T.protean_value_kind == .vector) {
             const count = try input.count();
             if (count > T.max_length) return error.InvalidValue;
             return .{ .items = try readElements(T.Child, allocator, input, count, borrow_bytes) };
@@ -335,7 +335,7 @@ fn read(comptime T: type, allocator: std.mem.Allocator, input: *wire.Reader, com
             break :blk result;
         },
         .@"union" => |info| blk: {
-            if (info.tag_type == null) @compileError("Agent requires tagged unions");
+            if (info.tag_type == null) @compileError("Protean requires tagged unions");
             const tag = try input.natural();
             inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, index| {
                 if (tag == index) break :blk @unionInit(T, field_name, try read(FieldType, allocator, input, borrow_bytes));
@@ -354,10 +354,10 @@ fn read(comptime T: type, allocator: std.mem.Allocator, input: *wire.Reader, com
         },
         .pointer => |info| blk: {
             if (info.size != .slice or info.sentinel_ptr != null)
-                @compileError("Agent portable pointers must be unsentinelled slices");
+                @compileError("Protean portable pointers must be unsentinelled slices");
             break :blk readElements(info.child, allocator, input, try input.count(), borrow_bytes);
         },
-        else => @compileError("Unsupported Agent portable value type: " ++ @typeName(T)),
+        else => @compileError("Unsupported Protean portable value type: " ++ @typeName(T)),
     };
 }
 

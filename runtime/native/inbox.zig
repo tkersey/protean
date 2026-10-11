@@ -1,7 +1,7 @@
 //! Native declaration of the ordinary authored inbox capability. Acquisition
 //! and consumption are performed only by the durable task/occurrence owner.
 const std = @import("std");
-const contracts = @import("agent_contracts");
+const contracts = @import("protean_contracts");
 const registry = @import("registry.zig");
 const values = @import("values.zig");
 

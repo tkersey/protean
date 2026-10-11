@@ -6,9 +6,9 @@ const sqlite = @import("sqlite.zig");
 const journal = @import("store.zig");
 const c = @import("native_c");
 
-fn regular(fd: c_int) !c.struct_agent_native_stat {
-    var stat: c.struct_agent_native_stat = undefined;
-    if (c.agent_native_fstat(fd, &stat) != 0) return error.StorageUnavailable;
+fn regular(fd: c_int) !c.struct_protean_native_stat {
+    var stat: c.struct_protean_native_stat = undefined;
+    if (c.protean_native_fstat(fd, &stat) != 0) return error.StorageUnavailable;
     if (stat.st_mode & c.S_IFMT != c.S_IFREG or stat.st_mode & 0o077 != 0 or stat.st_uid != c.geteuid() or stat.st_nlink != 1) return error.UnsafeStatePath;
     return stat;
 }
@@ -24,8 +24,8 @@ fn openFile(dir: c_int, name: [:0]const u8, flags: c_int) !c_int {
     return fd;
 }
 fn trustedParent(fd: c_int) !void {
-    var stat: c.struct_agent_native_stat = undefined;
-    if (c.agent_native_fstat(fd, &stat) != 0) return error.StorageUnavailable;
+    var stat: c.struct_protean_native_stat = undefined;
+    if (c.protean_native_fstat(fd, &stat) != 0) return error.StorageUnavailable;
     // SQLite opens a pathname after descriptor-based namespace admission.
     // An untrusted writer must not be able to replace any admitted ancestor in
     // that interval. Root and this OS principal are the launch trust boundary;
@@ -84,12 +84,12 @@ fn trustedAncestry(start: c_int) !void {
     defer _ = c.close(current);
     for (0..4096) |_| {
         try trustedParent(current);
-        var stat: c.struct_agent_native_stat = undefined;
-        if (c.agent_native_fstat(current, &stat) != 0) return error.StorageUnavailable;
+        var stat: c.struct_protean_native_stat = undefined;
+        if (c.protean_native_fstat(current, &stat) != 0) return error.StorageUnavailable;
         const parent = c.openat(current, "..", c.O_RDONLY | c.O_DIRECTORY | c.O_CLOEXEC);
         if (parent < 0) return error.StorageUnavailable;
-        var parent_stat: c.struct_agent_native_stat = undefined;
-        if (c.agent_native_fstat(parent, &parent_stat) != 0) {
+        var parent_stat: c.struct_protean_native_stat = undefined;
+        if (c.protean_native_fstat(parent, &parent_stat) != 0) {
             _ = c.close(parent);
             return error.StorageUnavailable;
         }
@@ -133,8 +133,8 @@ pub fn openDirectory(a: std.mem.Allocator, path: []const u8, create_final: bool,
         }
         component = next;
     }
-    var stat: c.struct_agent_native_stat = undefined;
-    if (c.agent_native_fstat(dir, &stat) != 0) return error.StorageUnavailable;
+    var stat: c.struct_protean_native_stat = undefined;
+    if (c.protean_native_fstat(dir, &stat) != 0) return error.StorageUnavailable;
     if (private_final) {
         if (stat.st_mode & 0o077 != 0 or stat.st_uid != c.geteuid()) return error.UnsafeStatePath;
     } else try trustedParent(dir);
@@ -152,8 +152,8 @@ pub const Namespace = struct {
     pub fn open(a: std.mem.Allocator, io: std.Io, path: []const u8) !Namespace {
         const dir = try openDirectory(a, path, true, true);
         errdefer _ = c.close(dir);
-        var stat: c.struct_agent_native_stat = undefined;
-        if (c.agent_native_fstat(dir, &stat) != 0) return error.StorageUnavailable;
+        var stat: c.struct_protean_native_stat = undefined;
+        if (c.protean_native_fstat(dir, &stat) != 0) return error.StorageUnavailable;
         _ = try inspectDirectory(a, io, dir, false);
         const lock = try openFile(dir, "owner.lock", c.O_RDWR | c.O_CREAT);
         errdefer _ = c.close(lock);

@@ -1,8 +1,8 @@
 //! Static compiled adapters. Requests must match identity, both canonical
 //! schemas, and a current launch/task grant before adapter code can run.
 const std = @import("std");
-const data = @import("boundary_data");
-const contracts = @import("agent_contracts");
+const data = @import("horos_data");
+const contracts = @import("protean_contracts");
 const values = @import("values.zig");
 const json = @import("json.zig");
 const state = @import("state.zig");

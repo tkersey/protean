@@ -1,8 +1,8 @@
-//! Native client values use the existing ordinary Agent codecs and schemas.
-//! JSON only projects those values; it is not an alternate World wire format.
+//! Native client values use the existing ordinary Protean codecs and schemas.
+//! JSON only projects those values; it is not an alternate Kronos wire format.
 const std = @import("std");
-const data = @import("boundary_data");
-const contracts = @import("agent_contracts");
+const data = @import("horos_data");
+const contracts = @import("protean_contracts");
 const json = @import("json.zig");
 
 test "client JSON integers accept exact equivalent spellings within the declared range" {
@@ -22,8 +22,8 @@ pub fn fromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error
         if (text.len > schemas.maximumTextBytes(T) or !std.unicode.utf8ValidateSlice(text)) return error.InvalidParams;
         return .{ .bytes = text };
     }
-    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "agent_value_kind")) {
-        if (T.agent_value_kind == .bytes) {
+    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "protean_value_kind")) {
+        if (T.protean_value_kind == .bytes) {
             const text = try json.text(value);
             const size = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(text) catch return error.InvalidParams;
             if (size > T.max_length.?) return error.InvalidParams;
@@ -34,7 +34,7 @@ pub fn fromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error
             if (!std.mem.eql(u8, text, std.base64.url_safe_no_pad.Encoder.encode(encoded, bytes))) return error.InvalidParams;
             return .{ .bytes = bytes };
         }
-        if (T.agent_value_kind == .vector) {
+        if (T.protean_value_kind == .vector) {
             if (value != .array or value.array.items.len > T.max_length) return error.InvalidParams;
             const result = try a.alloc(T.Child, value.array.items.len);
             for (result, value.array.items) |*slot, child| slot.* = try fromJson(T.Child, a, child);
@@ -85,12 +85,12 @@ pub fn fromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error
 
 pub fn toJson(comptime T: type, a: std.mem.Allocator, value: T) std.mem.Allocator.Error!json.Value {
     if (comptime schemas.isText(T)) return json.string(value.bytes);
-    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "agent_value_kind")) {
-        if (T.agent_value_kind == .bytes) {
+    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "protean_value_kind")) {
+        if (T.protean_value_kind == .bytes) {
             const result = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(value.bytes.len));
             return json.string(std.base64.url_safe_no_pad.Encoder.encode(result, value.bytes));
         }
-        if (T.agent_value_kind == .vector) {
+        if (T.protean_value_kind == .vector) {
             var array: std.array_list.Managed(json.Value) = .init(a);
             for (value.items) |child| try array.append(try toJson(T.Child, a, child));
             return .{ .array = array };
@@ -157,7 +157,7 @@ const Catalog = struct {
 };
 
 /// A data catalog, not a source compiler. Canonicalization and encoding remain
-/// owned by Boundary; handler schemas and authored schemas share that owner.
+/// owned by Horos; handler schemas and authored schemas share that owner.
 pub fn schemaBytes(comptime T: type, a: std.mem.Allocator) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();

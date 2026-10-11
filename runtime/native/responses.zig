@@ -1,7 +1,7 @@
 //! Fixed-profile Responses projection. All actions remain ordinary proposals
 //! for the existing checked responder; this adapter never dispatches tools.
 const std = @import("std");
-const contracts = @import("agent_contracts");
+const contracts = @import("protean_contracts");
 const registry = @import("registry.zig");
 const values = @import("values.zig");
 const json = @import("json.zig");

@@ -45,9 +45,9 @@ const Context = struct {
         if (comptime @hasDecl(@import("root"), "native_hash")) {
             const optimized = @import("root").native_hash;
             var state: optimized.State = undefined;
-            optimized.agent_native_sha256_init(&state);
-            optimized.agent_native_sha256_update(&state, bytes.ptr, bytes.len);
-            optimized.agent_native_sha256_final(&state, &hash);
+            optimized.protean_native_sha256_init(&state);
+            optimized.protean_native_sha256_update(&state, bytes.ptr, bytes.len);
+            optimized.protean_native_sha256_final(&state, &hash);
         } else std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
         return c.a.dupe(u8, &std.fmt.bytesToHex(hash, .lower));
     }
@@ -69,7 +69,7 @@ const Context = struct {
 
 fn sha3(bytes: []const u8, output: *[32]u8) void {
     if (comptime @hasDecl(@import("root"), "native_hash")) {
-        @import("root").native_hash.agent_native_sha3_256(bytes.ptr, bytes.len, output);
+        @import("root").native_hash.protean_native_sha3_256(bytes.ptr, bytes.len, output);
     } else std.crypto.hash.sha3.Sha3_256.hash(bytes, output, .{});
 }
 
@@ -178,9 +178,9 @@ fn lockAt(c: Context, path: []const u8) !Value {
     try equal(try text(lock, "format"), "agent-native-source-lock/v2");
     const status = try text(lock, "status");
     if (!std.mem.eql(u8, status, "released-integration") and !std.mem.eql(u8, status, "development-integration")) return error.InvalidMetadata;
-    inline for (.{ "boundary", "world" }) |name| {
-        const item = try field(lock, name);
-        const repository = "tkersey/" ++ name;
+    inline for (.{ .{ "boundary", "horos" }, .{ "world", "kronos" } }) |binding| {
+        const item = try field(lock, binding[0]);
+        const repository = "tkersey/" ++ binding[1];
         try equal(try text(item, "repository"), repository);
         const commit = try text(item, "commit");
         if (commit.len != 40) return error.InvalidMetadata;
@@ -268,7 +268,7 @@ fn manifest(c: Context, args: []const []const u8) !void {
     const library_path = try Dir.cwd().realPathFileAlloc(c.io, args[16], c.a);
     const library = try Inventory.load(c, library_path, 100000);
     var licenses: std.ArrayList(Value) = .empty;
-    inline for (.{ "Agent", "World", "Boundary" }, 3..) |component, index| {
+    inline for (.{ "Protean", "Kronos", "Horos" }, 3..) |component, index| {
         try licenses.append(c.a, try c.value(.{ .component = component, .text = try c.read(args[index], 1024 * 1024) }));
     }
     const exe_dir = std.fs.path.dirname(args[15]) orelse return error.InvalidPath;
@@ -521,14 +521,14 @@ fn setup(c: Context, args: []const []const u8) !void {
     const lock = try lockAt(c, args[0]);
     try equal(std.mem.trim(u8, try command(c, &.{ args[3], "version" }, 1024), "\r\n "), "0.17.0");
     try Dir.cwd().createDirPath(c.io, args[2]);
-    const boundary = try sourceAt(c, args[2], "boundary", try field(lock, "boundary"), offline);
+    const horos = try sourceAt(c, args[2], "horos", try field(lock, "boundary"), offline);
     if (!authoring_only) {
-        _ = try sourceAt(c, args[2], "world", try field(lock, "world"), offline);
+        _ = try sourceAt(c, args[2], "kronos", try field(lock, "world"), offline);
         try sqliteAt(c, args[2], args[1], offline);
     }
     // Seed Zig's normal package cache from an already authenticated source.
     // The public downstream module graph can then use its ordinary pinned package.
-    const package_hash = try command(c, &.{ args[3], "fetch", boundary }, 65536);
+    const package_hash = try command(c, &.{ args[3], "fetch", horos }, 65536);
     try equal(std.mem.trim(u8, package_hash, "\r\n "), try text(try field(try field(lock, "boundary"), "package"), "zigHash"));
 }
 
@@ -543,7 +543,7 @@ pub fn main(init: std.process.Init) !void {
     while (iterator.next()) |arg| try args.append(c.a, arg);
     if (std.mem.eql(u8, operation, "setup")) return setup(c, args.items);
     if (std.mem.eql(u8, operation, "manifest")) return manifest(c, args.items);
-    if (std.mem.eql(u8, operation, "verify-boundary")) {
+    if (std.mem.eql(u8, operation, "verify-horos")) {
         if (args.items.len != 3) return error.ExpectedVerificationArguments;
         const lock = try lockAt(c, args.items[0]);
         const package = std.mem.eql(u8, args.items[2], "package");

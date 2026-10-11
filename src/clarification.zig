@@ -1,9 +1,9 @@
-//! Consequence-sensitive decisions emitted as ordinary Boundary computations.
+//! Consequence-sensitive decisions emitted as ordinary Horos computations.
 //! The application owns the proposal boundary and the completeness of its key.
 //! This module owns coverage, exact-key grouping, and offered-choice selection.
 const std = @import("std");
-const source = @import("boundary").source;
-const typed = @import("boundary").authoring;
+const source = @import("horos").source;
+const typed = @import("horos").authoring;
 const deliberation = @import("deliberation.zig");
 const equality = @import("value_equality.zig");
 const interaction = @import("interaction.zig");
@@ -527,7 +527,7 @@ test "domain and portable projection declarations reject before authoring contro
     const declarations = b.functions.items.len;
     try std.testing.expectEqual(d.classify, (try define(&b, spec)).classify);
     try std.testing.expectEqual(declarations, b.functions.items.len);
-    var compiled = try @import("boundary").program.compile(
+    var compiled = try @import("horos").program.compile(
         std.testing.allocator,
         b.module(d.classify, try b.scalar(void)),
     );
@@ -568,7 +568,7 @@ test "presenter requires the exact pure signature and portable context" {
         .presentation = nothing,
     };
     const resolve = try resolver(&b, d, p);
-    var compiled = try @import("boundary").program.compile(
+    var compiled = try @import("horos").program.compile(
         std.testing.allocator,
         b.module(resolve, unit),
     );

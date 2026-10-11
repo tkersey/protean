@@ -1,22 +1,22 @@
 //! Stable-address evaluator storage, reachable only by the native task owner.
 //! Environmental callbacks receive values/authority, never this handle.
 const std = @import("std");
-const world = @import("world");
-const data = @import("boundary_data");
+const kronos = @import("kronos");
+const data = @import("horos_data");
 
 const Storage = struct {
     parent: std.mem.Allocator,
-    budget: world.AllocationBudget,
+    budget: kronos.AllocationBudget,
     program: *Program,
     own_program: bool,
-    resident: world.Resident,
+    resident: kronos.Resident,
     live: bool,
 };
 
 const ProgramStorage = struct {
     parent: std.mem.Allocator,
-    budget: world.AllocationBudget,
-    prepared: world.Prepared,
+    budget: kronos.AllocationBudget,
+    prepared: kronos.Prepared,
     residents: usize = 0,
 };
 
@@ -30,7 +30,7 @@ pub const Program = opaque {
         const owner = try a.create(ProgramStorage);
         errdefer a.destroy(owner);
         owner.* = .{ .parent = a, .budget = .{ .parent = a, .limit = working_bytes }, .prepared = undefined };
-        owner.prepared = try world.Prepared.init(owner.budget.allocator(), image);
+        owner.prepared = try kronos.Prepared.init(owner.budget.allocator(), image);
         return @ptrCast(owner);
     }
     pub fn close(self: *Program) !void {
@@ -64,8 +64,8 @@ pub const Driver = opaque {
         owner.own_program = false;
         const prepared = &program.storage().prepared;
         owner.resident = switch (instance) {
-            .initial_args => |args| try world.Resident.start(owner.budget.allocator(), prepared, args),
-            .state => |state| try world.Resident.restore(owner.budget.allocator(), prepared, state),
+            .initial_args => |args| try kronos.Resident.start(owner.budget.allocator(), prepared, args),
+            .state => |state| try kronos.Resident.restore(owner.budget.allocator(), prepared, state),
         };
         program.storage().residents += 1;
         owner.live = true;

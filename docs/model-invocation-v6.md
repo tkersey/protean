@@ -3,20 +3,20 @@
 `agent.model.invoke.v6` adds separately bound inference selection and context
 projection to the existing model/responder owner. It does not change v3, inline
 v4, or the fixed-profile v5 contract. The reference consumer is
-[`adaptive-agent`](../examples/adaptive-agent/README.md).
+[`protean`](../examples/adaptive/README.md).
 
 ## Authored API and execution
 
-Scope authority is the October 9, 2026 **authored program on Boundary, executed
-by World** amendment. It supersedes dual-adaptive-backend and immediate
+Scope authority is the October 9, 2026 **authored program on Horos, executed
+by Kronos** amendment. It supersedes dual-adaptive-backend and immediate
 standalone-distribution gates without changing these effect identities.
 
-`agent.adaptive_controls.defineInference` and `defineSkill(P, ...)` construct
+`protean.adaptive_controls.defineInference` and `defineSkill(P, ...)` construct
 reusable control transitions. `P.declareAdaptive` and
-`agent.responders.defineAdaptiveModelObserved(P, ...)` provide the admitted model
+`protean.responders.defineAdaptiveModelObserved(P, ...)` provide the admitted model
 effect and checked continuation. These owners are independent of the repository
-example. Consumers compose them through existing Agent/Boundary authoring;
-World executes the emitted BPI3 and owns its saved continuation.
+example. Consumers compose them through existing Protean/Horos authoring;
+Kronos executes the emitted BPI3 and owns its saved continuation.
 
 The program owns task state, inference selection, skill residency, revisions,
 projection revisions, D/O masks, logical budgets and completion. Native Zig
@@ -25,7 +25,7 @@ explicit effect boundaries. They cannot choose the next action from a transcript
 substitute a model, mutate a skill, reset an epoch or retry unknown delivery.
 
 The existing native reference embedding and build helper remain supported.
-`adaptive-agent-image` emits BPI3 and ordinary wire contracts; `adaptive-agent`
+`protean-image` emits BPI3 and ordinary wire contracts; `protean`
 adds the existing native reference vehicle. A prebuilt vehicle does not invoke
 the Zig compiler or require an adaptive JS runtime. Separate final distribution
 polish is deferred, not a blocker on the reusable API or reference integration.
@@ -108,7 +108,7 @@ original top-level effort. Unchanged input prefixes and their cache breakpoints
 are retained; stale breakpoints in an edited suffix are replaced by the current
 eligible suffix boundary. Shared provider cache across models is not assumed.
 
-The reference program uses Boundary resumptions through World to retain task
+The reference program uses Horos resumptions through Kronos to retain task
 state, evidence references, control state and pending results. It no longer
 constructs a second JSON representation of task state for ordinary transitions.
 Explicit replacement contexts are retired: a plan continues its prior transcript
@@ -125,7 +125,7 @@ Native execution reuses `CaptureAdapter.prepare/acquire/interpret` and the
 existing task owner. Preparation fixes the exact request, selection and plan.
 Dispatch charges a durable physical attempt. Capture is committed before pure
 interpretation; reply, context objects and reported usage are then committed
-before World consumes the reply. An application can narrow the native host's
+before Kronos consumes the reply. An application can narrow the native host's
 attempt ceiling through a pure frozen-profile callback; this dispatch check is
 not applied to historical capture replay.
 
@@ -162,7 +162,7 @@ projection overflow. Preparation checks the complete rendered request before
 admitting a control. The reference has no handoff bundle or handoff-size gate.
 Its message representation shares the transport's 256 KiB ceiling. Existing native
 64 MiB requested allocation, 16 MiB worker and SQLite budgets, and 256 MiB
-namespace limits remain unchanged. Protocol frames, checkpoint size, World
+namespace limits remain unchanged. Protocol frames, checkpoint size, Kronos
 working memory and namespace quotas remain separate limits.
 
 External read-only qualification observations record actual byte counts, selection/epoch identities,

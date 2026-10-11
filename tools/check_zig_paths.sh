@@ -2,8 +2,8 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-observed=$(mktemp "${TMPDIR:-/tmp}/agent-zig-paths.XXXXXX")
-expected=$(mktemp "${TMPDIR:-/tmp}/agent-zig-paths-expected.XXXXXX")
+observed=$(mktemp "${TMPDIR:-/tmp}/protean-zig-paths.XXXXXX")
+expected=$(mktemp "${TMPDIR:-/tmp}/protean-zig-paths-expected.XXXXXX")
 trap 'rm -f "$observed" "$expected"' EXIT
 
 cd "$repo_root"

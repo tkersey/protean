@@ -20,7 +20,7 @@ export class RpcError extends Error {
  * Callers retain client_operation_id and exact parameters for durable retries.
  * A transport failure is not evidence that a mutation was unadmitted.
  */
-export class AgentClient {
+export class ProteanClient {
   readonly child: ChildProcessWithoutNullStreams;
   readonly closed: Promise<Exit>;
   private pending = new Map<string, Pending>();

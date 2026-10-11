@@ -1,7 +1,7 @@
 //! The strict model JSON subset and its self-describing argument codecs.
 //! Model-visible answers are data. This module grants no operation authority.
 const std = @import("std");
-const contracts = @import("agent_contracts");
+const contracts = @import("protean_contracts");
 pub const json = contracts.json;
 
 pub const FieldKind = enum { text, signed_integer, unsigned_integer, boolean, enumeration };
@@ -25,28 +25,28 @@ fn checkField(comptime name: []const u8, comptime T: type) void {
         .int => |info| if (info.bits != 8 and info.bits != 16 and
             info.bits != 32 and info.bits != 64)
         {
-            @compileError("Agent model codec integer width is unsupported: " ++ name);
+            @compileError("Protean model codec integer width is unsupported: " ++ name);
         },
         .@"enum" => |info| {
             if (info.mode != .exhaustive)
-                @compileError("Agent model codec requires an exhaustive enum: " ++ name);
+                @compileError("Protean model codec requires an exhaustive enum: " ++ name);
             for (info.field_values) |value| if (value < 0 or value > std.math.maxInt(u32))
-                @compileError("Agent model codec enum tags must fit u32: " ++ name);
+                @compileError("Protean model codec enum tags must fit u32: " ++ name);
         },
-        else => @compileError("Agent model codec is unsupported for '" ++ name ++
+        else => @compileError("Protean model codec is unsupported for '" ++ name ++
             "': " ++ @typeName(T)),
     }
 }
 
 pub fn checkPayload(comptime T: type) void {
-    if (json.isText(T)) @compileError("Agent model payload must be a product or enum");
+    if (json.isText(T)) @compileError("Protean model payload must be a product or enum");
     switch (@typeInfo(T)) {
         .@"struct" => |info| {
-            if (info.is_tuple) @compileError("Agent model codec does not admit tuple payloads");
+            if (info.is_tuple) @compileError("Protean model codec does not admit tuple payloads");
             for (info.field_names, info.field_types) |name, FieldType| checkField(name, FieldType);
         },
         .@"enum" => checkField("value", T),
-        else => @compileError("Agent model payload must be a product or enum: " ++
+        else => @compileError("Protean model payload must be a product or enum: " ++
             @typeName(T)),
     }
 }
@@ -57,7 +57,7 @@ fn fieldCount(comptime T: type) usize {
 
 pub fn Profile(comptime Answer: type) type {
     if (@typeInfo(Answer) != .@"union" or @typeInfo(Answer).@"union".tag_type == null)
-        @compileError("Agent model Answer must be a tagged union");
+        @compileError("Protean model Answer must be a tagged union");
     const variants = @typeInfo(Answer).@"union".field_types;
     const maxima = comptime blk: {
         var names: usize = 1;

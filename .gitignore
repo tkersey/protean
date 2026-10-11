@@ -14,6 +14,8 @@
 .ledger/**/*.cas.lock.advisory
 
 # Authenticated native build inputs and disposable qualification output.
+/.protean-native/
+# Keep prior local inputs private; never discover or migrate them.
 /.agent4-native/
 
 /.zig-cache-upload/

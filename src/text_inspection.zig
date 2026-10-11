@@ -1,10 +1,10 @@
 //! A separately compiled, bounded byte/LF fold with owned effectful retirement.
 const std = @import("std");
-const boundary = @import("boundary");
-const source = boundary.source;
-const data = boundary.data;
-const contracts = @import("agent_contracts");
-const a = boundary.authoring;
+const horos = @import("horos");
+const source = horos.source;
+const data = horos.data;
+const contracts = @import("protean_contracts");
+const a = horos.authoring;
 pub const chunk_bytes = 16;
 pub const maximum_subject_bytes = 65536;
 pub const Subject = struct { name: contracts.Text(64), version: [32]u8, length: u64 };
@@ -26,7 +26,7 @@ const Emit = struct {
     fn schema(e: Emit, comptime T: type) !*const a.Schema {
         switch (@typeInfo(T)) {
             .@"struct" => |info| {
-                if (@hasDecl(T, "agent_value_kind")) return a.interop.schema(e.c, try contracts.schema(T, a.interop.builder(e.c)));
+                if (@hasDecl(T, "protean_value_kind")) return a.interop.schema(e.c, try contracts.schema(T, a.interop.builder(e.c)));
                 var fields: [info.field_names.len]a.Field = undefined;
                 inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, i| fields[i] = .{ .name = field_name, .schema = try e.schema(FieldType) };
                 return e.c.record(&fields);
@@ -175,7 +175,7 @@ pub fn emit(allocator: std.mem.Allocator) ![]u8 {
     const read = try c.external(read_identity, try e.schema(Read), try e.schema(Reply));
     const close = try c.external(close_identity, subject_schema, e.unit);
     const loop = try fold(e, read);
-    const generator = try boundary.library.generator.create(c, "agent.text.result.v1", e.unit, result_schema, e.unit, .{
+    const generator = try horos.library.generator.create(c, "agent.text.result.v1", e.unit, result_schema, e.unit, .{
         .captures = .{ .continuation = &.{ e.unit, e.integer, subject_schema, result_schema, try e.schema(Read), try e.schema(Reply), try e.schema(Chunk), try e.schema(Stats), try e.schema([32]u8), try e.schema(contracts.Bytes(chunk_bytes)), try c.scalar(bool), try c.scalar(u8) }, .body = &.{subject_schema} },
         .residual = &.{ read, close },
         .body_use = .reusable,

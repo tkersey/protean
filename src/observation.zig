@@ -2,9 +2,9 @@
 //! Origin tags describe observations. Only the separate internal evidence
 //! resource can satisfy a protected commitment's live-evidence requirement.
 const std = @import("std");
-const boundary = @import("boundary");
-const source = boundary.source;
-const typed = boundary.authoring;
+const horos = @import("horos");
+const source = horos.source;
+const typed = horos.authoring;
 const authoring = @import("authoring.zig");
 const decision = @import("decision.zig");
 const Id = source.Id;
@@ -127,7 +127,7 @@ pub fn withLive(
 }
 
 /// Simulator is an ordinary reusable computation Q -> T, with its actual row.
-/// Any permitted model/read operations in it stay visible to Agent admission.
+/// Any permitted model/read operations in it stay visible to Protean admission.
 pub fn withSimulation(
     c: authoring.Context,
     d: Definition,

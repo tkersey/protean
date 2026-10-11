@@ -1,6 +1,6 @@
 //! Shared executable front end. Application code supplies only compiled adapters.
 const std = @import("std");
-const native = @import("agent_native");
+const native = @import("protean_native");
 const environment = @import("environment");
 const types = @import("application_types");
 

@@ -9,7 +9,7 @@ const tasks = @import("tasks.zig");
 const Namespace = @import("namespace.zig").Namespace;
 const transport_api = @import("transport.zig");
 const Worker = @import("worker.zig").Worker;
-const world = @import("world");
+const kronos = @import("kronos");
 const c = @import("native_c");
 const identity = @import("identity.zig");
 const Shutdown = enum { park, cancel };
@@ -21,7 +21,7 @@ pub fn reportFailure(err: anyerror) u8 {
     if (flags < 0 or c.fcntl(c.STDERR_FILENO, c.F_SETFL, flags | c.O_NONBLOCK) < 0) return 74;
     defer _ = c.fcntl(c.STDERR_FILENO, c.F_SETFL, flags);
     var buffer: [192]u8 = undefined;
-    const message = std.fmt.bufPrint(&buffer, "agent: {s}\n", .{@errorName(err)}) catch return 74;
+    const message = std.fmt.bufPrint(&buffer, "protean: {s}\n", .{@errorName(err)}) catch return 74;
     _ = c.write(c.STDERR_FILENO, message.ptr, message.len);
     return 74;
 }
@@ -69,7 +69,7 @@ fn Connection(comptime Types: type) type {
                 try json.put(a, &result, "protocol_version", json.string(protocol.version));
                 try json.put(a, &result, "server_instance_id", json.string(self.instance));
                 var info = json.object();
-                try json.put(a, &info, "name", json.string("Agent native host"));
+                try json.put(a, &info, "name", json.string("Protean native host"));
                 try json.put(a, &info, "version", json.string("1.0.0-dev"));
                 try json.put(a, &result, "server_info", info);
                 try json.put(a, &result, "build_manifest_id", json.string(self.application.manifest_id));
@@ -196,7 +196,7 @@ pub fn run(comptime Types: type, comptime Environment: type, init: std.process.I
         if (comptime @hasDecl(Environment, "configure")) {
             try std.Io.File.stdout().writeStreamingAll(init.io, "Configured application commands:\nvalidate --config FILE\nrun --config FILE --task TEXT --state-dir PATH --authorize-inference --credential-file FILE\nserve --transport stdio --config FILE --state-dir PATH [--authorize-inference --credential-file FILE]\nresume --state-dir PATH [--task-id ID] [--config FILE] [--authorize-inference --credential-file FILE]\nUse --profile-task ID with serve to restore that task's frozen profile and snapshot.\nAn explicit --trust-root DER_FILE selects a TLS trust root. Credentials are never discovered.\n--test-provider selects loopback HTTPS with a built-in non-secret token; it requires --trust-root and rejects --credential-file.\nStatus/result read saved task data without loading execution configuration.\nOffline mode uses embedded deterministic fixtures and requires --offline.\n\n");
         }
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Agent native application\n\n--help\ndescribe-build\nlicenses\ndemo --offline --state-dir PATH\nserve --transport stdio --offline [--state-dir PATH]\nstatus|result|resume|cancel --offline --state-dir PATH [--task-id ID]\nrun --offline --state-dir PATH --input-json JSON [--operation-id ID]\nrespond --offline --state-dir PATH --task-id ID --question-id ID --question-revision N --request-digest SHA256 --answer-json JSON [--operation-id ID]\nexport-checkpoint --offline --state-dir PATH [--task-id ID] --output FILE\nimport-checkpoint --offline --state-dir NEW_PATH --input FILE [--operation-id ID]\n\nA state directory enables durable tasks. Without it, serve provides discovery only.\nTask selection is required when more than one applicable task exists.\nWith --operation-id, resume/cancel/respond require --task-id; resume also requires --expected-revision. Preserve those parameters on retries.\n");
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Protean native application\n\n--help\ndescribe-build\nlicenses\ndemo --offline --state-dir PATH\nserve --transport stdio --offline [--state-dir PATH]\nstatus|result|resume|cancel --offline --state-dir PATH [--task-id ID]\nrun --offline --state-dir PATH --input-json JSON [--operation-id ID]\nrespond --offline --state-dir PATH --task-id ID --question-id ID --question-revision N --request-digest SHA256 --answer-json JSON [--operation-id ID]\nexport-checkpoint --offline --state-dir PATH [--task-id ID] --output FILE\nimport-checkpoint --offline --state-dir NEW_PATH --input FILE [--operation-id ID]\n\nA state directory enables durable tasks. Without it, serve provides discovery only.\nTask selection is required when more than one applicable task exists.\nWith --operation-id, resume/cancel/respond require --task-id; resume also requires --expected-revision. Preserve those parameters on retries.\n");
         return 0;
     }
     if (std.mem.eql(u8, command, "describe-build") or std.mem.eql(u8, command, "licenses")) {
@@ -289,7 +289,7 @@ pub fn run(comptime Types: type, comptime Environment: type, init: std.process.I
 
     // Main-thread allocations are reclaimable and bounded. Workers use their
     // own preallocated region, so this accounting never races with worker I/O.
-    var budget: world.AllocationBudget = .{ .parent = init.gpa, .limit = 64 * 1024 * 1024 };
+    var budget: kronos.AllocationBudget = .{ .parent = init.gpa, .limit = 64 * 1024 * 1024 };
     const a = budget.allocator();
     var handlers = try registry.Registry.init(a, &Environment.handlers);
     defer handlers.deinit();
@@ -536,8 +536,8 @@ test "execution exit distinguishes application failure from incomplete cleanup" 
 
 fn driveHuman(comptime Types: type, a: std.mem.Allocator, service: *tasks.Service(Types), id: [16]u8, operation_id: []const u8) !void {
     interrupts.store(0, .release);
-    if (c.agent_native_signals_begin(interrupt) != 0) return error.IoUnavailable;
-    defer c.agent_native_signals_end();
+    if (c.protean_native_signals_begin(interrupt) != 0) return error.IoUnavailable;
+    defer c.protean_native_signals_end();
     const slot = try Worker.init(a, service.io);
     defer {
         if (slot.future != null) std.process.exit(2);
@@ -752,8 +752,8 @@ fn serve(comptime Types: type, io: std.Io, a: std.mem.Allocator, connection: *Co
     var transport = try transport_api.Transport.init(a, io, connection.limits);
     defer transport.deinit();
     interrupts.store(0, .release);
-    if (c.agent_native_signals_begin(interrupt) != 0) return error.IoUnavailable;
-    defer c.agent_native_signals_end();
+    if (c.protean_native_signals_begin(interrupt) != 0) return error.IoUnavailable;
+    defer c.protean_native_signals_end();
     const worker: ?*Worker = if (connection.client != null) try Worker.init(a, io) else null;
     defer if (worker) |slot| {
         // Unexpected failure with live I/O uses process-crash recovery. Never

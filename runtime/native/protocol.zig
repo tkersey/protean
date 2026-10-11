@@ -1,4 +1,4 @@
-//! agent-host/1.0 admission. This layer cannot drive World or dispatch a tool.
+//! agent-host/1.0 admission. This layer cannot drive Kronos or dispatch a tool.
 const std = @import("std");
 const json = @import("json.zig");
 pub const version = "agent-host/1.0";
