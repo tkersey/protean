@@ -3,38 +3,38 @@
   "status": "development-integration",
   "boundary": {
     "repository": "tkersey/horos",
-    "commit": "00df17d7f563745b740b9121f1abffdb1f1540b3",
-    "gitTree": "780ec23243e69f6f8ec7aa768c2aba16f4c530ac",
+    "commit": "3586b932d4c5cebb9dbf621b7db152fd003ae70d",
+    "gitTree": "265c5ee15985394bf6e2f97f03ee037072517d68",
     "version": "4.0.0-dev.0",
     "source": {
-      "inventorySha256": "00a868a4f0ec354c60c1abb453556c63da949a01970712404dd55e5a7027a748",
+      "inventorySha256": "49abe1fd86ff33ad5c59e6b111eb5c64bef959109015e5d3380c06298c346af3",
       "entries": 396,
-      "bytes": 8383877
+      "bytes": 8391047
     },
     "archive": {
-      "url": "https://github.com/tkersey/horos/archive/00df17d7f563745b740b9121f1abffdb1f1540b3.tar.gz",
-      "sha256": "26361fc964c61e260f55485b24e5280b88242e4ad8595f39ddc13dddc4737cf5",
-      "bytes": 1523666
+      "url": "https://github.com/tkersey/horos/archive/3586b932d4c5cebb9dbf621b7db152fd003ae70d.tar.gz",
+      "sha256": "37df1f840051f0874108c568f93bb2c32dced59dbf0ed13eb4c39c21a30495dc",
+      "bytes": 1524708
     },
     "authentication": "Development successor source archive compared file-for-file and mode-for-mode with the exact Git commit; complete normalized source inventory authenticated.",
     "package": {
-      "zigHash": "horos-4.0.0-dev.0-flclaNJgOADDePue1SsqM0EPwQ-HTcO7hfpbV-W_3JmA",
+      "zigHash": "horos-4.0.0-dev.0-flclaNR8OACFbfLAxxAtaykv_oDYWFFkSyXdGPjRj_n7",
       "defaultProfile": "zig-managed",
       "profiles": {
         "zig-managed": {
-          "inventorySha256": "29be936f12da8aa41a67b3cf52938c603bd73d7fc89b1f6ba5367c14320cee90",
+          "inventorySha256": "63848eb0b007fbb01093de23e74972e81a453f75fbc3334e566c069456c7e71f",
           "entries": 376,
-          "bytes": 3694802
+          "bytes": 3701972
         },
         "archive-extracted": {
-          "inventorySha256": "29be936f12da8aa41a67b3cf52938c603bd73d7fc89b1f6ba5367c14320cee90",
+          "inventorySha256": "63848eb0b007fbb01093de23e74972e81a453f75fbc3334e566c069456c7e71f",
           "entries": 376,
-          "bytes": 3694802
+          "bytes": 3701972
         }
       },
       "archive": {
-        "sha256": "26aeb4b1fd8988da30f2a47c10df2bdaea4dc261872634fe7f648a9aefed3924",
-        "bytes": 735047
+        "sha256": "bca0120dd0aaab7d1054120911f57d8d56096b52e1edab191b99f396d77a586a",
+        "bytes": 736297
       }
     },
     "api": {
@@ -81,7 +81,7 @@
         },
         {
           "path": "src/authoring.zig",
-          "sha256": "36dd2e237d746f609b182b4f55ee304500ad705e09b2c088b670b52716b10030"
+          "sha256": "2717e33395a2ccd210e639289e3fc295725bf794d97bbbe61170d8b2272757f6"
         },
         {
           "path": "src/data/native_shape.zig",
@@ -89,25 +89,25 @@
         },
         {
           "path": "src/authoring/runtime.zig",
-          "sha256": "209b1be501b6d9fdeb935ea60772b2418a003de5637ed9c63f8727df5cf57b0d"
+          "sha256": "a6e6fbee7b72a73d42439f8bf8e9eb3e10da03aa45de19b96edafd535104fc67"
         }
       ]
     }
   },
   "world": {
     "repository": "tkersey/kosmos",
-    "commit": "08562157045629df2703534ba013a68148ff0226",
-    "gitTree": "29cedc7ac79a6b050d86e7ebd54aaa4d47bed59a",
+    "commit": "99d3e761989143cbf7e4ef360b50e795924ef1c7",
+    "gitTree": "51315bc7b01226fe7a544a37ab3e494bf98d3238",
     "version": "6.0.0",
     "source": {
-      "inventorySha256": "1ee3fcb5406ebba23e89359bd06f0a45d5090c1c0a6b9aa1f7560accba4f477c",
+      "inventorySha256": "a380e149d427d0823ffa658dfd1842de34bcc7ee72c8d975ed639775fa8f51e1",
       "entries": 112,
       "bytes": 1456124
     },
     "archive": {
-      "url": "https://github.com/tkersey/kosmos/archive/08562157045629df2703534ba013a68148ff0226.tar.gz",
-      "sha256": "0e600e8855dcfb60a158d226b525602586002b5e2cdbf157433f97c3bbb00be1",
-      "bytes": 326860
+      "url": "https://github.com/tkersey/kosmos/archive/99d3e761989143cbf7e4ef360b50e795924ef1c7.tar.gz",
+      "sha256": "da5f7b69483b5316e60165923e723f6306d1797d8870eacb9b988df36a3c60aa",
+      "bytes": 326882
     },
     "authentication": "Development successor source archive compared file-for-file and mode-for-mode with the exact Git commit; complete normalized source inventory authenticated."
   },
@@ -120,8 +120,8 @@
     "architecture": "arm64"
   },
   "publicationObservation": {
-    "boundarySource": "https://github.com/tkersey/horos/commit/00df17d7f563745b740b9121f1abffdb1f1540b3",
-    "worldSource": "https://github.com/tkersey/kosmos/commit/08562157045629df2703534ba013a68148ff0226",
+    "boundarySource": "https://github.com/tkersey/horos/commit/3586b932d4c5cebb9dbf621b7db152fd003ae70d",
+    "worldSource": "https://github.com/tkersey/kosmos/commit/99d3e761989143cbf7e4ef360b50e795924ef1c7",
     "compatiblePublishedReleaseObserved": false
   },
   "limitations": [
