@@ -18,11 +18,11 @@ pub fn reference(bytes: []const u8) t.model.ArtifactReference {
     return .{ .digest = digest(bytes), .bytes = bytes.len };
 }
 pub fn open(ctx: native.registry.ProjectionContext, ref: t.model.ArtifactReference) !contracts.Decoded(t.WorkArtifact) {
-    const bytes = try ctx.object(.{ .digest = ref.digest, .bytes = ref.bytes }, 128 * 1024);
+    const bytes = try ctx.object(.{ .digest = ref.digest, .bytes = ref.bytes }, std.math.cast(usize, ref.bytes) orelse return error.Capacity);
     defer ctx.allocator.free(bytes);
     var record = try contracts.decodeOwned(t.WorkArtifact, ctx.allocator, bytes);
     errdefer record.deinit();
-    if (record.value.version != 1 or !same(&record.value.task, &ctx.task) or !same(&record.value.policy, &digest(ctx.profile))) return error.InvalidWorkArtifact;
+    if (record.value.version != 2 or !same(&record.value.task, &ctx.task) or !same(&record.value.policy, &digest(ctx.profile))) return error.InvalidWorkArtifact;
     return record;
 }
 pub fn evidence(ctx: native.registry.ProjectionContext, ref: t.SourceEvidenceReference) !t.Evidence {
@@ -33,9 +33,9 @@ pub fn evidence(ctx: native.registry.ProjectionContext, ref: t.SourceEvidenceRef
     return .{ .snapshot = item.snapshot, .path = .{ .bytes = try ctx.allocator.dupe(u8, item.path.bytes) }, .sha256 = .{ .bytes = try ctx.allocator.dupe(u8, item.sha256.bytes) }, .start = item.start, .end = item.end, .file_bytes = item.file_bytes, .content = .{ .bytes = try ctx.allocator.dupe(u8, item.content.bytes) } };
 }
 fn snapshot(ctx: native.registry.ProjectionContext) !native.repository.Snapshot {
-    const root = (try native.json.parse(ctx.allocator, ctx.profile, .{ .bytes = 256 * 1024 })).value;
+    const root = (try native.json.parse(ctx.allocator, ctx.profile, .{ .bytes = ctx.profile.len, .tokens = ctx.profile.len, .members = ctx.profile.len })).value;
     const ref = try native.values.fromJson(native.registry.ObjectReference, ctx.allocator, native.json.get(root, "snapshot") orelse return error.InvalidConfiguration);
-    return native.repository.Snapshot.openBorrowed(ctx.allocator, try ctx.object(ref, native.repository.maximum_snapshot_bytes));
+    return native.repository.Snapshot.openBorrowed(ctx.allocator, try ctx.object(ref, std.math.cast(usize, ref.bytes) orelse return error.Capacity));
 }
 /// Bind work to a function call in the exact captured response and its original
 /// offered set. The authored image supplies its current context, not a host loop.
@@ -51,13 +51,13 @@ pub fn admitAction(ctx: native.registry.ProjectionContext, source_context: t.mod
     const policy = try native.adaptive_responses.Admission(P).policy(ctx.allocator, ctx.profile);
     var context = try Adapter.Context.open(ctx, source_context, policy.audience.bytes);
     defer context.deinit();
-    const bytes = try ctx.object(.{ .digest = context.value.source_request.digest, .bytes = context.value.source_request.bytes }, 2 * 1024 * 1024);
+    const bytes = try ctx.object(.{ .digest = context.value.source_request.digest, .bytes = context.value.source_request.bytes }, std.math.cast(usize, context.value.source_request.bytes) orelse return error.Capacity);
     var prepared = try contracts.decodeOwned(Adapter.Prepared, ctx.allocator, bytes);
     defer prepared.deinit();
-    const captured = try ctx.object(.{ .digest = context.value.source_capture.digest, .bytes = context.value.source_capture.bytes }, 4 * 1024 * 1024);
+    const captured = try ctx.object(.{ .digest = context.value.source_capture.digest, .bytes = context.value.source_capture.bytes }, std.math.cast(usize, context.value.source_capture.bytes) orelse return error.Capacity);
     var raw = try contracts.decodeOwned(native.responses.Raw, ctx.allocator, captured);
     defer raw.deinit();
-    const response = (try native.json.parse(ctx.allocator, raw.value.body.bytes, .{ .bytes = P.representation.provider_response_bytes })).value;
+    const response = (try native.json.parse(ctx.allocator, raw.value.body.bytes, .{ .bytes = raw.value.body.bytes.len, .tokens = raw.value.body.bytes.len, .members = raw.value.body.bytes.len })).value;
     const normalized = try native.responses.Adapter(P).normalize(ctx.allocator, prepared.value.request.invocation, native.json.get(response, "output") orelse return error.InvalidCapture);
     if (normalized != .output) return error.InvalidCapture;
     var found = false;
@@ -76,7 +76,7 @@ fn prepare(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
     try admit(ctx, request);
     var source = try snapshot(ctx);
     defer source.deinit();
-    var record: t.WorkArtifact = .{ .version = 1, .task = ctx.task, .policy = digest(ctx.profile), .context = request.context, .call_id = request.call_id, .request = request.action, .outcome = undefined, .evidence = null, .model_text = undefined };
+    var record: t.WorkArtifact = .{ .version = 2, .task = ctx.task, .policy = digest(ctx.profile), .context = request.context, .call_id = request.call_id, .request = request.action, .outcome = undefined, .evidence = null, .model_text = undefined };
     switch (request.action) {
         .list => |value| {
             const result = try Queries.list(ctx.allocator, source, value);

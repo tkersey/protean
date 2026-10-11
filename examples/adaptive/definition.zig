@@ -102,7 +102,7 @@ const Emit = struct {
         const value = try e.context.builder.value(.{ .schema = try e.context.schema(T), .expression = .{ .primitive = .{
             .opcode = .sequence_append,
             .operands = &.{ try a.interop.valueId(b, list), try a.interop.valueId(b, item) },
-            .failures = &.{.{ .kind = .capacity_exceeded, .value = try a.interop.failureLiteralId(e.author, try e.failure()) }},
+            .failures = if (@as(?u64, T.max_length) != null) &.{.{ .kind = .capacity_exceeded, .value = try a.interop.failureLiteralId(e.author, try e.failure()) }} else &.{},
         } } });
         return a.interop.adoptValue(b, value, try e.schema(T));
     }
@@ -152,7 +152,6 @@ const Application = struct {
         const task = try root.field(try root.parameter("input"), "task");
         const empty = try e.literal(root, t.State, .{
             .task = .{ .bytes = "" },
-            .followups = .{ .items = &.{} },
             .control = .{ .selection = .{ .profile_id = .{ .bytes = "" }, .profile_digest = @splat(0), .effective_effort = .medium, .control_revision = 0 }, .top_effort = .medium, .epoch = 0, .epoch_reason = .initial, .eviction_generation = 0, .skills = .{ .items = &.{} } },
             .replay = null,
             .results = .{ .items = &.{} },
@@ -170,8 +169,7 @@ const Application = struct {
         });
         const initial = try e.update(root, empty, .{ .task = task, .control = try root.field(frozen, "initial"), .messages = messages });
         const policy = try root.product(try e.schema(t.PolicyView), &.{
-            .{ .name = "profiles", .value = try root.field(frozen, "profiles") },                       .{ .name = "catalog", .value = try root.field(frozen, "catalog") },
-            .{ .name = "maximum_model_calls", .value = try root.field(frozen, "maximum_model_calls") }, .{ .name = "maximum_revision", .value = try root.field(frozen, "maximum_revision") },
+            .{ .name = "profiles", .value = try root.field(frozen, "profiles") }, .{ .name = "catalog", .value = try root.field(frozen, "catalog") },
         });
         try c.define(entry, try root.ret(try root.call(loop, &.{ .{ .name = "bindings", .value = policy }, .{ .name = "state", .value = initial } })));
         return c.module(entry, try e.schema(t.Failure));
@@ -222,25 +220,11 @@ const Program = struct {
         try e.author.define(p.has_source, try any.ret(try any.conditional(try any.less(index, try any.sequenceLength(evidence)), try scan.ret(result), try end.ret(try end.constant(bool, false)))));
     }
 
-    fn offers(p: Program, b: *a.Body, bindings: V, state: V) !V {
-        const work = try b.less(try b.field(state, "work_calls"), try b.constant(u16, 12));
+    fn offers(p: Program, b: *a.Body, state: V) !V {
         const evidence = try b.field(state, "evidence");
-        const readable = try b.select(work, try b.less(try b.sequenceLength(evidence), try b.constant(u64, 8)), try b.constant(bool, false));
-        const reportable = try b.less(try b.constant(u64, 0), try b.sequenceLength(evidence));
-        const askable = try b.select(work, try b.less(try b.sequenceLength(try b.field(state, "followups")), try b.constant(u64, 4)), try b.constant(bool, false));
-        const controls = try b.select(try b.less(try b.field(try b.field(try b.field(state, "control"), "selection"), "control_revision"), try b.field(bindings, "maximum_revision")), try b.less(try b.sequenceLength(try b.field(state, "receipts")), try b.constant(u64, 16)), try b.constant(bool, false));
-        var offered: [P.declaration_count]V = undefined;
-        offered[t.ordinal("list")] = work;
-        offered[t.ordinal("read")] = readable;
-        offered[t.ordinal("ask")] = askable;
-        offered[t.ordinal("report")] = reportable;
-        offered[t.ordinal("stop")] = try b.constant(bool, true);
-        offered[t.ordinal("inference_set")] = controls;
-        offered[t.ordinal("skill_set")] = controls;
-        const inspectable = try b.call(p.has_source, &.{ .{ .name = "evidence", .value = evidence }, .{ .name = "index", .value = try b.constant(u64, 0) } });
-        offered[t.ordinal("inspect")] = try b.select(work, inspectable, try b.constant(bool, false));
-        offered[t.ordinal("tool_build")] = work;
-        offered[t.ordinal("tool_run")] = readable;
+        var offered: [P.declaration_count]V = @splat(try b.constant(bool, true));
+        offered[t.ordinal("report")] = try b.less(try b.constant(u64, 0), try b.sequenceLength(evidence));
+        offered[t.ordinal("inspect")] = try b.call(p.has_source, &.{ .{ .name = "evidence", .value = evidence }, .{ .name = "index", .value = try b.constant(u64, 0) } });
         return p.e.sequence(b, [P.declaration_count]bool, &offered);
     }
     fn stopped(p: Program, b: *a.Body, state: V, reason: []const u8) !V {
@@ -251,16 +235,15 @@ const Program = struct {
         const b = try e.author.body(p.loop);
         const bindings = try b.parameter("bindings");
         const state = try b.parameter("state");
-        const active = try b.branch();
-        const spent = try b.branch();
+        const active = b;
         const preparation = try active.perform(p.ops.prepare, try active.product(try e.schema(t.Preparation), &.{
-            .{ .name = "state", .value = state }, .{ .name = "offered", .value = try p.offers(active, bindings, state) }, .{ .name = "control", .value = try e.literal(active, ?t.ControlSubject, null) },
+            .{ .name = "state", .value = state }, .{ .name = "offered", .value = try p.offers(active, state) }, .{ .name = "control", .value = try e.literal(active, ?t.ControlSubject, null) },
         }));
         const ready = try active.caseOf(preparation, "ready");
         const rejected = try active.caseOf(preparation, "rejected");
         const work = ready.body();
         const request = try work.field(ready.payload(), "request");
-        const counted = try e.update(work, state, .{ .model_calls = try work.checkedAdd(try work.field(state, "model_calls"), try work.constant(u16, 1), try e.failure()), .messages = try e.literal(work, P.Messages, .{ .items = &.{} }), .results = try e.literal(work, t.PendingResults, .{ .items = &.{} }) });
+        const counted = try e.update(work, state, .{ .model_calls = try work.checkedAdd(try work.field(state, "model_calls"), try work.constant(u64, 1), try e.failure()), .messages = try e.literal(work, P.Messages, .{ .items = &.{} }), .results = try e.literal(work, t.PendingResults, .{ .items = &.{} }) });
         const observation = try e.invoke(work, p.responder, &.{ request, try work.field(request, "offered") }, protean.responders.AdaptiveModelObservation(P, false));
         const normalized = try work.field(observation, "normalized");
         const interpretation = try work.field(observation, "interpretation");
@@ -284,12 +267,11 @@ const Program = struct {
         const unavailable = try e.finish(refusal, counted, .no_result, try e.literal(refusal, t.Summary, .{ .bytes = "The response did not contain one admissible action with complete replay." }), try refusal.field(state, "evidence"));
         const result = try work.match(interpretation, &.{ try accepted.ret(try chosen.match(action, &cases)), try refused.ret(unavailable) });
         const prepared = try active.match(preparation, &.{ try ready.ret(result), try rejected.ret(try p.stopped(rejected.body(), state, "The next context cannot be prepared within the admitted policy and capacity.")) });
-        try e.author.define(p.loop, try b.ret(try b.conditional(try b.less(try b.field(state, "model_calls"), try b.field(bindings, "maximum_model_calls")), try active.ret(prepared), try spent.ret(try p.stopped(spent, state, "The admitted model-call allowance is exhausted.")))));
+        try e.author.define(p.loop, try b.ret(prepared));
     }
     fn resumeTask(p: Program, b: *a.Body, bindings: V, state: V) !V {
         const e = p.e;
-        const poll = try b.branch();
-        const full = try b.branch();
+        const poll = b;
         const raw = try poll.perform(p.ops.inbox, try poll.constant(void, {}));
         const inbox = try a.interop.term(poll, try e.context.builder.pure(try a.interop.valueId(poll, raw)), try e.schema(Inbox.Reply));
         const empty = try poll.caseOf(inbox, "empty");
@@ -297,18 +279,17 @@ const Program = struct {
         const arrived = message.body();
         const text = try arrived.field(try arrived.field(message.payload(), "value"), "message");
         const updated = try e.update(arrived, state, .{
-            .followups = try e.append(arrived, t.Followups, try arrived.field(state, "followups"), text),
             .messages = try e.sequence(arrived, P.Messages, &.{try e.message(arrived, .user, try e.widen(arrived, P.MessageText, text))}),
         });
         const successor = try poll.match(inbox, &.{ try empty.ret(state), try message.ret(updated) });
-        return b.conditional(try b.less(try b.sequenceLength(try b.field(state, "followups")), try b.constant(u64, 4)), try poll.ret(try poll.call(p.loop, &.{ .{ .name = "bindings", .value = bindings }, .{ .name = "state", .value = successor } })), try full.ret(try full.call(p.loop, &.{ .{ .name = "bindings", .value = bindings }, .{ .name = "state", .value = state } })));
+        return poll.call(p.loop, &.{ .{ .name = "bindings", .value = bindings }, .{ .name = "state", .value = successor } });
     }
     fn toolResult(p: Program, b: *a.Body, bindings: V, state: V, call_id: V, text: V) !V {
         const e = p.e;
         const result = try b.product(try e.schema(t.PendingResult), &.{ .{ .name = "call_id", .value = call_id }, .{ .name = "output", .value = text } });
         const successor = try e.update(b, state, .{
             .results = try e.sequence(b, @FieldType(t.State, "results"), &.{result}),
-            .work_calls = try b.checkedAdd(try b.field(state, "work_calls"), try b.constant(u16, 1), try e.failure()),
+            .work_calls = try b.checkedAdd(try b.field(state, "work_calls"), try b.constant(u64, 1), try e.failure()),
         });
         return p.resumeTask(b, bindings, successor);
     }
@@ -351,8 +332,7 @@ const Program = struct {
             2 => {
                 const question = try b.product(try e.schema(t.Question), &.{.{ .name = "prompt", .value = try b.field(value, "question") }});
                 const answer = try b.perform(p.ops.ask, question);
-                const successor = try e.update(b, state, .{ .followups = try e.append(b, t.Followups, try b.field(state, "followups"), try b.field(answer, "message")) });
-                return p.toolResult(b, bindings, successor, call_id, try b.variant(try e.schema(t.ResultValue), "inline_text", try b.field(answer, "message")));
+                return p.toolResult(b, bindings, state, call_id, try b.variant(try e.schema(t.ResultValue), "inline_text", try b.field(answer, "message")));
             },
             3 => {
                 const selected = try b.sequenceGet(try b.field(state, "evidence"), try b.field(value, "evidence_index"));
@@ -395,16 +375,15 @@ const Program = struct {
     fn control(p: Program, b: *a.Body, bindings: V, state: V, call_id: V, command: V, comptime inference: bool) !V {
         const e = p.e;
         const Input = if (inference) t.controls.InferenceInput else t.controls.SkillInput(P);
-        var fields: [if (inference) 4 else 5]a.Argument = undefined;
+        var fields: [if (inference) 3 else 4]a.Argument = undefined;
         fields[0] = .{ .name = "state", .value = try b.field(state, "control") };
         fields[1] = .{ .name = if (inference) "profiles" else "catalog", .value = try b.field(bindings, if (inference) "profiles" else "catalog") };
         fields[2] = .{ .name = "command", .value = command };
         if (!inference) fields[3] = .{ .name = "watermark", .value = try b.field(try b.variantPayload(try b.field(state, "replay"), "some", try e.failure()), "watermark") };
-        fields[fields.len - 1] = .{ .name = "maximum_revision", .value = try b.field(bindings, "maximum_revision") };
         const proposal = try e.invoke(b, if (inference) p.inference else p.skill, &.{try b.product(try e.schema(Input), &fields)}, t.controls.Proposal);
         const subject = try b.product(try e.schema(t.ControlSubject), &.{ .{ .name = "call_id", .value = call_id }, .{ .name = "reason", .value = try b.field(command, "reason") }, .{ .name = "proposal", .value = proposal } });
         const preparation = try b.perform(p.ops.prepare, try b.product(try e.schema(t.Preparation), &.{
-            .{ .name = "state", .value = state }, .{ .name = "offered", .value = try p.offers(b, bindings, state) }, .{ .name = "control", .value = try b.variant(try e.schema(?t.ControlSubject), "some", subject) },
+            .{ .name = "state", .value = state }, .{ .name = "offered", .value = try p.offers(b, state) }, .{ .name = "control", .value = try b.variant(try e.schema(?t.ControlSubject), "some", subject) },
         }));
         const ready = try b.caseOf(preparation, "ready");
         const rejected = try b.caseOf(preparation, "rejected");

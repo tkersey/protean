@@ -111,7 +111,7 @@ try {
   }
   const demo = JSON.parse(run(executable, ['demo', '--offline', '--state-dir', join(scratch, 'state')]));
   assert.equal(demo.output.disposition, 'report');
-  assert.equal(demo.output.model_calls, 14);
+  assert.equal(demo.output.model_calls, '14');
   console.log(JSON.stringify({downstream: 'public addNativeSystem', node_free_acquisition_build_install: true, package: packageHash, target: manifest.target, program: manifest.program_sha256, elapsed_seconds: (performance.now() - started) / 1000}));
 } finally {
   rmSync(scratch, {recursive: true, force: true});

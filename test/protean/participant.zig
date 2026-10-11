@@ -145,7 +145,7 @@ test "compiled participant uses the actual checked model responder through norma
     var compiled = try protean.compile(a, System);
     defer compiled.deinit();
     try std.testing.expectEqual(1, compiled.program.effects.len);
-    try std.testing.expectEqualStrings("agent.model.invoke.v3", compiled.program.effects[0].identity);
+    try std.testing.expectEqualStrings("agent.model.invoke.v7", compiled.program.effects[0].identity);
     const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
     defer a.free(image);
     _ = try compiled.encode(a, image);
@@ -202,7 +202,7 @@ test "participant admission owns the exact component bytes before caller mutatio
     var compiled = try protean.compile(a, System);
     defer compiled.deinit();
     try std.testing.expectEqual(@as(u8, 0xff), bytes[0]);
-    try std.testing.expectEqualStrings("agent.model.invoke.v3", compiled.program.effects[0].identity);
+    try std.testing.expectEqualStrings("agent.model.invoke.v7", compiled.program.effects[0].identity);
 }
 
 fn incomingOwnerType(b: *source.Builder, wrapped: bool) !struct { effect: source.Id, owner: source.Id, input: source.Id } {

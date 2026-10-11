@@ -9,11 +9,12 @@ live in `.protean-native/inputs`. No legacy aliases or duplicate binaries exist.
 `addNativeSystem`, `tool_build`, `tool_run`, `inference_set` and `skill_set`
 keep their names, permissions and behavior.
 
-The application identity `adaptive-agent` used by saved tasks and client requests;
+The naming change preserved the application identity `adaptive-agent` used by saved tasks and client requests;
 `agent.*` / `adaptive-agent.*` semantic, schema and resource IDs;
-`agent-host/1.0`, `agent-client-values/*`, `agent-native-*` serialized formats,
+the `agent-host/*`, `agent-client-values/*`, and `agent-native-*` serialized format families,
 state namespaces and schema URNs; and `world.advance` stored operation labels
-remain unchanged. Source-lock and build-manifest fields `boundary` / `world`
+remain independent of branding. Subsequent contract changes advance their versions
+through the owning protocol. Source-lock and build-manifest fields `boundary` / `world`
 and publication-record field spellings remain schema, while their selected
 repository URLs and contents now identify Horos and Kronos. Horos wire formats,
 magic, numeric tags and hash domains are unchanged. Generic agents, ownership

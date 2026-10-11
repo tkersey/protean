@@ -30,15 +30,15 @@ pub fn profileChoice(profile: model.AdaptiveInferenceProfile, digest: [32]u8) Pr
     return .{ .profile = .{ .id = profile.id, .efforts = profile.efforts, .effort_update = profile.effort_update }, .digest = digest };
 }
 pub const Skill = struct { id: contracts.Text(64), version: contracts.Text(64), instructions: model.ArtifactReference };
-pub const Catalog = struct { skills: contracts.Vector(Skill, 32) };
-pub const Profiles = contracts.Vector(ProfileChoice, 8);
+pub const Catalog = struct { skills: contracts.Vector(Skill, null) };
+pub const Profiles = contracts.Vector(ProfileChoice, null);
 pub const State = struct {
     selection: model.AdaptiveSelection,
     top_effort: Effort,
     epoch: u64,
     epoch_reason: model.EpochReason,
     eviction_generation: u64,
-    skills: contracts.Vector(model.SkillMaterialization, 32),
+    skills: contracts.Vector(model.SkillMaterialization, null),
 };
 pub const Rejection = enum { none, stale_revision, unknown_profile, unsupported_effort, unknown_skill, version_mismatch, invalid_operation, capacity };
 pub const Proposal = struct {
@@ -46,9 +46,9 @@ pub const Proposal = struct {
     disposition: enum { proposed, unchanged, rejected },
     rejection: Rejection,
 };
-pub const InferenceInput = struct { state: State, profiles: Profiles, command: InferenceSet, maximum_revision: u64 };
+pub const InferenceInput = struct { state: State, profiles: Profiles, command: InferenceSet };
 pub fn SkillInput(comptime _: type) type {
-    return struct { state: State, catalog: Catalog, command: SkillSet, watermark: u64, maximum_revision: u64 };
+    return struct { state: State, catalog: Catalog, command: SkillSet, watermark: u64 };
 }
 
 const Emit = struct {
@@ -98,7 +98,7 @@ const Emit = struct {
         const raw = try e.context.builder.value(.{ .schema = try e.context.schema(T), .expression = .{ .primitive = .{
             .opcode = .sequence_append,
             .operands = &.{ try a.interop.valueId(body, vector), try a.interop.valueId(body, item) },
-            .failures = &.{.{ .kind = .capacity_exceeded, .value = try e.context.builder.failureLiteral(e.failure) }},
+            .failures = &.{},
         } } });
         return a.interop.adoptValue(body, raw, try e.schema(T));
     }
@@ -108,7 +108,7 @@ const Emit = struct {
 /// effort admission execute inside the authored program over frozen metadata.
 pub fn defineInference(c: authoring.Context, failure: Id) !Id {
     const b = c.builder;
-    const cached = try b.specialization(Id, "agent.adaptive.inference-control/v1", .{try b.failureLiteral(failure)});
+    const cached = try b.specialization(Id, "agent.adaptive.inference-control/v2", .{try b.failureLiteral(failure)});
     if (cached.cached) |existing| return existing;
     const typed = try a.Context.init(b);
     const e: Emit = .{ .context = c, .typed = typed, .failure = failure };
@@ -139,8 +139,7 @@ pub fn defineInference(c: authoring.Context, failure: Id) !Id {
     const unchanged = try admitted.branch();
     const changed = try admitted.branch();
     const revision = try e.field(changed, selection, model.AdaptiveSelection, "control_revision");
-    const room = try changed.branch();
-    const full = try changed.branch();
+    const room = changed;
     const keeps_epoch = try room.select(same_profile, try e.field(room, profile, InferenceCapability, "effort_update"), try room.constant(bool, false));
     const old_epoch = try e.field(room, state, State, "epoch");
     const epoch = try room.select(keeps_epoch, old_epoch, try e.increment(room, old_epoch));
@@ -157,7 +156,7 @@ pub fn defineInference(c: authoring.Context, failure: Id) !Id {
         .epoch = epoch,
         .epoch_reason = try room.select(keeps_epoch, try e.field(room, state, State, "epoch_reason"), reason),
     });
-    const changed_result = try changed.conditional(try changed.less(revision, try e.field(changed, input, InferenceInput, "maximum_revision")), try room.ret(try e.outcome(room, successor, .proposed, .none)), try full.ret(try e.outcome(full, state, .rejected, .capacity)));
+    const changed_result = try e.outcome(room, successor, .proposed, .none);
     const admitted_result = try admitted.conditional(try admitted.select(same_profile, same_effort, try admitted.constant(bool, false)), try unchanged.ret(try e.outcome(unchanged, state, .unchanged, .none)), try changed.ret(changed_result));
     const matched_result = try match.conditional(supported, try admitted.ret(admitted_result), try unsupported.ret(try e.outcome(unsupported, state, .rejected, .unsupported_effort)));
     const next_result = try next.call(lookup, &.{ .{ .name = "input", .value = input }, .{ .name = "index", .value = try e.increment(next, index) } });
@@ -200,7 +199,7 @@ fn supportsEffort(e: Emit, body: *a.Body, efforts: V, effort: V) !V {
 /// Pure skill-state transition. No body is read or installed here: a proposed
 /// state must still pass immutable-resource/context preparation before commit.
 pub fn defineSkill(comptime P: type, c: authoring.Context, failure: Id) !Id {
-    const cached = try c.builder.specialization(Id, "agent.adaptive.skill-control/v1", .{ @typeName(P), try c.builder.failureLiteral(failure) });
+    const cached = try c.builder.specialization(Id, "agent.adaptive.skill-control/v2", .{ @typeName(P), try c.builder.failureLiteral(failure) });
     if (cached.cached) |existing| return existing;
     const typed = try a.Context.init(c.builder);
     const e: Emit = .{ .context = c, .typed = typed, .failure = failure };
@@ -316,14 +315,9 @@ fn SkillGenerator(comptime P: type) type {
             const state = try e.field(body, input, Input, "state");
             const unchanged = try body.branch();
             const update = try body.branch();
-            const limits = try update.call(try skillCapacity(e), &.{
-                .{ .name = "skills", .value = skills },                      .{ .name = "index", .value = try update.constant(u64, 0) },
-                .{ .name = "active", .value = try update.constant(u64, 0) }, .{ .name = "bytes", .value = try update.constant(u64, 0) },
-            });
             const selection = try e.field(update, state, State, "selection");
             const revision = try e.field(update, selection, model.AdaptiveSelection, "control_revision");
-            const room = try update.branch();
-            const full = try update.branch();
+            const room = update;
             const epoch = try e.field(room, state, State, "epoch");
             const generation = try e.field(room, state, State, "eviction_generation");
             const successor = try e.replace(room, State, state, .{
@@ -334,7 +328,7 @@ fn SkillGenerator(comptime P: type) type {
                 .epoch_reason = try room.select(removed, try e.literal(room, model.EpochReason, .eviction), try e.field(room, state, State, "epoch_reason")),
                 .eviction_generation = try room.select(removed, try e.increment(room, generation), generation),
             });
-            const admitted = try update.conditional(try e.both(update, limits, try update.less(revision, try e.field(update, input, Input, "maximum_revision"))), try room.ret(try e.outcome(room, successor, .proposed, .none)), try full.ret(try e.outcome(full, state, .rejected, .capacity)));
+            const admitted = try e.outcome(room, successor, .proposed, .none);
             return body.conditional(changed, try update.ret(admitted), try unchanged.ret(try e.outcome(unchanged, state, .unchanged, .none)));
         }
 
@@ -357,36 +351,4 @@ fn SkillGenerator(comptime P: type) type {
             return a.interop.functionId(t, entry_function);
         }
     };
-}
-
-fn skillCapacity(e: Emit) !*const a.Function {
-    const t = e.typed;
-    const b = e.context.builder;
-    const cached = try b.specialization(Id, "agent.adaptive.skill-capacity/v1", .{ @intFromPtr(t), try b.failureLiteral(e.failure) });
-    if (cached.cached) |existing| return a.interop.declaredFunction(t, existing);
-    const function = try t.function("adaptive skill capacity", &.{
-        .{ .name = "skills", .schema = try e.schema(@FieldType(State, "skills")) }, .{ .name = "index", .schema = try t.scalar(u64) },
-        .{ .name = "active", .schema = try t.scalar(u64) },                         .{ .name = "bytes", .schema = try t.scalar(u64) },
-    }, try t.scalar(bool), &.{});
-    const body = try t.body(function);
-    const skills = try body.parameter("skills");
-    const index = try body.parameter("index");
-    const active = try body.parameter("active");
-    const bytes = try body.parameter("bytes");
-    const room = try body.branch();
-    const full = try body.branch();
-    const item = try room.sequenceGet(skills, index);
-    const some = try room.caseOf(item, "some");
-    const none = try room.caseOf(item, "none");
-    const next = some.body();
-    const fault = try a.interop.literalFailure(t, e.failure, try a.interop.schema(t, b.values.items[e.failure].schema));
-    const result = try next.call(function, &.{
-        .{ .name = "skills", .value = skills },                                                                                                                          .{ .name = "index", .value = try e.increment(next, index) },
-        .{ .name = "active", .value = try next.select(try e.field(next, some.payload(), model.SkillMaterialization, "active"), try e.increment(next, active), active) }, .{ .name = "bytes", .value = try next.checkedAdd(bytes, try e.field(next, try e.field(next, some.payload(), model.SkillMaterialization, "resource"), model.ArtifactReference, "bytes"), fault) },
-    });
-    const valid = try e.both(body, try body.less(active, try body.constant(u64, 5)), try body.less(bytes, try body.constant(u64, 128 * 1024 + 1)));
-    try t.define(function, try body.ret(try body.conditional(valid, try room.ret(try room.match(item, &.{ try some.ret(result), try none.ret(try none.body().constant(bool, true)) })), try full.ret(try full.constant(bool, false)))));
-    const id = try a.interop.functionId(t, function);
-    _ = try cached.finish(b, id);
-    return function;
 }

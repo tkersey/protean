@@ -43,7 +43,7 @@ fn bindings(ctx: native.Context, _: void) !t.Bindings {
         try native.json.put(ctx.allocator, &value, "input_ref", native.json.string(try tool_resources.referenceText(ctx.allocator, input.object)));
         try inputs.array.append(value);
     };
-    return .{ .policy = frozen.profile_identity, .snapshot = frozen.snapshot.identity, .files = @intCast(frozen.snapshot.files().len), .excluded_entries = frozen.snapshot.decoded.value.excluded_entries, .profiles = .{ .items = choices }, .catalog = .{ .skills = .{ .items = catalog } }, .initial = frozen.initial, .maximum_model_calls = frozen.policy.model_attempts, .maximum_revision = frozen.policy.control_transitions, .instructions = try context.instructions(ctx.allocator, frozen.policy, frozen.catalog), .status = .{ .bytes = try std.fmt.allocPrint(ctx.allocator, "Initial profile: {s}; effort: {s}; control revision: 0. Snapshot: {d} files, {d} excluded entries. Read-only work allowance: 12; inference allowance: {d}. Tool construction permits at most 4 physical attempts; execution at most 8, subject to that shared work allowance. Authorized typed Table inputs: {s}", .{ frozen.initial.selection.profile_id.bytes, @tagName(frozen.initial.selection.effective_effort), frozen.snapshot.files().len, frozen.snapshot.decoded.value.excluded_entries, frozen.policy.model_attempts, try native.json.canonical(ctx.allocator, inputs) }) } };
+    return .{ .policy = frozen.profile_identity, .snapshot = frozen.snapshot.identity, .files = @intCast(frozen.snapshot.files().len), .excluded_entries = frozen.snapshot.decoded.value.excluded_entries, .profiles = .{ .items = choices }, .catalog = .{ .skills = .{ .items = catalog } }, .initial = frozen.initial, .instructions = try context.instructions(ctx.allocator, frozen.policy, frozen.catalog), .status = .{ .bytes = try std.fmt.allocPrint(ctx.allocator, "Initial profile: {s}; effort: {s}; control revision: 0. Snapshot: {d} files, {d} excluded entries. Authorized typed Table inputs: {s}", .{ frozen.initial.selection.profile_id.bytes, @tagName(frozen.initial.selection.effective_effort), frozen.snapshot.files().len, frozen.snapshot.decoded.value.excluded_entries, try native.json.canonical(ctx.allocator, inputs) }) } };
 }
 fn present(ctx: native.Context, question: t.Question) !native.json.Value {
     var value = native.json.object();
@@ -69,11 +69,11 @@ fn configuredTools(bits: [8]bool) [t.P.declaration_count]bool {
     return result;
 }
 fn componentCatalog(a: std.mem.Allocator, assets: native.discovery.Assets) ![]const u8 {
-    const metadata = (try native.json.parseAsset(a, assets.application, 1024 * 1024)).value;
+    const metadata = (try native.json.parseAsset(a, assets.application, assets.application.len)).value;
     const values = native.json.get(metadata, "resources") orelse return error.MissingArtifact;
     for (values.array.items) |resource| {
         if (std.mem.eql(u8, try native.json.text(native.json.get(resource, "id") orelse return error.InvalidAssets), "tool-construction.catalog"))
-            return (try native.values.fromJson(contracts.Bytes(128 * 1024), a, native.json.get(resource, "base64url") orelse return error.InvalidAssets)).bytes;
+            return (try native.values.fromJson(contracts.Bytes(null), a, native.json.get(resource, "base64url") orelse return error.InvalidAssets)).bytes;
     }
     return error.MissingArtifact;
 }
@@ -99,7 +99,7 @@ fn containsCredential(value: native.json.Value, token: []const u8) bool {
     };
 }
 pub fn taskInput(a: std.mem.Allocator, text: []const u8) !t.Input {
-    if (text.len > 2048 or !std.unicode.utf8ValidateSlice(text)) return error.InvalidParams;
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidParams;
     return .{ .task = .{ .bytes = try a.dupe(u8, text) } };
 }
 
@@ -118,7 +118,7 @@ fn testEndpoint(endpoint: []const u8) bool {
 }
 
 fn fixtureProfile(id: []const u8, model: []const u8) t.model.AdaptiveInferenceProfile {
-    return .{ .id = .{ .bytes = id }, .model = .{ .bytes = model }, .reasoning_mode = .standard, .reasoning_context = .auto, .efforts = .{ .items = &.{ .medium, .high } }, .effort_update = false, .explicit_cache = true, .additional_tools = true, .cache_diagnostics = true, .opaque_family = .{ .bytes = "fixture" }, .max_output_tokens = 4096, .request_bytes = 256 * 1024, .response_bytes = 512 * 1024, .timeout_ms = 1000 };
+    return .{ .id = .{ .bytes = id }, .model = .{ .bytes = model }, .reasoning_mode = .standard, .reasoning_context = .auto, .efforts = .{ .items = &.{ .medium, .high } }, .effort_update = false, .explicit_cache = true, .additional_tools = true, .cache_diagnostics = true, .opaque_family = .{ .bytes = "fixture" }, .max_output_tokens = null, .request_bytes = null, .response_bytes = null, .timeout_ms = null };
 }
 pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration.Options, frozen: ?native.tasks.FrozenInputs, assets: native.discovery.Assets) !native.configuration.Admitted {
     if (options.test_provider and (options.offline or options.credential_path != null or options.trust_root_path == null)) return error.InvalidConfiguration;
@@ -128,14 +128,12 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
     var tool_config: ?t.ToolConfiguration = null;
     var configuration_digest: ?[]const u8 = null;
     if (options.config_path) |path| {
-        const bytes = try native.configuration.readFile(a, io, path, 256 * 1024, false);
-        const parsed = try native.json.parse(a, bytes, .{ .bytes = 256 * 1024 });
-        if (native.json.get(parsed.value, "schema") != null) {
-            const value = try native.values.fromJson(t.ConfigurationV2, a, parsed.value);
-            if (!std.mem.eql(u8, value.schema.bytes, "adaptive-agent.configuration.v2")) return error.InvalidConfiguration;
-            config = value.adaptive;
-            tool_config = value.tools;
-        } else config = try native.values.fromJson(Config, a, parsed.value);
+        const bytes = try native.configuration.readFile(a, io, path, null, false);
+        const parsed = try native.json.parse(a, bytes, .{ .bytes = bytes.len, .tokens = bytes.len, .members = bytes.len });
+        const value = try native.values.fromJson(t.ConfigurationV3, a, parsed.value);
+        if (!std.mem.eql(u8, value.schema.bytes, "adaptive-agent.configuration.v3")) return error.InvalidConfiguration;
+        config = value.adaptive;
+        tool_config = value.tools;
         configuration_digest = try hex(a, try native.json.canonical(a, parsed.value));
     }
     var resources: std.ArrayList([]const u8) = .empty;
@@ -147,13 +145,13 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
         if (!options.offline and config == null) return error.MissingConfiguration;
         const snapshot = if (config) |value| try native.repository.captureWithScratch(a, options.scratch_allocator orelse a, io, value.snapshot_root.bytes) else blk: {
             const contents = "pub fn main() void {\n    // The offline fixture has no external effects.\n}\n";
-            break :blk try contracts.encodeOwned(native.repository.Record, a, .{ .version = 1, .excluded_entries = 0, .files = .{ .items = &.{.{ .path = .{ .bytes = "src/main.zig" }, .sha256 = digest(contents), .contents = .{ .bytes = contents } }} } });
+            break :blk try contracts.encodeOwned(native.repository.Record, a, .{ .version = 2, .excluded_entries = 0, .files = .{ .items = &.{.{ .path = .{ .bytes = "src/main.zig" }, .sha256 = digest(contents), .contents = .{ .bytes = contents } }} } });
         };
         try resources.append(a, snapshot);
         var skills: std.ArrayList(t.P.AdaptiveSkill) = .empty;
         if (config) |value| {
             for (value.skills.items) |skill| {
-                const body = try native.configuration.readFile(a, io, skill.markdown.bytes, 32 * 1024, false);
+                const body = try native.configuration.readFile(a, io, skill.markdown.bytes, null, false);
                 if (!std.unicode.utf8ValidateSlice(body)) return error.InvalidSkill;
                 try resources.append(a, body);
                 if (std.mem.eql(u8, skill.id.bytes, "tool-construction")) return error.InvalidSkill;
@@ -201,7 +199,7 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
         core[t.ordinal("tool_run")] = if (tool_policy) |value| value.run else false;
         permitted[t.ordinal("tool_build")] = if (tool_policy) |value| value.build else false;
         permitted[t.ordinal("tool_run")] = core[t.ordinal("tool_run")];
-        const policy: t.P.AdaptivePolicy = .{ .schema = .{ .bytes = t.P.adaptive_policy_identity }, .endpoint = if (config) |value| value.endpoint else .{ .bytes = "https://offline.invalid/v1/responses" }, .audience = if (config) |value| value.audience else .{ .bytes = "offline-fixture" }, .profiles = profiles, .catalog = work.reference(catalog), .core_tools = core, .permitted_tools = permitted, .model_attempts = if (config) |value| value.maximum_model_calls else 16, .control_transitions = if (config) |value| value.maximum_control_revision else 16 };
+        const policy: t.P.AdaptivePolicy = .{ .schema = .{ .bytes = t.P.adaptive_policy_identity }, .endpoint = if (config) |value| value.endpoint else .{ .bytes = "https://offline.invalid/v1/responses" }, .audience = if (config) |value| value.audience else .{ .bytes = "offline-fixture" }, .profiles = profiles, .catalog = work.reference(catalog), .core_tools = core, .permitted_tools = permitted };
         var root = native.json.object();
         try native.json.put(a, &root, "mode", native.json.string(mode));
         try native.json.put(a, &root, "application", native.json.string(t.application_id));
@@ -215,32 +213,24 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
         try native.json.put(a, &root, "initial_effort", native.json.string(if (config) |value| @tagName(value.initial_effort) else "medium"));
         profile_bytes = try native.json.canonical(a, root);
     }
-    const root = (try native.json.parse(a, profile_bytes, .{ .bytes = 256 * 1024 })).value;
+    const root = (try native.json.parse(a, profile_bytes, .{ .bytes = profile_bytes.len, .tokens = profile_bytes.len, .members = profile_bytes.len })).value;
     if (!std.mem.eql(u8, try native.json.text(native.json.get(root, "mode") orelse return error.InvalidConfiguration), mode) or
         !std.mem.eql(u8, try native.json.text(native.json.get(root, "application") orelse return error.InvalidConfiguration), t.application_id) or
         !std.mem.eql(u8, try native.json.text(native.json.get(root, "assets") orelse return error.InvalidConfiguration), try hex(a, assets.application))) return error.IncompatibleProfile;
     if (configuration_digest) |expected| if (!std.mem.eql(u8, expected, try native.json.text(native.json.get(root, "configuration_digest") orelse return error.InvalidConfiguration))) return error.IncompatibleProfile;
     const policy = try Admission.policy(a, profile_bytes);
-    if (policy.model_attempts > 16 or policy.control_transitions > 16) return error.InvalidConfiguration;
     if (!options.offline) {
         if (options.test_provider) {
             if (!testEndpoint(policy.endpoint.bytes)) return error.InvalidConfiguration;
         } else if (!std.mem.eql(u8, policy.endpoint.bytes, "https://api.openai.com/v1/responses")) return error.InvalidConfiguration;
     }
     if (resources.items.len < 2) return error.MissingArtifact;
-    if (resources.items.len > native.tasks.maximum_resources) return error.Capacity;
-    var resource_bytes: usize = 0;
-    for (resources.items) |bytes| {
-        resource_bytes = try std.math.add(usize, resource_bytes, bytes.len);
-        if (resource_bytes > 16 * 1024 * 1024) return error.Capacity;
-    }
     const snapshot_ref = try native.values.fromJson(native.registry.ObjectReference, a, native.json.get(root, "snapshot") orelse return error.InvalidConfiguration);
     if (snapshot_ref.bytes != resources.items[0].len or !std.mem.eql(u8, &snapshot_ref.digest, &digest(resources.items[0]))) return error.InvalidSnapshot;
     const catalog_bytes = resources.items[resources.items.len - 1];
     if (policy.catalog.bytes != catalog_bytes.len or !std.mem.eql(u8, &policy.catalog.digest, &digest(catalog_bytes))) return error.InvalidSkill;
     const catalog = try contracts.decodeOwned(t.P.AdaptiveCatalog, a, catalog_bytes);
     try Admission.validateCatalog(policy, catalog.value);
-    if (catalog.value.skills.items.len > 32) return error.Capacity;
     const tool_policy = if (native.json.get(root, "tool_construction")) |value| try native.values.fromJson(t.ToolPolicy, a, value) else null;
     const extra: usize = if (tool_policy) |value| 1 + value.inputs.items.len else 0;
     if (catalog.value.skills.items.len + 2 + extra != resources.items.len) return error.MissingArtifact;
@@ -280,11 +270,11 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
     for (initial.efforts.items) |item| supported = supported or item == effort;
     if (!supported) return error.UnsupportedEffort;
     var token: []const u8 = if (options.test_provider) "qualification-only" else "";
-    if (options.credential_path) |path| token = std.mem.trim(u8, try native.configuration.readFile(a, io, path, 16 * 1024, true), "\r\n");
-    const trust_root = if (options.trust_root_path) |path| try native.configuration.readFile(a, io, path, 256 * 1024, false) else null;
+    if (options.credential_path) |path| token = std.mem.trim(u8, try native.configuration.readFile(a, io, path, null, true), "\r\n");
+    const trust_root = if (options.trust_root_path) |path| try native.configuration.readFile(a, io, path, null, false) else null;
     // Frozen bodies as well as the snapshot must not embed the transport secret.
     if (options.credential_path != null) {
-        if (token.len == 0 or token.len > 4096) return error.InvalidCredential;
+        if (token.len == 0) return error.InvalidCredential;
         for (token) |byte| if (byte <= 0x20 or byte >= 0x7f) return error.InvalidCredential;
         if (containsCredential(root, token)) return error.UnsafeCredentialFile;
         for (resources.items) |resource| if (std.mem.indexOf(u8, resource, token) != null) return error.UnsafeCredentialFile;

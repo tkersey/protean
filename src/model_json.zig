@@ -102,6 +102,10 @@ fn writeUnsigned(writer: anytype, comptime value: anytype) void {
 
 fn writeSchema(comptime T: type, writer: anytype) void {
     if (comptime isText(T)) {
+        if (T.max_length == null) {
+            writer.raw("{\"type\":\"string\"}");
+            return;
+        }
         writer.raw("{\"type\":\"string\",\"description\":\"UTF-8 encoding must not exceed ");
         writeUnsigned(writer, maximumTextBytes(T));
         writer.raw(" bytes; maxLength is an additional character-count bound.\",\"maxLength\":");
@@ -242,6 +246,10 @@ fn writePositiveDecimalRange(comptime maximum: u64, writer: anytype) void {
 
 fn writeClientSchema(comptime T: type, writer: anytype) void {
     if (comptime isText(T)) {
+        if (T.max_length == null) {
+            writer.raw("{\"type\":\"string\"}");
+            return;
+        }
         writer.raw("{\"type\":\"string\",\"maxLength\":");
         writeUnsigned(writer, maximumTextBytes(T));
         writer.raw(",\"x-max-utf8-bytes\":");
@@ -251,11 +259,13 @@ fn writeClientSchema(comptime T: type, writer: anytype) void {
     }
     if (@typeInfo(T) == .@"struct" and @hasDecl(T, "protean_value_kind")) {
         if (T.protean_value_kind == .bytes) {
-            const maximum = T.max_length orelse @compileError("client bytes must be bounded");
-            writer.raw("{\"type\":\"string\",\"contentEncoding\":\"base64url\",\"maxLength\":");
-            writeUnsigned(writer, std.base64.url_safe_no_pad.Encoder.calcSize(maximum));
-            writer.raw(",\"x-maximum-bytes\":");
-            writeUnsigned(writer, maximum);
+            writer.raw("{\"type\":\"string\",\"contentEncoding\":\"base64url\"");
+            if (T.max_length) |maximum| {
+                writer.raw(",\"maxLength\":");
+                writeUnsigned(writer, std.base64.url_safe_no_pad.Encoder.calcSize(maximum));
+                writer.raw(",\"x-maximum-bytes\":");
+                writeUnsigned(writer, maximum);
+            }
             // Complete groups, then only canonical zero-padded terminal bits.
             // Strict end assertion also rejects a final newline.
             writer.raw(",\"pattern\":\"^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-][AQgw]|[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048])?(?![\\\\s\\\\S])\"");
@@ -263,8 +273,11 @@ fn writeClientSchema(comptime T: type, writer: anytype) void {
             return;
         }
         if (T.protean_value_kind == .vector) {
-            writer.raw("{\"type\":\"array\",\"maxItems\":");
-            writeUnsigned(writer, T.max_length);
+            writer.raw("{\"type\":\"array\"");
+            if (@as(?u64, T.max_length)) |maximum| {
+                writer.raw(",\"maxItems\":");
+                writeUnsigned(writer, maximum);
+            }
             writer.raw(",\"items\":");
             writeClientSchema(T.Child, writer);
             writer.byte('}');
@@ -340,9 +353,10 @@ fn writeClientSchema(comptime T: type, writer: anytype) void {
     }
 }
 
-fn maximumValueBytes(comptime T: type) usize {
+fn maximumValueBytes(comptime T: type) ?usize {
     if (comptime isText(T)) {
-        return 2 + 6 * maximumTextBytes(T);
+        const maximum = T.max_length orelse return null;
+        return 2 + 6 * maximum;
     }
     return switch (@typeInfo(T)) {
         .void => 2,
@@ -363,7 +377,7 @@ fn maximumValueBytes(comptime T: type) usize {
             inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, index| {
                 if (index != 0) maximum += 1;
                 maximum += 2 + 6 * field_name.len + 1;
-                maximum += maximumValueBytes(FieldType);
+                maximum += maximumValueBytes(FieldType) orelse return null;
             }
             break :blk maximum;
         },
@@ -373,9 +387,9 @@ fn maximumValueBytes(comptime T: type) usize {
     };
 }
 
-pub fn maximumToolArgumentsByteLength(comptime T: type) usize {
+pub fn maximumToolArgumentsByteLength(comptime T: type) ?usize {
     return if (@typeInfo(T) == .@"enum")
-        10 + maximumValueBytes(T)
+        10 + (maximumValueBytes(T) orelse return null)
     else
         maximumValueBytes(T);
 }

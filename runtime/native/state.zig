@@ -15,57 +15,51 @@ pub const Status = enum { queued, running, waiting_input, parked, cancelling, bl
 pub const RecordKind = enum { occurrence, question, message, artifact, capture, attempt, origin };
 pub const Blocker = enum { missing_capability, denied, capacity, missing_artifact, incompatible_profile, unavailable_environment };
 
-/// Reference metadata is bounded independently of the unchanged payload quota.
-pub const maximum_resources = 64;
-pub const Task = TaskRecord(maximum_resources);
-pub const LegacyTask = TaskRecord(16);
+/// Growing task metadata retains immutable object identities without a count quota.
+pub const Task = struct {
+    id: TaskId,
+    application_id: Name,
+    input_schema_id: Name,
+    output_schema_id: Name,
+    failure_schema_id: Name,
+    message_schema_id: Name,
+    principal: Name,
+    tenant: Name,
+    profile_id: Name,
+    profile: Reference,
+    resources: contracts.Vector(Reference, null) = .{ .items = &.{} },
+    image: Reference,
+    runtime_identity: Digest,
+    input: Reference,
+    checkpoint: Reference,
+    outcome: Reference,
+    outcome_kind: Outcome,
+    current_occurrence: ?Digest,
+    revision: u64,
+    execution_revision: u64,
+    schedule: Schedule,
+    cancellation: ?Reason,
+    cancellation_applied: bool,
+    blocker: ?Blocker,
+    result: ?Reference,
+    client_result: ?Reference,
+    result_artifact: ?Digest,
+    event_floor: u64,
+    event_high: u64,
+    next_message: u64,
+    messages: contracts.Vector(Digest, null),
+    inference_attempts: u64,
+    inference_request_bytes: u64,
+    inference_output_tokens: u64,
+    evidence_bytes: u64,
 
-fn TaskRecord(comptime resource_limit: u64) type {
-    return struct {
-        id: TaskId,
-        application_id: Name,
-        input_schema_id: Name,
-        output_schema_id: Name,
-        failure_schema_id: Name,
-        message_schema_id: Name,
-        principal: Name,
-        tenant: Name,
-        profile_id: Name,
-        profile: Reference,
-        resources: contracts.Vector(Reference, resource_limit) = .{ .items = &.{} },
-        image: Reference,
-        runtime_identity: Digest,
-        input: Reference,
-        checkpoint: Reference,
-        outcome: Reference,
-        outcome_kind: Outcome,
-        current_occurrence: ?Digest,
-        revision: u64,
-        execution_revision: u64,
-        schedule: Schedule,
-        cancellation: ?Reason,
-        cancellation_applied: bool,
-        blocker: ?Blocker,
-        result: ?Reference,
-        client_result: ?Reference,
-        result_artifact: ?Digest,
-        event_floor: u64,
-        event_high: u64,
-        next_message: u64,
-        messages: contracts.Vector(Digest, 16),
-        inference_attempts: u32,
-        inference_request_bytes: u64,
-        inference_output_tokens: u64,
-        evidence_bytes: u64,
-
-        pub fn terminal(task: @This()) bool {
-            return switch (task.outcome_kind) {
-                .completed, .failed, .cancelled => true,
-                else => false,
-            };
-        }
-    };
-}
+    pub fn terminal(task: @This()) bool {
+        return switch (task.outcome_kind) {
+            .completed, .failed, .cancelled => true,
+            else => false,
+        };
+    }
+};
 
 pub const Method = enum { submit, message, respond, cancel, @"resume", import_checkpoint };
 pub const Disposition = enum { accepted, queued, answer_acquired, cancellation_requested, resumed, imported };
@@ -110,13 +104,39 @@ pub const Message = struct {
 
 /// The immutable part of a question's public projection survives retirement.
 /// The caller supplies the retained prompt object, never a current pending slot.
+pub fn questionPromptReference(a: std.mem.Allocator, question: Question) !json.Value {
+    var ref = json.object();
+    const digest = try a.dupe(u8, &std.fmt.bytesToHex(question.prompt.digest, .lower));
+    try json.put(a, &ref, "artifact_id", json.string(digest));
+    try json.put(a, &ref, "sha256", json.string(digest));
+    try json.put(a, &ref, "bytes", json.string(try std.fmt.allocPrint(a, "{d}", .{question.prompt.bytes})));
+    try json.put(a, &ref, "media_type", json.string("application/json"));
+    try json.put(a, &ref, "schema_id", json.string("agent-native-question-prompt.v1"));
+    try json.put(a, &ref, "retention", json.string("state-namespace"));
+    try json.put(a, &ref, "question_id", json.string(try a.dupe(u8, &std.fmt.bytesToHex(question.id, .lower))));
+    return ref;
+}
+
 pub fn questionData(a: std.mem.Allocator, question: Question, prompt: []const u8) !json.Value {
     var result = json.object();
     try json.put(a, &result, "question_id", json.string(try a.dupe(u8, &std.fmt.bytesToHex(question.id, .lower))));
     try json.put(a, &result, "question_revision", json.string(try std.fmt.allocPrint(a, "{d}", .{question.revision})));
     try json.put(a, &result, "request_digest", json.string(try a.dupe(u8, &std.fmt.bytesToHex(question.request_digest, .lower))));
     try json.put(a, &result, "answer_schema_id", json.string(try a.dupe(u8, question.answer_schema_id.bytes)));
-    try json.put(a, &result, "prompt", (try json.parse(a, prompt, .{ .bytes = 32 * 1024 })).value);
+    // Prompt bytes come from the owner's canonical JSON presentation. Do not
+    // materialize a second large value just to choose a bounded public view.
+    if (prompt.len <= json.payload_limits.bytes) {
+        const parsed = json.parse(a, prompt, json.payload_limits) catch |err| switch (err) {
+            error.Capacity => null,
+            else => return err,
+        };
+        if (parsed) |inline_prompt| {
+            try json.put(a, &result, "prompt", inline_prompt.value);
+            if (try json.fits(a, result, json.payload_limits)) return result;
+            _ = result.object.swapRemove("prompt");
+        }
+    }
+    try json.put(a, &result, "prompt_ref", try questionPromptReference(a, question));
     return result;
 }
 
@@ -185,7 +205,7 @@ pub const Capture = struct {
     /// replay object instead of guessing references inside opaque reply bytes.
     projection: ?struct {
         reply: Reference,
-        objects: contracts.Vector(Reference, 16),
+        objects: contracts.Vector(Reference, null),
         output_tokens: ?u64,
     } = null,
 };
@@ -203,7 +223,6 @@ pub const Origin = struct {
 pub const ArchiveRecord = struct { kind: RecordKind, id: Digest, body: Reference };
 pub const ArchiveEvent = struct { seq: u64, revision: u64, body: Reference };
 pub const ArchiveOperation = struct { key: Name, request: Digest, body: Reference };
-pub const ArchiveReservation = struct { attempt: Digest, bytes: u64 };
 pub const ArchiveSchema = struct { name: Name, definition: Reference };
 pub const Archive = struct {
     version: u32,
@@ -211,34 +230,24 @@ pub const Archive = struct {
     profile: enum { offline_copy },
     task: Reference,
     build: Reference,
-    schemas: contracts.Vector(ArchiveSchema, 16),
-    records: contracts.Vector(ArchiveRecord, 1024),
-    events: contracts.Vector(ArchiveEvent, 2048),
-    operations: contracts.Vector(ArchiveOperation, 2048),
-    reservations: contracts.Vector(ArchiveReservation, 64),
-    objects: contracts.Vector(Reference, 4096),
+    schemas: contracts.Vector(ArchiveSchema, null),
+    records: contracts.Vector(ArchiveRecord, null),
+    events: contracts.Vector(ArchiveEvent, null),
+    operations: contracts.Vector(ArchiveOperation, null),
+    objects: contracts.Vector(Reference, null),
 };
 
-test "larger resource capacity preserves legacy task bytes" {
+test "task metadata retains resource and input identities past former capacities" {
     const a = std.testing.allocator;
-    const references: [maximum_resources + 1]Reference = @splat(.{ .digest = @splat(7), .bytes = 3 });
-    var legacy = std.mem.zeroes(LegacyTask);
-    legacy.resources.items = references[0..16];
-    const old_bytes = try contracts.encodeOwned(LegacyTask, a, legacy);
-    defer a.free(old_bytes);
-    var current = try contracts.decodeOwned(Task, a, old_bytes);
-    defer current.deinit();
-    const same_bytes = try contracts.encodeOwned(Task, a, current.value);
-    defer a.free(same_bytes);
-    try std.testing.expectEqualSlices(u8, old_bytes, same_bytes);
-    var larger = current.value;
-    larger.resources.items = references[0..maximum_resources];
-    const new_bytes = try contracts.encodeOwned(Task, a, larger);
-    defer a.free(new_bytes);
-    var decoded = try contracts.decodeOwned(Task, a, new_bytes);
+    const references: [65]Reference = @splat(.{ .digest = @splat(7), .bytes = 3 });
+    const messages: [17]Digest = @splat(@splat(8));
+    var task = std.mem.zeroes(Task);
+    task.resources.items = &references;
+    task.messages.items = &messages;
+    const bytes = try contracts.encodeOwned(Task, a, task);
+    defer a.free(bytes);
+    var decoded = try contracts.decodeOwned(Task, a, bytes);
     defer decoded.deinit();
-    try std.testing.expectEqual(maximum_resources, decoded.value.resources.items.len);
-    try std.testing.expectError(error.InvalidValue, contracts.decodeOwned(LegacyTask, a, new_bytes));
-    larger.resources.items = &references;
-    try std.testing.expectError(error.InvalidValue, contracts.encodeOwned(Task, a, larger));
+    try std.testing.expectEqualDeep(task.resources, decoded.value.resources);
+    try std.testing.expectEqualDeep(task.messages, decoded.value.messages);
 }

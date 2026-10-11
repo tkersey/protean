@@ -3,8 +3,6 @@
 const std = @import("std");
 const c = @import("native_c");
 var in_use: std.atomic.Value(bool) = .init(false);
-pub const heap_bytes = @import("native_options").sqlite_heap_bytes;
-pub const maximum_blob_bytes = 16 * 1024 * 1024;
 pub const Error = error{ StorageUnavailable, CorruptState, Capacity, Constraint, AlreadyOpen, Closed, Busy } || std.mem.Allocator.Error;
 
 fn result(code: c_int) Error!void {
@@ -22,7 +20,6 @@ pub const Param = union(enum) { text: []const u8, blob: []const u8, integer: i64
 
 const Storage = struct {
     allocator: std.mem.Allocator,
-    heap: []align(@alignOf(u64)) u8,
     handle: ?*c.sqlite3,
     released: bool = false,
 };
@@ -35,7 +32,7 @@ pub const Database = opaque {
         return self.owner().handle orelse error.Closed;
     }
 
-    /// One connection and one fixed SQLite heap per native process. The caller
+    /// One connection per native process, using SQLite's system allocator. The caller
     /// must acquire the namespace's OS lock before opening its database.
     pub fn open(a: std.mem.Allocator, path: []const u8, create: bool) Error!*Database {
         if (std.mem.indexOfScalar(u8, path, 0) != null) return error.StorageUnavailable;
@@ -43,11 +40,6 @@ pub const Database = opaque {
         errdefer in_use.store(false, .release);
         const storage = try a.create(Storage);
         errdefer a.destroy(storage);
-        const heap = try a.alignedAlloc(u8, .of(u64), heap_bytes);
-        errdefer a.free(heap);
-        // MEMSYS5 is compiled in. No fallback to uncapped system malloc is
-        // permitted if configuration or initialization fails.
-        try result(c.sqlite3_config(c.SQLITE_CONFIG_HEAP, @as(?*anyopaque, @ptrCast(heap.ptr)), @as(c_int, heap_bytes), @as(c_int, 32)));
         errdefer _ = c.sqlite3_shutdown();
         try result(c.sqlite3_initialize());
         if (c.sqlite3_libversion_number() != 3053004) return error.StorageUnavailable;
@@ -62,22 +54,17 @@ pub const Database = opaque {
         try result(opened);
         const ptr = db orelse return error.StorageUnavailable;
         _ = c.sqlite3_extended_result_codes(ptr, 1);
-        // The SQL limit includes the record header and its digest column.
-        // Logical object admission has its own exact payload limit.
-        _ = c.sqlite3_limit(ptr, c.SQLITE_LIMIT_LENGTH, maximum_blob_bytes + 64 * 1024);
-        _ = c.sqlite3_limit(ptr, c.SQLITE_LIMIT_SQL_LENGTH, 64 * 1024);
-        _ = c.sqlite3_limit(ptr, c.SQLITE_LIMIT_COLUMN, 128);
+        // Namespace authority excludes attaching other databases. Size and
+        // allocation failures otherwise come from the actual SQLite/OS limits.
         _ = c.sqlite3_limit(ptr, c.SQLITE_LIMIT_ATTACHED, 0);
-        _ = c.sqlite3_limit(ptr, c.SQLITE_LIMIT_VARIABLE_NUMBER, 64);
-        storage.* = .{ .allocator = a, .heap = heap, .handle = ptr };
+        storage.* = .{ .allocator = a, .handle = ptr };
         return @ptrCast(storage);
     }
 
     pub fn close(self: *Database) Error!void {
         const storage = self.owner();
         const db = try self.handle();
-        // close_v2 would defer destruction while statements remain alive. That
-        // is unsuitable for an explicitly owned static heap, so reject instead.
+        // Reject live statements instead of deferring destruction past ownership.
         try result(c.sqlite3_close(db));
         storage.handle = null;
         try result(c.sqlite3_shutdown());
@@ -87,8 +74,11 @@ pub const Database = opaque {
     pub fn destroy(self: *Database) Error!void {
         const storage = self.owner();
         if (storage.handle != null or !storage.released) return error.Busy;
-        storage.allocator.free(storage.heap);
         storage.allocator.destroy(storage);
+    }
+    /// Query the linked SQLite library; this is not an application size policy.
+    pub fn blobLimit(self: *Database) Error!usize {
+        return @intCast(c.sqlite3_limit(try self.handle(), c.SQLITE_LIMIT_LENGTH, -1));
     }
     pub fn changes(self: *Database) Error!u64 {
         return @intCast(c.sqlite3_changes64(try self.handle()));
@@ -105,7 +95,6 @@ pub const Database = opaque {
         try result(c.sqlite3_exec(try self.handle(), sql.ptr, null, null, null));
     }
     pub fn prepare(self: *Database, comptime sql: [:0]const u8, params: []const Param) Error!Statement {
-        if (params.len > 64) return error.Capacity;
         var statement: ?*c.sqlite3_stmt = null;
         try result(c.sqlite3_prepare_v3(try self.handle(), sql.ptr, @intCast(sql.len), 0, &statement, null));
         const stmt = statement orelse return error.StorageUnavailable;
@@ -129,8 +118,7 @@ pub const Database = opaque {
     }
 };
 
-/// Incremental I/O keeps the complete payload in the caller's budget rather
-/// than making a second, power-of-two allocation in SQLite's fixed heap.
+/// Incremental I/O avoids materializing a second complete payload in SQLite.
 pub const Blob = struct {
     handle: *c.sqlite3_blob,
 

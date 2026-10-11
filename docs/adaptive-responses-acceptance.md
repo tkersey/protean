@@ -5,7 +5,7 @@ construction and host APIs. Horos owns compilation/linking; Kronos owns
 execution and continuation. The adaptive application and supplied tool-construction
 skill are retained from the accepted tool-construction implementation.
 
-Current qualification belongs to the exact consolidation PR head. Historical
+Current qualification belongs to the exact current PR head. Historical
 provider trials and previous-head CI results do not qualify this candidate.
 Routine verification uses recorded or controlled provider replies, never paid
 calls or discovered credentials.
@@ -15,11 +15,11 @@ calls or discovered credentials.
 | `adaptive_controls.zig` | Authored model/effort selection, skill transitions, stale revision rejection, idempotence, deactivation and eviction. |
 | `model_custody.zig` | The checked responder retains the original offered set across suspension. |
 | `adaptive_responses.zig` and its declarative corpus | Envelope, replay, usage, exact integers, Unicode, pairing, capabilities, compatible history and opaque-context exclusion. |
-| `adaptive_recovery.zig` | Acquired-response restart, original captures, frozen resources, bounded state and allocations. |
-| `native_tasks.zig` and `runtime/native` tests | Durable ownership, receipts, questions, inboxes, reservations, archive admission, resource limits, protocol and shutdown behavior. |
+| `adaptive_recovery.zig` | Acquired-response restart, original captures, frozen resources, variable-length state, checked accounting and allocation failures. |
+| `native_tasks.zig` and `runtime/native` tests | Durable ownership, receipts, questions, inboxes, actual storage failures, archive admission, paged projections, protocol and shutdown behavior. |
 | `native_adaptive.mjs` and `adaptive_native_peer.mjs` | Copied native executable; controlled HTTPS; actual authored decisions; skill/model changes; held I/O; crash/restart; questions; cancellation; generated-tool build, run, reuse and foreign-reference rejection. |
 | `native_archive.mjs` | Independently decoded captures and deliberate closure, profile, private-artifact, receipt and event corruption. |
-| `native_https.mjs` | TLS chain/hostname/expiry, bounded bodies, truncation, deadlines and absence of redirects/retries. |
+| `native_https.mjs` | TLS chain/hostname/expiry, explicit body/timeout constraints, truncation, cancellation and absence of redirects/retries. |
 | `installations.mjs` | Clean source package and public `addNativeSystem` acquisition/build/install/inspection with Node/Python excluded by the OS execution boundary. |
 | `values.test.mjs` | Independent canonical wire observations for the archive/capture peer's small codec. |
 
@@ -30,7 +30,7 @@ model normalizer is removed: its established intersection wire bytes are fixed
 expectations in `native-responses-v1.json`; native-only cases retain their own
 explicit expected outcomes. No second provider implementation runs as an oracle.
 
-The 14-call adaptive trajectory and generated-tool scenarios use the actual
+The 14-call adaptive trajectory and 38-call continuing generated-tool scenario use the actual
 compiled application. They establish neither live-model quality nor cache reuse,
 billed cost, exhaustive scheduling, or all maximal input combinations. Transient
 prefixes and marker placement are checked directly; hypothetical eager/naive

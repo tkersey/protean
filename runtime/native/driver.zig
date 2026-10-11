@@ -6,7 +6,6 @@ const data = @import("horos_data");
 
 const Storage = struct {
     parent: std.mem.Allocator,
-    budget: kronos.AllocationBudget,
     program: *Program,
     own_program: bool,
     resident: kronos.Resident,
@@ -15,7 +14,6 @@ const Storage = struct {
 
 const ProgramStorage = struct {
     parent: std.mem.Allocator,
-    budget: kronos.AllocationBudget,
     prepared: kronos.Prepared,
     residents: usize = 0,
 };
@@ -26,11 +24,11 @@ pub const Program = opaque {
     fn storage(self: *Program) *ProgramStorage {
         return @ptrCast(@alignCast(self));
     }
-    pub fn open(a: std.mem.Allocator, image: []const u8, working_bytes: usize) !*Program {
+    pub fn open(a: std.mem.Allocator, image: []const u8) !*Program {
         const owner = try a.create(ProgramStorage);
         errdefer a.destroy(owner);
-        owner.* = .{ .parent = a, .budget = .{ .parent = a, .limit = working_bytes }, .prepared = undefined };
-        owner.prepared = try kronos.Prepared.init(owner.budget.allocator(), image);
+        owner.* = .{ .parent = a, .prepared = undefined };
+        owner.prepared = try kronos.Prepared.init(a, image);
         return @ptrCast(owner);
     }
     pub fn close(self: *Program) !void {
@@ -46,26 +44,24 @@ pub const Driver = opaque {
         return @ptrCast(@alignCast(self));
     }
 
-    pub fn open(a: std.mem.Allocator, image: []const u8, instance: data.invocation.Instance, working_bytes: usize) !*Driver {
-        const program = try Program.open(a, image, working_bytes);
+    pub fn open(a: std.mem.Allocator, image: []const u8, instance: data.invocation.Instance) !*Driver {
+        const program = try Program.open(a, image);
         errdefer program.close() catch unreachable;
-        const driver = try start(a, program, instance, working_bytes);
+        const driver = try start(a, program, instance);
         driver.storage().own_program = true;
         return driver;
     }
 
-    pub fn start(a: std.mem.Allocator, program: *Program, instance: data.invocation.Instance, working_bytes: usize) !*Driver {
-        if (working_bytes == 0) return error.Capacity;
+    pub fn start(a: std.mem.Allocator, program: *Program, instance: data.invocation.Instance) !*Driver {
         const owner = try a.create(Storage);
         errdefer a.destroy(owner);
         owner.parent = a;
-        owner.budget = .{ .parent = a, .limit = working_bytes };
         owner.program = program;
         owner.own_program = false;
         const prepared = &program.storage().prepared;
         owner.resident = switch (instance) {
-            .initial_args => |args| try kronos.Resident.start(owner.budget.allocator(), prepared, args),
-            .state => |state| try kronos.Resident.restore(owner.budget.allocator(), prepared, state),
+            .initial_args => |args| try kronos.Resident.start(a, prepared, args),
+            .state => |state| try kronos.Resident.restore(a, prepared, state),
         };
         program.storage().residents += 1;
         owner.live = true;

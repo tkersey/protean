@@ -106,7 +106,7 @@ fn trustedAncestry(start: c_int) !void {
 /// Descriptor-based path admission shared by state namespaces and archives.
 /// The caller owns the returned descriptor. Only namespaces create a final dir.
 pub fn openDirectory(a: std.mem.Allocator, path: []const u8, create_final: bool, private_final: bool) !c_int {
-    if (path.len == 0 or path.len > 4096 or std.mem.indexOfScalar(u8, path, 0) != null) return error.UnsafeStatePath;
+    if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.UnsafeStatePath;
     // Walk every component without following symlinks. Only the selected
     // final directory may be created; no ambient parent tree is modified.
     var components = std.mem.tokenizeScalar(u8, path, '/');

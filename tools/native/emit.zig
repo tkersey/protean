@@ -96,17 +96,12 @@ pub fn write(comptime definition: type, comptime types: type, init: std.process.
 
     const capabilities = try capabilityMetadata(definition.capabilities, a, compiled.program);
     var resources: std.ArrayList(Resource) = .empty;
-    var resource_bytes: usize = 0;
     inline for (definition.resources) |resource| {
-        resource_bytes = try std.math.add(usize, resource_bytes, resource.bytes.len);
-        if (resource.bytes.len > 1024 * 1024 or resource_bytes > 8 * 1024 * 1024) return error.AssetCapacity;
         for (resources.items) |prior| if (std.mem.eql(u8, prior.id, resource.id)) return error.DuplicateResource;
         try resources.append(a, .{ .id = resource.id, .version = resource.version, .media_type = resource.media_type, .sha256 = try digest(a, resource.bytes), .bytes = resource.bytes.len, .base64url = try base64(a, resource.bytes) });
     }
     if (comptime @hasDecl(definition, "generatedResources")) {
         for (try definition.generatedResources(a)) |resource| {
-            resource_bytes = try std.math.add(usize, resource_bytes, resource.bytes.len);
-            if (resource.bytes.len > 1024 * 1024 or resource_bytes > 8 * 1024 * 1024) return error.AssetCapacity;
             for (resources.items) |prior| if (std.mem.eql(u8, prior.id, resource.id)) return error.DuplicateResource;
             try resources.append(a, .{ .id = resource.id, .version = resource.version, .media_type = resource.media_type, .sha256 = try digest(a, resource.bytes), .bytes = resource.bytes.len, .base64url = try base64(a, resource.bytes) });
         }

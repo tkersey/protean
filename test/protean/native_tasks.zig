@@ -69,6 +69,11 @@ fn present(ctx: native.Context, input: u32) !native.json.Value {
         }
         return deep;
     }
+    if (input == 44) {
+        const text = try ctx.allocator.alloc(u8, 128 * 1024);
+        @memset(text, 'q');
+        return native.json.string(text);
+    }
     return native.json.number(ctx.allocator, input);
 }
 const CapturingIncrement = struct {
@@ -121,9 +126,9 @@ pub fn ownerManifest(a: std.mem.Allocator, image: []const u8, identity: [32]u8, 
     const assets_hex = std.fmt.bytesToHex(assets_digest, .lower);
     return std.json.Stringify.valueAlloc(a, .{
         .native_host_contract = "unit-native-contract",
-        .protocol = "agent-host/1.0",
+        .protocol = "agent-host/2.0",
         .client_mapping = "agent-client-values/1.0",
-        .state_format = "agent-native-state/10",
+        .state_format = "agent-native-state/11",
         .optimize = "safe",
         .program_sha256 = @as([]const u8, &image_hex),
         .program_identity = @as([]const u8, &identity_hex),
@@ -263,7 +268,6 @@ fn omitIncrementEvidence(a: std.mem.Allocator, io: std.Io, shape: anytype, sourc
     }
     try std.testing.expectEqual(1, count);
     archive.records.items = records.items;
-    archive.reservations.items = &.{};
     var objects: std.ArrayList(@TypeOf(archive.objects.items[0])) = .empty;
     var body: std.ArrayList(u8) = .empty;
     var offset: usize = start + manifest_length;
@@ -337,31 +341,6 @@ fn checkCaptureImport(a: std.mem.Allocator, frame: std.mem.Allocator, io: std.Io
     _ = try service.resumeTask(frame, label, task_id, task.value.revision);
 }
 
-// Other admitted operations may consume all unreserved space while this
-// capture waits. Use reservations as pressure rather than allocating a 256-MiB
-// fixture. The pressure survives the real close/reopen below.
-fn reserveRemainingCapacity(namespace: *native.Namespace) !void {
-    const db = namespace.store.database;
-    var query = try db.prepare("SELECT (SELECT page_count FROM pragma_page_count)*4096-(SELECT freelist_count FROM pragma_freelist_count)*4096+coalesce(sum(bytes),0) FROM reservations", &.{});
-    const used: u64 = blk: {
-        defer query.deinit();
-        try std.testing.expect(try query.step() == .row);
-        break :blk @intCast(try query.integer(0));
-    };
-    var remaining = 256 * 1024 * 1024 - 1024 * 1024 - used - 512 * 1024;
-    try namespace.store.begin();
-    defer namespace.store.rollback();
-    var index: u8 = 0;
-    while (remaining != 0) : (index += 1) {
-        var id: [32]u8 = @splat(250);
-        id[0] = index;
-        const bytes = @min(remaining, 16 * 1024 * 1024);
-        try db.run("INSERT INTO reservations VALUES(?,?)", &.{ .{ .blob = &id }, .{ .integer = @intCast(bytes) } });
-        remaining -= bytes;
-    }
-    try namespace.commit("test.intervening-capacity-pressure");
-}
-
 fn rejectRequeuedHistory(a: std.mem.Allocator, service: *native.tasks.Service(T), namespace: *native.Namespace, value: anytype, message_id: [32]u8, directory: []const u8) !void {
     try std.testing.expectEqual(.yielded, value.outcome_kind);
     const path = try std.fmt.allocPrint(a, "{s}/consumed-yield.bundle", .{directory});
@@ -421,7 +400,6 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
     defer application.deinit();
     application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
     var increment_declaration = native.leaf(u32, u32, .{ .identity = "task-owner.increment.v1", .resource_role = "local" }, increment);
-    increment_declaration.attempt_limit = if (captured) 2 else 1;
     if (captured) {
         increment_declaration.background = true;
         increment_declaration.capture = .{ .prepare = CapturingIncrement.prepare, .acquire = CapturingIncrement.invoke, .interpret = CapturingIncrement.interpret };
@@ -436,13 +414,13 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
     var grants: [3]native.registry.Grant = undefined;
     for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = application.image_identity };
     var configured: u32 = 37;
-    const resource_set: [native.tasks.maximum_resources][]const u8 = @splat("immutable snapshot bytes");
+    const resource_set: [65][]const u8 = @splat("immutable snapshot bytes");
     const profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "fixed-profile", .environment = &configured, .resources = &resource_set, .authority = .{ .grants = &grants, .principal = "test", .tenant = "test" } };
-    const oversized_resources: [native.tasks.maximum_resources + 1][]const u8 = @splat("immutable snapshot bytes");
+    const oversized_resources: [66][]const u8 = @splat("immutable snapshot bytes");
     var oversized_profile = profile;
     oversized_profile.resources = &oversized_resources;
-    try std.testing.expectError(error.Capacity, oversized_profile.resourceIdentity(application.image_identity));
-    for (&grants) |*grant| grant.resource_identity = try profile.resourceIdentity(application.image_identity);
+    try std.testing.expect(!std.mem.eql(u8, &(try profile.resourceIdentity(a, application.image_identity)), &(try oversized_profile.resourceIdentity(a, application.image_identity))));
+    for (&grants) |*grant| grant.resource_identity = try profile.resourceIdentity(a, application.image_identity);
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var path_buffer: [4096]u8 = undefined;
@@ -473,8 +451,7 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
     for (0..32) |_| {
         const step = try service.pump(frame);
         if (step == .work) {
-            const ctx: native.Context = .{ .allocator = frame, .io = io, .authority = &profile.authority, .task_id = "test", .profile = profile.bytes, .environment = profile.environment, .exhausted_capabilities = step.work.exhausted_capabilities };
-            try std.testing.expectEqual(!captured or retried, ctx.nextAttemptLimitExhausted("task-owner.increment.v1"));
+            const ctx: native.Context = .{ .allocator = frame, .io = io, .authority = &profile.authority, .task_id = "test", .profile = profile.bytes, .environment = profile.environment };
             if (captured and !retried) {
                 try service.notSent(frame, step.work);
                 const archive_path = try std.fmt.allocPrint(frame, "{s}/not-sent.bundle", .{path_buffer[0..length]});
@@ -493,7 +470,6 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
             if (captured) {
                 const saved = (try namespace.store.recordBytes(frame, "capture", step.work.attempt, step.work.task)) orelse return error.MissingRawCapture;
                 try std.testing.expect(saved.len != 0);
-                try reserveRemainingCapacity(&namespace);
             }
             break;
         }
@@ -525,7 +501,7 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
     service = try native.tasks.Service(T).init(a, io, &namespace, assets, &application, handlers, profile);
     service_live = true;
     const frozen = try service.frozenInputs(frame, accepted.receipt.task);
-    try std.testing.expectEqual(native.tasks.maximum_resources, frozen.resources.len);
+    try std.testing.expectEqual(65, frozen.resources.len);
     try std.testing.expectEqualStrings(profile.bytes, frozen.profile);
     try std.testing.expectEqualStrings(profile.resources[0], frozen.resources[0]);
     try std.testing.expect(try service.pump(frame) == .idle);
@@ -550,11 +526,6 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
         if (step == .waiting) break;
     }
     if (captured) {
-        // Projection and its Kronos successor succeeded while pressure remained.
-        // Release only this fixture's unrelated reservations for later cases.
-        try namespace.store.begin();
-        try namespace.store.database.run("DELETE FROM reservations WHERE substr(attempt,2)=?", &.{.{ .blob = &@as([31]u8, @splat(250)) }});
-        try namespace.commit("test.release-capacity-pressure");
         try checkCaptureImport(a, frame, io, &service, &namespace, &service_live, &namespace_live, path, path_buffer[0..length], accepted.receipt.task, "historical-capture");
     }
     var question = (try service.pendingQuestion(frame, accepted.receipt.task)) orelse return error.ExpectedQuestion;
@@ -715,6 +686,21 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
     try std.testing.expect(dispatched != null);
     try service.notSent(frame, dispatched.?);
     _ = try service.message(frame, "message-before-cancel", no_send.receipt.task, 11);
+    {
+        for (0..16) |i| _ = try service.message(frame, try std.fmt.allocPrint(frame, "queued-beyond-old-limit-{d}", .{i}), no_send.receipt.task, @intCast(i));
+        var overflow_queue_params = native.json.object();
+        try native.json.put(frame, &overflow_queue_params, "task_id", native.json.string(try frame.dupe(u8, &std.fmt.bytesToHex(no_send.receipt.task, .lower))));
+        const queue_status = try client.call(frame, .@"task.status", overflow_queue_params);
+        try std.testing.expectEqualStrings("17", queue_status.object.get("pending_message_count").?.string);
+        try std.testing.expectEqual(16, queue_status.object.get("pending_messages").?.array.items.len);
+        try std.testing.expect(queue_status.object.get("pending_messages_truncated").?.bool);
+        const queued_history = try client.events(frame, no_send.receipt.task, 0, 128);
+        var queue_events: usize = 0;
+        for (queued_history.object.get("events").?.array.items) |event| {
+            if (std.mem.eql(u8, event.object.get("type").?.string, "message_queued")) queue_events += 1;
+        }
+        try std.testing.expectEqual(17, queue_events);
+    }
     _ = try service.requestCancel(frame, "cancel-no-send", no_send.receipt.task, "stop before invocation");
     for (0..32) |_| {
         const step = try service.pump(frame);
@@ -748,6 +734,38 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
     service = try native.tasks.Service(T).init(a, io, &namespace, assets, &application, handlers, profile);
     service_live = true;
 
+    if (captured) {
+        const failing = try service.submit(frame, "capture-publication-failure", 20);
+        var pending: ?native.tasks.Work = null;
+        for (0..32) |_| {
+            const step = try service.pump(frame);
+            if (step == .work) {
+                pending = step.work;
+                break;
+            }
+        }
+        try std.testing.expect(pending != null);
+        // Freeze the actual database at its current page count. A large raw
+        // response needs more pages and must fail before it is acknowledged.
+        try namespace.store.database.exec("PRAGMA max_page_count=1;");
+        const raw = try frame.alloc(u8, 1024 * 1024);
+        @memset(raw, 0x5a);
+        try std.testing.expectError(error.Capacity, service.acquire(frame, pending.?, raw));
+        try std.testing.expect(namespace.store.fenced);
+        try service.close(frame);
+        service_live = false;
+        try namespace.close();
+        namespace_live = false;
+        namespace = try native.Namespace.open(a, io, path);
+        namespace_live = true;
+        service = try native.tasks.Service(T).init(a, io, &namespace, assets, &application, handlers, profile);
+        service_live = true;
+        var unknown = try service.task(frame, failing.receipt.task);
+        defer unknown.deinit();
+        try std.testing.expectEqual(.unknown, try service.status(frame, unknown.value));
+        try std.testing.expectError(error.UnsettledOccurrence, service.resumeTask(frame, "must-not-reissue", failing.receipt.task, unknown.value.revision));
+        try std.testing.expectEqual(1, try namespace.store.capabilityAttempts(failing.receipt.task, "task-owner.increment.v1"));
+    }
     if (!captured) {
         try questionReferenceWitness(frame, &service);
         // Exercise the stored-event projection's byte domain without another
@@ -798,7 +816,7 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
 
 fn questionReferenceWitness(a: std.mem.Allocator, service: *native.tasks.Service(T)) !void {
     var client: native.client.Client(T) = .{ .service = service, .batch = true };
-    for ([_]u32{ 41, 42 }) |input| {
+    for ([_]u32{ 41, 42, 43 }) |input| {
         const admitted = try service.submit(a, try std.fmt.allocPrint(a, "question-ref-{d}", .{input}), input);
         var calls: usize = 0;
         for (0..16) |_| {
@@ -852,25 +870,37 @@ fn questionReferenceWitness(a: std.mem.Allocator, service: *native.tasks.Service
         try native.json.put(a, &params, "question_id", ref.object.get("question_id").?);
         try native.json.put(a, &params, "offset", native.json.string("0"));
         try native.json.put(a, &params, "length", native.json.string("32768"));
-        const chunk = try client.call(a, .@"artifact.read", params);
-        const text = chunk.object.get("data").?.string;
-        const decoded = try a.alloc(u8, try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(text));
-        try std.base64.url_safe_no_pad.Decoder.decode(decoded, text);
+        var decoded: std.ArrayList(u8) = .empty;
+        var chunks: usize = 0;
+        while (true) {
+            const chunk = try client.call(a, .@"artifact.read", params);
+            const text = chunk.object.get("data").?.string;
+            const bytes = try a.alloc(u8, try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(text));
+            try std.base64.url_safe_no_pad.Decoder.decode(bytes, text);
+            try decoded.appendSlice(a, bytes);
+            chunks += 1;
+            if (chunk.object.get("eof").?.bool) break;
+            try native.json.put(a, &params, "offset", chunk.object.get("next_offset").?);
+        }
+        try std.testing.expectEqual(@as(usize, if (input == 43) 5 else 1), chunks);
         // Build expected bytes independently of the JSON encoder/projection.
-        const expected = try a.alloc(u8, if (input == 41) 20_001 else 68);
+        const expected = try a.alloc(u8, if (input == 41) 20_001 else if (input == 42) 68 else 128 * 1024 + 2);
         if (input == 41) {
             expected[0] = '[';
             for (0..10_000) |i| {
                 expected[1 + i * 2] = '0';
                 expected[2 + i * 2] = if (i == 9999) ']' else ',';
             }
-        } else {
+        } else if (input == 42) {
             @memset(expected[0..32], '[');
             @memcpy(expected[32..36], "null");
             @memset(expected[36..], ']');
+        } else {
+            expected[0] = '"';
+            @memset(expected[1 .. expected.len - 1], 'q');
+            expected[expected.len - 1] = '"';
         }
-        try std.testing.expectEqualSlices(u8, expected, decoded);
-        try std.testing.expect(chunk.object.get("eof").?.bool);
+        try std.testing.expectEqualSlices(u8, expected, decoded.items);
         try native.json.put(a, &params, "artifact_id", native.json.string(try a.dupe(u8, &std.fmt.bytesToHex(saved.value.request.digest, .lower))));
         try std.testing.expectError(error.ArtifactUnavailable, client.call(a, .@"artifact.read", params));
         try native.json.put(a, &params, "artifact_id", ref.object.get("artifact_id").?);
@@ -947,8 +977,8 @@ fn largeArtifactBatch(service: *native.tasks.Service(T), task_id: [16]u8) !void 
         try service.namespace.commit("test.publish-large-artifact");
     }
 
-    // The fixture's existing SQLite is outside this allocator. Reserve its
-    // 16MiB plus the production worker's 16MiB inside the same host-sized budget.
+    // Test-local allocation pressure proves bounded chunk reads. These bytes
+    // are not a production SQLite, worker, or host heap policy.
     var budget: kronos.AllocationBudget = .{ .parent = a, .limit = 64 * 1024 * 1024 };
     const bounded = budget.allocator();
     const reservation = try bounded.alloc(u8, 32 * 1024 * 1024);
@@ -1500,4 +1530,98 @@ test "terminal cleanup failures retain bounded shutdown ownership without runnab
     defer retained.deinit();
     try std.testing.expect(!try service.taskCleanupComplete(frame, retained.value));
     try std.testing.expect(try service.pump(frame) == .idle);
+}
+
+test "completed result beyond the former wire-read ceiling remains publicly retrievable" {
+    const Large = struct {
+        pub const application_id = "large-result-test";
+        pub const input_schema_id = "large-result.input.v1";
+        pub const output_schema_id = "large-result.output.v1";
+        pub const failure_schema_id = "large-result.failure.v1";
+        pub const message_schema_id = "large-result.message.v1";
+        pub const Input = protean.contracts.Utf8;
+        pub const Output = Input;
+        pub const Failure = void;
+        pub const Message = void;
+    };
+    const Identity = struct {
+        pub fn emit(c: protean.Context) !horos.source.Module {
+            const b = c.builder;
+            const input_schema = try c.schema(Large.Input);
+            const entry = try b.declare(&.{input_schema}, input_schema, &.{}, &.{});
+            try b.define(entry, try b.pure(try b.reference(b.parameter(entry, 0))));
+            return b.module(entry, try c.schema(void));
+        }
+    };
+    const parent = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(parent);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var compiled = try protean.compile(a, protean.system(.{ .InitialArgs = Large.Input, .Result = Large.Output, .Failure = void, .application = Identity }));
+    defer compiled.deinit();
+    const image = try a.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
+    _ = try compiled.encode(a, image);
+    const admitted_image = try horos.data.program_image.Admitted.decode(a, image);
+    defer admitted_image.deinit();
+    const manifest = try ownerManifest(a, image, admitted_image.identity(), "large-result-test");
+    const assets: native.discovery.Assets = .{ .image = image, .application = "large-result-test", .manifest = manifest };
+    var application: native.discovery.Application = .{ .arena = .init(parent), .metadata = .null, .manifest = .null, .manifest_id = "unit", .image_identity = admitted_image.identity() };
+    defer application.deinit();
+    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
+    var handlers = try native.Registry.init(parent, &.{});
+    defer handlers.deinit();
+    const profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "large-result-profile", .authority = .{ .grants = &.{}, .principal = "test", .tenant = "test" } };
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(io, &path);
+    var namespace = try native.Namespace.open(parent, io, try std.fmt.allocPrint(a, "{s}/state", .{path[0..length]}));
+    defer namespace.close() catch unreachable;
+    var service = try native.tasks.Service(Large).init(parent, io, &namespace, assets, &application, handlers, profile);
+    defer service.close(a) catch unreachable;
+    const text = try a.alloc(u8, 4 * 1024 * 1024 + 1);
+    @memset(text, 'x');
+    const accepted = try service.submit(a, "large-result", .{ .bytes = text });
+    while (true) {
+        var frame = std.heap.ArenaAllocator.init(parent);
+        defer frame.deinit();
+        const step = try service.pump(frame.allocator());
+        try std.testing.expect(step != .work);
+        var task = try service.task(frame.allocator(), accepted.receipt.task);
+        defer task.deinit();
+        if (task.value.terminal()) {
+            try std.testing.expect(task.value.result.?.bytes > 4 * 1024 * 1024);
+            break;
+        }
+    }
+    var client: native.client.Client(Large) = .{ .service = &service };
+    var params = native.json.object();
+    try native.json.put(a, &params, "task_id", native.json.string(try a.dupe(u8, &std.fmt.bytesToHex(accepted.receipt.task, .lower))));
+    // The response view must fit independently of the multi-megabyte wire value.
+    var response_budget: kronos.AllocationBudget = .{ .parent = parent, .limit = 256 * 1024 };
+    var response_arena = std.heap.ArenaAllocator.init(response_budget.allocator());
+    defer response_arena.deinit();
+    const result = try client.call(response_arena.allocator(), .@"task.result", params);
+    try std.testing.expect(result.object.get("ready").?.bool);
+    const outcome = result.object.get("outcome").?;
+    try std.testing.expect(outcome.object.get("value") == null);
+    const ref = outcome.object.get("value_ref").?;
+    var expected_hash = std.crypto.hash.sha2.Sha256.init(.{});
+    expected_hash.update("\"");
+    expected_hash.update(text);
+    expected_hash.update("\"");
+    var expected: [32]u8 = undefined;
+    expected_hash.final(&expected);
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(expected, .lower), ref.object.get("sha256").?.string);
+    try native.json.put(a, &params, "artifact_id", ref.object.get("artifact_id").?);
+    try native.json.put(a, &params, "length", native.json.string("32768"));
+    for ([_]usize{ 0, text.len + 2 - 32768 }) |offset| {
+        try native.json.put(a, &params, "offset", native.json.string(try std.fmt.allocPrint(a, "{d}", .{offset})));
+        const chunk = try client.call(a, .@"artifact.read", params);
+        var decoded: [32768]u8 = undefined;
+        try std.base64.url_safe_no_pad.Decoder.decode(&decoded, chunk.object.get("data").?.string);
+        try std.testing.expectEqual(text.len + 2, try native.json.decimal(usize, chunk.object.get("total_bytes").?));
+        for (decoded, 0..) |byte, index| try std.testing.expectEqual(@as(u8, if (offset + index == 0 or offset + index == text.len + 1) '"' else 'x'), byte);
+    }
 }

@@ -12,21 +12,21 @@ pub const tool_construction = @import("tool_construction_contracts.zig");
 pub const CapturedResponse = struct {
     status: u16,
     identity_encoding: bool,
-    request_id: ?Text(256),
-    body: Bytes(2 * 1024 * 1024),
+    request_id: ?Utf8,
+    body: Bytes(null),
 };
 
 /// Frozen read-only repository bytes; validation and capture belong to each
 /// environment, while the record itself has one shared wire definition.
 pub const RepositorySnapshotFile = struct {
-    path: Text(256),
+    path: Utf8,
     sha256: [32]u8,
-    contents: Bytes(256 * 1024),
+    contents: Bytes(null),
 };
 pub const RepositorySnapshot = struct {
     version: u32,
-    excluded_entries: u32,
-    files: Vector(RepositorySnapshotFile, 512),
+    excluded_entries: u64,
+    files: Vector(RepositorySnapshotFile, null),
 };
 
 /// One ordinary inbox result shared by authoring and native environments.
@@ -39,10 +39,15 @@ pub fn InboxReply(comptime Message: type) type {
     };
 }
 
+/// Optional representation bounds never encode infinity as a numeric sentinel.
+pub fn exceeds(length: usize, maximum: anytype) bool {
+    return if (maximum) |limit| length > limit else false;
+}
+
 pub const Error = wire.Error || std.mem.Allocator.Error || error{InvalidValue};
 pub const Descriptor = data.schema.Descriptor;
 
-pub fn Text(comptime maximum: u64) type {
+pub fn Text(comptime maximum: ?u64) type {
     return struct {
         pub const protean_value_kind = .text;
         pub const max_length: ?u64 = maximum;
@@ -50,7 +55,7 @@ pub fn Text(comptime maximum: u64) type {
     };
 }
 
-pub fn Bytes(comptime maximum: u64) type {
+pub fn Bytes(comptime maximum: ?u64) type {
     return struct {
         pub const protean_value_kind = .bytes;
         pub const max_length: ?u64 = maximum;
@@ -64,10 +69,10 @@ pub const Utf8 = struct {
     bytes: []const u8,
 };
 
-pub fn Vector(comptime Element: type, comptime maximum: u64) type {
+pub fn Vector(comptime Element: type, comptime maximum: ?u64) type {
     return struct {
         pub const protean_value_kind = .vector;
-        pub const max_length = maximum;
+        pub const max_length = if (maximum) |n| n else null;
         pub const Child = Element;
         items: []const Element,
     };
@@ -153,6 +158,7 @@ pub fn schema(comptime T: type, builder: anytype) !p.Id {
 }
 
 fn wrapperSchema(comptime T: type, builder: anytype) !p.Id {
+    if (T.protean_value_kind == .vector and @as(?u64, T.max_length) == null) return builder.schema(.{ .seq = try schema(T.Child, builder) });
     if (T.protean_value_kind == .vector) return builder.schema(.{ .vector = .{
         .element = try schema(T.Child, builder),
         .maximum = T.max_length,
@@ -161,6 +167,7 @@ fn wrapperSchema(comptime T: type, builder: anytype) !p.Id {
         if (T.max_length == null) return builder.schema(.text);
         return builder.schema(.{ .bounded_text = T.max_length.? });
     }
+    if (T.max_length == null) return builder.schema(.bytes);
     return builder.schema(.{ .bounded_bytes = T.max_length.? });
 }
 
@@ -229,7 +236,7 @@ fn checkBlob(comptime T: type, bytes: []const u8) Error!void {
 fn write(comptime T: type, value: T, output: *wire.Writer) Error!void {
     if (comptime wrapped(T)) {
         if (T.protean_value_kind == .vector) {
-            if (value.items.len > T.max_length) return error.InvalidValue;
+            if (@as(?u64, T.max_length)) |maximum| if (value.items.len > maximum) return error.InvalidValue;
             return writeSlice(T.Child, value.items, output);
         }
         try checkBlob(T, value.bytes);
@@ -302,7 +309,7 @@ fn read(comptime T: type, allocator: std.mem.Allocator, input: *wire.Reader, com
     if (comptime wrapped(T)) {
         if (T.protean_value_kind == .vector) {
             const count = try input.count();
-            if (count > T.max_length) return error.InvalidValue;
+            if (@as(?u64, T.max_length)) |maximum| if (count > maximum) return error.InvalidValue;
             return .{ .items = try readElements(T.Child, allocator, input, count, borrow_bytes) };
         }
         const bytes = try input.bytes();

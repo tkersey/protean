@@ -22,8 +22,10 @@ construction tests, compile-time rejection cases, model/value contracts, helper
 integrity tests, adaptive asset emission, formatting, and independent wire checks.
 It does not acquire Kronos or SQLite.
 
-The native job authenticates Kronos source and SQLite, runs `check-native`, and
-then runs the public downstream installation witness. Native owners have their
+The native job authenticates Kronos source and SQLite, builds the product, then
+runs `check-native` and the public downstream installation witness concurrently.
+The downstream reference is an immutable copy of that product; both checks must
+finish successfully and the final product must match the copy. Native owners have their
 own test root because Zig does not collect test declarations from named imported
 modules. The integration root shares the actual application types/assets and
 Kronos module. Controlled peers exercise HTTPS, actual authored adaptive control,

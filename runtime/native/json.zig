@@ -274,6 +274,10 @@ pub fn canonical(allocator: std.mem.Allocator, value: Value) ![]u8 {
 
 /// Terminal values can expand sixfold when escaped. Count before allocating so
 /// an arena does not retain every buffer grown while encoding a large result.
+pub fn canonicalOptional(allocator: std.mem.Allocator, value: Value, maximum: anytype) ![]u8 {
+    return if (maximum) |limit| canonicalBounded(allocator, value, limit) else canonical(allocator, value);
+}
+
 pub fn canonicalBounded(allocator: std.mem.Allocator, value: Value, maximum: usize) ![]u8 {
     var buffer: [4096]u8 = undefined;
     var counter = std.Io.Writer.Discarding.init(&buffer);

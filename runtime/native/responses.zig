@@ -13,10 +13,10 @@ pub const Settings = struct {
     audience: contracts.Text(128),
     model: contracts.Text(128),
     effort: contracts.Text(16),
-    max_output_tokens: u32,
-    request_bytes: u32,
-    response_bytes: u32,
-    timeout_ms: u32,
+    max_output_tokens: ?u32,
+    request_bytes: ?u32,
+    response_bytes: ?u32,
+    timeout_ms: ?u32,
 };
 pub const Environment = struct {
     token: []const u8,
@@ -49,9 +49,9 @@ fn list(a: std.mem.Allocator) json.Value {
     return .{ .array = .init(a) };
 }
 pub fn settings(a: std.mem.Allocator, profile: []const u8) !Settings {
-    const parsed = try json.parse(a, profile, .{ .bytes = 256 * 1024 });
+    const parsed = try json.parse(a, profile, .{ .bytes = profile.len, .tokens = profile.len, .members = profile.len });
     const result = try values.fromJson(Settings, a, try field(parsed.value, "responses"));
-    if (result.model.bytes.len == 0 or result.audience.bytes.len == 0 or result.max_output_tokens == 0 or result.max_output_tokens > 32768) return error.InvalidConfiguration;
+    if (result.model.bytes.len == 0 or result.audience.bytes.len == 0 or result.max_output_tokens == 0) return error.InvalidConfiguration;
     // HTTPS validates the finite transport limits without making a connection.
     _ = try (https.Config{ .endpoint = result.endpoint.bytes, .token = "validation", .request_limit = result.request_bytes, .response_limit = result.response_bytes, .timeout_ms = result.timeout_ms }).validate();
     return result;
@@ -61,7 +61,7 @@ const ArgumentError = error{ WrongType, UnknownField, MissingField, IntegerRange
 fn argument(comptime T: type, value: json.Value) ArgumentError!T {
     if (comptime contracts.json.isText(T)) {
         if (value != .string) return error.WrongType;
-        if (value.string.len > contracts.json.maximumTextBytes(T)) return error.Capacity;
+        if (contracts.exceeds(value.string.len, T.max_length)) return error.Capacity;
         return .{ .bytes = value.string };
     }
     return switch (@typeInfo(T)) {
@@ -123,7 +123,7 @@ pub fn Adapter(comptime P: type) type {
                 !equal(invocation.model.bytes, config.model.bytes) or invocation.parameters.max_output_tokens != config.max_output_tokens or invocation.parameters.temperature != null or
                 invocation.response_policy.store or invocation.response_policy.stream or invocation.response_policy.background or
                 invocation.selection.parallel_calls or invocation.selection.maximum_calls > 1 or invocation.selection.minimum_calls > invocation.selection.maximum_calls or
-                invocation.maximum_provider_response_bytes != config.response_bytes or config.response_bytes > P.representation.provider_response_bytes) return error.IncompatibleProfile;
+                invocation.maximum_provider_response_bytes != config.response_bytes or (P.representation.provider_response_bytes != null and (config.response_bytes == null or config.response_bytes.? > P.representation.provider_response_bytes.?))) return error.IncompatibleProfile;
             const reasoning = invocation.parameters.reasoning orelse return error.IncompatibleProfile;
             if (reasoning.effort == null or !equal(@tagName(reasoning.effort.?), config.effort.bytes) or reasoning.summary != null) return error.IncompatibleProfile;
             const catalog = P.allDeclarations().items;
@@ -142,30 +142,33 @@ pub fn Adapter(comptime P: type) type {
             var input = list(ctx.allocator);
             if (request.replay) |ref| {
                 if (!equal(ref.schema.bytes, P.context_identity) or !equal(&ref.profile, &request.profile) or !equal(&ref.task, &ctx.task) or
-                    !equal(ref.tenant.bytes, ctx.tenant) or !equal(ref.audience.bytes, config.audience.bytes) or ref.first != 0 or ref.next > 8192) return error.InvalidContext;
+                    !equal(ref.tenant.bytes, ctx.tenant) or !equal(ref.audience.bytes, config.audience.bytes) or ref.first != 0) return error.InvalidContext;
                 var current: ?registry.ObjectReference = .{ .digest = ref.digest, .bytes = ref.bytes };
                 var previous_next = ref.next;
-                var depth: usize = 0;
+                var first = true;
+                var visited: std.AutoHashMap([32]u8, void) = .init(ctx.allocator);
+                defer visited.deinit();
                 while (current) |reference| {
-                    if (depth == 64) return error.Capacity;
-                    const bytes = try ctx.object(reference, 2 * 1024 * 1024);
+                    if (visited.contains(reference.digest)) return error.InvalidContext;
+                    try visited.put(reference.digest, {});
+                    const bytes = try ctx.object(reference, std.math.cast(usize, reference.bytes) orelse return error.Capacity);
                     defer ctx.allocator.free(bytes);
                     var artifact = try contracts.decodeOwned(P.Context, ctx.allocator, bytes);
                     defer artifact.deinit();
                     const value = artifact.value;
                     if (!equal(value.schema.bytes, ref.schema.bytes) or !equal(&value.profile, &ref.profile) or !equal(&value.task, &ref.task) or
                         !equal(value.tenant.bytes, ref.tenant.bytes) or !equal(value.audience.bytes, ref.audience.bytes) or value.first != 0 or
-                        value.next > previous_next or (depth == 0 and value.next != ref.next)) return error.InvalidContext;
-                    const raw = try ctx.object(.{ .digest = value.source_capture.digest, .bytes = value.source_capture.bytes }, 4 * 1024 * 1024);
+                        value.next > previous_next or (first and value.next != ref.next)) return error.InvalidContext;
+                    const raw = try ctx.object(.{ .digest = value.source_capture.digest, .bytes = value.source_capture.bytes }, std.math.cast(usize, value.source_capture.bytes) orelse return error.Capacity);
                     ctx.allocator.free(raw);
-                    if (depth == 0) {
-                        const parsed = try json.parse(ctx.allocator, value.items.bytes, .{ .bytes = 2 * 1024 * 1024 });
+                    if (first) {
+                        const parsed = try json.parse(ctx.allocator, value.items.bytes, .{ .bytes = value.items.bytes.len, .tokens = value.items.bytes.len, .members = value.items.bytes.len });
                         input = parsed.value;
                         if (input != .array or input.array.items.len != ref.next) return error.InvalidContext;
                     }
                     previous_next = value.next;
                     current = if (value.parent) |parent| .{ .digest = parent.digest, .bytes = parent.bytes } else null;
-                    depth += 1;
+                    first = false;
                 }
             }
             var pending = try replayCalls(ctx.allocator, input);
@@ -195,7 +198,7 @@ pub fn Adapter(comptime P: type) type {
             var body = json.object();
             try json.put(ctx.allocator, &body, "model", json.string(config.model.bytes));
             try json.put(ctx.allocator, &body, "input", try history(ctx, request.value, config));
-            try json.put(ctx.allocator, &body, "max_output_tokens", try json.number(ctx.allocator, config.max_output_tokens));
+            if (config.max_output_tokens) |maximum| try json.put(ctx.allocator, &body, "max_output_tokens", try json.number(ctx.allocator, maximum));
             var reasoning = json.object();
             try json.put(ctx.allocator, &reasoning, "effort", json.string(config.effort.bytes));
             try json.put(ctx.allocator, &body, "reasoning", reasoning);
@@ -216,7 +219,7 @@ pub fn Adapter(comptime P: type) type {
             inline for (.{ "parallel_tool_calls", "store", "stream", "background" }) |key| try json.put(ctx.allocator, &body, key, .{ .bool = false });
             try json.put(ctx.allocator, &body, "truncation", json.string("disabled"));
             const rendered = try json.canonical(ctx.allocator, body);
-            if (rendered.len > config.request_bytes) return error.Capacity;
+            if (contracts.exceeds(rendered.len, config.request_bytes)) return error.Capacity;
             return rendered;
         }
 
@@ -251,7 +254,7 @@ pub fn Adapter(comptime P: type) type {
             if (raw.value.status < 200 or raw.value.status >= 300) return encode(ctx, .{ .result = .{ .provider_failure = .{ .kind = .http_status, .http_status = raw.value.status } } }, null);
             if (!raw.value.identity_encoding) return encode(ctx, unsupported(.unsupported_output_item), null);
             if (!std.unicode.utf8ValidateSlice(raw.value.body.bytes)) return encode(ctx, unsupported(.invalid_utf8), null);
-            const response = json.parse(ctx.allocator, raw.value.body.bytes, .{ .bytes = config.response_bytes }) catch |err| return encode(ctx, unsupported(if (err == error.Capacity) .normalization_limit else .malformed_json), null);
+            const response = json.parse(ctx.allocator, raw.value.body.bytes, .{ .bytes = config.response_bytes orelse raw.value.body.bytes.len, .tokens = raw.value.body.bytes.len, .members = raw.value.body.bytes.len }) catch |err| return encode(ctx, unsupported(if (err == error.Capacity) .normalization_limit else .malformed_json), null);
             const body = response.value;
             // Returned usage is an observation of the captured response, not a
             // consequence of accepting its actions or replay. Attach it once.
@@ -265,16 +268,14 @@ pub fn Adapter(comptime P: type) type {
             if (!is(body, "status", "completed") or (json.get(body, "error") orelse return unsupported(.unsupported_status)) != .null) return unsupported(.unsupported_status);
             const output = field(body, "output") catch return unsupported(.unsupported_status);
             if (output != .array) return unsupported(.unsupported_status);
-            if (output.array.items.len > P.representation.maximum_output_items) return unsupported(.normalization_limit);
+            if (contracts.exceeds(output.array.items.len, P.representation.maximum_output_items)) return unsupported(.normalization_limit);
             const normalized = normalize(ctx.allocator, request.invocation, output) catch |err| return unsupported(if (err == error.Capacity) .normalization_limit else if (err == error.MixedRefusal) .mixed_refusal else .unsupported_output_item);
             var input = try history(ctx, request, config);
             for (output.array.items) |item| try input.array.append(try replayItem(ctx.allocator, item));
             _ = replayCalls(ctx.allocator, input) catch return unsupported(.unsupported_output_item);
             const replay = try json.canonical(ctx.allocator, input);
-            if (replay.len > 2 * 1024 * 1024 or input.array.items.len > 8192) return unsupported(.normalization_limit);
             if (!usage_valid) return unsupported(.unsupported_output_item);
             const artifact = try contracts.encodeOwned(P.Context, ctx.allocator, .{ .schema = .{ .bytes = P.context_identity }, .profile = request.profile, .task = ctx.task, .tenant = .{ .bytes = ctx.tenant }, .audience = config.audience, .first = 0, .next = input.array.items.len, .source_capture = .{ .digest = storage.digest(captured), .bytes = captured.len }, .parent = if (request.replay) |prior| .{ .digest = prior.digest, .bytes = prior.bytes } else null, .items = .{ .bytes = replay } });
-            if (artifact.len > 2 * 1024 * 1024) return unsupported(.normalization_limit);
             const ref: Reference = .{ .digest = storage.digest(artifact), .bytes = artifact.len, .schema = .{ .bytes = P.context_identity }, .profile = request.profile, .task = ctx.task, .tenant = .{ .bytes = ctx.tenant }, .audience = config.audience, .first = 0, .next = input.array.items.len };
             const objects = try ctx.allocator.alloc([]const u8, 1);
             objects[0] = artifact;
@@ -291,7 +292,7 @@ pub fn Adapter(comptime P: type) type {
             const limits = P.normalizationLimits();
             while ((scanner.peekNextTokenType() catch return .{ .invalid = .malformed }) != .object_end) : (fields += 1) {
                 if (fields == limits.maximum_argument_fields) return .{ .invalid = .capacity };
-                const token = scanner.nextAllocMax(a, .alloc_if_needed, P.representation.arguments_json_bytes) catch return .{ .invalid = .malformed };
+                const token = scanner.nextAllocMax(a, .alloc_if_needed, arguments.len) catch return .{ .invalid = .malformed };
                 const key = switch (token) {
                     .string, .allocated_string => |bytes| bytes,
                     else => return .{ .invalid = .malformed },
@@ -302,7 +303,7 @@ pub fn Adapter(comptime P: type) type {
             }
             _ = scanner.next() catch return .{ .invalid = .malformed };
             if ((scanner.next() catch return .{ .invalid = .malformed }) != .end_of_document) return .{ .invalid = .malformed };
-            const parsed = json.parse(a, arguments, .{ .bytes = P.representation.arguments_json_bytes }) catch |err| return .{ .invalid = switch (err) {
+            const parsed = json.parse(a, arguments, .{ .bytes = P.representation.arguments_json_bytes orelse arguments.len, .tokens = arguments.len, .members = arguments.len }) catch |err| return .{ .invalid = switch (err) {
                 error.DuplicateKey => .duplicate_field,
                 error.Capacity => .capacity,
                 else => .malformed,
@@ -340,7 +341,7 @@ pub fn Adapter(comptime P: type) type {
                     const call_id = try text(item, "call_id");
                     const name = try text(item, "name");
                     const args = try text(item, "arguments");
-                    if (call_id.len == 0 or call_id.len > P.representation.call_id_bytes or name.len > P.ToolName.max_length.? or args.len > P.representation.arguments_json_bytes) return error.Capacity;
+                    if (call_id.len == 0 or contracts.exceeds(call_id.len, P.representation.call_id_bytes) or name.len > P.ToolName.max_length.? or contracts.exceeds(args.len, P.representation.arguments_json_bytes)) return error.Capacity;
                     var ordinal: u32 = std.math.maxInt(u32);
                     for (invocation.tools.items) |tool| if (equal(tool.name.bytes, name)) {
                         ordinal = tool.action_ordinal;
@@ -358,7 +359,7 @@ pub fn Adapter(comptime P: type) type {
                             try joined.appendSlice(a, try text(part, "text"));
                         }
                     }
-                    if (joined.items.len > P.representation.result_text_bytes) return error.Capacity;
+                    if (contracts.exceeds(joined.items.len, P.representation.result_text_bytes)) return error.Capacity;
                     if (refusal == null) try items.append(a, .{ .message = .{ .role = .assistant, .content = .{ .bytes = joined.items } } });
                 } else {
                     var joined: std.ArrayList(u8) = .empty;
@@ -367,13 +368,13 @@ pub fn Adapter(comptime P: type) type {
                         if (index != 0) try joined.append(a, '\n');
                         try joined.appendSlice(a, try text(part, "text"));
                     }
-                    if (joined.items.len > P.representation.result_text_bytes) return error.Capacity;
+                    if (contracts.exceeds(joined.items.len, P.representation.result_text_bytes)) return error.Capacity;
                     try items.append(a, .{ .reasoning = .{ .summary = .{ .bytes = joined.items } } });
                 }
             }
             if (refusal) |message| {
                 for (items.items) |item| if (item != .reasoning) return error.MixedRefusal;
-                if (message.len > P.representation.result_text_bytes) return error.Capacity;
+                if (contracts.exceeds(message.len, P.representation.result_text_bytes)) return error.Capacity;
                 return .{ .refusal = .{ .bytes = message } };
             }
             const encoded = try contracts.encodeOwned(P.OutputItems, a, .{ .items = items.items });
@@ -470,7 +471,7 @@ pub fn replayItem(a: std.mem.Allocator, item: json.Value) !json.Value {
 }
 
 fn replayCalls(a: std.mem.Allocator, input: json.Value) !std.StringHashMap(void) {
-    if (input != .array or input.array.items.len > 8192) return error.Capacity;
+    if (input != .array) return error.InvalidContext;
     var seen = std.StringHashMap(void).init(a);
     var pending = std.StringHashMap(void).init(a);
     for (input.array.items) |item| {

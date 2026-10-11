@@ -5,16 +5,21 @@ const contracts = @import("protean_contracts");
 const codecs = @import("model_codec.zig");
 const models = @import("model.zig");
 
-pub const semantic_identity = "agent.model.invoke.v3";
-pub const replay_semantic_identity = "agent.model.invoke.v4";
-pub const reference_semantic_identity = "agent.model.invoke.v5";
-pub const context_semantic_identity = "agent.model.context.responses.v1";
-pub const adaptive_semantic_identity = "agent.model.invoke.v6";
-pub const adaptive_context_semantic_identity = "agent.model.context.responses.adaptive.v4";
-pub const adaptive_policy_semantic_identity = "agent.model.policy.adaptive.v1";
-pub const maximum_adaptive_request_bytes = 256 * 1024;
+pub const semantic_identity = "agent.model.invoke.v7";
+pub const replay_semantic_identity = "agent.model.invoke.v8";
+pub const reference_semantic_identity = "agent.model.invoke.v9";
+pub const context_semantic_identity = "agent.model.context.responses.v2";
+pub const adaptive_semantic_identity = "agent.model.invoke.v10";
+pub const adaptive_context_semantic_identity = "agent.model.context.responses.adaptive.v5";
+pub const adaptive_policy_semantic_identity = "agent.model.policy.adaptive.v2";
 pub fn isModelIdentity(identity: []const u8) bool {
-    return std.mem.eql(u8, identity, semantic_identity) or
+    // Retired model identities remain reserved; they cannot be relabeled as
+    // ordinary read effects merely because this build uses newer wire contracts.
+    return std.mem.eql(u8, identity, "agent.model.invoke.v3") or
+        std.mem.eql(u8, identity, "agent.model.invoke.v4") or
+        std.mem.eql(u8, identity, "agent.model.invoke.v5") or
+        std.mem.eql(u8, identity, "agent.model.invoke.v6") or
+        std.mem.eql(u8, identity, semantic_identity) or
         std.mem.eql(u8, identity, replay_semantic_identity) or
         std.mem.eql(u8, identity, reference_semantic_identity) or
         std.mem.eql(u8, identity, adaptive_semantic_identity);
@@ -40,10 +45,10 @@ pub const AdaptiveInferenceProfile = struct {
     additional_tools: bool,
     cache_diagnostics: bool,
     opaque_family: contracts.Text(64),
-    max_output_tokens: u32,
-    request_bytes: u32,
-    response_bytes: u32,
-    timeout_ms: u32,
+    max_output_tokens: ?u32,
+    request_bytes: ?u32,
+    response_bytes: ?u32,
+    timeout_ms: ?u32,
 };
 pub const EpochReason = enum { initial, model_change, effort_change, eviction };
 pub const SkillResidency = enum { resident, transient };
@@ -76,7 +81,7 @@ pub const AdaptivePlan = struct {
     eviction_generation: u64,
     prior: ?AdaptiveContextReference,
     catalog: ArtifactReference,
-    skills: contracts.Vector(SkillMaterialization, 32),
+    skills: contracts.Vector(SkillMaterialization, null),
 };
 pub const AdaptiveUsage = struct {
     input_tokens: ?u64,
@@ -102,7 +107,6 @@ pub const ContextReference = struct {
     first: u64,
     next: u64,
 };
-pub const maximum_replay_bytes: u32 = 2 * 1024 * 1024;
 pub const ArtifactReference = struct { digest: [32]u8, bytes: u64 };
 /// Context bindings are inside the hashed artifact too. A caller cannot relabel
 /// another task's bytes merely by changing the fields of an external reference.
@@ -116,7 +120,7 @@ pub const ContextArtifact = struct {
     next: u64,
     source_capture: ArtifactReference,
     parent: ?ArtifactReference,
-    items: contracts.Bytes(maximum_replay_bytes),
+    items: contracts.Bytes(null),
 };
 pub const ReplayStatus = enum { complete, unsupported, capacity };
 pub const Usage = struct { input_tokens: u64, output_tokens: u64, cached_input_tokens: ?u64 };
@@ -136,21 +140,19 @@ pub const UnsupportedResponse = enum {
     normalization_limit,
 };
 
-/// Every capacity is an application's declared value representation policy.
-/// These capacities are neither turn budgets nor limits on program lifetime.
+/// Optional, explicitly selected value representation bounds. Normal adaptive
+/// execution uses variable-length values and the actual allocator/provider.
 pub const Limits = struct {
-    model_id_bytes: u32,
-    temperature_bytes: u32,
-    maximum_messages: u32,
-    message_bytes: u32,
-    maximum_output_items: u32,
-    call_id_bytes: u32,
-    arguments_json_bytes: u32,
-    result_text_bytes: u32,
-    provider_response_bytes: u32,
-    /// Aggregate v6 reply budget, including normalized items and replay binding.
-    /// Raw provider capture remains available when this projection is too large.
-    maximum_adaptive_reply_bytes: u32 = 64 * 1024,
+    model_id_bytes: ?u32 = null,
+    temperature_bytes: ?u32 = null,
+    maximum_messages: ?u32 = null,
+    message_bytes: ?u32 = null,
+    maximum_output_items: ?u32 = null,
+    call_id_bytes: ?u32 = null,
+    arguments_json_bytes: ?u32 = null,
+    result_text_bytes: ?u32 = null,
+    provider_response_bytes: ?u32 = null,
+    maximum_adaptive_reply_bytes: ?u32 = null,
 };
 
 pub const Selection = struct {
@@ -165,14 +167,18 @@ pub const ResponsePolicy = struct {
     truncation: TruncationPolicy,
 };
 pub const NormalizationLimits = struct {
-    maximum_output_items: u32,
-    maximum_call_id_bytes: u32,
+    maximum_output_items: ?u32,
+    maximum_call_id_bytes: ?u32,
     maximum_name_bytes: u32,
-    maximum_arguments_bytes: u32,
+    maximum_arguments_bytes: ?u32,
     maximum_argument_name_bytes: u32,
     maximum_argument_fields: u32,
-    maximum_result_text_bytes: u32,
+    maximum_result_text_bytes: ?u32,
 };
+
+fn schemaBound(value: ?u32) ?u64 {
+    return if (value) |maximum| maximum else null;
+}
 
 fn checkDeclarations(comptime Answer: type, comptime declarations: anytype) void {
     const info = @typeInfo(Answer).@"union";
@@ -214,7 +220,7 @@ pub fn Profile(
         if (@field(limits, name) == 0)
             @compileError("Protean model limit must be positive: " ++ name);
     };
-    if (limits.maximum_adaptive_reply_bytes < 128)
+    if (limits.maximum_adaptive_reply_bytes != null and limits.maximum_adaptive_reply_bytes.? < 128)
         @compileError("adaptive reply budget must hold a capacity result and exact usage");
     const maxima = comptime blk: {
         var name: usize = 1;
@@ -224,9 +230,11 @@ pub fn Profile(
             name = @max(name, declaration.name.len);
             description = @max(description, declaration.description.len);
             schema = @max(schema, codecs.json.ToolSchema(Variant).value.len);
-            if (limits.arguments_json_bytes <
-                codecs.json.maximumToolArgumentsByteLength(Variant))
-                @compileError("Protean model arguments_json_bytes cannot represent every admitted answer");
+            if (limits.arguments_json_bytes) |maximum| {
+                const needed = codecs.json.maximumToolArgumentsByteLength(Variant) orelse
+                    @compileError("bounded arguments cannot represent an unbounded answer");
+                if (maximum < needed) @compileError("Protean model arguments_json_bytes cannot represent every admitted answer");
+            }
         }
         break :blk .{ .name = name, .description = description, .schema = schema };
     };
@@ -246,16 +254,16 @@ pub fn Profile(
         pub const declaration_count = declarations.len;
         pub const ArgumentCodec = CodecProfile.Codec;
         pub const DecodedAnswer = CodecProfile.Decoded;
-        pub const ModelId = contracts.Text(limits.model_id_bytes);
-        pub const Temperature = contracts.Text(limits.temperature_bytes);
-        pub const MessageText = contracts.Text(limits.message_bytes);
+        pub const ModelId = contracts.Text(schemaBound(limits.model_id_bytes));
+        pub const Temperature = contracts.Text(schemaBound(limits.temperature_bytes));
+        pub const MessageText = contracts.Text(schemaBound(limits.message_bytes));
         pub const ProtocolIdentity = contracts.Text(protocol_identity.len);
         pub const ToolName = contracts.Text(maxima.name);
         pub const ToolDescription = contracts.Text(maxima.description);
         pub const ToolSchema = contracts.Bytes(maxima.schema);
-        pub const ArgumentsJson = contracts.Bytes(limits.arguments_json_bytes);
-        pub const ResultText = contracts.Text(limits.result_text_bytes);
-        pub const CallId = contracts.Text(limits.call_id_bytes);
+        pub const ArgumentsJson = contracts.Bytes(schemaBound(limits.arguments_json_bytes));
+        pub const ResultText = contracts.Text(schemaBound(limits.result_text_bytes));
+        pub const CallId = contracts.Text(schemaBound(limits.call_id_bytes));
         pub const ReasoningConfig = struct {
             effort: ?models.ReasoningEffort,
             summary: ?models.ReasoningSummary,
@@ -266,7 +274,7 @@ pub fn Profile(
             reasoning: ?ReasoningConfig,
         };
         pub const Message = struct { role: MessageRole, content: MessageText };
-        pub const Messages = contracts.Vector(Message, limits.maximum_messages);
+        pub const Messages = contracts.Vector(Message, schemaBound(limits.maximum_messages));
         pub const ToolDeclaration = struct {
             action_ordinal: u32,
             action_tag: u32,
@@ -277,7 +285,7 @@ pub fn Profile(
             argument_codec: ArgumentCodec,
         };
         pub const Tools = contracts.Vector(ToolDeclaration, declarations.len);
-        /// Ordered product fields are the v3 application contract.
+        /// Ordered product fields are the v7 application contract.
         pub const Request = struct {
             protocol: ProtocolIdentity,
             model: ModelId,
@@ -287,7 +295,7 @@ pub fn Profile(
             selection: Selection,
             response_policy: ResponsePolicy,
             normalization_limits: NormalizationLimits,
-            maximum_provider_response_bytes: u32,
+            maximum_provider_response_bytes: ?u32,
         };
         pub const FunctionCall = struct {
             call_id: CallId,
@@ -301,7 +309,7 @@ pub fn Profile(
             message: struct { role: MessageRole, content: ResultText },
             reasoning: struct { summary: ResultText },
         };
-        pub const OutputItems = contracts.Vector(OutputItem, limits.maximum_output_items);
+        pub const OutputItems = contracts.Vector(OutputItem, schemaBound(limits.maximum_output_items));
         pub const Output = struct {
             items: OutputItems,
             normalized_output_digest: [32]u8,
@@ -315,14 +323,14 @@ pub fn Profile(
             unsupported_response: UnsupportedResponse,
         };
 
-        // Additive stateless contract. The v3 request/result wire remains exact.
-        // Opaque provider items are bounded ordinary data, never host closures.
-        pub const ReplayBytes = contracts.Bytes(maximum_replay_bytes);
+        // Inline replay shares the versioned invocation/result contract.
+        // Opaque provider items remain ordinary data, never host closures.
+        pub const ReplayBytes = contracts.Bytes(null);
         pub const ToolResult = struct { call_id: CallId, output: ResultText };
         pub const ReplayRequest = struct {
             invocation: Request,
             replay: ReplayBytes,
-            results: contracts.Vector(ToolResult, limits.maximum_output_items),
+            results: contracts.Vector(ToolResult, schemaBound(limits.maximum_output_items)),
         };
         pub const ReplayResult = struct {
             result: Result,
@@ -331,12 +339,12 @@ pub fn Profile(
             usage: ?Usage,
         };
 
-        // v5 leaves existing inline v4 consumers unchanged. Large captures and
+        // Reference replay retains large captures and
         // replay stay in the task owner's immutable store instead of PST3.
         pub const ReferenceRequest = struct {
             invocation: Request,
             replay: ?ContextReference,
-            results: contracts.Vector(ToolResult, limits.maximum_output_items),
+            results: contracts.Vector(ToolResult, schemaBound(limits.maximum_output_items)),
             profile: [32]u8,
         };
         pub const ReferenceResult = struct {
@@ -357,19 +365,17 @@ pub fn Profile(
             plan: AdaptivePlan,
             materialized: [declarations.len]bool,
             offered: [declarations.len]bool,
-            results: contracts.Vector(ToolResult, limits.maximum_output_items),
+            results: contracts.Vector(ToolResult, schemaBound(limits.maximum_output_items)),
         };
-        pub const AdaptivePrepared = struct { version: u32, request: AdaptiveRequest, body: contracts.Bytes(maximum_adaptive_request_bytes) };
+        pub const AdaptivePrepared = struct { version: u32, request: AdaptiveRequest, body: contracts.Bytes(null) };
         pub const AdaptivePolicy = struct {
             schema: contracts.Text(128),
             endpoint: contracts.Text(2048),
             audience: contracts.Text(128),
-            profiles: contracts.Vector(AdaptiveInferenceProfile, 8),
+            profiles: contracts.Vector(AdaptiveInferenceProfile, null),
             catalog: ArtifactReference,
             core_tools: [declarations.len]bool,
             permitted_tools: [declarations.len]bool,
-            model_attempts: u16,
-            control_transitions: u16,
         };
         pub const AdaptiveSkill = struct {
             id: contracts.Text(64),
@@ -379,7 +385,7 @@ pub fn Profile(
             tools: [declarations.len]bool,
         };
         pub const AdaptiveCatalog = struct {
-            skills: contracts.Vector(AdaptiveSkill, 32),
+            skills: contracts.Vector(AdaptiveSkill, null),
         };
         /// Audit closure and rendered input are different sets. items contains
         /// committed history, never copies of transient suffix injections.
@@ -397,14 +403,15 @@ pub fn Profile(
             watermark: u64,
             source_capture: ArtifactReference,
             source_request: ArtifactReference,
-            response_id: ?contracts.Text(256),
-            items: contracts.Bytes(maximum_replay_bytes),
+            response_id: ?contracts.Utf8,
+            items: contracts.Bytes(null),
             /// Origin is projection-owned, never inferred from provider text.
             /// It distinguishes injected skill material from identical evidence
             /// and records which responses could have observed an evicted skill.
-            origins: contracts.Vector(ContextOrigin, 8192),
+            origins: contracts.Vector(ContextOrigin, null),
         };
-        pub const ContextOrigin = struct { watermark: u64, resident_skill: ?u8 = null, reasoning_skills: u32 = 0, reasoning_tools: [declarations.len]bool = @splat(false) };
+        pub const ReasoningSkills = contracts.Vector(u64, null);
+        pub const ContextOrigin = struct { watermark: u64, resident_skill: ?u64 = null, reasoning_skills: ReasoningSkills = .{ .items = &.{} }, reasoning_tools: [declarations.len]bool = @splat(false) };
         pub const AdaptiveResult = struct {
             result: Result,
             replay: ?AdaptiveContextReference,
@@ -476,7 +483,7 @@ pub fn Profile(
                 if (!models.isAdmitted(Model)) @compileError("Protean model must use protean.model");
                 if (!std.mem.eql(u8, Model.protocol.semantic_identity, protocol_identity))
                     @compileError("Protean model profile uses an unsupported provider protocol");
-                if (Model.model_id.len > limits.model_id_bytes)
+                if (contracts.exceeds(Model.model_id.len, limits.model_id_bytes))
                     @compileError("Protean model identifier exceeds model_id_bytes");
             }
             const parameters = Model.parameters;
@@ -485,7 +492,7 @@ pub fn Profile(
                 parameters.temperature
             else
                 null;
-            if (temperature != null and temperature.?.len > limits.temperature_bytes)
+            if (temperature != null and contracts.exceeds(temperature.?.len, limits.temperature_bytes))
                 @compileError("Protean model temperature exceeds temperature_bytes");
             return .{
                 .max_output_tokens = if (has and @hasField(@TypeOf(parameters), "max_output_tokens"))
@@ -540,7 +547,7 @@ pub fn Profile(
             selection: Selection,
         ) !Request {
             if (selection.minimum_calls > selection.maximum_calls or
-                selection.maximum_calls > limits.maximum_output_items)
+                contracts.exceeds(selection.maximum_calls, limits.maximum_output_items))
                 return error.InvalidSelection;
             return .{
                 .protocol = .{ .bytes = protocol_identity },

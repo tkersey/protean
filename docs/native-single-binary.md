@@ -1,6 +1,6 @@
 # Native Protean
 
-`protean` is the supported application. Its human CLI and `agent-host/1.0`
+`protean` is the supported application. Its human CLI and `agent-host/2.0`
 stdio interface use one native task owner and one authored Horos program.
 Kronos evaluates the program and its saved continuation. Read-only snapshot work,
 Responses I/O, and generated pure tools are native environmental capabilities.
@@ -96,11 +96,24 @@ artifact reads are bounded. The small client in `test/support/stdio-client.mts`
 is an external verification caller; it is not installed with the product.
 
 A state directory admits one native owner. SQLite commits, sealed generation,
-frozen resources, task revisions, occurrences, acquisitions, and reservations
-remain durable. A response acquired before restart is interpreted from its
+frozen resources, task revisions, occurrences, and acquisitions remain durable. A response acquired before restart is interpreted from its
 original bytes rather than dispatched again. Unknown external delivery cannot
 be automatically retried or declared cancelled. Cleanup failure and incomplete
 shutdown remain distinct from application failure.
+
+SQLite uses its system allocator and filesystem capacity; Protean imposes no
+namespace byte quota or fixed SQLite heap. The linked library's actual BLOB
+limit is queried at admission. A storage failure during capture publication
+fences the owner; reopening retains unknown delivery and cannot reissue the
+external call. No finite reserve promises publication of an unknown-size reply.
+
+`agent-host/2.0` retains bounded transport and scheduling windows: framed RPC,
+concurrent owned tasks, output backpressure, and artifact/event pages. These do
+not accumulate into task-lifetime allowances. Parked tasks and archive records
+have no application count cap. Status reports `pending_message_count` and a
+bounded `pending_messages` view with `pending_messages_truncated`; `task.events`
+provides the complete message history in pages. The inbox itself retains every
+accepted message until its authored consumption or terminal disposition.
 
 ## Saved state and portability
 

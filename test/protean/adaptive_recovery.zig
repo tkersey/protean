@@ -10,7 +10,8 @@ const environment = @import("adaptive_environment");
 const protocol = horos.data.invocation;
 const Ref = t.model.ArtifactReference;
 
-fn constructionRecipe(a: std.mem.Allocator, stages: []const struct { component: []const u8, operation: ?[]const u8 = null }) ![]u8 {
+const Stage = struct { component: []const u8, operation: ?[]const u8 = null };
+fn constructionRecipe(a: std.mem.Allocator, stages: []const Stage) ![]u8 {
     const wire = protean.contracts.tool_construction;
     var instances: std.ArrayList(@FieldType(wire.Recipe, "instances").Child) = .empty;
     var bindings: std.ArrayList(@FieldType(wire.Recipe, "bindings").Child) = .empty;
@@ -57,6 +58,22 @@ test "compiled catalog composes coverage and orphan grouping and reuses exact BP
     const task: [16]u8 = @splat(17);
     const product = try engine.construct(a, scratch.allocator(), task, "frozen-policy", encoded_catalog.?, coverage);
     const tool = product.built;
+    // Composition size follows the frozen catalog and actual allocation, not
+    // the old sixteen-instance matrix. Ten swaps compose to the identity.
+    const swaps = try constructionRecipe(a, &(@as([10]Stage, @splat(.{ .component = "swap" }))));
+    const many_instances = try engine.build(a, a, catalog.value, swaps);
+    try std.testing.expect(swaps.len > 2700);
+    const Model = protean.model(.{ .name = "recipe-codec-fixture", .model = "fixture-model", .parameters = .{}, .protocol = struct {
+        pub const semantic_identity = t.model.protocol_identity;
+    } });
+    var invocation = try t.P.templateValue(Model, .{ .items = &.{} }, .{ .minimum_calls = 1, .maximum_calls = 1, .parallel_calls = false });
+    invocation.tools = t.P.allDeclarations();
+    const arguments = try std.json.Stringify.valueAlloc(a, .{ .proposal_json = swaps }, .{});
+    const response = try std.json.Stringify.valueAlloc(a, .{.{ .type = "function_call", .status = "completed", .call_id = "large-recipe", .name = "tool_build", .arguments = arguments }}, .{});
+    const parsed = try native.json.parse(a, response, .{ .bytes = response.len, .tokens = response.len });
+    const normalized = try native.responses.Adapter(t.P).normalize(a, invocation, parsed.value);
+    try std.testing.expectEqualStrings(swaps, normalized.output.items.items[0].function_call.decoded_action.decoded.tool_build.proposal_json.bytes);
+
     // Persistence round-trip keeps the exact image, recipe and task binding.
     var recovered = try protean.contracts.decodeOwned(wire.Program, a, try protean.contracts.encodeOwned(wire.Program, a, product));
     defer recovered.deinit();
@@ -64,18 +81,24 @@ test "compiled catalog composes coverage and orphan grouping and reuses exact BP
     const schema = try native.values.schemaBytes(t.tool_types.Table, a);
     const input: t.tool_types.Table = .{ .rows = .{ .items = &.{ auditRow(1, 10, 100, 1), auditRow(2, 20, 200, 1), auditRow(3, 30, 300, 2), auditRow(4, 40, 400, 2), auditRow(5, 50, 500, 3) } }, .relation = .{ .items = &.{ auditRow(11, 10, 100, 1), auditRow(12, 20, 201, 1), auditRow(13, 40, 400, 2), auditRow(14, 40, 401, 2), auditRow(15, 90, 1, 3), auditRow(16, 91, 1, 3), auditRow(17, 92, 1, 4) } }, .selected = .{ .items = &.{ 10, 20, 30, 40 } } };
     const admitted_input: wire.Input = .{ .schema = .{ .bytes = schema }, .value = .{ .bytes = try protean.contracts.encodeOwned(t.tool_types.Table, a, input) } };
-    try std.testing.expectError(error.UnauthorizedProgram, engine.execute(a, a, std.testing.io, null, @splat(18), "frozen-policy", encoded_catalog.?, recovered.value, admitted_input, .{}));
-    try std.testing.expectError(error.UnauthorizedProgram, engine.execute(a, a, std.testing.io, null, task, "changed-policy", encoded_catalog.?, recovered.value, admitted_input, .{}));
-    const first = try engine.execute(a, a, std.testing.io, null, task, "frozen-policy", encoded_catalog.?, recovered.value, admitted_input, .{});
+    try std.testing.expectError(error.UnauthorizedProgram, engine.execute(a, a, null, @splat(18), "frozen-policy", encoded_catalog.?, recovered.value, admitted_input));
+    try std.testing.expectError(error.UnauthorizedProgram, engine.execute(a, a, null, task, "changed-policy", encoded_catalog.?, recovered.value, admitted_input));
+    const first = try engine.execute(a, a, null, task, "frozen-policy", encoded_catalog.?, recovered.value, admitted_input);
     var result = try protean.contracts.decodeOwned(t.tool_types.Table, a, first);
     defer result.deinit();
     try std.testing.expectEqual(4, result.value.rows.items.len);
+    const large_rows = try a.alloc(t.tool_types.Row, 40);
+    for (large_rows, 0..) |*row, i| row.* = auditRow(@intCast(i), 10, 100, 1);
+    const large: t.tool_types.Table = .{ .rows = .{ .items = large_rows }, .relation = input.relation, .selected = input.selected };
+    const large_bytes = try protean.contracts.encodeOwned(t.tool_types.Table, a, large);
+    const unchanged = try engine.run(a, a, null, many_instances, schema, large_bytes);
+    try std.testing.expectEqualSlices(u8, large_bytes, unchanged);
     for (result.value.rows.items, [_]u64{ 1, 2, 3, 4 }, 1..) |row, status, id| {
         try std.testing.expectEqual(id, row.id);
         try std.testing.expectEqual(status, row.status);
     }
     const next: t.tool_types.Table = .{ .rows = .{ .items = &.{auditRow(80, 20, 201, 9)} }, .relation = input.relation, .selected = .{ .items = &.{20} } };
-    var reused = try protean.contracts.decodeOwned(t.tool_types.Table, a, try engine.execute(a, a, std.testing.io, null, task, "frozen-policy", encoded_catalog.?, recovered.value, .{ .schema = .{ .bytes = schema }, .value = .{ .bytes = try protean.contracts.encodeOwned(t.tool_types.Table, a, next) } }, .{}));
+    var reused = try protean.contracts.decodeOwned(t.tool_types.Table, a, try engine.execute(a, a, null, task, "frozen-policy", encoded_catalog.?, recovered.value, .{ .schema = .{ .bytes = schema }, .value = .{ .bytes = try protean.contracts.encodeOwned(t.tool_types.Table, a, next) } }));
     defer reused.deinit();
     try std.testing.expectEqual(1, reused.value.rows.items.len);
     try std.testing.expectEqual(80, reused.value.rows.items[0].id);
@@ -83,7 +106,7 @@ test "compiled catalog composes coverage and orphan grouping and reuses exact BP
     const reverse = try constructionRecipe(a, &.{ .{ .component = "filter", .operation = "selected" }, .{ .component = "swap" }, .{ .component = "map", .operation = "join" }, .{ .component = "filter", .operation = "orphan" }, .{ .component = "group" } });
     const reverse_tool = try engine.build(a, scratch.allocator(), catalog.value, reverse);
     try std.testing.expect(!std.mem.eql(u8, tool.image.bytes, reverse_tool.image.bytes));
-    var grouped = try protean.contracts.decodeOwned(t.tool_types.Table, a, try engine.run(a, a, std.testing.io, null, reverse_tool, schema, try protean.contracts.encodeOwned(t.tool_types.Table, a, input), .{}));
+    var grouped = try protean.contracts.decodeOwned(t.tool_types.Table, a, try engine.run(a, a, null, reverse_tool, schema, try protean.contracts.encodeOwned(t.tool_types.Table, a, input)));
     defer grouped.deinit();
     try std.testing.expectEqual(2, grouped.value.rows.items.len);
     try std.testing.expectEqual(3, grouped.value.rows.items[0].group);
@@ -113,12 +136,11 @@ test "compiled catalog composes coverage and orphan grouping and reuses exact BP
     const altered = try a.dupe(u8, substituted.built.image.bytes);
     altered[0] ^= 1;
     substituted.built.image.bytes = altered;
-    try std.testing.expectError(error.InvalidDerivation, engine.execute(a, a, std.testing.io, null, task, "frozen-policy", encoded_catalog.?, substituted, admitted_input, .{}));
-    try std.testing.expectError(error.IncompatibleInterface, engine.run(a, a, std.testing.io, null, tool, try native.values.schemaBytes(bool, a), admitted_input.value.bytes, .{}));
-    try std.testing.expectError(error.OutOfMemory, engine.run(a, a, std.testing.io, null, tool, schema, admitted_input.value.bytes, .{ .working_bytes = 1 }));
+    try std.testing.expectError(error.InvalidDerivation, engine.execute(a, a, null, task, "frozen-policy", encoded_catalog.?, substituted, admitted_input));
+    try std.testing.expectError(error.IncompatibleInterface, engine.run(a, a, null, tool, try native.values.schemaBytes(bool, a), admitted_input.value.bytes));
+    try std.testing.expectError(error.OutOfMemory, engine.run(a, std.testing.failing_allocator, null, tool, schema, admitted_input.value.bytes));
     var cancelled: std.atomic.Value(bool) = .init(true);
-    try std.testing.expectError(error.Canceled, engine.run(a, a, std.testing.io, &cancelled, tool, schema, admitted_input.value.bytes, .{}));
-    try std.testing.expectError(error.FuelExhausted, engine.run(a, a, std.testing.io, null, tool, schema, try protean.contracts.encodeOwned(t.tool_types.Table, a, input), .{ .transitions = 1 }));
+    try std.testing.expectError(error.Canceled, engine.run(a, a, &cancelled, tool, schema, admitted_input.value.bytes));
 }
 // Independent projection of the persisted capture record, including the
 // acquired-but-not-interpreted discriminant exercised below.
@@ -153,7 +175,7 @@ test "adaptive unload capture recovers under its original plan without another a
     const configured = try environment.configure(permanent, io, .{ .offline = true, .scratch_allocator = a }, null, assets);
     var grants: [environment.handlers.len]native.registry.Grant = undefined;
     const profile: native.tasks.Profile = .{ .id = configured.id, .runtime_identity = @splat(73), .bytes = configured.bytes, .environment = configured.environment, .resources = configured.resources, .authority = .{ .grants = &grants, .principal = "adaptive-unit", .tenant = "local", .inference = true } };
-    for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(application.image_identity) };
+    for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var buffer: [4096]u8 = undefined;
@@ -300,54 +322,52 @@ test "adaptive unload capture recovers under its original plan without another a
     service_live = false;
     try namespace.close();
     namespace_live = false;
-    try narrowAttemptCeiling(a, io, assets, &application, handlers, configured, buffer[0..length]);
+    try continuedAttemptAccounting(a, io, assets, &application, handlers, configured, buffer[0..length]);
 }
 
-fn narrowAttemptCeiling(parent: std.mem.Allocator, io: std.Io, assets: native.discovery.Assets, application: *native.discovery.Application, handlers: native.Registry, original: native.configuration.Admitted, directory: []const u8) !void {
+fn continuedAttemptAccounting(parent: std.mem.Allocator, io: std.Io, assets: native.discovery.Assets, application: *native.discovery.Application, handlers: native.Registry, original: native.configuration.Admitted, directory: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(parent);
     defer arena.deinit();
     const a = arena.allocator();
-    var root = (try native.json.parse(a, original.bytes, .{ .bytes = 256 * 1024 })).value;
-    try native.json.put(a, root.object.getPtr("adaptive").?, "model_attempts", try native.json.number(a, 1));
-    const bytes = try native.json.canonical(a, root);
-    const configured = try environment.configure(a, io, .{ .offline = true, .scratch_allocator = parent }, .{ .profile_id = original.id, .profile = bytes, .resources = original.resources }, assets);
+    const configured = try environment.configure(a, io, .{ .offline = true, .scratch_allocator = parent }, .{ .profile_id = original.id, .profile = original.bytes, .resources = original.resources }, assets);
     var grants: [environment.handlers.len]native.registry.Grant = undefined;
     const profile: native.tasks.Profile = .{ .id = configured.id, .runtime_identity = @splat(73), .bytes = configured.bytes, .environment = configured.environment, .resources = configured.resources, .authority = .{ .grants = &grants, .principal = "adaptive-unit", .tenant = "local", .inference = true } };
-    for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(application.image_identity) };
-    const path = try std.fmt.allocPrint(a, "{s}/attempt-ceiling", .{directory});
+    for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
+    const path = try std.fmt.allocPrint(a, "{s}/attempt-accounting", .{directory});
     var namespace = try native.Namespace.open(parent, io, path);
     defer namespace.close() catch unreachable;
     var service = try native.tasks.Service(t).init(parent, io, &namespace, assets, application, handlers, profile);
     defer service.close(parent) catch unreachable;
-    const task = (try service.submit(a, "one-attempt", environment.demo_input)).receipt.task;
-    var unsent = false;
+    const task = (try service.submit(a, "continued-attempts", environment.demo_input)).receipt.task;
+    var unsent: u64 = 0;
     for (0..128) |_| {
         var iteration = std.heap.ArenaAllocator.init(parent);
         defer iteration.deinit();
         const frame = iteration.allocator();
         var saved = try service.task(frame, task);
         defer saved.deinit();
-        if (unsent and saved.value.blocker == .capacity) {
-            try std.testing.expectEqual(1, saved.value.inference_attempts);
-            return;
-        }
         const step = try service.pump(frame);
         if (step != .work) continue;
         const work = step.work;
         if (work.entry.declaration.inference) {
-            try std.testing.expect(!unsent);
+            try std.testing.expectEqual(unsent + 1, (try service.task(frame, task)).value.inference_attempts);
+            if (unsent == 17) {
+                try std.testing.expectEqual(18, try namespace.store.capabilityAttempts(task, t.P.adaptive_identity));
+                try service.notSent(frame, work);
+                return;
+            }
             try service.notSent(frame, work);
             var stopped = try service.task(frame, task);
             defer stopped.deinit();
-            _ = try service.resumeTask(frame, "retry-with-one-attempt-ceiling", task, stopped.value.revision);
-            unsent = true;
+            _ = try service.resumeTask(frame, try std.fmt.allocPrint(frame, "retry-{d}", .{unsent}), task, stopped.value.revision);
+            unsent += 1;
         } else {
             var request = try protocol.decode(protocol.Request, frame, work.request);
             defer request.deinit();
-            const ctx: native.Context = .{ .allocator = frame, .io = io, .authority = &profile.authority, .task_id = "one-attempt", .profile = profile.bytes, .environment = profile.environment };
+            const ctx: native.Context = .{ .allocator = frame, .io = io, .authority = &profile.authority, .task_id = "continued-attempts", .profile = profile.bytes, .environment = profile.environment };
             const reply = if (work.entry.declaration.capture) |adapter| (try adapter.acquire(ctx, work.prepared.?)).captured else try work.entry.declaration.invoke.?(ctx, request.value.binding.payload);
             try service.acquire(frame, work, reply);
         }
     }
-    return error.MissingAttemptCeiling;
+    return error.MissingContinuedAttempts;
 }

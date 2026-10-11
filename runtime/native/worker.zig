@@ -7,8 +7,7 @@ const registry = @import("registry.zig");
 
 pub const Worker = struct {
     io: std.Io,
-    memory: []u8,
-    fixed: std.heap.FixedBufferAllocator,
+    allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator = undefined,
     work: tasks.Work = undefined,
     authority: registry.Authority = undefined,
@@ -25,19 +24,16 @@ pub const Worker = struct {
     pub fn init(a: std.mem.Allocator, io: std.Io) !*Worker {
         const self = try a.create(Worker);
         errdefer a.destroy(self);
-        const memory = try a.alloc(u8, 16 * 1024 * 1024);
-        self.* = .{ .io = io, .memory = memory, .fixed = .init(memory) };
+        self.* = .{ .io = io, .allocator = a };
         return self;
     }
     pub fn deinit(self: *Worker, a: std.mem.Allocator) !void {
         if (self.future != null) return error.Busy;
-        a.free(self.memory);
         a.destroy(self);
     }
     pub fn start(self: *Worker, work: tasks.Work, authority: registry.Authority, environment: ?*anyopaque) !void {
         if (self.future != null) return error.Busy;
-        self.fixed.reset();
-        self.arena = .init(self.fixed.allocator());
+        self.arena = .init(self.allocator);
         self.work = work;
         self.authority = authority;
         self.environment = environment;
@@ -58,7 +54,7 @@ pub const Worker = struct {
         var request = try data.invocation.decode(data.invocation.Request, a, self.work.request);
         defer request.deinit();
         const id = std.fmt.bytesToHex(self.work.task, .lower);
-        const ctx: registry.Context = .{ .allocator = a, .io = self.io, .authority = &self.authority, .task_id = &id, .profile = self.work.profile, .environment = self.environment, .cancellation = &self.cancellation, .exhausted_capabilities = self.work.exhausted_capabilities };
+        const ctx: registry.Context = .{ .allocator = a, .io = self.io, .authority = &self.authority, .task_id = &id, .profile = self.work.profile, .environment = self.environment, .cancellation = &self.cancellation };
         try ctx.checkCancellation();
         self.invoked = true;
         if (self.work.entry.declaration.capture) |adapter| {

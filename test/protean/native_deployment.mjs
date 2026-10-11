@@ -3,11 +3,28 @@
 import assert from 'node:assert/strict';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
+import {copyFileSync, createReadStream, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
+import {createInterface} from 'node:readline';
 
 const shell = value => `'${value.replaceAll("'", "'\\''")}'`;
+
+async function* traceExecutions(path) {
+  const input = createReadStream(path);
+  const lines = createInterface({input});
+  try {
+    for await (const line of lines) {
+      if (!/\bexecve(?:at)?\(/.test(line)) continue;
+      assert(!line.includes('execveat('), line);
+      const match = line.match(/execve\("((?:\\.|[^"\\])*)"/);
+      assert(match, line);
+      const octets = match[1].match(/\\x[0-9a-fA-F]{2}/g) ?? [];
+      assert.equal(octets.join(''), match[1], line);
+      yield {path: Buffer.from(octets.map(octet => parseInt(octet.slice(2), 16))).toString('utf8'), pid: Number(line.match(/^\s*(\d+)\s+/)?.[1])};
+    }
+  } finally { lines.close(); input.destroy(); }
+}
 
 export function deployment(source, name) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'Protean deployment ü ')));
@@ -23,7 +40,7 @@ export function deployment(source, name) {
     assert.match(format, /ELF 64-bit.*x86-64/);
     const linkage = execFileSync('readelf', ['-lWd', executable], {encoding: 'utf8'});
     assert(!/INTERP|\(NEEDED\)|\(RPATH\)|\(RUNPATH\)/.test(linkage), 'Linux product must have no dynamic loader or shared-library dependency');
-    const args = ['/usr/bin/strace', '-f', '-qq', '-xx', '-s', '4096', '-e', 'trace=process,file', '-o'];
+    const args = ['/usr/bin/strace', '-f', '-qq', '-xx', '-s', '4096', '-e', 'trace=process', '-o'];
     const isolate = ['/usr/bin/bwrap', '--unshare-user', '--die-with-parent', '--unshare-pid', '--new-session', '--uid', '0', '--gid', '0',
       '--proc', '/proc', '--dev', '/dev', '--ro-bind', executable, executable, '--bind', data, data, '--chdir'];
     // The controller owns tracing and namespace setup. Neither tool is mounted
@@ -46,36 +63,28 @@ export function deployment(source, name) {
     writeFileSync(profile, `(version 1)\n(allow default)\n(deny process-exec)\n(allow process-exec (literal ${JSON.stringify(executable)}))\n(deny file-read-data)\n(allow file-read-data (literal ${JSON.stringify(executable)}) (subpath ${JSON.stringify(data)}) ${ancestors.join(' ')} (subpath "/System") (subpath "/usr/lib") (subpath "/dev"))\n(deny file-write*)\n(allow file-write* (subpath ${JSON.stringify(data)}) (subpath "/dev"))\n`, {mode: 0o600});
     writeFileSync(command, `#!/bin/sh\nexec /usr/bin/sandbox-exec -f ${shell(profile)} ${shell(executable)} "$@"\n`, {mode: 0o700});
   } else throw new Error('unqualified native deployment platform');
-  return {data, controller, executable, command, signal(child, signal) {
+  return {data, controller, executable, command, async signal(child, signal) {
     if (process.platform !== 'linux') return child.kill(signal);
     // The launched PID is strace, not the application inside bwrap's new
     // session. Its private trace identifies the application's host PID.
-    const trace = readFileSync(join(controller, `trace.${child.pid}`), 'utf8');
-    const encoded = [...Buffer.from(executable)].map(byte => `\\x${byte.toString(16).padStart(2, '0')}`).join('');
-    const executions = trace.split('\n').filter(line => line.includes(`execve("${encoded}",`));
-    const pids = [...new Set(executions.map(line => Number(line.match(/^\s*(\d+)\s+/)?.[1])))];
+    const observed = new Set();
+    for await (const execution of traceExecutions(join(controller, `trace.${child.pid}`))) {
+      if (execution.path === executable) observed.add(execution.pid);
+    }
+    const pids = [...observed];
     assert.equal(pids.length, 1, 'one application process in this launch trace');
     assert(Number.isSafeInteger(pids[0]) && pids[0] > 1, 'trace must identify the application PID');
     process.kill(pids[0], signal);
-  }, close(passed) {
+  }, async close(passed) {
     try {
       let executions = 0;
       if (process.platform === 'linux' && passed) {
         const traces = readdirSync(controller).filter(name => name.startsWith('trace.'));
         assert(traces.length > 0, 'deployment must have an executed trace');
         for (const name of traces) {
-          const trace = readFileSync(join(controller, name), 'utf8');
-          assert(trace.length < 8 * 1024 * 1024, 'bounded deployment trace');
-          for (const line of trace.split('\n')) {
-            if (!/\bexecve(?:at)?\(/.test(line)) continue;
-            assert(!line.includes('execveat('), line);
-            const match = line.match(/execve\("((?:\\.|[^"\\])*)"/);
-            assert(match, line);
-            const octets = match[1].match(/\\x[0-9a-fA-F]{2}/g) ?? [];
-            assert.equal(octets.join(''), match[1], line);
-            const path = Buffer.from(octets.map(octet => parseInt(octet.slice(2), 16))).toString('utf8');
-            assert(path === '/usr/bin/bwrap' || path === executable, `unexpected deployment executable: ${path}`);
-            if (path === executable) executions++;
+          for await (const execution of traceExecutions(join(controller, name))) {
+            assert(execution.path === '/usr/bin/bwrap' || execution.path === executable, `unexpected deployment executable: ${execution.path}`);
+            if (execution.path === executable) executions++;
           }
         }
         assert(executions > 0);

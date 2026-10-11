@@ -1,4 +1,4 @@
-//! Bounded environmental archives. Canonical Kronos objects and ordinary Protean
+//! Environmental archives. Canonical Kronos objects and ordinary Protean
 //! records travel as data; namespace locks, grants and subscriptions do not.
 const std = @import("std");
 const contracts = @import("protean_contracts");
@@ -10,10 +10,6 @@ const json = @import("json.zig");
 const namespace = @import("namespace.zig");
 const c = @import("native_c");
 
-pub const maximum_bytes = storage.state_bytes;
-const maximum_object = storage.maximum_object_bytes;
-const maximum_manifest = 1024 * 1024;
-const maximum_schema = 64 * 1024;
 const magic = "AGNX0001";
 const temporary_prefix = ".protean-archive-";
 const temporary_length = temporary_prefix.len + 32;
@@ -58,7 +54,7 @@ fn privateFile(fd: c_int) !u64 {
     return @intCast(stat.st_size);
 }
 fn parent(a: std.mem.Allocator, path: []const u8) !struct { fd: c_int, name: [:0]u8 } {
-    if (path.len == 0 or path.len > 4096 or path[path.len - 1] == '/' or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidParams;
+    if (path.len == 0 or path[path.len - 1] == '/' or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidParams;
     const name = std.fs.path.basename(path);
     if (same(name, ".") or same(name, "..")) return error.InvalidParams;
     const directory = try namespace.openDirectory(a, std.fs.path.dirname(path) orelse ".", false, false);
@@ -102,7 +98,7 @@ const Output = struct {
         self.allocator.free(self.name);
     }
     pub fn write(self: *Output, bytes: []const u8) !void {
-        if (self.bytes + bytes.len > maximum_bytes) return error.Capacity;
+        const next = try std.math.add(u64, self.bytes, bytes.len);
         var offset: usize = 0;
         while (offset < bytes.len) {
             const count = c.write(self.fd, bytes[offset..].ptr, bytes.len - offset);
@@ -111,7 +107,7 @@ const Output = struct {
             offset += @intCast(count);
         }
         self.hash.update(bytes);
-        self.bytes += bytes.len;
+        self.bytes = next;
     }
     fn finish(self: *Output) !Exported {
         if (c.fsync(self.fd) != 0) return error.StorageUnavailable;
@@ -145,7 +141,7 @@ pub const Reader = struct {
         if (fd < 0) return error.NotFound;
         errdefer _ = c.close(fd);
         const length = try privateFile(fd);
-        if (length < 32 or length > maximum_bytes) return error.InvalidArchive;
+        if (length < 32) return error.InvalidArchive;
         var header: [32]u8 = undefined;
         try readAt(fd, 0, &header);
         if (!same(header[0..8], magic) or std.mem.readInt(u32, header[20..24], .little) != 0) return error.InvalidArchive;
@@ -153,8 +149,9 @@ pub const Reader = struct {
         const manifest_len = std.mem.readInt(u32, header[12..16], .little);
         const count = std.mem.readInt(u32, header[16..20], .little);
         const body_len = std.mem.readInt(u64, header[24..32], .little);
-        if (schema_len > maximum_schema or manifest_len > maximum_manifest or body_len > maximum_bytes or @as(u64, 32) + schema_len + manifest_len + body_len != length) return error.InvalidArchive;
-        const prefix = try a.alloc(u8, 32 + schema_len + manifest_len);
+        const prefix_len = @as(u64, 32) + schema_len + manifest_len;
+        if (prefix_len > length or body_len != length - prefix_len) return error.InvalidArchive;
+        const prefix = try a.alloc(u8, std.math.cast(usize, prefix_len) orelse return error.Capacity);
         errdefer a.free(prefix);
         try readAt(fd, 0, prefix);
         if (!same(prefix[0..32], &header)) return error.InvalidArchive;
@@ -164,10 +161,10 @@ pub const Reader = struct {
         var manifest = contracts.decodeOwned(state.Archive, a, prefix[32 + schema_len ..]) catch |err| return if (err == error.OutOfMemory) err else error.InvalidArchive;
         errdefer manifest.deinit();
         const value = manifest.value;
-        if (value.version != 1 or count != value.objects.items.len) return error.NonPortable;
+        if (value.version != 2 or count != value.objects.items.len) return error.NonPortable;
         var total: u64 = 0;
         for (value.objects.items, 0..) |ref, i| {
-            if (ref.bytes > maximum_object or (i != 0 and std.mem.order(u8, &value.objects.items[i - 1].digest, &ref.digest) != .lt)) return error.InvalidArchive;
+            if ((i != 0 and std.mem.order(u8, &value.objects.items[i - 1].digest, &ref.digest) != .lt)) return error.InvalidArchive;
             total = try std.math.add(u64, total, ref.bytes);
         }
         if (total != body_len) return error.InvalidArchive;
@@ -192,8 +189,8 @@ pub const Reader = struct {
     }
     /// Preview only declared, digest-checked immutable data. Import still
     /// reacquires and authenticates the complete archive before publication.
-    pub fn object(self: *Reader, a: std.mem.Allocator, wanted: state.Reference, limit: usize) ![]u8 {
-        if (wanted.bytes > limit) return error.Capacity;
+    pub fn object(self: *Reader, a: std.mem.Allocator, wanted: state.Reference, limit: ?usize) ![]u8 {
+        if (limit != null and wanted.bytes > limit.?) return error.Capacity;
         var offset: u64 = self.prefix.len;
         for (self.manifest.value.objects.items) |reference| {
             if (same(&reference.digest, &wanted.digest)) {
@@ -246,12 +243,10 @@ const Collector = struct {
     bytes: u64 = 0,
 
     fn add(self: *Collector, ref: state.Reference) !void {
-        if (ref.bytes > maximum_object) return error.Capacity;
         if (self.objects.get(ref.digest)) |prior| {
             if (prior.bytes != ref.bytes) return error.CorruptState;
             return;
         }
-        if (self.objects.count() == 4096 or self.bytes + ref.bytes > maximum_bytes) return error.Capacity;
         var supplied = false;
         for (self.supplied) |blob| if (same(&blob.reference.digest, &ref.digest)) {
             if (blob.bytes.len != ref.bytes) return error.CorruptState;
@@ -259,11 +254,11 @@ const Collector = struct {
             break;
         };
         if (!supplied) {
-            const actual = try self.store.objectReference(ref.digest, maximum_object);
+            const actual = try self.store.objectReference(ref.digest, null);
             if (actual.bytes != ref.bytes) return error.CorruptState;
         }
         try self.objects.put(self.allocator, ref.digest, ref);
-        self.bytes += ref.bytes;
+        self.bytes = try std.math.add(u64, self.bytes, ref.bytes);
     }
     fn visit(self: *Collector, comptime T: type, value: T) !void {
         if (T == state.Reference) return self.add(value);
@@ -283,7 +278,7 @@ const Collector = struct {
         }
     }
     fn reply(self: *Collector, value: occurrence.Acquired) !void {
-        try self.add(try self.store.objectReference(value.reply, 4 * 1024 * 1024));
+        try self.add(try self.store.objectReference(value.reply, null));
     }
 };
 
@@ -343,18 +338,18 @@ fn validateEventFacts(store: *storage.Store, archive: state.Archive, task: state
             var id: state.Digest = undefined;
             _ = std.fmt.hexToBytes(&id, data.object.get("question_id").?.string) catch return error.InvalidArchive;
             const reference = record(archive, .question, id) orelse return error.InvalidArchive;
-            const bytes = try store.object(a, reference, 256 * 1024);
+            const bytes = try store.object(a, reference, null);
             const question = (try contracts.decodeOwned(state.Question, a, bytes)).value;
             if (question.receipt) |answer| if (event.revision >= answer.revision) return error.InvalidArchive;
             record_id = id;
-            const prompt = try store.object(a, question.prompt, 32 * 1024);
+            const prompt = try store.object(a, question.prompt, null);
             break :blk try state.questionData(a, question, prompt);
         },
         .input_accepted => {
             const fact = admission.?;
             const id = fact.question orelse return error.InvalidArchive;
             const reference = record(archive, .question, id) orelse return error.InvalidArchive;
-            const bytes = try store.object(a, reference, 256 * 1024);
+            const bytes = try store.object(a, reference, null);
             const question = (try contracts.decodeOwned(state.Question, a, bytes)).value;
             const receipt = question.receipt orelse return error.InvalidArchive;
             if (question.answer == null or !same(&storage.digest(try contracts.encodeOwned(state.Receipt, a, receipt)), &fact.receipt)) return error.InvalidArchive;
@@ -365,7 +360,7 @@ fn validateEventFacts(store: *storage.Store, archive: state.Archive, task: state
             _ = std.fmt.hexToBytes(&id, data.object.get("message_id").?.string) catch return error.InvalidArchive;
             if (event.kind == .message_queued and (admission.?.message == null or !same(&id, &admission.?.message.?))) return error.InvalidArchive;
             const reference = record(archive, .message, id) orelse return error.InvalidArchive;
-            const bytes = try store.object(a, reference, 256 * 1024);
+            const bytes = try store.object(a, reference, null);
             const message = (try contracts.decodeOwned(state.Message, a, bytes)).value;
             record_id = id;
             const disposition: state.MessageDisposition = switch (event.kind) {
@@ -381,7 +376,7 @@ fn validateEventFacts(store: *storage.Store, archive: state.Archive, task: state
             var id: state.Digest = undefined;
             _ = std.fmt.hexToBytes(&id, data.object.get("archive_sha256").?.string) catch return error.InvalidArchive;
             const reference = record(archive, .origin, id) orelse return error.InvalidArchive;
-            const bytes = try store.object(a, reference, 256 * 1024);
+            const bytes = try store.object(a, reference, null);
             const origin = (try contracts.decodeOwned(state.Origin, a, bytes)).value;
             if (origin.source_revision != event.revision - 1) return error.InvalidArchive;
             return null;
@@ -411,35 +406,24 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
     try collector.add(archive.task);
     try collector.add(archive.build);
     if (archive.schemas.items.len != expected.schemas.len) return error.NonPortable;
-    var legacy_task = false;
     for (archive.schemas.items, expected.schemas) |declared, wanted| {
-        if (!same(declared.name.bytes, wanted.name.bytes)) return error.NonPortable;
-        if (declared.definition.bytes != wanted.definition.bytes or !same(&declared.definition.digest, &wanted.definition.digest)) {
-            if (!same(declared.name.bytes, "task")) return error.NonPortable;
-            const legacy = try values.schemaBytes(state.LegacyTask, a);
-            defer a.free(legacy);
-            if (declared.definition.bytes != legacy.len or !same(&declared.definition.digest, &storage.digest(legacy))) return error.NonPortable;
-            legacy_task = true;
-        }
+        if (!same(declared.name.bytes, wanted.name.bytes) or declared.definition.bytes != wanted.definition.bytes or !same(&declared.definition.digest, &wanted.definition.digest)) return error.NonPortable;
         try collector.add(declared.definition);
     }
-    const task_bytes = try store.object(store.allocator, archive.task, 256 * 1024);
+    const task_bytes = try store.object(store.allocator, archive.task, null);
     defer store.allocator.free(task_bytes);
     var task = try contracts.decodeOwned(state.Task, store.allocator, task_bytes);
     errdefer task.deinit();
     const value = task.value;
-    // The wire layout is unchanged, but the old descriptor must still enforce
-    // its own bound. Never accept a larger record under an old schema claim.
-    if (legacy_task and value.resources.items.len > 16) return error.NonPortable;
     try collector.visit(state.Task, value);
     if (value.revision == 0 or value.revision > std.math.maxInt(i64) or value.execution_revision >= value.revision or value.event_floor == 0 or value.event_high < value.event_floor or value.event_high > std.math.maxInt(i64)) return error.CorruptState;
     var current: ?occurrence.Occurrence = null;
-    var inference_attempts: u32 = 0;
+    var inference_attempts: u64 = 0;
     var inference_bytes: u64 = 0;
     for (archive.records.items, 0..) |row, index| {
         for (archive.records.items[0..index]) |prior| if (prior.kind == row.kind and same(&prior.id, &row.id)) return error.InvalidArchive;
         try collector.add(row.body);
-        const bytes = try store.object(store.allocator, row.body, 256 * 1024);
+        const bytes = try store.object(store.allocator, row.body, null);
         defer store.allocator.free(bytes);
         inline for (@typeInfo(state.RecordKind).@"enum".field_names) |kind| {
             if (row.kind == @field(state.RecordKind, kind)) {
@@ -467,7 +451,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
                     };
                 } else if (comptime same(kind, "attempt")) {
                     if (item.inference) {
-                        inference_attempts = try std.math.add(u32, inference_attempts, 1);
+                        inference_attempts = try std.math.add(u64, inference_attempts, 1);
                         inference_bytes = try std.math.add(u64, inference_bytes, if (item.prepared) |body| body.bytes else item.request.bytes);
                     }
                 } else if (comptime same(kind, "capture")) {
@@ -502,7 +486,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
     for (archive.operations.items, 0..) |row, i| {
         for (archive.operations.items[0..i]) |prior| if (same(row.key.bytes, prior.key.bytes)) return error.InvalidArchive;
         try collector.add(row.body);
-        const bytes = try store.object(store.allocator, row.body, 256 * 1024);
+        const bytes = try store.object(store.allocator, row.body, null);
         defer store.allocator.free(bytes);
         var decoded = try contracts.decodeOwned(state.Receipt, store.allocator, bytes);
         defer decoded.deinit();
@@ -542,7 +526,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
     for (archive.events.items) |row| {
         if (row.seq != next or row.revision == 0 or row.revision < revision or row.revision > value.revision) return error.CorruptState;
         try collector.add(row.body);
-        const bytes = try store.object(store.allocator, row.body, 256 * 1024);
+        const bytes = try store.object(store.allocator, row.body, null);
         defer store.allocator.free(bytes);
         var decoded = try contracts.decodeOwned(state.Event, store.allocator, bytes);
         defer decoded.deinit();
@@ -607,7 +591,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
             if (!questions.contains(row.id)) omitted += 1;
         } else if (row.kind == .message) {
             const admitted = message_admissions.get(row.id) orelse return error.InvalidArchive;
-            const bytes = try store.object(store.allocator, row.body, 256 * 1024);
+            const bytes = try store.object(store.allocator, row.body, null);
             defer store.allocator.free(bytes);
             var decoded = try contracts.decodeOwned(state.Message, store.allocator, bytes);
             defer decoded.deinit();
@@ -630,9 +614,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
     // Each fact above has one distinct publication. Even unknown prefix
     // timing cannot hide more publications than the number of pruned events.
     if (omitted > value.event_floor - 1) return error.InvalidArchive;
-    const reserved: ?state.Digest = if (current) |pending| if (pending.state == .settled_reply and record(archive, .attempt, pending.state.settled_reply.attempt) != null) pending.state.settled_reply.attempt else null else null;
-    if (archive.reservations.items.len != @intFromBool(reserved != null)) return error.CorruptState;
-    if (reserved) |attempt| if (!same(&archive.reservations.items[0].attempt, &attempt) or archive.reservations.items[0].bytes != storage.acquired_reserve) return error.CorruptState;
+
     const objects = try a.dupe(state.Reference, collector.objects.values());
     std.mem.sort(state.Reference, objects, {}, struct {
         fn less(_: void, left: state.Reference, right: state.Reference) bool {
@@ -658,15 +640,13 @@ pub fn write(a: std.mem.Allocator, io: std.Io, store: *storage.Store, task: stat
     manifest.objects.items = inspected.objects;
     const schema = try values.schemaBytes(state.Archive, temporary);
     const encoded = try contracts.encodeOwned(state.Archive, temporary, manifest);
-    if (schema.len > maximum_schema or encoded.len > maximum_manifest) return error.Capacity;
     var total: u64 = 0;
     for (manifest.objects.items) |ref| total = try std.math.add(u64, total, ref.bytes);
-    if (32 + schema.len + encoded.len + total > maximum_bytes) return error.Capacity;
     var header: [32]u8 = @splat(0);
     @memcpy(header[0..8], magic);
-    std.mem.writeInt(u32, header[8..12], @intCast(schema.len), .little);
-    std.mem.writeInt(u32, header[12..16], @intCast(encoded.len), .little);
-    std.mem.writeInt(u32, header[16..20], @intCast(manifest.objects.items.len), .little);
+    std.mem.writeInt(u32, header[8..12], std.math.cast(u32, schema.len) orelse return error.Capacity, .little);
+    std.mem.writeInt(u32, header[12..16], std.math.cast(u32, encoded.len) orelse return error.Capacity, .little);
+    std.mem.writeInt(u32, header[16..20], std.math.cast(u32, manifest.objects.items.len) orelse return error.Capacity, .little);
     std.mem.writeInt(u64, header[24..32], total, .little);
     var output = try Output.open(a, io, path, state_directory);
     defer output.deinit();
@@ -682,7 +662,7 @@ pub fn write(a: std.mem.Allocator, io: std.Io, store: *storage.Store, task: stat
         if (supplied) |content| {
             // A supplied immutable schema/build asset is not a license to mask
             // corruption of a previously imported copy in the same store.
-            const prior = store.object(a, ref, maximum_object) catch |err| switch (err) {
+            const prior = store.object(a, ref, null) catch |err| switch (err) {
                 error.MissingArtifact => null,
                 else => return err,
             };

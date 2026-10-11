@@ -70,14 +70,14 @@ pub fn skillBody(a: std.mem.Allocator, bytes: []const u8) ![]const u8 {
         try native.json.put(a, &entry, "failure", native.json.string(try shapeName(a, component.object.program, component.object.program.roots.failure)));
         try view.array.append(entry);
     }
-    const rendered = try native.json.canonicalBounded(a, view, 16 * 1024);
+    const rendered = try native.json.canonical(a, view);
     const body = try std.fmt.allocPrint(a, "{s}\n\n## Construction recipe contract\n" ++
-        "Encode an object matching this schema as proposal_json (at most {d} UTF-8 bytes). " ++
+        "Encode an object matching this schema as proposal_json. " ++
         "Use unique instance keys; endpoint instance fields refer to those keys. " ++
         "Bind required imports to supplied exports using the catalog's actual symbols. " ++
         "Use at least one instance and an acyclic inter-instance graph. Unknown fields reject.\n" ++
         "Recipe JSON schema:\n{s}\n\n## Frozen reference domain\n" ++
-        "Table contains rows, relation (each at most 32 Row values), and selected (at most 32 keys). " ++
+        "Table contains rows, relation (sequences of Row values), and selected (a sequence of keys). " ++
         "Row has u64 fields id, key, value, group, matches, match_id, mismatches, status. " ++
         "compose applies first then second; map applies row to each row; filter retains rows satisfying keep; " ++
         "selected tests membership of row.key in selected; join matches row.key against relation and counts matches and unequal values; " ++
@@ -86,16 +86,14 @@ pub fn skillBody(a: std.mem.Allocator, bytes: []const u8) ![]const u8 {
         "All preserve Table's other fields except swap. These semantics do not select your composition.\n\n" ++
         "Actual frozen component signatures (complete):\n{s}\n", .{
         @embedFile("skills/tool-construction/SKILL.md"),
-        contracts.json.maximumTextBytes(@FieldType(@FieldType(t.Action, "tool_build"), "proposal_json")),
         &contracts.json.ClientSchema(wire.Recipe).value,
         rendered,
     });
-    if (body.len > 32 * 1024) return error.Capacity;
     return body;
 }
 
 pub fn policy(ctx: native.registry.ProjectionContext) !t.ToolPolicy {
-    const root = (try native.json.parse(ctx.allocator, ctx.profile, .{ .bytes = 256 * 1024 })).value;
+    const root = (try native.json.parse(ctx.allocator, ctx.profile, .{ .bytes = ctx.profile.len, .tokens = ctx.profile.len, .members = ctx.profile.len })).value;
     return native.values.fromJson(t.ToolPolicy, ctx.allocator, native.json.get(root, "tool_construction") orelse return error.ToolConstructionNotAdmitted);
 }
 pub fn sameReference(left: t.model.ArtifactReference, right: t.model.ArtifactReference) bool {

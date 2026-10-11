@@ -1,7 +1,7 @@
-//! agent-host/1.0 admission. This layer cannot drive Kronos or dispatch a tool.
+//! agent-host/2.0 admission. This layer cannot drive Kronos or dispatch a tool.
 const std = @import("std");
 const json = @import("json.zig");
-pub const version = "agent-host/1.0";
+pub const version = "agent-host/2.0";
 
 pub const Limits = struct {
     frame_bytes: usize = 1024 * 1024,
@@ -16,12 +16,10 @@ pub const Limits = struct {
     artifact_chunk_bytes: usize = 32 * 1024,
     event_page: usize = 128,
     subscriptions: usize = 16,
-    nonterminal_tasks: usize = 16,
-    queued_messages: usize = 16,
-    queued_message_bytes: usize = 256 * 1024,
+    owned_tasks: usize = 16,
+    pending_message_page: usize = 16,
     incomplete_frame_ms: u32 = 30_000,
     output_stall_ms: u32 = 5000,
-    state_database_bytes: u64 = @import("native_options").state_bytes,
 };
 
 /// Caller supplies a bounded buffer of frame_bytes - 1. Returned frames borrow

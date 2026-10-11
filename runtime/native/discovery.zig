@@ -102,15 +102,15 @@ pub const Application = struct {
         var arena = std.heap.ArenaAllocator.init(a);
         errdefer arena.deinit();
         const storage = arena.allocator();
-        const metadata = try json.parseAsset(storage, assets.application, 16 * 1024 * 1024);
-        const manifest = try json.parse(storage, assets.manifest, .{ .bytes = 256 * 1024 });
+        const metadata = try json.parseAsset(storage, assets.application, assets.application.len);
+        const manifest = try json.parseAsset(storage, assets.manifest, assets.manifest.len);
         try sameField(metadata.value, "format", "agent-native-application/v1");
         try sameField(metadata.value, "application_id", Types.application_id);
         try sameField(metadata.value, "application_version", Types.application_version);
         const client_mapping = values.schemas.clientMapping(.{ Types.Input, Types.Output, Types.Failure, Types.Answer, Types.Message });
         try sameField(metadata.value, "client_mapping", client_mapping);
         sameField(metadata.value, "program_sha256", try digest(storage, assets.image)) catch return error.ApplicationProgramDigestMismatch;
-        try sameField(manifest.value, "format", "agent-native-build/v1");
+        try sameField(manifest.value, "format", "agent-native-build/v2");
         try sameField(manifest.value, "client_mapping", client_mapping);
         try sameField(manifest.value, "state_format", std.fmt.comptimePrint("agent-native-state/{d}", .{@import("store.zig").format}));
         sameField(manifest.value, "program_sha256", try digest(storage, assets.image)) catch return error.ManifestProgramDigestMismatch;
@@ -124,7 +124,7 @@ pub const Application = struct {
             try sameField(schema, "schema_id", item[2]);
             const bytes = try values.schemaBytes(item[1], storage);
             try sameField(schema, "wire_sha256", try digest(storage, bytes));
-            const client = try json.parseAsset(storage, &values.schemas.ClientSchema(item[1]).value, 16 * 1024 * 1024);
+            const client = try json.parseAsset(storage, &values.schemas.ClientSchema(item[1]).value, values.schemas.ClientSchema(item[1]).value.len);
             if (!std.mem.eql(u8, try json.canonical(storage, client.value), try json.canonical(storage, json.get(schema, "json") orelse return error.InvalidAssets)))
                 return error.ClientJsonSchemaMismatch;
         }
@@ -397,6 +397,76 @@ test "nested authored schemas remain available beyond the peer frame depth" {
         const decoded = try a.alloc(u8, try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(text));
         try std.base64.url_safe_no_pad.Decoder.decode(decoded, text);
         try std.testing.expectEqualSlices(u8, encoded[0..decoded.len], decoded);
+    }
+}
+
+test "discovery preserves admitted capability counts in inline and referenced metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Handler = struct {
+        fn run(_: registry.Context, value: u32) !u32 {
+            return value;
+        }
+    };
+    for ([_]usize{ 65, 513 }) |count| {
+        const declarations = try a.alloc(registry.Declaration, count);
+        for (declarations, 0..) |*declaration, i| {
+            declaration.* = registry.leaf(u32, u32, .{ .identity = "capability", .resource_role = "local" }, Handler.run);
+            declaration.identity = try std.fmt.allocPrint(a, "capability-{d}", .{i});
+        }
+        var handlers = try registry.Registry.init(a, declarations);
+        defer handlers.deinit();
+        var capabilities: std.array_list.Managed(json.Value) = .init(a);
+        for (handlers.entries) |entry| {
+            var capability = json.object();
+            try json.put(a, &capability, "identity", json.string(entry.declaration.identity));
+            try json.put(a, &capability, "resource_role", json.string(entry.declaration.resource_role));
+            try json.put(a, &capability, "payload_sha256", json.string(try digest(a, entry.payload_schema)));
+            try json.put(a, &capability, "resume_sha256", json.string(try digest(a, entry.resume_schema)));
+            try capabilities.append(capability);
+        }
+        for (handlers.entries) |entry| try validateCapability(a, capabilities.items, entry);
+        var metadata = json.object();
+        try json.put(a, &metadata, "application_id", json.string("many-capabilities"));
+        try json.put(a, &metadata, "application_version", json.string("1"));
+        try json.put(a, &metadata, "client_mapping", json.string("agent-client-values/1.0"));
+        const wire = try values.schemaBytes(u32, a);
+        const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(wire.len));
+        var schema = json.object();
+        try json.put(a, &schema, "schema_id", json.string("number.v1"));
+        try json.put(a, &schema, "wire_sha256", json.string(try digest(a, wire)));
+        try json.put(a, &schema, "wire_base64url", json.string(std.base64.url_safe_no_pad.Encoder.encode(encoded, wire)));
+        try json.put(a, &schema, "json", (try json.parseAsset(a, &values.schemas.ClientSchema(u32).value, values.schemas.ClientSchema(u32).value.len)).value);
+        for ([_][]const u8{ "input", "output", "failure", "answer", "message" }) |key| try json.put(a, &metadata, key, schema);
+        try json.put(a, &metadata, "capabilities", .{ .array = capabilities });
+        const protocol_schema = try @import("schemas.zig").document(a, metadata, .{});
+        const artifacts = [2]?Artifact{ try Artifact.freeze(a, metadata, "application"), try Artifact.freeze(a, protocol_schema, "protocol") };
+        const app: Application = .{ .arena = .init(a), .metadata = metadata, .manifest = .null, .manifest_id = "test", .image_identity = @splat(0), .public_metadata = metadata, .protocol_schema = protocol_schema, .schema_artifacts = artifacts };
+        const description = try app.describe(a, json.object(), null);
+        try std.testing.expect(try fitsDescription(a, description));
+        const projected = description.object.get("application").?;
+        if (count == 65) {
+            try std.testing.expectEqual(count, projected.object.get("capabilities").?.array.items.len);
+        } else {
+            const reference_value = projected.object.get("metadata_ref").?;
+            const request = try artifactRequest(blk: {
+                var params = json.object();
+                try json.put(a, &params, "artifact_id", reference_value.object.get("artifact_id").?);
+                try json.put(a, &params, "offset", json.string("0"));
+                try json.put(a, &params, "length", json.string("32768"));
+                break :blk params;
+            });
+            const artifact = try app.schemaArtifact(request.id);
+            const retained = (try json.parseAsset(a, artifact.bytes, artifact.bytes.len)).value;
+            try std.testing.expectEqual(count, retained.object.get("capabilities").?.array.items.len);
+        }
+        const description_schema = protocol_schema.object.get("$defs").?.object.get("describe.result").?;
+        const inline_schema = description_schema.object.get("properties").?.object.get("application").?.object.get("oneOf").?.array.items[0];
+        const capability_schema = inline_schema.object.get("properties").?.object.get("capabilities").?;
+        try std.testing.expect(capability_schema.object.get("maxItems") == null);
+        try std.testing.expectEqualStrings("array", capability_schema.object.get("type").?.string);
+        try std.testing.expect(capability_schema.object.get("items") != null);
     }
 }
 

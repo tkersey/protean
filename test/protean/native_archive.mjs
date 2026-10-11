@@ -11,14 +11,14 @@ const taskFields = ['id', 'application_id', 'input_schema_id', 'output_schema_id
 export function readArchive(bytes) {
   assert.equal(bytes.subarray(0, 8).toString(), 'AGNX0001');
   const schemaLength = bytes.readUInt32LE(8), manifestLength = bytes.readUInt32LE(12);
-  assert(schemaLength <= 65536 && manifestLength <= 1048576);
+  assert(32 + schemaLength + manifestLength <= bytes.length);
   assert.equal(bytes.readUInt32LE(20), 0);
   const schemaBytes = bytes.subarray(32, 32 + schemaLength);
   const schema = decodeSchema(schemaBytes);
   const manifest = decodeValue(schema, bytes.subarray(32 + schemaLength, 32 + schemaLength + manifestLength));
-  assert.equal(manifest.length, 11);
-  assert.deepEqual(manifest.slice(0, 3), [1, 0, 0]);
-  const [,,, taskReference, buildReference, definitions,,,,, references] = manifest;
+  assert.equal(manifest.length, 10);
+  assert.deepEqual(manifest.slice(0, 3), [2, 0, 0]);
+  const [,,, taskReference, buildReference, definitions,,,, references] = manifest;
   assert.equal(references.length, bytes.readUInt32LE(16));
   let offset = 32 + schemaLength + manifestLength;
   assert.equal(BigInt(bytes.length - offset), bytes.readBigUInt64LE(24));
@@ -26,7 +26,7 @@ export function readArchive(bytes) {
   let previous = '';
   for (const reference of references) {
     const digest = key(reference), length = Number(reference[1]);
-    assert(Number.isSafeInteger(length) && length >= 0 && length <= 16 * 1024 * 1024);
+    assert(Number.isSafeInteger(length) && length >= 0 && length <= bytes.length - offset);
     assert(previous < digest);
     const value = bytes.subarray(offset, offset + length);
     assert.equal(value.length, length);
@@ -57,7 +57,7 @@ export function readArchive(bytes) {
 
 function encode(archive) {
   const references = [...archive.objects].sort(([left], [right]) => left.localeCompare(right)).map(([digest, bytes]) => [[...Buffer.from(digest, 'hex')], BigInt(bytes.length)]);
-  archive.manifest[10] = references;
+  archive.manifest[9] = references;
   const manifest = Buffer.from(encodeValue(archive.schema, archive.manifest));
   const body = references.map(reference => archive.objects.get(key(reference)));
   const header = Buffer.alloc(32);
@@ -114,7 +114,7 @@ export function tamperedAdaptiveControl(bytes, capturedResponseSchema) {
     if (row[0] !== 4) continue;
     const attemptRow = archive.manifest[6].find(([kind, id]) => kind === 5 && Buffer.from(id).equals(Buffer.from(row[1])));
     const attempt = decodeValue(archive.schemas.get('attempt'), archive.object(attemptRow[2]));
-    if (attempt[5] !== 'agent.model.invoke.v6') continue;
+    if (attempt[5] !== 'agent.model.invoke.v10') continue;
     const capture = decodeValue(archive.schemas.get('capture'), archive.object(row[2]));
     const raw = decodeValue(capturedResponseSchema, archive.object(capture[4].value));
     const body = JSON.parse(Buffer.from(raw[3]).toString('utf8'));
@@ -193,8 +193,7 @@ export function omittedAttempts(bytes) {
   const archive = readArchive(bytes);
   assert(archive.manifest[6].some(([kind]) => kind === 5));
   archive.manifest[6] = archive.manifest[6].filter(([kind]) => kind !== 4 && kind !== 5);
-  archive.manifest[9] = [];
-  for (const field of ['inference_attempts', 'inference_request_bytes']) archive.taskValue[taskFields.indexOf(field)] = field === 'inference_attempts' ? 0 : 0n;
+  for (const field of ['inference_attempts', 'inference_request_bytes']) archive.taskValue[taskFields.indexOf(field)] = 0n;
   archive.manifest[3] = replace(archive, archive.manifest[3], Buffer.from(encodeValue(archive.schemas.get('task'), archive.taskValue)));
   pruneObjects(archive);
   return encode(archive);

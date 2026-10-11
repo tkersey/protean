@@ -345,12 +345,12 @@ test "dynamic normalization bounds preserve reply-schema compatibility before mo
                     .request = template(&.{}, single),
                     .offered = .{ true, false },
                 };
-                @field(value.request.normalization_limits, field) += 1;
+                if (@typeInfo(@FieldType(@TypeOf(value.request.normalization_limits), field)) == .optional) @field(value.request.normalization_limits, field).? += 1 else @field(value.request.normalization_limits, field) += 1;
                 var rejected = try start(compiled.program, value);
                 defer rejected.deinit();
                 try std.testing.expect(rejected.record == .failed);
                 try std.testing.expectEqualSlices(u8, &.{}, rejected.record.failed.value);
-                @field(value.request.normalization_limits, field) -= 1;
+                if (@typeInfo(@FieldType(@TypeOf(value.request.normalization_limits), field)) == .optional) @field(value.request.normalization_limits, field).? -= 1 else @field(value.request.normalization_limits, field) -= 1;
                 var exact = try start(compiled.program, value);
                 defer exact.deinit();
                 try expectRequest(exact, value);
@@ -375,7 +375,7 @@ test "dynamic normalization bounds preserve reply-schema compatibility before mo
             };
             independent.request.normalization_limits.maximum_argument_name_bytes += 1;
             independent.request.normalization_limits.maximum_argument_fields += 1;
-            independent.request.maximum_provider_response_bytes = P.representation.provider_response_bytes + 1;
+            independent.request.maximum_provider_response_bytes = P.representation.provider_response_bytes.? + 1;
             var admitted = try start(compiled.program, independent);
             defer admitted.deinit();
             try expectRequest(admitted, independent);
@@ -384,7 +384,7 @@ test "dynamic normalization bounds preserve reply-schema compatibility before mo
                 switch (case) {
                     0 => invalid.request.selection.minimum_calls = 2,
                     1 => invalid.request.selection.maximum_calls =
-                        invalid.request.normalization_limits.maximum_output_items + 1,
+                        invalid.request.normalization_limits.maximum_output_items.? + 1,
                     2 => invalid.request.maximum_provider_response_bytes = 0,
                     else => unreachable,
                 }

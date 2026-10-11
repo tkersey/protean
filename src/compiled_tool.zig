@@ -66,7 +66,7 @@ pub fn declare(c: Context, spec: Specification) !Descriptor {
             return error.InvalidCompiledTool;
     }
     for (object.program.effects, 0..) |effect, id| {
-        if (std.mem.eql(u8, effect.identity, "agent.model.invoke.v3")) return error.InvalidCompiledTool;
+        if (@import("model_invocation.zig").isModelIdentity(effect.identity)) return error.InvalidCompiledTool;
         if (!effect.external) continue;
         var imported = false;
         for (object.imports) |symbol| if (symbol.reference.kind == .effect and symbol.reference.id == id) {

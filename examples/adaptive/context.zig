@@ -1,4 +1,4 @@
-//! Pure context construction with captured native allowance observations.
+//! Pure context construction with captured native preparation.
 //! Selection stays authored; native dispatch remains the authority for work.
 const std = @import("std");
 const native = @import("protean_native");
@@ -35,10 +35,9 @@ pub fn instructions(a: std.mem.Allocator, policy: P.AdaptivePolicy, catalog: P.A
     for (profiles, policy.profiles.items) |*out, entry| out.* = .{ .id = entry.id, .model = entry.model, .efforts = entry.efforts };
     const skills = try a.alloc(Skill, catalog.skills.items.len);
     for (skills, catalog.skills.items) |*out, entry| out.* = .{ .id = entry.id, .version = entry.version, .description = entry.description };
-    const Catalog = struct { profiles: contracts.Vector(Profile, 8), skills: contracts.Vector(Skill, 32) };
+    const Catalog = struct { profiles: contracts.Vector(Profile, null), skills: contracts.Vector(Skill, null) };
     const metadata = try native.json.canonical(a, try native.values.toJson(Catalog, a, .{ .profiles = .{ .items = profiles }, .skills = .{ .items = skills } }));
     const text = try std.fmt.allocPrint(a, "{s}\nApproved catalog:\n{s}", .{ @embedFile("instructions.txt"), metadata });
-    if (text.len > P.MessageText.max_length.?) return error.Capacity;
     return .{ .bytes = text };
 }
 
@@ -61,7 +60,7 @@ fn receiptText(a: std.mem.Allocator, receipt: t.ControlReceipt, control: t.contr
     inline for (.{ "previous_revision", "next_revision", "context_epoch", "eviction_generation" }) |name| try native.json.put(a, &value, name, try native.json.number(a, @field(receipt, name)));
     try native.json.put(a, &value, "takes_effect", native.json.string("next inference; no provider request has been executed by this control"));
     try native.json.put(a, &value, "skills", try native.values.toJson(@FieldType(t.controls.State, "skills"), a, control.skills));
-    return .{ .bytes = try native.json.canonicalBounded(a, value, P.ResultText.max_length.?) };
+    return .{ .bytes = try native.json.canonical(a, value) };
 }
 
 fn controlSource(ctx: native.registry.ProjectionContext, state: t.State, subject: t.ControlSubject, policy: P.AdaptivePolicy) !contracts.Decoded(P.AdaptiveContext) {
@@ -71,13 +70,13 @@ fn controlSource(ctx: native.registry.ProjectionContext, state: t.State, subject
     if (!try encodedEqual(ctx.allocator, t.model.AdaptiveSelection, state.control.selection, prior.value.selection) or
         state.control.epoch != prior.value.plan.epoch or state.control.eviction_generation != prior.value.plan.eviction_generation or
         !try encodedEqual(ctx.allocator, @FieldType(t.controls.State, "skills"), state.control.skills, prior.value.plan.skills)) return error.InvalidContext;
-    const prepared_bytes = try ctx.object(.{ .digest = prior.value.source_request.digest, .bytes = prior.value.source_request.bytes }, 2 * 1024 * 1024);
+    const prepared_bytes = try ctx.object(.{ .digest = prior.value.source_request.digest, .bytes = prior.value.source_request.bytes }, std.math.cast(usize, prior.value.source_request.bytes) orelse return error.Capacity);
     var prepared = try contracts.decodeOwned(Adapter.Prepared, ctx.allocator, prepared_bytes);
     defer prepared.deinit();
-    const capture = try ctx.object(.{ .digest = prior.value.source_capture.digest, .bytes = prior.value.source_capture.bytes }, 4 * 1024 * 1024);
+    const capture = try ctx.object(.{ .digest = prior.value.source_capture.digest, .bytes = prior.value.source_capture.bytes }, std.math.cast(usize, prior.value.source_capture.bytes) orelse return error.Capacity);
     var raw = try contracts.decodeOwned(native.responses.Raw, ctx.allocator, capture);
     defer raw.deinit();
-    const response = (try native.json.parse(ctx.allocator, raw.value.body.bytes, .{ .bytes = P.representation.provider_response_bytes })).value;
+    const response = (try native.json.parse(ctx.allocator, raw.value.body.bytes, .{ .bytes = raw.value.body.bytes.len, .tokens = raw.value.body.bytes.len, .members = raw.value.body.bytes.len })).value;
     const output = native.json.get(response, "output") orelse return error.InvalidCapture;
     const normalized = try native.responses.Adapter(P).normalize(ctx.allocator, prepared.value.request.invocation, output);
     if (normalized != .output) return error.InvalidCapture;
@@ -132,7 +131,7 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
                 break :blk try a.dupe(u8, record.value.model_text.bytes);
             },
             .control => |ref| blk: {
-                const bytes = try ctx.object(.{ .digest = ref.digest, .bytes = ref.bytes }, 128 * 1024);
+                const bytes = try ctx.object(.{ .digest = ref.digest, .bytes = ref.bytes }, std.math.cast(usize, ref.bytes) orelse return error.Capacity);
                 var record = try contracts.decodeOwned(t.ReceiptArtifact, a, bytes);
                 defer record.deinit();
                 if (!equal(&record.value.receipt.task, &ctx.task) or !equal(record.value.receipt.call_id.bytes, item.call_id.bytes)) return error.InvalidContext;
@@ -145,7 +144,6 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
     if (input.control) |subject| {
         var prior = try controlSource(ctx, input.state, subject, policy);
         defer prior.deinit();
-        if (input.state.receipts.items.len == 16) return error.Capacity;
         if (subject.proposal.disposition == .proposed) {
             if (subject.proposal.rejection != .none) return error.InvalidContext;
             if (subject.proposal.state.selection.control_revision != try std.math.add(u64, control.selection.control_revision, 1)) return error.InvalidContext;
@@ -191,7 +189,6 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
     for (materialized, P.allDeclarations().items) |defined, item| if (defined) try declarations.append(a, item);
     var messages = input.state.messages;
     if (input.state.replay) |prior| if (prior.eviction_generation != control.eviction_generation and input.state.programs.items.len != 0) {
-        if (messages.items.len == t.P.Messages.max_length) return error.Capacity;
         var retained: native.json.Value = .{ .array = .init(a) };
         for (input.state.programs.items) |ref| try retained.array.append(native.json.string(try tool_resources.referenceText(a, ref)));
         const text_value = try std.fmt.allocPrint(a, "Retained generated tool references after instruction eviction: {s}. These references carry no authority; tool_run still checks the frozen policy and input. Acquired evidence indexes remain stable.", .{try native.json.canonical(a, retained)});
@@ -209,7 +206,7 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
         .plan = .{ .epoch = control.epoch, .reason = control.epoch_reason, .watermark = if (input.state.replay) |ref| ref.watermark else 0, .eviction_generation = control.eviction_generation, .prior = input.state.replay, .catalog = policy.catalog, .skills = control.skills },
         .invocation = .{
             .protocol = .{ .bytes = t.model.protocol_identity },
-            .model = selected.model,
+            .model = .{ .bytes = selected.model.bytes },
             .parameters = .{ .max_output_tokens = selected.max_output_tokens, .temperature = null, .reasoning = .{ .effort = control.top_effort, .summary = null } },
             .messages = messages,
             .tools = .{ .items = declarations.items },
@@ -222,7 +219,7 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
     // Horos retains the computation and task facts. Continue its immutable
     // transcript; only the projection owner changes provider-visible material.
     _ = try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, request));
-    var receipt_object: ?contracts.Bytes(128 * 1024) = null;
+    var receipt_object: ?contracts.Bytes(null) = null;
     var receipt_ref: ?t.ReceiptReference = null;
     var next_results = pending;
     if (receipt) |value| {
@@ -254,8 +251,6 @@ fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition 
     ctx.checkCancellation() catch |err| return .{ .definitely_not_sent = err };
     return .{ .captured = try contracts.encodeOwned(t.PreparationCapture, ctx.allocator, .{
         .prepared = digest(bytes),
-        .build_exhausted = ctx.nextAttemptLimitExhausted(t.tool_build_identity),
-        .run_exhausted = ctx.nextAttemptLimitExhausted(t.tool_run_identity),
     }) };
 }
 fn interpret(ctx: native.registry.ProjectionContext, request: []const u8, prepared: []const u8, captured: []const u8) !native.registry.Projection {
@@ -264,13 +259,6 @@ fn interpret(ctx: native.registry.ProjectionContext, request: []const u8, prepar
     if (!equal(&observation.value.prepared, &digest(prepared)) or !equal(try prepare(ctx, request), prepared)) return error.InvalidCapture;
     var product = try contracts.decodeOwned(Product, ctx.allocator, prepared);
     defer product.deinit();
-    // Replay the original observation, never today's mutable attempt count.
-    // Intersecting the prepared mask cannot introduce an ungranted operation.
-    if (product.value.result == .ready) {
-        const offered = &product.value.result.ready.request.offered;
-        offered[t.ordinal("tool_build")] = offered[t.ordinal("tool_build")] and !observation.value.build_exhausted;
-        offered[t.ordinal("tool_run")] = offered[t.ordinal("tool_run")] and !observation.value.run_exhausted;
-    }
     const objects = try ctx.allocator.alloc([]const u8, @intFromBool(product.value.receipt != null));
     if (product.value.receipt) |receipt| objects[0] = try ctx.allocator.dupe(u8, receipt.bytes);
     return .{ .reply = try contracts.encodeOwned(t.PreparationResult, ctx.allocator, product.value.result), .objects = objects };
