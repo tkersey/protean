@@ -52,5 +52,5 @@ try {
   passed = true;
   console.log(JSON.stringify({adaptive: 'authored control scenario', model_calls: result.output.model_calls, controls: result.output.receipts.length, live_provider: false}));
 } finally {
-  app.close(passed);
+  await app.close(passed);
 }

@@ -287,7 +287,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
     const leftover = await client.call('task.message', {...message, client_operation_id: 'adaptive-after-restart',
       message: {...message.message, value: {message: 'FOLLOWUP-D: use the acquired source identity after restart.'}}});
     assert.equal(leftover.disposition, 'queued');
-    app.signal(client.child, 'SIGKILL'); await client.closed; client = null;
+    await app.signal(client.child, 'SIGKILL'); await client.closed; client = null;
     await writeFile(join(root, 'src/main.zig'), 'changed after admission\n');
     const changedConfig = join(app.data, 'changed-adaptive.json');
     await writeFile(changedConfig, JSON.stringify(configuration({...config, initial_effort: 'high'})));
@@ -470,7 +470,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
         await until(() => client.call('task.status', {task_id: task.task_id}), value => value.status === 'unknown');
         assert.deepEqual(await within(client.close(), 3000, 'native cancellation close timeout'), {code: 2, signal: null});
       } else {
-        app.signal(client.child, method);
+        await app.signal(client.child, method);
         assert.deepEqual(await within(client.closed, 3000, 'native signal did not stop held inference'), {code: 2, signal: null});
       }
       client = null;
@@ -515,7 +515,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
         assert.equal(alternateIndex, 12);
         const originalProgram = await artifact(task.task_id, toolSubject.program);
         assert.equal(Buffer.from(decodeValue(contract(asset, 'ToolProgram'), originalProgram)[5][0]).subarray(0, 8).toString(), 'ABL_BPI3');
-        app.signal(client.child, 'SIGKILL'); await client.closed; client = null;
+        await app.signal(client.child, 'SIGKILL'); await client.closed; client = null;
         const bundle = join(app.data, 'constructed-tool.bundle');
         invoke('export-checkpoint', '--state-dir', selectedState, '--task-id', task.task_id, '--output', bundle);
         selectedState = join(app.data, 'constructed tool imported');
