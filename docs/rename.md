@@ -3,8 +3,8 @@
 Protean is the native adaptive application and reusable Zig library. Use
 `protean`, `protean_native`, `protean_contracts`, `build_protean.zig`,
 `src/protean.zig`, `check-protean`, and `examples/adaptive`. The corresponding
-projects and modules are Horos (`horos`, `horos_data`) and Kronos (`kronos`).
-Native overrides are `-Dhoros-source` and `-Dkronos-source`; new setup inputs
+projects and modules are Horos (`horos`, `horos_data`) and Kosmos (`kosmos`).
+Native overrides are `-Dhoros-source` and `-Dkosmos-source`; new setup inputs
 live in `.protean-native/inputs`. No legacy aliases or duplicate binaries exist.
 `addNativeSystem`, `tool_build`, `tool_run`, `inference_set` and `skill_set`
 keep their names, permissions and behavior.
@@ -16,7 +16,7 @@ state namespaces and schema URNs; and `world.advance` stored operation labels
 remain independent of branding. Subsequent contract changes advance their versions
 through the owning protocol. Source-lock and build-manifest fields `boundary` / `world`
 and publication-record field spellings remain schema, while their selected
-repository URLs and contents now identify Horos and Kronos. Horos wire formats,
+repository URLs and contents now identify Horos and Kosmos. Horos wire formats,
 magic, numeric tags and hash domains are unchanged. Generic agents, ownership
 boundaries, HTTP `User-Agent`, copyright and historical retirement references
 retain their meanings and spelling. Tests still name removed paths when checking

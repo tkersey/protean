@@ -1,7 +1,7 @@
 const std = @import("std");
 const horos = @import("horos");
 const protean = @import("protean");
-const kronos = @import("kronos");
+const kosmos = @import("kosmos");
 const contracts = protean.contracts;
 const model = protean.model_invocation;
 const Answer = union(enum(u32)) {
@@ -53,7 +53,7 @@ fn execute(comptime T: type, program: horos.data.activation.Program, value: Inpu
     const image = try allocator.alloc(u8, try horos.data.program_image.encodedLength(program));
     defer allocator.free(image);
     _ = try horos.data.program_image.encode(allocator, program, image);
-    var outcome = try kronos.invocation.invoke(allocator, .{
+    var outcome = try kosmos.invocation.invoke(allocator, .{
         .image = image,
         .instance = .{ .initial_args = bytes },
     });
@@ -68,7 +68,7 @@ fn expectRejected(program: horos.data.activation.Program, value: Inputs, expecte
     try std.testing.expectEqual(expected, observed.value.rejected);
 }
 
-test "actual Kronos preserves every admitted call and enforces current call policy" {
+test "actual Kosmos preserves every admitted call and enforces current call policy" {
     var b = horos.source.Builder.init(allocator);
     defer b.deinit();
     const entry = try P.interpretAll(&b);
@@ -105,7 +105,7 @@ test "actual Kronos preserves every admitted call and enforces current call poli
     try std.testing.expectEqual(0, empty_result.value.accepted.len);
 }
 
-test "actual Kronos rejects forged declaration association variants and offer custody" {
+test "actual Kosmos rejects forged declaration association variants and offer custody" {
     var b = horos.source.Builder.init(allocator);
     defer b.deinit();
     const entry = try P.interpretAll(&b);

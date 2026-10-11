@@ -1,5 +1,5 @@
 //! Native client values use the existing ordinary Protean codecs and schemas.
-//! JSON only projects those values; it is not an alternate Kronos wire format.
+//! JSON only projects those values; it is not an alternate Kosmos wire format.
 const std = @import("std");
 const data = @import("horos_data");
 const contracts = @import("protean_contracts");

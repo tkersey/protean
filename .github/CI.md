@@ -20,15 +20,15 @@ The authoring job uses native setup with `--authoring-only`, then runs
 `zig build check-protean -Dnative=false -Doptimize=safe`. This retains generic
 construction tests, compile-time rejection cases, model/value contracts, helper
 integrity tests, adaptive asset emission, formatting, and independent wire checks.
-It does not acquire Kronos or SQLite.
+It does not acquire Kosmos or SQLite.
 
-The native job authenticates Kronos source and SQLite, builds the product, then
+The native job authenticates Kosmos source and SQLite, builds the product, then
 runs `check-native` and the public downstream installation witness concurrently.
 The downstream reference is an immutable copy of that product; both checks must
 finish successfully and the final product must match the copy. Native owners have their
 own test root because Zig does not collect test declarations from named imported
 modules. The integration root shares the actual application types/assets and
-Kronos module. Controlled peers exercise HTTPS, actual authored adaptive control,
+Kosmos module. Controlled peers exercise HTTPS, actual authored adaptive control,
 tool construction/reuse, acquisitions, restart, cancellation and archive checks.
 No paid provider calls are made.
 
@@ -36,7 +36,7 @@ No paid provider calls are made.
 reference executable. It creates a clean source package and consumer, then uses
 OS execution boundaries to exclude Node/Python from acquisition, source emission,
 public `addNativeSystem`, build/install, inspection, and offline execution. It
-also verifies that altered Horos/Kronos inputs reject through the public build
+also verifies that altered Horos/Kosmos inputs reject through the public build
 graph. Node is the external controller. The old `--scan-only`/`--output` modes and
 `check-authoring-installation`, `check-native-host`, `check-native-consumer`, and
 `native-example` targets are removed.
@@ -74,8 +74,8 @@ node test/protean/installations.mjs .protean-native/inputs zig-out/bin/protean
 
 For a targeted HTTPS change, `check-native-https` selects the existing native
 probe and independent endpoint. The native product path itself needs no Node,
-Python, WASM kernel, or Kronos JS delivery. Horos's independent oracle and
-Kronos's source-agreement/embedding qualification remain in their owning projects.
+Python, WASM kernel, or Kosmos JS delivery. Horos's independent oracle and
+Kosmos's source-agreement/embedding qualification remain in their owning projects.
 
 ## Compilation and caching
 

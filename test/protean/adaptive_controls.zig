@@ -1,7 +1,7 @@
 const std = @import("std");
 const horos = @import("horos");
 const protean = @import("protean");
-const kronos = @import("kronos");
+const kosmos = @import("kosmos");
 const controls = protean.adaptive_controls;
 const contracts = protean.contracts;
 const model = protean.model_invocation;
@@ -75,7 +75,7 @@ test "authored inference control proposes independent effort and model changes w
         }
         const args = try contracts.encodeOwned(controls.InferenceInput, allocator, input);
         defer allocator.free(args);
-        var output = try kronos.invocation.invoke(allocator, .{ .image = image, .instance = .{ .initial_args = args } });
+        var output = try kosmos.invocation.invoke(allocator, .{ .image = image, .instance = .{ .initial_args = args } });
         defer output.deinit();
         try std.testing.expect(output.record == .completed);
         var decoded = try contracts.decodeOwned(controls.Proposal, allocator, output.record.completed);
@@ -188,7 +188,7 @@ test "authored skill control preserves state on rejection and fences actual evic
         }
         const args = try contracts.encodeOwned(Input, allocator, input);
         defer allocator.free(args);
-        var output = try kronos.invocation.invoke(allocator, .{ .image = image, .instance = .{ .initial_args = args } });
+        var output = try kosmos.invocation.invoke(allocator, .{ .image = image, .instance = .{ .initial_args = args } });
         defer output.deinit();
         try std.testing.expect(output.record == .completed);
         var decoded = try contracts.decodeOwned(controls.Proposal, allocator, output.record.completed);

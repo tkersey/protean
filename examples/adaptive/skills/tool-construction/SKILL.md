@@ -3,14 +3,14 @@ name: tool-construction
 description: >-
   Construct a checked, reusable Horos computation when existing tools do not
   adequately express a deterministic task. Compose admitted components, revise
-  from actual diagnostics, and request execution through Kronos on authorized
+  from actual diagnostics, and request execution through Kosmos on authorized
   inputs. Prefer an adequate existing tool to unnecessary construction.
 ---
 
 # Tool construction
 
 Turn a useful requirement into a small executable procedure. The procedure is a
-Horos program; Kronos, not this skill or a host-side workflow interpreter,
+Horos program; Kosmos, not this skill or a host-side workflow interpreter,
 executes it. Your surrounding agent remains responsible for external reads,
 model calls, questions, permissions, and deciding what the result establishes.
 
@@ -103,7 +103,7 @@ or call another model secretly on your behalf.
 
 ## Interpret results at their actual strength
 
-Kronos completion means the admitted computation completed. Check its result
+Kosmos completion means the admitted computation completed. Check its result
 against the task's required relationships and available independent observations.
 A well-typed empty list is not evidence that every input was examined. A
 schema-valid report is not proof that its conclusion is correct.

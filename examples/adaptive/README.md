@@ -5,7 +5,7 @@ model can call `inference_set` and `skill_set`; the host admits their proposed
 next request before the computation commits the new control revision.
 
 This is Protean's supported application. It uses the reusable Zig authoring and
-native-host APIs; Horos owns compiled control and Kronos owns continuation.
+native-host APIs; Horos owns compiled control and Kosmos owns continuation.
 
 Linux reference qualification uses recorded provider replies and controlled I/O.
 The [acceptance map](../../docs/adaptive-responses-acceptance.md) binds the current
@@ -56,7 +56,7 @@ public path used by downstream native hosts.
 ./zig-out/bin/protean demo --offline --state-dir ./adaptive-demo
 ```
 
-The prebuilt reference embeds the same BPI3 and runs it through native Kronos.
+The prebuilt reference embeds the same BPI3 and runs it through native Kosmos.
 It does not execute `.zig` source or invoke a compiler, Node, Python or a helper
 service. Separate image and contract files are build/inspection outputs, not
 additional launch dependencies of this existing embedding. Exact image, assets,
@@ -171,7 +171,7 @@ apply. Finite tests do not establish infinite capacity or termination.
 
 The `tool-construction` skill exposes a frozen catalog of compiled BMO1
 components. `tool_build` links a recipe with Horos's data-only
-linker; `tool_run` executes the resulting BPI3 with native Kronos. Neither invokes
+linker; `tool_run` executes the resulting BPI3 with native Kosmos. Neither invokes
 the Zig compiler, another model, or a host interpreter for the recipe. Generated
 programs receive ordinary values and cannot perform external effects.
 
@@ -290,7 +290,7 @@ changes retain visible messages and settled tool exchanges while excluding old
 opaque reasoning and old-profile effort updates. No task-state handoff bundle is
 constructed. Original captures remain immutable audit evidence.
 
-Work results and control receipts are immutable artifacts. Kronos continuations
+Work results and control receipts are immutable artifacts. Kosmos continuations
 retain references, not duplicated source excerpts or directory pages. The
 current model call's offered set is checked independently from materialized
 definitions, and work dispatch binds to that captured call. Queued user messages

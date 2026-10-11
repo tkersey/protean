@@ -2,7 +2,7 @@
 
 Protean protects the declared public authoring path and its untrusted runtime inputs.
 It is not a sandbox for hostile native emitters that forge Builder data or its
-admission registry. Horos checks the resulting program and Kronos admits each
+admission registry. Horos checks the resulting program and Kosmos admits each
 supplied State relative to that image.
 
 Every external reply must match its current ERQ3 and concrete resume schema. Invalid

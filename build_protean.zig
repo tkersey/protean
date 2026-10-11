@@ -53,8 +53,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const target = b.standardTargetOptions(.{});
     const source = b.option(std.Build.LazyPath, "horos-source", "Authenticated immutable Horos source copy");
-    const native_enabled = b.option(bool, "native", "Enable native Kronos host modules") orelse true;
-    const kronos_source = b.option(std.Build.LazyPath, "kronos-source", "Immutable Kronos source for native agreement") orelse b.path(".protean-native/inputs/kronos");
+    const native_enabled = b.option(bool, "native", "Enable native Kosmos host modules") orelse true;
+    const kosmos_source = b.option(std.Build.LazyPath, "kosmos-source", "Immutable Kosmos source for native agreement") orelse b.path(".protean-native/inputs/kosmos");
     const sqlite_source = b.option(std.Build.LazyPath, "sqlite-source", "Authenticated optional native SQLite source") orelse b.path(".protean-native/inputs/sqlite");
     const data = if (source) |root| b.createModule(.{
         .root_source_file = root.path(b, "src/data/root.zig"),
@@ -180,7 +180,7 @@ pub fn build(b: *std.Build) void {
     const adaptive_image_step = b.step("protean-image", "Emit the adaptive Horos program and ordinary contracts");
     adaptive_image_step.dependOn(&b.addInstallFileWithDir(adaptive_image, .prefix, "protean/adaptive/program.bpi3").step);
     adaptive_image_step.dependOn(&b.addInstallFileWithDir(adaptive_application, .prefix, "protean/adaptive/application.json").step);
-    const aggregate = b.step("check-protean", "Check authoring and pure contracts without Kronos");
+    const aggregate = b.step("check-protean", "Check authoring and pure contracts without Kosmos");
     const lint = b.step("lint", "Check formatting and the Zig source inventory");
     const format_check = b.addRunFile(.zig_exe);
     format_check.addArgs(&.{ "fmt", "--check", "build.zig", "build_protean.zig", "build_native.zig", "src", "runtime/native", "tools/native", "examples/adaptive", "test/protean", "test/protean/https_probe.zig", "test/consumers/adaptive/build.zig", "test/authoring_tests.zig" });
@@ -211,14 +211,14 @@ pub fn build(b: *std.Build) void {
     }
     const helper_tests = b.addTest(.{ .root_module = host_tool.root_module });
     check.dependOn(&b.addRunArtifact(helper_tests).step);
-    const native_checks = b.step("check-native", "Check native and custody contracts against the selected Kronos");
+    const native_checks = b.step("check-native", "Check native and custody contracts against the selected Kosmos");
     const native_product = b.step("check-native-product", "Qualify the native adaptive application on the selected supported platform");
     const native_consumer = b.step("check-native-https", "Check native HTTPS against an independent endpoint");
     native_checks.dependOn(native_product);
     native_product.dependOn(native_consumer);
     if (native_enabled) {
-        const kronos = b.createModule(.{
-            .root_source_file = kronos_source.path(b, "src/root.zig"),
+        const kosmos = b.createModule(.{
+            .root_source_file = kosmos_source.path(b, "src/root.zig"),
             .target = b.graph.host,
             .optimize = optimize,
             .imports = &.{.{ .name = "horos_data", .module = data }},
@@ -226,7 +226,7 @@ pub fn build(b: *std.Build) void {
         const native_guard = b.addRunArtifact(host_tool);
         native_guard.addArg("verify-native");
         native_guard.addFileArg2(b.path("conformance/protean/dependencies.lock.json"), .{});
-        native_guard.addDirectoryArg2(kronos_source, .{ .make_absolute = true });
+        native_guard.addDirectoryArg2(kosmos_source, .{ .make_absolute = true });
         native_guard.addDirectoryArg2(sqlite_source, .{ .make_absolute = true });
         native_guard.addFileArg2(b.path("conformance/protean/native-dependencies.lock.json"), .{});
         native_guard.has_side_effects = true;
@@ -237,7 +237,7 @@ pub fn build(b: *std.Build) void {
         const native_admission_files = b.addWriteFiles();
         native_admission_files.step.dependOn(&native_guard.step);
         const native_admission = b.createModule(.{ .root_source_file = native_admission_files.add("native_dependency_admission.zig", "") });
-        const host_environment = nativeEnvironment(b, b.graph.host, optimize, kronos, data, contracts, native_admission, sqlite_source, &native_guard.step);
+        const host_environment = nativeEnvironment(b, b.graph.host, optimize, kosmos, data, contracts, native_admission, sqlite_source, &native_guard.step);
         // Host-default Linux packaging selects musl. Explicit unsupported target
         // requests are rejected by the public helper before creating emitters.
         const default_musl = target.query.isNative() and target.result.os.tag == .linux and target.result.cpu.arch == .x86_64;
@@ -268,13 +268,13 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{ .{ .name = "horos", .module = native_horos }, .{ .name = "horos_data", .module = native_data }, .{ .name = "protean_contracts", .module = native_contracts } },
         });
-        const native_kronos = if (!default_musl and target.query.isNative()) kronos else b.createModule(.{
-            .root_source_file = kronos_source.path(b, "src/root.zig"),
+        const native_kosmos = if (!default_musl and target.query.isNative()) kosmos else b.createModule(.{
+            .root_source_file = kosmos_source.path(b, "src/root.zig"),
             .target = native_target,
             .optimize = optimize,
             .imports = &.{.{ .name = "horos_data", .module = native_data }},
         });
-        const public_environment = if (!default_musl and target.query.isNative()) host_environment else nativeEnvironment(b, native_target, optimize, native_kronos, native_data, native_contracts, native_admission, sqlite_source, &native_guard.step);
+        const public_environment = if (!default_musl and target.query.isNative()) host_environment else nativeEnvironment(b, native_target, optimize, native_kosmos, native_data, native_contracts, native_admission, sqlite_source, &native_guard.step);
         // Executed native checks use the delivered ABI when it runs on this
         // host. This also shares its C library instead of compiling a GNU-only
         // SQLite copy solely for tests of a musl product.
@@ -286,7 +286,7 @@ pub fn build(b: *std.Build) void {
             native_graph.data = native_data;
             native_graph.contracts = native_contracts;
         }
-        const checked_kronos = if (native_on_host) native_kronos else kronos;
+        const checked_kosmos = if (native_on_host) native_kosmos else kosmos;
         const checked_environment = if (native_on_host) public_environment else host_environment;
         b.addNamedLazyPath("native-sqlite-source", sqlite_source);
         b.installArtifact(host_tool);
@@ -315,7 +315,7 @@ pub fn build(b: *std.Build) void {
                 .application = .{ .emitted = .{ .image = adaptive_image, .application = adaptive_application, .types = b.path("examples/adaptive/types.zig") } },
                 .environment = b.path("examples/adaptive/environment.zig"),
             });
-            const adaptive_reference = b.step("protean", "Build the native Kronos reference host for the adaptive program");
+            const adaptive_reference = b.step("protean", "Build the native Kosmos reference host for the adaptive program");
             adaptive_reference.dependOn(&adaptive_product.install.step);
             adaptive_reference.dependOn(adaptive_image_step);
             native_product.dependOn(adaptive_reference);
@@ -330,7 +330,7 @@ pub fn build(b: *std.Build) void {
                 .target = native_graph.target orelse b.graph.host,
                 .optimize = optimize,
                 .strip = optimize != .debug,
-                .imports = &.{ .{ .name = "kronos", .module = checked_kronos }, .{ .name = "horos_data", .module = native_graph.data }, .{ .name = "protean_native", .module = checked_environment }, .{ .name = "protean_contracts", .module = native_graph.contracts } },
+                .imports = &.{ .{ .name = "kosmos", .module = checked_kosmos }, .{ .name = "horos_data", .module = native_graph.data }, .{ .name = "protean_native", .module = checked_environment }, .{ .name = "protean_contracts", .module = native_graph.contracts } },
             });
             const consumer = b.addExecutable(.{
                 .name = "protean-https-probe",
@@ -355,7 +355,7 @@ pub fn build(b: *std.Build) void {
         // The deployed applications and public API/HTTPS probe remain safe.
         native_suite.optimize = .debug;
         native_suite.strip = optimize != .debug;
-        native_suite.addImport("kronos", checked_kronos);
+        native_suite.addImport("kosmos", checked_kosmos);
         native_suite.addImport("protean_native", checked_environment);
         const adaptive_test_types = native_graph.module("examples/adaptive/types.zig");
         const adaptive_test_environment = native_graph.module("examples/adaptive/environment.zig");
@@ -375,7 +375,7 @@ pub fn build(b: *std.Build) void {
         native_unit_tests.optimize = .debug;
         native_graph.testModule(native_product, native_unit_tests);
     } else {
-        const missing = b.addFail("enable -Dnative=true with authenticated Kronos and SQLite sources");
+        const missing = b.addFail("enable -Dnative=true with authenticated Kosmos and SQLite sources");
         native_checks.dependOn(&missing.step);
         native_consumer.dependOn(&missing.step);
     }
@@ -389,7 +389,7 @@ pub fn build(b: *std.Build) void {
     b.default_step = aggregate;
 }
 
-fn nativeEnvironment(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, kronos: *std.Build.Module, data: *std.Build.Module, contracts: *std.Build.Module, admission: *std.Build.Module, sqlite_source: std.Build.LazyPath, gate: *std.Build.Step) *std.Build.Module {
+fn nativeEnvironment(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, kosmos: *std.Build.Module, data: *std.Build.Module, contracts: *std.Build.Module, admission: *std.Build.Module, sqlite_source: std.Build.LazyPath, gate: *std.Build.Step) *std.Build.Module {
     const options = b.addOptions();
     options.addOption(u32, "state_format", @import("build_native.zig").state_format);
     // The exact admitted 0.17 compiler still supplies build-time translate-c.
@@ -423,7 +423,7 @@ fn nativeEnvironment(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
         .strip = optimize != .debug,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "kronos", .module = kronos },
+            .{ .name = "kosmos", .module = kosmos },
             .{ .name = "horos_data", .module = data },
             .{ .name = "protean_contracts", .module = contracts },
             .{ .name = "_native_dependency_admission", .module = admission },

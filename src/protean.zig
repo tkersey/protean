@@ -1,4 +1,4 @@
-//! Public staged Protean authoring; runtime execution belongs to Kronos.
+//! Public staged Protean authoring; runtime execution belongs to Kosmos.
 pub const package_version = "4.0.0-dev.0";
 pub const Context = @import("authoring.zig").Context;
 pub const system = @import("authoring.zig").system;

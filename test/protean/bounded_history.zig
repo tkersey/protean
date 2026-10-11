@@ -2,7 +2,7 @@
 const std = @import("std");
 const protean = @import("protean");
 const horos = @import("horos");
-const kronos = @import("kronos");
+const kosmos = @import("kosmos");
 const Id = horos.source.Id;
 const History = protean.contracts.Vector(u64, 2);
 const Input = struct { turns: u8, effects: u8, drop_oldest: bool };
@@ -87,7 +87,7 @@ fn fail(c: protean.Context, value: Failure) !Id {
 
 const Driver = struct {
     image: []u8,
-    outcome: kronos.invocation.Outcome,
+    outcome: kosmos.invocation.Outcome,
     fn init(input: Input) !Driver {
         const a = std.testing.allocator;
         var compiled = try protean.compile(a, System);
@@ -97,7 +97,7 @@ const Driver = struct {
         _ = try compiled.encode(a, image);
         const args = try protean.contracts.encodeOwned(Input, a, input);
         defer a.free(args);
-        return .{ .image = image, .outcome = try kronos.invocation.invoke(a, .{ .image = image, .instance = .{ .initial_args = args } }) };
+        return .{ .image = image, .outcome = try kosmos.invocation.invoke(a, .{ .image = image, .instance = .{ .initial_args = args } }) };
     }
     fn deinit(d: *Driver) void {
         d.outcome.deinit();
@@ -118,7 +118,7 @@ const Driver = struct {
         defer a.free(bytes);
         const reply_bytes = try horos.data.invocation.encodeOwned(horos.data.invocation.Result, a, .{ .request_identity = r.value.request_identity, .value = bytes });
         defer a.free(reply_bytes);
-        const next = try kronos.invocation.invoke(a, .{ .image = d.image, .instance = .{ .state = d.outcome.record.requested.state.? }, .control = .{ .reply = reply_bytes } });
+        const next = try kosmos.invocation.invoke(a, .{ .image = d.image, .instance = .{ .state = d.outcome.record.requested.state.? }, .control = .{ .reply = reply_bytes } });
         d.outcome.deinit();
         d.outcome = next;
     }

@@ -1,8 +1,8 @@
-//! Data-only Horos construction and pure native Kronos execution.
+//! Data-only Horos construction and pure native Kosmos execution.
 //! Callers own task admission, occurrence accounting, and durable publication.
 const std = @import("std");
 const data = @import("horos_data");
-const kronos = @import("kronos");
+const kosmos = @import("kosmos");
 const contracts = @import("protean_contracts");
 const json = @import("json.zig");
 const values = @import("values.zig");
@@ -187,9 +187,9 @@ pub fn build(output: std.mem.Allocator, scratch: std.mem.Allocator, catalog: Cat
 pub fn run(output: std.mem.Allocator, parent: std.mem.Allocator, cancellation: ?*const std.atomic.Value(bool), built: Built, input_schema: []const u8, input: []const u8) ![]u8 {
     if (cancellation) |flag| if (flag.load(.acquire)) return error.Canceled;
     const a = parent;
-    var prepared = try kronos.Prepared.init(a, built.image.bytes);
+    var prepared = try kosmos.Prepared.init(a, built.image.bytes);
     defer prepared.deinit();
-    var session = try kronos.Session.start(a, &prepared, input);
+    var session = try kosmos.Session.start(a, &prepared, input);
     defer session.deinit();
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();

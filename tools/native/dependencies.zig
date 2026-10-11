@@ -178,7 +178,7 @@ fn lockAt(c: Context, path: []const u8) !Value {
     try equal(try text(lock, "format"), "agent-native-source-lock/v2");
     const status = try text(lock, "status");
     if (!std.mem.eql(u8, status, "released-integration") and !std.mem.eql(u8, status, "development-integration")) return error.InvalidMetadata;
-    inline for (.{ .{ "boundary", "horos" }, .{ "world", "kronos" } }) |binding| {
+    inline for (.{ .{ "boundary", "horos" }, .{ "world", "kosmos" } }) |binding| {
         const item = try field(lock, binding[0]);
         const repository = "tkersey/" ++ binding[1];
         try equal(try text(item, "repository"), repository);
@@ -265,7 +265,7 @@ fn manifest(c: Context, args: []const []const u8) !void {
     const library_path = try Dir.cwd().realPathFileAlloc(c.io, args[16], c.a);
     const library = try Inventory.load(c, library_path, 100000);
     var licenses: std.ArrayList(Value) = .empty;
-    inline for (.{ "Protean", "Kronos", "Horos" }, 3..) |component, index| {
+    inline for (.{ "Protean", "Kosmos", "Horos" }, 3..) |component, index| {
         try licenses.append(c.a, try c.value(.{ .component = component, .text = try c.read(args[index], 1024 * 1024) }));
     }
     const exe_dir = std.fs.path.dirname(args[15]) orelse return error.InvalidPath;
@@ -520,7 +520,7 @@ fn setup(c: Context, args: []const []const u8) !void {
     try Dir.cwd().createDirPath(c.io, args[2]);
     const horos = try sourceAt(c, args[2], "horos", try field(lock, "boundary"), offline);
     if (!authoring_only) {
-        _ = try sourceAt(c, args[2], "kronos", try field(lock, "world"), offline);
+        _ = try sourceAt(c, args[2], "kosmos", try field(lock, "world"), offline);
         try sqliteAt(c, args[2], args[1], offline);
     }
     // Seed Zig's normal package cache from an already authenticated source.

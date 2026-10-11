@@ -72,7 +72,7 @@ pub const AdaptiveContextReference = struct {
     watermark: u64,
     eviction_generation: u64,
 };
-/// Large immutable history stays outside Kronos values. Adapters validate each
+/// Large immutable history stays outside Kosmos values. Adapters validate each
 /// continuation against its original capture/resource closure before dispatch.
 pub const AdaptivePlan = struct {
     epoch: u64,

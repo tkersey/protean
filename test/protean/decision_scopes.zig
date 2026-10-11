@@ -1,7 +1,7 @@
 const std = @import("std");
 const horos = @import("horos");
 const protean = @import("protean");
-const kronos = @import("kronos");
+const kosmos = @import("kosmos");
 const source = horos.source;
 const data = horos.data;
 const Id = source.Id;
@@ -89,7 +89,7 @@ fn execute(module: source.Module, prescribed: []const u8, expected: []const u8) 
     const invocation_image_0 = try a.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
     defer a.free(invocation_image_0);
     _ = try horos.data.program_image.encode(a, compiled.program, invocation_image_0);
-    var outcome = try kronos.invocation.invoke(a, .{
+    var outcome = try kosmos.invocation.invoke(a, .{
         .image = invocation_image_0,
         .instance = .{ .initial_args = &.{} },
     });
@@ -103,7 +103,7 @@ fn execute(module: source.Module, prescribed: []const u8, expected: []const u8) 
         const invocation_image_1 = try a.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
         defer a.free(invocation_image_1);
         _ = try horos.data.program_image.encode(a, compiled.program, invocation_image_1);
-        var next = try kronos.invocation.invoke(a, .{
+        var next = try kosmos.invocation.invoke(a, .{
             .image = invocation_image_1,
             .instance = .{ .state = outcome.record.requested.state.? },
             .control = .{ .reply = reply },

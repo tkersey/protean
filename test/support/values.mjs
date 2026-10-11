@@ -1,7 +1,7 @@
 // Independent wire codec for native archive/capture peers. No JSON client mapping
 // or application execution lives here.
 // Copyright (c) 2026 Agent contributors. MIT license.
-// Pure application values. No process framing, execution, or Kronos internals.
+// Pure application values. No process framing, execution, or Kosmos internals.
 // Wire source: Boundary 2 docs/bpi3-wire.md (profile 1).
 
 const U64_MAX = (1n << 64n) - 1n;

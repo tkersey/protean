@@ -4,7 +4,7 @@ const std = @import("std");
 const protean = @import("protean");
 const native = @import("protean_native");
 const horos = @import("horos");
-const kronos = @import("kronos");
+const kosmos = @import("kosmos");
 const t = @import("adaptive_types");
 const environment = @import("adaptive_environment");
 const protocol = horos.data.invocation;
@@ -54,7 +54,7 @@ test "compiled catalog composes coverage and orphan grouping and reuses exact BP
     defer catalog.deinit();
     try engine.validateCatalog(a, catalog.value);
     const coverage = try constructionRecipe(a, &.{ .{ .component = "filter", .operation = "selected" }, .{ .component = "map", .operation = "join" }, .{ .component = "map", .operation = "classify" } });
-    var scratch: kronos.AllocationBudget = .{ .parent = a, .limit = 16 * 1024 * 1024 };
+    var scratch: kosmos.AllocationBudget = .{ .parent = a, .limit = 16 * 1024 * 1024 };
     const task: [16]u8 = @splat(17);
     const product = try engine.construct(a, scratch.allocator(), task, "frozen-policy", encoded_catalog.?, coverage);
     const tool = product.built;
@@ -155,7 +155,7 @@ const CaptureRecord = struct {
 };
 
 test "adaptive unload capture recovers under its original plan without another acquisition" {
-    var budget: kronos.AllocationBudget = .{ .parent = std.testing.allocator, .limit = 64 * 1024 * 1024 };
+    var budget: kosmos.AllocationBudget = .{ .parent = std.testing.allocator, .limit = 64 * 1024 * 1024 };
     const a = budget.allocator();
     const io = std.testing.io;
     var profile_arena = std.heap.ArenaAllocator.init(a);
@@ -202,7 +202,7 @@ test "adaptive unload capture recovers under its original plan without another a
     var maximum_prepared: usize = 0;
     var maximum_scratch: usize = 0;
     for (0..512) |_| {
-        var scratch: kronos.AllocationBudget = .{ .parent = a, .limit = 64 * 1024 * 1024 };
+        var scratch: kosmos.AllocationBudget = .{ .parent = a, .limit = 64 * 1024 * 1024 };
         var arena = std.heap.ArenaAllocator.init(scratch.allocator());
         defer arena.deinit();
         defer maximum_scratch = @max(maximum_scratch, scratch.peak);
@@ -278,7 +278,7 @@ test "adaptive unload capture recovers under its original plan without another a
             if (inference) model_calls += 1;
             try service.acquire(frame, work, reply);
             if (inference and model_calls == 8 and !restarted) {
-                // No interpretation, receipt publication or Kronos successor has
+                // No interpretation, receipt publication or Kosmos successor has
                 // run after the raw control response became durable.
                 const raw = (try namespace.store.recordBytes(frame, "capture", work.attempt, task)) orelse return error.MissingCapture;
                 var capture = try protean.contracts.decodeOwned(CaptureRecord, frame, raw);

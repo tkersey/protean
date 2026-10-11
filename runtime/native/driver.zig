@@ -1,20 +1,20 @@
 //! Stable-address evaluator storage, reachable only by the native task owner.
 //! Environmental callbacks receive values/authority, never this handle.
 const std = @import("std");
-const kronos = @import("kronos");
+const kosmos = @import("kosmos");
 const data = @import("horos_data");
 
 const Storage = struct {
     parent: std.mem.Allocator,
     program: *Program,
     own_program: bool,
-    resident: kronos.Resident,
+    resident: kosmos.Resident,
     live: bool,
 };
 
 const ProgramStorage = struct {
     parent: std.mem.Allocator,
-    prepared: kronos.Prepared,
+    prepared: kosmos.Prepared,
     residents: usize = 0,
 };
 
@@ -28,7 +28,7 @@ pub const Program = opaque {
         const owner = try a.create(ProgramStorage);
         errdefer a.destroy(owner);
         owner.* = .{ .parent = a, .prepared = undefined };
-        owner.prepared = try kronos.Prepared.init(a, image);
+        owner.prepared = try kosmos.Prepared.init(a, image);
         return @ptrCast(owner);
     }
     pub fn close(self: *Program) !void {
@@ -60,8 +60,8 @@ pub const Driver = opaque {
         owner.own_program = false;
         const prepared = &program.storage().prepared;
         owner.resident = switch (instance) {
-            .initial_args => |args| try kronos.Resident.start(a, prepared, args),
-            .state => |state| try kronos.Resident.restore(a, prepared, state),
+            .initial_args => |args| try kosmos.Resident.start(a, prepared, args),
+            .state => |state| try kosmos.Resident.restore(a, prepared, state),
         };
         program.storage().residents += 1;
         owner.live = true;

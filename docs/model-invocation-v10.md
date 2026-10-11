@@ -7,14 +7,14 @@ The reference consumer is [Protean](../examples/adaptive/README.md).
 
 ## Authored API and execution
 
-Horos authors and checks the program; native Kronos executes its continuation.
+Horos authors and checks the program; native Kosmos executes its continuation.
 
 `protean.adaptive_controls.defineInference` and `defineSkill(P, ...)` construct
 reusable control transitions. `P.declareAdaptive` and
 `protean.responders.defineAdaptiveModelObserved(P, ...)` provide the admitted model
 effect and checked continuation. These owners are independent of the repository
 example. Consumers compose them through existing Protean/Horos authoring;
-Kronos executes the emitted BPI3 and owns its saved continuation.
+Kosmos executes the emitted BPI3 and owns its saved continuation.
 
 The program owns task state, inference selection, skill residency, revisions,
 projection revisions, D/O masks, accounting and completion. Native Zig
@@ -106,7 +106,7 @@ original top-level effort. Unchanged input prefixes and their cache breakpoints
 are retained; stale breakpoints in an edited suffix are replaced by the current
 eligible suffix boundary. Shared provider cache across models is not assumed.
 
-The reference program uses Horos resumptions through Kronos to retain task
+The reference program uses Horos resumptions through Kosmos to retain task
 state, evidence references, control state and pending results. It no longer
 constructs a second JSON representation of task state for ordinary transitions.
 Explicit replacement contexts are retired: a plan continues its prior transcript
@@ -124,7 +124,7 @@ Native execution reuses `CaptureAdapter.prepare/acquire/interpret` and the
 existing task owner. Preparation fixes the exact request, selection and plan.
 Dispatch charges a durable physical attempt. Capture is committed before pure
 interpretation; reply, context objects and reported usage are then committed
-before Kronos consumes the reply. Physical-attempt accounting does not impose a
+before Kosmos consumes the reply. Physical-attempt accounting does not impose a
 stopping condition. Captured replay does not dispatch another attempt.
 
 A lost process after dispatch without capture leaves unknown delivery. Neither

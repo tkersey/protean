@@ -1,10 +1,10 @@
 const std = @import("std");
 const horos = @import("horos");
 const protean = @import("protean");
-const kronos = @import("kronos");
+const kosmos = @import("kosmos");
 const witness = @import("callable.zig");
 
-test "static-code callable preserves actual Kronos observations and branch work" {
+test "static-code callable preserves actual Kosmos observations and branch work" {
     const allocator = std.testing.allocator;
     var prior_functions: ?usize = null;
     var prior_schemas: ?usize = null;
@@ -25,22 +25,22 @@ test "static-code callable preserves actual Kronos observations and branch work"
         defer raw.deinit();
         var selected = try horos.program.compile(allocator, changed);
         defer selected.deinit();
-        var raw_stats: kronos.Statistics = .{};
-        var selected_stats: kronos.Statistics = .{};
+        var raw_stats: kosmos.Statistics = .{};
+        var selected_stats: kosmos.Statistics = .{};
         const invocation_image_0 = try allocator.alloc(u8, try horos.data.program_image.encodedLength(raw.program));
         defer allocator.free(invocation_image_0);
         _ = try horos.data.program_image.encode(allocator, raw.program, invocation_image_0);
         var before = observed: {
             const instance: horos.data.invocation.Instance = .{ .initial_args = &.{} };
             var session = switch (instance) {
-                .initial_args => |args| try kronos.Session.initImage(allocator, invocation_image_0, args),
-                .state => |state| try kronos.Session.restoreImage(allocator, invocation_image_0, state),
+                .initial_args => |args| try kosmos.Session.initImage(allocator, invocation_image_0, args),
+                .state => |state| try kosmos.Session.restoreImage(allocator, invocation_image_0, state),
             };
             defer session.deinit();
             session.statistics = &raw_stats;
             session.store.statistics = &raw_stats.storage;
-            _ = try kronos.invocation.advance(&session, .none, null);
-            break :observed try kronos.invocation.finish(allocator, &session, true);
+            _ = try kosmos.invocation.advance(&session, .none, null);
+            break :observed try kosmos.invocation.finish(allocator, &session, true);
         };
         defer before.deinit();
         const invocation_image_1 = try allocator.alloc(u8, try horos.data.program_image.encodedLength(selected.program));
@@ -49,14 +49,14 @@ test "static-code callable preserves actual Kronos observations and branch work"
         var after = observed: {
             const instance: horos.data.invocation.Instance = .{ .initial_args = &.{} };
             var session = switch (instance) {
-                .initial_args => |args| try kronos.Session.initImage(allocator, invocation_image_1, args),
-                .state => |state| try kronos.Session.restoreImage(allocator, invocation_image_1, state),
+                .initial_args => |args| try kosmos.Session.initImage(allocator, invocation_image_1, args),
+                .state => |state| try kosmos.Session.restoreImage(allocator, invocation_image_1, state),
             };
             defer session.deinit();
             session.statistics = &selected_stats;
             session.store.statistics = &selected_stats.storage;
-            _ = try kronos.invocation.advance(&session, .none, null);
-            break :observed try kronos.invocation.finish(allocator, &session, true);
+            _ = try kosmos.invocation.advance(&session, .none, null);
+            break :observed try kosmos.invocation.finish(allocator, &session, true);
         };
         defer after.deinit();
         try std.testing.expect(before.record == .completed);

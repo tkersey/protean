@@ -63,7 +63,7 @@ try {
   // Cached transport bytes are optional and remain untrusted until native setup
   // authenticates them. No source or pre-generated manifest is copied.
   const seed = resolve(process.argv[2] ?? join(root, '.protean-native/inputs'));
-  for (const name of [`horos-${lock.boundary.commit}.tar.gz`, `kronos-${lock.world.commit}.tar.gz`, `${sqlite.archive.root}.zip`])
+  for (const name of [`horos-${lock.boundary.commit}.tar.gz`, `kosmos-${lock.world.commit}.tar.gz`, `${sqlite.archive.root}.zip`])
     if (existsSync(join(seed, name))) copyFileSync(join(seed, name), join(inputs, name));
   const started = performance.now();
   run(zig, ['run', join(root, 'tools/native/dependencies.zig'), '--', 'setup', sourceLock, nativeLock, inputs, zig]);
@@ -88,11 +88,11 @@ try {
   const zon = readFileSync(join(root, 'test/consumers/adaptive/build.zig.zon'), 'utf8').replace('.path = "../../.."', `.path = "../package/${packageHash}"`);
   writeFileSync(join(consumer, 'build.zig.zon'), zon);
   const prefixDir = join(scratch, 'installed');
-  const buildArgs = ['build', '-Doptimize=safe', `-Dkronos-source=${join(inputs, 'kronos')}`, `-Dsqlite-source=${join(inputs, 'sqlite')}`, '--prefix', prefixDir, '--prefix-exe-dir', 'executables', '--summary', 'all'];
+  const buildArgs = ['build', '-Doptimize=safe', `-Dkosmos-source=${join(inputs, 'kosmos')}`, `-Dsqlite-source=${join(inputs, 'sqlite')}`, '--prefix', prefixDir, '--prefix-exe-dir', 'executables', '--summary', 'all'];
   run(zig, buildArgs, consumer);
   // The actual exported module graph must stop on either a changed package or
   // a changed native source override, before compiling/claiming new assets.
-  for (const path of [join(consumer, 'zig-pkg', lock.boundary.package.zigHash, 'src/root.zig'), join(inputs, 'kronos/src/root.zig')]) {
+  for (const path of [join(consumer, 'zig-pkg', lock.boundary.package.zigHash, 'src/root.zig'), join(inputs, 'kosmos/src/root.zig')]) {
     const original = readFileSync(path);
     try {
       writeFileSync(path, Buffer.concat([original, Buffer.from('\n// changed after admission\n')]));

@@ -1,7 +1,7 @@
 const std = @import("std");
 const horos = @import("horos");
 const protean = @import("protean");
-const kronos = @import("kronos");
+const kosmos = @import("kosmos");
 const contracts = protean.contracts;
 const model = protean.model_invocation;
 const source = horos.source;
@@ -191,19 +191,19 @@ fn expectNormalized(expected: P.Result, actual: P.Result) !void {
     try std.testing.expectEqualSlices(u8, expected_bytes, actual_bytes);
 }
 
-fn start(program: data.activation.Program, value: Input) !kronos.invocation.Outcome {
+fn start(program: data.activation.Program, value: Input) !kosmos.invocation.Outcome {
     const bytes = try contracts.encodeOwned(Input, allocator, value);
     defer allocator.free(bytes);
     const invocation_image_0 = try allocator.alloc(u8, try horos.data.program_image.encodedLength(program));
     defer allocator.free(invocation_image_0);
     _ = try horos.data.program_image.encode(allocator, program, invocation_image_0);
-    return kronos.invocation.invoke(allocator, .{
+    return kosmos.invocation.invoke(allocator, .{
         .image = invocation_image_0,
         .instance = .{ .initial_args = bytes },
     });
 }
 
-fn expectRequest(outcome: kronos.invocation.Outcome, value: Input) !void {
+fn expectRequest(outcome: kosmos.invocation.Outcome, value: Input) !void {
     try std.testing.expect(outcome.record == .requested);
     var request_owner_0 = try data.invocation.decode(
         data.invocation.Request,
@@ -251,9 +251,9 @@ fn result(items: []const P.OutputItem) P.Result {
 fn resumeResult(
     comptime Result: type,
     program: data.activation.Program,
-    parked: kronos.invocation.Outcome,
+    parked: kosmos.invocation.Outcome,
     reply: Result,
-) !kronos.invocation.Outcome {
+) !kosmos.invocation.Outcome {
     try std.testing.expect(parked.record == .requested);
     var request_owner_1 = try data.invocation.decode(
         data.invocation.Request,
@@ -276,7 +276,7 @@ fn resumeResult(
     const invocation_image_1 = try allocator.alloc(u8, try horos.data.program_image.encodedLength(program));
     defer allocator.free(invocation_image_1);
     _ = try horos.data.program_image.encode(allocator, program, invocation_image_1);
-    return kronos.invocation.invoke(allocator, .{
+    return kosmos.invocation.invoke(allocator, .{
         .image = invocation_image_1,
         .instance = .{ .state = parked.record.requested.state.? },
         .control = .{ .reply = bytes },
@@ -286,7 +286,7 @@ fn resumeResult(
 fn finish(
     comptime T: type,
     program: data.activation.Program,
-    parked: kronos.invocation.Outcome,
+    parked: kosmos.invocation.Outcome,
     reply: P.Result,
 ) !contracts.Decoded(T) {
     var outcome = try resumeResult(P.Result, program, parked, reply);
@@ -314,7 +314,7 @@ test "model responder derives held offers and preserves the complete semantic re
         const invocation_image_2 = try allocator.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
         defer allocator.free(invocation_image_2);
         _ = try horos.data.program_image.encode(allocator, compiled.program, invocation_image_2);
-        var parked = try kronos.invocation.invoke(allocator, .{
+        var parked = try kosmos.invocation.invoke(allocator, .{
             .image = invocation_image_2,
             .instance = .{ .initial_args = bytes },
         });
@@ -521,7 +521,7 @@ test "two scoped model calls retain separate offered sets and post answer contin
     const invocation_image_3 = try allocator.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
     defer allocator.free(invocation_image_3);
     _ = try horos.data.program_image.encode(allocator, compiled.program, invocation_image_3);
-    var first = try kronos.invocation.invoke(allocator, .{
+    var first = try kosmos.invocation.invoke(allocator, .{
         .image = invocation_image_3,
         .instance = .{ .initial_args = bytes },
     });
@@ -612,7 +612,7 @@ test "model responder executes indexes 31 32 and 63 while an unoffered declarati
     const invocation_image_4 = try allocator.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
     defer allocator.free(invocation_image_4);
     _ = try horos.data.program_image.encode(allocator, compiled.program, invocation_image_4);
-    var parked = try kronos.invocation.invoke(allocator, .{
+    var parked = try kosmos.invocation.invoke(allocator, .{
         .image = invocation_image_4,
         .instance = .{ .initial_args = bytes },
     });
@@ -669,7 +669,7 @@ test "stateless replay responder retains opaque data while protecting the reques
     const image = try allocator.alloc(u8, try data.program_image.encodedLength(compiled.program));
     defer allocator.free(image);
     _ = try data.program_image.encode(allocator, compiled.program, image);
-    var parked = try kronos.invocation.invoke(allocator, .{ .image = image, .instance = .{ .initial_args = args } });
+    var parked = try kosmos.invocation.invoke(allocator, .{ .image = image, .instance = .{ .initial_args = args } });
     defer parked.deinit();
     try std.testing.expect(parked.record == .requested);
     var request = try data.invocation.decode(data.invocation.Request, allocator, parked.record.requested.request);
@@ -731,7 +731,7 @@ test "reference responder preserves frozen bindings and the exact request-time o
     const image = try allocator.alloc(u8, try data.program_image.encodedLength(compiled.program));
     defer allocator.free(image);
     _ = try data.program_image.encode(allocator, compiled.program, image);
-    var parked = try kronos.invocation.invoke(allocator, .{ .image = image, .instance = .{ .initial_args = args } });
+    var parked = try kosmos.invocation.invoke(allocator, .{ .image = image, .instance = .{ .initial_args = args } });
     defer parked.deinit();
     try std.testing.expect(parked.record == .requested);
     var request = try data.invocation.decode(data.invocation.Request, allocator, parked.record.requested.request);
@@ -813,7 +813,7 @@ test "adaptive responder keeps definitions separate from original call authority
     _ = try data.program_image.encode(allocator, compiled.program, image);
     const args = try contracts.encodeOwned(AdaptiveInput, allocator, input);
     defer allocator.free(args);
-    var parked = try kronos.invocation.invoke(allocator, .{ .image = image, .instance = .{ .initial_args = args } });
+    var parked = try kosmos.invocation.invoke(allocator, .{ .image = image, .instance = .{ .initial_args = args } });
     defer parked.deinit();
     try std.testing.expect(parked.record == .requested);
     var request = try data.invocation.decode(data.invocation.Request, allocator, parked.record.requested.request);
@@ -839,7 +839,7 @@ test "adaptive responder keeps definitions separate from original call authority
     input.request.materialized = .{ false, true };
     const invalid_args = try contracts.encodeOwned(AdaptiveInput, allocator, input);
     defer allocator.free(invalid_args);
-    var rejected = try kronos.invocation.invoke(allocator, .{ .image = image, .instance = .{ .initial_args = invalid_args } });
+    var rejected = try kosmos.invocation.invoke(allocator, .{ .image = image, .instance = .{ .initial_args = invalid_args } });
     defer rejected.deinit();
     try std.testing.expect(rejected.record == .failed);
 }

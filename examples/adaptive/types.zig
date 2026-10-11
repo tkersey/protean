@@ -48,7 +48,7 @@ pub const P = model.Profile(Action, .{
     .{ .name = "skill_set", .description = "Load, deactivate or physically unload a pinned approved skill. Use an exact version and current control revision." },
     .{ .name = "inspect", .description = "Locate guard-like lines in source-file evidence by its global evidence_index. Generated results are not source files. Requires an active invariant-review skill; it is not a correctness proof." },
     .{ .name = "tool_build", .description = "Construct a pure Horos program from a closed JSON link recipe over the admitted component catalog. Construction does not execute it or establish task correctness." },
-    .{ .name = "tool_run", .description = "Run an admitted generated program on one authorized compatible input reference through native Kronos." },
+    .{ .name = "tool_run", .description = "Run an admitted generated program on one authorized compatible input reference through native Kosmos." },
 }, .{});
 pub fn ordinal(comptime name: []const u8) usize {
     return @backingInt(@field(std.meta.Tag(Action), name));

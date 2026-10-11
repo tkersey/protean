@@ -28,7 +28,7 @@ try {
   assert.equal(manifest.program_sha256, application.program_sha256);
   assert.equal(manifest.application_assets_sha256, createHash('sha256').update(readFileSync(process.argv[3])).digest('hex'));
   assert.equal(manifest.dependencies.sqlite.version, '3.53.4');
-  assert.deepEqual(manifest.licenses.map(item => item.component).sort(), ['Protean', 'Kronos', 'Horos', 'Zig standard library', 'SQLite', ...(manifest.target.includes('linux') ? ['musl libc'] : [])].sort());
+  assert.deepEqual(manifest.licenses.map(item => item.component).sort(), ['Protean', 'Kosmos', 'Horos', 'Zig standard library', 'SQLite', ...(manifest.target.includes('linux') ? ['musl libc'] : [])].sort());
   assert(manifest.licenses.some(item => item.component === 'SQLite' && item.text.includes('disclaims copyright')));
   assert(!JSON.stringify(manifest).includes(process.cwd()));
   const result = invoke('demo', '--offline', '--state-dir', join(app.data, 'adaptive state'));
