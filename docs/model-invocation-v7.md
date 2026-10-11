@@ -1,15 +1,15 @@
-# Protean model invocation v3
+# Protean model invocation v7
 
-`agent.model.invoke.v3` is an ordinary external Horos 2 effect. Its payload
+`agent.model.invoke.v7` is an ordinary external Horos 2 effect. Its payload
 and result are application-specific schemas derived by `model_invocation.Profile`.
 Its provider protocol remains `agent.model.protocol.openai-responses-v2`.
 The image selects model configuration, semantic messages, offered declarations,
 normalization bounds and answer policy. These schema and authoring contracts
-remain shared by the native v5/v6 adapters. The former JavaScript v3 transport
-is retired; the native application uses v6.
+remain shared by the native v9/v10 adapters. The former JavaScript v3 transport
+is retired; the native application uses v10.
 
 Use `Profile(Answer, declarations, limits)` for a tagged answer union and one
-name/description per variant. Each payload is an enum or a flat product of bounded
+name/description per variant. Each payload is an enum or a flat product of bounded or variable-length
 Text, bool, i8/i16/i32/i64, u8/u16/u32/u64 and exhaustive enums with u32 tags.
 `Question(Value, name, description, limits)` derives one synthetic `answer`
 declaration. Product and enum values are its payload directly; other admitted
@@ -49,7 +49,7 @@ interpretation; it does not perform another model call or normalize again.
 
 Values use Horos 2's documented encoding: minimal unsigned LEB128 lengths and
 sum ordinals; fixed little-endian scalar integers and explicit u32 enumeration
-tags; ordered products; UTF-8 text. No BPI1 envelope is accepted as v3.
+tags; ordered products; UTF-8 text. No BPI1 envelope is accepted as v7.
 
 | Product | Fields, in order |
 | --- | --- |
@@ -133,3 +133,16 @@ The built-in adapter returns `unsupported_parameter` before provider I/O when
 Model results do not authenticate human identities, prove real observations,
 authorize writes or provide exactly-once delivery. Approval, simulation provenance
 and environmental operation authority remain separate authored contracts.
+
+## Optional representations
+
+The v7 contract makes representation bounds optional. `null` selects a
+variable-length representation; numeric zero retains its ordinary zero-capacity
+meaning where admitted and never means unlimited. `maximum_provider_response_bytes`
+and the output-item/call-ID/argument/result-text normalization bounds are optional
+`u32` values. Name and argument-field counts remain derived from the compiled
+closed action grammar. Codec `maximum_bytes` is an optional `u64`. Normal adaptive
+execution supplies no application size bounds. Explicitly bounded consumers still
+reject requests whose promised result could exceed their result schema.
+
+Earlier saved contracts require their original compatible build.

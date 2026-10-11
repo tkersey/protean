@@ -81,26 +81,36 @@ pub fn Client(comptime Types: type) type {
             try json.put(a, &result, "blocker", if (task.blocker) |blocker| json.string(@tagName(blocker)) else .null);
             try json.put(a, &result, "cancellation", if (task.cancellation) |reason| json.string(try a.dupe(u8, reason.bytes)) else .null);
             var messages: std.array_list.Managed(json.Value) = .init(a);
-            for (task.messages.items) |message_id| {
+            try json.put(a, &result, "pending_messages", .{ .array = messages });
+            try json.put(a, &result, "pending_message_count", try counter(a, task.messages.items.len));
+            try json.put(a, &result, "pending_messages_truncated", .{ .bool = false });
+            try json.put(a, &result, "message_history", json.string("task.events"));
+            if (try self.service.pendingQuestion(a, id)) |pending| {
+                var question = pending;
+                defer question.deinit();
+                const bytes = try self.service.namespace.store.object(a, question.value.prompt, null);
+                defer a.free(bytes);
+                try json.put(a, &result, "question", try self.projectQuestion(a, id, try state.questionData(a, question.value, bytes)));
+            } else try json.put(a, &result, "question", .null);
+            for (task.messages.items[0..@min(task.messages.items.len, (protocol.Limits{}).pending_message_page)]) |message_id| {
                 const bytes = (try self.service.namespace.store.recordBytes(a, "message", message_id, id)) orelse return error.CorruptState;
                 defer a.free(bytes);
                 var saved = try contracts.decodeOwned(state.Message, a, bytes);
                 defer saved.deinit();
                 try messages.append(try state.messageData(a, saved.value, saved.value.disposition));
+                try json.put(a, &result, "pending_messages", .{ .array = messages });
+                if (!try json.fits(a, result, json.projection_limits)) {
+                    messages.items.len -= 1;
+                    break;
+                }
             }
             try json.put(a, &result, "pending_messages", .{ .array = messages });
-            try json.put(a, &result, "message_history", json.string("task.events"));
-            if (try self.service.pendingQuestion(a, id)) |pending| {
-                var question = pending;
-                defer question.deinit();
-                const bytes = try self.service.namespace.store.object(a, question.value.prompt, 32 * 1024);
-                defer a.free(bytes);
-                try json.put(a, &result, "question", try self.projectQuestion(a, id, try state.questionData(a, question.value, bytes)));
-            } else try json.put(a, &result, "question", .null);
+            try json.put(a, &result, "pending_messages_truncated", .{ .bool = messages.items.len != task.messages.items.len });
             return result;
         }
 
         fn projectQuestion(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, value: json.Value) !json.Value {
+            if (json.get(value, "prompt_ref") != null) return value;
             const prompt = json.get(value, "prompt") orelse return error.CorruptState;
             if (try json.fits(a, prompt, json.payload_limits)) return value;
             const id = try identifier(32, try field(value, "question_id"));

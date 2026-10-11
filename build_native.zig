@@ -1,10 +1,8 @@
 //! Build/environmental API. No target program executes while generating assets.
 const std = @import("std");
 /// One packaging constant supplies both the namespace reader and manifest.
-pub const state_format: u32 = 10;
-pub const sqlite_heap_bytes: u32 = 16 * 1024 * 1024;
-pub const state_bytes: u64 = 256 * 1024 * 1024;
-pub const sqlite_flags: []const []const u8 = &.{ "-std=c99", "-DSQLITE_THREADSAFE=1", "-DSQLITE_ENABLE_MEMSYS5=1", "-DSQLITE_OMIT_LOAD_EXTENSION=1", "-DSQLITE_DQS=0", "-DSQLITE_DEFAULT_MEMSTATUS=1", "-DSQLITE_DEFAULT_FOREIGN_KEYS=1" };
+pub const state_format: u32 = 11;
+pub const sqlite_flags: []const []const u8 = &.{ "-std=c99", "-DSQLITE_THREADSAFE=1", "-DSQLITE_OMIT_LOAD_EXTENSION=1", "-DSQLITE_DQS=0", "-DSQLITE_DEFAULT_MEMSTATUS=1", "-DSQLITE_DEFAULT_FOREIGN_KEYS=1" };
 
 pub fn sqliteFlags(optimize: std.lang.Optimize) []const []const u8 {
     // Reduce optimization work on the amalgamation while retaining safe mode's
@@ -107,9 +105,9 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
     manifest.addFileArg2(kronos.root_source_file.?.dirname().dirname().path(b, "LICENSE"), .{});
     manifest.addFileArg2(modules.native_data.root_source_file.?.dirname().dirname().dirname().path(b, "LICENSE"), .{});
     manifest.addDirectoryArg2(modules.sqlite_source, .{ .make_absolute = true });
-    manifest.addArg(b.fmt("{d}", .{sqlite_heap_bytes}));
+    manifest.addArg("system");
     manifest.addArg(std.json.Stringify.valueAlloc(b.allocator, sqliteFlags(optimize), .{}) catch @panic("out of memory"));
-    manifest.addArg(b.fmt("{d}", .{state_bytes}));
+    manifest.addArg("filesystem");
     manifest.addArg(b.fmt("agent-native-state/{d}", .{state_format}));
     manifest.addArgs(&.{ target.result.zigTriple(b.allocator) catch @panic("out of memory"), @tagName(optimize) });
     // Always-run steps do not hash file arguments into their output directory

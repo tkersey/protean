@@ -17,7 +17,6 @@ pub const DecodeFailure = enum {
 
 fn checkField(comptime name: []const u8, comptime T: type) void {
     if (json.isText(T)) {
-        _ = json.maximumTextBytes(T);
         return;
     }
     switch (@typeInfo(T)) {
@@ -90,7 +89,7 @@ pub fn Profile(comptime Answer: type) type {
             name: FieldName,
             kind: FieldKind,
             bit_width: u16,
-            maximum_bytes: u32,
+            maximum_bytes: ?u64,
             enum_names: EnumNames,
             enum_tags: EnumTags,
         };
@@ -122,7 +121,7 @@ pub fn Profile(comptime Answer: type) type {
                     else => unreachable,
                 },
                 .bit_width = if (@typeInfo(T) == .int) @bitSizeOf(T) else 0,
-                .maximum_bytes = if (json.isText(T)) @intCast(json.maximumTextBytes(T)) else 0,
+                .maximum_bytes = if (json.isText(T)) T.max_length else null,
                 .enum_names = .{ .items = &(comptime enumeration.names) },
                 .enum_tags = .{ .items = &(comptime enumeration.tags) },
             };

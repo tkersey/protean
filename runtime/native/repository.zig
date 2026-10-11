@@ -5,14 +5,11 @@ const contracts = @import("protean_contracts");
 const storage = @import("store.zig");
 const c = @import("native_c");
 
-pub const maximum_files = 512;
-pub const maximum_file_bytes = 256 * 1024;
-pub const maximum_snapshot_bytes = storage.maximum_object_bytes;
 pub const File = contracts.RepositorySnapshotFile;
 pub const Record = contracts.RepositorySnapshot;
 
 pub fn pathAllowed(path: []const u8) bool {
-    if (path.len == 0 or path.len > 256 or !std.unicode.utf8ValidateSlice(path)) return false;
+    if (path.len == 0 or !std.unicode.utf8ValidateSlice(path)) return false;
     for (path) |byte| if (byte < 0x20 or byte == 0x7f or byte == '\\') return false;
     var segments = std.mem.splitScalar(u8, path, '/');
     while (segments.next()) |segment| if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return false;
@@ -31,10 +28,9 @@ pub const Snapshot = struct {
         return openWithOwnership(a, bytes, true);
     }
     fn openWithOwnership(a: std.mem.Allocator, bytes: []const u8, comptime borrowed: bool) !Snapshot {
-        if (bytes.len > maximum_snapshot_bytes) return error.SnapshotCapacity;
         var record = if (borrowed) try contracts.decodeBorrowed(Record, a, bytes) else try contracts.decodeOwned(Record, a, bytes);
         errdefer record.deinit();
-        if (record.value.version != 1) return error.UnsupportedSnapshot;
+        if (record.value.version != 2) return error.UnsupportedSnapshot;
         var previous: ?[]const u8 = null;
         for (record.value.files.items) |file| {
             if (!pathAllowed(file.path.bytes) or (previous != null and !std.mem.lessThan(u8, previous.?, file.path.bytes)) or
@@ -52,7 +48,7 @@ pub const Snapshot = struct {
     }
     pub fn get(self: Snapshot, path: []const u8) ?File {
         if (!pathAllowed(path)) return null;
-        // A bounded sorted catalog, with no filesystem or ambient lookup.
+        // A sorted catalog, with no filesystem or ambient lookup.
         var low: usize = 0;
         var high = self.files().len;
         while (low < high) {
@@ -73,20 +69,31 @@ const Collector = struct {
     payload_allocator: std.mem.Allocator,
     io: std.Io,
     files: std.ArrayList(File) = .empty,
-    bytes: usize = 0,
-    excluded: u32 = 0,
-    visited: usize = 0,
+    excluded: u64 = 0,
 
-    fn walk(self: *Collector, directory: std.Io.Dir, prefix: []const u8, depth: usize) anyerror!void {
-        if (depth > 32) return error.SnapshotCapacity;
-        var iterator = directory.iterate();
-        while (try iterator.next(self.io)) |entry| {
-            self.visited += 1;
-            if (self.visited > 4096) return error.SnapshotCapacity;
+    fn walk(self: *Collector, root: std.Io.Dir) !void {
+        // Iterators reset their buffer pointer on next(), so moving this stack
+        // is safe. Directory handles are owned until popped, including errors.
+        const Frame = struct { directory: std.Io.Dir, prefix: []const u8, iterator: std.Io.Dir.Iterator, owned: bool };
+        var stack: std.ArrayList(Frame) = .empty;
+        defer {
+            for (stack.items) |frame| if (frame.owned) frame.directory.close(self.io);
+            stack.deinit(self.allocator);
+        }
+        try stack.append(self.allocator, .{ .directory = root, .prefix = "", .iterator = root.iterate(), .owned = false });
+        while (stack.items.len != 0) {
+            const top = &stack.items[stack.items.len - 1];
+            const entry = (try top.iterator.next(self.io)) orelse {
+                const finished = stack.pop().?;
+                if (finished.owned) finished.directory.close(self.io);
+                continue;
+            };
+            const directory = top.directory;
+            const prefix = top.prefix;
             // These named administrative/build trees are outside this profile.
             // Count every excluded entry and expose it in the frozen record.
             if (std.mem.eql(u8, entry.name, ".git") or std.mem.eql(u8, entry.name, ".zig-cache") or std.mem.eql(u8, entry.name, "zig-out") or std.mem.eql(u8, entry.name, "node_modules")) {
-                self.excluded += 1;
+                self.excluded = try std.math.add(u64, self.excluded, 1);
                 continue;
             }
             const path = if (prefix.len == 0) try self.allocator.dupe(u8, entry.name) else try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, entry.name });
@@ -94,11 +101,10 @@ const Collector = struct {
             switch (entry.kind) {
                 .directory => {
                     const child = try directory.openDir(self.io, entry.name, .{ .iterate = true, .follow_symlinks = false });
-                    defer child.close(self.io);
-                    try self.walk(child, path, depth + 1);
+                    errdefer child.close(self.io);
+                    try stack.append(self.allocator, .{ .directory = child, .prefix = path, .iterator = child.iterate(), .owned = true });
                 },
                 .file => {
-                    if (self.files.items.len == maximum_files) return error.SnapshotCapacity;
                     const name = try self.allocator.dupeSentinel(u8, entry.name, 0);
                     // A path can change after readdir. O_NONBLOCK prevents a
                     // replacement FIFO from blocking before fstat rejects it.
@@ -108,16 +114,14 @@ const Collector = struct {
                     defer file.close(self.io);
                     const before = try file.stat(self.io);
                     if (before.kind != .file) return error.UnsupportedSnapshotEntry;
-                    if (before.size > maximum_file_bytes or before.size > maximum_snapshot_bytes - self.bytes) return error.SnapshotCapacity;
                     var buffer: [4096]u8 = undefined;
                     var reader = file.reader(self.io, &buffer);
-                    const bytes = try self.payload_allocator.alloc(u8, @intCast(before.size));
+                    const bytes = try self.payload_allocator.alloc(u8, std.math.cast(usize, before.size) orelse return error.SnapshotCapacity);
                     errdefer self.payload_allocator.free(bytes);
                     reader.interface.readSliceAll(bytes) catch |err| return if (err == error.EndOfStream) error.SnapshotChanged else err;
                     if (reader.interface.takeByte()) |_| return error.SnapshotChanged else |err| if (err != error.EndOfStream) return err;
                     const after = try file.stat(self.io);
                     if (bytes.len != before.size or before.size != after.size or before.inode != after.inode or !std.meta.eql(before.mtime, after.mtime) or !std.meta.eql(before.ctime, after.ctime)) return error.SnapshotChanged;
-                    self.bytes += bytes.len;
                     try self.files.append(self.allocator, .{ .path = .{ .bytes = path }, .sha256 = storage.digest(bytes), .contents = .{ .bytes = bytes } });
                 },
                 // In particular, never follow repository symlinks or open a
@@ -133,7 +137,7 @@ pub fn capture(a: std.mem.Allocator, io: std.Io, root: []const u8) ![]u8 {
 }
 
 /// Keep temporary file buffers out of an output arena whose lifetime is the
-/// whole task profile. Both allocators remain charged to the host budget.
+/// whole task profile. Actual allocation failure remains visible.
 pub fn captureWithScratch(a: std.mem.Allocator, scratch: std.mem.Allocator, io: std.Io, root: []const u8) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(scratch);
     defer arena.deinit();
@@ -141,15 +145,14 @@ pub fn captureWithScratch(a: std.mem.Allocator, scratch: std.mem.Allocator, io: 
     defer directory.close(io);
     var collector: Collector = .{ .allocator = arena.allocator(), .payload_allocator = scratch, .io = io };
     defer for (collector.files.items) |file| scratch.free(file.contents.bytes);
-    try collector.walk(directory, "", 0);
+    try collector.walk(directory);
     std.mem.sort(File, collector.files.items, {}, struct {
         fn less(_: void, left: File, right: File) bool {
             return std.mem.lessThan(u8, left.path.bytes, right.path.bytes);
         }
     }.less);
-    const bytes = try contracts.encodeOwned(Record, a, .{ .version = 1, .excluded_entries = collector.excluded, .files = .{ .items = collector.files.items } });
+    const bytes = try contracts.encodeOwned(Record, a, .{ .version = 2, .excluded_entries = collector.excluded, .files = .{ .items = collector.files.items } });
     errdefer a.free(bytes);
-    if (bytes.len > maximum_snapshot_bytes) return error.SnapshotCapacity;
     return bytes;
 }
 
@@ -157,7 +160,7 @@ test "snapshot admission binds sorted paths and exact frozen content" {
     const a = std.testing.allocator;
     const source = "fn main() void {}\n";
     var files = [_]File{.{ .path = .{ .bytes = "src/main.zig" }, .sha256 = storage.digest(source), .contents = .{ .bytes = source } }};
-    const bytes = try contracts.encodeOwned(Record, a, .{ .version = 1, .excluded_entries = 0, .files = .{ .items = &files } });
+    const bytes = try contracts.encodeOwned(Record, a, .{ .version = 2, .excluded_entries = 0, .files = .{ .items = &files } });
     defer a.free(bytes);
     var snapshot = try Snapshot.open(a, bytes);
     defer snapshot.deinit();
@@ -170,7 +173,7 @@ test "snapshot admission binds sorted paths and exact frozen content" {
     try std.testing.expectEqualStrings(source, snapshot.get("src/main.zig").?.contents.bytes);
     try std.testing.expect(snapshot.get("../src/main.zig") == null);
     files[0].sha256[0] ^= 1;
-    const changed = try contracts.encodeOwned(Record, a, .{ .version = 1, .excluded_entries = 0, .files = .{ .items = &files } });
+    const changed = try contracts.encodeOwned(Record, a, .{ .version = 2, .excluded_entries = 0, .files = .{ .items = &files } });
     defer a.free(changed);
     try std.testing.expectError(error.InvalidSnapshot, Snapshot.open(a, changed));
     try std.testing.expectError(error.InvalidSnapshot, Snapshot.openBorrowed(a, changed));
@@ -187,6 +190,23 @@ test "capture freezes bytes, reports exclusions and refuses repository symlinks"
     try temporary.dir.writeFile(io, .{ .sub_path = "z.zig", .data = "old\n" });
     try temporary.dir.writeFile(io, .{ .sub_path = "a.zig", .data = "雪\n" });
     try temporary.dir.createDir(io, ".git", .default_dir);
+    for (0..513) |i| {
+        const name = try std.fmt.allocPrint(a, "file-{d}.txt", .{i});
+        defer a.free(name);
+        try temporary.dir.writeFile(io, .{ .sub_path = name, .data = "" });
+    }
+    const large = try a.alloc(u8, 256 * 1024 + 1);
+    defer a.free(large);
+    @memset(large, 'x');
+    try temporary.dir.writeFile(io, .{ .sub_path = "large.txt", .data = large });
+    var deep_name: std.ArrayList(u8) = .empty;
+    defer deep_name.deinit(a);
+    for (0..33) |_| try deep_name.appendSlice(a, "directory/");
+    try deep_name.appendSlice(a, "source.txt");
+    const deep_path = deep_name.items;
+    try temporary.dir.createDirPath(io, std.fs.path.dirname(deep_path).?);
+    try temporary.dir.writeFile(io, .{ .sub_path = deep_path, .data = "deep source" });
+
     var path: [4096]u8 = undefined;
     const length = try temporary.dir.realPath(io, &path);
     const bytes = try capture(a, io, path[0..length]);
@@ -195,6 +215,9 @@ test "capture freezes bytes, reports exclusions and refuses repository symlinks"
     defer snapshot.deinit();
     try std.testing.expectEqual(1, snapshot.decoded.value.excluded_entries);
     try std.testing.expectEqualStrings("a.zig", snapshot.files()[0].path.bytes);
+    try std.testing.expectEqual(517, snapshot.files().len);
+    try std.testing.expectEqualSlices(u8, large, snapshot.get("large.txt").?.contents.bytes);
+    try std.testing.expectEqualStrings("deep source", snapshot.get(deep_path).?.contents.bytes);
     const repeated = try capture(a, io, path[0..length]);
     defer a.free(repeated);
     try std.testing.expectEqualSlices(u8, bytes, repeated);
@@ -221,7 +244,7 @@ pub fn Tools(comptime t: type) type {
                     truncated = true;
                     break;
                 }
-                try entries.append(a, .{ .path = file.path, .bytes = file.contents.bytes.len });
+                try entries.append(a, .{ .path = .{ .bytes = file.path.bytes }, .bytes = file.contents.bytes.len });
             }
             const value: t.Listing = .{
                 .entries = .{ .items = entries.items },
@@ -244,7 +267,7 @@ pub fn Tools(comptime t: type) type {
                 const hex = std.fmt.bytesToHex(file.sha256, .lower);
                 break :value .{ .found = .{
                     .snapshot = snapshot.identity,
-                    .path = file.path,
+                    .path = .{ .bytes = file.path.bytes },
                     .sha256 = .{ .bytes = try a.dupe(u8, &hex) },
                     .start = start,
                     .end = end,
@@ -257,7 +280,7 @@ pub fn Tools(comptime t: type) type {
 
         fn text(comptime T: type, a: std.mem.Allocator, value: T) !t.P.ResultText {
             const bytes = try @import("json.zig").canonical(a, try @import("values.zig").toJson(T, a, value));
-            if (bytes.len > t.P.ResultText.max_length.?) return error.Capacity;
+            if (contracts.exceeds(bytes.len, t.P.ResultText.max_length)) return error.Capacity;
             return .{ .bytes = bytes };
         }
     };

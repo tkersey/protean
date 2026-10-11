@@ -82,15 +82,6 @@ pub const Context = struct {
     /// Application/environment handles only; no evaluator handle is supplied.
     environment: ?*anyopaque,
     cancellation: ?*const std.atomic.Value(bool) = null,
-    /// Dispatch-time observation, including the current physical attempt.
-    /// This can narrow presentation; only the task owner admits actual work.
-    exhausted_capabilities: []const []const u8 = &.{},
-
-    pub fn nextAttemptLimitExhausted(self: Context, identity: []const u8) bool {
-        for (self.exhausted_capabilities) |item| if (std.mem.eql(u8, item, identity)) return true;
-        return false;
-    }
-
     pub fn checkCancellation(self: Context) error{Canceled}!void {
         if (self.cancellation) |flag| if (flag.load(.acquire)) return error.Canceled;
     }
@@ -101,13 +92,6 @@ pub const Declaration = struct {
     resource_role: []const u8,
     kind: Kind,
     inference: bool = false,
-    /// A frozen application policy may narrow the host's physical-attempt
-    /// ceiling. This is dispatch admission, never capture reinterpretation.
-    inference_attempt_limit: ?*const fn (std.mem.Allocator, []const u8) anyerror!u32 = null,
-    /// All physical attempts for this identity, including rejected/failed work.
-    /// Counted from the existing durable attempt records across restart/import.
-    /// Every schema specialization of one identity must use the same limit.
-    attempt_limit: ?u32 = null,
     /// Only this adapter's committed projection objects are public task data.
     /// Raw captures, prepared requests and other adapters' objects stay private.
     public_outputs: bool = false,
@@ -136,15 +120,12 @@ pub const Registry = struct {
     entries: []const Entry,
 
     pub fn init(a: std.mem.Allocator, declarations: []const Declaration) !Registry {
-        if (declarations.len > 64) return error.Capacity;
         var arena = std.heap.ArenaAllocator.init(a);
         errdefer arena.deinit();
         const storage = arena.allocator();
         const entries = try storage.alloc(Entry, declarations.len);
         for (declarations, entries, 0..) |declaration, *entry, i| {
             if (declaration.identity.len == 0 or declaration.resource_role.len == 0) return error.InvalidCapability;
-            if (declaration.inference_attempt_limit != null and !declaration.inference) return error.InvalidCapability;
-            if (declaration.attempt_limit) |limit| if (limit == 0 or limit > 64 or declaration.kind != .leaf) return error.InvalidCapability;
             if (declaration.public_outputs and declaration.capture == null) return error.InvalidCapability;
             if (declaration.kind == .leaf and declaration.invoke == null and declaration.capture == null) return error.InvalidCapability;
             if (declaration.capture != null and (declaration.kind != .leaf or !declaration.background or declaration.invoke != null)) return error.InvalidCapability;
@@ -157,8 +138,6 @@ pub const Registry = struct {
             // A request names its exact schemas, but has no independent role
             // selector. Indistinguishable bindings must never depend on order.
             for (entries[0..i]) |prior| {
-                if (std.mem.eql(u8, prior.declaration.identity, declaration.identity) and
-                    prior.declaration.attempt_limit != declaration.attempt_limit) return error.InvalidCapability;
                 if (sameBinding(prior, declaration.identity, entry.payload_schema, entry.resume_schema)) return error.DuplicateCapability;
             }
         }
@@ -311,22 +290,9 @@ test "schema-specialized capability families resolve independently of declaratio
     const small = leaf(u32, u32, .{ .identity = "model-family", .resource_role = "small" }, Handler.small);
     const large = leaf(u64, u64, .{ .identity = "model-family", .resource_role = "large" }, Handler.large);
     try std.testing.expectError(error.DuplicateCapability, Registry.init(a, &.{ small, small }));
-    var limited_small = small;
-    limited_small.attempt_limit = 2;
-    var limited_large = large;
-    limited_large.attempt_limit = 2;
     var distinct_large = large;
     distinct_large.identity = "other-family";
-    distinct_large.attempt_limit = 3;
-    // Shared accounting requires a single policy for the entire identity;
-    // neither declaration order nor a different schema can select a new budget.
-    for ([_]?u32{ null, 1, 3 }) |limit| {
-        var conflicting = large;
-        conflicting.attempt_limit = limit;
-        try std.testing.expectError(error.InvalidCapability, Registry.init(a, &.{ limited_small, conflicting }));
-        try std.testing.expectError(error.InvalidCapability, Registry.init(a, &.{ conflicting, limited_small }));
-    }
-    for ([_][2]Declaration{ .{ small, large }, .{ large, small }, .{ limited_small, limited_large }, .{ limited_large, limited_small }, .{ limited_small, distinct_large }, .{ distinct_large, limited_small } }) |declarations| {
+    for ([_][2]Declaration{ .{ small, large }, .{ large, small }, .{ small, distinct_large }, .{ distinct_large, small } }) |declarations| {
         var registry = try Registry.init(a, &declarations);
         defer registry.deinit();
         for (registry.entries) |entry| {

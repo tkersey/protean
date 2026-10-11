@@ -36,17 +36,17 @@ pub fn Admission(comptime P: type) type {
         pub const Selected = struct { profile: Profile, transport: responses.Settings };
 
         pub fn policy(a: std.mem.Allocator, bytes: []const u8) !Policy {
-            const parsed = try json.parse(a, bytes, .{ .bytes = 256 * 1024 });
+            const parsed = try json.parse(a, bytes, .{ .bytes = bytes.len, .tokens = bytes.len, .members = bytes.len });
             const value = try values.fromJson(Policy, a, json.get(parsed.value, "adaptive") orelse return error.InvalidConfiguration);
             if (!equal(value.schema.bytes, P.adaptive_policy_identity) or value.audience.bytes.len == 0 or
-                value.profiles.items.len == 0 or value.model_attempts == 0 or value.model_attempts > 64 or value.control_transitions > 32 or
-                value.catalog.bytes == 0 or value.catalog.bytes > 64 * 1024) return error.InvalidConfiguration;
+                value.profiles.items.len == 0 or
+                value.catalog.bytes == 0) return error.InvalidConfiguration;
             for (value.core_tools, value.permitted_tools) |core, permitted| if (core and !permitted) return error.InvalidConfiguration;
             for (value.profiles.items, 0..) |entry, index| {
-                if (!identifier(entry.id.bytes) or entry.model.bytes.len == 0 or entry.model.bytes.len > P.representation.model_id_bytes or
+                if (!identifier(entry.id.bytes) or entry.model.bytes.len == 0 or contracts.exceeds(entry.model.bytes.len, P.representation.model_id_bytes) or
                     !identifier(entry.opaque_family.bytes) or entry.efforts.items.len == 0 or
-                    entry.max_output_tokens == 0 or entry.max_output_tokens > 32768 or
-                    entry.request_bytes > @FieldType(P.AdaptivePrepared, "body").max_length.? or entry.response_bytes > 512 * 1024 or entry.response_bytes > P.representation.provider_response_bytes or
+                    entry.max_output_tokens == 0 or
+                    (P.representation.provider_response_bytes != null and (entry.response_bytes == null or entry.response_bytes.? > P.representation.provider_response_bytes.?)) or
                     (entry.effort_update and entry.reasoning_mode != .standard)) return error.InvalidConfiguration;
                 for (value.profiles.items[0..index]) |earlier| if (equal(earlier.id.bytes, entry.id.bytes)) return error.InvalidConfiguration;
                 for (entry.efforts.items, 0..) |effort, n| for (entry.efforts.items[0..n]) |earlier| if (effort == earlier) return error.InvalidConfiguration;
@@ -96,7 +96,7 @@ pub fn Admission(comptime P: type) type {
         }
 
         pub fn catalog(ctx: registry.ProjectionContext, frozen: Policy) !contracts.Decoded(P.AdaptiveCatalog) {
-            const bytes = try object(ctx, frozen.catalog, 64 * 1024);
+            const bytes = try object(ctx, frozen.catalog, std.math.cast(usize, frozen.catalog.bytes) orelse return error.Capacity);
             defer ctx.allocator.free(bytes);
             var decoded = try contracts.decodeOwned(P.AdaptiveCatalog, ctx.allocator, bytes);
             errdefer decoded.deinit();
@@ -108,24 +108,18 @@ pub fn Admission(comptime P: type) type {
         /// Callers separately establish resource integrity and deployment limits.
         pub fn validateCatalog(frozen: Policy, value: P.AdaptiveCatalog) !void {
             const entries = value.skills.items;
-            var admitted_bytes: u64 = 0;
             for (entries, 0..) |entry, index| {
-                if (!identifier(entry.id.bytes) or !identifier(entry.version.bytes) or entry.instructions.bytes == 0 or entry.instructions.bytes > 32 * 1024) return error.InvalidSkill;
-                admitted_bytes += entry.instructions.bytes;
-                if (admitted_bytes > 128 * 1024) return error.Capacity;
+                if (!identifier(entry.id.bytes) or !identifier(entry.version.bytes) or entry.instructions.bytes == 0) return error.InvalidSkill;
                 for (entries[0..index]) |earlier| if (equal(entry.id.bytes, earlier.id.bytes)) return error.InvalidSkill;
                 for (entry.tools, frozen.permitted_tools) |enabled, permitted| if (enabled and !permitted) return error.InvalidSkill;
             }
         }
 
         pub fn bind(ctx: registry.ProjectionContext, frozen: Policy, request: P.AdaptiveRequest, skills: P.AdaptiveCatalog) !Selected {
-            if (!equal(&request.policy, &storage.digest(ctx.profile)) or !sameReference(request.plan.catalog, frozen.catalog) or
-                request.selection.control_revision > frozen.control_transitions) return error.IncompatibleProfile;
+            if (!equal(&request.policy, &storage.digest(ctx.profile)) or !sameReference(request.plan.catalog, frozen.catalog)) return error.IncompatibleProfile;
             const selected = try select(ctx.allocator, frozen, request);
             var materialized = frozen.core_tools;
             var permitted = frozen.core_tools;
-            var active: usize = 0;
-            var body_bytes: u64 = 0;
             for (request.plan.skills.items, 0..) |loaded, index| {
                 var found: ?P.AdaptiveSkill = null;
                 for (skills.skills.items) |entry| if (equal(entry.id.bytes, loaded.skill_id.bytes) and equal(entry.version.bytes, loaded.version.bytes)) {
@@ -134,10 +128,7 @@ pub fn Admission(comptime P: type) type {
                 const entry = found orelse return error.UnknownSkill;
                 if (!sameReference(entry.instructions, loaded.resource) or loaded.introduced_at > request.plan.watermark) return error.InvalidSkill;
                 for (request.plan.skills.items[0..index]) |earlier| if (equal(earlier.skill_id.bytes, loaded.skill_id.bytes)) return error.InvalidSkill;
-                active += @intFromBool(loaded.active);
-                body_bytes += entry.instructions.bytes;
-                if (active > 4 or body_bytes > 128 * 1024) return error.Capacity;
-                const body = try object(ctx, entry.instructions, 32 * 1024);
+                const body = try object(ctx, entry.instructions, std.math.cast(usize, entry.instructions.bytes) orelse return error.Capacity);
                 defer ctx.allocator.free(body);
                 if (!std.unicode.utf8ValidateSlice(body)) return error.InvalidSkill;
                 for (entry.tools, 0..) |enabled, ordinal| {
@@ -174,7 +165,7 @@ pub fn Adapter(comptime P: type) type {
         pub const Context = @import("adaptive_context.zig").Projection(P);
         pub const Prepared = P.AdaptivePrepared;
         pub fn declaration() registry.Declaration {
-            return .{ .identity = P.adaptive_identity, .resource_role = "inference", .kind = .leaf, .inference = true, .inference_attempt_limit = attemptLimit, .background = true, .payload_schema = struct {
+            return .{ .identity = P.adaptive_identity, .resource_role = "inference", .kind = .leaf, .inference = true, .background = true, .payload_schema = struct {
                 fn schema(a: std.mem.Allocator) ![]u8 {
                     return values.schemaBytes(P.AdaptiveRequest, a);
                 }
@@ -183,10 +174,6 @@ pub fn Adapter(comptime P: type) type {
                     return values.schemaBytes(P.AdaptiveResult, a);
                 }
             }.schema, .capture = .{ .prepare = prepare, .acquire = acquire, .interpret = interpret } };
-        }
-
-        fn attemptLimit(a: std.mem.Allocator, profile: []const u8) !u32 {
-            return (try A.policy(a, profile)).model_attempts;
         }
 
         pub fn prepare(ctx: registry.ProjectionContext, bytes: []const u8) ![]u8 {
@@ -202,7 +189,7 @@ pub fn Adapter(comptime P: type) type {
             try json.put(a, &body, "model", json.string(selected.transport.model.bytes));
             try json.put(a, &body, "input", projected.input);
             try json.put(a, &body, "tools", projected.core_tools);
-            try json.put(a, &body, "max_output_tokens", try json.number(a, selected.transport.max_output_tokens));
+            if (selected.transport.max_output_tokens) |maximum| try json.put(a, &body, "max_output_tokens", try json.number(a, maximum));
             var reasoning = json.object();
             try json.put(a, &reasoning, "effort", json.string(selected.transport.effort.bytes));
             try json.put(a, &reasoning, "mode", json.string(@tagName(selected.profile.reasoning_mode)));
@@ -235,7 +222,7 @@ pub fn Adapter(comptime P: type) type {
                 if (selected.profile.cache_diagnostics) if (projected.prior_response_id) |id| try json.put(a, &cache, "comparison_response_id", json.string(id));
                 try json.put(a, &body, "prompt_cache_options", cache);
             }
-            const rendered = try json.canonicalBounded(a, body, selected.transport.request_bytes);
+            const rendered = try json.canonicalOptional(a, body, selected.transport.request_bytes);
             return contracts.encodeOwned(Prepared, a, .{ .version = 1, .request = request.value, .body = .{ .bytes = rendered } });
         }
 
@@ -248,16 +235,20 @@ pub fn Adapter(comptime P: type) type {
             const selected = A.select(ctx.allocator, policy, prepared.value.request) catch |err| return .{ .definitely_not_sent = err };
             // Selection is re-admitted under the frozen catalog at acquisition,
             // rather than reading the newest mutable launch configuration.
-            const body = json.parse(ctx.allocator, prepared.value.body.bytes, .{ .bytes = selected.transport.request_bytes }) catch |err| return .{ .definitely_not_sent = err };
+            const body = json.parse(ctx.allocator, prepared.value.body.bytes, .{ .bytes = selected.transport.request_bytes orelse prepared.value.body.bytes.len, .tokens = prepared.value.body.bytes.len, .members = prepared.value.body.bytes.len }) catch |err| return .{ .definitely_not_sent = err };
             const reasoning = json.get(body.value, "reasoning") orelse return .{ .definitely_not_sent = error.InvalidPreparedRequest };
-            const maximum = json.get(body.value, "max_output_tokens") orelse return .{ .definitely_not_sent = error.InvalidPreparedRequest };
+            const maximum = json.get(body.value, "max_output_tokens");
             if (!jsonTextEquals(body.value, "model", selected.transport.model.bytes) or
                 !jsonTextEquals(reasoning, "effort", selected.transport.effort.bytes) or
                 !jsonTextEquals(reasoning, "mode", @tagName(selected.profile.reasoning_mode)) or
                 !jsonTextEquals(reasoning, "context", @tagName(selected.profile.reasoning_context)) or
-                !jsonTextEquals(body.value, "truncation", "disabled") or maximum != .number_string) return .{ .definitely_not_sent = error.InvalidPreparedRequest };
-            const maximum_tokens = json.numberInteger(u32, maximum.number_string) catch return .{ .definitely_not_sent = error.InvalidPreparedRequest };
-            if (maximum_tokens != selected.transport.max_output_tokens) return .{ .definitely_not_sent = error.InvalidPreparedRequest };
+                !jsonTextEquals(body.value, "truncation", "disabled")) return .{ .definitely_not_sent = error.InvalidPreparedRequest };
+            if (selected.transport.max_output_tokens) |expected| {
+                const actual = maximum orelse return .{ .definitely_not_sent = error.InvalidPreparedRequest };
+                if (actual != .number_string) return .{ .definitely_not_sent = error.InvalidPreparedRequest };
+                const tokens = json.numberInteger(u32, actual.number_string) catch return .{ .definitely_not_sent = error.InvalidPreparedRequest };
+                if (tokens != expected) return .{ .definitely_not_sent = error.InvalidPreparedRequest };
+            } else if (maximum != null) return .{ .definitely_not_sent = error.InvalidPreparedRequest };
             const input = json.get(body.value, "input") orelse return .{ .definitely_not_sent = error.InvalidPreparedRequest };
             const effective = Context.effectiveEffort(input, prepared.value.request.invocation.parameters.reasoning.?.effort.?) catch return .{ .definitely_not_sent = error.InvalidPreparedRequest };
             if (effective != prepared.value.request.selection.effective_effort) return .{ .definitely_not_sent = error.InvalidPreparedRequest };
@@ -320,7 +311,7 @@ pub fn Adapter(comptime P: type) type {
         fn encode(ctx: registry.ProjectionContext, result: P.AdaptiveResult, objects: []const []const u8) !registry.Projection {
             const bytes = try contracts.encodeOwned(P.AdaptiveResult, ctx.allocator, result);
             const tokens = if (result.usage) |available| available.output_tokens else null;
-            if (bytes.len > P.representation.maximum_adaptive_reply_bytes) {
+            if (contracts.exceeds(bytes.len, P.representation.maximum_adaptive_reply_bytes)) {
                 ctx.allocator.free(bytes);
                 return .{ .reply = try contracts.encodeOwned(P.AdaptiveResult, ctx.allocator, .{
                     .result = .{ .unsupported_response = .normalization_limit },
@@ -348,28 +339,28 @@ pub fn Adapter(comptime P: type) type {
             if (raw.value.status < 200 or raw.value.status >= 300) return encode(ctx, .{ .result = .{ .provider_failure = .{ .kind = .http_status, .http_status = raw.value.status } }, .replay = null, .replay_status = .unsupported, .usage = null }, &.{});
             if (!raw.value.identity_encoding) return unsupported(ctx, .unsupported_output_item, null);
             if (!std.unicode.utf8ValidateSlice(raw.value.body.bytes)) return unsupported(ctx, .invalid_utf8, null);
-            const parsed = json.parse(ctx.allocator, raw.value.body.bytes, .{ .bytes = selected.transport.response_bytes }) catch |err| return unsupported(ctx, if (err == error.Capacity) .normalization_limit else .malformed_json, null);
+            const parsed = json.parse(ctx.allocator, raw.value.body.bytes, .{ .bytes = selected.transport.response_bytes orelse raw.value.body.bytes.len, .tokens = raw.value.body.bytes.len, .members = raw.value.body.bytes.len }) catch |err| return unsupported(ctx, if (err == error.Capacity) .normalization_limit else .malformed_json, null);
             const body = parsed.value;
             const observed = usage(body);
             if (jsonTextEquals(body, "status", "failed") or jsonTextEquals(body, "status", "incomplete")) return encode(ctx, .{ .result = .{ .provider_failure = .{ .kind = if (jsonTextEquals(body, "status", "failed")) .response_failed else .response_incomplete, .http_status = 0 } }, .replay = null, .replay_status = .unsupported, .usage = observed.value }, &.{});
             if (!jsonTextEquals(body, "status", "completed") or (json.get(body, "error") orelse return unsupported(ctx, .unsupported_status, observed.value)) != .null) return unsupported(ctx, .unsupported_status, observed.value);
             const output = json.get(body, "output") orelse return unsupported(ctx, .unsupported_status, observed.value);
             if (output != .array) return unsupported(ctx, .unsupported_output_item, observed.value);
-            if (output.array.items.len > P.representation.maximum_output_items) return unsupported(ctx, .normalization_limit, observed.value);
+            if (contracts.exceeds(output.array.items.len, P.representation.maximum_output_items)) return unsupported(ctx, .normalization_limit, observed.value);
             const normalized = responses.Adapter(P).normalize(ctx.allocator, request.value.invocation, output) catch |err| return unsupported(ctx, if (err == error.Capacity) .normalization_limit else if (err == error.MixedRefusal) .mixed_refusal else .unsupported_output_item, observed.value);
             if (!observed.valid) return unsupported(ctx, .unsupported_output_item, observed.value);
             var projected = try Context.render(ctx, request.value, policy, selected, catalog.value);
             for (output.array.items) |item| {
                 try projected.history.array.append(try responses.replayItem(ctx.allocator, item));
                 const reasoning_item = jsonTextEquals(item, "type", "reasoning");
-                try projected.origins.append(ctx.allocator, .{ .watermark = request.value.plan.watermark, .reasoning_skills = if (reasoning_item) projected.reasoning_skills else 0, .reasoning_tools = if (reasoning_item) request.value.materialized else @splat(false) });
+                try projected.origins.append(ctx.allocator, .{ .watermark = request.value.plan.watermark, .reasoning_skills = if (reasoning_item) projected.reasoning_skills else .{ .items = &.{} }, .reasoning_tools = if (reasoning_item) request.value.materialized else @splat(false) });
             }
             var pending = Context.pending(ctx.allocator, projected.history) catch return unsupported(ctx, .unsupported_output_item, observed.value);
             pending.deinit();
-            const items = json.canonicalBounded(ctx.allocator, projected.history, 2 * 1024 * 1024) catch return unsupported(ctx, .normalization_limit, observed.value);
-            var response_id: ?contracts.Text(256) = null;
+            const items = try json.canonical(ctx.allocator, projected.history);
+            var response_id: ?contracts.Utf8 = null;
             if (json.get(body, "id")) |id| {
-                if (id != .string or id.string.len == 0 or id.string.len > 256) return unsupported(ctx, .unsupported_output_item, observed.value);
+                if (id != .string or id.string.len == 0) return unsupported(ctx, .unsupported_output_item, observed.value);
                 response_id = .{ .bytes = id.string };
             }
             const watermark = try std.math.add(u64, request.value.plan.watermark, 1);
@@ -389,7 +380,6 @@ pub fn Adapter(comptime P: type) type {
                 .items = .{ .bytes = items },
                 .origins = .{ .items = projected.origins.items },
             });
-            if (artifact.len > 2 * 1024 * 1024) return unsupported(ctx, .normalization_limit, observed.value);
             const objects = try ctx.allocator.alloc([]const u8, 1);
             objects[0] = artifact;
             return encode(ctx, .{ .result = normalized, .replay_status = .complete, .usage = observed.value, .replay = .{

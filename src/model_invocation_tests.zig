@@ -110,7 +110,7 @@ test "stateless replay is an additive bounded ordinary contract with exact legac
     try std.testing.expectEqual(replay, try Fixture.declareReplay(&builder));
     try std.testing.expectEqualStrings(invocation.replay_semantic_identity, builder.effects.items[@intCast(replay)].identity);
     try std.testing.expectEqual(try contracts.schema(Fixture.ReplayRequest, &builder), builder.effects.items[@intCast(replay)].payload);
-    try std.testing.expectEqual(invocation.maximum_replay_bytes, Fixture.ReplayBytes.max_length.?);
+    try std.testing.expectEqual(null, Fixture.ReplayBytes.max_length);
 }
 
 test "reference replay carries bounded bindings without copying provider history" {

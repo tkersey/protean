@@ -102,15 +102,15 @@ pub const Application = struct {
         var arena = std.heap.ArenaAllocator.init(a);
         errdefer arena.deinit();
         const storage = arena.allocator();
-        const metadata = try json.parseAsset(storage, assets.application, 16 * 1024 * 1024);
-        const manifest = try json.parse(storage, assets.manifest, .{ .bytes = 256 * 1024 });
+        const metadata = try json.parseAsset(storage, assets.application, assets.application.len);
+        const manifest = try json.parseAsset(storage, assets.manifest, assets.manifest.len);
         try sameField(metadata.value, "format", "agent-native-application/v1");
         try sameField(metadata.value, "application_id", Types.application_id);
         try sameField(metadata.value, "application_version", Types.application_version);
         const client_mapping = values.schemas.clientMapping(.{ Types.Input, Types.Output, Types.Failure, Types.Answer, Types.Message });
         try sameField(metadata.value, "client_mapping", client_mapping);
         sameField(metadata.value, "program_sha256", try digest(storage, assets.image)) catch return error.ApplicationProgramDigestMismatch;
-        try sameField(manifest.value, "format", "agent-native-build/v1");
+        try sameField(manifest.value, "format", "agent-native-build/v2");
         try sameField(manifest.value, "client_mapping", client_mapping);
         try sameField(manifest.value, "state_format", std.fmt.comptimePrint("agent-native-state/{d}", .{@import("store.zig").format}));
         sameField(manifest.value, "program_sha256", try digest(storage, assets.image)) catch return error.ManifestProgramDigestMismatch;
@@ -124,7 +124,7 @@ pub const Application = struct {
             try sameField(schema, "schema_id", item[2]);
             const bytes = try values.schemaBytes(item[1], storage);
             try sameField(schema, "wire_sha256", try digest(storage, bytes));
-            const client = try json.parseAsset(storage, &values.schemas.ClientSchema(item[1]).value, 16 * 1024 * 1024);
+            const client = try json.parseAsset(storage, &values.schemas.ClientSchema(item[1]).value, values.schemas.ClientSchema(item[1]).value.len);
             if (!std.mem.eql(u8, try json.canonical(storage, client.value), try json.canonical(storage, json.get(schema, "json") orelse return error.InvalidAssets)))
                 return error.ClientJsonSchemaMismatch;
         }

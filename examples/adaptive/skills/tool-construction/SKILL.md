@@ -22,7 +22,7 @@ mechanical work would otherwise require repeated model orchestration, or a
 parameterized procedure will be useful on more than one input. Do not construct
 a tool merely to demonstrate that construction is available.
 
-This release constructs bounded, deterministic computations over admitted input
+This release constructs deterministic computations over admitted input
 values. A generated program cannot contact a model, read the filesystem, call a
 network service, request approval, install code, spawn another agent, or invoke
 `tool_build` or `tool_run`. Obtain necessary evidence through the parent agent's
@@ -49,18 +49,18 @@ another compatible input without another construction call.
 ## Use the actual admitted vocabulary
 
 Read the tool-construction interface supplied with this skill: the current
-catalog identity, component identifiers, imports, exports, schemas, and limits.
+catalog identity, component identifiers, imports, exports, and schemas.
 Those machine-derived interfaces—not examples remembered from another run—are
 the authority on what can be composed.
 
 Choose the smallest composition that establishes the required relationships.
 Use available sequencing, branching, traversal, joining, and reduction
 components where appropriate. A repeated operation belongs in an admitted
-bounded traversal, not in an unrolled list specialized to this input's length.
+traversal, not in an unrolled list specialized to this input's length.
 Wire compatible contracts explicitly. Do not invent a component or symbol,
 borrow contract, hidden callback, effect declaration, or conversion.
 
-The proposal is a bounded link recipe, not Zig/JavaScript/Python source and not
+The proposal is a link recipe, not Zig/JavaScript/Python source and not
 raw BMO1/BPI3 bytes. Its `instances` select approved components by catalog ID;
 `bindings` connect their named imports and exports; `entry` selects the exported
 entry function. Use the exact schema supplied by the running interface. Never
@@ -69,7 +69,7 @@ substitute filesystem paths or URLs for component IDs.
 ## Build, inspect, then run
 
 `tool_build` accepts `proposal_json`, the complete recipe encoded as a JSON
-string. The host supplies the task, catalog, authority, and limits; do not invent
+string. The host supplies the task, catalog, and authority; do not invent
 those fields. Construction does not execute the proposed program.
 
 A successful build returns a `tool_ref` and the actual input/output contracts.
@@ -80,7 +80,7 @@ composition match your intended procedure before requesting execution.
 `tool_run` accepts `tool_ref` and `input_ref`. Use the exact returned program
 reference and an authorized value reference matching its input contract. The
 input reference identifies real admitted data, not a new location to read or
-model-invented evidence. The host rechecks permission and budgets. The reference
+model-invented evidence. The host rechecks permission and the retained derivation. The reference
 itself grants neither execution nor access to someone else's input.
 
 Do not synthesize new model-visible function schemas for each artifact. Use the
@@ -95,8 +95,8 @@ composition; preserve the original required behavior. A missing symbol is not
 fixed by renaming arbitrary components. A schema conflict is not fixed by
 ignoring a field. An effect denial is not fixed by declaring the program pure.
 
-Use remaining construction allowances deliberately. Repeating the same invalid
-recipe without new information wastes the budget. Report a precise unsupported
+Use returned evidence to decide whether another construction is useful. Repeating
+the same invalid recipe without new information does not repair it. Report a precise unsupported
 operation, incompatible interface, or capacity limit when the admitted vocabulary
 cannot express the requirement. Do not ask the builder to generate a solution
 or call another model secretly on your behalf.
@@ -114,9 +114,8 @@ Do not manufacture a success criterion from the program's own output or demand
 a permanent regression file for every successful call. Preserve valid negative
 outcomes such as missing evidence rather than translating them into agreement.
 
-Treat `rejected`, `failed`, `budget_exhausted`, `cancelled`, and unresolved delivery
-as their actual dispositions. Do not reset allowances by building the same tool
-again, opening a new child, or retrying an ambiguous occurrence. Reuse an acquired
+Treat rejection, failure, cancellation, and unresolved delivery as their actual
+dispositions. Do not retry an ambiguous occurrence. Reuse an acquired
 result through the existing task lifecycle; a new execution is a new accounted
 operation, even when its computation is pure.
 

@@ -76,6 +76,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
     try {
       const chunks = []; for await (const bytes of request) chunks.push(bytes);
       const bytes = Buffer.concat(chunks), body = JSON.parse(bytes);
+      assert.equal(Object.hasOwn(body, 'max_output_tokens'), false, 'normal requests omit an artificial output-token cap');
       assert.equal(request.url, '/v1/responses'); assert.equal(request.headers.authorization, 'Bearer qualification-only');
       if (scenario.startsWith('tools-')) {
         const index = alternateIndex++, subject = toolSubject;
@@ -96,14 +97,14 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
           const recipe = JSON.parse(text.slice(text.indexOf(marker) + marker.length).split('\n')[0]);
           assert.deepEqual(recipe.required, ['instances', 'bindings', 'entry']);
           assert.equal(recipe.additionalProperties, false);
-          assert.equal(recipe.properties.instances.maxItems, 16);
+          assert.equal(Object.hasOwn(recipe.properties.instances, 'maxItems'), false);
           assert.deepEqual(recipe.properties.instances.items.required, ['key', 'component_id']);
-          assert.equal(recipe.properties.instances.items.properties.key.maxLength, 64);
-          assert.equal(recipe.properties.bindings.maxItems, 64);
+          assert.equal(Object.hasOwn(recipe.properties.instances.items.properties.key, 'maxLength'), false);
+          assert.equal(Object.hasOwn(recipe.properties.bindings, 'maxItems'), false);
           assert.deepEqual(recipe.properties.bindings.items.required, ['required', 'supplied']);
           assert.deepEqual(recipe.properties.bindings.items.properties.required.required, ['instance', 'symbol']);
           assert.deepEqual(recipe.properties.entry.required, ['instance', 'symbol']);
-          assert.match(text, /proposal_json \(at most 2700 UTF-8 bytes\)/);
+          assert.match(text, /schema as proposal_json\./);
         }
         if (index === 0) {
           assert(!offered.has('tool_build')); assert(offered.has('tool_run'));
@@ -135,7 +136,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
           if (index === 4) { assert.equal(output(3).disposition, 'rejected'); assert(offered.has('tool_build')); call = ['tool_build', {proposal_json: JSON.stringify(subject.recipe)}]; }
           if (index === 5) {
             const built = output(4); assert.equal(built.disposition, 'structurally_admitted', JSON.stringify(built)); subject.program = built.tool_ref;
-            assert(!offered.has('tool_build'), 'four physical construction attempts exhaust the offered allowance');
+            assert(offered.has('tool_build'), 'accounting four attempts does not revoke construction authority');
             assert(offered.has('tool_run')); call = ['tool_run', {tool_ref: subject.program, input_ref: subject.inputs[0].input_ref}];
           }
           if (index === 6) { const result = output(5); assert.equal(result.disposition, 'completed', JSON.stringify(result)); assert.deepEqual(result.value.rows.map(row => [row.id, row.status]), [['1', '1'], ['2', '2'], ['3', '3'], ['4', '4']]); call = skill('load', 1, 'invariant-review'); }
@@ -144,15 +145,28 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
           if (index === 9) { assert.match(outputText(8), /source-file evidence/); call = ['inspect', {evidence_index: 1}]; }
           if (index === 10) { assert.match(outputText(9), /Observed 0 lines.*evidence 1/); call = skill('unload', 2, 'invariant-review'); }
           if (index === 11) call = ['ask', {question: 'The first audit and source inspection are acquired. Continue on the second input?'}];
-          if (index === 12) { assert(!offered.has('tool_build'), 'exhausted construction remains unavailable after restart/import while its skill is active'); call = skill('deactivate', 3); }
+          if (index === 12) { assert(offered.has('tool_build'), 'construction authority survives restart/import with its active skill'); call = skill('deactivate', 3); }
           if (index === 13) call = skill('unload', 4);
           if (index === 14) {
             assert(!offered.has('tool_build')); assert(offered.has('tool_run'));
             assert(strings(body.input).some(text => text.includes('Retained generated tool references') && text.includes(subject.program)));
             call = ['tool_run', {tool_ref: subject.program, input_ref: subject.inputs[1].input_ref}];
           }
-          if (index === 15) { const result = output(14); assert.equal(result.disposition, 'completed', JSON.stringify(result)); assert.equal(result.tool_ref, subject.program); assert.deepEqual(result.value.rows.map(row => [row.id, row.status]), [['80', '1']]); call = ['report', {summary: 'The same admitted program found agreement on the changed second input.', evidence_index: 2}]; }
-          assert(index <= 15);
+          if (index >= 15 && index <= 24) {
+            const result = output(index - 1);
+            assert.equal(result.disposition, 'completed', JSON.stringify(result));
+            assert.equal(result.tool_ref, subject.program);
+            const expected = (index - 1) % 2 === 0 ? [['80', '1']] : [['1', '1'], ['2', '2'], ['3', '3'], ['4', '4']];
+            assert.deepEqual(result.value.rows.map(row => [row.id, row.status]), expected);
+            assert(offered.has('tool_run'), 'work and generated executions remain available beyond the old quotas');
+            call = ['tool_run', {tool_ref: subject.program, input_ref: subject.inputs[index % 2 === 0 ? 1 : 0].input_ref}];
+          }
+          if (index >= 25 && index <= 36) {
+            assert(offered.has('skill_set'), 'control revisions remain available beyond sixteen');
+            call = skill(index % 2 === 1 ? 'load' : 'unload', index - 20, 'repository-orientation');
+          }
+          if (index === 37) call = ['report', {summary: 'The same admitted program continued auditing both inputs after restart; the second input agrees.', evidence_index: 12}];
+          assert(index <= 37);
         }
         assert(call);
         response.writeHead(200, {'content-type': 'application/json'});
@@ -188,8 +202,8 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
   server.on('connection', socket => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)); });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const profile = (id, model) => ({id, model, reasoning_mode: 'standard', reasoning_context: 'auto', efforts: ['medium', 'high'], effort_update: false,
-    explicit_cache: true, additional_tools: true, cache_diagnostics: true, opaque_family: 'fixture', max_output_tokens: 4096,
-    request_bytes: 256 * 1024, response_bytes: 512 * 1024, timeout_ms: 10000});
+    explicit_cache: true, additional_tools: true, cache_diagnostics: true, opaque_family: 'fixture', max_output_tokens: null,
+    request_bytes: null, response_bytes: null, timeout_ms: null});
   const skills = [], skillBodies = [];
   for (const id of ['repository-orientation', 'invariant-review', 'technical-reporting']) {
     const resource = asset.resources.find(row => row.id === id), markdown = join(app.data, `${id}.md`);
@@ -198,9 +212,9 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
     skills.push({id, version: '1', description: id, markdown, tools: Array.from({length: 8}, (_value, index) => id === 'invariant-review' && index === 7)});
   }
   const config = {workspace: 'adaptive-controlled', snapshot_root: root, endpoint: `https://127.0.0.1:${server.address().port}/v1/responses`, audience: 'controlled-adaptive',
-    profiles: [profile('analysis', 'fixture-model-a'), profile('deep', 'fixture-model-b')], initial_profile: 'analysis', initial_effort: 'medium', skills,
-    maximum_model_calls: 16, maximum_control_revision: 16};
-  await writeFile(configPath, JSON.stringify(config));
+    profiles: [profile('analysis', 'fixture-model-a'), profile('deep', 'fixture-model-b')], initial_profile: 'analysis', initial_effort: 'medium', skills};
+  const configuration = adaptive => ({schema: 'adaptive-agent.configuration.v3', adaptive, tools: null});
+  await writeFile(configPath, JSON.stringify(configuration(config)));
   const invoke = (...args) => {
     const result = spawnSync(app.command, [...args, '--test-provider', '--trust-root', trust], {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024});
     assert.equal(result.status, 0, result.error ?? `${result.stderr}\n${result.stdout}`); return JSON.parse(result.stdout);
@@ -221,10 +235,15 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
   };
   try {
     invoke('validate', '--config', configPath); assert.equal(requests.length, 0);
+    const retiredConfig = join(app.data, 'retired-quota-contract.json');
+    await writeFile(retiredConfig, JSON.stringify({...configuration(config), schema: 'adaptive-agent.configuration.v2'}));
+    const retired = spawnSync(app.command, ['validate', '--config', retiredConfig, '--test-provider', '--trust-root', trust],
+      {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 10000});
+    assert.equal(retired.status, 64, 'old finite contracts require their original build');
     for (const [field, value] of [['id', 'review/guards'], ['version', '1.0.0+local']]) {
       const invalid = structuredClone(config), path = join(app.data, `invalid-skill-${field}.json`);
       invalid.skills[0][field] = value;
-      await writeFile(path, JSON.stringify(invalid));
+      await writeFile(path, JSON.stringify(configuration(invalid)));
       const rejected = spawnSync(app.command, ['validate', '--config', path, '--test-provider', '--trust-root', trust],
         {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 10000});
       assert.equal(rejected.status, 64, `${field}: ${rejected.error ?? rejected.stdout}`);
@@ -232,7 +251,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
     }
     const credential = join(app.data, 'synthetic-private-credential'), leakedConfig = join(app.data, 'credential-profile.json');
     await writeFile(credential, 'qualification-only\n', {mode: 0o600});
-    await writeFile(leakedConfig, JSON.stringify({...config, endpoint: 'https://api.openai.com/v1/responses', workspace: 'qualification-only'}));
+    await writeFile(leakedConfig, JSON.stringify(configuration({...config, endpoint: 'https://api.openai.com/v1/responses', workspace: 'qualification-only'})));
     const leaked = spawnSync(app.command, ['validate', '--config', leakedConfig, '--credential-file', credential],
       {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 10000});
     assert.equal(leaked.status, 64); assert(!`${leaked.stdout}${leaked.stderr}`.includes('qualification-only'));
@@ -240,7 +259,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
     await launch(['--config', configPath]);
     const description = await client.call('describe');
     const accepted = await client.call('task.submit', {client_operation_id: 'adaptive-controlled-submit', application_id: 'adaptive-agent', profile_id: description.profile.id,
-      input: {schema_id: 'adaptive-agent.input.v1', value: {task: 'Explain the fixture entry point using source evidence and exercise the approved adaptive controls.'}}});
+      input: {schema_id: 'adaptive-agent.input.v2', value: {task: 'Explain the fixture entry point using source evidence and exercise the approved adaptive controls.'}}});
     let timer;
     try { await Promise.race([held, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('provider hold timeout')), 15000); })]); }
     finally { clearTimeout(timer); }
@@ -249,7 +268,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
     const statusStart = performance.now(); const heldStatus = await client.call('task.status', {task_id: accepted.task_id}, 2000); const statusMs = performance.now() - statusStart;
     assert.equal(heldStatus.profile_digest, accepted.profile_digest);
     const message = {client_operation_id: 'adaptive-held-followup', task_id: accepted.task_id,
-      message: {schema_id: 'adaptive-agent.message.v1', value: {message: 'FOLLOWUP-A: distinguish observations from unrun checks.'}}};
+      message: {schema_id: 'adaptive-agent.message.v2', value: {message: 'FOLLOWUP-A: distinguish observations from unrun checks.'}}};
     const queued = await client.call('task.message', message, 2000); assert.equal(queued.disposition, 'queued');
     assert.equal((await client.call('task.message', message, 2000)).receipt_id, queued.receipt_id);
     for (const [id, text] of [['two', 'FOLLOWUP-B: retain original source identity.'], ['three', 'FOLLOWUP-C: do not claim unrun checks.']]) {
@@ -265,13 +284,13 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
     assert(!requests[8].bytes.includes('OPAQUE-SKILL-CONTEXT-6'));
     assert(!requests[8].body.input.some(item => item.type === 'additional_tools' && item.tools.some(tool => tool.name === 'inspect')));
     assert.equal(waiting.profile_digest, accepted.profile_digest);
-    const leftover = await client.call('task.message', {...message, client_operation_id: 'adaptive-unconsumed',
-      message: {...message.message, value: {message: 'Retain this input when the authored allowance is full.'}}});
+    const leftover = await client.call('task.message', {...message, client_operation_id: 'adaptive-after-restart',
+      message: {...message.message, value: {message: 'FOLLOWUP-D: use the acquired source identity after restart.'}}});
     assert.equal(leftover.disposition, 'queued');
     app.signal(client.child, 'SIGKILL'); await client.closed; client = null;
     await writeFile(join(root, 'src/main.zig'), 'changed after admission\n');
     const changedConfig = join(app.data, 'changed-adaptive.json');
-    await writeFile(changedConfig, JSON.stringify({...config, initial_effort: 'high'}));
+    await writeFile(changedConfig, JSON.stringify(configuration({...config, initial_effort: 'high'})));
     const refused = spawnSync(app.command, ['resume', '--state-dir', state, '--task-id', accepted.task_id, '--config', changedConfig, '--test-provider', '--trust-root', trust],
       {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 10000});
     assert.equal(refused.status, 64); assert.equal(requests.length, 13);
@@ -304,8 +323,9 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
     assert.equal(archive.task.resources.length, skillBodies.length + 2);
     for (const [index, skill] of skillBodies.entries()) assert.equal(archive.object(archive.task.resources[index + 1]).toString('utf8'), skill.body);
     const messageStates = archive.manifest[6].filter(([kind]) => kind === 2).map(([, , ref]) => decodeValue(archive.schemas.get('message'), archive.object(ref))[5]);
-    assert.equal(messageStates.filter(state => state === 2).length, 3, 'three authored follow-ups consumed');
-    assert.equal(messageStates.filter(state => state === 3).length, 1, 'input beyond the authored allowance remains not consumed');
+    assert.equal(messageStates.filter(state => state === 2).length, 4, 'all four follow-ups are consumed once, in addition to the clarification answer');
+    assert(requests[13].bytes.includes('FOLLOWUP-D'));
+    assert.equal(messageStates.filter(state => state === 3).length, 0, 'the former answer-plus-followup quota does not abandon queued input');
     let providerProjections = 0, controlProjections = 0, workProjections = 0, readEvidence = 0;
     const captureRows = [], toolNames = ['list', 'read', 'ask', 'report', 'stop', 'inference_set', 'skill_set', 'inspect'];
     const revisions = [0, 0, 0, 1, 1, 2, 3, 4, 5, 6, 7, 7, 8, 8];
@@ -321,7 +341,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
       const identity = attempt[5], prepared = archive.object(capture[3]), rawBytes = archive.object(capture[4].value);
       const replyBytes = resultValue(archive.object(capture[6].value[0]));
       assert.equal(capture[5], 0); assert.equal(capture[6].tag, 1);
-      if (identity === 'agent.model.invoke.v6') {
+      if (identity === 'agent.model.invoke.v10') {
         const envelope = decodeValue(schemas.AdaptivePrepared, prepared);
         assert.equal(envelope.length, 3); assert.equal(envelope[0], 1);
         const request = envelope[1], plan = request[3], index = Number(plan[2]);
@@ -337,7 +357,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
         assert.equal(request[2][2], index >= 5 && index <= 8 ? 4 : 3);
         assert.equal(request[4][7], index >= 3 && index <= 7, 'deactivated skill remains materialized until unload');
         assert.equal(request[5][7], index >= 3 && index <= 6, 'deactivation removes callable permission');
-        assert.equal(request[5][2], index !== 13, 'the exact authored input allowance removes ask');
+        assert.equal(request[5][2], true, 'clarification remains offered after all accepted inputs');
         const expectedSkills = index >= 3 && index <= 7 ? ['invariant-review'] : index === 10 || index === 11 ? ['technical-reporting'] : [];
         assert.deepEqual(plan[6].map(skill => skill[1]), expectedSkills);
         const reply = decodeValue(schemas.AdaptiveResult, replyBytes);
@@ -349,7 +369,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
         assert.equal(call[3], toolNames.indexOf(expectedCall.name));
         const context = decodeValue(schemas.AdaptiveContext, archive.object(reply[1].value[0]));
         assert.equal(context.length, 14); assert.deepEqual(context[2], archive.task.id);
-        assert.equal(context[0], 'agent.model.context.responses.adaptive.v4'); assert.deepEqual(context[1], request[1]);
+        assert.equal(context[0], 'agent.model.context.responses.adaptive.v5'); assert.deepEqual(context[1], request[1]);
         assert.equal(context[3], archive.task.tenant); assert.equal(context[4], frozenProfile.adaptive.audience);
         assert.equal(context[6], request[2][2]);
         assert.deepEqual(context[5], request[2]); assert.deepEqual(context[7], plan); assert.equal(context[8], BigInt(index + 1));
@@ -363,17 +383,17 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
         captureRows.push({request, http: requests[index].body});
         providerProjections++;
       } else {
-        if (identity === 'agent.adaptive.context.prepare.v1') {
+        if (identity === 'agent.adaptive.context.prepare.v2') {
           const observation = decodeValue(schemas.PreparationCapture, rawBytes);
           assert.equal(Buffer.from(observation[0]).toString('hex'), hash(prepared));
-          assert.deepEqual(observation.slice(1), [false, false], 'legacy trajectory performs no constructed-tool attempts');
+          assert.equal(observation.length, 1, 'preparation captures no quota-exhaustion policy');
           const product = decodeValue(schemas.PreparationProduct, prepared);
           assert(Buffer.from(encodeValue(schemas.PreparationResult, product[0])).equals(replyBytes));
           assert.deepEqual((product[1].tag === 1 ? [reference(Buffer.from(product[1].value))] : []), capture[6].value[1]);
           controlProjections++;
         } else {
           assert(prepared.equals(rawBytes), 'deterministic work retained its original prepared capture');
-          assert(['agent.adaptive.snapshot.work.v1', 'agent.adaptive.snapshot.guards.v1'].includes(identity));
+          assert(['agent.adaptive.snapshot.work.v2', 'agent.adaptive.snapshot.guards.v2'].includes(identity));
           const work = decodeValue(schemas.WorkArtifact, rawBytes), reply = decodeValue(schemas.WorkReply, replyBytes);
           assert.deepEqual(reply[0], reference(rawBytes)); assert.deepEqual(capture[6].value[1], [reference(rawBytes)]);
           assert.deepEqual(work[1], archive.task.id);
@@ -402,11 +422,11 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
     await launch(['--config', configPath], deniedState);
     const deniedProfile = (await client.call('describe')).profile;
     const deniedTask = await client.call('task.submit', {client_operation_id: 'disabled-offer-submit', application_id: 'adaptive-agent', profile_id: deniedProfile.id,
-      input: {schema_id: 'adaptive-agent.input.v1', value: {task: 'Reject inspection after its skill is deactivated.'}}});
+      input: {schema_id: 'adaptive-agent.input.v2', value: {task: 'Reject inspection after its skill is deactivated.'}}});
     const deniedResult = await until(() => client.call('task.result', {task_id: deniedTask.task_id}), value => value.ready);
     if (providerFailure) throw providerFailure;
     assert.equal(alternateIndex, 8); assert.equal(deniedResult.outcome.value.disposition, 'no_result');
-    assert.equal(deniedResult.outcome.value.model_calls, 8); assert.equal(deniedResult.outcome.value.work_calls, 3);
+    assert.equal(deniedResult.outcome.value.model_calls, '8'); assert.equal(deniedResult.outcome.value.work_calls, '3');
     assert.equal(deniedResult.outcome.value.control.skills[0].active, false);
     assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
     const deniedPath = join(app.data, 'disabled-offer.bundle');
@@ -417,7 +437,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
       if (kind !== 4) continue;
       const attemptRow = deniedArchive.manifest[6].find(([tag, candidate]) => tag === 5 && Buffer.from(candidate).equals(Buffer.from(id)));
       const attempt = decodeValue(deniedArchive.schemas.get('attempt'), deniedArchive.object(attemptRow[2]));
-      if (attempt[5] !== 'agent.model.invoke.v6') continue;
+      if (attempt[5] !== 'agent.model.invoke.v10') continue;
       const capture = decodeValue(deniedArchive.schemas.get('capture'), deniedArchive.object(ref));
       const request = decodeValue(schemas.AdaptivePrepared, deniedArchive.object(capture[3]))[1];
       if (request[3][2] !== 7n) continue;
@@ -436,11 +456,11 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
       await launch(['--config', configPath], selectedState);
       const profile = (await client.call('describe')).profile;
       const submission = {client_operation_id: 'native-interrupt-submit', application_id: 'adaptive-agent', profile_id: profile.id,
-        input: {schema_id: 'adaptive-agent.input.v1', value: {task: 'Cancel the held native adaptive inference.'}}};
+        input: {schema_id: 'adaptive-agent.input.v2', value: {task: 'Cancel the held native adaptive inference.'}}};
       const task = await client.call('task.submit', submission);
       await within(heldRequest, 15000, 'native cancellation request not received');
       await client.call('task.message', {client_operation_id: 'cli-interrupt', task_id: task.task_id,
-        message: {schema_id: 'adaptive-agent.message.v1', value: {message: 'This valid caller ID must not prevent native interruption.'}}});
+        message: {schema_id: 'adaptive-agent.message.v2', value: {message: 'This valid caller ID must not prevent native interruption.'}}});
       const cancelParams = {client_operation_id: 'native-cancel-once', task_id: task.task_id};
       let cancellation;
       const stopStarted = performance.now();
@@ -480,11 +500,11 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
       toolSubject = {recipe: name === 'tools-reverse' ? reverseRecipe : coverageRecipe, foreign: retainedProgram};
       let selectedState = name === 'tools-foreign' ? retainedState : join(app.data, name);
       const selectedConfig = join(app.data, `${name}.json`);
-      await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v2', adaptive: {...config, skills: name === 'tools-reuse' ? config.skills.filter(skill => skill.id === 'invariant-review') : []}, tools: {build: name !== 'tools-foreign', run: true, inputs}}));
+      await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: name === 'tools-reuse' ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: name !== 'tools-foreign', run: true, inputs}}));
       await launch(['--config', selectedConfig], selectedState);
       const description = await client.call('describe');
       const task = await client.call('task.submit', {client_operation_id: name, application_id: 'adaptive-agent', profile_id: description.profile.id,
-        input: {schema_id: 'adaptive-agent.input.v1', value: {task: name === 'tools-reverse' ? 'Group source records unsupported by the selected lock scope.' : 'Audit selected lock records against source records, retaining all classifications and reuse the tool on the second input.'}}});
+        input: {schema_id: 'adaptive-agent.input.v2', value: {task: name === 'tools-reverse' ? 'Group source records unsupported by the selected lock scope.' : 'Audit selected lock records against source records, retaining all classifications and reuse the tool on the second input.'}}});
       if (name === 'tools-reuse') {
         const waiting = await until(async () => {
           const value = await client.call('task.status', {task_id: task.task_id});
@@ -506,14 +526,14 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
         assert((await artifact(task.task_id, toolSubject.program)).equals(originalProgram));
         const exported = readArchive(await readFile(bundle));
         const attempts = exported.manifest[6].filter(([kind]) => kind === 5).map(([, , ref]) => decodeValue(exported.schemas.get('attempt'), exported.object(ref))[5]);
-        assert.equal(attempts.filter(identity => identity === 'agent.adaptive.tool.build.v1').length, 4);
-        assert.equal(attempts.filter(identity => identity === 'agent.adaptive.snapshot.guards.v1').length, 1, 'generated-evidence rejection never dispatches source inspection');
+        assert.equal(attempts.filter(identity => identity === 'agent.adaptive.tool.build.v2').length, 4);
+        assert.equal(attempts.filter(identity => identity === 'agent.adaptive.snapshot.guards.v2').length, 1, 'generated-evidence rejection never dispatches source inspection');
         let privateChecks = 0;
         for (const [kind, id, ref] of exported.manifest[6]) {
           if (kind !== 4) continue;
           const row = exported.manifest[6].find(([kind, candidate]) => kind === 5 && Buffer.from(candidate).equals(Buffer.from(id)));
           const attempt = decodeValue(exported.schemas.get('attempt'), exported.object(row[2]));
-          if (attempt[5] !== 'agent.model.invoke.v6') continue;
+          if (attempt[5] !== 'agent.model.invoke.v10') continue;
           const capture = decodeValue(exported.schemas.get('capture'), exported.object(ref));
           for (const privateRef of [capture[4].value, ...capture[6].value[1]]) {
             await assert.rejects(client.call('artifact.read', {task_id: task.task_id, artifact_id: Buffer.from(privateRef[0]).toString('hex'), offset: '0', length: '1'}), error => error.data?.kind === 'ArtifactUnavailable');
@@ -541,9 +561,9 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
       } else {
         assert.equal(result.outcome.value.disposition, 'no_result');
         assert.equal(result.outcome.value.programs.length, 0);
-        assert.equal(result.outcome.value.work_calls, name === 'tools-disabled' ? 0 : 1);
+        assert.equal(result.outcome.value.work_calls, name === 'tools-disabled' ? '0' : '1');
       }
-      if (name === 'tools-reuse') { retainedProgram = toolSubject.program; retainedState = selectedState; assert.equal(alternateIndex, 16); assert.equal(result.outcome.value.control.skills.length, 0); }
+      if (name === 'tools-reuse') { retainedProgram = toolSubject.program; retainedState = selectedState; assert.equal(alternateIndex, 38); assert.equal(result.outcome.value.model_calls, '38'); assert.equal(result.outcome.value.evidence.length, 1, 'report selects acquired evidence at global index twelve'); assert.equal(result.outcome.value.control.selection.control_revision, '17'); assert.equal(result.outcome.value.control.skills.length, 0); }
       toolRuns.push({scenario: name, provider_calls: alternateIndex, disposition: result.outcome.value.disposition});
       assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
     }
@@ -553,7 +573,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
       held_ping_ms: pingMs, held_status_ms: statusMs, archive_bytes: archiveBytes.length,
       independent_negative_provider_requests: alternateRequests,
       provider_projections: providerProjections, context_projections: controlProjections, work_projections: workProjections,
-      consumed_messages: 3, not_consumed_messages: 1, disabled_offer_rejected: offeredWitness, cancellations, tool_construction: toolRuns,
+      consumed_messages: 4, not_consumed_messages: 0, disabled_offer_rejected: offeredWitness, cancellations, tool_construction: toolRuns,
       live_provider: false}));
   } catch (error) {
     throw providerFailure ?? error;

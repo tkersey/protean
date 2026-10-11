@@ -319,20 +319,39 @@ fn Generator(comptime P: type, comptime batch: bool, comptime format: Format) ty
         }
         fn checkTemplate(g: G, body: *typed.Body, template: *const typed.Value, selection: *const typed.Value) !void {
             const bytes = try g.field(body, template, P.Request, "maximum_provider_response_bytes");
-            try g.rejectWhen(body, try body.equal(bytes, try body.constant(u32, 0)));
+            const no_bytes = try body.caseOf(bytes, "0");
+            const bounded_bytes = try body.caseOf(bytes, "1");
+            try g.rejectWhen(body, try body.match(bytes, &.{
+                try no_bytes.ret(try no_bytes.body().constant(bool, false)),
+                try bounded_bytes.ret(try bounded_bytes.body().equal(bounded_bytes.payload(), try bounded_bytes.body().constant(u32, 0))),
+            }));
             const Limits = @FieldType(P.Request, "normalization_limits");
             const limits = try g.field(body, template, P.Request, "normalization_limits");
             const count = try g.field(body, limits, Limits, "maximum_output_items");
             const Selection = @FieldType(P.Request, "selection");
             const minimum = try g.field(body, selection, Selection, "minimum_calls");
             const maximum = try g.field(body, selection, Selection, "maximum_calls");
-            try g.rejectWhen(body, try g.less(body, count, maximum));
+            const no_count = try body.caseOf(count, "0");
+            const bounded_count = try body.caseOf(count, "1");
+            try g.rejectWhen(body, try body.match(count, &.{
+                try no_count.ret(try no_count.body().constant(bool, false)),
+                try bounded_count.ret(try g.less(bounded_count.body(), bounded_count.payload(), maximum)),
+            }));
             try g.rejectWhen(body, try g.less(body, maximum, minimum));
             const bounds = P.normalizationLimits();
-            // Preserve the predecessor's guard order, before any environmental I/O.
+            // A request cannot promise a wider result than its reply schema.
             inline for (.{ "maximum_result_text_bytes", "maximum_arguments_bytes", "maximum_name_bytes", "maximum_call_id_bytes", "maximum_output_items" }) |name| {
                 const actual = try g.field(body, limits, Limits, name);
-                try g.rejectWhen(body, try g.less(body, try body.constant(u32, @field(bounds, name)), actual));
+                if (@typeInfo(@FieldType(Limits, name)) != .optional) {
+                    try g.rejectWhen(body, try g.less(body, try body.constant(u32, @field(bounds, name)), actual));
+                } else if (@field(bounds, name)) |bound| {
+                    const unbounded = try body.caseOf(actual, "0");
+                    const bounded = try body.caseOf(actual, "1");
+                    try g.rejectWhen(body, try body.match(actual, &.{
+                        try unbounded.ret(try unbounded.body().constant(bool, true)),
+                        try bounded.ret(try g.less(bounded.body(), try bounded.body().constant(u32, bound), bounded.payload())),
+                    }));
+                }
             }
         }
         fn request(g: G, body: *typed.Body, template: *const typed.Value, tools: *const typed.Value) !*const typed.Value {

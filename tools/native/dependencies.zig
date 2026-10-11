@@ -19,16 +19,16 @@ const Context = struct {
     fn join(c: Context, parts: []const []const u8) ![]const u8 {
         return std.fs.path.join(c.a, parts);
     }
-    fn read(c: Context, path: []const u8, limit: usize) ![]u8 {
+    fn read(c: Context, path: []const u8, limit: ?usize) ![]u8 {
         return c.readWithAllocator(c.a, path, limit);
     }
-    fn readWithAllocator(c: Context, allocator: Allocator, path: []const u8, limit: usize) ![]u8 {
+    fn readWithAllocator(c: Context, allocator: Allocator, path: []const u8, limit: ?usize) ![]u8 {
         var file = try Dir.cwd().openFile(c.io, path, .{ .follow_symlinks = false, .allow_directory = false });
         defer file.close(c.io);
         const before = try file.stat(c.io);
-        if (before.kind != .file or before.size > limit) return error.InvalidFile;
+        if (before.kind != .file or (limit != null and before.size > limit.?)) return error.InvalidFile;
         var reader = file.reader(c.io, &.{});
-        const bytes = try reader.interface.allocRemaining(allocator, .limited(limit));
+        const bytes = try reader.interface.allocRemaining(allocator, if (limit) |maximum| .limited(maximum) else .unlimited);
         errdefer allocator.free(bytes);
         const after = try file.stat(c.io);
         const named = try Dir.cwd().statFile(c.io, path, .{ .follow_symlinks = false });
@@ -247,21 +247,18 @@ fn verifySqlite(c: Context, path: []const u8, lock_path: []const u8) !Value {
 fn manifest(c: Context, args: []const []const u8) !void {
     if (args.len != 17) return error.ExpectedManifestArguments;
     const compiler_digest = try c.fileDigest(args[15]);
-    const image = try c.read(args[0], 16 * 1024 * 1024);
-    // Embedded application assets have the native discovery owner's 16 MiB
-    // extent, including up to 8 MiB of base64-encoded frozen resources.
-    const application_bytes = try c.read(args[1], 16 * 1024 * 1024);
+    const image = try c.read(args[0], null);
+    const application_bytes = try c.read(args[1], null);
     const application = try std.json.parseFromSliceLeaky(Value, c.a, application_bytes, .{});
     const lock = try lockAt(c, args[2]);
     try equal(try text(application, "program_sha256"), try c.digest(image));
     const mapping = try text(application, "client_mapping");
     if (!std.mem.eql(u8, mapping, "agent-client-values/1.0") and !std.mem.eql(u8, mapping, "agent-client-values/1.1")) return error.InvalidMetadata;
     var sqlite = try verifySqlite(c, args[6], args[14]);
-    const heap = try std.fmt.parseInt(u64, args[7], 10);
-    const state = try std.fmt.parseInt(u64, args[9], 10);
-    if (heap == 0 or heap > 16 * 1024 * 1024 or state <= 1024 * 1024 or state > 256 * 1024 * 1024 or state % 4096 != 0) return error.Capacity;
+    try equal(args[7], "system");
+    try equal(args[9], "filesystem");
     if (!std.mem.startsWith(u8, args[10], "agent-native-state/") or try std.fmt.parseInt(u32, args[10][19..], 10) == 0) return error.InvalidMetadata;
-    try c.put(&sqlite, "heap_bytes", heap);
+    try c.put(&sqlite, "allocator", "system");
     const flags = try std.json.parseFromSliceLeaky(Value, c.a, args[8], .{});
     if (flags != .array) return error.InvalidMetadata;
     try sqlite.object.put(c.a, "compile_flags", flags);
@@ -288,14 +285,14 @@ fn manifest(c: Context, args: []const []const u8) !void {
     const linux = std.mem.indexOf(u8, args[11], "linux") != null;
     if (linux) try licenses.append(c.a, try c.value(.{ .component = "musl libc", .text = try c.read(try c.join(&.{ library_path, "libc/musl/COPYRIGHT" }), 1024 * 1024) }));
     const result = .{
-        .format = "agent-native-build/v1",
+        .format = "agent-native-build/v2",
         .application_id = try text(application, "application_id"),
         .application_version = try text(application, "application_version"),
-        .native_host_contract = "agent-native-host/1.0",
-        .protocol = "agent-host/1.0",
+        .native_host_contract = "agent-native-host/2.0",
+        .protocol = "agent-host/2.0",
         .client_mapping = mapping,
         .state_format = args[10],
-        .state_database_bytes = state,
+        .storage = "filesystem capacity and linked SQLite limits",
         .target = args[11],
         .optimize = args[12],
         .program_sha256 = try c.digest(image),

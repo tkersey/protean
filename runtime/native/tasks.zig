@@ -24,7 +24,6 @@ pub fn cleanupComplete(outcome: data.invocation.Outcome) bool {
     };
 }
 
-pub const maximum_resources = state.maximum_resources;
 pub const Profile = struct {
     id: []const u8,
     runtime_identity: state.Digest,
@@ -41,14 +40,14 @@ pub const Profile = struct {
     pub fn validate(self: Profile) !void {
         _ = try name(self.id);
         _ = try name(self.authority.principal);
-        if (self.bytes.len > 256 * 1024 or self.authority.revoked) return error.Denied;
+        if (self.authority.revoked) return error.Denied;
     }
 
-    pub fn resourceIdentity(self: Profile, image: state.Digest) !state.Digest {
-        if (self.resources.len > maximum_resources) return error.Capacity;
-        var refs: [maximum_resources]state.Reference = undefined;
-        for (self.resources, refs[0..self.resources.len]) |bytes, *ref| ref.* = .{ .digest = storage.digest(bytes), .bytes = bytes.len };
-        return registry.resourceIdentity(image, storage.digest(self.bytes), refs[0..self.resources.len]);
+    pub fn resourceIdentity(self: Profile, a: std.mem.Allocator, image: state.Digest) !state.Digest {
+        const refs = try a.alloc(state.Reference, self.resources.len);
+        defer a.free(refs);
+        for (self.resources, refs) |bytes, *ref| ref.* = .{ .digest = storage.digest(bytes), .bytes = bytes.len };
+        return registry.resourceIdentity(image, storage.digest(self.bytes), refs);
     }
 };
 pub const FrozenInputs = struct {
@@ -63,16 +62,13 @@ fn readFrozenInputs(a: std.mem.Allocator, value: state.Task, source: anytype) !F
         for (resources[0..acquired]) |bytes| a.free(bytes);
         a.free(resources);
     }
-    var total: u64 = 0;
     for (value.resources.items, resources) |reference, *bytes| {
-        total = std.math.add(u64, total, reference.bytes) catch return error.Capacity;
-        if (total > 16 * 1024 * 1024) return error.Capacity;
-        bytes.* = try source.object(a, reference, 16 * 1024 * 1024);
+        bytes.* = try source.object(a, reference, null);
         acquired += 1;
     }
     const profile_id = try a.dupe(u8, value.profile_id.bytes);
     errdefer a.free(profile_id);
-    return .{ .profile_id = profile_id, .profile = try source.object(a, value.profile, 256 * 1024), .resources = resources };
+    return .{ .profile_id = profile_id, .profile = try source.object(a, value.profile, null), .resources = resources };
 }
 pub const Admission = struct { receipt: state.Receipt, replayed: bool };
 pub const Status = state.Status;
@@ -83,7 +79,6 @@ pub const Work = struct {
     request: []const u8,
     prepared: ?[]const u8 = null,
     profile: []const u8 = &.{},
-    exhausted_capabilities: []const []const u8 = &.{},
     entry: registry.Entry,
     cleanup: bool,
 };
@@ -108,7 +103,7 @@ fn name(bytes: []const u8) !state.Name {
     return .{ .bytes = bytes };
 }
 fn answerDigest(a: std.mem.Allocator, task_id: state.TaskId, question_id: state.Digest, revision: u64, request_digest: state.Digest, schema_id: []const u8, answer: []const u8) !state.Digest {
-    const Request = struct { method: state.Method, task: state.TaskId, question: state.Digest, revision: u64, request: state.Digest, schema: state.Name, answer: contracts.Bytes(64 * 1024) };
+    const Request = struct { method: state.Method, task: state.TaskId, question: state.Digest, revision: u64, request: state.Digest, schema: state.Name, answer: contracts.Bytes(null) };
     return operation(Request, a, .{ .method = .respond, .task = task_id, .question = question_id, .revision = revision, .request = request_digest, .schema = try name(schema_id), .answer = .{ .bytes = answer } });
 }
 
@@ -133,12 +128,12 @@ pub fn Service(comptime Types: type) type {
         /// opening a namespace never resumes a persisted task.
         runnable: std.ArrayList(state.TaskId) = .empty,
         /// Unsettled cleanup retains ownership, but never runnable work.
-        owned: [16]?state.TaskId = @splat(null),
+        owned: [(@import("protocol.zig").Limits{}).owned_tasks]?state.TaskId = @splat(null),
         work: ?Work = null,
 
         pub fn init(a: std.mem.Allocator, io: std.Io, namespace: *Namespace, assets: discovery.Assets, application: *const discovery.Application, handlers: registry.Registry, profile: Profile) !Self {
             try profile.validate();
-            var self: Self = .{ .allocator = a, .io = io, .namespace = namespace, .assets = assets, .application = application, .handlers = handlers, .profile = profile, .program = try evaluator.Program.open(a, assets.image, 8 * 1024 * 1024) };
+            var self: Self = .{ .allocator = a, .io = io, .namespace = namespace, .assets = assets, .application = application, .handlers = handlers, .profile = profile, .program = try evaluator.Program.open(a, assets.image) };
             errdefer self.program.close() catch unreachable;
             try self.recover(a);
             return self;
@@ -175,7 +170,7 @@ pub fn Service(comptime Types: type) type {
                 var attempt = try self.record(state.Attempt, a, "attempt", owner.attempt, task_id);
                 defer attempt.deinit();
                 if (!std.meta.eql(attempt.value.profile, value.value.profile)) return error.CorruptState;
-                const bytes = try self.store().object(a, attempt.value.request, 4 * 1024 * 1024);
+                const bytes = try self.store().object(a, attempt.value.request, null);
                 defer a.free(bytes);
                 var request = try data.invocation.decode(data.invocation.Request, a, bytes);
                 defer request.deinit();
@@ -197,7 +192,7 @@ pub fn Service(comptime Types: type) type {
             try self.allowed();
             var reader = try archive_api.Reader.open(a, path);
             defer reader.deinit();
-            const bytes = try reader.object(a, reader.manifest.value.task, 256 * 1024);
+            const bytes = try reader.object(a, reader.manifest.value.task, null);
             defer a.free(bytes);
             var decoded = try contracts.decodeOwned(state.Task, a, bytes);
             defer decoded.deinit();
@@ -236,7 +231,7 @@ pub fn Service(comptime Types: type) type {
         }
         pub fn taskCleanupComplete(self: *Self, a: std.mem.Allocator, value: state.Task) !bool {
             if (!value.terminal()) return false;
-            const bytes = try self.store().object(a, value.outcome, 4 * 1024 * 1024);
+            const bytes = try self.store().object(a, value.outcome, null);
             defer a.free(bytes);
             var outcome = try data.invocation.decode(data.invocation.Outcome, a, bytes);
             defer outcome.deinit();
@@ -330,7 +325,7 @@ pub fn Service(comptime Types: type) type {
         }
         fn runnableAdd(self: *Self, id: state.TaskId) !void {
             for (self.runnable.items) |item| if (same(&item, &id)) return;
-            if (self.runnable.items.len == 16) return error.Capacity;
+            if (self.runnable.items.len == self.owned.len) return error.Capacity;
             try self.runnable.append(self.allocator, id);
         }
         fn ensureOwnershipCapacity(self: *Self, id: ?state.TaskId) !void {
@@ -391,9 +386,9 @@ pub fn Service(comptime Types: type) type {
                 if (same(&active.task, &value.id) and active.execution_revision == value.execution_revision) return active.driver;
                 try self.retire(a);
             }
-            const checkpoint = try self.store().object(a, value.checkpoint, 1024 * 1024);
+            const checkpoint = try self.store().object(a, value.checkpoint, null);
             defer a.free(checkpoint);
-            const driver = try evaluator.Driver.start(self.allocator, self.program, .{ .state = checkpoint }, 8 * 1024 * 1024);
+            const driver = try evaluator.Driver.start(self.allocator, self.program, .{ .state = checkpoint });
             self.active = .{ .task = value.id, .execution_revision = value.execution_revision, .driver = driver };
             return driver;
         }
@@ -422,9 +417,6 @@ pub fn Service(comptime Types: type) type {
             }
             const request = try submitDigest(a, profile_digest, input);
             if (try self.replay(a, id, request)) |prior| return prior;
-            const ids = try self.store().taskIds(a, true);
-            defer a.free(ids);
-            if (ids.len >= 16) return error.Capacity;
             try self.ensureOwnershipCapacity(null);
             // Reserve scheduling capacity before making acceptance durable.
             try self.runnable.ensureUnusedCapacity(self.allocator, 1);
@@ -433,7 +425,7 @@ pub fn Service(comptime Types: type) type {
             try self.io.randomSecure(&task_id);
             const input_bytes = try contracts.encodeOwned(Types.Input, a, input);
             defer a.free(input_bytes);
-            const driver = try evaluator.Driver.start(self.allocator, self.program, .{ .initial_args = input_bytes }, 8 * 1024 * 1024);
+            const driver = try evaluator.Driver.start(self.allocator, self.program, .{ .initial_args = input_bytes });
             self.active = .{ .task = task_id, .execution_revision = 0, .driver = driver };
             errdefer self.retire(a) catch {
                 self.store().fenced = true;
@@ -442,13 +434,6 @@ pub fn Service(comptime Types: type) type {
             defer a.free(outcome);
             const checkpoint = try driver.checkpoint(a);
             defer a.free(checkpoint);
-            if (checkpoint.len > 1024 * 1024) return error.Capacity;
-            if (self.profile.resources.len > maximum_resources) return error.Capacity;
-            var resource_bytes: u64 = 0;
-            for (self.profile.resources) |bytes| {
-                resource_bytes = std.math.add(u64, resource_bytes, bytes.len) catch return error.Capacity;
-                if (resource_bytes > 16 * 1024 * 1024) return error.Capacity;
-            }
             const resources = try a.alloc(state.Reference, self.profile.resources.len);
             defer a.free(resources);
             try self.store().begin();
@@ -575,16 +560,8 @@ pub fn Service(comptime Types: type) type {
             try self.compatibleApplication(value);
             if (!same(value.message_schema_id.bytes, Types.message_schema_id)) return error.IncompatibleProfile;
             if (!self.acceptsMessages()) return error.UnsupportedCapability;
-            if (value.messages.items.len >= 16) return error.Capacity;
             const bytes = try contracts.encodeOwned(Types.Message, a, input);
             defer a.free(bytes);
-            var queued_bytes: u64 = bytes.len;
-            for (value.messages.items) |message_id| {
-                var saved = try self.record(state.Message, a, "message", message_id, task_id);
-                defer saved.deinit();
-                queued_bytes = try std.math.add(u64, queued_bytes, saved.value.value.bytes);
-            }
-            if (queued_bytes > 256 * 1024) return error.Capacity;
             var identity: state.Digest = undefined;
             try self.io.randomSecure(&identity);
             const previous = value.revision;
@@ -650,7 +627,7 @@ pub fn Service(comptime Types: type) type {
                 return .{ .receipt = retained, .replayed = true };
             }
             if (question.retired or value.terminal() or (value.cancellation != null and !value.cancellation_applied) or value.current_occurrence == null or !same(&value.current_occurrence.?, &question.occurrence)) return error.StaleInteraction;
-            const original_request = try self.store().object(a, question.request, 4 * 1024 * 1024);
+            const original_request = try self.store().object(a, question.request, null);
             defer a.free(original_request);
             var admitted_request = try data.invocation.decode(data.invocation.Request, a, original_request);
             defer admitted_request.deinit();
@@ -724,7 +701,7 @@ pub fn Service(comptime Types: type) type {
                     .captured => return self.interpretCapture(a, value, pending),
                     .unknown, .dispatching => return self.blocked(a, value, .unavailable_environment),
                     .settled_reply => |acquired| {
-                        reply = try self.store().acquiredObject(a, acquired.reply, 4 * 1024 * 1024);
+                        reply = try self.store().acquiredObject(a, acquired.reply, null);
                         consumed = try occurrence.consumed(pending, binding, .{ .reply = acquired.reply }, value.cancellation != null);
                         control = .{ .reply = reply.? };
                     },
@@ -761,7 +738,6 @@ pub fn Service(comptime Types: type) type {
             if (outcome.value == .needs_capacity) return error.Capacity;
             const checkpoint = try driver.checkpoint(a);
             defer a.free(checkpoint);
-            if (checkpoint.len > 1024 * 1024 or encoded.len > 4 * 1024 * 1024) return error.Capacity;
             var value = initial;
             value.revision = try std.math.add(u64, value.revision, 1);
             value.execution_revision = try std.math.add(u64, value.execution_revision, 1);
@@ -775,7 +751,6 @@ pub fn Service(comptime Types: type) type {
             value.outcome = try self.store().putObject(encoded);
             if (consumed) |prior| {
                 try self.store().putRecord(occurrence.Occurrence, "occurrence", prior.id, value.id, prior);
-                if (prior.state.admitted == .reply) try self.store().releaseReservation(prior.state.admitted.reply.attempt);
                 const question_id: ?state.Digest = switch (prior.state.admitted) {
                     .reply => |acquired| if (acquired.answer) |answer| answer.question else null,
                     .cancelled => |waiting| if (waiting) |question| question.question else null,
@@ -857,7 +832,7 @@ pub fn Service(comptime Types: type) type {
             return .progressed;
         }
         fn clientResult(self: *Self, comptime T: type, a: std.mem.Allocator, value: *state.Task, schema_id: []const u8, result: T) !void {
-            const bytes = try json.canonicalBounded(self.allocator, try values.toJson(T, a, result), storage.maximum_object_bytes);
+            const bytes = try json.canonicalBounded(self.allocator, try values.toJson(T, a, result), try self.store().database.blobLimit());
             defer self.allocator.free(bytes);
             value.client_result = try self.store().putObject(bytes);
             if (bytes.len > 60 * 1024) {
@@ -870,7 +845,7 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn dispatch(self: *Self, a: std.mem.Allocator, initial: state.Task, pending: occurrence.Occurrence) !Step {
-            const bytes = try self.store().object(a, initial.outcome, 4 * 1024 * 1024);
+            const bytes = try self.store().object(a, initial.outcome, null);
             defer a.free(bytes);
             var outcome = try data.invocation.decode(data.invocation.Outcome, a, bytes);
             defer outcome.deinit();
@@ -894,7 +869,6 @@ pub fn Service(comptime Types: type) type {
                 .question => {
                     const prompt = try json.canonical(a, try entry.declaration.present.?(ctx, request.value.binding.payload));
                     defer a.free(prompt);
-                    if (prompt.len > 32 * 1024) return self.blocked(a, initial, .capacity);
                     var question_id: state.Digest = undefined;
                     try self.io.randomSecure(&question_id);
                     const waiting = try occurrence.awaiting(pending, binding, .{ .attempt = attempt, .question = question_id, .pending_digest = request.value.binding.pending_state_digest }, initial.cancellation != null and !initial.cancellation_applied);
@@ -923,7 +897,7 @@ pub fn Service(comptime Types: type) type {
                         message_decoded = try self.record(state.Message, a, "message", value.messages.items[0], value.id);
                         const saved = &message_decoded.?.value;
                         if (saved.disposition != .queued or saved.occurrence != null) return error.CorruptState;
-                        const message_bytes = try self.store().object(a, saved.value, 256 * 1024);
+                        const message_bytes = try self.store().object(a, saved.value, null);
                         defer a.free(message_bytes);
                         message_value = try contracts.decodeOwned(Types.Message, a, message_bytes);
                         message_name = std.fmt.bytesToHex(saved.id, .lower);
@@ -945,9 +919,6 @@ pub fn Service(comptime Types: type) type {
                     return .progressed;
                 },
                 .leaf => {
-                    if (entry.declaration.attempt_limit) |limit| {
-                        if (try self.store().capabilityAttempts(value.id, entry.declaration.identity) >= limit) return self.blocked(a, initial, .capacity);
-                    }
                     var preparation = std.heap.ArenaAllocator.init(a);
                     defer preparation.deinit();
                     const prepared = if (entry.declaration.capture) |adapter| adapter.prepare(self.projectionContext(preparation.allocator(), value), request.value.binding.payload) catch |err|
@@ -956,16 +927,10 @@ pub fn Service(comptime Types: type) type {
                             error.MissingArtifact, error.CorruptObject => .missing_artifact,
                             else => .incompatible_profile,
                         }) else null;
-                    if (prepared) |body| if (body.len > 2 * 1024 * 1024) return self.blocked(a, initial, .capacity);
                     const charged_bytes = if (prepared) |body| body.len else request_bytes.len;
                     if (entry.declaration.inference) {
-                        const maximum = if (entry.declaration.inference_attempt_limit) |limit|
-                            @min(@as(u32, 16), limit(preparation.allocator(), self.profile.bytes) catch return self.blocked(a, initial, .incompatible_profile))
-                        else
-                            16;
-                        if (value.inference_attempts >= maximum or value.inference_request_bytes + charged_bytes > 8 * 1024 * 1024) return self.blocked(a, initial, .capacity);
-                        value.inference_attempts += 1;
-                        value.inference_request_bytes += charged_bytes;
+                        value.inference_attempts = try std.math.add(u64, value.inference_attempts, 1);
+                        value.inference_request_bytes = try std.math.add(u64, value.inference_request_bytes, charged_bytes);
                     }
                     const retained = try self.allocator.dupe(u8, request_bytes);
                     errdefer self.allocator.free(retained);
@@ -973,12 +938,9 @@ pub fn Service(comptime Types: type) type {
                     errdefer if (retained_prepared) |body| self.allocator.free(body);
                     const retained_profile = try self.allocator.dupe(u8, self.profile.bytes);
                     errdefer self.allocator.free(retained_profile);
-                    const exhausted = try self.exhaustedCapabilities(value.id, entry.declaration.identity);
-                    errdefer self.allocator.free(exhausted);
-                    const work: Work = .{ .task = value.id, .occurrence = pending.id, .attempt = attempt, .request = retained, .prepared = retained_prepared, .profile = retained_profile, .exhausted_capabilities = exhausted, .entry = entry, .cleanup = value.cancellation_applied };
+                    const work: Work = .{ .task = value.id, .occurrence = pending.id, .attempt = attempt, .request = retained, .prepared = retained_prepared, .profile = retained_profile, .entry = entry, .cleanup = value.cancellation_applied };
                     try self.store().begin();
                     defer self.store().rollback();
-                    if (entry.declaration.capture != null) try self.store().reserveCapture(attempt) else try self.store().reserve(attempt);
                     try self.store().createRecord(state.Attempt, "attempt", attempt, value.id, .{ .id = attempt, .task = value.id, .occurrence = pending.id, .request = try self.store().putObject(request_bytes), .profile = value.profile, .capability = try name(entry.declaration.identity), .inference = entry.declaration.inference, .prepared = if (prepared) |body| try self.store().putObject(body) else null });
                     try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, value.id, dispatched);
                     try self.persist(value, initial.revision, "effect.dispatch");
@@ -986,17 +948,6 @@ pub fn Service(comptime Types: type) type {
                     return .{ .work = work };
                 },
             }
-        }
-
-        fn exhaustedCapabilities(self: *Self, task_id: state.TaskId, dispatch_identity: []const u8) ![]const []const u8 {
-            var exhausted: std.ArrayList([]const u8) = .empty;
-            errdefer exhausted.deinit(self.allocator);
-            for (self.handlers.entries) |entry| if (entry.declaration.attempt_limit) |limit| {
-                const used = try self.store().capabilityAttempts(task_id, entry.declaration.identity);
-                const dispatched: u32 = @intFromBool(same(entry.declaration.identity, dispatch_identity));
-                if (used + dispatched >= limit) try exhausted.append(self.allocator, entry.declaration.identity);
-            };
-            return exhausted.toOwnedSlice(self.allocator);
         }
 
         fn projectionContext(self: *Self, a: std.mem.Allocator, value: state.Task) registry.ProjectionContext {
@@ -1011,9 +962,9 @@ pub fn Service(comptime Types: type) type {
         fn capture(self: *Self, a: std.mem.Allocator, work: Work, raw: []const u8) !void {
             defer self.releaseWork();
             errdefer self.store().fenced = true;
-            // The initial native profile keeps captured bytes within its
-            // existing durable acquisition reservation.
-            if (raw.len > 4 * 1024 * 1024 or work.prepared == null) return error.Capacity;
+            // Publication failure fences this owner. The durable dispatched
+            // occurrence then recovers as unknown, never as permission to retry.
+            if (work.prepared == null) return error.InvalidPreparedRequest;
             var decoded = try self.task(a, work.task);
             defer decoded.deinit();
             var value = decoded.value;
@@ -1032,7 +983,6 @@ pub fn Service(comptime Types: type) type {
                 .response = try self.store().putObject(raw),
                 .disposition = .complete,
             });
-            try self.store().reserveCaptured(work.attempt);
             try self.store().putRecord(occurrence.Occurrence, "occurrence", work.occurrence, work.task, next);
             try self.persist(value, previous, "effect.capture");
         }
@@ -1047,7 +997,7 @@ pub fn Service(comptime Types: type) type {
                 !same(&attempt.value.occurrence, &pending.id) or !same(&raw.value.occurrence, &pending.id) or
                 !same(&attempt.value.profile.digest, &initial.profile.digest) or
                 !std.meta.eql(attempt.value.prepared.?, raw.value.request)) return error.CorruptState;
-            const encoded = try self.store().object(a, attempt.value.request, 4 * 1024 * 1024);
+            const encoded = try self.store().object(a, attempt.value.request, null);
             defer a.free(encoded);
             var request = try data.invocation.decode(data.invocation.Request, a, encoded);
             defer request.deinit();
@@ -1055,20 +1005,14 @@ pub fn Service(comptime Types: type) type {
             // Resolve the original schemas without acquiring another I/O grant.
             const entry = try self.handlers.resolve(request.value, self.application.image_identity);
             const adapter = entry.declaration.capture orelse return error.IncompatibleProfile;
-            const rendered = try self.store().object(a, raw.value.request, 2 * 1024 * 1024);
+            const rendered = try self.store().object(a, raw.value.request, null);
             defer a.free(rendered);
-            const response = try self.store().object(a, raw.value.response.?, 4 * 1024 * 1024);
+            const response = try self.store().object(a, raw.value.response.?, null);
             defer a.free(response);
             var projection_arena = std.heap.ArenaAllocator.init(a);
             defer projection_arena.deinit();
             const result = adapter.interpret(self.projectionContext(projection_arena.allocator(), initial), request.value.binding.payload, rendered, response) catch
                 return self.blocked(a, initial, .unavailable_environment);
-            if (result.reply.len > 1024 * 1024 or result.objects.len > 16) return self.blocked(a, initial, .capacity);
-            var total: usize = 0;
-            for (result.objects) |object| {
-                total = std.math.add(usize, total, object.len) catch return self.blocked(a, initial, .capacity);
-                if (total > 2 * 1024 * 1024) return self.blocked(a, initial, .capacity);
-            }
             var schema = try data.schema.decode(a, entry.resume_schema);
             defer schema.deinit();
             data.schema.validateValue(a, schema.descriptor, result.reply) catch return self.blocked(a, initial, .unavailable_environment);
@@ -1082,9 +1026,6 @@ pub fn Service(comptime Types: type) type {
             };
             try self.store().begin();
             defer self.store().rollback();
-            // Projection publication spends its own reserved phase; the
-            // successor retains the same budget as a directly acquired reply.
-            try self.store().reserveAcquired(attempt_id);
             const reply = try self.store().putObject(bound);
             const objects = try a.alloc(state.Reference, result.objects.len);
             defer a.free(objects);
@@ -1105,7 +1046,6 @@ pub fn Service(comptime Types: type) type {
             self.allocator.free(self.work.?.request);
             if (self.work.?.prepared) |body| self.allocator.free(body);
             self.allocator.free(self.work.?.profile);
-            self.allocator.free(self.work.?.exhausted_capabilities);
             self.work = null;
         }
         /// A worker has returned and will no longer access this work item.
@@ -1115,7 +1055,6 @@ pub fn Service(comptime Types: type) type {
             if (work.entry.declaration.capture != null) return self.capture(a, work, reply);
             defer self.releaseWork();
             errdefer self.store().fenced = true;
-            if (reply.len > 4 * 1024 * 1024) return error.Capacity;
             var schema = try data.schema.decode(a, work.entry.resume_schema);
             defer schema.deinit();
             try data.schema.validateValue(a, schema.descriptor, reply);
@@ -1133,7 +1072,6 @@ pub fn Service(comptime Types: type) type {
             try self.store().begin();
             defer self.store().rollback();
             _ = try self.store().putObject(bound);
-            try self.store().reserveAcquired(work.attempt);
             try self.store().putRecord(occurrence.Occurrence, "occurrence", work.occurrence, work.task, acquired);
             try self.persist(value, previous, "effect.acquire");
         }
@@ -1175,7 +1113,6 @@ pub fn Service(comptime Types: type) type {
             value.blocker = if (value.cancellation != null and !value.cancellation_applied) null else .unavailable_environment;
             try self.store().begin();
             defer self.store().rollback();
-            try self.store().releaseReservation(work.attempt);
             try self.store().putRecord(occurrence.Occurrence, "occurrence", work.occurrence, work.task, next);
             try self.event(&value, .blocked, "{\"delivery\":\"definitely_not_sent\"}");
             try self.persist(value, previous, "effect.not-sent");
@@ -1229,7 +1166,7 @@ pub fn Service(comptime Types: type) type {
                 var arena = std.heap.ArenaAllocator.init(self.allocator);
                 defer arena.deinit();
                 const temporary = arena.allocator();
-                const bytes = try self.store().object(temporary, row.body, 256 * 1024);
+                const bytes = try self.store().object(temporary, row.body, null);
                 var decoded = try contracts.decodeOwned(state.Receipt, temporary, bytes);
                 defer decoded.deinit();
                 const receipt_value = decoded.value;
@@ -1252,7 +1189,7 @@ pub fn Service(comptime Types: type) type {
                 if (receipt_value.method == .submit) {
                     if (submitted or receipt_value.revision != 1) return error.InvalidArchive;
                     submitted = true;
-                    const input_bytes = try self.store().object(temporary, value.input, 4 * 1024 * 1024);
+                    const input_bytes = try self.store().object(temporary, value.input, null);
                     var input = try contracts.decodeOwned(Types.Input, temporary, input_bytes);
                     defer input.deinit();
                     const expected_digest = try submitDigest(temporary, value.profile.digest, input.value);
@@ -1287,7 +1224,7 @@ pub fn Service(comptime Types: type) type {
                 const ordinal = try ordinals.getOrPut(item.ordinal);
                 if (ordinal.found_existing) return error.InvalidArchive;
                 count += 1;
-                const bytes = try self.store().object(temporary, item.value, 256 * 1024);
+                const bytes = try self.store().object(temporary, item.value, null);
                 var payload = contracts.decodeOwned(Types.Message, temporary, bytes) catch |err| return if (err == error.OutOfMemory) err else error.InvalidArchive;
                 defer payload.deinit();
                 const receipt_digest = receipts.get(item.id) orelse return error.InvalidArchive;
@@ -1306,12 +1243,12 @@ pub fn Service(comptime Types: type) type {
                             .admitted => |admitted| if (admitted == .reply) admitted.reply else return error.InvalidArchive,
                             else => return error.InvalidArchive,
                         };
-                        const request_bytes = try self.store().object(temporary, saved.value.request_object, 4 * 1024 * 1024);
+                        const request_bytes = try self.store().object(temporary, saved.value.request_object, null);
                         var request = try data.invocation.decode(data.invocation.Request, temporary, request_bytes);
                         defer request.deinit();
                         const entry = try self.handlers.resolve(request.value, self.application.image_identity);
                         if (entry.declaration.kind != .inbox) return error.InvalidArchive;
-                        const bound = try self.store().acquiredObject(temporary, acquired.reply, 4 * 1024 * 1024);
+                        const bound = try self.store().acquiredObject(temporary, acquired.reply, null);
                         var reply = try data.invocation.decode(data.invocation.Result, temporary, bound);
                         defer reply.deinit();
                         const input_id = (try self.validateInboxReply(temporary, value.id, saved.value, reply.value.value)) orelse return error.InvalidArchive;
@@ -1335,7 +1272,7 @@ pub fn Service(comptime Types: type) type {
                 const saved = decoded.value;
                 const is_current = if (value.current_occurrence) |id| same(&id, &saved.id) else false;
                 if (is_current == (saved.state == .admitted)) return error.InvalidArchive;
-                const encoded = try self.store().object(temporary, saved.request_object, 4 * 1024 * 1024);
+                const encoded = try self.store().object(temporary, saved.request_object, null);
                 var request = try data.invocation.decode(data.invocation.Request, temporary, encoded);
                 defer request.deinit();
                 if (!same(&request.value.request_identity, &saved.request) or !same(&request.value.binding.program_identity, &self.application.image_identity)) return error.InvalidArchive;
@@ -1351,7 +1288,7 @@ pub fn Service(comptime Types: type) type {
                 };
                 var reply_value: ?[]const u8 = null;
                 if (acquired) |reply| {
-                    const bytes = try self.store().acquiredObject(temporary, reply.reply, 4 * 1024 * 1024);
+                    const bytes = try self.store().acquiredObject(temporary, reply.reply, null);
                     const result = try data.invocation.decode(data.invocation.Result, temporary, bytes);
                     // Keep the decoded backing until this iteration's arena ends.
                     if (!same(&result.value.request_identity, &saved.request)) return error.InvalidArchive;
@@ -1406,7 +1343,7 @@ pub fn Service(comptime Types: type) type {
                                 !same(&bound.digest, &reference.digest) or !same(&bound.pending_digest, &q.pending_digest) or
                                 !same(&answer_receipt.task, &value.id) or answer_receipt.method != .respond or answer_receipt.disposition != .answer_acquired or
                                 answer_receipt.question == null or !same(&answer_receipt.question.?, &question_id)) return error.InvalidArchive;
-                            const bytes = try self.store().object(temporary, reference, 64 * 1024);
+                            const bytes = try self.store().object(temporary, reference, null);
                             const expected = try answerDigest(temporary, value.id, question_id, q.revision, q.request_digest, q.answer_schema_id.bytes, bytes);
                             if (!same(&expected, &answer_receipt.request_digest)) return error.InvalidArchive;
                             const key = try self.operationKey(temporary, answer_receipt.client_operation_id.bytes);
@@ -1454,20 +1391,13 @@ pub fn Service(comptime Types: type) type {
                 defer attempt.deinit();
                 var saved = try self.record(occurrence.Occurrence, temporary, "occurrence", attempt.value.occurrence, value.id);
                 defer saved.deinit();
-                const encoded = try self.store().object(temporary, attempt.value.request, 4 * 1024 * 1024);
+                const encoded = try self.store().object(temporary, attempt.value.request, null);
                 var request = try data.invocation.decode(data.invocation.Request, temporary, encoded);
                 defer request.deinit();
                 const entry = try self.handlers.resolve(request.value, self.application.image_identity);
-                if (entry.declaration.attempt_limit) |limit| {
-                    if (try self.store().capabilityAttempts(value.id, entry.declaration.identity) > limit) return error.InvalidArchive;
-                }
                 if (entry.declaration.kind != .leaf or !same(&request.value.request_identity, &saved.value.request) or
                     !std.meta.eql(attempt.value.request, saved.value.request_object) or !std.meta.eql(attempt.value.profile, value.profile) or !same(attempt.value.capability.bytes, entry.declaration.identity) or
                     attempt.value.inference != entry.declaration.inference or (attempt.value.prepared != null) != (entry.declaration.capture != null)) return error.InvalidArchive;
-                if (entry.declaration.inference_attempt_limit) |limit| {
-                    const profile = try self.store().object(temporary, value.profile, 256 * 1024);
-                    if (value.inference_attempts > @min(@as(u32, 16), try limit(temporary, profile))) return error.InvalidArchive;
-                }
             }
             var output_tokens: u64 = 0;
             for (records) |row| {
@@ -1492,7 +1422,7 @@ pub fn Service(comptime Types: type) type {
                 if (attempt.value.prepared == null or !same(&attempt.value.occurrence, &capture_value.occurrence) or
                     !std.meta.eql(attempt.value.profile, value.profile) or !std.meta.eql(attempt.value.prepared.?, capture_value.request) or
                     !same(&acquired.attempt, &row.id) or !same(&acquired.reply, &projection.reply.digest)) return error.CorruptState;
-                const encoded = try self.store().object(temporary, attempt.value.request, 4 * 1024 * 1024);
+                const encoded = try self.store().object(temporary, attempt.value.request, null);
                 var request = try data.invocation.decode(data.invocation.Request, temporary, encoded);
                 defer request.deinit();
                 if (!same(&request.value.request_identity, &saved.value.request)) return error.CorruptState;
@@ -1500,21 +1430,19 @@ pub fn Service(comptime Types: type) type {
                 if (!same(attempt.value.capability.bytes, entry.declaration.identity) or attempt.value.inference != entry.declaration.inference) return error.IncompatibleProfile;
                 const adapter = entry.declaration.capture orelse return error.IncompatibleProfile;
                 const context = self.projectionContext(temporary, value);
-                const rendered = try self.store().object(temporary, capture_value.request, 2 * 1024 * 1024);
+                const rendered = try self.store().object(temporary, capture_value.request, null);
                 if (!same(rendered, try adapter.prepare(context, request.value.binding.payload))) return error.CorruptState;
-                const response = try self.store().object(temporary, capture_value.response.?, 4 * 1024 * 1024);
+                const response = try self.store().object(temporary, capture_value.response.?, null);
                 const result = try adapter.interpret(context, request.value.binding.payload, rendered, response);
-                if (result.reply.len > 1024 * 1024 or result.objects.len != projection.objects.items.len or result.output_tokens != projection.output_tokens) return error.CorruptState;
-                var total: u64 = 0;
+                if (result.objects.len != projection.objects.items.len or result.output_tokens != projection.output_tokens) return error.CorruptState;
                 for (result.objects, projection.objects.items) |object, reference| {
-                    total = try std.math.add(u64, total, object.len);
-                    if (total > 2 * 1024 * 1024 or object.len != reference.bytes or !same(&storage.digest(object), &reference.digest)) return error.CorruptState;
+                    if (object.len != reference.bytes or !same(&storage.digest(object), &reference.digest)) return error.CorruptState;
                 }
                 var schema = try data.schema.decode(temporary, entry.resume_schema);
                 defer schema.deinit();
                 try data.schema.validateValue(temporary, schema.descriptor, result.reply);
                 const bound = try data.invocation.encodeOwned(data.invocation.Result, temporary, .{ .request_identity = saved.value.request, .value = result.reply });
-                if (!same(bound, try self.store().object(temporary, projection.reply, 4 * 1024 * 1024))) return error.CorruptState;
+                if (!same(bound, try self.store().object(temporary, projection.reply, null))) return error.CorruptState;
                 if (entry.declaration.inference) if (result.output_tokens) |tokens| {
                     output_tokens = try std.math.add(u64, output_tokens, tokens);
                 };
@@ -1561,9 +1489,9 @@ pub fn Service(comptime Types: type) type {
             value.schedule = .parked;
             try self.compatible(value);
             if (!same(value.input_schema_id.bytes, Types.input_schema_id) or !same(value.output_schema_id.bytes, Types.output_schema_id) or !same(value.failure_schema_id.bytes, Types.failure_schema_id) or !same(value.message_schema_id.bytes, Types.message_schema_id)) return error.IncompatibleProfile;
-            const build_bytes = try self.store().object(a, reader.manifest.value.build, 256 * 1024);
+            const build_bytes = try self.store().object(a, reader.manifest.value.build, null);
             defer a.free(build_bytes);
-            var build = try json.parse(a, build_bytes, .{ .bytes = 256 * 1024 });
+            var build = try json.parseAsset(a, build_bytes, build_bytes.len);
             defer build.deinit();
             for ([_][]const u8{ "native_host_contract", "protocol", "client_mapping", "state_format", "program_sha256", "program_identity", "application_assets_sha256", "optimize" }) |field| {
                 const expected = json.get(self.application.manifest, field) orelse return error.InvalidAssets;
@@ -1600,15 +1528,13 @@ pub fn Service(comptime Types: type) type {
         fn validatePendingMessages(self: *Self, a: std.mem.Allocator, value: state.Task) !void {
             if (value.messages.items.len != 0 and (value.terminal() or !self.acceptsMessages())) return error.InvalidArchive;
             var previous: u64 = 0;
-            var bytes: u64 = 0;
             for (value.messages.items, 0..) |id, index| {
                 var decoded = try self.record(state.Message, a, "message", id, value.id);
                 defer decoded.deinit();
                 const item = decoded.value;
                 if (item.ordinal <= previous) return error.InvalidArchive;
                 previous = item.ordinal;
-                bytes = std.math.add(u64, bytes, item.value.bytes) catch return error.InvalidArchive;
-                if (bytes > 256 * 1024 or (item.disposition == .acquired and index != 0)) return error.InvalidArchive;
+                if (item.disposition == .acquired and index != 0) return error.InvalidArchive;
             }
         }
 
@@ -1621,7 +1547,7 @@ pub fn Service(comptime Types: type) type {
             };
             const observed = try driver.drive(a, .none, 0);
             defer a.free(observed);
-            const prior = try self.store().object(a, value.outcome, 4 * 1024 * 1024);
+            const prior = try self.store().object(a, value.outcome, null);
             defer a.free(prior);
             if (!same(observed, prior)) return error.InvalidArchive;
             const checkpoint = try driver.checkpoint(a);
@@ -1681,7 +1607,7 @@ pub fn Service(comptime Types: type) type {
         fn validateImportedResult(self: *Self, comptime T: type, a: std.mem.Allocator, value: state.Task, bytes: []const u8) !void {
             var decoded = try contracts.decodeOwned(T, a, bytes);
             defer decoded.deinit();
-            const expected = try json.canonicalBounded(self.allocator, try values.toJson(T, a, decoded.value), storage.maximum_object_bytes);
+            const expected = try json.canonicalBounded(self.allocator, try values.toJson(T, a, decoded.value), try self.store().database.blobLimit());
             defer self.allocator.free(expected);
             const reference = value.client_result orelse return error.InvalidArchive;
             if (reference.bytes != expected.len or !same(&reference.digest, &storage.digest(expected))) return error.InvalidArchive;

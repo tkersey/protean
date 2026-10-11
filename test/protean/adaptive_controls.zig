@@ -53,7 +53,6 @@ test "authored inference control proposes independent effort and model changes w
     var input: controls.InferenceInput = .{
         .state = state,
         .profiles = .{ .items = &profiles },
-        .maximum_revision = 16,
         .command = .{ .profile_id = profile.id, .effort = .high, .expected_revision = 5, .reason = .{ .bytes = "Inspect a difficult invariant." } },
     };
     // The same image handles all cases; no host changes control state.
@@ -61,7 +60,6 @@ test "authored inference control proposes independent effort and model changes w
         input.command.profile_id = profile.id;
         input.command.effort = .high;
         input.command.expected_revision = 5;
-        input.maximum_revision = 16;
         profiles[0].profile.effort_update = false;
         switch (scenario) {
             0 => {}, // Effort fallback creates a new lineage.
@@ -71,7 +69,6 @@ test "authored inference control proposes independent effort and model changes w
             4 => input.command.profile_id.bytes = "unapproved",
             5 => {
                 input.command.effort = .medium;
-                input.maximum_revision = 5; // An idempotent selection costs no revision.
             },
             6 => profiles[0].profile.effort_update = true,
             else => unreachable,
@@ -160,7 +157,6 @@ test "authored skill control preserves state on rejection and fences actual evic
             .state = state,
             .catalog = .{ .skills = .{ .items = &catalog } },
             .watermark = 7,
-            .maximum_revision = 16,
             .command = .{ .operation = .load, .skill_id = catalog[0].id, .version = .{ .bytes = "1" }, .residency = .resident, .expected_revision = 5, .reason = .{ .bytes = "Use approved guidance." } },
         };
         switch (scenario) {
@@ -175,7 +171,10 @@ test "authored skill control preserves state on rejection and fences actual evic
             5 => input.command.residency = .unchanged,
             6 => input.command.version.bytes = "2",
             7 => input.command.expected_revision = 4,
-            8 => input.maximum_revision = 5,
+            8 => {
+                input.state.selection.control_revision = 17;
+                input.command.expected_revision = 17;
+            },
             9 => {
                 input.state.skills.items = loaded[0..4];
                 input.command.skill_id = catalog[4].id;
@@ -195,14 +194,17 @@ test "authored skill control preserves state on rejection and fences actual evic
         var decoded = try contracts.decodeOwned(controls.Proposal, allocator, output.record.completed);
         defer decoded.deinit();
         const proposal = decoded.value;
-        if (scenario >= 5) {
+        if (scenario == 8 or scenario == 9) {
+            try std.testing.expectEqual(.proposed, proposal.disposition);
+            try std.testing.expectEqual(input.state.selection.control_revision + 1, proposal.state.selection.control_revision);
+            try std.testing.expectEqual(@as(usize, if (scenario == 9) 5 else 1), proposal.state.skills.items.len);
+        } else if (scenario >= 5) {
             try std.testing.expectEqual(.rejected, proposal.disposition);
             try std.testing.expectEqualDeep(input.state, proposal.state);
             try std.testing.expectEqual(switch (scenario) {
                 5, 10 => controls.Rejection.invalid_operation,
                 6 => .version_mismatch,
                 7 => .stale_revision,
-                8, 9 => .capacity,
                 else => .unknown_skill,
             }, proposal.rejection);
         } else if (scenario == 1) {

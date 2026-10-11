@@ -65,13 +65,25 @@ test "adaptive projection preserves history and owns skill and opaque eviction" 
     var objects: Objects = .{};
     const skill_body = "UNIQUE-SKILL-PAYLOAD: inspect state-transition preservation.";
     const skill = try objects.add(a, skill_body);
-    const catalog = try objects.add(a, try contracts.encodeOwned(P.AdaptiveCatalog, a, .{ .skills = .{ .items = &.{.{
+    // The exercised skill lies beyond the former catalog/bitmask boundary.
+    // Every existing load, transient, round-trip and eviction assertion below
+    // must still track its actual ownership, independently of matching text.
+    const entries = try a.alloc(P.AdaptiveSkill, 33);
+    for (entries[0..32], 0..) |*entry, i| entry.* = .{
+        .id = .{ .bytes = try std.fmt.allocPrint(a, "unused-{d}", .{i}) },
+        .version = .{ .bytes = "1" },
+        .description = .{ .bytes = "Approved but never loaded." },
+        .instructions = skill,
+        .tools = .{ false, false },
+    };
+    entries[32] = .{
         .id = .{ .bytes = "invariant" },
         .version = .{ .bytes = "1" },
         .description = .{ .bytes = "Inspect invariants." },
         .instructions = skill,
         .tools = .{ false, true },
-    }} } }));
+    };
+    const catalog = try objects.add(a, try contracts.encodeOwned(P.AdaptiveCatalog, a, .{ .skills = .{ .items = entries } }));
     const inference: model.AdaptiveInferenceProfile = .{
         .id = .{ .bytes = "analysis" },
         .model = .{ .bytes = "fixture-model-a" },
@@ -106,8 +118,6 @@ test "adaptive projection preserves history and owns skill and opaque eviction" 
         .catalog = catalog,
         .core_tools = .{ true, false },
         .permitted_tools = .{ true, true },
-        .model_attempts = 16,
-        .control_transitions = 16,
     };
     var frozen = native.json.object();
     try native.json.put(a, &frozen, "adaptive", try native.values.toJson(P.AdaptivePolicy, a, policy));

@@ -166,18 +166,27 @@ fn parameter(a: std.mem.Allocator, method: protocol.Method, key: []const u8, app
 // A prompt is application presentation JSON, so it deliberately has no shape.
 const EventField = struct {
     name: []const u8,
-    kind: enum { digest, counter, name, prompt, disposition, delivery },
+    kind: enum { digest, counter, name, prompt, prompt_ref, disposition, delivery },
     optional: bool = false,
 };
 fn eventFields(kind: state.EventType) []const EventField {
     return switch (kind) {
-        .input_required => &.{ .{ .name = "question_id", .kind = .digest }, .{ .name = "question_revision", .kind = .counter }, .{ .name = "request_digest", .kind = .digest }, .{ .name = "answer_schema_id", .kind = .name }, .{ .name = "prompt", .kind = .prompt } },
+        .input_required => &.{ .{ .name = "question_id", .kind = .digest }, .{ .name = "question_revision", .kind = .counter }, .{ .name = "request_digest", .kind = .digest }, .{ .name = "answer_schema_id", .kind = .name }, .{ .name = "prompt", .kind = .prompt, .optional = true }, .{ .name = "prompt_ref", .kind = .prompt_ref, .optional = true } },
         .message_queued, .message_consumed, .message_not_consumed => &.{ .{ .name = "message_id", .kind = .digest }, .{ .name = "ordinal", .kind = .counter }, .{ .name = "disposition", .kind = .disposition } },
         .blocked => &.{.{ .name = "delivery", .kind = .delivery, .optional = true }},
         .imported => &.{.{ .name = "archive_sha256", .kind = .digest }},
         .accepted, .input_accepted, .cancellation_requested, .parked, .resumed, .delivery_unknown, .completed, .failed, .cancelled => &.{},
     };
 }
+fn questionReferenceSchema(a: std.mem.Allocator) !json.Value {
+    return try shape(a, &.{
+        .{ "artifact_id", try reference(a, "digest") },                       .{ "sha256", try reference(a, "digest") },
+        .{ "bytes", try reference(a, "counter") },                            .{ "media_type", try constant(a, "application/json") },
+        .{ "schema_id", try constant(a, "agent-native-question-prompt.v1") }, .{ "retention", try constant(a, "state-namespace") },
+        .{ "question_id", try reference(a, "digest") },
+    }, &.{});
+}
+
 fn eventPayload(a: std.mem.Allocator, kind: state.EventType) !json.Value {
     var fields: std.ArrayList(Property) = .empty;
     defer fields.deinit(a);
@@ -189,22 +198,12 @@ fn eventPayload(a: std.mem.Allocator, kind: state.EventType) !json.Value {
             .counter => try reference(a, "counter"),
             .name => try text(a, 1, 128),
             .prompt => json.object(),
+            .prompt_ref => try questionReferenceSchema(a),
             .disposition => try enumSchema(state.MessageDisposition, a),
             .delivery => try constant(a, "definitely_not_sent"),
         };
         try fields.append(a, .{ field.name, field_schema });
         if (field.optional) try optional.append(a, field.name);
-    }
-    if (kind == .input_required) {
-        try optional.append(a, "prompt");
-        try optional.append(a, "prompt_ref");
-        const ref = try shape(a, &.{
-            .{ "artifact_id", try reference(a, "digest") },                       .{ "sha256", try reference(a, "digest") },
-            .{ "bytes", try reference(a, "counter") },                            .{ "media_type", try constant(a, "application/json") },
-            .{ "schema_id", try constant(a, "agent-native-question-prompt.v1") }, .{ "retention", try constant(a, "state-namespace") },
-            .{ "question_id", try reference(a, "digest") },
-        }, &.{});
-        try fields.append(a, .{ "prompt_ref", ref });
     }
     var result = try shape(a, fields.items, optional.items);
     if (kind == .input_required) try json.put(a, &result, "oneOf", try literal(a, "[{\"required\":[\"prompt\"]},{\"required\":[\"prompt_ref\"]}]"));
@@ -215,6 +214,7 @@ pub fn validateEventData(a: std.mem.Allocator, kind: state.EventType, bytes: []c
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidArchive;
     const fields = eventFields(kind);
+    if (kind == .input_required and (parsed.value.object.contains("prompt") == parsed.value.object.contains("prompt_ref"))) return error.InvalidArchive;
     for (parsed.value.object.keys()) |key| {
         var found = false;
         for (fields) |field| if (std.mem.eql(u8, key, field.name)) {
@@ -230,6 +230,21 @@ pub fn validateEventData(a: std.mem.Allocator, kind: state.EventType, bytes: []c
         };
         switch (field.kind) {
             .prompt => {},
+            .prompt_ref => {
+                if (value != .object or value.object.count() != 7) return error.InvalidArchive;
+                inline for (.{ "artifact_id", "sha256", "question_id" }) |name| {
+                    const encoded = json.text(value.object.get(name) orelse return error.InvalidArchive) catch return error.InvalidArchive;
+                    if (encoded.len != 64) return error.InvalidArchive;
+                    var id: [32]u8 = undefined;
+                    _ = std.fmt.hexToBytes(&id, encoded) catch return error.InvalidArchive;
+                }
+                if (!std.mem.eql(u8, value.object.get("artifact_id").?.string, value.object.get("sha256").?.string) or
+                    !std.mem.eql(u8, value.object.get("question_id").?.string, (parsed.value.object.get("question_id") orelse return error.InvalidArchive).string)) return error.InvalidArchive;
+                _ = json.decimal(u64, value.object.get("bytes") orelse return error.InvalidArchive) catch return error.InvalidArchive;
+                inline for (.{ .{ "media_type", "application/json" }, .{ "schema_id", "agent-native-question-prompt.v1" }, .{ "retention", "state-namespace" } }) |pair| {
+                    if (!std.mem.eql(u8, json.text(value.object.get(pair[0]) orelse return error.InvalidArchive) catch return error.InvalidArchive, pair[1])) return error.InvalidArchive;
+                }
+            },
             .counter => {
                 _ = json.decimal(u64, value) catch return error.InvalidArchive;
             },
@@ -270,10 +285,10 @@ pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.
     const question = try eventPayload(a, .input_required);
     const message = try eventPayload(a, .message_queued);
     const snapshot = try shape(a, &.{
-        .{ "task_id", id },                                     .{ "application_id", try text(a, 1, 128) },                        .{ "profile_id", try text(a, 1, 128) },                    .{ "profile_digest", digest },
-        .{ "status", try enumSchema(state.Status, a) },         .{ "revision", count },                                            .{ "result_available", boolean },                          .{ "earliest_available_seq", count },
-        .{ "high_water_seq", count },                           .{ "blocker", try nullable(a, try enumSchema(state.Blocker, a)) }, .{ "cancellation", try nullable(a, try text(a, 0, 256)) }, .{ "pending_messages", try array(a, message, limits.queued_messages) },
-        .{ "message_history", try constant(a, "task.events") }, .{ "question", try nullable(a, question) },
+        .{ "task_id", id },                             .{ "application_id", try text(a, 1, 128) },                        .{ "profile_id", try text(a, 1, 128) },                    .{ "profile_digest", digest },
+        .{ "status", try enumSchema(state.Status, a) }, .{ "revision", count },                                            .{ "result_available", boolean },                          .{ "earliest_available_seq", count },
+        .{ "high_water_seq", count },                   .{ "blocker", try nullable(a, try enumSchema(state.Blocker, a)) }, .{ "cancellation", try nullable(a, try text(a, 0, 256)) }, .{ "pending_messages", try array(a, message, limits.pending_message_page) },
+        .{ "pending_message_count", count },            .{ "pending_messages_truncated", boolean },                        .{ "message_history", try constant(a, "task.events") },    .{ "question", try nullable(a, question) },
     }, &.{});
     try json.put(a, &definitions, "snapshot", snapshot);
     const artifact = try shape(a, &.{ .{ "artifact_id", digest }, .{ "sha256", digest }, .{ "bytes", count }, .{ "media_type", try constant(a, "application/json") }, .{ "schema_id", try text(a, 1, 128) }, .{ "retention", try constant(a, "state-namespace") } }, &.{});
@@ -370,7 +385,7 @@ pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.
     try json.put(a, &definitions, "task.event", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "method", try constant(a, "task.event") }, .{ "params", event_params } }, &.{}));
     const closed_params = try shape(a, &.{ .{ "subscription_id", id }, .{ "task_id", id }, .{ "reason", try constant(a, "CursorExpired") }, .{ "earliest_available_seq", count }, .{ "high_water_seq", count } }, &.{});
     try json.put(a, &definitions, "subscription.closed", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "method", try constant(a, "subscription.closed") }, .{ "params", closed_params } }, &.{}));
-    const server_closed = try shape(a, &.{ .{ "mode", try enumeration(a, &.{ "park", "cancel" }) }, .{ "disposition", try enumeration(a, &.{ "parked", "cancelled", "incomplete" }) }, .{ "recovery_tasks", try array(a, id, limits.nonterminal_tasks) } }, &.{});
+    const server_closed = try shape(a, &.{ .{ "mode", try enumeration(a, &.{ "park", "cancel" }) }, .{ "disposition", try enumeration(a, &.{ "parked", "cancelled", "incomplete" }) }, .{ "recovery_tasks", try array(a, id, limits.owned_tasks) } }, &.{});
     try json.put(a, &definitions, "server.closed", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "method", try constant(a, "server.closed") }, .{ "params", server_closed } }, &.{}));
     var limit_properties: std.array_list.Managed(Property) = .init(a);
     inline for (@typeInfo(protocol.Limits).@"struct".field_names) |name| {

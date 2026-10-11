@@ -8,12 +8,6 @@ const occurrence = @import("occurrence.zig");
 const hash_abi = @import("hash_abi.zig");
 const Digest = state.Digest;
 pub const format: u32 = @import("native_options").state_format;
-pub const state_bytes = @import("native_options").state_bytes;
-pub const maximum_object_bytes = sqlite.maximum_blob_bytes;
-pub const dispatch_reserve = 16 * 1024 * 1024;
-pub const capture_dispatch_reserve = 20 * 1024 * 1024;
-pub const captured_reserve = 15 * 1024 * 1024;
-pub const acquired_reserve = 11 * 1024 * 1024;
 
 pub fn digest(bytes: []const u8) Digest {
     // Share the optimized standard-library primitive already linked for file
@@ -62,7 +56,7 @@ pub const Store = struct {
     /// its OS lock and decided whether this is a new or existing database.
     pub fn init(a: std.mem.Allocator, database: *sqlite.Database, create: bool, namespace: Digest) !Store {
         try database.exec("PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;");
-        try database.exec(std.fmt.comptimePrint("PRAGMA page_size=4096; PRAGMA max_page_count={d};", .{state_bytes / 4096}));
+        try database.exec("PRAGMA page_size=4096;");
         if (create) {
             try database.exec("BEGIN IMMEDIATE;");
             errdefer database.exec("ROLLBACK;") catch {};
@@ -73,7 +67,6 @@ pub const Store = struct {
                 \\CREATE INDEX operation_tasks ON operations(task,id);
                 \\CREATE TABLE records(kind TEXT NOT NULL, id BLOB NOT NULL, task BLOB NOT NULL REFERENCES tasks(id), body BLOB NOT NULL REFERENCES objects(digest), PRIMARY KEY(kind,id)) WITHOUT ROWID;
                 \\CREATE TABLE events(task BLOB NOT NULL REFERENCES tasks(id), seq INTEGER NOT NULL, revision INTEGER NOT NULL, body BLOB NOT NULL REFERENCES objects(digest), PRIMARY KEY(task,seq)) WITHOUT ROWID;
-                \\CREATE TABLE reservations(attempt BLOB PRIMARY KEY CHECK(length(attempt)=32), bytes INTEGER NOT NULL CHECK(bytes>=0 AND bytes<=20971520)) WITHOUT ROWID;
             );
             try database.run("INSERT INTO meta VALUES(1,?, ?,0,?,?)", &.{ .{ .integer = format }, .{ .blob = &namespace }, .{ .blob = &@as(Digest, @splat(0)) }, .{ .blob = &namespace } });
             try database.exec("COMMIT;");
@@ -110,7 +103,6 @@ pub const Store = struct {
     /// checked seal before acknowledging anything or dispatching an effect.
     pub fn commit(self: *Store, transition: []const u8) !Head {
         try self.writing();
-        try self.checkCapacity();
         if (self.head.generation == std.math.maxInt(i64)) return error.Capacity;
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
         hash.update("agent.native.store.v1\x00");
@@ -142,40 +134,6 @@ pub const Store = struct {
         if (value < 0) return error.CorruptState;
         return @intCast(value);
     }
-    fn checkCapacity(self: *Store) !void {
-        const page_size = try self.scalar("PRAGMA page_size");
-        const pages = try self.scalar("PRAGMA page_count");
-        const free = try self.scalar("PRAGMA freelist_count");
-        const reserved = try self.scalar("SELECT coalesce(sum(bytes),0) FROM reservations");
-        if (page_size != 4096 or free > pages) return error.CorruptState;
-        // This check is on the resulting transaction, so another admission
-        // cannot consume space reserved for an already dispatched operation.
-        const used = try std.math.mul(u64, pages - free, page_size);
-        if (used +| reserved > state_bytes - 1024 * 1024) return error.Capacity;
-    }
-    pub fn reserve(self: *Store, attempt: Digest) !void {
-        try self.writing();
-        try self.database.run("INSERT INTO reservations VALUES(?,?)", &.{ .{ .blob = &attempt }, .{ .integer = dispatch_reserve } });
-    }
-    pub fn reserveCapture(self: *Store, attempt: Digest) !void {
-        try self.writing();
-        try self.database.run("INSERT INTO reservations VALUES(?,?)", &.{ .{ .blob = &attempt }, .{ .integer = capture_dispatch_reserve } });
-    }
-    pub fn reserveCaptured(self: *Store, attempt: Digest) !void {
-        try self.setReservation(attempt, captured_reserve);
-    }
-    pub fn reserveAcquired(self: *Store, attempt: Digest) !void {
-        try self.setReservation(attempt, acquired_reserve);
-    }
-    fn setReservation(self: *Store, attempt: Digest, bytes: u64) !void {
-        try self.writing();
-        try self.database.run("UPDATE reservations SET bytes=? WHERE attempt=?", &.{ .{ .integer = @intCast(bytes) }, .{ .blob = &attempt } });
-        if (try self.database.changes() != 1) return error.CorruptState;
-    }
-    pub fn releaseReservation(self: *Store, attempt: Digest) !void {
-        try self.writing();
-        try self.database.run("DELETE FROM reservations WHERE attempt=?", &.{.{ .blob = &attempt }});
-    }
 
     pub fn putObject(self: *Store, bytes: []const u8) !state.Reference {
         const ref: state.Reference = .{ .digest = digest(bytes), .bytes = bytes.len };
@@ -196,10 +154,10 @@ pub const Store = struct {
     pub fn acquireObject(self: *Store, ref: state.Reference, source: anytype) !void {
         try self.writing();
         errdefer self.rollback();
-        if (ref.bytes > maximum_object_bytes) return error.Capacity;
+        if (ref.bytes > (try self.database.blobLimit())) return error.Capacity;
         try self.database.run("INSERT OR IGNORE INTO objects VALUES(?,zeroblob(?))", &.{ .{ .blob = &ref.digest }, .{ .integer = @intCast(ref.bytes) } });
         const inserted = try self.database.changes() == 1;
-        const location = try self.objectLocation(ref.digest, maximum_object_bytes);
+        const location = try self.objectLocation(ref.digest, (try self.database.blobLimit()));
         if (location.bytes != ref.bytes) return error.CorruptState;
         var blob = try self.database.openBlob("objects", "body", location.row, inserted);
         var closed = false;
@@ -228,8 +186,8 @@ pub const Store = struct {
         hash_abi.protean_native_sha256_final(&hash, &observed);
         if (!std.mem.eql(u8, &observed, &ref.digest)) return error.InvalidObject;
     }
-    pub fn object(self: *Store, a: std.mem.Allocator, ref: state.Reference, limit: usize) ![]u8 {
-        if (ref.bytes > limit) return error.Capacity;
+    pub fn object(self: *Store, a: std.mem.Allocator, ref: state.Reference, limit: ?usize) ![]u8 {
+        if (limit != null and ref.bytes > limit.?) return error.Capacity;
         const bytes = try self.acquiredObject(a, ref.digest, limit);
         errdefer a.free(bytes);
         if (bytes.len != ref.bytes) return error.CorruptState;
@@ -238,7 +196,7 @@ pub const Store = struct {
     /// Check the complete immutable object, retaining only the requested range.
     /// An empty destination verifies integrity without materializing the object.
     pub fn objectRange(self: *Store, ref: state.Reference, start: usize, destination: []u8) !void {
-        if (ref.bytes > maximum_object_bytes) return error.Capacity;
+        if (ref.bytes > (try self.database.blobLimit())) return error.Capacity;
         if (start > ref.bytes or destination.len > ref.bytes - start) return error.InvalidParams;
         var sink = struct {
             start: usize,
@@ -256,8 +214,8 @@ pub const Store = struct {
 
     /// Sink bytes remain unpublished until this complete integrity check returns.
     pub fn writeObject(self: *Store, ref: state.Reference, sink: anytype) !void {
-        if (ref.bytes > maximum_object_bytes) return error.Capacity;
-        const location = try self.objectLocation(ref.digest, maximum_object_bytes);
+        if (ref.bytes > (try self.database.blobLimit())) return error.Capacity;
+        const location = try self.objectLocation(ref.digest, (try self.database.blobLimit()));
         if (location.bytes != ref.bytes) return error.CorruptState;
         var blob = try self.database.openBlob("objects", "body", location.row, false);
         var closed = false;
@@ -282,8 +240,8 @@ pub const Store = struct {
     }
     /// Private occurrence lookup. Public artifact reads require a separate
     /// task/audience-bound artifact record, never a bare content digest.
-    pub fn acquiredObject(self: *Store, a: std.mem.Allocator, id: Digest, limit: usize) ![]u8 {
-        const location = try self.objectLocation(id, @min(limit, maximum_object_bytes));
+    pub fn acquiredObject(self: *Store, a: std.mem.Allocator, id: Digest, limit: ?usize) ![]u8 {
+        const location = try self.objectLocation(id, if (limit) |maximum| @min(maximum, try self.database.blobLimit()) else try self.database.blobLimit());
         const bytes = try a.alloc(u8, location.bytes);
         errdefer a.free(bytes);
         var blob = try self.database.openBlob("objects", "body", location.row, false);
@@ -301,17 +259,17 @@ pub const Store = struct {
         if (!std.mem.eql(u8, &digest(bytes), &id)) return error.CorruptState;
         return bytes;
     }
-    fn objectLocation(self: *Store, id: Digest, limit: usize) !struct { row: i64, bytes: usize } {
+    fn objectLocation(self: *Store, id: Digest, limit: ?usize) !struct { row: i64, bytes: usize } {
         var query = try self.database.prepare("SELECT rowid,length(body) FROM objects WHERE digest=?", &.{.{ .blob = &id }});
         defer query.deinit();
         if (try query.step() != .row) return error.MissingArtifact;
         const length = try query.integer(1);
-        if (length < 0 or length > limit) return error.Capacity;
+        if (length < 0 or (limit != null and length > limit.?)) return error.Capacity;
         return .{ .row = try query.integer(0), .bytes = @intCast(length) };
     }
     fn recordObject(self: *Store, a: std.mem.Allocator, reference: []const u8) ![]u8 {
         if (reference.len != 32) return error.CorruptState;
-        return self.acquiredObject(a, reference[0..32].*, 256 * 1024) catch |err| switch (err) {
+        return self.acquiredObject(a, reference[0..32].*, null) catch |err| switch (err) {
             error.MissingArtifact => error.CorruptState,
             else => err,
         };
@@ -342,7 +300,7 @@ pub const Store = struct {
     }
     pub fn putReceipt(self: *Store, id: []const u8, request: Digest, bytes: []const u8) !void {
         try self.writing();
-        if (id.len == 0 or id.len > 128 or bytes.len > 64 * 1024) return error.Capacity;
+        if (id.len == 0 or id.len > 128) return error.Capacity;
         var decoded = try contracts.decodeOwned(state.Receipt, self.allocator, bytes);
         defer decoded.deinit();
         if (!std.mem.eql(u8, &decoded.value.request_digest, &request)) return error.CorruptState;
@@ -382,7 +340,6 @@ pub const Store = struct {
         try self.writing();
         const body = try contracts.encodeOwned(T, self.allocator, value);
         defer self.allocator.free(body);
-        if (body.len > 256 * 1024) return error.Capacity;
         const ref = try self.putObject(body);
         try self.database.run("UPDATE records SET body=? WHERE kind=? AND id=? AND task=?", &.{ .{ .blob = &ref.digest }, .{ .text = kind }, .{ .blob = &id }, .{ .blob = &task } });
         if (try self.database.changes() != 1) return error.CorruptState;
@@ -392,7 +349,6 @@ pub const Store = struct {
         try self.writing();
         const body = try contracts.encodeOwned(T, self.allocator, value);
         defer self.allocator.free(body);
-        if (body.len > 256 * 1024) return error.Capacity;
         const ref = try self.putObject(body);
         try self.database.run("INSERT INTO records VALUES(?,?,?,?)", &.{ .{ .text = kind }, .{ .blob = &id }, .{ .blob = &task }, .{ .blob = &ref.digest } });
     }
@@ -403,33 +359,29 @@ pub const Store = struct {
         return try self.recordObject(a, try query.bytes(0));
     }
     pub fn taskIds(self: *Store, a: std.mem.Allocator, nonterminal: bool) ![]state.TaskId {
-        var query = try self.database.prepare("SELECT id FROM tasks WHERE (?=0 OR terminal=0) ORDER BY id LIMIT 1025", &.{.{ .integer = @intFromBool(nonterminal) }});
+        var query = try self.database.prepare("SELECT id FROM tasks WHERE (?=0 OR terminal=0) ORDER BY id", &.{.{ .integer = @intFromBool(nonterminal) }});
         defer query.deinit();
         var ids: std.ArrayList(state.TaskId) = .empty;
         errdefer ids.deinit(a);
         while (try query.step() == .row) {
             const bytes = try query.bytes(0);
             if (bytes.len != 16) return error.CorruptState;
-            if (ids.items.len == 1024) return error.Capacity;
             try ids.append(a, bytes[0..16].*);
         }
         return ids.toOwnedSlice(a);
     }
 
-    pub fn capabilityAttempts(self: *Store, task: state.TaskId, capability: []const u8) !u32 {
-        var query = try self.database.prepare("SELECT body FROM records WHERE kind='attempt' AND task=? LIMIT 1025", &.{.{ .blob = &task }});
+    pub fn capabilityAttempts(self: *Store, task: state.TaskId, capability: []const u8) !u64 {
+        var query = try self.database.prepare("SELECT body FROM records WHERE kind='attempt' AND task=?", &.{.{ .blob = &task }});
         defer query.deinit();
-        var seen: usize = 0;
-        var count: u32 = 0;
+        var count: u64 = 0;
         while (try query.step() == .row) {
-            if (seen == 1024) return error.Capacity;
-            seen += 1;
             const bytes = try self.recordObject(self.allocator, try query.bytes(0));
             defer self.allocator.free(bytes);
             var attempt = try contracts.decodeOwned(state.Attempt, self.allocator, bytes);
             defer attempt.deinit();
             if (!std.mem.eql(u8, &task, &attempt.value.task)) return error.CorruptState;
-            if (std.mem.eql(u8, capability, attempt.value.capability.bytes)) count += 1;
+            if (std.mem.eql(u8, capability, attempt.value.capability.bytes)) count = try std.math.add(u64, count, 1);
         }
         return count;
     }
@@ -438,14 +390,11 @@ pub const Store = struct {
     /// Return provenance candidates, not permission. The capability owner must
     /// authorize disclosure before any returned object is read publicly.
     pub fn projectionOwners(self: *Store, a: std.mem.Allocator, task: state.TaskId, object_id: Digest) ![]ProjectionOwner {
-        var query = try self.database.prepare("SELECT id,body FROM records WHERE kind='capture' AND task=? LIMIT 1025", &.{.{ .blob = &task }});
+        var query = try self.database.prepare("SELECT id,body FROM records WHERE kind='capture' AND task=?", &.{.{ .blob = &task }});
         defer query.deinit();
         var result: std.ArrayList(ProjectionOwner) = .empty;
         errdefer result.deinit(a);
-        var seen: usize = 0;
         while (try query.step() == .row) {
-            if (seen == 1024) return error.Capacity;
-            seen += 1;
             const bytes = try self.recordObject(self.allocator, try query.bytes(1));
             defer self.allocator.free(bytes);
             var capture = try contracts.decodeOwned(state.Capture, self.allocator, bytes);
@@ -459,20 +408,20 @@ pub const Store = struct {
         return result.toOwnedSlice(a);
     }
 
-    pub fn objectReference(self: *Store, id: Digest, limit: usize) !state.Reference {
+    pub fn objectReference(self: *Store, id: Digest, limit: ?usize) !state.Reference {
         var query = try self.database.prepare("SELECT length(body) FROM objects WHERE digest=?", &.{.{ .blob = &id }});
         defer query.deinit();
         if (try query.step() != .row) return error.MissingArtifact;
         const length = try query.integer(0);
-        if (length < 0 or length > limit) return error.Capacity;
+        if (length < 0 or (limit != null and length > limit.?)) return error.Capacity;
         return .{ .digest = id, .bytes = @intCast(length) };
     }
     fn indexedReference(self: *Store, bytes: []const u8) !state.Reference {
         if (bytes.len != 32) return error.CorruptState;
-        return self.objectReference(bytes[0..32].*, 256 * 1024);
+        return self.objectReference(bytes[0..32].*, null);
     }
 
-    /// A bounded, task-scoped index snapshot. The archive owner validates each
+    /// A task-scoped index snapshot. The archive owner validates each
     /// canonical record and computes its artifact closure before publication.
     pub fn archiveIndex(self: *Store, a: std.mem.Allocator, task_id: state.TaskId, build: state.Reference) !state.Archive {
         if (self.transaction or self.fenced) return error.Busy;
@@ -481,13 +430,11 @@ pub const Store = struct {
         var records: std.ArrayList(state.ArchiveRecord) = .empty;
         var events: std.ArrayList(state.ArchiveEvent) = .empty;
         var operations: std.ArrayList(state.ArchiveOperation) = .empty;
-        var reservations: std.ArrayList(state.ArchiveReservation) = .empty;
         // The caller supplies an arena. No borrowed SQLite column escapes.
         {
-            var query = try self.database.prepare("SELECT kind,id,body FROM records WHERE task=? ORDER BY kind,id LIMIT 1025", &.{.{ .blob = &task_id }});
+            var query = try self.database.prepare("SELECT kind,id,body FROM records WHERE task=? ORDER BY kind,id", &.{.{ .blob = &task_id }});
             defer query.deinit();
             while (try query.step() == .row) {
-                if (records.items.len == 1024) return error.Capacity;
                 const kind = std.meta.stringToEnum(state.RecordKind, try query.bytes(0)) orelse return error.NonPortable;
                 const id = try query.bytes(1);
                 if (id.len != 32) return error.CorruptState;
@@ -495,10 +442,9 @@ pub const Store = struct {
             }
         }
         {
-            var query = try self.database.prepare("SELECT seq,revision,body FROM events WHERE task=? ORDER BY seq LIMIT 2049", &.{.{ .blob = &task_id }});
+            var query = try self.database.prepare("SELECT seq,revision,body FROM events WHERE task=? ORDER BY seq", &.{.{ .blob = &task_id }});
             defer query.deinit();
             while (try query.step() == .row) {
-                if (events.items.len == 2048) return error.Capacity;
                 const seq = try query.integer(0);
                 const revision = try query.integer(1);
                 if (seq <= 0 or revision <= 0) return error.CorruptState;
@@ -506,29 +452,17 @@ pub const Store = struct {
             }
         }
         {
-            var query = try self.database.prepare("SELECT id,request,receipt FROM operations WHERE task=? ORDER BY id LIMIT 2049", &.{.{ .blob = &task_id }});
+            var query = try self.database.prepare("SELECT id,request,receipt FROM operations WHERE task=? ORDER BY id", &.{.{ .blob = &task_id }});
             defer query.deinit();
             while (try query.step() == .row) {
-                if (operations.items.len == 2048) return error.Capacity;
                 const key = try query.bytes(0);
                 const request = try query.bytes(1);
                 if (key.len == 0 or key.len > 128 or request.len != 32) return error.CorruptState;
                 try operations.append(a, .{ .key = .{ .bytes = try a.dupe(u8, key) }, .request = request[0..32].*, .body = try self.indexedReference(try query.bytes(2)) });
             }
         }
-        {
-            var query = try self.database.prepare("SELECT r.attempt,r.bytes FROM reservations r JOIN records x ON x.kind='attempt' AND x.id=r.attempt WHERE x.task=? ORDER BY r.attempt LIMIT 65", &.{.{ .blob = &task_id }});
-            defer query.deinit();
-            while (try query.step() == .row) {
-                if (reservations.items.len == 64) return error.Capacity;
-                const attempt = try query.bytes(0);
-                const bytes = try query.integer(1);
-                if (attempt.len != 32 or bytes <= 0 or bytes > capture_dispatch_reserve) return error.CorruptState;
-                try reservations.append(a, .{ .attempt = attempt[0..32].*, .bytes = @intCast(bytes) });
-            }
-        }
         return .{
-            .version = 1,
+            .version = 2,
             .classification = .private,
             .profile = .offline_copy,
             .task = .{ .digest = digest(task_bytes), .bytes = task_bytes.len },
@@ -537,7 +471,6 @@ pub const Store = struct {
             .records = .{ .items = try records.toOwnedSlice(a) },
             .events = .{ .items = try events.toOwnedSlice(a) },
             .operations = .{ .items = try operations.toOwnedSlice(a) },
-            .reservations = .{ .items = try reservations.toOwnedSlice(a) },
             .objects = .{ .items = &.{} },
         };
     }
@@ -557,13 +490,9 @@ pub const Store = struct {
             try self.database.run("INSERT INTO events VALUES(?,?,?,?)", &.{ .{ .blob = &task.id }, .{ .integer = @intCast(row.seq) }, .{ .integer = @intCast(row.revision) }, .{ .blob = &row.body.digest } });
         }
         for (archive.operations.items) |row| {
-            const receipt_bytes = try self.object(a, row.body, 256 * 1024);
+            const receipt_bytes = try self.object(a, row.body, null);
             defer a.free(receipt_bytes);
             try self.putReceipt(row.key.bytes, row.request, receipt_bytes);
-        }
-        for (archive.reservations.items) |row| {
-            if (row.bytes == 0 or row.bytes > capture_dispatch_reserve) return error.CorruptState;
-            try self.database.run("INSERT INTO reservations VALUES(?,?)", &.{ .{ .blob = &row.attempt }, .{ .integer = @intCast(row.bytes) } });
         }
     }
     pub fn putEvent(self: *Store, event: state.Event) !void {
@@ -634,10 +563,9 @@ test "objects and immutable admission receipts commit together or disappear toge
     try db.run("UPDATE operations SET task=? WHERE id='request-1'", &.{.{ .blob = &@as(state.TaskId, @splat(2)) }});
     try db.run("UPDATE objects SET body=? WHERE digest=?", &.{ .{ .blob = "changed receipt" }, .{ .blob = &digest(receipt_bytes) } });
     try std.testing.expectError(error.CorruptState, store.receipt(a, "request-1", digest("submit/input")));
-    try std.testing.expect(@import("native_c").sqlite3_memory_used() <= sqlite.heap_bytes);
 }
 
-test "file-backed objects cross allocator boundaries without growing the SQLite heap" {
+test "file-backed objects cross former allocation limits and retain chunk integrity" {
     const a = std.testing.allocator;
     const io = std.testing.io;
     var temporary = std.testing.tmpDir(.{});
@@ -646,30 +574,30 @@ test "file-backed objects cross allocator boundaries without growing the SQLite 
     const path_length = try temporary.dir.realPath(io, &path_buffer);
     const path = try std.fmt.allocPrint(a, "{s}/objects.sqlite", .{path_buffer[0..path_length]});
     defer a.free(path);
-    const bytes = try a.alloc(u8, maximum_object_bytes + 1);
+    const fixture_bytes = 16 * 1024 * 1024 + 1;
+    const bytes = try a.alloc(u8, fixture_bytes);
     defer a.free(bytes);
     @memset(bytes, 0x5a);
-    const sizes = [_]usize{ 0, 8 * 1024 * 1024, 8 * 1024 * 1024 + 1, 9 * 1024 * 1024, maximum_object_bytes };
+    const sizes = [_]usize{ 0, 8 * 1024 * 1024, 8 * 1024 * 1024 + 1, 9 * 1024 * 1024, fixture_bytes };
     var references: [sizes.len]state.Reference = undefined;
     {
         const db = try sqlite.Database.open(a, path, true);
         defer db.destroy() catch unreachable;
         defer db.close() catch unreachable;
         var store = try Store.init(a, db, true, @splat(7));
+        try std.testing.expect(try db.blobLimit() > fixture_bytes);
+        try std.testing.expect(try store.scalar("PRAGMA max_page_count") > 256 * 1024 * 1024 / 4096);
         for (sizes, &references) |size, *reference| {
             try store.begin();
             reference.* = try store.putObject(bytes[0..size]);
             try std.testing.expectEqualDeep(reference.*, try store.putObject(bytes[0..size]));
             _ = try store.commit("large-object");
         }
-        try store.begin();
-        try std.testing.expectError(error.Capacity, store.putObject(bytes));
-        store.rollback();
         bytes[0] ^= 1;
         try store.begin();
         const rolled_back = try store.putObject(bytes[0 .. 9 * 1024 * 1024]);
         store.rollback();
-        try std.testing.expectError(error.MissingArtifact, store.object(a, rolled_back, maximum_object_bytes));
+        try std.testing.expectError(error.MissingArtifact, store.object(a, rolled_back, fixture_bytes));
         bytes[0] ^= 1;
         const invalid: state.Reference = .{ .digest = digest("expected"), .bytes = 8 };
         var bad_source = struct {
@@ -681,8 +609,7 @@ test "file-backed objects cross allocator boundaries without growing the SQLite 
         try std.testing.expectError(error.InvalidObject, store.acquireObject(invalid, &bad_source));
         try std.testing.expect(!store.transaction);
         try std.testing.expectError(error.InvalidState, store.commit("must-not-publish-invalid-object"));
-        try std.testing.expectError(error.MissingArtifact, store.object(a, invalid, maximum_object_bytes));
-        try std.testing.expect(@import("native_c").sqlite3_memory_used() <= sqlite.heap_bytes);
+        try std.testing.expectError(error.MissingArtifact, store.object(a, invalid, fixture_bytes));
     }
     {
         const db = try sqlite.Database.open(a, path, false);
@@ -690,7 +617,7 @@ test "file-backed objects cross allocator boundaries without growing the SQLite 
         defer db.close() catch unreachable;
         var store = try Store.init(a, db, false, @splat(7));
         for (sizes, references) |size, reference| {
-            const actual = try store.object(a, reference, maximum_object_bytes);
+            const actual = try store.object(a, reference, fixture_bytes);
             defer a.free(actual);
             try std.testing.expectEqualSlices(u8, bytes[0..size], actual);
         }
@@ -700,46 +627,42 @@ test "file-backed objects cross allocator boundaries without growing the SQLite 
         try std.testing.expectEqualSlices(u8, bytes[65500..][0..range.len], &range);
         try store.objectRange(largest, largest.bytes, &.{});
         try std.testing.expectError(error.InvalidParams, store.objectRange(largest, largest.bytes, &range));
-        try std.testing.expectError(error.Capacity, store.object(a, largest, maximum_object_bytes - 1));
+        try std.testing.expectError(error.Capacity, store.object(a, largest, fixture_bytes - 1));
         try store.begin();
-        const location = try store.objectLocation(largest.digest, maximum_object_bytes);
+        const location = try store.objectLocation(largest.digest, fixture_bytes);
         var blob = try db.openBlob("objects", "body", location.row, true);
-        try blob.write(&.{0xff}, maximum_object_bytes - 1);
+        try blob.write(&.{0xff}, fixture_bytes - 1);
         try blob.close();
         _ = try store.commit("corrupt-last-byte");
         // Corruption outside the requested range must still be rejected.
         try std.testing.expectError(error.CorruptState, store.objectRange(largest, 0, &range));
         try std.testing.expectError(error.CorruptState, store.objectRange(largest, 0, &.{}));
-        try std.testing.expectError(error.CorruptState, store.object(a, largest, maximum_object_bytes));
+        try std.testing.expectError(error.CorruptState, store.object(a, largest, fixture_bytes));
         try store.begin();
-        try std.testing.expectError(error.CorruptState, store.putObject(bytes[0..maximum_object_bytes]));
+        try std.testing.expectError(error.CorruptState, store.putObject(bytes[0..fixture_bytes]));
         store.rollback();
-        try std.testing.expect(@import("native_c").sqlite3_memory_used() <= sqlite.heap_bytes);
     }
 }
 
-test "commits cannot spend another occurrence's reserved storage" {
+test "actual SQLite storage exhaustion rolls back unpublished objects" {
     const a = std.testing.allocator;
     const db = try sqlite.Database.open(a, ":memory:", true);
     defer db.destroy() catch unreachable;
     defer db.close() catch unreachable;
     var store = try Store.init(a, db, true, @splat(7));
-    for (0..15) |i| {
-        var attempt: Digest = @splat(0);
-        attempt[0] = @intCast(i);
-        try store.begin();
-        try store.reserve(attempt);
-        _ = try store.commit("reserve");
-    }
+    // Lower SQLite's actual page limit only for this fault-injection fixture.
+    try db.exec("PRAGMA max_page_count=32;");
+    const bytes = try a.alloc(u8, 256 * 1024);
+    defer a.free(bytes);
+    @memset(bytes, 0x5a);
     try store.begin();
-    try store.reserve(@splat(16));
-    try std.testing.expectError(error.Capacity, store.commit("must-not-acknowledge"));
+    try std.testing.expectError(error.Capacity, store.putObject(bytes));
     store.rollback();
-    try std.testing.expect(!store.fenced);
-    try std.testing.expectEqual(15, store.head.generation);
-    try store.begin();
-    try store.releaseReservation(@splat(0));
-    try store.reserve(@splat(16));
-    _ = try store.commit("replace-released-reservation");
-    try std.testing.expectEqual(16, store.head.generation);
+    try std.testing.expectEqual(0, store.head.generation);
+    try std.testing.expect(!store.transaction);
+    try std.testing.expectError(error.MissingArtifact, store.object(a, .{ .digest = digest(bytes), .bytes = bytes.len }, null));
+    // SQLITE_FULL may roll back automatically. The owner stays fenced until
+    // reopen; recovery must not turn uncertainty into a fresh admission.
+    try std.testing.expect(store.fenced);
+    try std.testing.expectError(error.StorageUnavailable, store.begin());
 }

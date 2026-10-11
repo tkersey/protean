@@ -20,9 +20,9 @@ try {
     return JSON.parse(result.stdout);
   };
   const manifest = invoke('describe-build');
-  assert.equal(manifest.format, 'agent-native-build/v1');
+  assert.equal(manifest.format, 'agent-native-build/v2');
   assert.equal(manifest.application_id, 'adaptive-agent');
-  assert.equal(manifest.protocol, 'agent-host/1.0');
+  assert.equal(manifest.protocol, 'agent-host/2.0');
   assert.equal(manifest.compiler.version, '0.17.0');
   assert.equal(manifest.artifact_sha256, createHash('sha256').update(readFileSync(app.executable)).digest('hex'));
   assert.equal(manifest.program_sha256, application.program_sha256);
@@ -34,8 +34,8 @@ try {
   const result = invoke('demo', '--offline', '--state-dir', join(app.data, 'adaptive state'));
   assert.equal(result.mode, 'offline-demo');
   assert.equal(result.output.disposition, 'report');
-  assert.equal(result.output.model_calls, 14);
-  assert.equal(result.output.work_calls, 5);
+  assert.equal(result.output.model_calls, '14');
+  assert.equal(result.output.work_calls, '5');
   assert.equal(result.output.control.selection.profile_id, 'analysis');
   assert.equal(result.output.control.selection.effective_effort, 'medium');
   assert.equal(result.output.control.selection.control_revision, '8');

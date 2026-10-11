@@ -60,8 +60,8 @@ export class ProteanClient {
   }
 
   async initialize(): Promise<Json> {
-    const value = await this.call('initialize', {protocol_versions: ['agent-host/1.0'], client_info: {name: 'native-example-client', version: '1'}});
-    if (!object(value) || value.protocol_version !== 'agent-host/1.0' || !object(value.limits)) {
+    const value = await this.call('initialize', {protocol_versions: ['agent-host/2.0'], client_info: {name: 'native-example-client', version: '1'}});
+    if (!object(value) || value.protocol_version !== 'agent-host/2.0' || !object(value.limits)) {
       this.fail(new Error('unsupported server negotiation'));
       throw this.failure;
     }

@@ -1,67 +1,102 @@
 {
-  "workspace": "read-only-example",
-  "snapshot_root": "./snapshot",
-  "endpoint": "https://api.openai.com/v1/responses",
-  "audience": "operator-approved-openai",
-  "profiles": [
-    {
-      "id": "analysis",
-      "model": "REPLACE_WITH_APPROVED_MODEL_A",
-      "reasoning_mode": "standard",
-      "reasoning_context": "auto",
-      "efforts": ["medium", "high"],
-      "effort_update": true,
-      "explicit_cache": true,
-      "additional_tools": true,
-      "cache_diagnostics": true,
-      "opaque_family": "approved-a",
-      "max_output_tokens": 4096,
-      "request_bytes": 262144,
-      "response_bytes": 524288,
-      "timeout_ms": 60000
-    },
-    {
-      "id": "deep",
-      "model": "REPLACE_WITH_APPROVED_MODEL_B",
-      "reasoning_mode": "standard",
-      "reasoning_context": "auto",
-      "efforts": ["medium", "high"],
-      "effort_update": true,
-      "explicit_cache": true,
-      "additional_tools": true,
-      "cache_diagnostics": true,
-      "opaque_family": "approved-b",
-      "max_output_tokens": 4096,
-      "request_bytes": 262144,
-      "response_bytes": 524288,
-      "timeout_ms": 60000
-    }
-  ],
-  "initial_profile": "analysis",
-  "initial_effort": "medium",
-  "skills": [
-    {
-      "id": "repository-orientation",
-      "version": "1",
-      "description": "Orient using acquired repository evidence.",
-      "markdown": "./skills/orientation.md",
-      "tools": [false, false, false, false, false, false, false, false]
-    },
-    {
-      "id": "invariant-review",
-      "version": "1",
-      "description": "Inspect lexical guard locations in acquired evidence.",
-      "markdown": "./skills/invariant-review.md",
-      "tools": [false, false, false, false, false, false, false, true]
-    },
-    {
-      "id": "technical-reporting",
-      "version": "1",
-      "description": "Report observations and explicit limits.",
-      "markdown": "./skills/technical-reporting.md",
-      "tools": [false, false, false, false, false, false, false, false]
-    }
-  ],
-  "maximum_model_calls": 16,
-  "maximum_control_revision": 16
+  "schema": "adaptive-agent.configuration.v3",
+  "adaptive": {
+    "workspace": "read-only-example",
+    "snapshot_root": "./snapshot",
+    "endpoint": "https://api.openai.com/v1/responses",
+    "audience": "operator-approved-openai",
+    "profiles": [
+      {
+        "id": "analysis",
+        "model": "gpt-6-astra",
+        "reasoning_mode": "standard",
+        "reasoning_context": "auto",
+        "efforts": [
+          "medium",
+          "high"
+        ],
+        "effort_update": true,
+        "explicit_cache": true,
+        "additional_tools": true,
+        "cache_diagnostics": true,
+        "opaque_family": "gpt-6-astra",
+        "max_output_tokens": null,
+        "request_bytes": null,
+        "response_bytes": null,
+        "timeout_ms": null
+      },
+      {
+        "id": "deep",
+        "model": "gpt-6.1-sol",
+        "reasoning_mode": "standard",
+        "reasoning_context": "auto",
+        "efforts": [
+          "medium",
+          "high"
+        ],
+        "effort_update": true,
+        "explicit_cache": true,
+        "additional_tools": true,
+        "cache_diagnostics": true,
+        "opaque_family": "gpt-6.1-sol",
+        "max_output_tokens": null,
+        "request_bytes": null,
+        "response_bytes": null,
+        "timeout_ms": null
+      }
+    ],
+    "initial_profile": "analysis",
+    "initial_effort": "medium",
+    "skills": [
+      {
+        "id": "repository-orientation",
+        "version": "1",
+        "description": "Orient using acquired repository evidence.",
+        "markdown": "./skills/orientation.md",
+        "tools": [
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false
+        ]
+      },
+      {
+        "id": "invariant-review",
+        "version": "1",
+        "description": "Inspect lexical guard locations in acquired evidence.",
+        "markdown": "./skills/invariant-review.md",
+        "tools": [
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          true
+        ]
+      },
+      {
+        "id": "technical-reporting",
+        "version": "1",
+        "description": "Report observations and explicit limits.",
+        "markdown": "./skills/technical-reporting.md",
+        "tools": [
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false
+        ]
+      }
+    ]
+  },
+  "tools": null
 }

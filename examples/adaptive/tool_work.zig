@@ -7,18 +7,17 @@ const work = @import("work.zig");
 const resources = @import("tool_resources.zig");
 const wire = contracts.tool_construction;
 const engine = native.tool_construction;
-const maximum_program_bytes = 4 * wire.maximum_asset_bytes + wire.maximum_recipe_bytes + 128;
 const Prepared = struct {
     task: [16]u8,
     policy: [32]u8,
     request: t.ToolRequest,
-    catalog: contracts.Bytes(wire.maximum_asset_bytes),
+    catalog: contracts.Bytes(null),
     program: ?wire.Program = null,
     input: ?wire.Input = null,
     input_ref: ?t.model.ArtifactReference = null,
     rejected: ?t.ToolFailure = null,
 };
-const Captured = struct { prepared: [32]u8, artifact: t.ToolArtifact, program: ?contracts.Bytes(maximum_program_bytes) };
+const Captured = struct { prepared: [32]u8, artifact: t.ToolArtifact, program: ?contracts.Bytes(null) };
 fn same(left: []const u8, right: []const u8) bool {
     return std.mem.eql(u8, left, right);
 }
@@ -26,7 +25,7 @@ fn failure(stage: @FieldType(t.ToolFailure, "stage"), err: anyerror) t.ToolFailu
     return .{ .stage = stage, .reason = .{ .bytes = @errorName(err) } };
 }
 pub fn open(ctx: native.registry.ProjectionContext, ref: t.model.ArtifactReference) !contracts.Decoded(t.ToolArtifact) {
-    const bytes = try ctx.object(.{ .digest = ref.digest, .bytes = ref.bytes }, 128 * 1024);
+    const bytes = try ctx.object(.{ .digest = ref.digest, .bytes = ref.bytes }, std.math.cast(usize, ref.bytes) orelse return error.Capacity);
     defer ctx.allocator.free(bytes);
     var record = try contracts.decodeOwned(t.ToolArtifact, ctx.allocator, bytes);
     errdefer record.deinit();
@@ -40,10 +39,10 @@ fn resolveRun(ctx: native.registry.ProjectionContext, policy: t.ToolPolicy, prep
     for (policy.inputs.items) |input| allowed = allowed or resources.sameReference(input.object, input_ref);
     if (!allowed) return error.UnauthorizedInput;
     const tool_ref = try resources.parseReference(request.tool_ref.bytes);
-    const bytes = try ctx.object(.{ .digest = tool_ref.digest, .bytes = tool_ref.bytes }, maximum_program_bytes);
+    const bytes = try ctx.object(.{ .digest = tool_ref.digest, .bytes = tool_ref.bytes }, std.math.cast(usize, tool_ref.bytes) orelse return error.Capacity);
     const program = try contracts.decodeOwned(wire.Program, ctx.allocator, bytes);
-    if (program.value.version != 1 or !same(&program.value.task, &ctx.task) or !same(&program.value.policy, &prepared.policy) or !same(&program.value.catalog, &policy.catalog.digest)) return error.UnauthorizedProgram;
-    const input_bytes = try ctx.object(.{ .digest = input_ref.digest, .bytes = input_ref.bytes }, wire.maximum_asset_bytes + wire.maximum_value_bytes + 32);
+    if (program.value.version != 2 or !same(&program.value.task, &ctx.task) or !same(&program.value.policy, &prepared.policy) or !same(&program.value.catalog, &policy.catalog.digest)) return error.UnauthorizedProgram;
+    const input_bytes = try ctx.object(.{ .digest = input_ref.digest, .bytes = input_ref.bytes }, std.math.cast(usize, input_ref.bytes) orelse return error.Capacity);
     prepared.program = program.value;
     prepared.input = (try contracts.decodeOwned(wire.Input, ctx.allocator, input_bytes)).value;
     prepared.input_ref = input_ref;
@@ -56,7 +55,7 @@ fn prepare(ctx: native.registry.ProjectionContext, bytes: []const u8, comptime b
     try work.admitAction(ctx, request.value.context, request.value.call_id, expected);
     const policy = try resources.policy(ctx);
     if (if (build) !policy.build else !policy.run) return error.Unauthorized;
-    const catalog = try ctx.object(.{ .digest = policy.catalog.digest, .bytes = policy.catalog.bytes }, wire.maximum_asset_bytes);
+    const catalog = try ctx.object(.{ .digest = policy.catalog.digest, .bytes = policy.catalog.bytes }, std.math.cast(usize, policy.catalog.bytes) orelse return error.Capacity);
     var prepared: Prepared = .{ .task = ctx.task, .policy = work.digest(ctx.profile), .request = request.value, .catalog = .{ .bytes = catalog } };
     if (!build) resolveRun(ctx, policy, &prepared) catch |err| {
         prepared.rejected = failure(.admission, err);
@@ -95,9 +94,9 @@ fn render(a: std.mem.Allocator, artifact: t.ToolArtifact, program: ?wire.Program
             try native.json.put(a, &value, "value", try native.values.toJson(t.tool_types.Table, a, decoded.value));
         },
     }
-    return .{ .bytes = try native.json.canonicalBounded(a, value, t.P.ResultText.max_length.?) };
+    return .{ .bytes = try native.json.canonical(a, value) };
 }
-fn compute(ctx: native.Context, prepared: Prepared, program_bytes: *?contracts.Bytes(maximum_program_bytes)) !@FieldType(t.ToolArtifact, "outcome") {
+fn compute(ctx: native.Context, prepared: Prepared, program_bytes: *?contracts.Bytes(null)) !@FieldType(t.ToolArtifact, "outcome") {
     if (prepared.rejected) |reason| return .{ .rejected = reason };
     try ctx.checkCancellation();
     switch (prepared.request.action) {
@@ -109,23 +108,18 @@ fn compute(ctx: native.Context, prepared: Prepared, program_bytes: *?contracts.B
             return .{ .built = work.reference(bytes) };
         },
         .run => |request| {
-            const value = try engine.execute(ctx.allocator, ctx.allocator, ctx.io, ctx.cancellation, prepared.task, ctx.profile, prepared.catalog.bytes, prepared.program orelse return error.InvalidPreparedRequest, prepared.input orelse return error.InvalidPreparedRequest, .{});
+            const value = try engine.execute(ctx.allocator, ctx.allocator, ctx.cancellation, prepared.task, ctx.profile, prepared.catalog.bytes, prepared.program orelse return error.InvalidPreparedRequest, prepared.input orelse return error.InvalidPreparedRequest);
             return .{ .ran = .{ .program = try resources.parseReference(request.tool_ref.bytes), .input = prepared.input_ref orelse return error.InvalidPreparedRequest, .value = .{ .bytes = value } } };
         },
     }
 }
 fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition {
-    const started = std.Io.Clock.awake.now(ctx.io).toMilliseconds();
     var decoded = try contracts.decodeOwned(Prepared, ctx.allocator, bytes);
     defer decoded.deinit();
     const prepared = decoded.value;
     if (!same(&prepared.policy, &work.digest(ctx.profile)) or !same(ctx.task_id, &std.fmt.bytesToHex(prepared.task, .lower))) return error.InvalidPreparedRequest;
-    var program_bytes: ?contracts.Bytes(maximum_program_bytes) = null;
+    var program_bytes: ?contracts.Bytes(null) = null;
     var artifact: t.ToolArtifact = .{ .task = prepared.task, .policy = prepared.policy, .call_id = prepared.request.call_id, .outcome = compute(ctx, prepared, &program_bytes) catch |err| .{ .rejected = failure(if (prepared.request.action == .build) .construction else .execution, err) }, .model_text = .{ .bytes = "" } };
-    if (std.Io.Clock.awake.now(ctx.io).toMilliseconds() - started >= (engine.Limits{}).deadline_ms) {
-        program_bytes = null;
-        artifact.outcome = .{ .rejected = failure(if (prepared.request.action == .build) .construction else .execution, error.Timeout) };
-    }
     const program = if (program_bytes) |encoded| (try contracts.decodeOwned(wire.Program, ctx.allocator, encoded.bytes)).value else null;
     artifact.model_text = render(ctx.allocator, artifact, program) catch |err| blk: {
         program_bytes = null;
@@ -167,7 +161,7 @@ fn interpret(ctx: native.registry.ProjectionContext, request: []const u8, prepar
     return .{ .reply = try contracts.encodeOwned(t.ToolReply, ctx.allocator, .{ .artifact = ref, .program = if (result.artifact.outcome == .built) result.artifact.outcome.built else null, .evidence = evidence }), .objects = objects };
 }
 pub fn declaration(comptime build: bool) native.Declaration {
-    return .{ .identity = if (build) t.tool_build_identity else t.tool_run_identity, .resource_role = if (build) "tool-construction" else "tool-execution", .kind = .leaf, .background = true, .attempt_limit = if (build) 4 else 8, .public_outputs = true, .payload_schema = struct {
+    return .{ .identity = if (build) t.tool_build_identity else t.tool_run_identity, .resource_role = if (build) "tool-construction" else "tool-execution", .kind = .leaf, .background = true, .public_outputs = true, .payload_schema = struct {
         fn schema(a: std.mem.Allocator) ![]u8 {
             return native.values.schemaBytes(t.ToolRequest, a);
         }

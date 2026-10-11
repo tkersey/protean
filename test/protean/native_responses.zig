@@ -154,8 +154,6 @@ test "adaptive admission binds selected profiles and skill permissions to the fr
         .catalog = .{ .digest = digest(catalog_bytes), .bytes = catalog_bytes.len },
         .core_tools = .{false},
         .permitted_tools = .{true},
-        .model_attempts = 16,
-        .control_transitions = 16,
     };
     var frozen = native.json.object();
     try native.json.put(a, &frozen, "adaptive", try native.values.toJson(P.AdaptivePolicy, a, policy));

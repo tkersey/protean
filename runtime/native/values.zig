@@ -19,14 +19,15 @@ pub const Error = error{InvalidParams} || std.mem.Allocator.Error;
 pub fn fromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
     if (comptime schemas.isText(T)) {
         const text = try json.text(value);
-        if (text.len > schemas.maximumTextBytes(T) or !std.unicode.utf8ValidateSlice(text)) return error.InvalidParams;
+        if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidParams;
+        if (T.max_length) |maximum| if (text.len > maximum) return error.InvalidParams;
         return .{ .bytes = text };
     }
     if (@typeInfo(T) == .@"struct" and @hasDecl(T, "protean_value_kind")) {
         if (T.protean_value_kind == .bytes) {
             const text = try json.text(value);
             const size = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(text) catch return error.InvalidParams;
-            if (size > T.max_length.?) return error.InvalidParams;
+            if (T.max_length) |maximum| if (size > maximum) return error.InvalidParams;
             const bytes = try a.alloc(u8, size);
             std.base64.url_safe_no_pad.Decoder.decode(bytes, text) catch return error.InvalidParams;
             // Require canonical trailing bits and forbid padded aliases.
@@ -35,7 +36,8 @@ pub fn fromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error
             return .{ .bytes = bytes };
         }
         if (T.protean_value_kind == .vector) {
-            if (value != .array or value.array.items.len > T.max_length) return error.InvalidParams;
+            if (value != .array) return error.InvalidParams;
+            if (@as(?u64, T.max_length)) |maximum| if (value.array.items.len > maximum) return error.InvalidParams;
             const result = try a.alloc(T.Child, value.array.items.len);
             for (result, value.array.items) |*slot, child| slot.* = try fromJson(T.Child, a, child);
             return .{ .items = result };

@@ -19,9 +19,9 @@ The reusable owners are `protean.adaptive_controls.defineInference`,
 computations and checked contracts. [`definition.zig`](definition.zig) composes
 them with this consumer's task, evidence, question, inbox and completion logic;
 [`types.zig`](types.zig) supplies its actions and ordinary schemas. Model choice,
-skills, offers, budgets, epochs and next actions stay in that authored program.
+skills, offers, epochs and next actions stay in that authored program.
 The native adapter realizes its explicit requests; it has no transcript-driven
-policy loop. See the [v6 API contract](../../docs/model-invocation-v6.md).
+policy loop. See the [v10 API contract](../../docs/model-invocation-v10.md).
 
 From the Protean repository after the [native setup](../../docs/native-single-binary.md):
 
@@ -69,25 +69,36 @@ model/effort changes, deactivation, hard unload, return to an earlier profile,
 a question and a report. This script is an explicit fixture input, not the
 production decision loop.
 
-A configured reference uses `validate --config FILE`, then:
+For live execution, copy `adaptive.example.json`, set the snapshot and skill
+paths, then validate and launch with an explicitly supplied credential file:
 
 ```sh
+./zig-out/bin/protean validate --config ./approved-adaptive.json
 ./zig-out/bin/protean run --config ./approved-adaptive.json \
+  --authorize-inference --credential-file /absolute/path/to/private-key-file \
   --input-json '{"task":"Explain the entry point using source evidence."}' \
   --state-dir ./adaptive-task
-./zig-out/bin/protean serve --transport stdio \
-  --config ./approved-adaptive.json --state-dir ./adaptive-task
 ```
 
-Inference additionally requires `--authorize-inference --credential-file FILE`.
-Configuration and discovery alone perform no inference or credential discovery.
-Use `--help` for status, result, response, resume, cancellation and checkpoint
-commands. The CLI and `agent-host/1.0` front end use the same image and native
-task owner. Protocol callers may use any language; the existing optional
-[`stdio-client.mts`](../../test/support/stdio-client.mts) is a caller, not an agent
-runtime dependency. Questions require the reported identity/revision/digest;
-queued follow-ups cannot substitute for a question response. Stable client
-operation IDs support lost-ack retries, not new inference after unknown delivery.
+Use a new state directory for the new build. The maintained template starts at
+`gpt-6-astra`, `medium`, standard mode and also admits `gpt-6.1-sol`. Configuration
+and discovery do not perform inference. `demo --offline` remains deterministic.
+The credential file must be private to the current user; its contents are never
+part of task resources or prepared provider requests.
+
+For an interactive continuing task, launch `serve --transport stdio` with those
+same configuration, authorization, credential and state flags. The
+`agent-host/2.0` interface and CLI share the same image and task owner. Questions
+require the returned identity/revision/digest; queued `task.message` follow-ups
+use a distinct interface. Stable operation IDs support lost-ack retries. Unknown
+external delivery never authorizes another provider attempt.
+
+Use `status`, `result`, `respond`, `resume`, `cancel`, `export-checkpoint` and
+`import-checkpoint` as described by `--help`. Restart with `--profile-task ID`
+to restore the original frozen configuration and resources. Import into a fresh
+namespace, and do not run source and copied tasks concurrently as if custody
+had transferred. The optional [stdio client](../../test/support/stdio-client.mts)
+is an external caller, not a runtime dependency.
 
 SQLite, the existing C shim, libc and OS facilities remain admitted native
 dependencies. Zig and setup/build tools are authoring dependencies; JavaScript
@@ -96,23 +107,24 @@ adaptive mobility is future work; checkpoint copying does not transfer custody.
 
 ## Frozen configuration
 
-[`adaptive.example.json`](adaptive.example.json) is a disabled-by-default launch
-template, not a model approval. Replace both model placeholders with approved
-Responses IDs, check their declared feature flags, and select your read-only
-snapshot. Paths are relative to the launch working directory. The template and
-skill files accompany the native reference artifacts. Configuration alone never
-authorizes inference; the launch flag and explicit credential file are separate.
-
-Configuration has these fields:
+[`adaptive.example.json`](adaptive.example.json) uses
+`adaptive-agent.configuration.v3`. It contains `adaptive` and `tools` fields;
+`tools: null` leaves construction unadmitted. Paths are relative to the launch
+working directory. The `adaptive` object contains:
 
 - `workspace`, `snapshot_root`, `endpoint`, `audience`;
 - `profiles`, `initial_profile`, `initial_effort`;
-- `skills`, `maximum_model_calls` (1–16), `maximum_control_revision` (0–16).
+- `skills`.
+
+There are no model/work/control/question/build/run allowances. Old unversioned
+and v2 configurations require their original compatible build.
 
 Every profile declares `id`, actual API `model`, `reasoning_mode`,
 `reasoning_context`, `efforts`, `effort_update`, `explicit_cache`,
 `additional_tools`, `cache_diagnostics`, `opaque_family`, `max_output_tokens`,
-`request_bytes`, `response_bytes`, and `timeout_ms`. Profiles that admit `effort_update: true` use append-only configuration updates
+`request_bytes`, `response_bytes`, and `timeout_ms`. The last four fields are optional values: `null` imposes no
+application cap; an explicitly selected positive value retains its stated
+meaning. The maintained live template uses `null` for all four. Profiles that admit `effort_update: true` use append-only configuration updates
 after settling the actual control call. Request-level effort stays unchanged;
 the replayed update selects effective effort. A false declaration changes the
 request-level effort without discarding visible history. Features are
@@ -124,42 +136,50 @@ and eight `tools` booleans in this order: list, read, ask, report, stop,
 inference_set, skill_set, inspect. The first seven are core tools. `inspect` is
 a lexical guard-line count over previously acquired evidence and is available
 only while a loaded approved skill grants it. It does not prove correctness.
-No skill executes scripts or installs code. Markdown is admitted before task
-creation (32 KiB per body, 128 KiB total). The shared catalog format allows 32
-entries; this deployment admits 32 (including the built-in construction skill),
-subject to the native host's 64 frozen resource slots. Snapshot and skill catalog use two slots; construction-enabled
-configuration also stores its component catalog and admitted input values.
-At most four skills may be active.
-The complete frozen resource set, including the snapshot, must fit 16 MiB.
-Context and continuation limits can reject a
-proposed transition before it is acknowledged.
-The task admits four answers and follow-ups in total. At that limit it stops
-offering questions and polling the inbox; later queued messages remain retained
-and are reported as not consumed when the task finishes.
+No skill executes scripts or installs code. Skill bodies, catalogs and the
+ordered frozen resources use variable-length values. Skills do not disappear
+because a counter reaches a framework-selected number.
 
-The adaptive model reply has a 16 KiB aggregate projection ceiling, independent
-of the 512 KiB raw response ceiling. An oversized projection returns a typed
-capacity result, retains its captured response and observed usage, and does not
-trigger another provider attempt. The full allowed combinations remain subject
-to the existing Kronos, worker, object and namespace budgets.
+The snapshot, skill bytes, catalogs and profiles are frozen into task resources.
+Reopening reads those exact bytes. Editing a configuration or Markdown file
+cannot update a saved task; new authorization requires a new task.
 
-The snapshot, skill bytes, catalog, profiles and limits are frozen into task
-resources. Reopening reads those bytes. Editing a configuration or Markdown
-file cannot update a saved task; supply a new task for new authorization.
+## Capacity and accounting
+
+Model/work counts, control revisions, physical attempts, captures and returned
+usage remain distinct durable facts. Replay of an acquired response is not a
+new provider attempt. Counters use checked arithmetic; no wrap or saturation
+creates another identity. Public 64-bit values use decimal strings.
+
+Growing evidence, program and receipt collections retain immutable object
+references in acquisition order. Conversation history stays with the existing
+context owner. There is no cumulative call, time, token or spending allowance,
+fixed worker/SQLite heap, or application namespace-size quota. Requests and
+responses allocate their actual encoded sizes. A provider restriction, explicit
+profile constraint, allocation failure or storage failure remains observable.
+
+Execution uses cancellable 256-transition quanta without a cumulative fuel or
+ten-second stop. Protocol frames, concurrent scheduling/backpressure windows,
+32 KiB artifact chunks, 128-event pages and 4 KiB source-read pages bound a unit
+of work, not its lifetime. Complete large results and questions are retained as
+artifacts. Status includes the total pending-message count and a bounded view;
+`task.events` supplies the complete message history. SQLite's actual linked-library
+limits, archive integer fields, checked machine arithmetic and OS capacity still
+apply. Finite tests do not establish infinite capacity or termination.
 
 ## Construct and reuse a pure tool
 
 The `tool-construction` skill exposes a frozen catalog of compiled BMO1
-components. `tool_build` links a bounded recipe with Horos's data-only
+components. `tool_build` links a recipe with Horos's data-only
 linker; `tool_run` executes the resulting BPI3 with native Kronos. Neither invokes
 the Zig compiler, another model, or a host interpreter for the recipe. Generated
 programs receive ordinary values and cannot perform external effects.
 
-Enable this explicitly with configuration version 2:
+Enable this explicitly with configuration version 3:
 
 ```text
-schema: "adaptive-agent.configuration.v2"
-adaptive: the complete original configuration object described above
+schema: "adaptive-agent.configuration.v3"
+adaptive: the complete adaptive configuration object described above
 tools: the object below
 ```
 
@@ -191,11 +211,11 @@ For example, the `tools` object can admit two compatible inputs:
 The host supplies each input's opaque reference in the initial bindings. All
 64-bit numbers use decimal strings. Admission converts these records to the
 ordinary `Table` schema and initializes result fields; it performs no audit.
-Each table has at most 32 rows, 32 related records and 32 selected keys. Up to
-four inputs may be frozen. The original unversioned configuration and its eight
-skill bits retain their meanings and enable neither new operation.
+Table rows, related records, selected keys and the admitted input collection
+use variable-length sequences. The compiled component catalog remains the exact
+authority for composition; more capacity does not grant new components.
 
-Version 2 admits the exact developer-owned skill automatically. Loading it
+A non-null `tools` object admits the developer-owned construction skill. Loading it
 introduces its instructions, recipe JSON schema and complete machine-derived
 component signatures at the normal skill context position. This checked recipe selects matching rows
 and is a small working example, not a complete audit:
@@ -228,25 +248,16 @@ destroy a constructed program. After unload, the parent exposes retained tool
 references without reinserting the removed instructions. References from a
 different task or policy do not confer authority.
 
-Exhausted construction and execution allowances remove those tools from future
-offers using the native attempt records. Captured allowance observations replay
-unchanged across restart. `inspect` accepts source-file evidence only; generated
-results remain reportable, and selecting one for inspection returns a recoverable
-tool rejection.
+`inspect` accepts source-file evidence only; generated results remain reportable,
+and selecting one for inspection returns a recoverable tool rejection.
 
-The model-facing recipe limit is 2,700 bytes so worst-case escaping fits the
-existing 16-KiB argument envelope. The native construction API has an 8-KiB
-upper ceiling. Both enforce at most 16 instances, 64 bindings, an acyclic
-inter-instance graph, and 128-KiB catalog/image assets. Each task permits four
-physical build attempts and eight runs, including failed attempts and retries,
-within its existing twelve-work-call allowance. Runs admit 32-KiB values,
-one million cumulative Kronos transitions, and a ten-second checked deadline;
-cancellation and time are checked between 256-transition quanta. The existing
-16-MiB worker allocation region also covers decoding, linking and publication.
-Limits intersect: an individually valid value can still exceed a combined
-worker or model-envelope budget and receive an explicit failure.
+Recipes require unique instance keys, schema-compatible bindings and an acyclic
+inter-instance graph. There is no recipe/count/image-size allowance. Generated
+execution validates the retained derivation and runs the exact referenced image;
+it does not replace the artifact or ask another model to synthesize a program.
+Failed attempts remain recorded and do not suppress otherwise authorized tools.
 
-Application version 2 reports `adaptive-agent.output.v2`: each evidence entry
+Application version 3 reports `adaptive-agent.output.v3`: each evidence entry
 is tagged `source` or `generated`, and constructed program references are
 retained in `programs`. `report.evidence_index` selects the stable acquired
 evidence list. Old saved tasks retain their original image/runtime bindings and
@@ -285,9 +296,20 @@ current model call's offered set is checked independently from materialized
 definitions, and work dispatch binds to that captured call. Queued user messages
 are consumed through the authored inbox only after the current call settles.
 
-The new contracts are `agent.model.invoke.v6` and
-`agent.model.context.responses.adaptive.v4`. Shared earlier schema meanings
-remain intact; the fixed applications are retired. Reports expose bounded evidence
-and control receipts; raw provider captures and opaque reasoning are not public
-report artifacts. Absent usage remains unavailable. Explicit cache markers and
-unchanged request prefixes do not establish provider cache reuse.
+The current adaptive contracts are `agent.model.invoke.v10`,
+`agent.model.context.responses.adaptive.v5` and `agent.model.policy.adaptive.v2`.
+Old saved tasks retain their original contracts and require their original
+compatible executable. Raw provider captures and opaque reasoning remain private.
+Absent usage remains unavailable. Explicit cache markers and unchanged request
+prefixes do not establish provider cache reuse.
+
+## Qualification status
+
+Deterministic checks cover 38 continuing model calls across restart/import,
+17 control revisions, 12 generated runs, larger catalogs/resources/snapshots,
+large-prompt artifact reads, and honest recovery from failed capture publication.
+These use controlled provider replies. They do not establish real model access,
+actual configuration-update acceptance, a provider cache hit, or live task quality.
+Live qualification requires an explicitly supplied credential binding. Record the
+exact source/dependency/program/executable identities, UTC run times, returned
+models, effective efforts, physical attempts, usage and useful outcomes in the PR.

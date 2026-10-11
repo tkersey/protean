@@ -124,7 +124,7 @@ fn Generator(comptime P: type, comptime batch: bool) type {
             const minimum = try g.field(selection, 0, u32);
             if (batch) {
                 const reversed = try b.primitive(try g.schema(bool), .less, &.{ maximum, minimum }, 0);
-                const over_limit = try b.primitive(try g.schema(bool), .less, &.{ try b.constant(u32, P.representation.maximum_output_items), maximum }, 0);
+                const over_limit = if (P.representation.maximum_output_items) |limit| try b.primitive(try g.schema(bool), .less, &.{ try b.constant(u32, limit), maximum }, 0) else try b.constant(bool, false);
                 const ordered = try b.primitive(try g.schema(bool), .boolean_not, &.{reversed}, 0);
                 const bounded = try b.primitive(try g.schema(bool), .boolean_not, &.{over_limit}, 0);
                 return g.guard(ordered, try g.guard(bounded, matched, .invalid_selection), .invalid_selection);

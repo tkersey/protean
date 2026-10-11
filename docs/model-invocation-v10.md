@@ -1,15 +1,13 @@
-# Adaptive Responses contract (v6)
+# Adaptive Responses contract (v10)
 
-`agent.model.invoke.v6` adds separately bound inference selection and context
-projection to the existing model/responder owner. It does not change v3, inline
-v4, or the fixed-profile v5 contract. The reference consumer is
-[`protean`](../examples/adaptive/README.md).
+`agent.model.invoke.v10` binds inference selection and context projection to the
+existing model/responder owner. The shared invocation is v7, inline replay v8,
+and reference replay v9. Earlier saved contracts require their original build.
+The reference consumer is [Protean](../examples/adaptive/README.md).
 
 ## Authored API and execution
 
-Scope authority is the October 9, 2026 **authored program on Horos, executed
-by Kronos** amendment. It supersedes dual-adaptive-backend and immediate
-standalone-distribution gates without changing these effect identities.
+Horos authors and checks the program; native Kronos executes its continuation.
 
 `protean.adaptive_controls.defineInference` and `defineSkill(P, ...)` construct
 reusable control transitions. `P.declareAdaptive` and
@@ -19,8 +17,8 @@ example. Consumers compose them through existing Protean/Horos authoring;
 Kronos executes the emitted BPI3 and owns its saved continuation.
 
 The program owns task state, inference selection, skill residency, revisions,
-projection revisions, D/O masks, logical budgets and completion. Native Zig
-adapters perform deterministic bounded projection, provider I/O and storage at
+projection revisions, D/O masks, accounting and completion. Native Zig
+adapters perform deterministic projection, provider I/O and storage at
 explicit effect boundaries. They cannot choose the next action from a transcript,
 substitute a model, mutate a skill, reset an epoch or retry unknown delivery.
 
@@ -34,16 +32,16 @@ polish is deferred, not a blocker on the reusable API or reference integration.
 
 | Value | Meaning and owner |
 | --- | --- |
-| Frozen task profile and ordered resources | Existing native grant identity. Contains the approved universe and limits for this task. |
+| Frozen task profile and ordered resources | Existing native grant identity. Contains the approved universe and explicitly selected constraints for this task. |
 | `AdaptiveSelection.profile_id/profile_digest` | One approved inference entry; the digest covers its ordinary encoded value. It cannot replace the task policy. |
 | `control_revision` | Authored configuration revision. Separate from native task revision, message ordinal, provider call ID, and physical attempt count. |
 | `AdaptivePlan.epoch/watermark` | Explicit projection lineage and committed response position. |
 | `eviction_generation` | Authored exclusion fence. Every newly selected lineage must respect it. |
 | `AdaptiveContextReference` | Content reference plus schema, policy, inference selection, task, tenant, audience, epoch, watermark, and eviction bindings. |
 
-The additional identities are `agent.model.context.responses.adaptive.v4` and
-`agent.model.policy.adaptive.v1`. The v5
-`agent.model.context.responses.v1` reference is not an adaptive reference.
+The additional identities are `agent.model.context.responses.adaptive.v5` and
+`agent.model.policy.adaptive.v2`. The v9
+`agent.model.context.responses.v2` reference is not an adaptive reference.
 
 ## Requests and checked actions
 
@@ -64,8 +62,8 @@ captured call, task, snapshot and exact native resource role. The adaptive
 model identity remains protected against raw model-effect authoring bypasses.
 
 An inference profile explicitly declares its model, efforts, reasoning mode and
-context, feature flags, opaque-family label, output-token maximum, byte bounds
-and timeout. No feature is inferred from a model-name prefix. An admitted `effort_update: true` keeps the original top-level effort and
+context, feature flags, opaque-family label, optional output-token maximum, byte bounds
+and timeout. Normal live configuration leaves all four null. No feature is inferred from a model-name prefix. An admitted `effort_update: true` keeps the original top-level effort and
 appends a configuration update after the actual settled control result. The
 rendered update sequence is folded to validate effective effort again before
 dispatch. With `effort_update: false`, the request-level effort changes, but
@@ -114,8 +112,9 @@ constructs a second JSON representation of task state for ordinary transitions.
 Explicit replacement contexts are retired: a plan continues its prior transcript
 and cannot supply replacement messages for an existing context.
 
-Context schema v4 retains per-item projection provenance and removes replacement
-seeds from the embedded plan. Exact application,
+Context schema v5 retains per-item projection provenance with variable-length
+skill membership and history; no fixed-width catalog mask or ancestry quota
+limits eviction tracking. Replacement seeds remain absent from the plan. Exact application,
 image, schema and runtime bindings remain recovery gates; old saved tasks are
 not migrated or reinterpreted under a new build.
 
@@ -125,9 +124,8 @@ Native execution reuses `CaptureAdapter.prepare/acquire/interpret` and the
 existing task owner. Preparation fixes the exact request, selection and plan.
 Dispatch charges a durable physical attempt. Capture is committed before pure
 interpretation; reply, context objects and reported usage are then committed
-before Kronos consumes the reply. An application can narrow the native host's
-attempt ceiling through a pure frozen-profile callback; this dispatch check is
-not applied to historical capture replay.
+before Kronos consumes the reply. Physical-attempt accounting does not impose a
+stopping condition. Captured replay does not dispatch another attempt.
 
 A lost process after dispatch without capture leaves unknown delivery. Neither
 the native host nor the adapter silently retries it. Native restoration and
@@ -137,33 +135,28 @@ archive admission use original captures and their original request settings.
 and optional usage. Exact provider bytes remain a `CapturedResponse`, while the
 adaptive context records the original prepared request and capture. The replay
 grammar is closed, preserves call/result pairing and admitted phase/opaque
-fields, and rejects provider-created tool additions. The aggregate reply limit
-can return `normalization_limit` with retained usage and no replay, independently
-of raw response and individual-field bounds.
+fields, and rejects provider-created tool additions. Explicitly bounded consumer
+profiles may return `normalization_limit`; the normal adaptive application uses
+variable-length replies and retains complete captures.
 
 The native grammar is checked against independent declarative fixtures,
 including exact failure classifications, full-width integer arguments, Unicode,
 opaque fields and ordered replay. The removed JS adaptive implementation is
 superseded by scope change; no differential execution or dual-backend gate is
-required. Existing v3/v4/fixed-profile v5 consumers retain their contracts.
+required. Original saved programs require their original compatible build.
 
 ## Bounds and observations
 
-The example admits 1–16 charged model attempts, 0–16 control revisions,
-14 approved skills, four active skills, 32 KiB per body, and 128 KiB of skill
-bodies. Snapshot, bodies and catalog together fit the native 16 MiB frozen
-resource ceiling. It retains at most eight evidence references, permits 12 work actions,
-16 control receipts, and four answers/follow-ups combined. These are independent
-ceilings, not a promise that every maximal field combination fits a request.
-
-Provider requests are at most 256 KiB and responses at most 512 KiB. The
-normalized adaptive reply is at most 16 KiB; its raw capture is retained on
-projection overflow. Preparation checks the complete rendered request before
-admitting a control. The reference has no handoff bundle or handoff-size gate.
-Its message representation shares the transport's 256 KiB ceiling. Existing native
-64 MiB requested allocation, 16 MiB worker and SQLite budgets, and 256 MiB
-namespace limits remain unchanged. Protocol frames, checkpoint size, Kronos
-working memory and namespace quotas remain separate limits.
+The application has no cumulative model/work/control/question/build/run quota.
+Growing histories and results use existing immutable objects, variable-length
+values, and stable references. Worker and SQLite allocation follows actual need;
+there is no application namespace-size quota. Model requests omit an artificial
+output-token cap and have no default transport size or task-time allowance.
+Cancellation, checked integer arithmetic, physical allocation/storage failure,
+actual provider constraints, protocol framing, and resumable execution/page
+quanta remain. Large public questions/results use the existing artifact path.
+Old configuration v1/v2 values are not reinterpreted as unlimited: new tasks use
+configuration v3 and newly versioned application/model/native contracts.
 
 External read-only qualification observations record actual byte counts, selection/epoch identities,
 skill residency, D/O identities, marker positions, local visible-prefix equality,

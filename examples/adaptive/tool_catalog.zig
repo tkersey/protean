@@ -62,7 +62,7 @@ const E = struct {
         } } });
     }
     fn append(e: E, list: Id, row: Id) !Id {
-        return e.primitive(e.rows, .sequence_append, &.{ list, row }, .capacity_exceeded);
+        return e.b.primitive(e.rows, .sequence_append, &.{ list, row }, 0);
     }
     fn empty(e: E) !Id {
         return e.b.primitive(e.rows, .sequence, &.{}, 0);

@@ -9,7 +9,6 @@ const tasks = @import("tasks.zig");
 const Namespace = @import("namespace.zig").Namespace;
 const transport_api = @import("transport.zig");
 const Worker = @import("worker.zig").Worker;
-const kronos = @import("kronos");
 const c = @import("native_c");
 const identity = @import("identity.zig");
 const Shutdown = enum { park, cancel };
@@ -205,7 +204,7 @@ pub fn run(comptime Types: type, comptime Environment: type, init: std.process.I
         defer arena.deinit();
         const a = arena.allocator();
         const artifact = try identity.executable(init.io);
-        var manifest = (try json.parse(a, assets.manifest, .{ .bytes = 256 * 1024 })).value;
+        var manifest = (try json.parseAsset(a, assets.manifest, assets.manifest.len)).value;
         try json.put(a, &manifest, "artifact_sha256", json.string(try a.dupe(u8, &std.fmt.bytesToHex(artifact.sha256, .lower))));
         try json.put(a, &manifest, "artifact_bytes", json.string(try std.fmt.allocPrint(a, "{d}", .{artifact.bytes})));
         try json.put(a, &manifest, "embedded_manifest_sha256", json.string(try discovery.digest(a, assets.manifest)));
@@ -287,10 +286,9 @@ pub fn run(comptime Types: type, comptime Environment: type, init: std.process.I
     }
     if ((human == .@"import-checkpoint" and human_options.checkpoint_input == null) or (human == .@"export-checkpoint" and human_options.checkpoint_output == null)) return 64;
 
-    // Main-thread allocations are reclaimable and bounded. Workers use their
-    // own preallocated region, so this accounting never races with worker I/O.
-    var budget: kronos.AllocationBudget = .{ .parent = init.gpa, .limit = 64 * 1024 * 1024 };
-    const a = budget.allocator();
+    // The process allocator supports concurrent workers; each worker owns its
+    // arena until join and publication. Actual allocation failure remains visible.
+    const a = init.gpa;
     var handlers = try registry.Registry.init(a, &Environment.handlers);
     defer handlers.deinit();
     var application = try discovery.Application.init(Types, a, assets, handlers);
@@ -332,7 +330,6 @@ pub fn run(comptime Types: type, comptime Environment: type, init: std.process.I
                 _ = reportFailure(err);
                 return 64;
             };
-            if (admitted.bytes.len > 256 * 1024) return 64;
             if (frozen) |saved| {
                 if (!std.mem.eql(u8, saved.profile, admitted.bytes) or !std.mem.eql(u8, saved.profile_id, admitted.id)) return 64;
             }
@@ -348,7 +345,7 @@ pub fn run(comptime Types: type, comptime Environment: type, init: std.process.I
     }
     // Grant the finalized launch profile, including restored immutable inputs.
     // Task admission checks the same digest derived from its durable references.
-    const resource_identity = try profile.resourceIdentity(application.image_identity);
+    const resource_identity = try profile.resourceIdentity(a, application.image_identity);
     for (grants) |*grant| grant.resource_identity = resource_identity;
     if (task_text) |text| {
         if (comptime @hasDecl(Environment, "taskInput")) {

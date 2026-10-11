@@ -47,8 +47,9 @@ fn inputPart(part: json.Value) !void {
         if (!equal(try json.text(try field(marker, "mode")), "explicit")) return error.InvalidContext;
     }
 }
-fn read(ctx: registry.ProjectionContext, reference: anytype, limit: usize) ![]u8 {
-    if (reference.bytes == 0 or reference.bytes > limit) return error.Capacity;
+fn read(ctx: registry.ProjectionContext, reference: anytype) ![]u8 {
+    if (reference.bytes == 0) return error.InvalidContext;
+    const limit = std.math.cast(usize, reference.bytes) orelse return error.Capacity;
     const bytes = try ctx.object(.{ .digest = reference.digest, .bytes = reference.bytes }, limit);
     errdefer ctx.allocator.free(bytes);
     if (bytes.len != reference.bytes or !equal(&storage.digest(bytes), &reference.digest)) return error.InvalidContext;
@@ -63,7 +64,7 @@ pub fn Projection(comptime P: type) type {
             /// Committed events, without the transient material of this call.
             history: json.Value,
             origins: std.ArrayList(P.ContextOrigin),
-            reasoning_skills: u32,
+            reasoning_skills: P.ReasoningSkills,
             /// Exact chronological provider input, including transient suffix.
             input: json.Value,
             core_tools: json.Value,
@@ -74,7 +75,7 @@ pub fn Projection(comptime P: type) type {
         pub fn open(ctx: registry.ProjectionContext, reference: Ref, audience: []const u8) !contracts.Decoded(P.AdaptiveContext) {
             if (!equal(reference.schema.bytes, P.adaptive_context_identity) or !equal(&reference.policy, &storage.digest(ctx.profile)) or
                 !equal(&reference.task, &ctx.task) or !equal(reference.tenant.bytes, ctx.tenant) or !equal(reference.audience.bytes, audience)) return error.InvalidContext;
-            const bytes = try read(ctx, reference.object, 2 * 1024 * 1024);
+            const bytes = try read(ctx, reference.object);
             defer ctx.allocator.free(bytes);
             var decoded = try contracts.decodeOwned(P.AdaptiveContext, ctx.allocator, bytes);
             errdefer decoded.deinit();
@@ -85,9 +86,9 @@ pub fn Projection(comptime P: type) type {
                 value.plan.eviction_generation != reference.eviction_generation or value.plan.watermark == std.math.maxInt(u64) or value.watermark != value.plan.watermark + 1) return error.InvalidContext;
             // These reads make loss of audit dependencies an error even when
             // an epoch deliberately does not replay their prompt material.
-            const raw = try read(ctx, value.source_capture, 4 * 1024 * 1024);
+            const raw = try read(ctx, value.source_capture);
             ctx.allocator.free(raw);
-            const prepared = try read(ctx, value.source_request, 2 * 1024 * 1024);
+            const prepared = try read(ctx, value.source_request);
             ctx.allocator.free(prepared);
             return decoded;
         }
@@ -139,7 +140,7 @@ pub fn Projection(comptime P: type) type {
         /// scope an unsettled exchange; an ID reused after settlement is not an
         /// idempotency key for a later acquired response.
         pub fn pending(a: std.mem.Allocator, items: json.Value) !std.StringHashMap(void) {
-            if (items != .array or items.array.items.len > 8192) return error.Capacity;
+            if (items != .array) return error.InvalidContext;
             var calls = std.StringHashMap(void).init(a);
             errdefer calls.deinit();
             var previous_update = false;
@@ -228,14 +229,15 @@ pub fn Projection(comptime P: type) type {
         fn revise(ctx: registry.ProjectionContext, history: *json.Value, origins: *std.ArrayList(P.ContextOrigin), old: P.AdaptiveContext, request: P.AdaptiveRequest, catalog: P.AdaptiveCatalog, explicit_cache: bool) !void {
             const a = ctx.allocator;
             const changed_profile = !equal(&old.selection.profile_digest, &request.selection.profile_digest);
-            var removed_skills: u32 = 0;
+            const removed_skills = try a.alloc(bool, catalog.skills.items.len);
+            @memset(removed_skills, false);
             for (old.plan.skills.items) |skill| {
                 var retained = false;
                 for (request.plan.skills.items) |next| if (sameSkill(skill, next)) {
                     retained = !(skill.residency == .transient and skill.active and !next.active);
                 };
                 if (!retained) for (catalog.skills.items, 0..) |entry, index| {
-                    if (equal(entry.id.bytes, skill.skill_id.bytes)) removed_skills |= @as(u32, 1) << @intCast(index);
+                    if (equal(entry.id.bytes, skill.skill_id.bytes)) removed_skills[index] = true;
                 };
             }
             var kept = list(a);
@@ -255,7 +257,12 @@ pub fn Projection(comptime P: type) type {
                 }
                 var removed_definition = false;
                 for (origin.reasoning_tools, request.materialized) |seen, defined| removed_definition = removed_definition or (seen and !defined);
-                if (kind(item, "reasoning") and (changed_profile or origin.reasoning_skills & removed_skills != 0 or removed_definition)) retain = false;
+                var removed_reasoning_skill = false;
+                for (origin.reasoning_skills.items) |index| {
+                    if (index >= removed_skills.len) return error.InvalidContext;
+                    removed_reasoning_skill = removed_reasoning_skill or removed_skills[@intCast(index)];
+                }
+                if (kind(item, "reasoning") and (changed_profile or removed_reasoning_skill or removed_definition)) retain = false;
                 if (kind(item, "configuration_update") and changed_profile) retain = false;
                 if (kind(item, "additional_tools")) {
                     const original = try field(item, "tools");
@@ -296,9 +303,9 @@ pub fn Projection(comptime P: type) type {
                 previous = try open(ctx, ref, frozen.audience.bytes);
                 var parent = previous.?.value.plan.prior;
                 var watermark = previous.?.value.plan.watermark;
-                var depth: usize = 1;
+                // open proves each watermark is its parent watermark plus
+                // one, so ancestry strictly descends without a depth quota.
                 while (parent) |ancestor| {
-                    if (depth == 64) return error.Capacity;
                     if (ancestor.watermark != watermark) return error.InvalidContext;
                     var saved = try open(ctx, ancestor, frozen.audience.bytes);
                     defer saved.deinit();
@@ -309,7 +316,6 @@ pub fn Projection(comptime P: type) type {
                         next.audience.bytes = try a.dupe(u8, next.audience.bytes);
                     }
                     watermark = saved.value.plan.watermark;
-                    depth += 1;
                 }
                 const old = previous.?.value;
                 if (request.plan.watermark != old.watermark or request.selection.control_revision < old.selection.control_revision) return error.InvalidContext;
@@ -325,10 +331,16 @@ pub fn Projection(comptime P: type) type {
                         request.plan.eviction_generation != try std.math.add(u64, old.plan.eviction_generation, @intFromBool(removing))) return error.InvalidContext;
                     if (same_profile and request.plan.reason == .eviction and request.invocation.parameters.reasoning.?.effort.? != old.top_effort) return error.InvalidContext;
                 }
-                history = (try json.parse(a, old.items.bytes, .{ .bytes = 2 * 1024 * 1024 })).value;
+                history = (try json.parse(a, old.items.bytes, .{ .bytes = old.items.bytes.len, .tokens = old.items.bytes.len, .members = old.items.bytes.len })).value;
                 if (old.origins.items.len != history.array.items.len) return error.InvalidContext;
                 for (old.origins.items) |origin| if (origin.watermark > old.plan.watermark) return error.InvalidContext;
-                try origins.appendSlice(a, old.origins.items);
+                // Retained provenance owns its variable-length membership after
+                // the previous context's decoding arena is released.
+                for (old.origins.items) |origin| {
+                    var owned = origin;
+                    owned.reasoning_skills.items = try a.dupe(u64, origin.reasoning_skills.items);
+                    try origins.append(a, owned);
+                }
                 new_start = history.array.items.len;
                 try settle(a, &history, request, selected.profile.explicit_cache);
                 try fillOrigins(a, &origins, history.array.items.len, request.plan.watermark);
@@ -364,7 +376,7 @@ pub fn Projection(comptime P: type) type {
                 for ((try field(item, "tools")).array.items) |definition| defined[try ordinal(try json.text(try field(definition, "name")))] = true;
             };
             for (request.plan.skills.items) |loaded| {
-                var index: ?u8 = null;
+                var index: ?u64 = null;
                 for (catalog.skills.items, 0..) |entry, i| if (equal(loaded.skill_id.bytes, entry.id.bytes)) {
                     index = @intCast(i);
                 };
@@ -388,7 +400,7 @@ pub fn Projection(comptime P: type) type {
                     retained = true;
                 };
                 if (loaded.residency == .resident and !retained) {
-                    const body = try read(ctx, loaded.resource, 32 * 1024);
+                    const body = try read(ctx, loaded.resource);
                     try history.array.append(try message(a, "developer", body, false));
                     try origins.append(a, .{ .watermark = loaded.introduced_at, .resident_skill = skill_index });
                 }
@@ -397,17 +409,23 @@ pub fn Projection(comptime P: type) type {
             var input = list(a);
             try input.array.appendSlice(history.array.items);
             for (request.plan.skills.items) |loaded| if (loaded.residency == .transient and loaded.active) {
-                const body = try read(ctx, loaded.resource, 32 * 1024);
+                const body = try read(ctx, loaded.resource);
                 try input.array.append(try message(a, "developer", body, false));
             };
-            var reasoning_skills: u32 = 0;
-            for (origins.items) |origin| reasoning_skills |= origin.reasoning_skills;
+            const exposed = try a.alloc(bool, catalog.skills.items.len);
+            @memset(exposed, false);
+            for (origins.items) |origin| for (origin.reasoning_skills.items) |index| {
+                if (index >= exposed.len) return error.InvalidContext;
+                exposed[@intCast(index)] = true;
+            };
             for (request.plan.skills.items) |loaded| if (loaded.residency == .resident or loaded.active) {
                 for (catalog.skills.items, 0..) |entry, index| if (equal(entry.id.bytes, loaded.skill_id.bytes)) {
-                    reasoning_skills |= @as(u32, 1) << @intCast(index);
+                    exposed[index] = true;
                 };
             };
-            if (input.array.items.len > 8192) return error.Capacity;
+            var observed_skills: std.ArrayList(u64) = .empty;
+            for (exposed, 0..) |seen, index| if (seen) try observed_skills.append(a, @intCast(index));
+            const reasoning_skills: P.ReasoningSkills = .{ .items = observed_skills.items };
             return .{ .history = history, .origins = origins, .reasoning_skills = reasoning_skills, .input = input, .core_tools = core, .prior_response_id = if (same_profile) if (previous.?.value.response_id) |id| try a.dupe(u8, id.bytes) else null else null, .prior_request = if (previous) |saved| saved.value.source_request else null };
         }
 
