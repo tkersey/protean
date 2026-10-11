@@ -191,10 +191,16 @@ fn allocationFailure(allocator: std.mem.Allocator) !void {
 test "compiled tool construction releases all partial object and link owners" {
     Tool.bytes = try object(false);
     defer a.free(Tool.bytes);
-    std.testing.checkAllAllocationFailures(a, allocationFailure, .{}) catch |err| {
-        std.debug.print("compiled-tool failure injection: {s}\n", .{@errorName(err)});
-        return err;
-    };
+    // SafeAllocator may grow an arena in place on one run but move it on the
+    // next. Failure-index replay requires a fixed allocation schedule. Refuse
+    // optional resizing so every growth uses an injected allocation; still use
+    // the testing allocator for leak and ownership checks.
+    try allocationFailure(a);
+    var vtable = a.vtable.*;
+    vtable.resize = std.mem.Allocator.noResize;
+    vtable.remap = std.mem.Allocator.noRemap;
+    const backing: std.mem.Allocator = .{ .ptr = a.ptr, .vtable = &vtable };
+    try std.testing.checkAllAllocationFailures(backing, allocationFailure, .{});
 }
 
 test "compiled tool final link forwards semantic contract and deterministic limits" {
