@@ -19,8 +19,8 @@ zig build protean -Doptimize=safe
 ```
 
 The selected source tuple is Horos 4.0.0 at
-`2d0d378cb2dd16ec7e8178d03cccef1c68b98446`, Kosmos 7.0.0 at
-`94f64f9ab0555976dec36593df4bdb23254b3b60`, and SQLite 3.53.4. The versioned
+`bacdcaada3f09b1cbc4e787a45ba300d5fdbcb99`, Kosmos 7.0.0 at
+`fc6a5606421d6b6c65bc93f2a4847e41dc52711c`, and SQLite 3.53.4. The versioned
 `agent-native-source-lock/v2` binds exact archives and complete source/package
 inventories. It intentionally contains no WASM delivery contract. Kosmos owns
 its optional JS/WASM release descriptor, which this build never rewrites.
