@@ -18,9 +18,9 @@ zig run tools/native/dependencies.zig -- setup \
 zig build protean -Doptimize=safe
 ```
 
-The approved development successor tuple is Horos at
-`3586b932d4c5cebb9dbf621b7db152fd003ae70d`, Kosmos at
-`99d3e761989143cbf7e4ef360b50e795924ef1c7`, and SQLite 3.53.4. The versioned
+The selected source tuple is Horos 4.0.0 at
+`13713db071e6dba42ec06eabf224b628c2f3d3ed`, Kosmos 7.0.0 at
+`5ca974c1a8d103e64d0facb80e8f1a01b82093c7`, and SQLite 3.53.4. The versioned
 `agent-native-source-lock/v2` binds exact archives and complete source/package
 inventories. It intentionally contains no WASM delivery contract. Kosmos owns
 its optional JS/WASM release descriptor, which this build never rewrites.

@@ -1,4 +1,4 @@
-# Horos 4 authoring in Protean 4 development
+# Horos 4 authoring in Protean 4
 
 Protean uses Horos's canonical shape-preserving authoring interface. Its native
 host and wire contracts remain unchanged: model invocation v7–v10, ABI 3, the
