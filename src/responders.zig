@@ -132,11 +132,7 @@ fn defineObserved(comptime P: type, c: authoring.Context, failure: anytype, comp
     }, .{ @intFromPtr(t), @typeName(P), effect, try typed.interop.failureLiteralId(t, fault), batch });
     const signature = try t.callable(.{ .request = try c.schema(format.Request(P)), .offered = try c.schema([P.declaration_count]bool) }, try c.schema(format.Observation(P, batch)), .{operation}, .{ .use = .reusable });
     if (instance.cached) |cached| return typed.interop.refineFunction(t, try typed.interop.declaredFunction(t, cached), signature);
-    const interpreter = try typed.interop.sourceFunction(t, if (batch) try P.interpretAll(b) else try P.interpreter(b), try t.callable(.{
-        .result = try c.schema(P.Result),
-        .offered = try c.schema([P.declaration_count]bool),
-        .selection = try c.schema(@import("model_invocation.zig").Selection),
-    }, try c.schema(if (batch) P.BatchInterpretation else P.Interpretation), .{}, .{ .use = .reusable }));
+    const interpreter = if (batch) try P.interpretAll(c) else try P.interpreter(c);
     const handle = try t.functionFor("observed model response", signature);
     const function = try typed.interop.functionId(t, handle);
     const g = Generator(P, batch, format, @TypeOf(fault), @TypeOf(failure)){ .context = c, .typed_context = t, .handle = handle, .function = function, .fault = fault, .failure = failure };

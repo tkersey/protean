@@ -100,7 +100,7 @@ test "protected Protean source rejects raw model emission with forged request-ti
     const request = try b.reference(b.parameter(entry, 0));
     const raw = try b.term(.{ .perform = .{ .effect = effect, .payload = request } });
     const forged = try b.term(.{ .call = .{
-        .function = try P.interpreter(&b),
+        .function = try horos.authoring.interop.functionId(context.author, try P.interpreter(context)),
         .arguments = &.{
             try b.reference(normalized),
             try horos.authoring.interop.valueId(context.author, try context.literal([2]bool, .{ true, true })),

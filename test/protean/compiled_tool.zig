@@ -191,7 +191,10 @@ fn allocationFailure(allocator: std.mem.Allocator) !void {
 test "compiled tool construction releases all partial object and link owners" {
     Tool.bytes = try object(false);
     defer a.free(Tool.bytes);
-    try std.testing.checkAllAllocationFailures(a, allocationFailure, .{});
+    std.testing.checkAllAllocationFailures(a, allocationFailure, .{}) catch |err| {
+        std.debug.print("compiled-tool failure injection: {s}\n", .{@errorName(err)});
+        return err;
+    };
 }
 
 test "compiled tool final link forwards semantic contract and deterministic limits" {

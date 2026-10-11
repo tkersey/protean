@@ -10,7 +10,8 @@ a checked, context-owned `Value(Shape(T))` without requiring a Body. Literals ca
 be reused in sibling bodies within that Context. `context.external` returns an
 operation retaining its payload and reply contracts. Model responder and adaptive
 control definitions return typed function handles, and inbox declarations retain
-their reply shape.
+their reply shape. `Profile.interpreter(context)` and `interpretAll(context)`
+also return typed functions for ordinary named calls.
 
 ```zig
 const c = context.author;
@@ -38,7 +39,8 @@ zero and finite bounds retain their distinct meanings.
 |---|---|
 | `src/authoring.zig`, `examples/adaptive/definition.zig` | Shared Context, native schemas, global checked literals, typed operations/functions and named constructions |
 | `src/adaptive_controls.zig`, `src/text_inspection.zig` | Typed fields, updates, vector operations, branches and helper results; no recursive schema or numeric field-name reconstruction |
-| `src/responders.zig` | Typed model operations and functions; checked import of the generated source interpreter; exact checked effect-site ID for registry certification |
+| `src/responders.zig`, `src/model_interpretation.zig` | Typed model operations, candidate-admission functions and calls; exact checked effect-site ID for registry certification |
+| `src/model_invocation.zig` | Native contracts and typed interpretation factories; raw effect/declaration helpers retain their source-admission purpose |
 | `src/inbox.zig` | Typed operation declaration; `poll` remains an explicit raw source-term integration |
 | `src/value_equality.zig` | Public comparison retains its input shapes; the recursive runtime-schema visitor uses Dynamic and checked refinement |
 | `src/decision.zig`, `src/scopes.zig`, `src/react.zig`, `src/observation.zig` | Existing runtime source-schema interfaces retain IDs; their authoring helpers use explicit Dynamic children and checked mapping of actual callable contracts |

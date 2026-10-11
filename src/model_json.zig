@@ -6,7 +6,7 @@ pub fn taggedOptional(comptime T: type) bool {
 }
 
 fn containsTaggedOptional(comptime T: type) bool {
-    if (native.wrapped(T)) {
+    if (comptime native.wrapped(T)) {
         return if (T.protean_value_kind == .vector) containsTaggedOptional(T.Child) else false;
     }
     return switch (@typeInfo(T)) {
@@ -26,7 +26,7 @@ pub fn clientMapping(comptime types: anytype) []const u8 {
     return "agent-client-values/1.0";
 }
 pub fn isText(comptime T: type) bool {
-    return native.wrapped(T) and
+    return comptime native.wrapped(T) and
         T.protean_value_kind == .text;
 }
 
@@ -260,7 +260,7 @@ fn writeClientSchema(comptime T: type, writer: anytype) void {
         writer.byte('}');
         return;
     }
-    if (native.wrapped(T)) {
+    if (comptime native.wrapped(T)) {
         if (T.protean_value_kind == .bytes) {
             writer.raw("{\"type\":\"string\",\"contentEncoding\":\"base64url\"");
             if (T.max_length) |maximum| {
