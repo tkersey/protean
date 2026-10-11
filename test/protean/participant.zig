@@ -1,3 +1,4 @@
+const horos_authoring = @import("horos").authoring;
 const std = @import("std");
 const protean = @import("protean");
 const horos = @import("horos");
@@ -68,10 +69,10 @@ const Application = struct {
     pub fn emit(c: protean.Context) !source.Module {
         const b = c.builder;
         const unit = try b.scalar(void);
-        const request = try c.schema(P.Request);
-        const offered = try c.schema([1]bool);
-        const result = try c.schema(P.Interpretation);
-        const helper = try protean.responders.defineModel(P, c, try c.literal(void, {}), false);
+        const request = try horos_authoring.interop.schemaId(c.author, try c.schema(P.Request));
+        const offered = try horos_authoring.interop.schemaId(c.author, try c.schema([1]bool));
+        const result = try horos_authoring.interop.schemaId(c.author, try c.schema(P.Interpretation));
+        const helper = try horos_authoring.interop.functionId(c.author, try protean.responders.defineModel(P, c, try c.literal(void, {}), false));
         const model = try P.declare(b);
         const bound = if (completion) try completionHelper(c, request, offered, result) else if (wrong_result)
             try wrongHelper(c, request, offered)
@@ -89,7 +90,7 @@ const Application = struct {
         });
         if (mutate_object) @memset(@constCast(bytes), 0xff);
         if (assessment) try c.registry.speculate(participant, if (allow_model) &.{model} else &.{});
-        const entry = try b.declare(&.{try c.schema(Input)}, result, &.{model}, &.{});
+        const entry = try b.declare(&.{try horos_authoring.interop.schemaId(c.author, try c.schema(Input))}, result, &.{model}, &.{});
         const input = try b.reference(b.parameter(entry, 0));
         try b.define(entry, try b.term(.{ .call = .{ .function = participant, .arguments = &.{
             try b.primitive(request, .field, &.{input}, 0),
@@ -108,11 +109,11 @@ fn wrongHelper(c: protean.Context, request: source.Id, offered: source.Id) !sour
 
 fn completionHelper(c: protean.Context, request: source.Id, offered: source.Id, result: source.Id) !source.Id {
     const b = c.builder;
-    const write = try c.external("fixture/target-write", try b.scalar(void), result, .write);
+    const write = try horos_authoring.interop.operationId(c.author, try c.external("fixture/target-write", try horos_authoring.interop.schema(c.author, try b.scalar(void)), try horos_authoring.interop.schema(c.author, result), .write));
     const helper = try b.declare(&.{ request, offered }, result, &.{write}, &.{});
     const operation = try b.term(.{ .perform = .{
         .effect = write,
-        .payload = try c.literal(void, {}),
+        .payload = try horos_authoring.interop.valueId(c.author, try c.literal(void, {})),
     } });
     // A trusted real completion site that would write if invoked. Assessment
     // must reject this binding even when ordinary source admission permits it.

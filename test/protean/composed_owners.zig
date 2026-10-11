@@ -9,15 +9,15 @@ fn Application(comptime duplicate: bool, comptime assessment: bool, comptime wri
     return struct {
         pub fn emit(context: protean.Context) !source.Module {
             const b = context.builder;
-            const c = try a.Context.init(b);
-            const integer = try c.scalar(u64);
-            const unit = try c.scalar(void);
-            const release_id = try context.external("composed/cleanup", try a.interop.schemaId(c, integer), try a.interop.schemaId(c, unit), if (write) .write else .read);
-            const release = try a.interop.operation(c, release_id);
+            const c = context.author;
+            const integer = try c.schema(u64);
+            const unit = try c.schema(void);
+            const release = try context.external("composed/cleanup", integer, unit, if (write) .write else .read);
+            const release_id = try a.interop.operationId(c, release);
             const g = try generator.create(c, "composed/participant", integer, integer, integer, .{
-                .captures = .{ .continuation = &.{integer} },
+                .captures = .{ .continuation = .{integer} },
                 .residual = &.{release},
-                .parameters = &.{.{ .name = "input", .schema = integer }},
+                .parameters = .{ .input = integer },
                 .body_use = .reusable,
             });
             const joined = try generator.pipeline(c, "composed/pipeline", g, g);
@@ -28,63 +28,60 @@ fn Application(comptime duplicate: bool, comptime assessment: bool, comptime wri
             const body = try c.body(body_fn);
             const capability = try body.parameter("capability");
             const input = try body.parameter("input");
-            const run_type = try c.callable(&.{}, integer, &.{g.effect()}, .{ .use = .reusable, .captures = &.{ g.capability(), integer } });
+            const run_type = try c.callable(.{}, integer, &.{g.effect()}, .{ .use = .reusable, .captures = .{ g.capability(), integer } });
             const run_fn = try c.functionFor("participant offers", run_type);
             const run = try body.closureBody(run_fn);
             const reply = try run.performLocal(g.effect(), capability, input);
             try c.define(run_fn, try run.ret(try run.performLocal(g.effect(), capability, reply)));
-            const cleanup_type = try c.callable(&.{.{ .name = "exit", .schema = try c.cleanupInfo(unit) }}, unit, &.{release}, .{ .use = .reusable, .captures = &.{integer} });
+            const cleanup_type = try c.callable(.{ .exit = try c.cleanupInfo(unit) }, unit, &.{release}, .{ .use = .reusable, .captures = &.{integer} });
             const cleanup_fn = try c.functionFor("retained cleanup", cleanup_type);
             const cleanup = try body.closureBody(cleanup_fn);
             try c.define(cleanup_fn, try cleanup.ret(try cleanup.perform(release, input)));
             const cleanup_id = try a.interop.functionId(c, cleanup_fn);
             if (write) try context.registry.protectSite(cleanup_id, b.functions.items[@intCast(cleanup_id)].body.?, release_id);
-            try c.define(body_fn, try body.ret(try body.protect(try body.lambda(run_fn, run_type), try body.lambda(cleanup_fn, cleanup_type), &.{})));
-            const entry = try c.function("entry", &.{.{ .name = "args", .schema = unit }}, unit, &.{release});
+            try c.define(body_fn, try body.ret(try body.protect(try body.lambda(run_fn, run_type), try body.lambda(cleanup_fn, cleanup_type), .{})));
+            const entry = try c.function("entry", .{ .args = unit }, unit, &.{release});
             const root = try c.body(entry);
-            var work = root;
-            var stages: [3]Stage = undefined;
-            var owners: [2]*const a.Value = undefined;
-            for (&owners, 0..) |*owner, i| {
-                const answer = try work.handleWithArguments(g.handler(), try work.lambda(body_fn, body_type), &.{.{ .name = "input", .value = try work.constant(u64, i + 1) }}, &.{});
-                stages[i] = try Stage.open(work, answer, unit);
-                owner.* = stages[i].package;
-                work = stages[i].selected.body();
-            }
-            const answer = try work.call(joined.start, &.{ .{ .name = "left", .value = owners[0] }, .{ .name = "right", .value = owners[1] }, .{ .name = "input", .value = try work.constant(u64, 7) } });
-            stages[2] = try Stage.open(work, answer, unit);
-            work = stages[2].selected.body();
-            _ = try work.disposePackage(stages[2].package);
-            if (duplicate) _ = try work.disposePackage(stages[2].package);
-            var result = try work.constant(void, {});
-            var remaining = stages.len;
-            while (remaining != 0) {
-                remaining -= 1;
-                result = try stages[remaining].finish(result);
-            }
+            const first_answer = try root.handleWithArguments(g.handler(), try root.lambda(body_fn, body_type), .{ .input = try root.constant(u64, 1) }, .{});
+            const first = try Stage(@TypeOf(root), @TypeOf(first_answer)).open(root, first_answer, unit);
+            const second_body = first.selected.body();
+            const second_answer = try second_body.handleWithArguments(g.handler(), try second_body.lambda(body_fn, body_type), .{ .input = try second_body.constant(u64, 2) }, .{});
+            const second = try Stage(@TypeOf(second_body), @TypeOf(second_answer)).open(second_body, second_answer, unit);
+            const join_body = second.selected.body();
+            const joined_answer = try join_body.call(joined.start, .{ .left = first.package, .right = second.package, .input = try join_body.constant(u64, 7) });
+            const last = try Stage(@TypeOf(join_body), @TypeOf(joined_answer)).open(join_body, joined_answer, unit);
+            const work = last.selected.body();
+            _ = try work.disposePackage(last.package);
+            if (duplicate) _ = try work.disposePackage(last.package);
+            const result = try first.finish(try second.finish(try last.finish(try work.constant(void, {}))));
             try c.define(entry, try root.ret(result));
             if (assessment) try context.registry.speculate(try a.interop.functionId(c, entry), &.{release_id});
             return c.module(entry, unit);
         }
     };
 }
-const Stage = struct {
-    parent: *a.Body,
-    answer: *const a.Value,
-    done: *const a.Case,
-    selected: *const a.Case,
-    package: *const a.Value,
-    result: *const a.Schema,
-    fn open(parent: *a.Body, answer: *const a.Value, result: *const a.Schema) !Stage {
-        const done = try parent.caseOf(answer, "done");
-        const selected = try parent.caseOf(answer, "yielded");
-        const parts = try selected.body().destructure(selected.payload());
-        return .{ .parent = parent, .answer = answer, .done = done, .selected = selected, .package = try parts.get("future"), .result = result };
-    }
-    fn finish(self: @This(), value: *const a.Value) !*const a.Value {
-        return self.parent.match(self.answer, &.{ try self.done.fail(self.result, try self.done.body().constant(void, {})), try self.selected.ret(value) });
-    }
-};
+fn Stage(comptime Parent: type, comptime Answer: type) type {
+    const Done = @TypeOf(@as(Parent, undefined).caseOf(@as(Answer, undefined), "done") catch unreachable);
+    const Selected = @TypeOf(@as(Parent, undefined).caseOf(@as(Answer, undefined), "yielded") catch unreachable);
+    const Package = @TypeOf(@as(Selected, undefined).body().field(@as(Selected, undefined).payload(), "future") catch unreachable);
+    return struct {
+        parent: Parent,
+        answer: Answer,
+        done: Done,
+        selected: Selected,
+        package: Package,
+        result: *const a.Schema(a.Shape(void)),
+        fn open(parent: Parent, answer: Answer, result: *const a.Schema(a.Shape(void))) !@This() {
+            const done = try parent.caseOf(answer, "done");
+            const selected = try parent.caseOf(answer, "yielded");
+            const parts = try selected.body().destructure(selected.payload());
+            return .{ .parent = parent, .answer = answer, .done = done, .selected = selected, .package = try parts.get("future"), .result = result };
+        }
+        fn finish(self: @This(), value: *const a.Value(a.Shape(void))) !*const a.Value(a.Shape(void)) {
+            return self.parent.match(self.answer, .{ .done = try self.done.fail(self.result, try self.done.body().constant(void, {})), .yielded = try self.selected.ret(value) });
+        }
+    };
+}
 fn compile(comptime duplicate: bool, comptime assessment: bool, comptime write: bool) !void {
     const System = protean.system(.{ .InitialArgs = void, .Result = void, .Failure = void, .application = Application(duplicate, assessment, write) });
     var result = try protean.compile(std.testing.allocator, System);

@@ -55,14 +55,14 @@ pub fn interpret(
     return instance.finish(b, interpretation);
 }
 
-fn schemas(c: *typed.Context, ids: []const Id) typed.Error![]const *const typed.Schema {
-    const result = try typed.interop.builder(c).allocator().alloc(*const typed.Schema, ids.len);
+fn schemas(c: *typed.Context, ids: []const Id) typed.Error![]const *const typed.Schema(typed.Dynamic) {
+    const result = try typed.interop.builder(c).allocator().alloc(*const typed.Schema(typed.Dynamic), ids.len);
     for (ids, result) |id, *item| item.* = try typed.interop.schema(c, id);
     return result;
 }
 
-fn operations(c: *typed.Context, ids: []const Id) typed.Error![]const *const typed.Operation {
-    const result = try typed.interop.builder(c).allocator().alloc(*const typed.Operation, ids.len);
+fn operations(c: *typed.Context, ids: []const Id) typed.Error![]const *const typed.Operation(typed.Dynamic) {
+    const result = try typed.interop.builder(c).allocator().alloc(*const typed.Operation(typed.Dynamic), ids.len);
     for (ids, result) |id, *item| item.* = try typed.interop.operation(c, id);
     return result;
 }
@@ -83,11 +83,11 @@ fn authoredInterpretation(
     const c = try typed.Context.init(b);
     const operation = try typed.interop.operation(c, family.effect);
     const answer_schema = try typed.interop.schema(c, result);
-    const responder_schema = try typed.interop.namedCallable(c, responder, &.{"question"});
-    const captures = try b.allocator().alloc(*const typed.Schema, scope.captures.len + 2);
+    const responder_schema = try @import("authoring_imports.zig").callable(c, responder, .{ .question = try typed.interop.schema(c, family.question) });
+    const captures = try b.allocator().alloc(*const typed.Schema(typed.Dynamic), scope.captures.len + 2);
     @memcpy(captures[0..scope.captures.len], try schemas(c, scope.captures));
     captures[scope.captures.len] = try typed.interop.schema(c, family.capability);
-    captures[scope.captures.len + 1] = responder_schema;
+    captures[scope.captures.len + 1] = typed.interop.erase(responder_schema);
     const handler = try c.handler(operation, answer_schema, answer_schema, .{
         .mode = .deep,
         .use = .linear,
@@ -97,17 +97,14 @@ fn authoredInterpretation(
         .captures = captures,
         .owned_regions = try regions(c, scope.owned_regions),
         .borrowed_regions = try regions(c, scope.borrowed_regions),
-        .state = &.{.{ .name = "responder", .schema = responder_schema }},
+        .state = .{ .responder = responder_schema },
     });
     const returns = try c.returnFunction(handler);
     const return_body = try c.body(returns);
     try c.define(returns, try return_body.ret(try return_body.parameter("result")));
     const clause = try c.clauseFunction(handler);
     const clause_body = try c.body(clause);
-    const reply = try clause_body.apply(try clause_body.parameter("responder"), &.{.{
-        .name = "question",
-        .value = try clause_body.parameter("payload"),
-    }});
+    const reply = try clause_body.apply(try clause_body.parameter("responder"), .{ .question = try clause_body.parameter("payload") });
     const resumed = try clause_body.resumeValue(try clause_body.parameter("resumption"), reply);
     try c.define(clause, try clause_body.ret(resumed));
     return .{

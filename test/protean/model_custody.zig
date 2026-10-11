@@ -75,12 +75,13 @@ fn compileResponder(comptime Q: type, comptime multiple: bool, comptime observed
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
-    const context: protean.Context = .{ .builder = &b, .registry = &registry };
-    const failure = try b.constant(void, {});
+    const context = try protean.Context.init(&b, &registry);
+    const failure = try context.literal(void, {});
     const define = if (observed) protean.responders.defineModelObserved else protean.responders.defineModel;
-    const entry = try define(Q, context, failure, multiple);
+    const entry_handle = try define(Q, context, failure, multiple);
+    const entry = try horos.authoring.interop.functionId(context.author, entry_handle);
     const shared = try define(Q, context, failure, multiple);
-    try std.testing.expectEqual(entry, shared);
+    try std.testing.expectEqual(entry_handle, shared);
     const module = b.module(entry, try b.scalar(void));
     try protean.admission.verify(allocator, module, &registry);
     return horos.program.compile(allocator, module);
@@ -91,19 +92,19 @@ test "protected Protean source rejects raw model emission with forged request-ti
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
-    const context: protean.Context = .{ .builder = &b, .registry = &registry };
+    const context = try protean.Context.init(&b, &registry);
     const effect = try P.declare(&b);
     try registry.classify(effect, .model);
-    const entry = try b.declare(&.{try context.schema(P.Request)}, try context.schema(P.Interpretation), &.{effect}, &.{});
-    const normalized = try b.variable(try context.schema(P.Result));
+    const entry = try b.declare(&.{try contracts.schema(P.Request, &b)}, try contracts.schema(P.Interpretation, &b), &.{effect}, &.{});
+    const normalized = try b.variable(try contracts.schema(P.Result, &b));
     const request = try b.reference(b.parameter(entry, 0));
     const raw = try b.term(.{ .perform = .{ .effect = effect, .payload = request } });
     const forged = try b.term(.{ .call = .{
         .function = try P.interpreter(&b),
         .arguments = &.{
             try b.reference(normalized),
-            try context.literal([2]bool, .{ true, true }),
-            try context.literal(model.Selection, single),
+            try horos.authoring.interop.valueId(context.author, try context.literal([2]bool, .{ true, true })),
+            try horos.authoring.interop.valueId(context.author, try context.literal(model.Selection, single)),
         },
     } });
     try b.define(entry, try b.bind(normalized, raw, forged));
@@ -121,10 +122,9 @@ test "reserved model identity cannot evade custody by omitted or read classifica
         defer b.deinit();
         var registry = protean.admission.Registry.init(b.allocator());
         defer registry.deinit();
-        const context: protean.Context = .{ .builder = &b, .registry = &registry };
         const effect = try P.declare(&b);
         if (role) |classification| try registry.classify(effect, classification);
-        const entry = try b.declare(&.{try context.schema(P.Request)}, try context.schema(P.Result), &.{effect}, &.{});
+        const entry = try b.declare(&.{try contracts.schema(P.Request, &b)}, try contracts.schema(P.Result, &b), &.{effect}, &.{});
         try b.define(entry, try b.term(.{ .perform = .{
             .effect = effect,
             .payload = try b.reference(b.parameter(entry, 0)),
@@ -142,9 +142,10 @@ test "observed model result preserves normalized provenance and typed recovery d
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
-    const context: protean.Context = .{ .builder = &b, .registry = &registry };
-    const failure = try b.constant(void, {});
-    const entry = try protean.responders.defineModelObserved(P, context, failure, false);
+    const context = try protean.Context.init(&b, &registry);
+    const failure = try context.literal(void, {});
+    const entry_handle = try protean.responders.defineModelObserved(P, context, failure, false);
+    const entry = try horos.authoring.interop.functionId(context.author, entry_handle);
     _ = try protean.responders.defineModel(P, context, failure, false);
     // The convenience projection reuses the same checked model-emission owner.
     try std.testing.expectEqual(1, registry.sites.items.len);
@@ -466,17 +467,17 @@ fn pairModule(c: protean.Context) !source.Module {
     const b = c.builder;
     const effect = try P.declare(b);
     const entry = try b.declare(
-        &.{try c.schema(PairInput)},
-        try c.schema(PairResult),
+        &.{try contracts.schema(PairInput, c.builder)},
+        try contracts.schema(PairResult, c.builder),
         &.{effect},
         &.{},
     );
     const args = try b.reference(b.parameter(entry, 0));
-    const first = try b.primitive(try c.schema(Input), .field, &.{args}, 0);
-    const second = try b.primitive(try c.schema(Input), .field, &.{args}, 1);
-    const first_answer = try b.variable(try c.schema(P.Interpretation));
-    const second_answer = try b.variable(try c.schema(P.Interpretation));
-    const answers = try b.primitive(try c.schema(PairResult), .product, &.{
+    const first = try b.primitive(try contracts.schema(Input, c.builder), .field, &.{args}, 0);
+    const second = try b.primitive(try contracts.schema(Input, c.builder), .field, &.{args}, 1);
+    const first_answer = try b.variable(try contracts.schema(P.Interpretation, c.builder));
+    const second_answer = try b.variable(try contracts.schema(P.Interpretation, c.builder));
+    const answers = try b.primitive(try contracts.schema(PairResult, c.builder), .product, &.{
         try b.reference(first_answer), try b.reference(second_answer),
     }, 0);
     const first_call = try pairCall(c, first);
@@ -492,8 +493,8 @@ fn pairCall(c: protean.Context, value: source.Id) !source.Id {
         c,
         try c.builder.constant(void, {}),
         false,
-        try c.builder.primitive(try c.schema(P.Request), .field, &.{value}, 0),
-        try c.builder.primitive(try c.schema([2]bool), .field, &.{value}, 1),
+        try c.builder.primitive(try contracts.schema(P.Request, c.builder), .field, &.{value}, 0),
+        try c.builder.primitive(try contracts.schema([2]bool, c.builder), .field, &.{value}, 1),
     );
 }
 
@@ -656,8 +657,9 @@ test "stateless replay responder retains opaque data while protecting the reques
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
-    const c: protean.Context = .{ .builder = &b, .registry = &registry };
-    const entry = try protean.responders.defineReplayModelObserved(P, c, try b.constant(void, {}), false);
+    const c = try protean.Context.init(&b, &registry);
+    const entry_handle = try protean.responders.defineReplayModelObserved(P, c, try c.literal(void, {}), false);
+    const entry = try horos.authoring.interop.functionId(c.author, entry_handle);
     const module = b.module(entry, try b.scalar(void));
     try protean.admission.verify(allocator, module, &registry);
     var compiled = try horos.program.compile(allocator, module);
@@ -704,10 +706,9 @@ test "replay model identity cannot bypass the protected responder" {
         defer b.deinit();
         var registry = protean.admission.Registry.init(b.allocator());
         defer registry.deinit();
-        const c: protean.Context = .{ .builder = &b, .registry = &registry };
         const effect = try P.declareReplay(&b);
         if (role) |classification| try registry.classify(effect, classification);
-        const entry = try b.declare(&.{try c.schema(P.ReplayRequest)}, try c.schema(P.ReplayResult), &.{effect}, &.{});
+        const entry = try b.declare(&.{try contracts.schema(P.ReplayRequest, &b)}, try contracts.schema(P.ReplayResult, &b), &.{effect}, &.{});
         try b.define(entry, try b.term(.{ .perform = .{ .effect = effect, .payload = try b.reference(b.parameter(entry, 0)) } }));
         try std.testing.expectError(if (role == .model) error.ProtectedEffectBypass else error.EffectRoleMismatch, protean.admission.verify(allocator, b.module(entry, try b.scalar(void)), &registry));
     }
@@ -718,8 +719,9 @@ test "reference responder preserves frozen bindings and the exact request-time o
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
-    const c: protean.Context = .{ .builder = &b, .registry = &registry };
-    const entry = try protean.responders.defineReferenceModelObserved(P, c, try b.constant(void, {}), false);
+    const c = try protean.Context.init(&b, &registry);
+    const entry_handle = try protean.responders.defineReferenceModelObserved(P, c, try c.literal(void, {}), false);
+    const entry = try horos.authoring.interop.functionId(c.author, entry_handle);
     const module = b.module(entry, try b.scalar(void));
     try protean.admission.verify(allocator, module, &registry);
     var compiled = try horos.program.compile(allocator, module);
@@ -766,10 +768,9 @@ test "reference model identity cannot bypass the protected responder" {
         defer b.deinit();
         var registry = protean.admission.Registry.init(b.allocator());
         defer registry.deinit();
-        const c: protean.Context = .{ .builder = &b, .registry = &registry };
         const effect = try P.declareReference(&b);
         if (role) |classification| try registry.classify(effect, classification);
-        const entry = try b.declare(&.{try c.schema(P.ReferenceRequest)}, try c.schema(P.ReferenceResult), &.{effect}, &.{});
+        const entry = try b.declare(&.{try contracts.schema(P.ReferenceRequest, &b)}, try contracts.schema(P.ReferenceResult, &b), &.{effect}, &.{});
         try b.define(entry, try b.term(.{ .perform = .{ .effect = effect, .payload = try b.reference(b.parameter(entry, 0)) } }));
         try std.testing.expectError(if (role == .model) error.ProtectedEffectBypass else error.EffectRoleMismatch, protean.admission.verify(allocator, b.module(entry, try b.scalar(void)), &registry));
     }
@@ -780,8 +781,9 @@ test "adaptive responder keeps definitions separate from original call authority
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
-    const c: protean.Context = .{ .builder = &b, .registry = &registry };
-    const entry = try protean.responders.defineAdaptiveModelObserved(P, c, try b.constant(void, {}), false);
+    const c = try protean.Context.init(&b, &registry);
+    const entry_handle = try protean.responders.defineAdaptiveModelObserved(P, c, try c.literal(void, {}), false);
+    const entry = try horos.authoring.interop.functionId(c.author, entry_handle);
     const module = b.module(entry, try b.scalar(void));
     try protean.admission.verify(allocator, module, &registry);
     var compiled = try horos.program.compile(allocator, module);
@@ -850,10 +852,9 @@ test "adaptive model identity cannot bypass the protected responder" {
         defer b.deinit();
         var registry = protean.admission.Registry.init(b.allocator());
         defer registry.deinit();
-        const c: protean.Context = .{ .builder = &b, .registry = &registry };
         const effect = try P.declareAdaptive(&b);
         if (role) |classification| try registry.classify(effect, classification);
-        const entry = try b.declare(&.{try c.schema(P.AdaptiveRequest)}, try c.schema(P.AdaptiveResult), &.{effect}, &.{});
+        const entry = try b.declare(&.{try contracts.schema(P.AdaptiveRequest, &b)}, try contracts.schema(P.AdaptiveResult, &b), &.{effect}, &.{});
         try b.define(entry, try b.term(.{ .perform = .{ .effect = effect, .payload = try b.reference(b.parameter(entry, 0)) } }));
         try std.testing.expectError(if (role == .model) error.ProtectedEffectBypass else error.EffectRoleMismatch, protean.admission.verify(allocator, b.module(entry, try b.scalar(void)), &registry));
     }

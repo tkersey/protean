@@ -47,11 +47,11 @@ fn authoredReader(
     const operation = try typed.interop.operation(c, family.effect);
     const environment_schema = try typed.interop.schema(c, environment);
     const result_schema = try typed.interop.schema(c, result);
-    const captures = try b.allocator().alloc(*const typed.Schema, scope.captures.len + 2);
+    const captures = try b.allocator().alloc(*const typed.Schema(typed.Dynamic), scope.captures.len + 2);
     for (scope.captures, 0..) |id, i| captures[i] = try typed.interop.schema(c, id);
     captures[scope.captures.len] = try typed.interop.schema(c, family.capability);
     captures[scope.captures.len + 1] = environment_schema;
-    const residual = try b.allocator().alloc(*const typed.Operation, scope.residual.effects.len);
+    const residual = try b.allocator().alloc(*const typed.Operation(typed.Dynamic), scope.residual.effects.len);
     for (scope.residual.effects, residual) |id, *item| item.* = try typed.interop.operation(c, id);
     const owned = try b.allocator().alloc(*const typed.Region, scope.owned_regions.len);
     for (scope.owned_regions, owned) |id, *item| item.* = try typed.interop.region(c, id);
@@ -66,7 +66,7 @@ fn authoredReader(
         .captures = captures,
         .owned_regions = owned,
         .borrowed_regions = borrowed,
-        .state = &.{.{ .name = "environment", .schema = environment_schema }},
+        .state = .{ .environment = environment_schema },
     });
     const returns = try c.returnFunction(handler);
     const return_body = try c.body(returns);

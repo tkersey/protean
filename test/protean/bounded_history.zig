@@ -1,4 +1,5 @@
 //! Budget order and bounded history are ordinary authored policy, not host state.
+const horos_authoring = @import("horos").authoring;
 const std = @import("std");
 const protean = @import("protean");
 const horos = @import("horos");
@@ -14,30 +15,30 @@ const System = protean.system(.{ .InitialArgs = Input, .Result = History, .Failu
 const Application = struct {
     pub fn emit(c: protean.Context) !horos.source.Module {
         const b = c.builder;
-        const decide = try c.external("history.decide", try c.schema(History), try c.schema(Choice), .read);
-        const observe = try c.external("history.observe", try c.schema(u64), try c.schema(u64), .read);
-        const loop = try b.declare(&.{ try c.schema(Input), try c.schema(History) }, try c.schema(History), &.{ decide, observe }, &.{});
+        const decide = try horos_authoring.interop.operationId(c.author, try c.external("history.decide", try c.schema(History), try c.schema(Choice), .read));
+        const observe = try horos_authoring.interop.operationId(c.author, try c.external("history.observe", try c.schema(u64), try c.schema(u64), .read));
+        const loop = try b.declare(&.{ try horos_authoring.interop.schemaId(c.author, try c.schema(Input)), try horos_authoring.interop.schemaId(c.author, try c.schema(History)) }, try horos_authoring.interop.schemaId(c.author, try c.schema(History)), &.{ decide, observe }, &.{});
         const input = try b.reference(b.parameter(loop, 0));
         const history = try b.reference(b.parameter(loop, 1));
         const turns = try field(c, u8, input, 0);
         const effects = try field(c, u8, input, 1);
         const drop = try field(c, bool, input, 2);
-        const selected = try b.variable(try c.schema(Choice));
-        const value = try b.variable(try c.schema(u64));
-        const done = try b.variable(try c.schema(void));
-        const observed = try b.variable(try c.schema(u64));
-        const room = try b.variable(try c.schema(History));
+        const selected = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(Choice)));
+        const value = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(u64)));
+        const done = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(void)));
+        const observed = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(u64)));
+        const room = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(History)));
         const tail = try makeRoom(c, history, drop);
-        const appended = try b.value(.{ .schema = try c.schema(History), .expression = .{ .primitive = .{
+        const appended = try b.value(.{ .schema = try horos_authoring.interop.schemaId(c.author, try c.schema(History)), .expression = .{ .primitive = .{
             .opcode = .sequence_append,
             .operands = &.{ try b.reference(room), try b.reference(observed) },
-            .failures = &.{.{ .kind = .capacity_exceeded, .value = try b.failureLiteral(try c.literal(Failure, .history_overflow)) }},
+            .failures = &.{.{ .kind = .capacity_exceeded, .value = try b.failureLiteral(try horos_authoring.interop.valueId(c.author, try c.literal(Failure, .history_overflow))) }},
         } } });
-        const next = try b.primitive(try c.schema(Input), .product, &.{ try subtract(c, turns, .turn_budget), try subtract(c, effects, .effect_budget), drop }, 0);
+        const next = try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(Input)), .product, &.{ try subtract(c, turns, .turn_budget), try subtract(c, effects, .effect_budget), drop }, 0);
         const continued = try b.term(.{ .call = .{ .function = loop, .arguments = &.{ next, appended } } });
         const operation = try b.bind(room, tail, try b.bind(observed, try b.term(.{ .perform = .{ .effect = observe, .payload = try b.reference(value) } }), continued));
         const admitted = try b.term(.{ .conditional = .{
-            .condition = try less(c, try c.literal(u8, 0), effects),
+            .condition = try less(c, try horos_authoring.interop.valueId(c.author, try c.literal(u8, 0)), effects),
             .when_true = operation,
             .when_false = try fail(c, .effect_budget),
         } });
@@ -46,43 +47,43 @@ const Application = struct {
         } } });
         const decide_term = try b.bind(selected, try b.term(.{ .perform = .{ .effect = decide, .payload = history } }), choice);
         try b.define(loop, try b.term(.{ .conditional = .{
-            .condition = try less(c, try c.literal(u8, 0), turns),
+            .condition = try less(c, try horos_authoring.interop.valueId(c.author, try c.literal(u8, 0)), turns),
             .when_true = decide_term,
             .when_false = try fail(c, .turn_budget),
         } }));
-        const entry = try b.declare(&.{try c.schema(Input)}, try c.schema(History), &.{ decide, observe }, &.{});
-        try b.define(entry, try b.term(.{ .call = .{ .function = loop, .arguments = &.{ try b.reference(b.parameter(entry, 0)), try c.literal(History, .{ .items = &.{} }) } } }));
-        return b.module(entry, try c.schema(Failure));
+        const entry = try b.declare(&.{try horos_authoring.interop.schemaId(c.author, try c.schema(Input))}, try horos_authoring.interop.schemaId(c.author, try c.schema(History)), &.{ decide, observe }, &.{});
+        try b.define(entry, try b.term(.{ .call = .{ .function = loop, .arguments = &.{ try b.reference(b.parameter(entry, 0)), try horos_authoring.interop.valueId(c.author, try c.literal(History, .{ .items = &.{} })) } } }));
+        return b.module(entry, try horos_authoring.interop.schemaId(c.author, try c.schema(Failure)));
     }
 };
 
 fn makeRoom(c: protean.Context, history: Id, drop: Id) !Id {
     const b = c.builder;
-    const length = try b.primitive(try c.schema(u64), .sequence_length, &.{history}, 0);
-    const empty = try b.variable(try c.schema(void));
-    const pair = try b.variable(try c.schema(Pair));
-    const removed = try b.term(.{ .match_sum = .{ .value = try b.primitive(try c.schema(?Pair), .sequence_pop, &.{history}, 0), .cases = &.{
+    const length = try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(u64)), .sequence_length, &.{history}, 0);
+    const empty = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(void)));
+    const pair = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(Pair)));
+    const removed = try b.term(.{ .match_sum = .{ .value = try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(?Pair)), .sequence_pop, &.{history}, 0), .cases = &.{
         .{ .variable = empty, .body = try fail(c, .history_overflow) },
         .{ .variable = pair, .body = try b.pure(try field(c, History, try b.reference(pair), 1)) },
     } } });
     const full = try b.term(.{ .conditional = .{ .condition = drop, .when_true = removed, .when_false = try fail(c, .history_overflow) } });
-    return b.term(.{ .conditional = .{ .condition = try less(c, length, try c.literal(u64, 2)), .when_true = try b.pure(history), .when_false = full } });
+    return b.term(.{ .conditional = .{ .condition = try less(c, length, try horos_authoring.interop.valueId(c.author, try c.literal(u64, 2))), .when_true = try b.pure(history), .when_false = full } });
 }
 fn field(c: protean.Context, comptime T: type, value: Id, index: u64) !Id {
-    return c.builder.primitive(try c.schema(T), .field, &.{value}, index);
+    return c.builder.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(T)), .field, &.{value}, index);
 }
 fn less(c: protean.Context, a: Id, z: Id) !Id {
-    return c.builder.primitive(try c.schema(bool), .less, &.{ a, z }, 0);
+    return c.builder.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(bool)), .less, &.{ a, z }, 0);
 }
 fn subtract(c: protean.Context, value: Id, failure: Failure) !Id {
-    return c.builder.value(.{ .schema = try c.schema(u8), .expression = .{ .primitive = .{
+    return c.builder.value(.{ .schema = try horos_authoring.interop.schemaId(c.author, try c.schema(u8)), .expression = .{ .primitive = .{
         .opcode = .integer_sub,
-        .operands = &.{ value, try c.literal(u8, 1) },
-        .failures = &.{.{ .kind = .arithmetic_overflow, .value = try c.builder.failureLiteral(try c.literal(Failure, failure)) }},
+        .operands = &.{ value, try horos_authoring.interop.valueId(c.author, try c.literal(u8, 1)) },
+        .failures = &.{.{ .kind = .arithmetic_overflow, .value = try c.builder.failureLiteral(try horos_authoring.interop.valueId(c.author, try c.literal(Failure, failure))) }},
     } } });
 }
 fn fail(c: protean.Context, value: Failure) !Id {
-    return c.builder.term(.{ .fail = try c.literal(Failure, value) });
+    return c.builder.term(.{ .fail = try horos_authoring.interop.valueId(c.author, try c.literal(Failure, value)) });
 }
 
 const Driver = struct {

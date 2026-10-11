@@ -48,19 +48,14 @@ pub fn define(b: *source.Builder, spec: Spec) source.Error!Loop {
 fn loopDefinition(b: *source.Builder, spec: Spec) typed.Error!Id {
     const c = try typed.Context.init(b);
     const state_schema = try typed.interop.schema(c, spec.state);
-    const decide_schema = try typed.interop.namedCallable(c, spec.decide, &.{"state"});
-    const execute_schema = try typed.interop.namedCallable(c, spec.execute, &.{"action"});
-    const fold_schema = try typed.interop.namedCallable(c, spec.fold, &.{ "state", "observation" });
-    const residual = try b.allocator().alloc(*const typed.Operation, spec.residual.effects.len);
+    const decide_schema = try @import("authoring_imports.zig").callable(c, spec.decide, .{ .state = state_schema });
+    const execute_schema = try @import("authoring_imports.zig").callable(c, spec.execute, .{ .action = try typed.interop.schema(c, spec.step.action) });
+    const fold_schema = try @import("authoring_imports.zig").callable(c, spec.fold, .{ .state = state_schema, .observation = try typed.interop.schema(c, spec.observation) });
+    const residual = try b.allocator().alloc(*const typed.Operation(typed.Dynamic), spec.residual.effects.len);
     for (residual, spec.residual.effects) |*item, id| item.* = try typed.interop.operation(c, id);
     const regions = try b.allocator().alloc(*const typed.Region, spec.regions.len);
     for (regions, spec.regions) |*item, id| item.* = try typed.interop.region(c, id);
-    const signature = try c.callable(&.{
-        .{ .name = "state", .schema = state_schema },
-        .{ .name = "decide", .schema = decide_schema },
-        .{ .name = "execute", .schema = execute_schema },
-        .{ .name = "fold", .schema = fold_schema },
-    }, try typed.interop.schema(c, spec.step.result), residual, .{
+    const signature = try c.callable(.{ .state = state_schema, .decide = decide_schema, .execute = execute_schema, .fold = fold_schema }, try typed.interop.schema(c, spec.step.result), residual, .{
         .use = .reusable,
         .captures = &.{},
         .regions = regions,
@@ -71,27 +66,14 @@ fn loopDefinition(b: *source.Builder, spec: Spec) typed.Error!Id {
     const decide = try body.parameter("decide");
     const execute = try body.parameter("execute");
     const fold = try body.parameter("fold");
-    const selected = try body.apply(decide, &.{.{ .name = "state", .value = state }});
+    const selected = try body.apply(decide, .{ .state = state });
     const continuing = try body.caseOf(selected, "0");
     const working = continuing.body();
-    const observation = try working.apply(execute, &.{.{
-        .name = "action",
-        .value = continuing.payload(),
-    }});
-    const next = try working.apply(fold, &.{
-        .{ .name = "state", .value = state },
-        .{ .name = "observation", .value = observation },
-    });
-    const again = try working.call(function, &.{
-        .{ .name = "state", .value = next },
-        .{ .name = "decide", .value = decide },
-        .{ .name = "execute", .value = execute },
-        .{ .name = "fold", .value = fold },
-    });
+    const observation = try working.apply(execute, .{ .action = continuing.payload() });
+    const next = try working.apply(fold, .{ .state = state, .observation = observation });
+    const again = try working.call(function, .{ .state = next, .decide = decide, .execute = execute, .fold = fold });
     const done = try body.caseOf(selected, "1");
-    const result = try body.match(selected, &.{
-        try continuing.ret(again), try done.ret(done.payload()),
-    });
+    const result = try body.match(selected, .{ .@"0" = try continuing.ret(again), .@"1" = try done.ret(done.payload()) });
     try c.define(function, try body.ret(result));
     return typed.interop.functionId(c, function);
 }

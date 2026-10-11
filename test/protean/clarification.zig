@@ -1,4 +1,5 @@
 //! Independent numeric decision oracle executed by unchanged native Kosmos.
+const horos_authoring = @import("horos").authoring;
 const std = @import("std");
 const protean = @import("protean");
 const horos = @import("horos");
@@ -198,7 +199,7 @@ const Composition = struct {
         defer b.deinit();
         var registry = protean.admission.Registry.init(b.allocator());
         defer registry.deinit();
-        const c = protean.Context{ .builder = &b, .registry = &registry };
+        const c = try protean.Context.init(&b, &registry);
         const unit = try b.scalar(void);
         const integer = try b.scalar(u64);
         const ids = try b.schema(.{ .seq = integer });
@@ -284,14 +285,14 @@ fn capturedBody(c: protean.Context, d: clarification.Definition, entry: Id, mode
     const reply = try b.variable(integer);
     const select = try protean.deliberation.choose(b, d.multi, try b.reference(b.parameter(body, 0)), try b.reference(b.parameter(entry, 1)));
     const read_cell = try b.primitive(integer, .cell_get, &.{try b.reference(cell)}, 0);
-    const interpreted = try b.variable(try c.schema(P.Interpretation));
-    const accepted = try b.variable(try c.schema(NumericAction));
-    const rejected = try b.variable(try c.schema(P.InterpretationFailure));
-    const action = try b.variable(try c.schema(@FieldType(NumericAction, "score")));
+    const interpreted = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(P.Interpretation)));
+    const accepted = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(NumericAction)));
+    const rejected = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(P.InterpretationFailure)));
+    const action = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(@FieldType(NumericAction, "score"))));
     const request = try numericRequest(c, &.{
         try b.reference(prefix), try b.reference(choice), try b.reference(before),
     });
-    const perform = try protean.responders.invokeModel(P, c, d.failure, false, request, try c.literal([1]bool, .{true}));
+    const perform = try protean.responders.invokeModel(P, c, d.failure, false, request, try horos_authoring.interop.valueId(c.author, try c.literal([1]bool, .{true})));
     const value = try b.primitive(integer, .field, &.{try b.reference(action)}, 0);
     const after = try b.bind(reply, try b.pure(value), try nonTailAssessment(b, d, reply, before, choice, read_cell));
     const chosen = try b.term(.{ .match_sum = .{
@@ -509,24 +510,24 @@ fn numericRequest(c: protean.Context, values: []const Id) !Id {
     for (messages, values) |*message, value| {
         const text = try b.primitive(try b.schema(.text), .text_integer, &.{value}, 0);
         const bounded = try b.value(.{
-            .schema = try c.schema(P.MessageText),
+            .schema = try horos_authoring.interop.schemaId(c.author, try c.schema(P.MessageText)),
             .expression = .{ .primitive = .{
                 .opcode = .blob_concat,
                 .operands = &.{
-                    try c.literal(P.MessageText, .{ .bytes = "" }), text,
+                    try horos_authoring.interop.valueId(c.author, try c.literal(P.MessageText, .{ .bytes = "" })), text,
                 },
                 .failures = &.{.{ .kind = .capacity_exceeded, .value = try b.failureLiteral(try b.constant(void, {})) }},
             } },
         });
-        message.* = try b.primitive(try c.schema(P.Message), .product, &.{
-            try c.literal(protean.model_invocation.MessageRole, .user), bounded,
+        message.* = try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(P.Message)), .product, &.{
+            try horos_authoring.interop.valueId(c.author, try c.literal(protean.model_invocation.MessageRole, .user)), bounded,
         }, 0);
     }
     var fields: [@typeInfo(P.Request).@"struct".field_names.len]Id = undefined;
     inline for (@typeInfo(P.Request).@"struct".field_names, @typeInfo(P.Request).@"struct".field_types, 0..) |field_name, FieldType, i| {
-        fields[i] = if (i == 3) try b.primitive(try c.schema(P.Messages), .sequence, messages, 0) else try c.literal(FieldType, @field(template, field_name));
+        fields[i] = if (i == 3) try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(P.Messages)), .sequence, messages, 0) else try horos_authoring.interop.valueId(c.author, try c.literal(FieldType, @field(template, field_name)));
     }
-    return b.primitive(try c.schema(P.Request), .product, &fields, 0);
+    return b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(P.Request)), .product, &fields, 0);
 }
 
 test "equal scores cannot conceal different operative keys" {

@@ -50,6 +50,8 @@ ordinary Horos programs. Checked model responders retain request-time offers;
 adaptive controls, inboxes, prompts, skills, compiled tools, and the generic
 interaction/approval constructions remain available to downstream authors.
 Model calls, choices, and continuations belong to the program.
+See the [Horos 4 authoring migration](docs/authoring-migration.md) for typed
+Context construction, native shapes and explicit source-record boundaries.
 
 The public `addNativeSystem` build function accepts caller-owned definition,
 types, and environment paths, or an already emitted image/assets/types tuple.

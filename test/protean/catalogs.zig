@@ -1,3 +1,4 @@
+const horos_authoring = @import("horos").authoring;
 const std = @import("std");
 const horos = @import("horos");
 const protean = @import("protean");
@@ -25,13 +26,13 @@ const Revision = protean.skill(.{
 
 const Read = struct {
     pub fn declare(c: protean.Context) !protean.tools.Descriptor {
-        const text = try c.schema(protean.contracts.Utf8);
+        const text = try horos_authoring.interop.schemaId(c.author, try c.schema(protean.contracts.Utf8));
         return .{
             .identity = "document.read",
             .payload = text,
             .result = text,
             .role = .read,
-            .implementation = .{ .external = try c.external("document.read", text, text, .read) },
+            .implementation = .{ .external = try horos_authoring.interop.operationId(c.author, try c.external("document.read", try horos_authoring.interop.schema(c.author, text), try horos_authoring.interop.schema(c.author, text), .read)) },
             .model_offered = true,
             .name = "read",
             .description = "Read the current document",
@@ -40,13 +41,13 @@ const Read = struct {
 };
 const Message = struct {
     pub fn declare(c: protean.Context) !protean.interaction.Definition {
-        const unit = try c.schema(void);
+        const unit = try horos_authoring.interop.schemaId(c.author, try c.schema(void));
         return protean.interaction.define(c.builder, .{
             .name = "message",
             .channel = unit,
             .purpose = unit,
             .presentation = unit,
-            .outgoing = try c.schema(protean.contracts.Utf8),
+            .outgoing = try horos_authoring.interop.schemaId(c.author, try c.schema(protean.contracts.Utf8)),
             .input = unit,
         });
     }
@@ -62,8 +63,8 @@ const Configured = struct {
         try std.testing.expectEqual(read.implementation.external, (try c.catalogs.tool("read")).implementation.external);
         try std.testing.expectEqual(@as(usize, 1), c.catalogs.skills.len);
         const Result = struct { model: catalogs.ModelValue, prompt: catalogs.PromptValue };
-        const result = try c.schema(Result);
-        const unit = try c.schema(void);
+        const result = try horos_authoring.interop.schemaId(c.author, try c.schema(Result));
+        const unit = try horos_authoring.interop.schemaId(c.author, try c.schema(void));
         const entry = try c.builder.declare(&.{unit}, result, &.{}, &.{});
         try c.builder.define(entry, try c.builder.pure(try c.builder.primitive(
             result,
@@ -111,9 +112,9 @@ test "supplied catalogs install before application and become ordinary program c
 
 const Empty = struct {
     pub fn emit(c: protean.Context) !horos.source.Module {
-        const unit = try c.schema(void);
+        const unit = try horos_authoring.interop.schemaId(c.author, try c.schema(void));
         const entry = try c.builder.declare(&.{unit}, unit, &.{}, &.{});
-        try c.builder.define(entry, try c.builder.pure(try c.literal(void, {})));
+        try c.builder.define(entry, try c.builder.pure(try horos_authoring.interop.valueId(c.author, try c.literal(void, {}))));
         return c.builder.module(entry, unit);
     }
 };
@@ -216,10 +217,10 @@ test "duplicate installed tool and interaction identities reject" {
 test "bad initial result and variable bindings reject without indexing invalid source" {
     const Bad = struct {
         pub fn emit(c: protean.Context) !horos.source.Module {
-            const unit = try c.schema(void);
+            const unit = try horos_authoring.interop.schemaId(c.author, try c.schema(void));
             const entry = try c.builder.declare(&.{unit}, unit, &.{}, &.{});
             c.builder.functions.items[@intCast(entry)].parameters = &.{std.math.maxInt(u64)};
-            try c.builder.define(entry, try c.builder.pure(try c.literal(void, {})));
+            try c.builder.define(entry, try c.builder.pure(try horos_authoring.interop.valueId(c.author, try c.literal(void, {}))));
             return c.builder.module(entry, unit);
         }
     };

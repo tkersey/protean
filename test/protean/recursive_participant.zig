@@ -1,4 +1,5 @@
 //! Compiled participants over suspended task-valued hyperfunction endpoints.
+const horos_authoring = @import("horos").authoring;
 const std = @import("std");
 const protean = @import("protean");
 const horos = @import("horos");
@@ -146,11 +147,11 @@ fn objectChecked(allocator: std.mem.Allocator, consumer: bool, false_capture: bo
 
 fn defineSample(c: protean.Context, t: Types) !void {
     const b = c.builder;
-    const interpreted = try protean.responders.defineModel(P, c, try b.constant(void, {}), false);
-    const result = try b.variable(try c.schema(P.Interpretation));
-    const accepted = try b.variable(try c.schema(P.AnswerType));
-    const rejected = try b.variable(try c.schema(P.InterpretationFailure));
-    const contribution = try b.variable(try c.schema(struct { value: u64 }));
+    const interpreted = try horos_authoring.interop.functionId(c.author, try protean.responders.defineModel(P, c, try c.literal(void, {}), false));
+    const result = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(P.Interpretation)));
+    const accepted = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(P.AnswerType)));
+    const rejected = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(P.InterpretationFailure)));
+    const contribution = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(struct { value: u64 })));
     const answer = try b.term(.{ .match_sum = .{ .value = try b.reference(accepted), .cases = &.{.{ .variable = contribution, .body = try b.pure(try b.primitive(t.integer, .field, &.{try b.reference(contribution)}, 0)) }} } });
     const dispatch = try b.term(.{ .match_sum = .{ .value = try b.reference(result), .cases = &.{
         .{ .variable = accepted, .body = answer },
@@ -158,8 +159,8 @@ fn defineSample(c: protean.Context, t: Types) !void {
     } } });
     const input = try b.reference(b.parameter(t.sample, 0));
     const call = try b.term(.{ .call = .{ .function = interpreted, .arguments = &.{
-        try b.primitive(try c.schema(P.Request), .field, &.{input}, 0),
-        try b.primitive(try c.schema([1]bool), .field, &.{input}, 1),
+        try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(P.Request)), .field, &.{input}, 0),
+        try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema([1]bool)), .field, &.{input}, 1),
     } } });
     try b.define(t.sample, try b.bind(result, call, dispatch));
 }
@@ -272,7 +273,7 @@ fn withIdle(b: *source.Builder, t: Types, work: Id) !Id {
 
 fn completionHelper(c: protean.Context, t: Types) !Id {
     const b = c.builder;
-    const write = try c.external("fixture.recursive.target-write", t.input, t.integer, .write);
+    const write = try horos_authoring.interop.operationId(c.author, try c.external("fixture.recursive.target-write", try horos_authoring.interop.schema(c.author, t.input), try horos_authoring.interop.schema(c.author, t.integer), .write));
     const function = try b.declare(&.{t.input}, t.integer, &.{write}, &.{});
     const operation = try b.term(.{ .perform = .{ .effect = write, .payload = try b.reference(b.parameter(function, 0)) } });
     // Model the real trusted completion site; ordinary admission permits it.

@@ -220,11 +220,11 @@ pub fn install(context: anytype, comptime spec: anytype) !Catalogs {
 }
 
 fn literal(c: anytype, comptime T: type, value: T) !Id {
-    return c.literal(T, value);
+    return horos.authoring.interop.valueId(c.author, try c.literal(T, value));
 }
 
 fn projectField(c: anytype, comptime T: type, value: Id, ordinal: Id) !Id {
-    return c.builder.primitive(try c.schema(T), .field, &.{value}, ordinal);
+    return c.builder.primitive(try horos.authoring.interop.schemaId(c.author, try c.schema(T)), .field, &.{value}, ordinal);
 }
 
 fn installModels(c: anytype, comptime entries: anytype) ![]const Model {
@@ -238,7 +238,7 @@ fn installModels(c: anytype, comptime entries: anytype) ![]const Model {
         });
         destination.* = .{
             .name = Entry.name,
-            .schema = try c.schema(ModelValue),
+            .schema = try horos.authoring.interop.schemaId(c.author, try c.schema(ModelValue)),
             .value = value,
             .protocol = try projectField(c, contracts.Utf8, value, 0),
             .model_id = try projectField(c, contracts.Utf8, value, 1),
@@ -276,7 +276,7 @@ fn installPrompts(c: anytype, comptime entries: anytype) ![]const Prompt {
             .content = .{ .bytes = Entry.content },
         });
         destination.* = .{
-            .schema = try c.schema(PromptValue),
+            .schema = try horos.authoring.interop.schemaId(c.author, try c.schema(PromptValue)),
             .value = value,
             .role = try projectField(c, prompts.Role, value, 0),
             .content = try projectField(c, contracts.Utf8, value, 1),
@@ -343,7 +343,7 @@ fn installSkills(c: anytype, comptime entries: anytype) ![]const Skill {
         });
         destination.* = .{
             .name = Entry.id,
-            .schema = try c.schema(SkillValue),
+            .schema = try horos.authoring.interop.schemaId(c.author, try c.schema(SkillValue)),
             .value = value,
             .description = try projectField(c, contracts.Utf8, value, 1),
             .instructions = try projectField(c, contracts.Utf8, value, 2),
