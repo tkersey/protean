@@ -96,6 +96,8 @@ pub const Application = struct {
     protocol_schema_sha256: []const u8 = "",
     public_metadata: json.Value = .null,
     schema_artifacts: [2]?Artifact = @splat(null),
+    legacy_protocol_schema: json.Value = .null,
+    legacy_schema_artifact: ?Artifact = null,
     execution_mode: enum { offline, live } = .offline,
 
     pub fn init(comptime Types: type, a: std.mem.Allocator, assets: Assets, handlers: registry.Registry) !Application {
@@ -145,12 +147,14 @@ pub const Application = struct {
             try validateCapability(storage, capabilities.array.items, entry);
         }
         const protocol_schema = try @import("schemas.zig").document(storage, metadata.value, .{});
+        const legacy_protocol_schema = try @import("schemas.zig").documentVersion(storage, metadata.value, .{}, .v2_0);
         const public_metadata = try publicMetadata(storage, metadata.value);
         const application_artifact = try Artifact.freeze(storage, public_metadata, "agent-native-discovery.application.v1");
-        const protocol_artifact = try Artifact.freeze(storage, protocol_schema, "agent-host.protocol-schema.v1");
+        const protocol_artifact = try Artifact.freeze(storage, protocol_schema, "agent-host.protocol-schema.v2");
+        const legacy_schema_artifact = try Artifact.freeze(storage, legacy_protocol_schema, "agent-host.protocol-schema.v1");
         const manifest_id = try digest(storage, assets.manifest);
         const protocol_digest = try storage.dupe(u8, &std.fmt.bytesToHex(protocol_artifact.sha256, .lower));
-        return .{ .arena = arena, .metadata = metadata.value, .manifest = manifest.value, .manifest_id = manifest_id, .image_identity = image_identity, .protocol_schema = protocol_schema, .protocol_schema_sha256 = protocol_digest, .public_metadata = public_metadata, .schema_artifacts = .{ application_artifact, protocol_artifact } };
+        return .{ .arena = arena, .metadata = metadata.value, .manifest = manifest.value, .manifest_id = manifest_id, .image_identity = image_identity, .protocol_schema = protocol_schema, .protocol_schema_sha256 = protocol_digest, .public_metadata = public_metadata, .schema_artifacts = .{ application_artifact, protocol_artifact }, .legacy_protocol_schema = legacy_protocol_schema, .legacy_schema_artifact = legacy_schema_artifact };
     }
     pub fn deinit(self: *Application) void {
         self.arena.deinit();
@@ -158,6 +162,7 @@ pub const Application = struct {
     }
 
     pub fn schemaArtifact(self: Application, id: [32]u8) !Artifact {
+        if (self.legacy_schema_artifact) |artifact| if (std.mem.eql(u8, &id, &artifact.sha256)) return artifact;
         for (self.schema_artifacts) |candidate| if (candidate) |artifact| {
             if (std.mem.eql(u8, &id, &artifact.sha256)) return artifact;
         };
@@ -172,6 +177,11 @@ pub const Application = struct {
     /// This projection is deliberately bounded; larger schema/resource assets
     /// are retained for the authorized artifact service rather than truncated.
     pub fn describe(self: Application, a: std.mem.Allocator, params: json.Value, launch: ?LaunchProfile) !json.Value {
+        return self.describeVersion(a, params, launch, .v2_1);
+    }
+    pub fn describeVersion(self: Application, a: std.mem.Allocator, params: json.Value, launch: ?LaunchProfile, selected: protocol.Version) !json.Value {
+        const schema_artifact = if (selected == .v2_0) self.legacy_schema_artifact orelse return error.InvalidAssets else self.schema_artifacts[1].?;
+        const protocol_schema = if (selected == .v2_0) self.legacy_protocol_schema else self.protocol_schema;
         if (json.get(params, "application_id")) |id| {
             const expected = try json.text(self.metadata.object.get("application_id").?);
             if (id != .string or !std.mem.eql(u8, id.string, expected)) return error.NotFound;
@@ -183,28 +193,36 @@ pub const Application = struct {
         } else 16;
         if (limit == 0 or limit > 16) return error.InvalidParams;
         const info = @typeInfo(protocol.Method).@"enum";
-        if (cursor > info.field_names.len) return error.InvalidParams;
-        const end = @min(info.field_names.len, cursor + limit);
+        var count: usize = 0;
+        inline for (info.field_names) |name| if (selected.supports(@field(protocol.Method, name))) {
+            count += 1;
+        };
+        if (cursor > count) return error.InvalidParams;
+        const end = @min(count, cursor + limit);
         var methods: std.array_list.Managed(json.Value) = .init(a);
-        inline for (info.field_names, 0..) |name, i| {
-            if (i >= cursor and i < end) {
-                var method = json.object();
-                try json.put(a, &method, "name", json.string(name));
-                const fields = protocol.fields(@field(protocol.Method, name));
-                var required: std.array_list.Managed(json.Value) = .init(a);
-                var optional: std.array_list.Managed(json.Value) = .init(a);
-                for (fields.required) |key| try required.append(json.string(key));
-                for (fields.optional) |key| try optional.append(json.string(key));
-                try json.put(a, &method, "required_fields", .{ .array = required });
-                try json.put(a, &method, "optional_fields", .{ .array = optional });
-                try json.put(a, &method, "params_schema", json.string("#/$defs/" ++ name ++ ".params"));
-                try json.put(a, &method, "result_schema", json.string("#/$defs/" ++ name ++ ".result"));
-                try methods.append(method);
+        var i: usize = 0;
+        inline for (info.field_names) |name| {
+            if (selected.supports(@field(protocol.Method, name))) {
+                if (i >= cursor and i < end) {
+                    var method = json.object();
+                    try json.put(a, &method, "name", json.string(name));
+                    const fields = protocol.fields(@field(protocol.Method, name));
+                    var required: std.array_list.Managed(json.Value) = .init(a);
+                    var optional: std.array_list.Managed(json.Value) = .init(a);
+                    for (fields.required) |key| try required.append(json.string(key));
+                    for (fields.optional) |key| try optional.append(json.string(key));
+                    try json.put(a, &method, "required_fields", .{ .array = required });
+                    try json.put(a, &method, "optional_fields", .{ .array = optional });
+                    try json.put(a, &method, "params_schema", json.string("#/$defs/" ++ name ++ ".params"));
+                    try json.put(a, &method, "result_schema", json.string("#/$defs/" ++ name ++ ".result"));
+                    try methods.append(method);
+                }
+                i += 1;
             }
         }
         var result = json.object();
         try json.put(a, &result, "methods", .{ .array = methods });
-        try json.put(a, &result, "next_cursor", if (end < info.field_names.len) json.string(try std.fmt.allocPrint(a, "{d}", .{end})) else .null);
+        try json.put(a, &result, "next_cursor", if (end < count) json.string(try std.fmt.allocPrint(a, "{d}", .{end})) else .null);
         var app = json.object();
         for ([_][]const u8{ "application_id", "application_version", "client_mapping" }) |key| try json.put(a, &app, key, self.public_metadata.object.get(key).?);
         try json.put(a, &app, "metadata_ref", try self.schema_artifacts[0].?.reference(a));
@@ -218,7 +236,7 @@ pub const Application = struct {
             try json.put(a, &profile, "resource_identity", json.string(try a.dupe(u8, &std.fmt.bytesToHex(admitted.resource_identity, .lower))));
         }
         try json.put(a, &result, "profile", profile);
-        const protocol_ref = try self.schema_artifacts[1].?.reference(a);
+        const protocol_ref = try schema_artifact.reference(a);
         try json.put(a, &result, "protocol_schema_ref", protocol_ref);
         if (!try fitsDescription(a, result)) return error.Capacity;
         // Inline only when the complete projection fits. Independent per-asset
@@ -227,9 +245,9 @@ pub const Application = struct {
             try json.put(a, &result, "application", self.public_metadata);
             if (!try fitsDescription(a, result)) try json.put(a, &result, "application", app);
         }
-        if (self.schema_artifacts[1].?.bytes.len <= (protocol.Limits{}).inline_bytes) {
+        if (schema_artifact.bytes.len <= (protocol.Limits{}).inline_bytes) {
             _ = result.object.swapRemove("protocol_schema_ref");
-            try json.put(a, &result, "protocol_schema", self.protocol_schema);
+            try json.put(a, &result, "protocol_schema", protocol_schema);
             if (!try fitsDescription(a, result)) {
                 _ = result.object.swapRemove("protocol_schema");
                 try json.put(a, &result, "protocol_schema_ref", protocol_ref);

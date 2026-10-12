@@ -34,6 +34,7 @@ fn Connection(comptime Types: type) type {
         instance: []const u8,
         artifact_identity: [32]u8,
         initialized: bool = false,
+        protocol_version: protocol.Version = .v2_0,
         closing: bool = false,
         shutdown: ?Shutdown = null,
         limits: protocol.Limits = .{},
@@ -44,31 +45,28 @@ fn Connection(comptime Types: type) type {
             if (request.method == .initialize) {
                 if (self.initialized) return protocol.failure(a, request.id, .ProtocolState, "correct_request");
                 const versions = request.params.object.get("protocol_versions").?;
-                if (versions != .array or versions.array.items.len == 0 or versions.array.items.len > 16)
-                    return protocol.failure(a, request.id, .InvalidParams, "correct_request");
-                var supported = false;
-                for (versions.array.items) |version| {
-                    if (version != .string or version.string.len > 128) return protocol.failure(a, request.id, .InvalidParams, "correct_request");
-                    supported = supported or std.mem.eql(u8, version.string, protocol.version);
-                }
+                const selected = protocol.Version.negotiate(versions) catch return protocol.failure(a, request.id, .InvalidParams, "correct_request");
                 if (json.get(request.params, "client_info")) |info| {
                     protocol.closed(info, .{ .required = &.{ "name", "version" } }) catch
                         return protocol.failure(a, request.id, .InvalidParams, "correct_request");
                     for (info.object.values()) |value| if (value != .string or value.string.len > 128)
                         return protocol.failure(a, request.id, .InvalidParams, "correct_request");
                 }
-                if (!supported) {
+                if (selected == null) {
                     self.closing = true;
                     var fault = try protocol.failure(a, request.id, .ProtocolState, "correct_request");
                     var versions_out: std.array_list.Managed(json.Value) = .init(a);
                     try versions_out.append(json.string(protocol.version));
+                    try versions_out.append(json.string(protocol.Version.v2_0.name()));
                     const error_value = fault.object.getPtr("error").?;
                     try json.put(a, error_value.object.getPtr("data").?, "supported_versions", .{ .array = versions_out });
                     return fault;
                 }
                 self.initialized = true;
+                self.protocol_version = selected.?;
+                if (self.client) |client| client.protocol_version = selected.?;
                 var result = json.object();
-                try json.put(a, &result, "protocol_version", json.string(protocol.version));
+                try json.put(a, &result, "protocol_version", json.string(selected.?.name()));
                 try json.put(a, &result, "server_instance_id", json.string(self.instance));
                 var info = json.object();
                 try json.put(a, &info, "name", json.string("Protean native host"));
@@ -87,11 +85,13 @@ fn Connection(comptime Types: type) type {
                 try json.put(a, &capabilities, "task_events", .{ .bool = self.client != null });
                 try json.put(a, &capabilities, "message_input", .{ .bool = messages });
                 try json.put(a, &capabilities, "task_execution", .{ .bool = self.client != null });
+                if (selected == .v2_1) try json.put(a, &capabilities, "task_reconciliation", .{ .bool = self.client != null });
                 try json.put(a, &result, "capabilities", capabilities);
                 return protocol.response(a, request.id, result);
             }
             if (!self.initialized) return protocol.failure(a, request.id, .ProtocolState, "correct_request");
-            if (self.shutdown != null and (request.method == .@"task.submit" or request.method == .@"task.message" or request.method == .@"task.resume" or request.method == .@"task.respond"))
+            if (!self.protocol_version.supports(request.method)) return protocol.failure(a, request.id, .MethodNotFound, "correct_request");
+            if (self.shutdown != null and (request.method == .@"task.submit" or request.method == .@"task.message" or request.method == .@"task.resume" or request.method == .@"task.respond" or request.method == .@"task.reconcile"))
                 return protocol.failure(a, request.id, .StateConflict, failureRecovery(.StateConflict));
             switch (request.method) {
                 .shutdown => {
@@ -114,7 +114,7 @@ fn Connection(comptime Types: type) type {
                         if (!client.service.profile.authority.revoked and client.service.profile.authority.disclosure) self.launch_profile else null
                     else
                         null;
-                    const result = self.application.describe(a, request.params, launch) catch |err| return protocol.failure(a, request.id, failureKind(err), failureRecovery(failureKind(err)));
+                    const result = self.application.describeVersion(a, request.params, launch, self.protocol_version) catch |err| return protocol.failure(a, request.id, failureKind(err), failureRecovery(failureKind(err)));
                     return protocol.response(a, request.id, result);
                 },
                 .@"artifact.read" => if (self.client == null and json.get(request.params, "task_id") == null) {
@@ -142,7 +142,7 @@ fn Connection(comptime Types: type) type {
         }
 
         fn member(self: *@This(), a: std.mem.Allocator, value: json.Value, batch: bool) !?json.Value {
-            return switch (protocol.admit(value, self.limits, batch)) {
+            return switch (protocol.admitVersion(value, self.limits, batch, if (self.initialized) self.protocol_version else .v2_1)) {
                 .notification => null,
                 .failure => |fault| try protocol.failure(a, fault.id, fault.kind, "correct_request"),
                 .call => |request| try self.call(a, request),
@@ -176,7 +176,7 @@ fn failureKind(err: anyerror) protocol.Kind {
     return switch (err) {
         error.Denied, error.UnknownTask, error.NotFound => .NotFound,
         error.OperationConflict => .OperationConflict,
-        error.StaleInteraction, error.QuestionMismatch => .StaleInteraction,
+        error.StaleInteraction, error.QuestionMismatch, error.StaleOccurrence => .StaleInteraction,
         error.AnswerConflict => .AnswerConflict,
         error.CursorExpired => .CursorExpired,
         error.Capacity, error.OutOfMemory, error.Overloaded => .Overloaded,

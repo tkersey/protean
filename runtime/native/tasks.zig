@@ -71,6 +71,7 @@ fn readFrozenInputs(a: std.mem.Allocator, value: state.Task, source: anytype) !F
     return .{ .profile_id = profile_id, .profile = try source.object(a, value.profile, null), .resources = resources };
 }
 pub const Admission = struct { receipt: state.Receipt, replayed: bool };
+pub const RecoveryAvailability = struct { occurrence: state.Digest, attempt: state.Digest, mechanisms: []const state.RecoveryRequest };
 pub const Status = state.Status;
 pub const Work = struct {
     owner_epoch: state.Digest,
@@ -311,10 +312,10 @@ pub fn Service(comptime Types: type) type {
         fn receipt(self: *Self, a: std.mem.Allocator, method: state.Method, id: []const u8, request: state.Digest, task_value: state.Task, disposition: state.Disposition, message_id: ?state.Digest, question: ?state.Digest) !Admission {
             return self.recoveryReceipt(a, method, id, request, task_value, disposition, message_id, question, null);
         }
-        fn recoveryReceipt(self: *Self, a: std.mem.Allocator, method: state.Method, id: []const u8, request: state.Digest, task_value: state.Task, disposition: state.Disposition, message_id: ?state.Digest, question: ?state.Digest, reconciliation: ?state.Digest) !Admission {
+        fn recoveryReceipt(self: *Self, a: std.mem.Allocator, method: state.Method, id: []const u8, request: state.Digest, task_value: state.Task, disposition: state.Disposition, message_id: ?state.Digest, question: ?state.Digest, reconciliation_id: ?state.Digest) !Admission {
             var identity: state.Digest = undefined;
             try self.io.randomSecure(&identity);
-            const saved: state.Receipt = .{ .id = identity, .client_operation_id = try name(id), .method = method, .request_digest = request, .task = task_value.id, .revision = task_value.revision, .disposition = disposition, .message = message_id, .question = question, .reconciliation = reconciliation };
+            const saved: state.Receipt = .{ .id = identity, .client_operation_id = try name(id), .method = method, .request_digest = request, .task = task_value.id, .revision = task_value.revision, .disposition = disposition, .message = message_id, .question = question, .reconciliation = reconciliation_id };
             const bytes = try contracts.encodeOwned(state.Receipt, a, saved);
             defer a.free(bytes);
             const key = try self.operationKey(a, id);
@@ -552,6 +553,35 @@ pub fn Service(comptime Types: type) type {
             try self.runnableAdd(task_id);
             self.claim(task_id);
             return admitted;
+        }
+
+        /// Public recovery hints contain original IDs and compiled mechanisms,
+        /// never prepared bytes or an authority to provide replacement replies.
+        pub fn recoveryAvailability(self: *Self, a: std.mem.Allocator, task_id: state.TaskId) !?RecoveryAvailability {
+            var decoded = try self.task(a, task_id);
+            defer decoded.deinit();
+            const value = decoded.value;
+            const id = value.current_occurrence orelse return null;
+            var pending = try self.record(occurrence.Occurrence, a, "occurrence", id, task_id);
+            defer pending.deinit();
+            if (pending.value.state != .unknown) return null;
+            var result: RecoveryAvailability = .{ .occurrence = id, .attempt = pending.value.state.unknown.id, .mechanisms = &.{} };
+            self.compatible(value) catch |err| return if (err == error.IncompatibleProfile) result else err;
+            const bytes = try self.store().object(a, pending.value.request_object, null);
+            defer a.free(bytes);
+            var request = try data.invocation.decode(data.invocation.Request, a, bytes);
+            defer request.deinit();
+            const entry = self.handlers.resolve(request.value, self.application.image_identity) catch |err| switch (err) {
+                error.MissingCapability, error.CapabilitySchemaMismatch, error.Denied => return result,
+            };
+            if (entry.declaration.recovery != null) result.mechanisms = &.{.rederive};
+            return result;
+        }
+
+        pub fn reconciliation(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, id: state.Digest) !contracts.Decoded(state.Reconciliation) {
+            var authorized = try self.task(a, task_id);
+            defer authorized.deinit();
+            return self.record(state.Reconciliation, a, "reconciliation", id, task_id);
         }
 
         /// Admit an explicit pure recovery operation. Receipt lookup precedes
@@ -1493,7 +1523,7 @@ pub fn Service(comptime Types: type) type {
                 const acquired: ?occurrence.Acquired = switch (saved.state) {
                     .settled_reply => |reply| reply,
                     .admitted => |admitted| if (admitted == .reply) admitted.reply else null,
-                    .awaiting, .not_sent => null,
+                    .awaiting, .not_sent, .unknown, .captured => null,
                     else => return error.UnsettledOccurrence,
                 };
                 var reply_value: ?[]const u8 = null;
@@ -1509,13 +1539,17 @@ pub fn Service(comptime Types: type) type {
                 }
                 switch (entry.declaration.kind) {
                     .leaf => {
-                        const attempt_id = if (acquired) |reply| reply.attempt else if (saved.state == .not_sent) saved.state.not_sent.id else return error.InvalidArchive;
+                        const attempt_id = if (acquired) |reply| reply.attempt else switch (saved.state) {
+                            .not_sent, .unknown, .captured => |attempt| attempt.id,
+                            else => return error.InvalidArchive,
+                        };
                         if (acquired) |reply| if (reply.answer != null) return error.InvalidArchive;
                         try requireArchiveRecord(records, .attempt, attempt_id);
                         var attempt = try self.record(state.Attempt, temporary, "attempt", attempt_id, value.id);
                         defer attempt.deinit();
                         if (!same(&attempt.value.occurrence, &saved.id) or !std.meta.eql(attempt.value.request, saved.request_object)) return error.InvalidArchive;
-                        if (acquired != null and entry.declaration.capture != null) {
+                        if (saved.state == .captured and entry.declaration.capture == null) return error.InvalidArchive;
+                        if ((acquired != null and entry.declaration.capture != null) or saved.state == .captured) {
                             try requireArchiveRecord(records, .capture, attempt_id);
                             var raw_capture = try self.record(state.Capture, temporary, "capture", attempt_id, value.id);
                             defer raw_capture.deinit();
@@ -1587,8 +1621,10 @@ pub fn Service(comptime Types: type) type {
 
         /// Per-record scratch is backed by the service allocator so replay
         /// releases it even when the enclosing request allocator is an arena.
-        /// A transferable capture must reproduce its committed reply, replay
+        /// A projected capture must reproduce its committed reply, replay
         /// objects and usage through the same pure adapter, without acquisition.
+        /// Uninterpreted bytes remain private evidence, bound to the exact
+        /// original attempt; transfer never claims that interpretation succeeds.
         fn validateCapturedProjections(self: *Self, value: state.Task, records: []const state.ArchiveRecord, mode: enum { inspect, retain }) !void {
             // Retained unsuccessful/rearmed attempts also need request/profile
             // coherence, even though they have no acquired response.
@@ -1599,6 +1635,7 @@ pub fn Service(comptime Types: type) type {
                 const temporary = arena.allocator();
                 var attempt = try self.record(state.Attempt, temporary, "attempt", row.id, value.id);
                 defer attempt.deinit();
+                try requireArchiveRecord(records, .occurrence, attempt.value.occurrence);
                 var saved = try self.record(occurrence.Occurrence, temporary, "occurrence", attempt.value.occurrence, value.id);
                 defer saved.deinit();
                 const encoded = try self.store().object(temporary, attempt.value.request, null);
@@ -1608,6 +1645,10 @@ pub fn Service(comptime Types: type) type {
                 if (entry.declaration.kind != .leaf or !same(&request.value.request_identity, &saved.value.request) or
                     !std.meta.eql(attempt.value.request, saved.value.request_object) or !std.meta.eql(attempt.value.profile, value.profile) or !same(attempt.value.capability.bytes, entry.declaration.identity) or
                     attempt.value.inference != entry.declaration.inference or (attempt.value.prepared != null) != (entry.declaration.capture != null)) return error.InvalidArchive;
+                if (entry.declaration.capture) |adapter| {
+                    const prepared = try self.store().object(temporary, attempt.value.prepared.?, null);
+                    if (!same(prepared, try self.prepareProjection(temporary, value, adapter, request.value.binding.payload))) return error.CorruptState;
+                }
             }
             var output_tokens: u64 = 0;
             for (records) |row| {
@@ -1618,20 +1659,31 @@ pub fn Service(comptime Types: type) type {
                 var raw = try self.record(state.Capture, temporary, "capture", row.id, value.id);
                 defer raw.deinit();
                 const capture_value = raw.value;
-                const projection = capture_value.projection orelse return error.UnsettledOccurrence;
-                if (capture_value.disposition != .complete or capture_value.response == null or !same(&capture_value.attempt, &row.id)) return error.CorruptState;
+                if (!same(&capture_value.attempt, &row.id) or (capture_value.disposition == .complete) != (capture_value.response != null)) return error.CorruptState;
+                try requireArchiveRecord(records, .attempt, row.id);
                 var attempt = try self.record(state.Attempt, temporary, "attempt", row.id, value.id);
                 defer attempt.deinit();
                 var saved = try self.record(occurrence.Occurrence, temporary, "occurrence", capture_value.occurrence, value.id);
                 defer saved.deinit();
+                if (attempt.value.prepared == null or !same(&attempt.value.occurrence, &capture_value.occurrence) or
+                    !std.meta.eql(attempt.value.profile, value.profile) or !std.meta.eql(attempt.value.prepared.?, capture_value.request)) return error.CorruptState;
+                const projection = capture_value.projection orelse {
+                    const original_attempt = switch (saved.value.state) {
+                        .captured => |pending| if (capture_value.disposition == .complete) pending.id else return error.CorruptState,
+                        .unknown => |pending| if (capture_value.disposition == .unknown) pending.id else return error.CorruptState,
+                        .not_sent => |pending| if (capture_value.disposition == .definitely_not_sent) pending.id else return error.CorruptState,
+                        else => return error.CorruptState,
+                    };
+                    if (!same(&original_attempt, &row.id)) return error.CorruptState;
+                    continue;
+                };
+                if (capture_value.disposition != .complete) return error.CorruptState;
                 const acquired = switch (saved.value.state) {
                     .settled_reply => |reply| reply,
                     .admitted => |admitted| if (admitted == .reply) admitted.reply else return error.CorruptState,
                     else => return error.UnsettledOccurrence,
                 };
-                if (attempt.value.prepared == null or !same(&attempt.value.occurrence, &capture_value.occurrence) or
-                    !std.meta.eql(attempt.value.profile, value.profile) or !std.meta.eql(attempt.value.prepared.?, capture_value.request) or
-                    !same(&acquired.attempt, &row.id) or !same(&acquired.reply, &projection.reply.digest)) return error.CorruptState;
+                if (!same(&acquired.attempt, &row.id) or !same(&acquired.reply, &projection.reply.digest)) return error.CorruptState;
                 const encoded = try self.store().object(temporary, attempt.value.request, null);
                 var request = try data.invocation.decode(data.invocation.Request, temporary, encoded);
                 defer request.deinit();
@@ -1640,7 +1692,6 @@ pub fn Service(comptime Types: type) type {
                 if (!same(attempt.value.capability.bytes, entry.declaration.identity) or attempt.value.inference != entry.declaration.inference) return error.IncompatibleProfile;
                 const adapter = entry.declaration.capture orelse return error.IncompatibleProfile;
                 const rendered = try self.store().object(temporary, capture_value.request, null);
-                if (!same(rendered, try self.prepareProjection(temporary, value, adapter, request.value.binding.payload))) return error.CorruptState;
                 const response = try self.store().object(temporary, capture_value.response.?, null);
                 const result = try self.interpretProjection(temporary, value, adapter, request.value.binding.payload, rendered, response);
                 if (result.objects.len != projection.objects.items.len or result.output_tokens != projection.output_tokens) return error.CorruptState;

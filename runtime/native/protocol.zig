@@ -1,7 +1,44 @@
-//! agent-host/2.0 admission. This layer cannot drive Kosmos or dispatch a tool.
+//! Versioned agent-host admission. This layer cannot drive Kosmos or dispatch a tool.
 const std = @import("std");
 const json = @import("json.zig");
-pub const version = "agent-host/2.0";
+pub const version = "agent-host/2.1";
+pub const Version = enum {
+    v2_0,
+    v2_1,
+
+    pub fn name(self: Version) []const u8 {
+        return switch (self) {
+            .v2_0 => "agent-host/2.0",
+            .v2_1 => version,
+        };
+    }
+    pub fn supports(self: Version, method: Method) bool {
+        return self == .v2_1 or method != .@"task.reconcile";
+    }
+    pub fn negotiate(versions: json.Value) !?Version {
+        if (versions != .array or versions.array.items.len == 0 or versions.array.items.len > 16) return error.InvalidParams;
+        var selected: ?Version = null;
+        for (versions.array.items) |item| {
+            if (item != .string or item.string.len > 128) return error.InvalidParams;
+            if (std.mem.eql(u8, item.string, Version.v2_1.name())) selected = .v2_1;
+            if (selected == null and std.mem.eql(u8, item.string, Version.v2_0.name())) selected = .v2_0;
+        }
+        return selected;
+    }
+};
+
+test "negotiation prefers 2.1 and leaves reconciliation unavailable to 2.0" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const offers = [_][]const u8{ "[\"agent-host/2.0\"]", "[\"agent-host/2.0\",\"agent-host/2.1\"]", "[\"agent-host/2.1\",\"agent-host/2.0\"]", "[\"agent-host/9.0\"]" };
+    const expected = [_]?Version{ .v2_0, .v2_1, .v2_1, null };
+    for (offers, expected) |bytes, selected| try std.testing.expectEqual(selected, try Version.negotiate((try json.parse(a, bytes, .{})).value));
+    try std.testing.expectError(error.InvalidParams, Version.negotiate((try json.parse(a, "[\"agent-host/2.1\",17]", .{})).value));
+    const request = (try json.parse(a, "{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"method\":\"task.reconcile\",\"params\":{\"client_operation_id\":\"r\",\"task_id\":\"task\",\"expected_revision\":\"1\",\"occurrence_id\":\"occurrence\",\"attempt_id\":\"attempt\",\"recovery\":{\"mechanism\":\"rederive\"}}}", .{})).value;
+    try std.testing.expectEqual(Kind.MethodNotFound, admitVersion(request, .{}, false, .v2_0).failure.kind);
+    try std.testing.expect(admitVersion(request, .{}, false, .v2_1) == .call);
+}
 
 pub const Limits = struct {
     frame_bytes: usize = 1024 * 1024,
@@ -110,6 +147,7 @@ pub const Method = enum {
     @"task.resume",
     @"artifact.read",
     shutdown,
+    @"task.reconcile",
 };
 
 pub const Fields = struct { required: []const []const u8, optional: []const []const u8 = &.{} };
@@ -127,6 +165,7 @@ pub fn fields(method: Method) Fields {
         .@"task.unsubscribe" => .{ .required = &.{"subscription_id"} },
         .@"task.cancel" => .{ .required = &.{ "client_operation_id", "task_id" }, .optional = &.{"reason"} },
         .@"task.resume" => .{ .required = &.{ "client_operation_id", "task_id", "expected_revision" } },
+        .@"task.reconcile" => .{ .required = &.{ "client_operation_id", "task_id", "expected_revision", "occurrence_id", "attempt_id", "recovery" } },
         .@"artifact.read" => .{ .required = &.{ "artifact_id", "offset", "length" }, .optional = &.{ "task_id", "question_id" } },
         .shutdown => .{ .required = &.{"mode"} },
     };
@@ -161,6 +200,9 @@ fn validId(value: json.Value, limit: usize) bool {
 }
 
 pub fn admit(value: json.Value, limits: Limits, batch: bool) Admitted {
+    return admitVersion(value, limits, batch, .v2_1);
+}
+pub fn admitVersion(value: json.Value, limits: Limits, batch: bool, selected: Version) Admitted {
     closed(value, .{ .required = &.{ "jsonrpc", "method" }, .optional = &.{ "id", "params" } }) catch
         return .{ .failure = .{ .kind = .InvalidRequest } };
     const rpc = value.object.get("jsonrpc").?;
@@ -173,6 +215,7 @@ pub fn admit(value: json.Value, limits: Limits, batch: bool) Admitted {
     if (!validId(id, limits.id_bytes)) return .{ .failure = .{ .kind = .InvalidRequest } };
     const params = value.object.get("params") orelse return .{ .failure = .{ .id = id, .kind = .InvalidParams } };
     const method = std.meta.stringToEnum(Method, name.string) orelse return .{ .failure = .{ .id = id, .kind = .MethodNotFound } };
+    if (!selected.supports(method)) return .{ .failure = .{ .id = id, .kind = .MethodNotFound } };
     if (batch and method == .initialize) return .{ .failure = .{ .id = id, .kind = .InvalidRequest } };
     closed(params, fields(method)) catch return .{ .failure = .{ .id = id, .kind = .InvalidParams } };
     return .{ .call = .{ .id = id, .method = method, .params = params } };

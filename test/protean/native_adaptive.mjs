@@ -22,7 +22,7 @@ try {
   const manifest = invoke('describe-build');
   assert.equal(manifest.format, 'agent-native-build/v2');
   assert.equal(manifest.application_id, 'adaptive-agent');
-  assert.equal(manifest.protocol, 'agent-host/2.0');
+  assert.equal(manifest.protocol, 'agent-host/2.1');
   assert.equal(manifest.compiler.version, '0.17.0');
   assert.equal(manifest.artifact_sha256, createHash('sha256').update(readFileSync(app.executable)).digest('hex'));
   assert.equal(manifest.program_sha256, application.program_sha256);

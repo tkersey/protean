@@ -129,7 +129,7 @@ pub fn ownerManifest(a: std.mem.Allocator, image: []const u8, identity: [32]u8, 
     const assets_hex = std.fmt.bytesToHex(assets_digest, .lower);
     return std.json.Stringify.valueAlloc(a, .{
         .native_host_contract = "unit-native-contract",
-        .protocol = "agent-host/2.0",
+        .protocol = "agent-host/2.1",
         .client_mapping = "agent-client-values/1.0",
         .state_format = "agent-native-state/12",
         .optimize = "safe",

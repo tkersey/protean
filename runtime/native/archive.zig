@@ -443,7 +443,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
                 if (T == state.Reconciliation) try state.visitReconciliationHistory(a, store, item, &collector);
                 if (comptime same(kind, "occurrence")) {
                     switch (item.state) {
-                        .dispatching, .unknown, .captured => return error.UnsettledOccurrence,
+                        .dispatching => return error.UnsettledOccurrence,
                         .settled_reply, .admitted => {},
                         else => {},
                     }
@@ -457,7 +457,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
                         inference_bytes = try std.math.add(u64, inference_bytes, if (item.prepared) |body| body.bytes else item.request.bytes);
                     }
                 } else if (comptime same(kind, "capture")) {
-                    if (item.disposition != .complete or item.response == null or item.projection == null) return error.UnsettledOccurrence;
+                    if ((item.disposition == .complete) != (item.response != null) or (item.projection != null and item.disposition != .complete)) return error.CorruptState;
                     if (!same(&item.attempt, &row.id) or record(archive, .attempt, item.attempt) == null) return error.CorruptState;
                 } else if (comptime same(kind, "message")) {
                     // Pending membership is an equality, not just validation

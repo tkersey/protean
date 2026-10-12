@@ -289,7 +289,7 @@ fn manifest(c: Context, args: []const []const u8) !void {
         .application_id = try text(application, "application_id"),
         .application_version = try text(application, "application_version"),
         .native_host_contract = "agent-native-host/2.0",
-        .protocol = "agent-host/2.0",
+        .protocol = "agent-host/2.1",
         .client_mapping = mapping,
         .state_format = args[10],
         .storage = "filesystem capacity and linked SQLite limits",

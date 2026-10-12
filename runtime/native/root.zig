@@ -43,4 +43,5 @@ test {
 pub const testing = if (@import("builtin").is_test) struct {
     pub const adaptive_history = @import("adaptive_history.zig");
     pub const state = @import("state.zig");
+    pub const occurrence = @import("occurrence.zig");
 } else struct {};

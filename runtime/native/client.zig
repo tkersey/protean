@@ -63,6 +63,7 @@ pub fn Client(comptime Types: type) type {
         subscription_counter: u64 = 0,
         subscription_nonce: [8]u8 = undefined,
         batch: bool = false,
+        protocol_version: protocol.Version = .v2_1,
 
         fn snapshot(self: *Self, a: std.mem.Allocator, id: state.TaskId) !json.Value {
             var decoded = try self.service.task(a, id);
@@ -106,6 +107,18 @@ pub fn Client(comptime Types: type) type {
             }
             try json.put(a, &result, "pending_messages", .{ .array = messages });
             try json.put(a, &result, "pending_messages_truncated", .{ .bool = messages.items.len != task.messages.items.len });
+            if (self.protocol_version == .v2_1) {
+                var recovery: json.Value = .null;
+                if (try self.service.recoveryAvailability(a, id)) |available| {
+                    recovery = json.object();
+                    try json.put(a, &recovery, "occurrence_id", try hexadecimal(a, available.occurrence));
+                    try json.put(a, &recovery, "attempt_id", try hexadecimal(a, available.attempt));
+                    var mechanisms: std.array_list.Managed(json.Value) = .init(a);
+                    for (available.mechanisms) |mechanism| try mechanisms.append(json.string(@tagName(mechanism)));
+                    try json.put(a, &recovery, "mechanisms", .{ .array = mechanisms });
+                }
+                try json.put(a, &result, "recovery", recovery);
+            }
             return result;
         }
 
@@ -134,6 +147,22 @@ pub fn Client(comptime Types: type) type {
             try json.put(a, &result, "disposition", json.string(@tagName(admitted.receipt.disposition)));
             if (admitted.receipt.message) |id| try json.put(a, &result, "message_id", try hexadecimal(a, id));
             if (admitted.receipt.question) |id| try json.put(a, &result, "question_id", try hexadecimal(a, id));
+            if (admitted.receipt.reconciliation) |id| {
+                if (self.protocol_version != .v2_1) return error.UnsupportedCapability;
+                var decoded = try self.service.reconciliation(a, admitted.receipt.task, id);
+                defer decoded.deinit();
+                const saved = decoded.value;
+                var recovery = json.object();
+                try json.put(a, &recovery, "reconciliation_id", try hexadecimal(a, id));
+                try json.put(a, &recovery, "occurrence_id", try hexadecimal(a, saved.occurrence));
+                try json.put(a, &recovery, "attempt_id", try hexadecimal(a, saved.attempt));
+                try json.put(a, &recovery, "status", json.string(@tagName(saved.outcome)));
+                try json.put(a, &recovery, "provenance", json.string(@tagName(saved.provenance)));
+                try json.put(a, &recovery, "mechanism", json.string(try a.dupe(u8, saved.mechanism.bytes)));
+                try json.put(a, &recovery, "mechanism_version", try counter(a, saved.mechanism_version));
+                try json.put(a, &recovery, "reason", if (saved.outcome == .unresolved) json.string(@tagName(saved.outcome.unresolved)) else .null);
+                try json.put(a, &result, "reconciliation", recovery);
+            }
             return result;
         }
 
@@ -158,6 +187,7 @@ pub fn Client(comptime Types: type) type {
                 var saved = try contracts.decodeOwned(state.Event, a, bytes);
                 defer saved.deinit();
                 const event = saved.value;
+                if (self.protocol_version == .v2_0 and event.kind == .reconciled) return error.UnsupportedCapability;
                 if (event.seq != next + 1 or !std.mem.eql(u8, &event.task, &id)) return error.CorruptState;
                 var item = json.object();
                 try json.put(a, &item, "task_id", try hexadecimal(a, id));
@@ -331,6 +361,7 @@ pub fn Client(comptime Types: type) type {
         }
 
         fn dispatch(self: *Self, a: std.mem.Allocator, method: protocol.Method, params: json.Value) !json.Value {
+            if (!self.protocol_version.supports(method)) return error.UnsupportedCapability;
             switch (method) {
                 .@"task.submit" => {
                     if (!std.mem.eql(u8, try json.text(try field(params, "application_id")), Types.application_id) or !std.mem.eql(u8, try json.text(try field(params, "profile_id")), self.service.profile.id)) return error.NotFound;
@@ -345,6 +376,13 @@ pub fn Client(comptime Types: type) type {
                 },
                 .@"task.cancel" => return self.admission(a, try self.service.requestCancel(a, try operationId(params), try identifier(16, try field(params, "task_id")), if (json.get(params, "reason")) |reason| try json.text(reason) else "client requested cancellation")),
                 .@"task.resume" => return self.admission(a, try self.service.resumeTask(a, try operationId(params), try identifier(16, try field(params, "task_id")), try json.decimal(u64, try field(params, "expected_revision")))),
+                .@"task.reconcile" => {
+                    try protocol.closed(params, protocol.fields(method));
+                    const recovery = try field(params, "recovery");
+                    try protocol.closed(recovery, .{ .required = &.{"mechanism"} });
+                    const mechanism = std.meta.stringToEnum(state.RecoveryRequest, try json.text(try field(recovery, "mechanism"))) orelse return error.InvalidParams;
+                    return self.admission(a, try self.service.reconcile(a, try operationId(params), try identifier(16, try field(params, "task_id")), try json.decimal(u64, try field(params, "expected_revision")), try identifier(32, try field(params, "occurrence_id")), try identifier(32, try field(params, "attempt_id")), mechanism));
+                },
                 .@"task.status" => return self.snapshot(a, try identifier(16, try field(params, "task_id"))),
                 .@"task.result" => return self.taskResult(a, try identifier(16, try field(params, "task_id"))),
                 .@"task.events" => {
@@ -356,6 +394,25 @@ pub fn Client(comptime Types: type) type {
                 .@"task.subscribe" => {
                     const task_id = try identifier(16, try field(params, "task_id"));
                     const after = try json.decimal(u64, try field(params, "after_seq"));
+                    // A 2.0 stream cannot represent 2.1 recovery events. Refuse
+                    // before allocating a subscription instead of later closing
+                    // the connection or silently dropping sequence numbers.
+                    if (self.protocol_version == .v2_0) {
+                        var task = try self.service.task(a, task_id);
+                        defer task.deinit();
+                        var rows = try self.service.namespace.store.database.prepare("SELECT body FROM events WHERE task=? AND seq>?", &.{ .{ .blob = &task_id }, .{ .integer = std.math.cast(i64, after) orelse return error.InvalidParams } });
+                        defer rows.deinit();
+                        while (try rows.step() == .row) {
+                            const digest = try rows.bytes(0);
+                            if (digest.len != 32) return error.CorruptState;
+                            const ref = try self.service.namespace.store.objectReference(digest[0..32].*, null);
+                            const bytes = try self.service.namespace.store.object(a, ref, null);
+                            defer a.free(bytes);
+                            var event = try contracts.decodeOwned(state.Event, a, bytes);
+                            defer event.deinit();
+                            if (event.value.kind == .reconciled) return error.UnsupportedCapability;
+                        }
+                    }
                     var result_value = try self.events(a, task_id, after, 1);
                     _ = result_value.object.swapRemove("events");
                     _ = result_value.object.swapRemove("next_after_seq");

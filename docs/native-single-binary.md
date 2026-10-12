@@ -1,6 +1,6 @@
 # Native Protean
 
-`protean` is the supported application. Its human CLI and `agent-host/2.0`
+`protean` is the supported application. Its human CLI and `agent-host/2.1`
 stdio interface use one native task owner and one authored Horos program.
 Kosmos evaluates the program and its saved continuation. Read-only snapshot work,
 Responses I/O, and generated pure tools are native environmental capabilities.
@@ -173,13 +173,38 @@ fails and fences the namespace. Switching tasks transfers the committed receipt
 without serializing the state again. Receipts convey only local native custody;
 durable copies remain ordinary data under the namespace owner.
 
-`agent-host/2.0` retains bounded transport windows: framed RPC, output
+Both `agent-host/2.0` and `agent-host/2.1` retain bounded transport windows: framed RPC, output
 backpressure, and artifact/event pages. These do
 not accumulate into task-lifetime allowances. Parked tasks and archive records
 have no application count cap. Status reports `pending_message_count` and a
 bounded `pending_messages` view with `pending_messages_truncated`; `task.events`
 provides the complete message history in pages. The inbox itself retains every
 accepted message until its authored consumption or terminal disposition.
+
+### Explicit recovery
+
+Initialization selects 2.1 when offered, with 2.0 retained for existing clients.
+Discovery returns the negotiated method set and matching immutable protocol
+schema. The existing 2.0 request fields and status/result shapes remain closed;
+`task.reconcile` is available only in 2.1. A 2.0 event query or subscription that
+would encounter a 2.1 reconciliation event returns `UnsupportedCapability`;
+status and result remain readable. Use 2.1 to read that recovery history.
+
+For an unknown occurrence, 2.1 status includes `recovery` with its original
+`occurrence_id`, `attempt_id`, and available `mechanisms`. Submit
+`task.reconcile` with those IDs, `task_id`, `expected_revision`, a stable
+`client_operation_id`, and `recovery: {"mechanism":"rederive"}`. Keep all
+parameters unchanged when replaying that operation. The receipt identifies the
+reconciliation and reports its current `unresolved`, `capture_admitted`, or
+`reply_settled` status. Capture admission alone does not establish a typed reply.
+
+Pure recovery is compiled for frozen snapshot operations and admitted generated
+tools. It reconstructs the original request from retained inputs; it does not
+invoke the original environmental adapter. Original ambiguous-delivery history,
+prepared inputs and captures remain private, including after archive import.
+The provider currently has no receipt-retrieval adapter: its mechanism list is
+empty and a rederivation request records an unresolved result without another
+inference attempt. Asynchronous receipt lookup is not implemented yet.
 
 ## Saved state and portability
 
@@ -198,6 +223,12 @@ Checkpoint export/import verifies canonical schemas, object closure, occurrences
 captures, event facts, receipts, and compatibility before admission. A valid
 archive is not permission to expose private captured data as a public artifact.
 An interrupted import does not create a partly authoritative task.
+Unknown delivery and uninterpreted captures can be archived, including captures
+whose response framing fails interpretation. Import keeps these tasks parked,
+preserves recovery receipts and the original private evidence, and does not
+invoke an adapter. A captured response still needs its original interpretation
+before reply settlement; an unknown attempt still needs explicit reconciliation.
+Export refuses an occurrence with an active environmental dispatch.
 
 Distributed adaptive mobility is not delivered. Copying an archive does not
 transfer exclusive custody, credentials, or authority over ambiguous effects.
