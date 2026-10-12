@@ -227,13 +227,16 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
     return client;
   };
   const artifact = async (taskId, ref) => {
-    const id = typeof ref === 'string' ? ref.split(':')[0] : Buffer.from(ref.digest).toString('hex');
+    const id = typeof ref === 'string' ? ref.split(':')[0] : ref.artifact_id ?? Buffer.from(ref.digest).toString('hex');
+    const expectedHash = ref.sha256 ?? id;
     const chunks = []; let offset = '0', done = false;
     while (!done) {
       const chunk = await client.call('artifact.read', {task_id: taskId, artifact_id: id, offset, length: '32768'});
-      assert.equal(chunk.sha256, id); chunks.push(Buffer.from(chunk.data, 'base64url')); offset = chunk.next_offset; done = chunk.eof;
+      assert.equal(chunk.sha256, expectedHash); chunks.push(Buffer.from(chunk.data, 'base64url')); offset = chunk.next_offset; done = chunk.eof;
     }
-    const bytes = Buffer.concat(chunks); assert.equal(hash(bytes), id); return bytes;
+    const bytes = Buffer.concat(chunks); assert.equal(hash(bytes), expectedHash);
+    if (typeof ref !== 'string') assert.equal(BigInt(bytes.length), BigInt(ref.bytes));
+    return bytes;
   };
   try {
     invoke('validate', '--config', configPath); assert.equal(requests.length, 0);
@@ -565,6 +568,10 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
       }
       const result = await until(() => client.call('task.result', {task_id: task.task_id}), value => value.ready, 2000);
       if (providerFailure) throw providerFailure;
+      if (result.outcome.value_ref) {
+        assert.equal(result.outcome.value_ref.schema_id, 'adaptive-agent.output.v4');
+        result.outcome.value = JSON.parse((await artifact(task.task_id, result.outcome.value_ref)).toString('utf8'));
+      }
       if (name === 'tools-reuse' || name === 'tools-reverse') {
         assert.equal(result.outcome.value.result.tag, 'report');
         assert.equal(result.outcome.value.programs.length, 1);

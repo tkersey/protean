@@ -14,22 +14,26 @@ so it can authenticate sources before any dependency code is executed:
 zig run tools/native/dependencies.zig -- setup \
   conformance/protean/dependencies.lock.json \
   conformance/protean/native-dependencies.lock.json \
-  .protean-native/inputs "$(command -v zig)"
-zig build protean -Doptimize=safe
+  .protean-native/inputs-v6 "$(command -v zig)" --offline
+zig build protean -Doptimize=safe \
+  -Dhoros-source=.protean-native/inputs-v6/horos \
+  -Dkosmos-source=.protean-native/inputs-v6/kosmos \
+  -Dsqlite-source=.protean-native/inputs-v6/sqlite
 ```
 
-The selected source tuple is Horos 4.0.0 at
-`bacdcaada3f09b1cbc4e787a45ba300d5fdbcb99`, Kosmos 7.0.0 at
-`fc6a5606421d6b6c65bc93f2a4847e41dc52711c`, and SQLite 3.53.4. The versioned
+The development source tuple is Horos 5.0.0 at
+`02231d2f9855c6648603e0be7ae5df7a761bfc03`, Kosmos 8.0.0 at
+`c376aecf14c4881d7679b0ba00cb9715b672e60e`, and SQLite 3.53.4. The versioned
 `agent-native-source-lock/v2` binds exact archives and complete source/package
 inventories. It intentionally contains no WASM delivery contract. Kosmos owns
 its optional JS/WASM release descriptor, which this build never rewrites.
 
-These commits are the source targets of the published stable
-[Horos 4.0.0](https://github.com/tkersey/horos/releases/tag/v4.0.0) and
-[Kosmos 7.0.0](https://github.com/tkersey/kosmos/releases/tag/v7.0.0) releases.
-Their release tags preserve the authenticated source commits; each has the
-same verified tree as its squash-landed main commit.
+These candidates are not yet published releases. The lock records authenticated
+local Git archives; remote transport identities and final release qualification
+remain pending. During development, supply exact extracted source copies with
+`-Dhoros-source` and `-Dkosmos-source`. Each override must match the complete
+locked inventory. The setup command above requires those pinned archives in its
+input directory until the remote artifacts are published.
 
 Setup performs bounded HTTPS acquisition, authenticates before invoking `tar`
 or `unzip`, rejects links/special source entries, verifies complete source
@@ -113,8 +117,21 @@ limit is queried at admission. A storage failure during capture publication
 fences the owner; reopening retains unknown delivery and cannot reissue the
 external call. No finite reserve promises publication of an unknown-size reply.
 
-`agent-host/2.0` retains bounded transport and scheduling windows: framed RPC,
-concurrent owned tasks, output backpressure, and artifact/event pages. These do
+The task owner rotates among eligible tasks, with one resident and one physical
+worker. A held leaf does not prevent another task's pure steps, questions, inbox,
+saved replies, or legal cancellation. A ready leaf waits for the worker without
+preparing or charging another attempt. Callbacks bind the task, occurrence,
+attempt, and owner epoch. Owned tasks use the supplied allocator; there is no
+fixed task-count quota. Both native front ends use this scheduling owner.
+
+Each drive publishes an outcome and owning checkpoint receipt together. The
+Driver retains the receipt before storage publication, including if that commit
+fails and fences the namespace. Switching tasks transfers the committed receipt
+without serializing the state again. Receipts convey only local native custody;
+durable copies remain ordinary data under the namespace owner.
+
+`agent-host/2.0` retains bounded transport windows: framed RPC, output
+backpressure, and artifact/event pages. These do
 not accumulate into task-lifetime allowances. Parked tasks and archive records
 have no application count cap. Status reports `pending_message_count` and a
 bounded `pending_messages` view with `pending_messages_truncated`; `task.events`
