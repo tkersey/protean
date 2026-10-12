@@ -23,7 +23,7 @@ pub fn fromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error
         if (T.max_length) |maximum| if (text.len > maximum) return error.InvalidParams;
         return .{ .bytes = text };
     }
-    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "protean_value_kind")) {
+    if (comptime contracts.native.wrapped(T)) {
         if (T.protean_value_kind == .bytes) {
             const text = try json.text(value);
             const size = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(text) catch return error.InvalidParams;
@@ -87,7 +87,7 @@ pub fn fromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error
 
 pub fn toJson(comptime T: type, a: std.mem.Allocator, value: T) std.mem.Allocator.Error!json.Value {
     if (comptime schemas.isText(T)) return json.string(value.bytes);
-    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "protean_value_kind")) {
+    if (comptime contracts.native.wrapped(T)) {
         if (T.protean_value_kind == .bytes) {
             const result = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(value.bytes.len));
             return json.string(std.base64.url_safe_no_pad.Encoder.encode(result, value.bytes));

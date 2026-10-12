@@ -76,7 +76,7 @@ try {
     const target = join(exportRoot, file); mkdirSync(dirname(target), {recursive: true}); copyFileSync(join(root, file), target);
   }
   const packageHash = run(zig, ['fetch', exportRoot]);
-  assert.match(packageHash, /^protean-4\.0\.0-dev\.0-[A-Za-z0-9_-]+$/);
+  assert.match(packageHash, /^protean-4\.0\.0-[A-Za-z0-9_-]+$/);
   const packageDir = join(scratch, 'package'); mkdirSync(packageDir);
   run('/usr/bin/tar', ['-xzf', join(cache, 'p', `${packageHash}.tar.gz`), '-C', packageDir]);
   const source = join(packageDir, packageHash);

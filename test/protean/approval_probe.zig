@@ -1,4 +1,5 @@
 //! Executable approval policy fixture independent of its environmental adapter.
+const horos_authoring = @import("horos").authoring;
 const std = @import("std");
 const protean = @import("protean");
 const horos = @import("horos");
@@ -31,10 +32,10 @@ pub fn build(c: protean.Context, mode: Mode) !source.Module {
     if (mode == .scoped or mode == .scoped_evidence)
         return scopedApproval(c, mode == .scoped_evidence);
     const b = c.builder;
-    const proposal = try c.schema(Proposal);
+    const proposal = try horos_authoring.interop.schemaId(c.author, try c.schema(Proposal));
     const boolean = try b.scalar(bool);
     const principal = try b.scalar(u32);
-    const commit = try c.external("agent.tool.document.replace.v1", proposal, try c.schema(Commit), .commit);
+    const commit = try horos_authoring.interop.operationId(c.author, try c.external("agent.tool.document.replace.v1", try horos_authoring.interop.schema(c.author, proposal), try c.schema(Commit), .commit));
     const authority = try b.declare(&.{ proposal, principal }, boolean, &.{}, &.{});
     const identity = try b.reference(b.parameter(authority, 1));
     try b.define(authority, try b.pure(try b.primitive(boolean, .equal, &.{ identity, try b.constant(u32, 7) }, 0)));
@@ -53,7 +54,7 @@ pub fn build(c: protean.Context, mode: Mode) !source.Module {
     else
         null;
     const placement: ?Id = if (mode == .placement_read or mode == .placement_commit) blk: {
-        const effect = if (mode == .placement_commit) commit else try c.external("test.placement.read", proposal, boolean, .read);
+        const effect = if (mode == .placement_commit) commit else try horos_authoring.interop.operationId(c.author, try c.external("test.placement.read", try horos_authoring.interop.schema(c.author, proposal), try horos_authoring.interop.schema(c.author, boolean), .read));
         const function = try b.declare(&.{proposal}, boolean, &.{effect}, &.{});
         try b.define(function, try b.pure(try b.constant(bool, true)));
         break :blk function;
@@ -63,7 +64,7 @@ pub fn build(c: protean.Context, mode: Mode) !source.Module {
         .proposal = proposal,
         .occurrence = try b.scalar(u64),
         .principal = principal,
-        .reason = try c.schema(contracts.Text(128)),
+        .reason = try horos_authoring.interop.schemaId(c.author, try c.schema(contracts.Text(128))),
         .commit_effect = commit,
         .authority = authority,
         .revalidate = policy,
@@ -81,7 +82,7 @@ pub fn build(c: protean.Context, mode: Mode) !source.Module {
     var incompatible = d.config;
     incompatible.principal = try b.scalar(u8);
     try std.testing.expectError(error.InvalidApprovalContract, protean.approval.define(c, incompatible));
-    const entry_result = if (mode == .raw_commit) try c.schema(Commit) else d.result;
+    const entry_result = if (mode == .raw_commit) try horos_authoring.interop.schemaId(c.author, try c.schema(Commit)) else d.result;
     const effects = if (witness) |w| (try (source.Row{ .effects = d.effects }).unionWith(b.allocator(), .{ .effects = &.{w.effect} })).effects else d.effects;
     const entry = try b.declare(&.{proposal}, entry_result, effects, &.{});
     const input = try b.reference(b.parameter(entry, 0));
@@ -114,7 +115,7 @@ test "approval emits ordinary checked BPI3 with a consumed private grant" {
     defer b.deinit();
     var registry = protean.admission.Registry.init(std.testing.allocator);
     defer registry.deinit();
-    const module = try build(.{ .builder = &b, .registry = &registry }, .valid);
+    const module = try build(try protean.Context.init(&b, &registry), .valid);
     try protean.admission.verify(std.testing.allocator, module, &registry);
     var compiled = try horos.program.compile(std.testing.allocator, module);
     defer compiled.deinit();
@@ -128,7 +129,7 @@ test "approval placement cannot hide ordinary I/O or commitment before final rev
         defer b.deinit();
         var registry = protean.admission.Registry.init(std.testing.allocator);
         defer registry.deinit();
-        try std.testing.expectError(error.InvalidApprovalPlacement, build(.{ .builder = &b, .registry = &registry }, mode));
+        try std.testing.expectError(error.InvalidApprovalPlacement, build(try protean.Context.init(&b, &registry), mode));
     }
 }
 
@@ -142,7 +143,7 @@ test "protected source rejects raw commit, stolen private call, and speculative 
         defer b.deinit();
         var registry = protean.admission.Registry.init(std.testing.allocator);
         defer registry.deinit();
-        const module = try build(.{ .builder = &b, .registry = &registry }, scenario[0]);
+        const module = try build(try protean.Context.init(&b, &registry), scenario[0]);
         try std.testing.expectError(scenario[1], protean.admission.verify(std.testing.allocator, module, &registry));
     }
 }
@@ -152,9 +153,9 @@ test "tool metadata and dispatch share one declaration without granting commit" 
     defer b.deinit();
     var registry = protean.admission.Registry.init(std.testing.allocator);
     defer registry.deinit();
-    const c: protean.Context = .{ .builder = &b, .registry = &registry };
+    const c = try protean.Context.init(&b, &registry);
     const integer = try b.scalar(u64);
-    const read = try c.external("test.document.read", integer, integer, .read);
+    const read = try horos_authoring.interop.operationId(c.author, try c.external("test.document.read", try horos_authoring.interop.schema(c.author, integer), try horos_authoring.interop.schema(c.author, integer), .read));
     const descriptor: protean.tools.Descriptor = .{
         .identity = "test.document.read",
         .payload = integer,
@@ -169,7 +170,7 @@ test "tool metadata and dispatch share one declaration without granting commit" 
     var altered = descriptor;
     altered.identity = "other.document.read";
     try std.testing.expectError(error.InvalidToolDeclaration, protean.tools.validate(c, &.{altered}));
-    const commit = try c.external("test.document.commit", integer, integer, .commit);
+    const commit = try horos_authoring.interop.operationId(c.author, try c.external("test.document.commit", try horos_authoring.interop.schema(c.author, integer), try horos_authoring.interop.schema(c.author, integer), .commit));
     altered = descriptor;
     altered.identity = "test.document.commit";
     altered.implementation = .{ .external = commit };
@@ -182,7 +183,7 @@ const LiveWitness = struct { proof: Id, consume: Id, project: Id, read: Id, effe
 fn liveWitness(c: protean.Context, proposal: Id) !LiveWitness {
     const b = c.builder;
     const integer = try b.scalar(u64);
-    const effect = try c.external("agent.tool.document.read.version.v1", try b.scalar(void), integer, .read);
+    const effect = try horos_authoring.interop.operationId(c.author, try c.external("agent.tool.document.read.version.v1", try horos_authoring.interop.schema(c.author, try b.scalar(void)), try horos_authoring.interop.schema(c.author, integer), .read));
     const proof = try b.resource(integer);
     const read = try b.declare(&.{}, proof, &.{effect}, &.{});
     const consume = try b.declare(&.{proof}, integer, &.{}, &.{});
@@ -205,7 +206,7 @@ test "required live proof stays private and is consumed before approval" {
     defer b.deinit();
     var registry = protean.admission.Registry.init(std.testing.allocator);
     defer registry.deinit();
-    const module = try build(.{ .builder = &b, .registry = &registry }, .evidence);
+    const module = try build(try protean.Context.init(&b, &registry), .evidence);
     try protean.admission.verify(std.testing.allocator, module, &registry);
     var compiled = try horos.program.compile(std.testing.allocator, module);
     defer compiled.deinit();
@@ -218,7 +219,7 @@ test "a simulated value cannot forge a live proof and a live proof cannot be use
         defer b.deinit();
         var registry = protean.admission.Registry.init(std.testing.allocator);
         defer registry.deinit();
-        const module = try build(.{ .builder = &b, .registry = &registry }, mode);
+        const module = try build(try protean.Context.init(&b, &registry), mode);
         try protean.admission.verify(std.testing.allocator, module, &registry);
         const expected = if (mode == .reused_evidence) error.UnavailableSlot else error.InvalidOwnership;
         try std.testing.expectError(expected, horos.program.compile(std.testing.allocator, module));
@@ -239,7 +240,7 @@ fn scopedApproval(c: protean.Context, evidence: bool) !source.Module {
     const policy = try b.declare(&.{integer}, boolean, &.{}, &.{region});
     try b.define(policy, try b.pure(try b.primitive(boolean, .cell_get, &.{try b.reference(cell)}, 0)));
     const operation_result = try b.schema(.{ .sum = &.{ integer, integer, unit, unit } });
-    const commit = try c.external("agent.tool.scoped.commit.v1", integer, operation_result, .commit);
+    const commit = try horos_authoring.interop.operationId(c.author, try c.external("agent.tool.scoped.commit.v1", try horos_authoring.interop.schema(c.author, integer), try horos_authoring.interop.schema(c.author, operation_result), .commit));
     const witness = if (evidence) try liveWitness(c, integer) else null;
     const d = try protean.approval.define(c, .{
         .name = "probe.scoped",
@@ -301,7 +302,7 @@ test "current policy may borrow a scoped cell across the approval interaction" {
         defer b.deinit();
         var registry = protean.admission.Registry.init(std.testing.allocator);
         defer registry.deinit();
-        const module = try build(.{ .builder = &b, .registry = &registry }, mode);
+        const module = try build(try protean.Context.init(&b, &registry), mode);
         try protean.admission.verify(std.testing.allocator, module, &registry);
         var compiled = try horos.program.compile(std.testing.allocator, module);
         defer compiled.deinit();

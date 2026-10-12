@@ -12,10 +12,10 @@ test "authored inference control proposes independent effort and model changes w
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
-    const c: protean.Context = .{ .builder = &b, .registry = &registry };
-    const entry = try controls.defineInference(c, try b.constant(void, {}));
-    try std.testing.expectEqual(entry, try controls.defineInference(c, try b.constant(void, {})));
-    const module = b.module(entry, try b.scalar(void));
+    const c = try protean.Context.init(&b, &registry);
+    const entry = try controls.defineInference(c, try c.literal(void, {}));
+    try std.testing.expectEqual(entry, try controls.defineInference(c, try c.literal(void, {})));
+    const module = try c.author.module(entry, try c.schema(void));
     try protean.admission.verify(allocator, module, &registry);
     var compiled = try horos.program.compile(allocator, module);
     defer compiled.deinit();
@@ -127,9 +127,9 @@ test "authored skill control preserves state on rejection and fences actual evic
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
-    const c: protean.Context = .{ .builder = &b, .registry = &registry };
-    const entry = try controls.defineSkill(P, c, try b.constant(void, {}));
-    const module = b.module(entry, try b.scalar(void));
+    const c = try protean.Context.init(&b, &registry);
+    const entry = try controls.defineSkill(P, c, try c.literal(void, {}));
+    const module = try c.author.module(entry, try c.schema(void));
     try protean.admission.verify(allocator, module, &registry);
     var compiled = try horos.program.compile(allocator, module);
     defer compiled.deinit();

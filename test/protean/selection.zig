@@ -7,7 +7,7 @@ fn construct(a: std.mem.Allocator) !void {
     defer b.deinit();
     var registry = protean.admission.Registry.init(a);
     defer registry.deinit();
-    const c = protean.Context{ .builder = &b, .registry = &registry };
+    const c = try protean.Context.init(&b, &registry);
     const integer = try b.scalar(u64);
     const shape = try protean.deliberation.selectionTypes(&b, integer, integer, 8);
     const assess = try b.declare(&.{integer}, integer, &.{}, &.{});

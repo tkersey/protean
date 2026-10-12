@@ -1,3 +1,4 @@
+const horos_authoring = @import("horos").authoring;
 const std = @import("std");
 const protean = @import("protean");
 const horos = @import("horos");
@@ -33,19 +34,19 @@ fn MessageContract(comptime application: []const u8, comptime message: []const u
 const Application = struct {
     pub fn emit(c: protean.Context) !horos.source.Module {
         const b = c.builder;
-        const number = try c.schema(u32);
-        const output = try c.schema(T.Output);
-        const leaf = try c.external("task-owner.increment.v1", number, number, .read);
-        const question = try c.external("task-owner.question.v1", number, number, .read);
-        const inbox = try Inbox.declare(c);
+        const number = try horos_authoring.interop.schemaId(c.author, try c.schema(u32));
+        const output = try horos_authoring.interop.schemaId(c.author, try c.schema(T.Output));
+        const leaf = try horos_authoring.interop.operationId(c.author, try c.external("task-owner.increment.v1", try horos_authoring.interop.schema(c.author, number), try horos_authoring.interop.schema(c.author, number), .read));
+        const question = try horos_authoring.interop.operationId(c.author, try c.external("task-owner.question.v1", try horos_authoring.interop.schema(c.author, number), try horos_authoring.interop.schema(c.author, number), .read));
+        const inbox = try horos_authoring.interop.operationId(c.author, try Inbox.declare(c));
         const entry = try b.declare(&.{number}, output, &.{ leaf, question, inbox }, &.{});
         const incremented = try b.variable(number);
         const answer = try b.variable(number);
-        const message = try b.variable(try c.schema(Inbox.Reply));
-        const padding = try c.literal(T.Padding, .{ .bytes = &@as([64 * 1024]u8, @splat('x')) });
+        const message = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(Inbox.Reply)));
+        const padding = try horos_authoring.interop.valueId(c.author, try c.literal(T.Padding, .{ .bytes = &@as([64 * 1024]u8, @splat('x')) }));
         const result = try b.primitive(output, .product, &.{ try b.reference(answer), try b.reference(message), padding }, 0);
         try b.define(entry, try b.bind(incremented, try b.term(.{ .perform = .{ .effect = leaf, .payload = try b.reference(b.parameter(entry, 0)) } }), try b.bind(answer, try b.term(.{ .perform = .{ .effect = question, .payload = try b.reference(incremented) } }), try b.bind(message, try Inbox.poll(c), try b.term(.{ .yield_then = try b.pure(result) })))));
-        return b.module(entry, try c.schema(void));
+        return b.module(entry, try horos_authoring.interop.schemaId(c.author, try c.schema(void)));
     }
 };
 fn increment(_: native.Context, input: u32) !u32 {
@@ -1019,8 +1020,8 @@ test "an inbox identity cannot be redeclared with a different message contract" 
     defer b.deinit();
     var registry = protean.admission.Registry.init(a);
     defer registry.deinit();
-    const ctx = protean.Context{ .builder = &b, .registry = &registry };
-    try std.testing.expectEqual(try Inbox.declare(ctx), try Inbox.declare(ctx));
+    const ctx = try protean.Context.init(&b, &registry);
+    try std.testing.expectEqual(try horos_authoring.interop.operationId(ctx.author, try Inbox.declare(ctx)), try horos_authoring.interop.operationId(ctx.author, try Inbox.declare(ctx)));
     try std.testing.expectError(error.InvalidInboxContract, protean.inbox.Profile(u64).declare(ctx));
 }
 
@@ -1043,9 +1044,9 @@ fn LargeResultProgram(comptime Types: type) type {
     return struct {
         pub fn emit(c: protean.Context) !horos.source.Module {
             const b = c.builder;
-            const bytes = try c.schema(Types.Output);
-            const entry = try b.declare(&.{try c.schema(bool)}, bytes, &.{}, &.{});
-            const payload = try c.literal(Types.Output, if (@hasDecl(Types, "dense")) .{ .items = &Types.payload } else .{ .bytes = &Types.payload });
+            const bytes = try horos_authoring.interop.schemaId(c.author, try c.schema(Types.Output));
+            const entry = try b.declare(&.{try horos_authoring.interop.schemaId(c.author, try c.schema(bool))}, bytes, &.{}, &.{});
+            const payload = try horos_authoring.interop.valueId(c.author, try c.literal(Types.Output, if (@hasDecl(Types, "dense")) .{ .items = &Types.payload } else .{ .bytes = &Types.payload }));
             try b.define(entry, try b.term(.{ .conditional = .{
                 .condition = try b.reference(b.parameter(entry, 0)),
                 .when_true = try b.term(.{ .fail = payload }),
@@ -1296,8 +1297,8 @@ const CleanupTypes = struct {
 const CleanupApplication = struct {
     pub fn emit(c: protean.Context) !horos.source.Module {
         const b = c.builder;
-        const unit = try c.schema(void);
-        const boolean = try c.schema(bool);
+        const unit = try horos_authoring.interop.schemaId(c.author, try c.schema(void));
+        const boolean = try horos_authoring.interop.schemaId(c.author, try c.schema(bool));
         const entry = try b.declare(&.{boolean}, unit, &.{}, &.{});
         const body = try b.declare(&.{}, unit, &.{}, &.{});
         // Stop inside protect before selecting failure versus cancellation.
@@ -1547,10 +1548,10 @@ test "completed result beyond the former wire-read ceiling remains publicly retr
     const Identity = struct {
         pub fn emit(c: protean.Context) !horos.source.Module {
             const b = c.builder;
-            const input_schema = try c.schema(Large.Input);
+            const input_schema = try horos_authoring.interop.schemaId(c.author, try c.schema(Large.Input));
             const entry = try b.declare(&.{input_schema}, input_schema, &.{}, &.{});
             try b.define(entry, try b.pure(try b.reference(b.parameter(entry, 0))));
-            return b.module(entry, try c.schema(void));
+            return b.module(entry, try horos_authoring.interop.schemaId(c.author, try c.schema(void)));
         }
     };
     const parent = std.testing.allocator;

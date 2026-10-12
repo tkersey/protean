@@ -71,8 +71,11 @@ fn expectRejected(program: horos.data.activation.Program, value: Inputs, expecte
 test "actual Kosmos preserves every admitted call and enforces current call policy" {
     var b = horos.source.Builder.init(allocator);
     defer b.deinit();
-    const entry = try P.interpretAll(&b);
-    var compiled = try horos.program.compile(allocator, b.module(entry, try b.scalar(void)));
+    var registry = protean.admission.Registry.init(b.allocator());
+    defer registry.deinit();
+    const context = try protean.Context.init(&b, &registry);
+    const entry = try P.interpretAll(context);
+    var compiled = try horos.program.compile(allocator, try context.author.module(entry, try context.schema(void)));
     defer compiled.deinit();
     const items = [_]P.OutputItem{
         .{ .reasoning = .{ .summary = .{ .bytes = "context" } } },
@@ -108,8 +111,11 @@ test "actual Kosmos preserves every admitted call and enforces current call poli
 test "actual Kosmos rejects forged declaration association variants and offer custody" {
     var b = horos.source.Builder.init(allocator);
     defer b.deinit();
-    const entry = try P.interpretAll(&b);
-    var compiled = try horos.program.compile(allocator, b.module(entry, try b.scalar(void)));
+    var registry = protean.admission.Registry.init(b.allocator());
+    defer registry.deinit();
+    const context = try protean.Context.init(&b, &registry);
+    const entry = try P.interpretAll(context);
+    var compiled = try horos.program.compile(allocator, try context.author.module(entry, try context.schema(void)));
     defer compiled.deinit();
     var items = [_]P.OutputItem{item(42)};
     items[0].function_call.name.bytes = "other";
@@ -141,8 +147,11 @@ test "actual Kosmos rejects forged declaration association variants and offer cu
 test "single answer convenience rejects multiple calls instead of choosing one" {
     var b = horos.source.Builder.init(allocator);
     defer b.deinit();
-    const entry = try P.interpreter(&b);
-    var compiled = try horos.program.compile(allocator, b.module(entry, try b.scalar(void)));
+    var registry = protean.admission.Registry.init(b.allocator());
+    defer registry.deinit();
+    const context = try protean.Context.init(&b, &registry);
+    const entry = try P.interpreter(context);
+    var compiled = try horos.program.compile(allocator, try context.author.module(entry, try context.schema(void)));
     defer compiled.deinit();
     const items = [_]P.OutputItem{ item(42), item(73) };
     var value = input(items[0..1]);

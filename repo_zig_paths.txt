@@ -46,6 +46,7 @@ src/adaptive_controls.zig
 src/admission.zig
 src/approval.zig
 src/authoring.zig
+src/authoring_imports.zig
 src/callable.zig
 src/catalogs.zig
 src/clarification.zig

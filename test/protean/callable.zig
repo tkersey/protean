@@ -48,7 +48,7 @@ pub fn build(b: *B, registry: *admission.Registry, representation: Representatio
     const family = try bnd.library.choice.family(author, "probe/choice");
     const choice = .{ .effect = try typed.interop.operationId(author, family.effect()), .capability = try typed.interop.schemaId(author, family.capability()) };
     try registry.classify(choice.effect, .internal);
-    const interpreted = try bnd.library.choice.all(author, family, try author.scalar(void), .{ .captures = .{ .continuation = &.{ try author.scalar(void), try typed.interop.schema(author, callback), family.capability() } }, .residual = &.{} });
+    const interpreted = try bnd.library.choice.all(author, family, try author.schema(void), .{ .captures = .{ .continuation = .{ try author.schema(void), try typed.interop.schema(author, callback), family.capability() } }, .residual = &.{} });
     const all = .{ .handler = try typed.interop.handlerId(author, interpreted.handler), .answer = try typed.interop.schemaId(author, interpreted.answer) };
     const body = try b.declare(&.{ choice.capability, callback }, unit, &.{choice.effect}, &.{});
     const decision = try b.variable(try b.scalar(bool));

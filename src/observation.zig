@@ -151,7 +151,7 @@ fn interpret(
     result: Id,
     responder: Id,
     scope: decision.Scope,
-    origin: Origin,
+    comptime origin: Origin,
 ) !decision.Interpretation {
     try checkResponder(b, d, responder, scope.residual);
     const instance = try b.specialization(decision.Interpretation, "agent.observation.interpret/v1", .{
@@ -168,18 +168,18 @@ fn authoredInterpretation(
     result: Id,
     responder: Id,
     scope: decision.Scope,
-    origin: Origin,
+    comptime origin: Origin,
 ) !decision.Interpretation {
     const c = try typed.Context.init(b);
     const operation = try typed.interop.operation(c, d.family.effect);
     const answer = try typed.interop.schema(c, result);
     const observation = try typed.interop.schema(c, d.observation);
-    const response = try typed.interop.namedCallable(c, responder, &.{"question"});
-    const captures = try b.allocator().alloc(*const typed.Schema, scope.captures.len + 2);
+    const response = try @import("authoring_imports.zig").callable(c, responder, .{ .question = try typed.interop.schema(c, d.question) });
+    const captures = try b.allocator().alloc(*const typed.Schema(typed.Dynamic), scope.captures.len + 2);
     for (scope.captures, 0..) |id, i| captures[i] = try typed.interop.schema(c, id);
     captures[scope.captures.len] = try typed.interop.schema(c, d.family.capability);
-    captures[scope.captures.len + 1] = response;
-    const residual = try b.allocator().alloc(*const typed.Operation, scope.residual.effects.len);
+    captures[scope.captures.len + 1] = typed.interop.erase(response);
+    const residual = try b.allocator().alloc(*const typed.Operation(typed.Dynamic), scope.residual.effects.len);
     for (scope.residual.effects, residual) |id, *item| item.* = try typed.interop.operation(c, id);
     const owned = try b.allocator().alloc(*const typed.Region, scope.owned_regions.len);
     for (scope.owned_regions, owned) |id, *item| item.* = try typed.interop.region(c, id);
@@ -194,17 +194,14 @@ fn authoredInterpretation(
         .captures = captures,
         .owned_regions = owned,
         .borrowed_regions = borrowed,
-        .state = &.{.{ .name = "responder", .schema = response }},
+        .state = .{ .responder = response },
     });
     const returns = try c.returnFunction(handler);
     const return_body = try c.body(returns);
     try c.define(returns, try return_body.ret(try return_body.parameter("result")));
     const clause = try c.clauseFunction(handler);
     const body = try c.body(clause);
-    const observed = try body.apply(try body.parameter("responder"), &.{.{
-        .name = "question",
-        .value = try body.parameter("payload"),
-    }});
+    const observed = try body.apply(try body.parameter("responder"), .{ .question = try body.parameter("payload") });
     const tagged = try body.variant(observation, switch (origin) {
         .external => "0",
         .simulated => "1",

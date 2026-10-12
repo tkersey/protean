@@ -351,9 +351,9 @@ fn insertGroup(e: Emit, key: Id) equality.TypedError!Id {
     const c = try typed.Context.init(e.b);
     const group = try typed.interop.schema(c, e.t.group);
     const groups = try typed.interop.schema(c, e.t.groups);
-    const fault = try typed.interop.literalFailure(c, e.failure, try typed.interop.schema(c, e.b.values.items[@intCast(e.failure)].schema));
+    const fault = try typed.interop.literalFailure(c, try @import("authoring_imports.zig").literal(c, e.failure));
     const equal = try equality.create(c, try typed.interop.schema(c, key), fault);
-    const f = try c.function("group exact clarification keys", &.{ .{ .name = "groups", .schema = groups }, .{ .name = "added", .schema = group } }, groups, &.{});
+    const f = try c.function("group exact clarification keys", .{ .groups = groups, .added = group }, groups, &.{});
     const body = try c.body(f);
     const added = try body.parameter("added");
     const popped = try body.pop(try body.parameter("groups"));
@@ -362,26 +362,17 @@ fn insertGroup(e: Emit, key: Id) equality.TypedError!Id {
     const work = item.body();
     const old = try work.field(item.payload(), "head");
     const tail = try work.field(item.payload(), "tail");
-    const same = try work.call(equal, &.{
-        .{ .name = "left", .value = try work.field(try work.field(old, "1"), "1") },
-        .{ .name = "right", .value = try work.field(try work.field(added, "1"), "1") },
-    });
+    const same = try work.call(equal, .{ .left = try work.field(try work.field(old, "1"), "1"), .right = try work.field(try work.field(added, "1"), "1") });
     const yes = try work.branch();
     const no = try work.branch();
     const earlier = try yes.less(try yes.field(added, "0"), try yes.field(old, "0"));
     const representative = try yes.select(earlier, added, old);
-    const merged = try yes.product(group, &.{
-        .{ .name = "0", .value = try yes.field(representative, "0") },
-        .{ .name = "1", .value = try yes.field(representative, "1") },
-        .{ .name = "2", .value = try yes.concat(try yes.field(old, "2"), try yes.field(added, "2")) },
-    });
-    const combined = try yes.concat(try yes.sequenceValue(groups, &.{merged}), tail);
-    const rest = try no.call(f, &.{ .{ .name = "groups", .value = tail }, .{ .name = "added", .value = added } });
-    const retained = try no.concat(try no.sequenceValue(groups, &.{old}), rest);
+    const merged = try yes.product(group, .{ .@"0" = try yes.field(representative, "0"), .@"1" = try yes.field(representative, "1"), .@"2" = try yes.concat(try yes.field(old, "2"), try yes.field(added, "2"), .{}) });
+    const combined = try yes.concat(try yes.sequenceValue(groups, &.{merged}), tail, .{});
+    const rest = try no.call(f, .{ .groups = tail, .added = added });
+    const retained = try no.concat(try no.sequenceValue(groups, &.{old}), rest, .{});
     const selected = try work.conditional(same, try yes.ret(combined), try no.ret(retained));
-    try c.define(f, try body.ret(try body.match(popped, &.{
-        try empty.ret(try empty.body().sequenceValue(groups, &.{added})), try item.ret(selected),
-    })));
+    try c.define(f, try body.ret(try body.match(popped, .{ .empty = try empty.ret(try empty.body().sequenceValue(groups, &.{added})), .item = try item.ret(selected) })));
     return typed.interop.functionId(c, f);
 }
 
@@ -588,9 +579,9 @@ test "clarification excludes live and human effects even when explicitly listed"
         defer b.deinit();
         var registry = admission.Registry.init(b.allocator());
         defer registry.deinit();
-        const c = @import("authoring.zig").Context{ .builder = &b, .registry = &registry };
+        const c = try @import("authoring.zig").Context.init(&b, &registry);
         const integer = try b.scalar(u64);
-        const effect = try c.external("test.clarification.forbidden", integer, integer, role);
+        const effect = try typed.interop.operationId(c.author, try c.external("test.clarification.forbidden", try typed.interop.schema(c.author, integer), try typed.interop.schema(c.author, integer), role));
         const d = try define(&b, .{
             .identity = "test.clarification.forbidden-multi",
             .candidate = integer,

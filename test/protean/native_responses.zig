@@ -1,3 +1,4 @@
+const horos_authoring = @import("horos").authoring;
 const std = @import("std");
 const protean = @import("protean");
 const native = @import("protean_native");
@@ -19,16 +20,16 @@ const PairInput = struct { first: P.ReferenceRequest, second: Q.ReferenceRequest
 const PairApplication = struct {
     pub fn emit(c: protean.Context) !@import("horos").source.Module {
         const b = c.builder;
-        const unit = try c.schema(void);
-        const first = try protean.responders.defineReferenceModelObserved(P, c, try b.constant(void, {}), false);
-        const second = try protean.responders.defineReferenceModelObserved(Q, c, try b.constant(void, {}), false);
-        const entry = try b.declare(&.{try c.schema(PairInput)}, unit, &.{ b.functions.items[first].effects[0], b.functions.items[second].effects[0] }, &.{});
+        const unit = try horos_authoring.interop.schemaId(c.author, try c.schema(void));
+        const first = try horos_authoring.interop.functionId(c.author, try protean.responders.defineReferenceModelObserved(P, c, try c.literal(void, {}), false));
+        const second = try horos_authoring.interop.functionId(c.author, try protean.responders.defineReferenceModelObserved(Q, c, try c.literal(void, {}), false));
+        const entry = try b.declare(&.{try horos_authoring.interop.schemaId(c.author, try c.schema(PairInput))}, unit, &.{ b.functions.items[first].effects[0], b.functions.items[second].effects[0] }, &.{});
         const input = try b.reference(b.parameter(entry, 0));
-        const first_result = try b.variable(try c.schema(protean.responders.ReferenceModelObservation(P, false)));
-        const second_result = try b.variable(try c.schema(protean.responders.ReferenceModelObservation(Q, false)));
-        const offered = try c.literal([1]bool, .{true});
-        const call_first = try b.term(.{ .call = .{ .function = first, .arguments = &.{ try b.primitive(try c.schema(P.ReferenceRequest), .field, &.{input}, 0), offered } } });
-        const call_second = try b.term(.{ .call = .{ .function = second, .arguments = &.{ try b.primitive(try c.schema(Q.ReferenceRequest), .field, &.{input}, 1), offered } } });
+        const first_result = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(protean.responders.ReferenceModelObservation(P, false))));
+        const second_result = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(protean.responders.ReferenceModelObservation(Q, false))));
+        const offered = try horos_authoring.interop.valueId(c.author, try c.literal([1]bool, .{true}));
+        const call_first = try b.term(.{ .call = .{ .function = first, .arguments = &.{ try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(P.ReferenceRequest)), .field, &.{input}, 0), offered } } });
+        const call_second = try b.term(.{ .call = .{ .function = second, .arguments = &.{ try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(Q.ReferenceRequest)), .field, &.{input}, 1), offered } } });
         try b.define(entry, try b.bind(first_result, call_first, try b.bind(second_result, call_second, try b.pure(try b.constant(void, {})))));
         return b.module(entry, unit);
     }

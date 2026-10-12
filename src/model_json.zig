@@ -1,11 +1,12 @@
 const std = @import("std");
+const native = @import("horos_data").schema.native;
 
 pub fn taggedOptional(comptime T: type) bool {
     return @typeInfo(T) == .optional and @typeInfo(@typeInfo(T).optional.child) == .optional;
 }
 
 fn containsTaggedOptional(comptime T: type) bool {
-    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "protean_value_kind")) {
+    if (comptime native.wrapped(T)) {
         return if (T.protean_value_kind == .vector) containsTaggedOptional(T.Child) else false;
     }
     return switch (@typeInfo(T)) {
@@ -25,7 +26,7 @@ pub fn clientMapping(comptime types: anytype) []const u8 {
     return "agent-client-values/1.0";
 }
 pub fn isText(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and @hasDecl(T, "protean_value_kind") and
+    return comptime native.wrapped(T) and
         T.protean_value_kind == .text;
 }
 
@@ -101,6 +102,7 @@ fn writeUnsigned(writer: anytype, comptime value: anytype) void {
 }
 
 fn writeSchema(comptime T: type, writer: anytype) void {
+    _ = comptime native.info(T);
     if (comptime isText(T)) {
         if (T.max_length == null) {
             writer.raw("{\"type\":\"string\"}");
@@ -245,6 +247,7 @@ fn writePositiveDecimalRange(comptime maximum: u64, writer: anytype) void {
 }
 
 fn writeClientSchema(comptime T: type, writer: anytype) void {
+    _ = comptime native.info(T);
     if (comptime isText(T)) {
         if (T.max_length == null) {
             writer.raw("{\"type\":\"string\"}");
@@ -257,7 +260,7 @@ fn writeClientSchema(comptime T: type, writer: anytype) void {
         writer.byte('}');
         return;
     }
-    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "protean_value_kind")) {
+    if (comptime native.wrapped(T)) {
         if (T.protean_value_kind == .bytes) {
             writer.raw("{\"type\":\"string\",\"contentEncoding\":\"base64url\"");
             if (T.max_length) |maximum| {
@@ -354,6 +357,7 @@ fn writeClientSchema(comptime T: type, writer: anytype) void {
 }
 
 fn maximumValueBytes(comptime T: type) ?usize {
+    _ = comptime native.info(T);
     if (comptime isText(T)) {
         const maximum = T.max_length orelse return null;
         return 2 + 6 * maximum;

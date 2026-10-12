@@ -1,3 +1,4 @@
+const horos_authoring = @import("horos").authoring;
 const std = @import("std");
 const protean = @import("protean");
 const horos = @import("horos");
@@ -9,7 +10,7 @@ const Id = source.Id;
 fn fixture(c: protean.Context) !protean.observation.Definition {
     _ = try c.builder.scalar(void);
     const number = try c.builder.scalar(u64);
-    const read = try c.external("consumer.document.read", number, number, .read);
+    const read = try horos_authoring.interop.operationId(c.author, try c.external("consumer.document.read", try horos_authoring.interop.schema(c.author, number), try horos_authoring.interop.schema(c.author, number), .read));
     return protean.observation.define(c, "document", read);
 }
 
@@ -109,7 +110,7 @@ test "one domain client uses actual live read or typed simulation as authored" {
         defer b.deinit();
         var registry = protean.admission.Registry.init(b.allocator());
         defer registry.deinit();
-        const c: protean.Context = .{ .builder = &b, .registry = &registry };
+        const c = try protean.Context.init(&b, &registry);
         const expected = [_]u8{ @intFromBool(!live), 42, 0, 0, 0, 0, 0, 0, 0 };
         const requests = try execute(try interpreted(c, live), &registry, &expected);
         try std.testing.expectEqual(@as(usize, if (live) 1 else 0), requests);
@@ -121,7 +122,7 @@ test "live proof retains exactly the corresponding external result across suspen
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
-    const c: protean.Context = .{ .builder = &b, .registry = &registry };
+    const c = try protean.Context.init(&b, &registry);
     const d = try fixture(c);
     const pair = try b.schema(.{ .product = &.{ d.data, d.data } });
     const entry = try b.declare(&.{}, pair, &.{d.live_effect}, &.{});
@@ -145,7 +146,7 @@ test "a simulation or external label cannot supply a live evidence resource" {
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
-    const c: protean.Context = .{ .builder = &b, .registry = &registry };
+    const c = try protean.Context.init(&b, &registry);
     const d = try fixture(c);
     const entry = try b.declare(&.{}, d.data, &.{}, &.{});
     for (0..2) |origin| {
@@ -160,9 +161,9 @@ test "equal data schemas do not make different live evidence contracts interchan
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
-    const c: protean.Context = .{ .builder = &b, .registry = &registry };
+    const c = try protean.Context.init(&b, &registry);
     const first = try fixture(c);
-    const other_read = try c.external("consumer.other.read", first.question, first.data, .read);
+    const other_read = try horos_authoring.interop.operationId(c.author, try c.external("consumer.other.read", try horos_authoring.interop.schema(c.author, first.question), try horos_authoring.interop.schema(c.author, first.data), .read));
     const second = try protean.observation.define(c, "other", other_read);
     try std.testing.expectError(error.InvalidObservationContract, protean.observation.define(c, "document", other_read));
     const owner = try b.declare(&.{second.proof}, first.data, &.{}, &.{});
@@ -175,7 +176,7 @@ test "application code cannot mint a live resource with raw source construction"
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
-    const c: protean.Context = .{ .builder = &b, .registry = &registry };
+    const c = try protean.Context.init(&b, &registry);
     const d = try fixture(c);
     const entry = try b.declare(&.{}, d.data, &.{}, &.{});
     const forged = try b.primitive(d.proof, .resource_pack, &.{try b.constant(u64, 42)}, 0);
@@ -190,7 +191,7 @@ test "raw handler cannot intercept the live read to mint evidence" {
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
-    const c: protean.Context = .{ .builder = &b, .registry = &registry };
+    const c = try protean.Context.init(&b, &registry);
     const d = try fixture(c);
     const capability = try b.schema(.{ .internal = .{ .capability = d.live_effect } });
     const responder = try b.schema(.{ .internal = .{ .computation = .{
@@ -247,7 +248,7 @@ test "typed simulation stays admissible inside actual internal multi-shot contro
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
-    const c: protean.Context = .{ .builder = &b, .registry = &registry };
+    const c = try protean.Context.init(&b, &registry);
     const d = try fixture(c);
     const typed = horos.authoring;
     const author = try typed.Context.init(&b);
@@ -279,7 +280,7 @@ test "typed simulation stays admissible inside actual internal multi-shot contro
         .effects = &.{choice.effect},
         .use = .linear,
     } } });
-    const choice_interpretation = try horos.library.choice.all(author, family, try typed.interop.schema(author, pair), .{ .captures = .{ .continuation = &.{ family.capability(), try author.scalar(bool) } }, .residual = &.{} });
+    const choice_interpretation = try horos.library.choice.all(author, family, try typed.interop.schema(author, pair), .{ .captures = .{ .continuation = .{ family.capability(), try author.schema(bool) } }, .residual = &.{} });
     const search = .{ .handler = try typed.interop.handlerId(author, choice_interpretation.handler), .answer = try typed.interop.schemaId(author, choice_interpretation.answer) };
     const entry = try b.declare(&.{}, search.answer, &.{}, &.{});
     try b.define(entry, try b.term(.{ .handle = .{
@@ -295,7 +296,7 @@ test "live evidence acquisition is excluded even from read-admitted speculation"
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
-    const c: protean.Context = .{ .builder = &b, .registry = &registry };
+    const c = try protean.Context.init(&b, &registry);
     const d = try fixture(c);
     const entry = try b.declare(&.{}, d.data, &.{d.live_effect}, &.{});
     const evidence = try b.variable(d.evidence);

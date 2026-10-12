@@ -222,7 +222,9 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
   let client;
   const launch = async (extra, selectedState = state) => {
     client = new ProteanClient(app.command, ['--state-dir', selectedState, '--authorize-inference', '--test-provider', '--trust-root', trust, ...extra], {cwd: app.data, env: {PATH: '/nonexistent'}});
-    await client.initialize(); return client;
+    const initialized = await client.initialize();
+    assert.equal(initialized.server_info.version, '4.0.0');
+    return client;
   };
   const artifact = async (taskId, ref) => {
     const id = typeof ref === 'string' ? ref.split(':')[0] : Buffer.from(ref.digest).toString('hex');

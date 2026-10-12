@@ -20,7 +20,7 @@ fn check(b: *horos.source.Builder, schema: Id, left: []const u8, right: []const 
     const c = try horos.authoring.Context.init(b);
     const contract = try horos.authoring.interop.schema(c, schema);
     const function = try equality.create(c, contract, try c.literalFailure(void, {}));
-    var compiled = try c.compile(std.testing.allocator, function, try c.scalar(void));
+    var compiled = try c.compile(std.testing.allocator, function, try c.schema(void));
     defer compiled.deinit();
     try observe(compiled.program, left, left, true);
     try observe(compiled.program, right, right, true);

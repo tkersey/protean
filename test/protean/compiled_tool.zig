@@ -1,3 +1,4 @@
+const horos_authoring = @import("horos").authoring;
 const std = @import("std");
 const protean = @import("protean");
 const horos = @import("horos");
@@ -51,12 +52,12 @@ const Tool = struct {
     var internal = false;
     var internal_role: protean.admission.Role = .internal;
     pub fn declare(c: protean.Context) !protean.tools.Descriptor {
-        const integer = try c.schema(u64);
+        const integer = try horos_authoring.interop.schemaId(c.author, try c.schema(u64));
         const read = if (internal) blk: {
             const effect = try c.builder.effect(.{ .identity = "fixture/compiled-read", .payload = integer, .result = integer, .external = false });
             try c.registry.classify(effect, internal_role);
             break :blk effect;
-        } else try c.external(if (rename) "fixture/other" else identity, integer, integer, role);
+        } else try horos_authoring.interop.operationId(c.author, try c.external(if (rename) "fixture/other" else identity, try horos_authoring.interop.schema(c.author, integer), try horos_authoring.interop.schema(c.author, integer), role));
         return protean.tools.declareCompiled(c, .{ .instance = "read-tool", .object = bytes, .entry = "inspect", .identity = "fixture/local-inspect", .payload = integer, .result = integer, .effects = &.{.{ .symbol = "read", .effect = read }}, .model_offered = true, .name = "inspect", .description = "Inspect a number using the compiled tool" });
     }
 };
@@ -190,7 +191,16 @@ fn allocationFailure(allocator: std.mem.Allocator) !void {
 test "compiled tool construction releases all partial object and link owners" {
     Tool.bytes = try object(false);
     defer a.free(Tool.bytes);
-    try std.testing.checkAllAllocationFailures(a, allocationFailure, .{});
+    // SafeAllocator may grow an arena in place on one run but move it on the
+    // next. Failure-index replay requires a fixed allocation schedule. Refuse
+    // optional resizing so every growth uses an injected allocation; still use
+    // the testing allocator for leak and ownership checks.
+    try allocationFailure(a);
+    var vtable = a.vtable.*;
+    vtable.resize = std.mem.Allocator.noResize;
+    vtable.remap = std.mem.Allocator.noRemap;
+    const backing: std.mem.Allocator = .{ .ptr = a.ptr, .vtable = &vtable };
+    try std.testing.checkAllAllocationFailures(backing, allocationFailure, .{});
 }
 
 test "compiled tool final link forwards semantic contract and deterministic limits" {

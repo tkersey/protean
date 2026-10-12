@@ -22,7 +22,7 @@ boundaries, HTTP `User-Agent`, copyright and historical retirement references
 retain their meanings and spelling. Tests still name removed paths when checking
 that those former implementations remain absent.
 
-Version 4.0.0-dev.0 and lineage ID `84371874` are retained. Zig computes the
+Protean 4.0.0 retains lineage ID `84371874`. Zig computes the
 name-derived fingerprint checksum `50216bba`; the downstream consumer likewise
 retains lineage `93b78865` with checksum `6504cc54`. Package and inventory
 identities are recomputed from actual renamed sources with Zig and the native

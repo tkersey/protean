@@ -520,7 +520,7 @@ pub fn Profile(
                 .maximum_name_bytes = maxima.name,
                 .maximum_arguments_bytes = limits.arguments_json_bytes,
                 .maximum_argument_name_bytes = @intCast(CodecProfile.FieldName.max_length.?),
-                .maximum_argument_fields = @intCast(ArgumentCodec.max_length),
+                .maximum_argument_fields = @intCast(ArgumentCodec.max_length.?),
                 .maximum_result_text_bytes = limits.result_text_bytes,
             };
         }
@@ -610,14 +610,14 @@ pub fn Profile(
 
         /// Checks the single-answer policy, normalized call association, concrete
         /// variant and request-time offered set. Returns candidate data only.
-        pub fn interpreter(builder: anytype) !u64 {
-            return @import("model_interpretation.zig").define(Self, builder);
+        pub fn interpreter(context: anytype) @TypeOf(@import("model_interpretation.zig").define(Self, context)) {
+            return @import("model_interpretation.zig").define(Self, context);
         }
 
         /// Preserves all admitted candidate calls in their original order.
         /// Candidate count cannot exceed the bounded incoming OutputItems count.
-        pub fn interpretAll(builder: anytype) !u64 {
-            return @import("model_interpretation.zig").defineAll(Self, builder);
+        pub fn interpretAll(context: anytype) @TypeOf(@import("model_interpretation.zig").defineAll(Self, context)) {
+            return @import("model_interpretation.zig").defineAll(Self, context);
         }
     };
 }

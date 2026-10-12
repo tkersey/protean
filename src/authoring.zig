@@ -5,7 +5,8 @@ const contracts = @import("protean_contracts");
 const admission = @import("admission.zig");
 pub const catalogs = @import("catalogs.zig");
 const source = horos.source;
-const p = horos.data.program;
+const a = horos.authoring;
+const native = horos.data.schema.native;
 
 /// Optional native authoring observations. These callbacks never enter a Module,
 /// BPI3, or PST3, and borrow their context only for the compilation call.
@@ -32,32 +33,28 @@ pub const CompileOptions = struct {
 pub const Context = struct {
     builder: *source.Builder,
     registry: *admission.Registry,
+    author: *a.Context,
     catalogs: catalogs.Catalogs = .{},
 
-    pub fn schema(self: Context, comptime T: type) !p.Id {
-        return contracts.schema(T, self.builder);
+    pub fn init(builder: *source.Builder, registry: *admission.Registry) !Context {
+        return .{ .builder = builder, .registry = registry, .author = try a.Context.init(builder) };
+    }
+
+    pub fn schema(self: Context, comptime T: type) !*const a.Schema(a.Shape(T)) {
+        return self.author.schema(T);
     }
 
     /// Declare environmental I/O; protected roles still need their checked owner.
-    pub fn external(
-        self: Context,
-        identity: []const u8,
-        payload: p.Id,
-        result: p.Id,
-        role: admission.Role,
-    ) !p.Id {
-        const effect = try self.builder.effect(.{
-            .identity = identity,
-            .payload = payload,
-            .result = result,
-        });
-        try self.registry.classify(effect, role);
-        return effect;
+    pub fn external(self: Context, identity: []const u8, payload: anytype, result: anytype, role: admission.Role) !*const a.Operation(a.OperationSignature(a.ShapeOf(@TypeOf(payload)), a.ShapeOf(@TypeOf(result)), native.Fields(&.{}, &.{}))) {
+        const operation = try self.author.external(identity, payload, result);
+        try self.registry.classify(try a.interop.operationId(self.author, operation), role);
+        return operation;
     }
 
-    pub fn literal(self: Context, comptime T: type, value: T) !p.Id {
-        const encoded = try contracts.encodeOwned(T, self.builder.allocator(), value);
-        return self.builder.literal(.{ .schema = try self.schema(T), .bytes = encoded });
+    pub fn literal(self: Context, comptime T: type, value: T) !*const a.Value(a.Shape(T)) {
+        const encoded = try contracts.encodeOwned(T, self.builder.arena.child_allocator, value);
+        defer self.builder.arena.child_allocator.free(encoded);
+        return a.interop.encodedLiteral(self.author, try self.schema(T), encoded);
     }
 };
 
@@ -97,10 +94,10 @@ pub fn compileObserved(
     defer builder.deinit();
     var registry = admission.Registry.init(builder.allocator());
     defer registry.deinit();
-    var context: Context = .{ .builder = &builder, .registry = &registry };
-    const initial = try context.schema(System.InitialArgs);
-    const result = try context.schema(System.Result);
-    const failure = try context.schema(System.Failure);
+    var context = try Context.init(&builder, &registry);
+    const initial = try a.interop.schemaId(context.author, try context.schema(System.InitialArgs));
+    const result = try a.interop.schemaId(context.author, try context.schema(System.Result));
+    const failure = try a.interop.schemaId(context.author, try context.schema(System.Failure));
     context.catalogs = try catalogs.install(context, System.Source);
     options.stage(.application_source);
     const module = try System.Application.emit(context);
