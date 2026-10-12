@@ -133,6 +133,17 @@ pub const Store = struct {
         if (self.transaction or self.sealed_generation != self.head.generation) return error.InvalidState;
         return self.integrity_epoch;
     }
+    /// Reconstruct dependency closure under one database snapshot. Reopening,
+    /// import and explicit audit never trust serialized retention metadata.
+    pub fn auditRetention(self: *Store, handlers: @import("registry.zig").Registry, image: Digest) !@import("retention.zig").Statistics {
+        const opened = !self.transaction;
+        if (opened) try self.begin();
+        defer if (opened) self.rollback();
+        return @import("retention.zig").verify(self, handlers, image) catch |err| {
+            if (err != error.OutOfMemory and err != error.Capacity) self.fence();
+            return err;
+        };
+    }
     pub fn begin(self: *Store) !void {
         if (self.fenced) return error.StorageUnavailable;
         if (self.transaction) return error.Busy;
@@ -1053,4 +1064,48 @@ test "old state formats require a fresh namespace without rewriting old records"
     defer tables.deinit();
     try std.testing.expectEqual(.row, try tables.step());
     try std.testing.expectEqual(@as(i64, 1), try tables.integer(0));
+}
+
+test "cold retention audit derives shared dependencies and detects missing edges and corrupt bodies" {
+    const registry = @import("registry.zig");
+    const a = std.testing.allocator;
+    var handlers = try registry.Registry.init(a, &.{});
+    defer handlers.deinit();
+    for (0..4) |scenario| {
+        const db = try sqlite.Database.open(a, ":memory:", true);
+        defer db.destroy() catch unreachable;
+        defer db.close() catch unreachable;
+        var store = try Store.init(a, db, true, @splat(9));
+        try store.begin();
+        const input = try store.putObject("shared immutable input");
+        const task = retentionFixtureTask(input);
+        try store.putTask(task, null);
+        const head = try store.commit("fixture");
+        try store.confirmSealed(head);
+        const statistics = try store.auditRetention(handlers, @splat(0));
+        try std.testing.expectEqual(2, statistics.objects);
+        try std.testing.expectEqual(1, statistics.edges);
+        try std.testing.expectEqual(head.generation, store.sealed_generation.?);
+        if (scenario == 0) {
+            store.allocator = std.testing.failing_allocator;
+            try std.testing.expectError(error.OutOfMemory, store.auditRetention(handlers, @splat(0)));
+            store.allocator = a;
+            try std.testing.expect(!store.fenced and !store.transaction);
+            try std.testing.expectEqual(head.generation, store.sealed_generation.?);
+            continue;
+        }
+        store.invalidateIntegrity();
+        switch (scenario) {
+            1 => try db.exec("DELETE FROM dependencies"),
+            2 => try db.exec("UPDATE dependencies SET child_bytes=child_bytes+1"),
+            3 => {
+                try db.exec("DROP TRIGGER retained_object_immutable");
+                try db.run("UPDATE objects SET body=? WHERE digest=?", &.{ .{ .blob = "altered immutable data" }, .{ .blob = &input.digest } });
+            },
+            else => unreachable,
+        }
+        try std.testing.expectError(error.CorruptState, store.auditRetention(handlers, @splat(0)));
+        try std.testing.expect(store.fenced);
+        try std.testing.expect(!store.transaction);
+    }
 }

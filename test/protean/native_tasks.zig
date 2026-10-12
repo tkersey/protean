@@ -78,6 +78,7 @@ fn present(ctx: native.Context, input: u32) !native.json.Value {
     return native.json.number(ctx.allocator, input);
 }
 const CapturingIncrement = struct {
+    var interpretations: usize = 0;
     fn prepare(ctx: native.registry.ProjectionContext, payload: []const u8) ![]u8 {
         var value = try protean.contracts.decodeOwned(u32, ctx.allocator, payload);
         defer value.deinit();
@@ -88,6 +89,7 @@ const CapturingIncrement = struct {
         return .{ .captured = try ctx.allocator.dupe(u8, "raw-response:21") };
     }
     fn interpret(ctx: native.registry.ProjectionContext, payload: []const u8, rendered: []const u8, raw: []const u8) !native.registry.Projection {
+        interpretations += 1;
         if (!std.mem.eql(u8, rendered, "increment:20") or !std.mem.eql(u8, raw, "raw-response:21")) return error.InvalidCapture;
         var value = try protean.contracts.decodeOwned(u32, ctx.allocator, payload);
         defer value.deinit();
@@ -372,6 +374,12 @@ fn rejectRequeuedHistory(a: std.mem.Allocator, service: *native.tasks.Service(T)
     const original_task = try namespace.store.putObject(original_task_bytes);
     const message = try namespace.store.putObject(try protean.contracts.encodeOwned(Message, a, decoded.value));
     const task = try namespace.store.putObject(try protean.contracts.encodeOwned(@TypeOf(value), a, requeued));
+    // This witness changes lifecycle facts, not reference closure. Keep the
+    // exact original dependencies so export reaches the lifecycle validator.
+    namespace.store.invalidateIntegrity();
+    for ([_]struct { old: @TypeOf(task), new: @TypeOf(task) }{ .{ .old = original_message, .new = message }, .{ .old = original_task, .new = task } }) |pair| {
+        try namespace.store.database.run("INSERT OR IGNORE INTO dependencies SELECT ?,?,child,child_bytes FROM dependencies WHERE parent=?", &.{ .{ .blob = &pair.new.digest }, .{ .integer = @intCast(pair.new.bytes) }, .{ .blob = &pair.old.digest } });
+    }
     try namespace.store.database.run("UPDATE records SET body=? WHERE kind='message' AND id=?", &.{ .{ .blob = &message.digest }, .{ .blob = &message_id } });
     try namespace.store.database.run("UPDATE tasks SET body=? WHERE id=?", &.{ .{ .blob = &task.digest }, .{ .blob = &value.id } });
     // Export intentionally requires a settled transaction. Commit the synthetic
@@ -379,6 +387,7 @@ fn rejectRequeuedHistory(a: std.mem.Allocator, service: *native.tasks.Service(T)
     try namespace.commit("test.requeued-history");
     defer {
         namespace.store.begin() catch unreachable;
+        namespace.store.invalidateIntegrity();
         namespace.store.database.run("UPDATE records SET body=? WHERE kind='message' AND id=?", &.{ .{ .blob = &original_message.digest }, .{ .blob = &message_id } }) catch unreachable;
         namespace.store.database.run("UPDATE tasks SET body=? WHERE id=?", &.{ .{ .blob = &original_task.digest }, .{ .blob = &value.id } }) catch unreachable;
         namespace.commit("test.restore-consumed-history") catch unreachable;
@@ -736,6 +745,51 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
     service_live = true;
 
     if (captured) {
+        const uninterpretable = try service.submit(frame, "uninterpretable-capture", 20);
+        var captured_work: ?native.tasks.Work = null;
+        for (0..32) |_| {
+            const step = try service.pump(frame);
+            if (step == .work) {
+                captured_work = step.work;
+                break;
+            }
+        }
+        try std.testing.expect(captured_work != null);
+        const invalid_raw = "captured bytes that cannot be interpreted";
+        const capture_id = captured_work.?.attempt;
+        try service.acquire(frame, captured_work.?, invalid_raw);
+        const interpretations = CapturingIncrement.interpretations;
+        try service.close(frame);
+        service_live = false;
+        try namespace.close();
+        namespace_live = false;
+        namespace = try native.Namespace.open(a, io, path);
+        namespace_live = true;
+        service = try native.tasks.Service(T).init(a, io, &namespace, assets, &application, handlers, profile);
+        service_live = true;
+        try std.testing.expectEqual(interpretations, CapturingIncrement.interpretations);
+        var pending_capture = try service.task(frame, uninterpretable.receipt.task);
+        defer pending_capture.deinit();
+        _ = try service.resumeTask(frame, "interpret-retained-capture", uninterpretable.receipt.task, pending_capture.value.revision);
+        try std.testing.expect(try service.pump(frame) == .waiting);
+        const saved_capture = (try namespace.store.recordBytes(frame, "capture", capture_id, uninterpretable.receipt.task)).?;
+        const Ref = @TypeOf(pending_capture.value.profile);
+        const Captured = struct {
+            task: [16]u8,
+            occurrence: [32]u8,
+            attempt: [32]u8,
+            request: Ref,
+            response: ?Ref,
+            disposition: enum { complete, definitely_not_sent, unknown },
+            projection: ?struct { reply: Ref, objects: protean.contracts.Vector(Ref, null), output_tokens: ?u64 },
+        };
+        var decoded_capture = try protean.contracts.decodeOwned(Captured, frame, saved_capture);
+        defer decoded_capture.deinit();
+        try std.testing.expect(decoded_capture.value.projection == null);
+        try std.testing.expectEqualStrings(invalid_raw, try namespace.store.object(frame, decoded_capture.value.response.?, null));
+        _ = try namespace.store.auditRetention(handlers, application.image_identity);
+        try std.testing.expect(!namespace.store.fenced);
+
         const failing = try service.submit(frame, "capture-publication-failure", 20);
         var pending: ?native.tasks.Work = null;
         for (0..32) |_| {

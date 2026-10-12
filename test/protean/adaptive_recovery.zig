@@ -203,6 +203,7 @@ fn adaptiveRecovery(comptime correction: bool) !void {
     _ = try service.message(permanent, "large-followup-one", task, .{ .message = .{ .bytes = &long_followup } });
     _ = try service.message(permanent, "large-followup-two", task, .{ .message = .{ .bytes = &long_followup } });
     var model_calls: usize = 0;
+    var last_model_capture: ?[32]u8 = null;
     var restarted = false;
     var witnessed = false;
     var finished = false;
@@ -332,6 +333,7 @@ fn adaptiveRecovery(comptime correction: bool) !void {
             const inference = work.entry.declaration.inference;
             if (inference) model_calls += 1;
             try service.acquire(frame, work, reply);
+            if (inference) last_model_capture = work.attempt;
             if (inference and model_calls == 8 and !restarted) {
                 // No interpretation, receipt publication or Kosmos successor has
                 // run after the raw control response became durable.
@@ -375,8 +377,32 @@ fn adaptiveRecovery(comptime correction: bool) !void {
     std.debug.print("adaptive capture recovery: model_acquisitions={d} state_bytes_peak={d} prepared_bytes_peak={d} projection_and_step_scratch_peak={d} requested_memory_peak={d}\n", .{ model_calls, maximum_state, maximum_prepared, maximum_scratch, budget.peak });
     try service.close(a);
     service_live = false;
+    if (correction) {
+        // Keep every object byte intact while dropping one registered context
+        // dependency. Reopen must reconstruct that edge from the exact codec,
+        // rather than treating the truncated metadata as proof of closure.
+        const raw = (try namespace.store.recordBytes(permanent, "capture", last_model_capture.?, task)).?;
+        var captured = try protean.contracts.decodeOwned(CaptureRecord, permanent, raw);
+        defer captured.deinit();
+        const objects = captured.value.projection.?.objects.items;
+        const root = objects[objects.len - 1];
+        var context = try protean.contracts.decodeOwned(t.P.AdaptiveContext, permanent, try namespace.store.object(permanent, .{ .digest = root.digest, .bytes = root.bytes }, null));
+        defer context.deinit();
+        try std.testing.expectEqualStrings(t.P.adaptive_context_identity, context.value.schema.bytes);
+        namespace.store.invalidateIntegrity();
+        try namespace.store.begin();
+        try namespace.store.database.run("DELETE FROM dependencies WHERE parent=? AND child=?", &.{ .{ .blob = &root.digest }, .{ .blob = &context.value.source_capture.digest } });
+        try std.testing.expectEqual(1, try namespace.store.database.changes());
+        try namespace.commit("test.missing-context-dependency");
+    }
     try namespace.close();
     namespace_live = false;
+    if (correction) {
+        namespace = try native.Namespace.open(a, io, path);
+        namespace_live = true;
+        try std.testing.expectError(error.CorruptState, native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile));
+        try std.testing.expect(namespace.store.fenced);
+    }
     if (!correction) try continuedAttemptAccounting(a, io, assets, &application, handlers, configured, buffer[0..length]);
 }
 

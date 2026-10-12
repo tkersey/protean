@@ -117,6 +117,18 @@ limit is queried at admission. A storage failure during capture publication
 fences the owner; reopening retains unknown delivery and cannot reissue the
 external call. No finite reserve promises publication of an unknown-size reply.
 
+Opening a task service, importing, and exporting reconstruct the retained
+dependency graph from canonical task, record, event, and operation bodies and
+the compiled projection codecs. The audit checks stored dependency edges and
+their lengths, and hashes each distinct reachable object once under one database
+transaction. Large opaque checkpoints and captures are hashed in streaming form.
+Raw captures remain valid retained data even when interpretation would reject
+them. A missing edge or altered object fences the owner. This audit grants no
+public artifact access and performs no environmental acquisition.
+
+This is cold retention validation. Context preparation still performs full
+semantic ancestry validation; owned validation reuse is not enabled yet.
+
 The task owner rotates among eligible tasks, with one resident and one physical
 worker. A held leaf does not prevent another task's pure steps, questions, inbox,
 saved replies, or legal cancellation. A ready leaf waits for the worker without

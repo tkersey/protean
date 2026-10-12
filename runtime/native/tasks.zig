@@ -138,6 +138,7 @@ pub fn Service(comptime Types: type) type {
             var self: Self = .{ .allocator = a, .io = io, .namespace = namespace, .assets = assets, .application = application, .handlers = handlers, .profile = profile, .program = try evaluator.Program.open(a, assets.image) };
             errdefer self.program.close() catch unreachable;
             try io.randomSecure(&self.owner_epoch);
+            _ = try self.store().auditRetention(handlers, application.image_identity);
             try self.recover(a);
             return self;
         }
@@ -1486,6 +1487,7 @@ pub fn Service(comptime Types: type) type {
 
         pub fn exportCheckpoint(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, path: []const u8) !archive_api.Exported {
             try self.archiveAccess();
+            _ = try self.store().auditRetention(self.handlers, self.application.image_identity);
             var value = try self.task(a, task_id);
             defer value.deinit();
             try self.compatible(value.value);
@@ -1543,6 +1545,7 @@ pub fn Service(comptime Types: type) type {
             try self.validateArchiveAdmissions(a, value, reader.manifest.value);
             try self.validateOccurrenceProvenance(a, value, reader.manifest.value.records.items);
             try self.validateCapturedProjections(value, reader.manifest.value.records.items, .retain);
+            _ = try self.store().auditRetention(self.handlers, self.application.image_identity);
             try self.validateImportedState(a, value, inspected.current);
             const previous = value.revision;
             value.revision = try std.math.add(u64, previous, 1);

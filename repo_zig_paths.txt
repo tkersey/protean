@@ -34,6 +34,7 @@ runtime/native/protocol.zig
 runtime/native/registry.zig
 runtime/native/repository.zig
 runtime/native/responses.zig
+runtime/native/retention.zig
 runtime/native/root.zig
 runtime/native/schemas.zig
 runtime/native/sqlite.zig
