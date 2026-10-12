@@ -1,6 +1,6 @@
 {
   "format": "agent-native-source-lock/v2",
-  "status": "development-integration",
+  "status": "released-integration",
   "boundary": {
     "repository": "tkersey/horos",
     "commit": "bacdcaada3f09b1cbc4e787a45ba300d5fdbcb99",
@@ -120,12 +120,12 @@
     "architecture": "arm64"
   },
   "publicationObservation": {
-    "boundarySource": "https://github.com/tkersey/horos/commit/bacdcaada3f09b1cbc4e787a45ba300d5fdbcb99",
-    "worldSource": "https://github.com/tkersey/kosmos/commit/fc6a5606421d6b6c65bc93f2a4847e41dc52711c",
-    "compatiblePublishedReleaseObserved": false
+    "boundarySource": "https://github.com/tkersey/horos/releases/tag/v4.0.0",
+    "worldSource": "https://github.com/tkersey/kosmos/releases/tag/v7.0.0",
+    "compatiblePublishedReleaseObserved": true
   },
   "limitations": [
-    "Zig 0.17.0 stable-version candidates: Horos 4 typed authoring and Kosmos 7 public package names, with unchanged portable formats and ABI 3. Release publication is not yet observed; existing releases and prior task bindings remain unchanged.",
+    "Published stable Horos 4.0.0 and Kosmos 7.0.0 releases bind the authenticated source commits above, with unchanged portable formats and ABI 3. Historical releases and prior task bindings remain unchanged.",
     "Current candidate qualification is recorded in the coordinated PRs and Protean CI. No live-provider qualification is implied."
   ]
 }

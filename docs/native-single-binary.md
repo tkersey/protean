@@ -25,6 +25,12 @@ The selected source tuple is Horos 4.0.0 at
 inventories. It intentionally contains no WASM delivery contract. Kosmos owns
 its optional JS/WASM release descriptor, which this build never rewrites.
 
+These commits are the source targets of the published stable
+[Horos 4.0.0](https://github.com/tkersey/horos/releases/tag/v4.0.0) and
+[Kosmos 7.0.0](https://github.com/tkersey/kosmos/releases/tag/v7.0.0) releases.
+Their release tags preserve the authenticated source commits; each has the
+same verified tree as its squash-landed main commit.
+
 Setup performs bounded HTTPS acquisition, authenticates before invoking `tar`
 or `unzip`, rejects links/special source entries, verifies complete source
 inventories, checks SQLite's SHA-256/SHA3 identities and license, and seeds Zig's
