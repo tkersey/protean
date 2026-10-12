@@ -450,7 +450,16 @@ test "context ancestry baseline counts exact v5 reads through 128 turns" {
         const body = try std.fmt.allocPrint(ctx.allocator, "{{\"status\":\"completed\",\"error\":null,\"output\":[{{\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"opaque\"}},{{\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"{s}\",\"name\":\"finish\",\"arguments\":\"{{\\\"value\\\":1}}\"}}]}}", .{call_id});
         const raw = try contracts.encodeOwned(native.responses.Raw, ctx.allocator, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = body } });
         _ = try objects.add(a, try a.dupe(u8, raw));
+        const before_interpret = objects.reads;
         const projection = try Adapter.interpret(ctx, encoded, prepared, raw);
+        // Interpretation derives the prepared body and retained history once.
+        // The predecessor made two catalog reads and two ancestry traversals.
+        try std.testing.expectEqual(1 + 3 * turn, objects.reads - before_interpret);
+        if (turn == 0) {
+            const forged = try ctx.allocator.dupe(u8, prepared);
+            forged[forged.len - 1] ^= 1;
+            try std.testing.expectError(error.InvalidCapture, Adapter.interpret(ctx, encoded, forged, raw));
+        }
         for (projection.objects) |object| _ = try objects.add(a, try a.dupe(u8, object));
         const result = try contracts.decodeOwned(P.AdaptiveResult, a, projection.reply);
         try std.testing.expectEqual(.complete, result.value.replay_status);

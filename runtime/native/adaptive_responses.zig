@@ -183,7 +183,14 @@ pub fn Adapter(comptime P: type) type {
             var catalog = try A.catalog(ctx, policy);
             defer catalog.deinit();
             const selected = try A.bind(ctx, policy, request.value, catalog.value);
-            const projected = try Context.render(ctx, request.value, policy, selected, catalog.value);
+            return (try project(ctx, request.value, policy, selected, catalog.value)).prepared;
+        }
+
+        const Projected = struct { prepared: []u8, context: Context.Rendered };
+        // Both consumers share one projection. The caller keeps decoded request
+        // and catalog owners alive until it has consumed this borrowed view.
+        fn project(ctx: registry.ProjectionContext, request: P.AdaptiveRequest, policy: A.Policy, selected: A.Selected, catalog: P.AdaptiveCatalog) !Projected {
+            const projected = try Context.render(ctx, request, policy, selected, catalog);
             const a = ctx.allocator;
             var body = json.object();
             try json.put(a, &body, "model", json.string(selected.transport.model.bytes));
@@ -196,13 +203,13 @@ pub fn Adapter(comptime P: type) type {
             try json.put(a, &reasoning, "context", json.string(@tagName(selected.profile.reasoning_context)));
             try json.put(a, &body, "reasoning", reasoning);
             var allowed: json.Value = .{ .array = .init(a) };
-            for (request.value.offered, P.allDeclarations().items) |offered, tool| if (offered) {
+            for (request.offered, P.allDeclarations().items) |offered, tool| if (offered) {
                 var item = json.object();
                 try json.put(a, &item, "type", json.string("function"));
                 try json.put(a, &item, "name", json.string(tool.name.bytes));
                 try allowed.array.append(item);
             };
-            const selection = request.value.invocation.selection;
+            const selection = request.invocation.selection;
             if (selection.maximum_calls == 0 or allowed.array.items.len == 0) {
                 if (selection.minimum_calls != 0) return error.InvalidDeclaration;
                 try json.put(a, &body, "tool_choice", json.string("none"));
@@ -223,7 +230,7 @@ pub fn Adapter(comptime P: type) type {
                 try json.put(a, &body, "prompt_cache_options", cache);
             }
             const rendered = try json.canonicalOptional(a, body, selected.transport.request_bytes);
-            return contracts.encodeOwned(Prepared, a, .{ .version = 1, .request = request.value, .body = .{ .bytes = rendered } });
+            return .{ .prepared = try contracts.encodeOwned(Prepared, a, .{ .version = 1, .request = request, .body = .{ .bytes = rendered } }), .context = projected };
         }
 
         pub fn acquire(ctx: registry.Context, bytes: []const u8) !registry.Acquisition {
@@ -327,13 +334,15 @@ pub fn Adapter(comptime P: type) type {
         }
 
         pub fn interpret(ctx: registry.ProjectionContext, request_bytes: []const u8, prepared_bytes: []const u8, captured: []const u8) !registry.Projection {
-            if (!equal(try prepare(ctx, request_bytes), prepared_bytes)) return error.InvalidCapture;
             var request = try contracts.decodeOwned(P.AdaptiveRequest, ctx.allocator, request_bytes);
             defer request.deinit();
             const policy = try A.policy(ctx.allocator, ctx.profile);
             var catalog = try A.catalog(ctx, policy);
             defer catalog.deinit();
             const selected = try A.bind(ctx, policy, request.value, catalog.value);
+            const projection = try project(ctx, request.value, policy, selected, catalog.value);
+            defer ctx.allocator.free(projection.prepared);
+            if (!equal(projection.prepared, prepared_bytes)) return error.InvalidCapture;
             var raw = try contracts.decodeOwned(responses.Raw, ctx.allocator, captured);
             defer raw.deinit();
             if (raw.value.status < 200 or raw.value.status >= 300) return encode(ctx, .{ .result = .{ .provider_failure = .{ .kind = .http_status, .http_status = raw.value.status } }, .replay = null, .replay_status = .unsupported, .usage = null }, &.{});
@@ -349,7 +358,7 @@ pub fn Adapter(comptime P: type) type {
             if (contracts.exceeds(output.array.items.len, P.representation.maximum_output_items)) return unsupported(ctx, .normalization_limit, observed.value);
             const normalized = responses.Adapter(P).normalize(ctx.allocator, request.value.invocation, output) catch |err| return unsupported(ctx, if (err == error.Capacity) .normalization_limit else if (err == error.MixedRefusal) .mixed_refusal else .unsupported_output_item, observed.value);
             if (!observed.valid) return unsupported(ctx, .unsupported_output_item, observed.value);
-            var projected = try Context.render(ctx, request.value, policy, selected, catalog.value);
+            var projected = projection.context;
             for (output.array.items) |item| {
                 try projected.history.array.append(try responses.replayItem(ctx.allocator, item));
                 const reasoning_item = jsonTextEquals(item, "type", "reasoning");
