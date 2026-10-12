@@ -6,9 +6,9 @@ pub const tool_types = @import("tool_types.zig");
 pub const controls = protean.adaptive_controls;
 pub const model = protean.model_invocation;
 pub const application_id = "adaptive-agent";
-pub const application_version = "3.0.0";
+pub const application_version = "4.0.0";
 pub const input_schema_id = "adaptive-agent.input.v2";
-pub const output_schema_id = "adaptive-agent.output.v3";
+pub const output_schema_id = "adaptive-agent.output.v4";
 pub const failure_schema_id = "adaptive-agent.failure.v1";
 pub const message_schema_id = "adaptive-agent.message.v2";
 pub const answer_schema_id = "adaptive-agent.answer.v2";
@@ -26,11 +26,28 @@ pub const Message = struct { message: Summary };
 pub const Answer = Message;
 pub const Question = struct { prompt: contracts.Utf8 };
 pub const Failure = enum { capacity, invalid_response, invalid_evidence };
+pub const Claim = struct {
+    kind: enum { observation, inference, hypothesis },
+    statement: contracts.Utf8,
+    reasoning: contracts.Utf8,
+    evidence_indices: contracts.Vector(u64, null),
+};
+pub const Report = struct {
+    summary: Summary,
+    claims: contracts.Vector(Claim, null),
+    limitations: contracts.Vector(contracts.Utf8, null),
+};
+pub const ReportRejection = struct {
+    reason: enum { empty_report, empty_summary, empty_statement, missing_reasoning, missing_evidence, out_of_range, duplicate_evidence },
+    claim_index: ?u64,
+    evidence_position: ?u64,
+};
+pub const Result = union(enum) { report: Report, no_result: Summary, refusal: Summary, capacity: Summary };
 pub const Action = union(enum) {
     list: struct { prefix: Path, after: Path },
     read: struct { path: Path, start: u64, maximum: u32 },
     ask: struct { question: contracts.Utf8 },
-    report: struct { summary: Summary, evidence_index: u64 },
+    report: Report,
     stop: struct { reason: contracts.Text(256) },
     inference_set: controls.InferenceSet,
     skill_set: controls.SkillSet,
@@ -42,7 +59,7 @@ pub const P = model.Profile(Action, .{
     .{ .name = "list", .description = "List a page of the admitted immutable snapshot; next is the following page's after." },
     .{ .name = "read", .description = "Read at most 4096 UTF-8 bytes. Successful reads append zero-indexed evidence." },
     .{ .name = "ask", .description = "Ask for clarification needed for the current task." },
-    .{ .name = "report", .description = "Finish with a grounded summary and one acquired evidence_index." },
+    .{ .name = "report", .description = "Finish with claims citing acquired evidence_indices, reasoning, and limitations. Observations and inferences require citations; inferences and hypotheses require reasoning." },
     .{ .name = "stop", .description = "Stop honestly if the task cannot be supported by the admitted evidence." },
     .{ .name = "inference_set", .description = "Select an approved profile and effort for the next inference, using the current control revision." },
     .{ .name = "skill_set", .description = "Load, deactivate or physically unload a pinned approved skill. Use an exact version and current control revision." },
@@ -116,7 +133,7 @@ pub const ToolArtifact = struct {
 };
 pub const ToolReply = struct { artifact: model.ArtifactReference, program: ?model.ArtifactReference, evidence: ?GeneratedEvidenceReference };
 pub const Programs = contracts.Vector(model.ArtifactReference, null);
-pub const ResultValue = union(enum) { inline_text: Summary, work: model.ArtifactReference, control: model.ArtifactReference, tool: model.ArtifactReference };
+pub const ResultValue = union(enum) { inline_text: Summary, work: model.ArtifactReference, control: model.ArtifactReference, tool: model.ArtifactReference, report_rejection: ReportRejection };
 pub const PendingResult = struct { call_id: P.CallId, output: ResultValue };
 pub const PendingResults = contracts.Vector(PendingResult, 1);
 pub const ControlReceipt = struct {
@@ -152,8 +169,7 @@ pub const State = struct {
     work_calls: u64,
 };
 pub const Output = struct {
-    disposition: enum { report, no_result, refusal, capacity },
-    summary: Summary,
+    result: Result,
     evidence: EvidenceList,
     programs: Programs,
     control: controls.State,
@@ -220,6 +236,9 @@ pub const support_types = .{
     .{ .name = "Question", .T = Question },
     .{ .name = "Answer", .T = Answer },
     .{ .name = "Action", .T = Action },
+    .{ .name = "Claim", .T = Claim },
+    .{ .name = "Report", .T = Report },
+    .{ .name = "ReportRejection", .T = ReportRejection },
     .{ .name = "Invocation", .T = P.Request },
     .{ .name = "Tools", .T = P.Tools },
     .{ .name = "NormalizationLimits", .T = model.NormalizationLimits },
@@ -229,6 +248,7 @@ pub const support_types = .{
     .{ .name = "AdaptiveRequest", .T = P.AdaptiveRequest },
     .{ .name = "AdaptiveResult", .T = P.AdaptiveResult },
     .{ .name = "AdaptiveContext", .T = P.AdaptiveContext },
+    .{ .name = "HistoryChunk", .T = P.HistoryChunk },
     .{ .name = "AdaptivePrepared", .T = P.AdaptivePrepared },
     .{ .name = "Policy", .T = P.AdaptivePolicy },
     .{ .name = "Profile", .T = model.AdaptiveInferenceProfile },

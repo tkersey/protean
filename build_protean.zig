@@ -358,6 +358,9 @@ pub fn build(b: *std.Build) void {
         native_suite.addImport("kosmos", checked_kosmos);
         native_suite.addImport("protean_native", checked_environment);
         const adaptive_test_types = native_graph.module("examples/adaptive/types.zig");
+        const adaptive_report = native_graph.module("examples/adaptive/report.zig");
+        adaptive_report.addImport("application_types", adaptive_test_types);
+        native_suite.addImport("adaptive_report", adaptive_report);
         const adaptive_test_environment = native_graph.module("examples/adaptive/environment.zig");
         adaptive_test_environment.addImport("application_types", adaptive_test_types);
         adaptive_test_environment.addImport("protean_native", checked_environment);

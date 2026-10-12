@@ -1,6 +1,6 @@
-# Adaptive Responses contract (v10)
+# Adaptive Responses contract (v11)
 
-`agent.model.invoke.v10` binds inference selection and context projection to the
+`agent.model.invoke.v11` binds inference selection and context projection to the
 existing model/responder owner. The shared invocation is v7, inline replay v8,
 and reference replay v9. Earlier saved contracts require their original build.
 The reference consumer is [Protean](../examples/adaptive/README.md).
@@ -39,7 +39,7 @@ polish is deferred, not a blocker on the reusable API or reference integration.
 | `eviction_generation` | Authored exclusion fence. Every newly selected lineage must respect it. |
 | `AdaptiveContextReference` | Content reference plus schema, policy, inference selection, task, tenant, audience, epoch, watermark, and eviction bindings. |
 
-The additional identities are `agent.model.context.responses.adaptive.v5` and
+The additional identities are `agent.model.context.responses.adaptive.v6` and
 `agent.model.policy.adaptive.v2`. The v9
 `agent.model.context.responses.v2` reference is not an adaptive reference.
 
@@ -112,11 +112,23 @@ constructs a second JSON representation of task state for ordinary transitions.
 Explicit replacement contexts are retired: a plan continues its prior transcript
 and cannot supply replacement messages for an existing context.
 
-Context schema v5 retains per-item projection provenance with variable-length
-skill membership and history; no fixed-width catalog mask or ancestry quota
-limits eviction tracking. Replacement seeds remain absent from the plan. Exact application,
-image, schema and runtime bindings remain recovery gates; old saved tasks are
-not migrated or reinterpreted under a new build.
+Context schema v6 pairs each retained provider item with its origin in immutable
+history chunks. A root references the current visible history; its prior context,
+prepared request, and raw capture retain a separate audit ancestry. Appends store
+new events and a root, while edits reuse unchanged chunks. There is no fixed
+catalog mask, event-size quota, or history-depth quota. Replacement seeds remain
+absent from the plan. Current recovery uses exact image, schema, profile, and
+runtime bindings. This release starts with fresh state; v5 contexts and old
+application continuations are not migrated.
+
+Report arguments use nested products and variable-length vectors. JSON schemas
+and argument codecs derive from the same canonical Zig types. Flat profiles
+retain their existing field-vector encoding. Profiles with nested fields use a
+preorder codec forest: each node carries field metadata, its direct child count,
+and an optional sequence bound. Products list their fields in declaration order;
+sequences have one unnamed element child. Enum names retain their declared wire
+tags. Typed decoding rejects unknown, missing, or duplicate fields at every
+object level and preserves exact integer values.
 
 ## Acquisition and replay
 
@@ -143,7 +155,7 @@ The native grammar is checked against independent declarative fixtures,
 including exact failure classifications, full-width integer arguments, Unicode,
 opaque fields and ordered replay. The removed JS adaptive implementation is
 superseded by scope change; no differential execution or dual-backend gate is
-required. Original saved programs require their original compatible build.
+required. Old example stores and archives are replaced with fresh v6 state.
 
 ## Bounds and observations
 

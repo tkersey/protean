@@ -114,7 +114,7 @@ export function tamperedAdaptiveControl(bytes, capturedResponseSchema) {
     if (row[0] !== 4) continue;
     const attemptRow = archive.manifest[6].find(([kind, id]) => kind === 5 && Buffer.from(id).equals(Buffer.from(row[1])));
     const attempt = decodeValue(archive.schemas.get('attempt'), archive.object(attemptRow[2]));
-    if (attempt[5] !== 'agent.model.invoke.v10') continue;
+    if (attempt[5] !== 'agent.model.invoke.v11') continue;
     const capture = decodeValue(archive.schemas.get('capture'), archive.object(row[2]));
     const raw = decodeValue(capturedResponseSchema, archive.object(capture[4].value));
     const body = JSON.parse(Buffer.from(raw[3]).toString('utf8'));

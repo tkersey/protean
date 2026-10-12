@@ -4,6 +4,7 @@ build_protean.zig
 examples/adaptive/context.zig
 examples/adaptive/definition.zig
 examples/adaptive/environment.zig
+examples/adaptive/report.zig
 examples/adaptive/tool_catalog.zig
 examples/adaptive/tool_resources.zig
 examples/adaptive/tool_types.zig
@@ -83,6 +84,7 @@ test/authoring_tests.zig
 test/consumers/adaptive/build.zig
 test/protean/adaptive_controls.zig
 test/protean/adaptive_recovery.zig
+test/protean/adaptive_reports.zig
 test/protean/adaptive_responses.zig
 test/protean/admission.zig
 test/protean/approval_equality.zig

@@ -146,3 +146,21 @@ test "reference replay carries bounded bindings without copying provider history
     try std.testing.expectEqualStrings(invocation.reference_semantic_identity, builder.effects.items[@intCast(v5)].identity);
     try std.testing.expectEqual(v5, try Fixture.declareReference(&builder));
 }
+
+test "nested tool codecs describe bounded vectors without changing flat field codecs" {
+    const Nested = invocation.Profile(union(enum) {
+        propose: struct { rows: contracts.Vector(struct { label: contracts.Text(8), mode: enum(u32) { first = 7, second = 19 } }, 2) },
+    }, .{.{ .name = "propose", .description = "Propose rows." }}, limits);
+    const tool = Nested.allDeclarations().items[0];
+    try std.testing.expectEqual(@as(usize, 4), tool.argument_codec.items.len);
+    try std.testing.expectEqual(.sequence, tool.argument_codec.items[0].field.kind);
+    try std.testing.expectEqual(@as(?u64, 2), tool.argument_codec.items[0].maximum_items);
+    try std.testing.expectEqual(@as(u32, 1), tool.argument_codec.items[0].children);
+    try std.testing.expectEqual(.product, tool.argument_codec.items[1].field.kind);
+    try std.testing.expectEqual(@as(u32, 2), tool.argument_codec.items[1].children);
+    try std.testing.expectEqualSlices(u32, &.{ 7, 19 }, tool.argument_codec.items[3].field.enum_tags.items);
+    try std.testing.expectEqual(@as(u32, 1), Nested.normalizationLimits().maximum_argument_fields);
+    try std.testing.expect(std.mem.indexOf(u8, tool.input_schema_json.bytes, "\"maxItems\":2") != null);
+    // Existing flat consumers still receive their six-field metadata records.
+    try std.testing.expectEqual(@as(usize, 6), @typeInfo(Fixture.ArgumentCodec.Child).@"struct".field_names.len);
+}

@@ -33,7 +33,7 @@ try {
   assert(!JSON.stringify(manifest).includes(process.cwd()));
   const result = invoke('demo', '--offline', '--state-dir', join(app.data, 'adaptive state'));
   assert.equal(result.mode, 'offline-demo');
-  assert.equal(result.output.disposition, 'report');
+  assert.equal(result.output.result.tag, 'report');
   assert.equal(result.output.model_calls, '14');
   assert.equal(result.output.work_calls, '5');
   assert.equal(result.output.control.selection.profile_id, 'analysis');

@@ -155,6 +155,14 @@ const CaptureRecord = struct {
 };
 
 test "adaptive unload capture recovers under its original plan without another acquisition" {
+    try adaptiveRecovery(false);
+}
+
+test "adaptive report correction preserves acquired evidence and retains a large complete report" {
+    try adaptiveRecovery(true);
+}
+
+fn adaptiveRecovery(comptime correction: bool) !void {
     var budget: kosmos.AllocationBudget = .{ .parent = std.testing.allocator, .limit = 64 * 1024 * 1024 };
     const a = budget.allocator();
     const io = std.testing.io;
@@ -212,11 +220,29 @@ test "adaptive unload capture recovers under its original plan without another a
         maximum_state = @max(maximum_state, saved.value.checkpoint.bytes);
         if (saved.value.terminal()) {
             try std.testing.expect(saved.value.outcome_kind == .completed);
-            const result = try namespace.store.object(frame, saved.value.result.?, 64 * 1024);
+            const result = try namespace.store.object(frame, saved.value.result.?, null);
             var output = try protean.contracts.decodeOwned(t.Output, frame, result);
             defer output.deinit();
-            try std.testing.expect(output.value.disposition == .report);
-            try std.testing.expectEqual(14, output.value.model_calls);
+            try std.testing.expect(output.value.result == .report);
+            try std.testing.expectEqual(@as(u64, if (correction) 16 else 14), output.value.model_calls);
+            if (correction) {
+                try std.testing.expect(result.len > (native.protocol.Limits{}).inline_bytes);
+                try std.testing.expectEqual(@as(usize, 70 * 1024), output.value.result.report.summary.bytes.len);
+                try std.testing.expectEqual(@as(usize, 2), output.value.evidence.items.len);
+                try std.testing.expectEqual(@as(usize, 3), output.value.result.report.claims.items.len);
+                try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, output.value.result.report.claims.items[0].evidence_indices.items);
+                try std.testing.expectEqual(@as(u64, 6), output.value.work_calls);
+                try std.testing.expectEqualStrings("src/main.zig", output.value.evidence.items[0].source.path.bytes);
+                try std.testing.expectEqualStrings("src/main.zig", output.value.evidence.items[1].source.path.bytes);
+                try std.testing.expectEqual(@as(u64, 32), output.value.evidence.items[1].source.end);
+                var client: native.client.Client(t) = .{ .service = &service };
+                var params = native.json.object();
+                try native.json.put(frame, &params, "task_id", native.json.string(try frame.dupe(u8, &std.fmt.bytesToHex(task, .lower))));
+                const exposed = try client.call(frame, .@"task.result", params);
+                const outcome = native.json.get(exposed, "outcome").?;
+                try std.testing.expect(native.json.get(outcome, "value") == null);
+                try std.testing.expect(native.json.get(outcome, "value_ref") != null);
+            }
             try std.testing.expectEqual(8, output.value.receipts.items.len);
             try std.testing.expectEqual(8, output.value.control.selection.control_revision);
             finished = true;
@@ -270,6 +296,35 @@ test "adaptive unload capture recovers under its original plan without another a
                     try std.testing.expectEqual(@as(usize, 1), task_count);
                     try std.testing.expectEqual(@as(usize, 2), followup_count);
                 }
+                if (correction and work.entry.declaration.inference and model_calls >= 13) {
+                    if (model_calls == 15) {
+                        var prepared = try protean.contracts.decodeOwned(t.P.AdaptivePrepared, frame, work.prepared.?);
+                        defer prepared.deinit();
+                        const prior = prepared.value.request.results.items;
+                        try std.testing.expectEqual(@as(usize, 1), prior.len);
+                        try std.testing.expectEqualStrings("report-14", prior[0].call_id.bytes);
+                        const rejection_json = (try native.json.parse(frame, prior[0].output.bytes, .{})).value;
+                        const rejection = try native.values.fromJson(t.ReportRejection, frame, rejection_json);
+                        try std.testing.expectEqualDeep(t.ReportRejection{ .reason = .out_of_range, .claim_index = 0, .evidence_position = 1 }, rejection);
+                    }
+                    const name = if (model_calls == 13) "read" else "report";
+                    const arguments = if (model_calls == 13)
+                        "{\"path\":\"src/main.zig\",\"start\":0,\"maximum\":32}"
+                    else if (model_calls == 14)
+                        "{\"summary\":\"Invalid citation\",\"claims\":[{\"kind\":\"observation\",\"statement\":\"Observed\",\"reasoning\":\"\",\"evidence_indices\":[0,2]}],\"limitations\":[]}"
+                    else blk_args: {
+                        const summary = try frame.alloc(u8, 70 * 1024);
+                        @memset(summary, 'S');
+                        break :blk_args try std.json.Stringify.valueAlloc(frame, .{ .summary = summary, .claims = .{
+                            .{ .kind = "observation", .statement = "Both ranges are retained.", .reasoning = "", .evidence_indices = .{ 0, 1 } },
+                            .{ .kind = "inference", .statement = "The ranges overlap.", .reasoning = "Both begin at offset zero.", .evidence_indices = .{1} },
+                            .{ .kind = "hypothesis", .statement = "Other files may differ.", .reasoning = "They were not inspected.", .evidence_indices = .{} },
+                        }, .limitations = .{"No entailment proof is claimed."} }, .{});
+                    };
+                    const call = try std.fmt.allocPrint(frame, "report-{d}", .{model_calls});
+                    const provider = try std.json.Stringify.valueAlloc(frame, .{ .id = call, .status = "completed", .@"error" = @as(?u8, null), .output = .{.{ .type = "function_call", .status = "completed", .call_id = call, .name = name, .arguments = arguments }} }, .{});
+                    break :blk try protean.contracts.encodeOwned(native.responses.Raw, frame, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = provider } });
+                }
                 const acquired = try adapter.acquire(context, work.prepared.?);
                 if (acquired != .captured) return error.UnexpectedAcquisitionFailure;
                 break :blk acquired.captured;
@@ -304,7 +359,7 @@ test "adaptive unload capture recovers under its original plan without another a
         }
     }
     try std.testing.expect(witnessed and finished);
-    try std.testing.expectEqual(14, model_calls);
+    try std.testing.expectEqual(@as(usize, if (correction) 16 else 14), model_calls);
     // Archive validation must release each replay's scratch memory even when
     // the CLI supplies an arena for the enclosing request.
     {
@@ -322,7 +377,7 @@ test "adaptive unload capture recovers under its original plan without another a
     service_live = false;
     try namespace.close();
     namespace_live = false;
-    try continuedAttemptAccounting(a, io, assets, &application, handlers, configured, buffer[0..length]);
+    if (!correction) try continuedAttemptAccounting(a, io, assets, &application, handlers, configured, buffer[0..length]);
 }
 
 fn continuedAttemptAccounting(parent: std.mem.Allocator, io: std.Io, assets: native.discovery.Assets, application: *native.discovery.Application, handlers: native.Registry, original: native.configuration.Admitted, directory: []const u8) !void {

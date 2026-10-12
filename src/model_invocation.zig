@@ -526,7 +526,7 @@ pub fn Profile(
                 .maximum_name_bytes = maxima.name,
                 .maximum_arguments_bytes = limits.arguments_json_bytes,
                 .maximum_argument_name_bytes = @intCast(CodecProfile.FieldName.max_length.?),
-                .maximum_argument_fields = @intCast(ArgumentCodec.max_length.?),
+                .maximum_argument_fields = @intCast(CodecProfile.maximum_fields),
                 .maximum_result_text_bytes = limits.result_text_bytes,
             };
         }

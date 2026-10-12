@@ -61,7 +61,7 @@ builds the adaptive application through that public API.
 
 [Architecture](docs/architecture.md) ·
 [Trust boundaries](docs/security_model.md) ·
-[Adaptive model contracts](docs/model-invocation-v10.md) ·
+[Adaptive model contracts](docs/model-invocation-v11.md) ·
 [Native Responses](docs/native-responses.md)
 
 ## Qualification

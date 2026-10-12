@@ -21,7 +21,7 @@ them with this consumer's task, evidence, question, inbox and completion logic;
 [`types.zig`](types.zig) supplies its actions and ordinary schemas. Model choice,
 skills, offers, epochs and next actions stay in that authored program.
 The native adapter realizes its explicit requests; it has no transcript-driven
-policy loop. See the [v10 API contract](../../docs/model-invocation-v10.md).
+policy loop. See the [v11 API contract](../../docs/model-invocation-v11.md).
 
 From the Protean repository after the [native setup](../../docs/native-single-binary.md):
 
@@ -257,11 +257,20 @@ execution validates the retained derivation and runs the exact referenced image;
 it does not replace the artifact or ask another model to synthesize a program.
 Failed attempts remain recorded and do not suppress otherwise authorized tools.
 
-Application version 3 reports `adaptive-agent.output.v3`: each evidence entry
-is tagged `source` or `generated`, and constructed program references are
-retained in `programs`. `report.evidence_index` selects the stable acquired
-evidence list. Old saved tasks retain their original image/runtime bindings and
-must use their original compatible executable; no implicit migration occurs.
+Application version 4 reports `adaptive-agent.output.v4`. Its `result` is one
+of `report`, `no_result`, `refusal`, or `capacity`. A report has a summary,
+claims, and limitations. Each claim states its kind (`observation`, `inference`,
+or `hypothesis`), statement, reasoning, and zero-based `evidence_indices`.
+Observations and inferences require citations; inferences and hypotheses require
+reasoning. At least one claim must cite evidence. Invalid proposals receive a
+typed rejection under the original tool-call ID and can be corrected.
+
+The output retains every acquired evidence entry in its original order, tagged
+`source` or `generated`, plus constructed program references in `programs`.
+Claims may share evidence; a claim cannot repeat an index. These checks establish
+membership and structural support, not the truth of model-written statements.
+This release uses context v6 and fresh format-12 state directories; old example
+databases and archives are disposable and are not migrated.
 
 Use the existing `artifact.read` method with `task_id` and the reference's
 hex digest as `artifact_id` to inspect a generated program or result in bounded
@@ -296,8 +305,8 @@ current model call's offered set is checked independently from materialized
 definitions, and work dispatch binds to that captured call. Queued user messages
 are consumed through the authored inbox only after the current call settles.
 
-The current adaptive contracts are `agent.model.invoke.v10`,
-`agent.model.context.responses.adaptive.v5` and `agent.model.policy.adaptive.v2`.
+The current adaptive contracts are `agent.model.invoke.v11`,
+`agent.model.context.responses.adaptive.v6` and `agent.model.policy.adaptive.v2`.
 Old saved tasks retain their original contracts and require their original
 compatible executable. Raw provider captures and opaque reasoning remain private.
 Absent usage remains unavailable. Explicit cache markers and unchanged request

@@ -57,12 +57,20 @@ pub fn settings(a: std.mem.Allocator, profile: []const u8) !Settings {
     return result;
 }
 
-const ArgumentError = error{ WrongType, UnknownField, MissingField, IntegerRange, Capacity };
-fn argument(comptime T: type, value: json.Value) ArgumentError!T {
+const ArgumentError = error{ WrongType, UnknownField, MissingField, IntegerRange, Capacity } || std.mem.Allocator.Error;
+fn argument(comptime T: type, a: std.mem.Allocator, value: json.Value) ArgumentError!T {
     if (comptime contracts.json.isText(T)) {
         if (value != .string) return error.WrongType;
         if (contracts.exceeds(value.string.len, T.max_length)) return error.Capacity;
         return .{ .bytes = value.string };
+    }
+    if (comptime contracts.native.wrapped(T) and T.protean_value_kind == .vector) {
+        if (value != .array) return error.WrongType;
+        if (contracts.exceeds(value.array.items.len, T.max_length)) return error.Capacity;
+        const items = try a.alloc(T.Child, value.array.items.len);
+        errdefer a.free(items);
+        for (items, value.array.items) |*item, child| item.* = try argument(T.Child, a, child);
+        return .{ .items = items };
     }
     return switch (@typeInfo(T)) {
         .int => blk: {
@@ -93,7 +101,7 @@ fn argument(comptime T: type, value: json.Value) ArgumentError!T {
                 if (!found) return error.UnknownField;
             }
             var result: T = undefined;
-            inline for (info.field_names, info.field_types) |name, FieldType| @field(result, name) = try argument(FieldType, value.object.get(name) orelse return error.MissingField);
+            inline for (info.field_names, info.field_types) |name, FieldType| @field(result, name) = try argument(FieldType, a, value.object.get(name) orelse return error.MissingField);
             break :blk result;
         },
         else => @compileError("unsupported model argument"),
@@ -322,7 +330,8 @@ pub fn Adapter(comptime P: type) type {
                         if (parsed.value != .object or parsed.value.object.count() != 1) return .{ .invalid = .unknown_field };
                         break :blk parsed.value.object.get("value") orelse return .{ .invalid = .missing_field };
                     } else parsed.value;
-                    const value = argument(T, child) catch |err| return .{ .invalid = switch (err) {
+                    const value = argument(T, a, child) catch |err| return .{ .invalid = switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
                         error.WrongType => .wrong_type,
                         error.UnknownField => .unknown_field,
                         error.MissingField => .missing_field,

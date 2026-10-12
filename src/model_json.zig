@@ -115,6 +115,17 @@ fn writeSchema(comptime T: type, writer: anytype) void {
         writer.byte('}');
         return;
     }
+    if (comptime native.wrapped(T) and T.protean_value_kind == .vector) {
+        writer.raw("{\"type\":\"array\"");
+        if (T.max_length) |maximum| {
+            writer.raw(",\"maxItems\":");
+            writeUnsigned(writer, maximum);
+        }
+        writer.raw(",\"items\":");
+        writeSchema(T.Child, writer);
+        writer.byte('}');
+        return;
+    }
     switch (@typeInfo(T)) {
         .void => writer.raw("{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"),
         .bool => writer.raw("{\"type\":\"boolean\"}"),
@@ -361,6 +372,12 @@ fn maximumValueBytes(comptime T: type) ?usize {
     if (comptime isText(T)) {
         const maximum = T.max_length orelse return null;
         return 2 + 6 * maximum;
+    }
+    if (comptime native.wrapped(T) and T.protean_value_kind == .vector) {
+        const maximum = T.max_length orelse return null;
+        if (maximum == 0) return 2;
+        const child = maximumValueBytes(T.Child) orelse return null;
+        return 2 + maximum * child + (maximum - 1);
     }
     return switch (@typeInfo(T)) {
         .void => 2,

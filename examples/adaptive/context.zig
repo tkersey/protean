@@ -118,6 +118,7 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
     for (resolved, pending.items) |*out, item| {
         const content: []const u8 = switch (item.output) {
             .inline_text => |value| value.bytes,
+            .report_rejection => |value| try native.json.canonical(a, try native.values.toJson(t.ReportRejection, a, value)),
             .work => |ref| blk: {
                 var record = try work.open(ctx, ref);
                 defer record.deinit();
