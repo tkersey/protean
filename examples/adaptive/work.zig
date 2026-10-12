@@ -114,6 +114,11 @@ fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition 
     ctx.checkCancellation() catch |err| return .{ .definitely_not_sent = err };
     return .{ .captured = try ctx.allocator.dupe(u8, bytes) };
 }
+fn rederive(ctx: native.registry.ProjectionContext, _: native.registry.RecoveryInput, _: []const u8, prepared: ?[]const u8) ![]u8 {
+    // Registry.rederive has checked exact equality with the pure snapshot
+    // preparation. Normal acquisition merely copies these same bytes.
+    return ctx.allocator.dupe(u8, prepared orelse return error.InvalidPreparedRequest);
+}
 fn dependencies(a: std.mem.Allocator, objects: []const []const u8) ![]native.registry.Dependency {
     if (objects.len > 1) return error.InvalidProjection;
     var references: native.registry.ProjectionReferences = .{ .allocator = a };
@@ -140,7 +145,7 @@ pub fn declaration() native.Declaration {
         fn schema(a: std.mem.Allocator) ![]u8 {
             return native.values.schemaBytes(t.WorkReply, a);
         }
-    }.schema, .capture = .{ .prepare = prepareWork, .acquire = acquire, .interpret = interpret, .dependencies = dependencies } };
+    }.schema, .capture = .{ .prepare = prepareWork, .acquire = acquire, .interpret = interpret, .dependencies = dependencies }, .recovery = .{ .identity = "agent.recovery.frozen-snapshot.v1", .version = 1, .rederive = rederive } };
 }
 fn prepareInspection(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
     var request = try contracts.decodeOwned(t.WorkRequest, ctx.allocator, bytes);

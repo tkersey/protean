@@ -96,38 +96,61 @@ fn render(a: std.mem.Allocator, artifact: t.ToolArtifact, program: ?wire.Program
     }
     return .{ .bytes = try native.json.canonical(a, value) };
 }
-fn compute(ctx: native.Context, prepared: Prepared, program_bytes: *?contracts.Bytes(null)) !@FieldType(t.ToolArtifact, "outcome") {
+fn compute(a: std.mem.Allocator, profile: []const u8, cancellation: ?*const std.atomic.Value(bool), prepared: Prepared, program_bytes: *?contracts.Bytes(null)) !@FieldType(t.ToolArtifact, "outcome") {
     if (prepared.rejected) |reason| return .{ .rejected = reason };
-    try ctx.checkCancellation();
+    if (cancellation) |flag| if (flag.load(.acquire)) return error.Canceled;
     switch (prepared.request.action) {
         .build => |request| {
-            const program = try engine.construct(ctx.allocator, ctx.allocator, prepared.task, ctx.profile, prepared.catalog.bytes, request.proposal_json.bytes);
-            try ctx.checkCancellation();
-            const bytes = try contracts.encodeOwned(wire.Program, ctx.allocator, program);
+            const program = try engine.construct(a, a, prepared.task, profile, prepared.catalog.bytes, request.proposal_json.bytes);
+            if (cancellation) |flag| if (flag.load(.acquire)) return error.Canceled;
+            const bytes = try contracts.encodeOwned(wire.Program, a, program);
             program_bytes.* = .{ .bytes = bytes };
             return .{ .built = work.reference(bytes) };
         },
         .run => |request| {
-            const value = try engine.execute(ctx.allocator, ctx.allocator, ctx.cancellation, prepared.task, ctx.profile, prepared.catalog.bytes, prepared.program orelse return error.InvalidPreparedRequest, prepared.input orelse return error.InvalidPreparedRequest);
+            const value = try engine.execute(a, a, cancellation, prepared.task, profile, prepared.catalog.bytes, prepared.program orelse return error.InvalidPreparedRequest, prepared.input orelse return error.InvalidPreparedRequest);
             return .{ .ran = .{ .program = try resources.parseReference(request.tool_ref.bytes), .input = prepared.input_ref orelse return error.InvalidPreparedRequest, .value = .{ .bytes = value } } };
         },
     }
+}
+fn encodeCapture(a: std.mem.Allocator, profile: []const u8, cancellation: ?*const std.atomic.Value(bool), bytes: []const u8, prepared: Prepared, comptime recovering: bool) ![]u8 {
+    var program_bytes: ?contracts.Bytes(null) = null;
+    var artifact: t.ToolArtifact = .{
+        .task = prepared.task,
+        .policy = prepared.policy,
+        .call_id = prepared.request.call_id,
+        .outcome = compute(a, profile, cancellation, prepared, &program_bytes) catch |err| blk: {
+            // A new operational failure is not a rederived semantic result.
+            if (recovering and (err == error.OutOfMemory or err == error.Capacity or err == error.Canceled)) return err;
+            break :blk .{ .rejected = failure(if (prepared.request.action == .build) .construction else .execution, err) };
+        },
+        .model_text = .{ .bytes = "" },
+    };
+    const program = if (program_bytes) |encoded| (try contracts.decodeOwned(wire.Program, a, encoded.bytes)).value else null;
+    artifact.model_text = render(a, artifact, program) catch |err| blk: {
+        if (recovering and (err == error.OutOfMemory or err == error.Capacity)) return err;
+        program_bytes = null;
+        artifact.outcome = .{ .rejected = failure(.execution, err) };
+        break :blk try render(a, artifact, null);
+    };
+    return contracts.encodeOwned(Captured, a, .{ .prepared = work.digest(bytes), .artifact = artifact, .program = program_bytes });
 }
 fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition {
     var decoded = try contracts.decodeOwned(Prepared, ctx.allocator, bytes);
     defer decoded.deinit();
     const prepared = decoded.value;
     if (!same(&prepared.policy, &work.digest(ctx.profile)) or !same(ctx.task_id, &std.fmt.bytesToHex(prepared.task, .lower))) return error.InvalidPreparedRequest;
-    var program_bytes: ?contracts.Bytes(null) = null;
-    var artifact: t.ToolArtifact = .{ .task = prepared.task, .policy = prepared.policy, .call_id = prepared.request.call_id, .outcome = compute(ctx, prepared, &program_bytes) catch |err| .{ .rejected = failure(if (prepared.request.action == .build) .construction else .execution, err) }, .model_text = .{ .bytes = "" } };
-    const program = if (program_bytes) |encoded| (try contracts.decodeOwned(wire.Program, ctx.allocator, encoded.bytes)).value else null;
-    artifact.model_text = render(ctx.allocator, artifact, program) catch |err| blk: {
-        program_bytes = null;
-        artifact.outcome = .{ .rejected = failure(.execution, err) };
-        break :blk try render(ctx.allocator, artifact, null);
-    };
-    return .{ .captured = try contracts.encodeOwned(Captured, ctx.allocator, .{ .prepared = work.digest(bytes), .artifact = artifact, .program = program_bytes }) };
+    return .{ .captured = try encodeCapture(ctx.allocator, ctx.profile, ctx.cancellation, bytes, prepared, false) };
 }
+fn rederive(ctx: native.registry.ProjectionContext, _: native.registry.RecoveryInput, _: []const u8, original: ?[]const u8) ![]u8 {
+    const bytes = original orelse return error.InvalidPreparedRequest;
+    var decoded = try contracts.decodeOwned(Prepared, ctx.allocator, bytes);
+    defer decoded.deinit();
+    const prepared = decoded.value;
+    if (!same(&prepared.task, &ctx.task) or !same(&prepared.policy, &work.digest(ctx.profile))) return error.InvalidPreparedRequest;
+    return encodeCapture(ctx.allocator, ctx.profile, null, bytes, prepared, true);
+}
+
 fn dependencies(a: std.mem.Allocator, objects: []const []const u8) ![]native.registry.Dependency {
     if (objects.len > 2) return error.InvalidProjection;
     var references: native.registry.ProjectionReferences = .{ .allocator = a };
@@ -179,5 +202,5 @@ pub fn declaration(comptime build: bool) native.Declaration {
         fn schema(a: std.mem.Allocator) ![]u8 {
             return native.values.schemaBytes(t.ToolReply, a);
         }
-    }.schema, .capture = .{ .prepare = if (build) prepareBuild else prepareRun, .acquire = acquire, .interpret = interpret, .dependencies = dependencies } };
+    }.schema, .capture = .{ .prepare = if (build) prepareBuild else prepareRun, .acquire = acquire, .interpret = interpret, .dependencies = dependencies }, .recovery = .{ .identity = "agent.recovery.pure-generated-tool.v1", .version = 1, .rederive = rederive } };
 }

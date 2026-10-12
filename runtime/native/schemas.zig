@@ -175,6 +175,7 @@ fn eventFields(kind: state.EventType) []const EventField {
         .message_queued, .message_consumed, .message_not_consumed => &.{ .{ .name = "message_id", .kind = .digest }, .{ .name = "ordinal", .kind = .counter }, .{ .name = "disposition", .kind = .disposition } },
         .blocked => &.{.{ .name = "delivery", .kind = .delivery, .optional = true }},
         .imported => &.{.{ .name = "archive_sha256", .kind = .digest }},
+        .reconciled => &.{.{ .name = "reconciliation_id", .kind = .digest }},
         .accepted, .input_accepted, .cancellation_requested, .parked, .resumed, .delivery_unknown, .completed, .failed, .cancelled => &.{},
     };
 }

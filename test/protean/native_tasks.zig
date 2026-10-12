@@ -782,6 +782,7 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
             response: ?Ref,
             disposition: enum { complete, definitely_not_sent, unknown },
             projection: ?struct { reply: Ref, objects: protean.contracts.Vector(Ref, null), output_tokens: ?u64 },
+            reconciliation: ?[32]u8,
         };
         var decoded_capture = try protean.contracts.decodeOwned(Captured, frame, saved_capture);
         defer decoded_capture.deinit();

@@ -38,7 +38,7 @@ pub fn visitReferencesAs(comptime T: type, comptime Ref: type, value: T, collect
 pub const Outcome = enum { progressed, yielded, requested, completed, failed, cancelled };
 pub const Schedule = enum { queued, active, parked };
 pub const Status = enum { queued, running, waiting_input, parked, cancelling, blocked, unknown, completed, failed, cancelled };
-pub const RecordKind = enum { occurrence, question, message, artifact, capture, attempt, origin };
+pub const RecordKind = enum { occurrence, question, message, artifact, capture, attempt, origin, reconciliation };
 pub const Blocker = enum { missing_capability, denied, capacity, missing_artifact, incompatible_profile, unavailable_environment };
 
 /// Growing task metadata retains immutable object identities without a count quota.
@@ -87,8 +87,8 @@ pub const Task = struct {
     }
 };
 
-pub const Method = enum { submit, message, respond, cancel, @"resume", import_checkpoint };
-pub const Disposition = enum { accepted, queued, answer_acquired, cancellation_requested, resumed, imported };
+pub const Method = enum { submit, message, respond, cancel, @"resume", import_checkpoint, reconcile };
+pub const Disposition = enum { accepted, queued, answer_acquired, cancellation_requested, resumed, imported, reconciled };
 pub const Receipt = struct {
     id: Digest,
     client_operation_id: Name,
@@ -99,6 +99,7 @@ pub const Receipt = struct {
     disposition: Disposition,
     message: ?Digest = null,
     question: ?Digest = null,
+    reconciliation: ?Digest = null,
 };
 
 pub const Question = struct {
@@ -190,6 +191,7 @@ pub const EventType = enum {
     failed,
     cancelled,
     imported,
+    reconciled,
 };
 pub const Event = struct {
     task: TaskId,
@@ -234,7 +236,86 @@ pub const Capture = struct {
         objects: contracts.Vector(Reference, null),
         output_tokens: ?u64,
     } = null,
+    reconciliation: ?Digest = null,
 };
+
+/// Recovery is a new observation about one original attempt. The original
+/// ambiguous occurrence and every predecessor body remain private audit roots.
+pub const RecoveryRequest = enum { rederive };
+pub const Reconciliation = struct {
+    version: u32 = 1,
+    id: Digest,
+    task: TaskId,
+    client_operation_id: Name,
+    request_digest: Digest,
+    admission_revision: u64,
+    occurrence: Digest,
+    attempt: Digest,
+    original_occurrence: Reference,
+    original_attempt: Reference,
+    original_capture: ?Reference = null,
+    request: Reference,
+    prepared: ?Reference,
+    profile: Reference,
+    resources: contracts.Vector(Reference, null),
+    capability: Name,
+    mechanism: Name,
+    mechanism_version: u32,
+    provenance: enum { none, rederived },
+    outcome: union(enum) {
+        unresolved: enum { unsupported, unavailable },
+        capture_admitted: Reference,
+        reply_settled: Reference,
+    },
+    previous: ?Reference = null,
+};
+
+/// Decode historical owners instead of trusting dependency rows or treating
+/// their content hashes as sufficient proof of the retained closure.
+pub fn visitReconciliationHistory(a: std.mem.Allocator, store: anytype, current: Reconciliation, collector: anytype) anyerror!void {
+    if (current.version != 1 or current.admission_revision == 0) return error.CorruptState;
+    const occurrence_bytes = try store.object(a, current.original_occurrence, null);
+    defer a.free(occurrence_bytes);
+    var original = try contracts.decodeOwned(occurrence.Occurrence, a, occurrence_bytes);
+    defer original.deinit();
+    if (!std.meta.eql(original.value.task, current.task) or !std.meta.eql(original.value.id, current.occurrence) or original.value.state != .unknown or !std.meta.eql(original.value.state.unknown.id, current.attempt) or !std.meta.eql(original.value.request_object, current.request)) return error.CorruptState;
+    try collector.typed(occurrence.Occurrence, current.original_occurrence, original.value);
+    const attempt_bytes = try store.object(a, current.original_attempt, null);
+    defer a.free(attempt_bytes);
+    var attempt = try contracts.decodeOwned(Attempt, a, attempt_bytes);
+    defer attempt.deinit();
+    if (!std.meta.eql(attempt.value.task, current.task) or !std.meta.eql(attempt.value.id, current.attempt) or !std.meta.eql(attempt.value.occurrence, current.occurrence) or !std.meta.eql(attempt.value.request, current.request) or !std.meta.eql(attempt.value.prepared, current.prepared) or !std.meta.eql(attempt.value.profile, current.profile) or !std.mem.eql(u8, attempt.value.capability.bytes, current.capability.bytes)) return error.CorruptState;
+    try collector.typed(Attempt, current.original_attempt, attempt.value);
+    if (current.original_capture) |ref| {
+        const bytes = try store.object(a, ref, null);
+        defer a.free(bytes);
+        var captured = try contracts.decodeOwned(Capture, a, bytes);
+        defer captured.deinit();
+        if (!std.meta.eql(captured.value.task, current.task) or !std.meta.eql(captured.value.attempt, current.attempt) or !std.meta.eql(captured.value.occurrence, current.occurrence) or current.prepared == null or !std.meta.eql(captured.value.request, current.prepared.?) or captured.value.projection != null) return error.CorruptState;
+        try collector.typed(Capture, ref, captured.value);
+    }
+    switch (current.outcome) {
+        .unresolved => if (current.provenance != .none or current.previous != null) return error.CorruptState,
+        .capture_admitted => if (current.provenance != .rederived or current.prepared == null or current.previous != null) return error.CorruptState,
+        .reply_settled => if (current.provenance != .rederived) return error.CorruptState,
+    }
+    if (current.previous) |ref| {
+        const bytes = try store.object(a, ref, null);
+        defer a.free(bytes);
+        var prior = try contracts.decodeOwned(Reconciliation, a, bytes);
+        defer prior.deinit();
+        // Pure capture recovery has exactly two publications. A predecessor
+        // cannot fabricate a chain, change operation identity, or erase roots.
+        if (current.outcome != .reply_settled or prior.value.outcome != .capture_admitted or prior.value.previous != null) return error.CorruptState;
+        var normalized = current;
+        normalized.outcome = prior.value.outcome;
+        normalized.previous = null;
+        const expected = try contracts.encodeOwned(Reconciliation, a, normalized);
+        defer a.free(expected);
+        if (!std.mem.eql(u8, expected, bytes)) return error.CorruptState;
+        try collector.typed(Reconciliation, ref, prior.value);
+    }
+}
 
 pub const Origin = struct {
     id: Digest,

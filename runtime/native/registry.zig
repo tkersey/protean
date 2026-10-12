@@ -40,6 +40,7 @@ pub const ProjectionBinding = struct {
     tenant: []const u8,
     profile: []const u8,
     application: state.Digest,
+    resources: []const ObjectReference = &.{},
 };
 
 /// Pure projection inputs: immutable objects and frozen task bindings, with no
@@ -50,6 +51,7 @@ pub const ProjectionContext = struct {
     tenant: []const u8,
     profile: []const u8,
     application: ?state.Digest = null,
+    resources: []const ObjectReference = &.{},
     objects: ReadView,
 
     pub fn object(self: ProjectionContext, ref: state.Reference, limit: usize) ![]u8 {
@@ -109,6 +111,29 @@ pub const Acquisition = union(enum) {
     unknown: anyerror,
 };
 
+/// Frozen occurrence inputs supplied by the task owner, never client-provided
+/// replacement answers. Logical attempt admission remains the Service's job.
+pub const RecoveryInput = struct {
+    task: state.TaskId,
+    occurrence: state.Digest,
+    attempt: state.Digest,
+    request_identity: state.Digest,
+    request: ObjectReference,
+    prepared: ?ObjectReference,
+    profile: ObjectReference,
+    resources: []const ObjectReference,
+    capability: []const u8,
+    inference: bool,
+};
+pub const Rederived = union(enum) { capture: []const u8, reply: []const u8 };
+pub const RecoveryAdapter = struct {
+    identity: []const u8,
+    version: u32,
+    /// Pure computation: only immutable objects and original prepared bytes.
+    /// No Context, IO, credentials, live filesystem, or environment handle.
+    rederive: *const fn (ProjectionContext, RecoveryInput, []const u8, ?[]const u8) anyerror![]u8,
+};
+
 pub const Grant = struct {
     identity: []const u8,
     resource_role: []const u8,
@@ -166,6 +191,7 @@ pub const Declaration = struct {
     background: bool = false,
     /// acquire receives prepared bytes and returns an uninterpreted capture.
     capture: ?CaptureAdapter = null,
+    recovery: ?RecoveryAdapter = null,
     payload_schema: *const fn (std.mem.Allocator) anyerror![]u8,
     resume_schema: *const fn (std.mem.Allocator) anyerror![]u8,
     invoke: ?*const fn (Context, []const u8) anyerror![]u8 = null,
@@ -197,6 +223,9 @@ pub const Registry = struct {
             if (declaration.public_outputs and declaration.capture == null) return error.InvalidCapability;
             if (declaration.kind == .leaf and declaration.invoke == null and declaration.capture == null) return error.InvalidCapability;
             if (declaration.capture != null and (declaration.kind != .leaf or !declaration.background or declaration.invoke != null)) return error.InvalidCapability;
+            if (declaration.recovery) |recovery| {
+                if (declaration.kind != .leaf or recovery.identity.len == 0 or recovery.version == 0) return error.InvalidCapability;
+            }
             if (declaration.kind == .question and (declaration.present == null or declaration.answer == null or declaration.answer_schema_id == null)) return error.InvalidCapability;
             entry.* = .{
                 .declaration = declaration,
@@ -240,7 +269,50 @@ pub const Registry = struct {
         }
         return if (known_identity) error.CapabilitySchemaMismatch else error.MissingCapability;
     }
+
+    /// Reconstruct the original pure result without invoking its environmental
+    /// adapter. This returns newly derived bytes, not historical delivery proof.
+    /// The task owner must still admit the same unknown occurrence/attempt and
+    /// durably record rederivation provenance before consuming these bytes.
+    pub fn rederive(self: Registry, ctx: ProjectionContext, input: RecoveryInput) !Rederived {
+        const image = ctx.application orelse return error.InvalidRecovery;
+        if (!std.meta.eql(ctx.task, input.task) or input.profile.bytes != ctx.profile.len or
+            !std.meta.eql(input.profile.digest, @import("store.zig").digest(ctx.profile)) or
+            !std.meta.eql(ctx.resources.len, input.resources.len)) return error.InvalidRecovery;
+        for (ctx.resources, input.resources) |actual, expected| if (!std.meta.eql(actual, expected)) return error.InvalidRecovery;
+        const request_bytes = try recoveryObject(ctx, input.request);
+        defer ctx.allocator.free(request_bytes);
+        var request = try data.invocation.decode(data.invocation.Request, ctx.allocator, request_bytes);
+        defer request.deinit();
+        if (!std.meta.eql(request.value.request_identity, input.request_identity)) return error.InvalidRecovery;
+        const entry = try self.resolve(request.value, image);
+        if (!std.mem.eql(u8, input.capability, entry.declaration.identity) or input.inference != entry.declaration.inference) return error.InvalidRecovery;
+        const adapter = entry.declaration.recovery orelse return error.UnsupportedRecovery;
+        const prepared = if (input.prepared) |ref| try recoveryObject(ctx, ref) else null;
+        defer if (prepared) |bytes| ctx.allocator.free(bytes);
+        if (entry.declaration.capture) |capture| {
+            const original = prepared orelse return error.InvalidRecovery;
+            const derived = try capture.prepare(ctx, request.value.binding.payload);
+            defer ctx.allocator.free(derived);
+            if (!std.mem.eql(u8, original, derived)) return error.InvalidPreparedRequest;
+            return .{ .capture = try adapter.rederive(ctx, input, request.value.binding.payload, original) };
+        }
+        if (prepared != null) return error.InvalidRecovery;
+        const reply = try adapter.rederive(ctx, input, request.value.binding.payload, null);
+        errdefer ctx.allocator.free(reply);
+        var schema = try data.schema.decode(ctx.allocator, entry.resume_schema);
+        defer schema.deinit();
+        try data.schema.validateValue(ctx.allocator, schema.descriptor, reply);
+        return .{ .reply = reply };
+    }
 };
+
+fn recoveryObject(ctx: ProjectionContext, ref: ObjectReference) ![]u8 {
+    const bytes = try ctx.object(ref, std.math.cast(usize, ref.bytes) orelse return error.Capacity);
+    errdefer ctx.allocator.free(bytes);
+    if (bytes.len != ref.bytes or !std.meta.eql(@import("store.zig").digest(bytes), ref.digest)) return error.InvalidRecovery;
+    return bytes;
+}
 
 pub fn leaf(comptime Payload: type, comptime Reply: type, comptime options: struct {
     identity: []const u8,
@@ -343,6 +415,68 @@ test "capability admission requires the complete schema and current resource gra
     var wrong = request;
     wrong.binding.resume_schema = &.{};
     try std.testing.expectError(error.CapabilitySchemaMismatch, registry.admit(wrong, authority, @splat(1), resource));
+}
+
+test "pure recovery binds frozen inputs and validates the original reply schema without invocation" {
+    const a = std.testing.allocator;
+    const storage = @import("store.zig");
+    const Handler = struct {
+        var invalid_reply: bool = false;
+        fn invoke(_: Context, _: u32) !u32 {
+            return error.EnvironmentMustNotRun;
+        }
+        fn rederive(ctx: ProjectionContext, _: RecoveryInput, payload: []const u8, prepared: ?[]const u8) ![]u8 {
+            try std.testing.expect(prepared == null);
+            if (invalid_reply) return ctx.allocator.dupe(u8, &.{0});
+            var input = try contracts.decodeOwned(u32, ctx.allocator, payload);
+            defer input.deinit();
+            return contracts.encodeOwned(u32, ctx.allocator, input.value + 1);
+        }
+    };
+    var declaration = leaf(u32, u32, .{ .identity = "pure-increment.v1", .resource_role = "frozen" }, Handler.invoke);
+    declaration.recovery = .{ .identity = "pure-increment.recovery.v1", .version = 1, .rederive = Handler.rederive };
+    var registry = try Registry.init(a, &.{declaration});
+    defer registry.deinit();
+    const entry = registry.entries[0];
+    const request = try data.invocation.request(.{ .program_identity = @splat(1), .pending_state_digest = @splat(2), .effect = 0, .semantic_identity = declaration.identity, .payload_schema = entry.payload_schema, .resume_schema = entry.resume_schema, .payload = &.{ 7, 0, 0, 0 } });
+    const encoded = try data.invocation.encodeOwned(data.invocation.Request, a, request);
+    defer a.free(encoded);
+    var object = struct {
+        bytes: []const u8,
+        fn read(pointer: *anyopaque, allocator: std.mem.Allocator, _: ObjectReference, _: usize) ![]u8 {
+            const self: *@This() = @ptrCast(@alignCast(pointer));
+            return allocator.dupe(u8, self.bytes);
+        }
+    }{ .bytes = encoded };
+    const resources: []const ObjectReference = &.{ .{ .digest = @splat(3), .bytes = 17 }, .{ .digest = @splat(4), .bytes = 19 } };
+    const ctx: ProjectionContext = .{ .allocator = a, .task = @splat(9), .tenant = "test", .profile = "frozen profile", .application = @splat(1), .resources = resources, .objects = .validating(&object, @TypeOf(object).read) };
+    const original: RecoveryInput = .{ .task = ctx.task, .occurrence = @splat(5), .attempt = @splat(6), .request_identity = request.request_identity, .request = .{ .digest = storage.digest(encoded), .bytes = encoded.len }, .prepared = null, .profile = .{ .digest = storage.digest(ctx.profile), .bytes = ctx.profile.len }, .resources = resources, .capability = declaration.identity, .inference = false };
+    const result = try registry.rederive(ctx, original);
+    defer a.free(result.reply);
+    try std.testing.expectEqualSlices(u8, &.{ 8, 0, 0, 0 }, result.reply);
+    for (0..7) |case| {
+        var input = original;
+        switch (case) {
+            0 => input.task[0] ^= 1,
+            1 => input.profile.digest[0] ^= 1,
+            2 => input.profile.bytes += 1,
+            3 => input.resources = &.{ resources[1], resources[0] },
+            4 => input.request_identity[0] ^= 1,
+            5 => input.request.digest[0] ^= 1,
+            6 => input.inference = true,
+            else => unreachable,
+        }
+        try std.testing.expectError(error.InvalidRecovery, registry.rederive(ctx, input));
+    }
+    var foreign = ctx;
+    foreign.application = @splat(7);
+    try std.testing.expectError(error.Denied, registry.rederive(foreign, original));
+    Handler.invalid_reply = true;
+    defer Handler.invalid_reply = false;
+    if (registry.rederive(ctx, original)) |invalid| {
+        a.free(invalid.reply);
+        return error.InvalidReplyAccepted;
+    } else |err| try std.testing.expect(err != error.EnvironmentMustNotRun);
 }
 
 test "schema-specialized capability families resolve independently of declaration order" {

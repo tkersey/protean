@@ -29,8 +29,9 @@ const Audit = struct {
     image: Digest,
     objects: std.AutoArrayHashMapUnmanaged(Digest, Object) = .empty,
     edges: std.AutoHashMapUnmanaged(Edge, void) = .empty,
-    tasks: std.AutoHashMapUnmanaged(state.TaskId, struct { revision: u64, profile: Ref }) = .empty,
+    tasks: std.AutoHashMapUnmanaged(state.TaskId, struct { revision: u64, profile: Ref, body: Ref }) = .empty,
     records: std.AutoArrayHashMapUnmanaged(Key, Ref) = .empty,
+    recovery_receipts: std.AutoHashMapUnmanaged(Key, void) = .empty,
     statistics: Statistics = .{},
 
     fn add(self: *Audit, ref: Ref) !void {
@@ -81,7 +82,7 @@ const Audit = struct {
             defer decoded.deinit();
             const task = decoded.value;
             if (!same(&task.id, &id) or task.revision != try rows.integer(1) or @intFromBool(task.terminal()) != try rows.integer(2)) return error.CorruptState;
-            try self.tasks.put(self.a, id, .{ .revision = task.revision, .profile = task.profile });
+            try self.tasks.put(self.a, id, .{ .revision = task.revision, .profile = task.profile, .body = ref });
             try self.value(state.Task, ref, task);
         }
     }
@@ -105,6 +106,7 @@ const Audit = struct {
                     const bound_id = if (T == state.Capture) item.attempt else item.id;
                     if (!same(&bound_task, &task) or !same(&bound_id, &id)) return error.CorruptState;
                     try self.value(T, ref, item);
+                    if (T == state.Reconciliation) try state.visitReconciliationHistory(self.a, self.store, item, self);
                 }
             }
         }
@@ -137,8 +139,18 @@ const Audit = struct {
                 const receipt = decoded.value;
                 if (!same(&receipt.task, &task) or !same(&receipt.request_digest, &request) or receipt.revision > owner.revision) return error.CorruptState;
                 try self.value(state.Receipt, ref, receipt);
+                if ((receipt.method == .reconcile) != (receipt.reconciliation != null)) return error.CorruptState;
+                if (receipt.reconciliation) |id| {
+                    var recovery = try self.record(.reconciliation, task, id);
+                    defer recovery.deinit();
+                    if (recovery.value.admission_revision != receipt.revision or !std.meta.eql(recovery.value.request_digest, receipt.request_digest) or !same(recovery.value.client_operation_id.bytes, receipt.client_operation_id.bytes)) return error.CorruptState;
+                    try self.recovery_receipts.put(self.a, .{ .kind = .reconciliation, .task = task, .id = id }, {});
+                }
             }
         }
+    }
+    pub fn typed(self: *Audit, comptime T: type, parent: Ref, input: T) !void {
+        try self.value(T, parent, input);
     }
     fn record(self: *Audit, comptime kind: state.RecordKind, task: state.TaskId, id: Digest) !contracts.Decoded(storage.Record(@tagName(kind))) {
         const ref = self.records.get(.{ .kind = kind, .task = task, .id = id }) orelse return error.CorruptState;
@@ -150,6 +162,7 @@ const Audit = struct {
             var decoded = try self.record(.capture, key.task, key.id);
             defer decoded.deinit();
             const capture = decoded.value;
+            if (capture.reconciliation) |id| if (!self.records.contains(.{ .kind = .reconciliation, .task = key.task, .id = id })) return error.CorruptState;
             var attempt = try self.record(.attempt, key.task, capture.attempt);
             defer attempt.deinit();
             var saved = try self.record(.occurrence, key.task, capture.occurrence);
@@ -179,6 +192,56 @@ const Audit = struct {
             for (edges) |dependency| {
                 if ((parents.get(dependency.parent.digest) orelse return error.InvalidProjection) != dependency.parent.bytes) return error.InvalidProjection;
                 try self.edge(dependency.parent, dependency.child);
+            }
+        }
+    }
+    fn reconciliations(self: *Audit) !void {
+        for (self.records.keys()) |key| {
+            if (key.kind != .reconciliation) continue;
+            if (!self.recovery_receipts.contains(key)) return error.CorruptState;
+            var decoded = try self.record(.reconciliation, key.task, key.id);
+            defer decoded.deinit();
+            const item = decoded.value;
+            const owner = self.tasks.get(key.task).?;
+            var task = try contracts.decodeOwned(state.Task, self.a, try self.body(owner.body));
+            defer task.deinit();
+            if (item.admission_revision > owner.revision or !std.meta.eql(item.profile, owner.profile) or item.resources.items.len != task.value.resources.items.len) return error.CorruptState;
+            for (item.resources.items, task.value.resources.items) |actual, expected| if (!std.meta.eql(actual, expected)) return error.CorruptState;
+            if (!std.meta.eql(self.records.get(.{ .kind = .attempt, .task = key.task, .id = item.attempt }) orelse return error.CorruptState, item.original_attempt)) return error.CorruptState;
+            var occurrence_value = try self.record(.occurrence, key.task, item.occurrence);
+            defer occurrence_value.deinit();
+            if (!std.meta.eql(occurrence_value.value.request_object, item.request)) return error.CorruptState;
+            var request = try data.invocation.decode(data.invocation.Request, self.a, try self.body(item.request));
+            defer request.deinit();
+            if (!std.meta.eql(request.value.request_identity, occurrence_value.value.request)) return error.CorruptState;
+            const entry = try self.handlers.resolve(request.value, self.image);
+            if (!same(entry.declaration.identity, item.capability.bytes)) return error.CorruptState;
+            if (item.provenance == .rederived) {
+                const adapter = entry.declaration.recovery orelse return error.CorruptState;
+                if (!same(adapter.identity, item.mechanism.bytes) or adapter.version != item.mechanism_version) return error.CorruptState;
+            }
+            switch (item.outcome) {
+                .unresolved => {},
+                .capture_admitted => |ref| {
+                    const pending = occurrence_value.value.state;
+                    if (pending != .captured or !std.meta.eql(pending.captured.id, item.attempt)) return error.CorruptState;
+                    var capture = try self.record(.capture, key.task, item.attempt);
+                    defer capture.deinit();
+                    if (capture.value.reconciliation == null or !std.meta.eql(capture.value.reconciliation.?, key.id) or capture.value.response == null or !std.meta.eql(capture.value.response.?, ref) or capture.value.projection != null) return error.CorruptState;
+                },
+                .reply_settled => |ref| {
+                    const acquired = switch (occurrence_value.value.state) {
+                        .settled_reply => |reply| reply,
+                        .admitted => |admitted| if (admitted == .reply) admitted.reply else return error.CorruptState,
+                        else => return error.CorruptState,
+                    };
+                    if (!std.meta.eql(acquired.attempt, item.attempt) or !std.meta.eql(acquired.reply, ref.digest)) return error.CorruptState;
+                    if (entry.declaration.capture != null) {
+                        var capture = try self.record(.capture, key.task, item.attempt);
+                        defer capture.deinit();
+                        if (capture.value.reconciliation == null or !std.meta.eql(capture.value.reconciliation.?, key.id) or capture.value.projection == null or !std.meta.eql(capture.value.projection.?.reply, ref) or item.previous == null) return error.CorruptState;
+                    }
+                },
             }
         }
     }
@@ -214,5 +277,6 @@ pub fn verify(store: *storage.Store, handlers: registry.Registry, image: Digest)
     try audit.recordRoots();
     try audit.otherRoots();
     try audit.projections();
+    try audit.reconciliations();
     return audit.finish();
 }

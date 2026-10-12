@@ -42,4 +42,5 @@ test {
 // Private history internals are exposed only to the repository's test graph.
 pub const testing = if (@import("builtin").is_test) struct {
     pub const adaptive_history = @import("adaptive_history.zig");
+    pub const state = @import("state.zig");
 } else struct {};

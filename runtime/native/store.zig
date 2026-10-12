@@ -42,6 +42,7 @@ pub fn Record(comptime kind: []const u8) type {
         .artifact => state.Artifact,
         .capture => state.Capture,
         .attempt => state.Attempt,
+        .reconciliation => state.Reconciliation,
         .origin => state.Origin,
     };
 }
@@ -174,6 +175,7 @@ pub const Store = struct {
             .tenant = binding.tenant,
             .profile = binding.profile,
             .application = binding.application,
+            .resources = binding.resources,
             .objects = .{ .source = &scope, .read_object = ProjectionScope.read, .native_scope = &scope },
         }));
         // Check and release even when the pure adapter failed. A malformed
@@ -526,6 +528,18 @@ pub const Store = struct {
         try self.database.run("INSERT OR IGNORE INTO dependencies VALUES(?,?,?,?)", &.{ .{ .blob = &parent.digest }, .{ .integer = @intCast(parent.bytes) }, .{ .blob = &child.digest }, .{ .integer = @intCast(child.bytes) } });
     }
     fn retainValue(self: *Store, comptime T: type, parent: state.Reference, value: T) !void {
+        try self.retainValueDirect(T, parent, value);
+        if (T == state.Reconciliation) {
+            var history = struct {
+                store: *Store,
+                pub fn typed(this: *@This(), comptime V: type, ref: state.Reference, item: V) !void {
+                    try this.store.retainValueDirect(V, ref, item);
+                }
+            }{ .store = self };
+            try state.visitReconciliationHistory(self.allocator, self, value, &history);
+        }
+    }
+    fn retainValueDirect(self: *Store, comptime T: type, parent: state.Reference, value: T) !void {
         var sink = struct {
             store: *Store,
             parent: state.Reference,
