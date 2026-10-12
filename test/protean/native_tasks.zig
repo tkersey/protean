@@ -1401,7 +1401,7 @@ fn checkCleanupArchiveFact(a: std.mem.Allocator, frame: std.mem.Allocator, io: s
     }
 }
 
-test "terminal cleanup failures retain bounded shutdown ownership without runnable work" {
+test "terminal cleanup failures retain allocator-governed shutdown ownership without runnable work" {
     const a = std.testing.allocator;
     const io = std.testing.io;
     var compiled = try protean.compile(a, protean.system(.{ .InitialArgs = bool, .Result = void, .Failure = void, .application = CleanupApplication }));
@@ -1436,9 +1436,9 @@ test "terminal cleanup failures retain bounded shutdown ownership without runnab
     defer arena.deinit();
     const frame = arena.allocator();
     var client: native.client.Client(CleanupTypes) = .{ .service = &service };
-    // Successful cleanup releases slots. Both terminal outcomes with failed
-    // cleanup remain owned. Then fill every slot to test admission-before-ack.
-    for (0..18) |index| {
+    // Successful cleanup releases ownership. Failed cleanup stays owned beyond
+    // the former fixed sixteen-task quota without adding runnable work.
+    for (0..22) |index| {
         const cleanup_fails = index >= 2;
         const cancel = index % 2 == 0;
         const operation = try std.fmt.allocPrint(frame, "cleanup-{d}", .{index});
@@ -1506,11 +1506,7 @@ test "terminal cleanup failures retain bounded shutdown ownership without runnab
         try std.testing.expectEqual(!cleanup_fails, try service.taskCleanupComplete(frame, terminal.value));
         try std.testing.expect(try service.pump(frame) == .idle);
         try std.testing.expectEqual(cleanup_fails, try service.shutdownIncomplete(frame));
-        var count: usize = 0;
-        for (service.owned) |id| if (id != null) {
-            count += 1;
-        };
-        try std.testing.expectEqual(if (cleanup_fails) index - 1 else 0, count);
+        try std.testing.expectEqual(if (cleanup_fails) index - 1 else 0, service.owned.items.len);
         var params = native.json.object();
         try native.json.put(frame, &params, "task_id", native.json.string(try frame.dupe(u8, &std.fmt.bytesToHex(submitted.receipt.task, .lower))));
         const result = try client.call(frame, .@"task.result", params);
@@ -1518,13 +1514,11 @@ test "terminal cleanup failures retain bounded shutdown ownership without runnab
         try std.testing.expectEqual(!cleanup_fails, result.object.get("outcome").?.object.get("cleanup_complete").?.bool);
         try std.testing.expect((try service.submit(frame, operation, cleanup_fails)).replayed);
     }
-    const generation = namespace.store.head.generation;
-    try std.testing.expectError(error.Capacity, service.submit(frame, "overflow-owned", false));
-    try std.testing.expectEqual(generation, namespace.store.head.generation);
+    _ = try service.submit(frame, "beyond-former-owned-quota", false);
     try service.park(frame);
     try std.testing.expect(try service.shutdownIncomplete(frame));
     // Reopening does not reacquire old work; its durable result stays honest.
-    const retained_id = service.owned[0].?;
+    const retained_id = service.owned.items[0];
     try service.close(frame);
     service_live = false;
     service = try native.tasks.Service(CleanupTypes).init(a, io, &namespace, assets, &application, handlers, profile);
@@ -1627,4 +1621,230 @@ test "completed result beyond the former wire-read ceiling remains publicly retr
         try std.testing.expectEqual(text.len + 2, try native.json.decimal(usize, chunk.object.get("total_bytes").?));
         for (decoded, 0..) |byte, index| try std.testing.expectEqual(@as(u8, if (offset + index == 0 or offset + index == text.len + 1) '"' else 'x'), byte);
     }
+}
+
+const FairTypes = struct {
+    pub const application_id = "fair-owner-test";
+    pub const input_schema_id = "fair.input.v1";
+    pub const output_schema_id = "fair.output.v1";
+    pub const failure_schema_id = "fair.failure.v1";
+    pub const message_schema_id = "fair.message.v1";
+    pub const Input = u32;
+    pub const Output = u32;
+    pub const Failure = void;
+    pub const Message = u32;
+};
+const FairApplication = struct {
+    pub fn emit(c: protean.Context) !horos.source.Module {
+        const b = c.builder;
+        const number = try b.scalar(u32);
+        const boolean = try b.scalar(bool);
+        const unit = try b.scalar(void);
+        const leaf = try horos_authoring.interop.operationId(c.author, try c.external("fair.leaf.v1", try c.schema(u32), try c.schema(u32), .read));
+        const question = try horos_authoring.interop.operationId(c.author, try c.external("fair.question.v1", try c.schema(u32), try c.schema(u32), .read));
+        const inbox = try horos_authoring.interop.operationId(c.author, try Inbox.declare(c));
+        const entry = try b.declare(&.{number}, number, &.{ leaf, question, inbox }, &.{});
+        const input = try b.reference(b.parameter(entry, 0));
+        var body = try b.term(.{ .yield_then = try b.pure(input) });
+        const ignored = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(Inbox.Reply)));
+        const paths = [_]horos.data.program.Id{
+            try b.term(.{ .yield_then = try b.term(.{ .call = .{ .function = entry, .arguments = &.{input} } }) }),
+            try b.term(.{ .perform = .{ .effect = leaf, .payload = input } }),
+            try b.term(.{ .perform = .{ .effect = question, .payload = input } }),
+            try b.bind(ignored, try Inbox.poll(c), try b.pure(input)),
+        };
+        for (paths, 0..) |path, selector| body = try b.term(.{ .conditional = .{
+            .condition = try b.primitive(boolean, .equal, &.{ input, try b.constant(u32, @intCast(selector)) }, 0),
+            .when_true = path,
+            .when_false = body,
+        } });
+        try b.define(entry, body);
+        return b.module(entry, unit);
+    }
+};
+const FairCapture = struct {
+    var preparations: usize = 0;
+    fn prepare(ctx: native.registry.ProjectionContext, payload: []const u8) ![]u8 {
+        preparations += 1;
+        return ctx.allocator.dupe(u8, payload);
+    }
+    fn acquire(ctx: native.Context, _: []const u8) !native.registry.Acquisition {
+        return .{ .captured = try protean.contracts.encodeOwned(u32, ctx.allocator, 99) };
+    }
+    fn interpret(ctx: native.registry.ProjectionContext, _: []const u8, _: []const u8, raw: []const u8) !native.registry.Projection {
+        return .{ .reply = try ctx.allocator.dupe(u8, raw) };
+    }
+    fn present(ctx: native.Context, input: u32) !native.json.Value {
+        return native.json.number(ctx.allocator, input);
+    }
+};
+
+test "eligible round robin progresses pure question inbox cancellation and replies while one worker is held" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    FairCapture.preparations = 0;
+    var compiled = try protean.compile(a, protean.system(.{ .InitialArgs = u32, .Result = u32, .Failure = void, .application = FairApplication }));
+    defer compiled.deinit();
+    const image = try a.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
+    defer a.free(image);
+    _ = try compiled.encode(a, image);
+    const admitted = try horos.data.program_image.Admitted.decode(a, image);
+    defer admitted.deinit();
+    const manifest = try ownerManifest(a, image, admitted.identity(), "fair-owner");
+    defer a.free(manifest);
+    const assets: native.discovery.Assets = .{ .image = image, .application = "fair-owner", .manifest = manifest };
+    var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "unit", .image_identity = admitted.identity() };
+    defer application.deinit();
+    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
+    var leaf = native.leaf(u32, u32, .{ .identity = "fair.leaf.v1", .resource_role = "local" }, increment);
+    leaf.capture = .{ .prepare = FairCapture.prepare, .acquire = FairCapture.acquire, .interpret = FairCapture.interpret, .dependencies = native.registry.opaqueProjection };
+    leaf.invoke = null;
+    leaf.background = true;
+    var handlers = try native.Registry.init(a, &.{
+        leaf,
+        native.question(u32, u32, .{ .identity = "fair.question.v1", .resource_role = "user", .answer_schema_id = "fair.answer.v1" }, FairCapture.present),
+        native.inbox.declaration(u32),
+    });
+    defer handlers.deinit();
+    var grants: [3]native.registry.Grant = undefined;
+    const profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "fair-profile", .authority = .{ .grants = &grants, .principal = "test", .tenant = "test" } };
+    for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(io, &path_buffer);
+    const path = try std.fmt.allocPrint(a, "{s}/state", .{path_buffer[0..length]});
+    defer a.free(path);
+    var namespace = try native.Namespace.open(a, io, path);
+    var namespace_live = true;
+    defer if (namespace_live) namespace.close() catch unreachable;
+    var failing = std.testing.FailingAllocator.init(a, .{});
+    var service = try native.tasks.Service(FairTypes).init(failing.allocator(), io, &namespace, assets, &application, handlers, profile);
+    var service_live = true;
+    defer if (service_live) service.close(a) catch unreachable;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const frame = arena.allocator();
+    const first = try service.submit(frame, "first-yielder", 0);
+    const second = try service.submit(frame, "second-yielder", 0);
+    try std.testing.expect(try service.pump(frame) == .progressed);
+    try std.testing.expect(try service.pump(frame) == .progressed);
+    for ([_][16]u8{ first.receipt.task, second.receipt.task }) |id| {
+        var task = try service.task(frame, id);
+        defer task.deinit();
+        try std.testing.expectEqual(1, task.value.execution_revision);
+    }
+    try std.testing.expect(try service.pump(frame) == .progressed);
+    var second_turn = try service.task(frame, second.receipt.task);
+    defer second_turn.deinit();
+    try std.testing.expectEqual(1, second_turn.value.execution_revision);
+    // Admission appends behind already queued continuations, even across a
+    // round boundary. A stream of newcomers cannot postpone an older peer.
+    const newcomer = try service.submit(frame, "new-yielder", 0);
+    try std.testing.expect(try service.pump(frame) == .progressed);
+    try std.testing.expect(try service.pump(frame) == .progressed);
+    var still_queued = try service.task(frame, newcomer.receipt.task);
+    defer still_queued.deinit();
+    try std.testing.expectEqual(0, still_queued.value.execution_revision);
+    _ = try service.requestCancel(frame, "cancel-first", first.receipt.task, "stop");
+    _ = try service.requestCancel(frame, "cancel-second", second.receipt.task, "stop");
+    _ = try service.requestCancel(frame, "cancel-new", newcomer.receipt.task, "stop");
+    try std.testing.expect(try service.pump(frame) == .progressed);
+    try std.testing.expect(try service.pump(frame) == .progressed);
+    try std.testing.expect(try service.pump(frame) == .progressed);
+    try std.testing.expect(try service.pump(frame) == .idle);
+    const slow = try service.submit(frame, "slow", 1);
+    try std.testing.expect(try service.pump(frame) == .progressed);
+    const held = (try service.pump(frame)).work;
+    var original_slow = try service.task(frame, slow.receipt.task);
+    defer original_slow.deinit();
+    // The held worker is released even when a later assertion fails.
+    defer if (service_live) {
+        if (service.work) |work| service.notSent(frame, work) catch unreachable;
+    };
+    const queued = try service.submit(frame, "queued-leaf", 1);
+    const infinite = try service.submit(frame, "yielding-forever", 0);
+    const finite = try service.submit(frame, "finite", 4);
+    const question = try service.submit(frame, "question", 2);
+    const inbox = try service.submit(frame, "inbox", 3);
+    const cancelled = try service.submit(frame, "cancelled", 4);
+    _ = try service.message(frame, "slow-followup", slow.receipt.task, 11);
+    _ = try service.message(frame, "inbox-message", inbox.receipt.task, 7);
+    _ = try service.requestCancel(frame, "cancel", cancelled.receipt.task, "stop");
+    for (0..35) |_| try std.testing.expect(try service.pump(frame) != .work);
+    try std.testing.expectEqual(1, FairCapture.preparations);
+    try std.testing.expectEqual(0, try namespace.store.capabilityAttempts(queued.receipt.task, "fair.leaf.v1"));
+    var unchanged_slow = try service.task(frame, slow.receipt.task);
+    defer unchanged_slow.deinit();
+    try std.testing.expectEqualDeep(original_slow.value.checkpoint, unchanged_slow.value.checkpoint);
+    try std.testing.expectEqual(original_slow.value.execution_revision, unchanged_slow.value.execution_revision);
+    try std.testing.expect(unchanged_slow.value.revision > original_slow.value.revision);
+    inline for (.{ .{ finite.receipt.task, .completed }, .{ inbox.receipt.task, .completed }, .{ cancelled.receipt.task, .cancelled } }) |expected| {
+        var task = try service.task(frame, expected[0]);
+        defer task.deinit();
+        try std.testing.expectEqual(expected[1], task.value.outcome_kind);
+    }
+    var live = try service.task(frame, infinite.receipt.task);
+    defer live.deinit();
+    try std.testing.expect(live.value.execution_revision > 1);
+    var asked = try service.task(frame, question.receipt.task);
+    defer asked.deinit();
+    try std.testing.expectEqual(.waiting_input, try service.status(frame, asked.value));
+    var active_question = (try service.pendingQuestion(frame, question.receipt.task)).?;
+    defer active_question.deinit();
+    _ = try service.respond(frame, "answer", question.receipt.task, active_question.value.id, active_question.value.revision, active_question.value.request_digest, "fair.answer.v1", .{ .number_string = "73" });
+    for (0..8) |_| try std.testing.expect(try service.pump(frame) != .work);
+    var answered = try service.task(frame, question.receipt.task);
+    defer answered.deinit();
+    try std.testing.expectEqual(.completed, answered.value.outcome_kind);
+    // Every callback dimension is checked before the current worker is touched.
+    inline for (.{ "owner_epoch", "task", "occurrence", "attempt" }) |field| {
+        var stale = held;
+        @field(stale, field)[0] ^= 1;
+        try std.testing.expectError(error.StaleOccurrence, service.acquire(frame, stale, &.{}));
+        try std.testing.expectEqualSlices(u8, &held.attempt, &service.work.?.attempt);
+    }
+    _ = try service.requestCancel(frame, "cancel-infinite", infinite.receipt.task, "stop");
+    _ = try service.requestCancel(frame, "cancel-queued", queued.receipt.task, "stop");
+    for (0..8) |_| try std.testing.expect(try service.pump(frame) != .work);
+    const raw = try protean.contracts.encodeOwned(u32, frame, 99);
+    try service.acquire(frame, held, raw);
+    try std.testing.expectError(error.StaleOccurrence, service.acquire(frame, held, raw));
+    for (0..8) |_| try std.testing.expect(try service.pump(frame) != .work);
+    var finished = try service.task(frame, slow.receipt.task);
+    defer finished.deinit();
+    try std.testing.expectEqual(.completed, finished.value.outcome_kind);
+    try std.testing.expectEqual(1, FairCapture.preparations);
+    try std.testing.expectEqual(1, try namespace.store.capabilityAttempts(slow.receipt.task, "fair.leaf.v1"));
+    try std.testing.expect(try service.pump(frame) == .idle);
+    // Stop writes only after both admissions. A quantum may publish to Kosmos,
+    // but its failed store publication must fence every task and retain custody.
+    const rollback = try service.submit(frame, "rollback-quantum", 4);
+    const no_dispatch = try service.submit(frame, "fenced-leaf", 1);
+    try namespace.store.database.exec("PRAGMA query_only=ON;");
+    try std.testing.expectError(error.StorageUnavailable, service.pump(frame));
+    try std.testing.expect(namespace.store.fenced);
+    try std.testing.expect(service.active != null);
+    try std.testing.expectError(error.StorageUnavailable, service.pump(frame));
+    try std.testing.expectEqual(1, FairCapture.preparations);
+    try namespace.store.database.exec("PRAGMA query_only=OFF;");
+    // Closing the fenced owner transfers its last receipt with no allocation.
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    try service.close(frame);
+    service_live = false;
+    failing.fail_index = std.math.maxInt(usize);
+    failing.resize_fail_index = std.math.maxInt(usize);
+    try namespace.close();
+    namespace_live = false;
+    namespace = try native.Namespace.open(a, io, path);
+    namespace_live = true;
+    service = try native.tasks.Service(FairTypes).init(failing.allocator(), io, &namespace, assets, &application, handlers, profile);
+    service_live = true;
+    var recovered = try service.task(frame, rollback.receipt.task);
+    defer recovered.deinit();
+    try std.testing.expectEqual(0, recovered.value.execution_revision);
+    try std.testing.expectEqual(.progressed, recovered.value.outcome_kind);
+    try std.testing.expectEqual(0, try namespace.store.capabilityAttempts(no_dispatch.receipt.task, "fair.leaf.v1"));
+    try std.testing.expect(try service.pump(frame) == .idle);
 }

@@ -16,7 +16,6 @@ pub const Limits = struct {
     artifact_chunk_bytes: usize = 32 * 1024,
     event_page: usize = 128,
     subscriptions: usize = 16,
-    owned_tasks: usize = 16,
     pending_message_page: usize = 16,
     incomplete_frame_ms: u32 = 30_000,
     output_stall_ms: u32 = 5000,

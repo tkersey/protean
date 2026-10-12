@@ -73,6 +73,7 @@ fn readFrozenInputs(a: std.mem.Allocator, value: state.Task, source: anytype) !F
 pub const Admission = struct { receipt: state.Receipt, replayed: bool };
 pub const Status = state.Status;
 pub const Work = struct {
+    owner_epoch: state.Digest,
     task: state.TaskId,
     occurrence: state.Digest,
     attempt: state.Digest,
@@ -128,13 +129,15 @@ pub fn Service(comptime Types: type) type {
         /// opening a namespace never resumes a persisted task.
         runnable: std.ArrayList(state.TaskId) = .empty,
         /// Unsettled cleanup retains ownership, but never runnable work.
-        owned: [(@import("protocol.zig").Limits{}).owned_tasks]?state.TaskId = @splat(null),
+        owned: std.ArrayList(state.TaskId) = .empty,
+        owner_epoch: state.Digest = undefined,
         work: ?Work = null,
 
         pub fn init(a: std.mem.Allocator, io: std.Io, namespace: *Namespace, assets: discovery.Assets, application: *const discovery.Application, handlers: registry.Registry, profile: Profile) !Self {
             try profile.validate();
             var self: Self = .{ .allocator = a, .io = io, .namespace = namespace, .assets = assets, .application = application, .handlers = handlers, .profile = profile, .program = try evaluator.Program.open(a, assets.image) };
             errdefer self.program.close() catch unreachable;
+            try io.randomSecure(&self.owner_epoch);
             try self.recover(a);
             return self;
         }
@@ -238,14 +241,14 @@ pub fn Service(comptime Types: type) type {
             return cleanupComplete(outcome.value);
         }
         pub fn shutdownIncomplete(self: *Self, a: std.mem.Allocator) !bool {
-            for (self.owned) |owned| if (owned) |id| {
+            for (self.owned.items) |id| {
                 var decoded = try self.task(a, id);
                 defer decoded.deinit();
                 const value = decoded.value;
                 if (value.terminal()) {
                     if (!try self.taskCleanupComplete(a, value)) return true;
                 } else if (try self.status(a, value) == .unknown or value.cancellation != null) return true;
-            };
+            }
             return false;
         }
         fn recover(self: *Self, a: std.mem.Allocator) !void {
@@ -325,27 +328,22 @@ pub fn Service(comptime Types: type) type {
         }
         fn runnableAdd(self: *Self, id: state.TaskId) !void {
             for (self.runnable.items) |item| if (same(&item, &id)) return;
-            if (self.runnable.items.len == self.owned.len) return error.Capacity;
             try self.runnable.append(self.allocator, id);
         }
         fn ensureOwnershipCapacity(self: *Self, id: ?state.TaskId) !void {
-            for (self.owned) |slot| {
-                if (slot == null) return;
-                if (id) |existing| if (same(&slot.?, &existing)) return;
-            }
-            return error.Capacity;
+            if (id) |existing| for (self.owned.items) |prior| {
+                if (same(&prior, &existing)) return;
+            };
+            try self.owned.ensureUnusedCapacity(self.allocator, 1);
         }
         fn claim(self: *Self, id: state.TaskId) void {
-            for (self.owned) |slot| if (slot) |prior| if (same(&prior, &id)) return;
-            for (&self.owned) |*slot| if (slot.* == null) {
-                slot.* = id;
-                return;
-            };
-            unreachable; // Capacity is reserved before durable admission.
+            for (self.owned.items) |prior| if (same(&prior, &id)) return;
+            // Capacity is reserved before durable admission.
+            self.owned.appendAssumeCapacity(id);
         }
         fn unclaim(self: *Self, id: state.TaskId) void {
-            for (&self.owned) |*slot| if (slot.*) |prior| if (same(&prior, &id)) {
-                slot.* = null;
+            for (self.owned.items, 0..) |prior, i| if (same(&prior, &id)) {
+                _ = self.owned.orderedRemove(i);
                 return;
             };
         }
@@ -373,9 +371,9 @@ pub fn Service(comptime Types: type) type {
             }
         }
         fn retire(self: *Self, a: std.mem.Allocator) !void {
+            _ = a;
             if (self.active) |active| {
-                const checkpoint = try active.driver.retire(a);
-                a.free(checkpoint);
+                try active.driver.retire();
                 try active.driver.destroy();
                 self.active = null;
             }
@@ -427,13 +425,17 @@ pub fn Service(comptime Types: type) type {
             defer a.free(input_bytes);
             const driver = try evaluator.Driver.start(self.allocator, self.program, .{ .initial_args = input_bytes });
             self.active = .{ .task = task_id, .execution_revision = 0, .driver = driver };
-            errdefer self.retire(a) catch {
-                self.store().fence();
+            errdefer if (!self.store().fenced) {
+                self.retire(a) catch {
+                    self.store().fence();
+                };
             };
-            const outcome = try driver.drive(a, .none, 0);
+            const publication = try driver.drive(a, .none, 0);
+            // Retain the new receipt if durable admission fails after publish.
+            errdefer self.store().fence();
+            const outcome = publication.outcome;
             defer a.free(outcome);
-            const checkpoint = try driver.checkpoint(a);
-            defer a.free(checkpoint);
+            const checkpoint = publication.checkpoint;
             const resources = try a.alloc(state.Reference, self.profile.resources.len);
             defer a.free(resources);
             try self.store().begin();
@@ -504,7 +506,7 @@ pub fn Service(comptime Types: type) type {
             const admitted = try self.receipt(a, .cancel, id, request, value, .cancellation_requested, null, null);
             try self.persist(value, previous, "task.cancel");
             if (!value.terminal()) {
-                try self.runnableAdd(task_id);
+                if (self.work == null or !same(&self.work.?.task, &task_id)) try self.runnableAdd(task_id);
                 self.claim(task_id);
             }
             return admitted;
@@ -676,8 +678,19 @@ pub fn Service(comptime Types: type) type {
         /// transition. The caller services its control channel between calls.
         pub fn pump(self: *Self, a: std.mem.Allocator) !Step {
             try self.allowed();
-            if (self.work != null or self.runnable.items.len == 0) return .idle;
-            const id = self.runnable.items[0];
+            // Scan one round, without charging or preparing blocked leaves.
+            // Each actual transition yields back to the host control channel.
+            const count = self.runnable.items.len;
+            for (0..count) |_| {
+                const id = self.runnable.orderedRemove(0);
+                self.runnable.appendAssumeCapacity(id);
+                const step = try self.pumpTask(a, id);
+                if (step != .idle) return step;
+            }
+            return .idle;
+        }
+
+        fn pumpTask(self: *Self, a: std.mem.Allocator, id: state.TaskId) !Step {
             var decoded = try self.task(a, id);
             defer decoded.deinit();
             const value = decoded.value;
@@ -699,7 +712,14 @@ pub fn Service(comptime Types: type) type {
                 const binding: occurrence.Binding = .{ .id = pending.id, .task = id, .request = pending.request };
                 switch (pending.state) {
                     .captured => return self.interpretCapture(a, value, pending),
-                    .unknown, .dispatching => return self.blocked(a, value, .unavailable_environment),
+                    .unknown => return self.blocked(a, value, .unavailable_environment),
+                    .dispatching => |attempt| {
+                        // This worker still owns the attempt even when another
+                        // task now owns the sole physical Kosmos resident.
+                        if (self.work) |work| if (same(&work.task, &id) and
+                            same(&work.occurrence, &pending.id) and same(&work.attempt, &attempt.id)) return .idle;
+                        return self.blocked(a, value, .unavailable_environment);
+                    },
                     .settled_reply => |acquired| {
                         reply = try self.store().acquiredObject(a, acquired.reply, null);
                         consumed = try occurrence.consumed(pending, binding, .{ .reply = acquired.reply }, value.cancellation != null);
@@ -728,7 +748,8 @@ pub fn Service(comptime Types: type) type {
         fn advance(self: *Self, a: std.mem.Allocator, initial: state.Task, control: data.invocation.Control, consumed: ?occurrence.Occurrence) !Step {
             const driver = try self.resident(a, initial);
             const quantum: u64 = if (control == .reply and initial.cancellation != null and !initial.cancellation_applied) 0 else 256;
-            const encoded = try driver.drive(a, control, quantum);
+            const publication = try driver.drive(a, control, quantum);
+            const encoded = publication.outcome;
             defer a.free(encoded);
             // Kosmos may now be ahead of storage. Any failure below fences all
             // further effects; restart uses the old checkpoint and saved reply.
@@ -736,8 +757,7 @@ pub fn Service(comptime Types: type) type {
             var outcome = try data.invocation.decode(data.invocation.Outcome, a, encoded);
             defer outcome.deinit();
             if (outcome.value == .needs_capacity) return error.Capacity;
-            const checkpoint = try driver.checkpoint(a);
-            defer a.free(checkpoint);
+            const checkpoint = publication.checkpoint;
             var value = initial;
             value.revision = try std.math.add(u64, value.revision, 1);
             value.execution_revision = try std.math.add(u64, value.execution_revision, 1);
@@ -856,6 +876,7 @@ pub fn Service(comptime Types: type) type {
             if (!same(&request.value.request_identity, &pending.request)) return error.CorruptState;
             const entry = self.handlers.admit(request.value, self.profile.authority, self.application.image_identity, registry.resourceIdentity(self.application.image_identity, initial.profile.digest, initial.resources.items)) catch |err|
                 return self.blocked(a, initial, if (err == error.Denied) .denied else .missing_capability);
+            if (entry.declaration.kind == .leaf and self.work != null) return .idle;
             var attempt: state.Digest = undefined;
             try self.io.randomSecure(&attempt);
             const binding: occurrence.Binding = .{ .id = pending.id, .task = pending.task, .request = pending.request };
@@ -938,13 +959,14 @@ pub fn Service(comptime Types: type) type {
                     errdefer if (retained_prepared) |body| self.allocator.free(body);
                     const retained_profile = try self.allocator.dupe(u8, self.profile.bytes);
                     errdefer self.allocator.free(retained_profile);
-                    const work: Work = .{ .task = value.id, .occurrence = pending.id, .attempt = attempt, .request = retained, .prepared = retained_prepared, .profile = retained_profile, .entry = entry, .cleanup = value.cancellation_applied };
+                    const work: Work = .{ .owner_epoch = self.owner_epoch, .task = value.id, .occurrence = pending.id, .attempt = attempt, .request = retained, .prepared = retained_prepared, .profile = retained_profile, .entry = entry, .cleanup = value.cancellation_applied };
                     try self.store().begin();
                     defer self.store().rollback();
                     try self.store().createRecord(state.Attempt, "attempt", attempt, value.id, .{ .id = attempt, .task = value.id, .occurrence = pending.id, .request = try self.store().putObject(request_bytes), .profile = value.profile, .capability = try name(entry.declaration.identity), .inference = entry.declaration.inference, .prepared = if (prepared) |body| try self.store().putObject(body) else null });
                     try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, value.id, dispatched);
                     try self.persist(value, initial.revision, "effect.dispatch");
                     self.work = work;
+                    self.runnableRemove(value.id);
                     return .{ .work = work };
                 },
             }
@@ -971,6 +993,7 @@ pub fn Service(comptime Types: type) type {
             var saved = try self.record(occurrence.Occurrence, a, "occurrence", work.occurrence, work.task);
             defer saved.deinit();
             const next = try occurrence.captured(saved.value, .{ .id = work.occurrence, .task = work.task, .request = saved.value.request }, work.attempt);
+            try self.runnable.ensureUnusedCapacity(self.allocator, 1);
             const previous = value.revision;
             value.revision = try std.math.add(u64, previous, 1);
             try self.store().begin();
@@ -985,6 +1008,7 @@ pub fn Service(comptime Types: type) type {
             });
             try self.store().putRecord(occurrence.Occurrence, "occurrence", work.occurrence, work.task, next);
             try self.persist(value, previous, "effect.capture");
+            try self.runnableAdd(value.id);
         }
 
         fn interpretCapture(self: *Self, a: std.mem.Allocator, initial: state.Task, pending: occurrence.Occurrence) !Step {
@@ -1041,7 +1065,8 @@ pub fn Service(comptime Types: type) type {
 
         fn currentWork(self: *Self, work: Work) !void {
             const current = self.work orelse return error.StaleOccurrence;
-            if (!same(&current.task, &work.task) or !same(&current.occurrence, &work.occurrence) or !same(&current.attempt, &work.attempt)) return error.StaleOccurrence;
+            if (!same(&self.owner_epoch, &work.owner_epoch) or !same(&current.owner_epoch, &work.owner_epoch) or
+                !same(&current.task, &work.task) or !same(&current.occurrence, &work.occurrence) or !same(&current.attempt, &work.attempt)) return error.StaleOccurrence;
         }
         fn releaseWork(self: *Self) void {
             self.allocator.free(self.work.?.request);
@@ -1068,6 +1093,7 @@ pub fn Service(comptime Types: type) type {
             const bound = try data.invocation.encodeOwned(data.invocation.Result, a, .{ .request_identity = saved.value.request, .value = reply });
             defer a.free(bound);
             const acquired = try occurrence.acquired(saved.value, binding, work.attempt, storage.digest(bound));
+            try self.runnable.ensureUnusedCapacity(self.allocator, 1);
             const previous = value.revision;
             value.revision = try std.math.add(u64, previous, 1);
             try self.store().begin();
@@ -1075,6 +1101,7 @@ pub fn Service(comptime Types: type) type {
             _ = try self.store().putObject(bound);
             try self.store().putRecord(occurrence.Occurrence, "occurrence", work.occurrence, work.task, acquired);
             try self.persist(value, previous, "effect.acquire");
+            try self.runnableAdd(value.id);
         }
         pub fn unknown(self: *Self, a: std.mem.Allocator, work: Work) !void {
             try self.currentWork(work);
@@ -1103,6 +1130,7 @@ pub fn Service(comptime Types: type) type {
         pub fn notSent(self: *Self, a: std.mem.Allocator, work: Work) !void {
             try self.currentWork(work);
             defer self.releaseWork();
+            errdefer self.store().fence();
             var decoded = try self.task(a, work.task);
             defer decoded.deinit();
             var value = decoded.value;
@@ -1112,11 +1140,15 @@ pub fn Service(comptime Types: type) type {
             const previous = value.revision;
             value.revision = try std.math.add(u64, previous, 1);
             value.blocker = if (value.cancellation != null and !value.cancellation_applied) null else .unavailable_environment;
+            const cancelling = value.blocker == null;
+            if (cancelling) try self.runnable.ensureUnusedCapacity(self.allocator, 1);
+            value.schedule = if (cancelling) .queued else .parked;
             try self.store().begin();
             defer self.store().rollback();
             try self.store().putRecord(occurrence.Occurrence, "occurrence", work.occurrence, work.task, next);
             try self.event(&value, .blocked, "{\"delivery\":\"definitely_not_sent\"}");
             try self.persist(value, previous, "effect.not-sent");
+            if (cancelling) try self.runnableAdd(value.id);
         }
 
         fn archiveAccess(self: *Self) !void {
@@ -1547,13 +1579,13 @@ pub fn Service(comptime Types: type) type {
             errdefer self.retire(a) catch {
                 self.store().fence();
             };
-            const observed = try driver.drive(a, .none, 0);
+            const publication = try driver.drive(a, .none, 0);
+            const observed = publication.outcome;
             defer a.free(observed);
             const prior = try self.store().object(a, value.outcome, null);
             defer a.free(prior);
             if (!same(observed, prior)) return error.InvalidArchive;
-            const checkpoint = try driver.checkpoint(a);
-            defer a.free(checkpoint);
+            const checkpoint = publication.checkpoint;
             if (!same(&storage.digest(checkpoint), &value.checkpoint.digest) or checkpoint.len != value.checkpoint.bytes) return error.InvalidArchive;
             var decoded = try data.invocation.decode(data.invocation.Outcome, a, observed);
             defer decoded.deinit();
@@ -1575,11 +1607,13 @@ pub fn Service(comptime Types: type) type {
                     // The imported marker claims Kosmos already received this
                     // control. Let Kosmos establish that it is a no-op without
                     // executing authored steps or dispatching any native work.
-                    const repeated = try driver.drive(a, .{ .cancel = .{ .text = value.cancellation.?.bytes } }, 0);
+                    // The next publication replaces the borrowed checkpoint.
+                    // Its exact persisted digest/length remain our comparison.
+                    const next = try driver.drive(a, .{ .cancel = .{ .text = value.cancellation.?.bytes } }, 0);
+                    const repeated = next.outcome;
                     defer a.free(repeated);
-                    const repeated_checkpoint = try driver.checkpoint(a);
-                    defer a.free(repeated_checkpoint);
-                    if (!same(repeated, observed) or !same(repeated_checkpoint, checkpoint)) return error.InvalidArchive;
+                    if (!same(repeated, observed) or next.checkpoint.len != value.checkpoint.bytes or
+                        !same(&storage.digest(next.checkpoint), &value.checkpoint.digest)) return error.InvalidArchive;
                 },
             };
             switch (decoded.value) {
@@ -1631,6 +1665,7 @@ pub fn Service(comptime Types: type) type {
             try self.retire(a);
             try self.program.close();
             self.runnable.deinit(self.allocator);
+            self.owned.deinit(self.allocator);
             self.* = undefined;
         }
 

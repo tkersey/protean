@@ -558,21 +558,24 @@ fn driveHuman(comptime Types: type, a: std.mem.Allocator, service: *tasks.Servic
             _ = try service.requestCancel(frame, operation, id, "human requested cancellation");
         }
         if (slot.future != null) {
-            var task = try service.task(frame, id);
+            var task = try service.task(frame, slot.work.task);
             defer task.deinit();
             if (task.value.cancellation != null and !slot.work.cleanup) slot.cancel();
-            if (!slot.finished()) {
-                _ = c.poll(null, 0, 20);
-                continue;
+            if (slot.finished()) {
+                try slot.join();
+                if (slot.reply) |reply| try service.acquire(frame, slot.work, reply) else if (!slot.invoked) try service.notSent(frame, slot.work) else try service.unknown(frame, slot.work);
+                try slot.release();
             }
-            try slot.join();
-            if (slot.reply) |reply| try service.acquire(frame, slot.work, reply) else if (!slot.invoked) try service.notSent(frame, slot.work) else try service.unknown(frame, slot.work);
-            try slot.release();
         }
-        switch (try service.pump(frame)) {
+        const step = try service.pump(frame);
+        switch (step) {
             .work => |work| slot.start(work, service.profile.authority, service.profile.environment) catch try service.notSent(frame, work),
             .progressed => {},
             .waiting, .idle => {
+                if (slot.future != null or service.runnable.items.len != 0) {
+                    if (step == .idle) _ = c.poll(null, 0, 20);
+                    continue;
+                }
                 try service.park(frame);
                 return;
             },
@@ -608,7 +611,7 @@ fn queueClosed(comptime Types: type, frame: std.mem.Allocator, connection: *Conn
     try json.put(frame, &params, "mode", json.string(@tagName(mode)));
     try json.put(frame, &params, "disposition", json.string(if (code == 2) "incomplete" else if (mode == .cancel) "cancelled" else "parked"));
     var pending: std.array_list.Managed(json.Value) = .init(frame);
-    if (connection.client) |client| for (client.service.owned) |owned| if (owned) |id| {
+    if (connection.client) |client| for (client.service.owned.items) |id| {
         try pending.append(json.string(try frame.dupe(u8, &std.fmt.bytesToHex(id, .lower))));
     };
     try json.put(frame, &params, "recovery_tasks", .{ .array = pending });
@@ -855,10 +858,10 @@ fn serve(comptime Types: type, io: std.Io, a: std.mem.Allocator, connection: *Co
             const service = client.service;
             const slot = worker.?;
             if (shutdown_at != null and mode == .cancel and !cancelled_owned) {
-                for (service.owned) |owned| if (owned) |id| {
+                for (service.owned.items) |id| {
                     const operation = try std.fmt.allocPrint(frame, "shutdown-{s}-{s}", .{ connection.instance, std.fmt.bytesToHex(id, .lower) });
                     _ = try service.requestCancel(frame, operation, id, "host requested cancellation");
-                };
+                }
                 cancelled_owned = true;
             }
             if (slot.future != null) {
