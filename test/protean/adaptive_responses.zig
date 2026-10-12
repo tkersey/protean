@@ -13,6 +13,8 @@ const Ref = model.ArtifactReference;
 const Objects = struct {
     items: std.ArrayList([]const u8) = .empty,
     denied: ?[32]u8 = null,
+    reads: usize = 0,
+    read_bytes: usize = 0,
     fn add(self: *Objects, a: std.mem.Allocator, bytes: []const u8) !Ref {
         try self.items.append(a, bytes);
         return .{ .digest = digest(bytes), .bytes = bytes.len };
@@ -20,7 +22,11 @@ const Objects = struct {
     fn read(owner: *anyopaque, a: std.mem.Allocator, ref: native.registry.ObjectReference, limit: usize) ![]u8 {
         const self: *Objects = @ptrCast(@alignCast(owner));
         if (self.denied) |denied| if (std.mem.eql(u8, &ref.digest, &denied)) return error.MissingArtifact;
-        for (self.items.items) |bytes| if (bytes.len == ref.bytes and bytes.len <= limit and std.mem.eql(u8, &digest(bytes), &ref.digest)) return a.dupe(u8, bytes);
+        for (self.items.items) |bytes| if (bytes.len == ref.bytes and bytes.len <= limit and std.mem.eql(u8, &digest(bytes), &ref.digest)) {
+            self.reads += 1;
+            self.read_bytes += bytes.len;
+            return a.dupe(u8, bytes);
+        };
         return error.MissingArtifact;
     }
 };
@@ -362,4 +368,109 @@ test "adaptive projection preserves history and owns skill and opaque eviction" 
     try std.testing.expect(std.mem.indexOf(u8, unloaded_http, "CLEAN-OPAQUE") != null);
     try std.testing.expect(std.mem.indexOf(u8, unloaded_http, "INACTIVE-OPAQUE") == null);
     try std.testing.expect(std.mem.indexOf(u8, unloaded_http, "AFTER-DEACTIVATION-OPAQUE") == null);
+}
+
+test "context ancestry baseline counts exact v5 reads through 128 turns" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var objects: Objects = .{};
+    const catalog = try objects.add(a, try contracts.encodeOwned(P.AdaptiveCatalog, a, .{ .skills = .{ .items = &.{} } }));
+    const inference: model.AdaptiveInferenceProfile = .{
+        .id = .{ .bytes = "analysis" },
+        .model = .{ .bytes = "fixture-model-a" },
+        .reasoning_mode = .standard,
+        .reasoning_context = .current_turn,
+        .efforts = .{ .items = &.{ .medium, .high } },
+        .effort_update = true,
+        .explicit_cache = true,
+        .additional_tools = true,
+        .cache_diagnostics = true,
+        .opaque_family = .{ .bytes = "fixture-a" },
+        .max_output_tokens = 4096,
+        .request_bytes = 4 * 1024 * 1024,
+        .response_bytes = 4096,
+        .timeout_ms = 1000,
+    };
+    const policy: P.AdaptivePolicy = .{
+        .schema = .{ .bytes = P.adaptive_policy_identity },
+        .endpoint = .{ .bytes = "https://example.test/v1/responses" },
+        .audience = .{ .bytes = "fixture" },
+        .profiles = .{ .items = &.{inference} },
+        .catalog = catalog,
+        .core_tools = .{ true, false },
+        .permitted_tools = .{ true, true },
+    };
+    var frozen = native.json.object();
+    try native.json.put(a, &frozen, "adaptive", try native.values.toJson(P.AdaptivePolicy, a, policy));
+    const profile = try native.json.canonical(a, frozen);
+    var ctx: native.registry.ProjectionContext = .{ .allocator = a, .task = @splat(7), .tenant = "fixture", .profile = profile, .objects = .{ .owner = &objects, .read = Objects.read } };
+    const Model = protean.model(.{ .name = "adaptive-fixture", .model = "fixture-model-a", .parameters = .{ .max_output_tokens = @as(u32, 4096), .reasoning = .{ .effort = .medium } }, .protocol = struct {
+        pub const semantic_identity = model.protocol_identity;
+    } });
+    var invocation = try P.templateValue(Model, .{ .items = &.{
+        .{ .role = .developer, .content = .{ .bytes = "Use actual evidence and approved tools." } },
+        .{ .role = .user, .content = .{ .bytes = "Inspect the snapshot." } },
+    } }, .{ .minimum_calls = 1, .maximum_calls = 1, .parallel_calls = false });
+    invocation.tools.items = P.allDeclarations().items[0..1];
+    var request: P.AdaptiveRequest = .{
+        .invocation = invocation,
+        .policy = digest(profile),
+        .selection = .{ .profile_id = inference.id, .profile_digest = try Admission.profileDigest(a, inference), .effective_effort = .medium, .control_revision = 0 },
+        .plan = .{ .epoch = 0, .reason = .initial, .watermark = 0, .eviction_generation = 0, .prior = null, .catalog = catalog, .skills = .{ .items = &.{} } },
+        .materialized = .{ true, false },
+        .offered = .{ true, false },
+        .results = .{ .items = &.{} },
+    };
+    // Frozen before changing the v5 projection owner (Protean f79da40).
+    // These count returned bytes, not disk I/O or latency. The in-memory object
+    // lookup deliberately makes no production performance claim.
+    const points = [_]usize{ 1, 8, 16, 32, 64, 128 };
+    const expected_reads = [_]usize{ 2555, 42749, 131122, 444178, 1615626, 6141317 };
+    const expected_body_bytes = [_]usize{ 1271, 3616, 6308, 11700, 22484, 44108 };
+    const expected_body_hashes = [_][]const u8{
+        "6ae7cd9e95eb22ae14dfac797dfb456b6146ac05045a25e1c8c188ccbbd788fd",
+        "7e5ab5d46b927d4d4ed3d97188183007af69f2f0ff0f9c5f3d8adc540ed36108",
+        "5a6f393ce5faa38508d0dc2e4ecb94a1955a9bcf79188a6227a5cc8c5ed9d114",
+        "878cc18afbaece11a73c4a2e2d2b8cd1557b5320cf7f3179b7cf87240a7595df",
+        "108da51cb912abf586ce48db30046f02098fd25570116208e3dec0d0dc8973d2",
+        "7a37c855db4eb9979457a5d36201cea9edfd4d54260d6a758bf0a264f7058ff7",
+    };
+    try std.testing.expectEqualStrings("e3d9173da4bc09371f08de6633fecc77714cfa16e1ed9d5bf83b85be8b1110c1", &std.fmt.bytesToHex(digest(profile), .lower));
+    try std.testing.expectEqualStrings("6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d", &std.fmt.bytesToHex(catalog.digest, .lower));
+    std.debug.print("context baseline profile_sha256={s} catalog_sha256={s}\n", .{ std.fmt.bytesToHex(digest(profile), .lower), std.fmt.bytesToHex(catalog.digest, .lower) });
+    for (0..128) |turn| {
+        var step = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer step.deinit();
+        ctx.allocator = step.allocator();
+        const encoded = try contracts.encodeOwned(P.AdaptiveRequest, ctx.allocator, request);
+        const prepared = try Adapter.prepare(ctx, encoded);
+        _ = try objects.add(a, try a.dupe(u8, prepared));
+        const call_id = try std.fmt.allocPrint(a, "probe-{d}", .{turn});
+        const body = try std.fmt.allocPrint(ctx.allocator, "{{\"status\":\"completed\",\"error\":null,\"output\":[{{\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"opaque\"}},{{\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"{s}\",\"name\":\"finish\",\"arguments\":\"{{\\\"value\\\":1}}\"}}]}}", .{call_id});
+        const raw = try contracts.encodeOwned(native.responses.Raw, ctx.allocator, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = body } });
+        _ = try objects.add(a, try a.dupe(u8, raw));
+        const projection = try Adapter.interpret(ctx, encoded, prepared, raw);
+        for (projection.objects) |object| _ = try objects.add(a, try a.dupe(u8, object));
+        const result = try contracts.decodeOwned(P.AdaptiveResult, a, projection.reply);
+        try std.testing.expectEqual(.complete, result.value.replay_status);
+        request.plan.prior = result.value.replay;
+        request.plan.watermark = result.value.replay.?.watermark;
+        request.invocation.messages.items = &.{};
+        const settled = try a.alloc(P.ToolResult, 1);
+        settled[0] = .{ .call_id = .{ .bytes = call_id }, .output = .{ .bytes = "Observation retained." } };
+        request.results.items = settled;
+        if (std.mem.indexOfScalar(usize, &points, turn + 1)) |point| {
+            objects.reads = 0;
+            objects.read_bytes = 0;
+            const next = try contracts.encodeOwned(P.AdaptiveRequest, ctx.allocator, request);
+            const measured = try Adapter.prepare(ctx, next);
+            const decoded = try contracts.decodeOwned(Adapter.Prepared, ctx.allocator, measured);
+            try std.testing.expectEqual(1 + 3 * (turn + 1), objects.reads);
+            try std.testing.expectEqual(expected_reads[point], objects.read_bytes);
+            try std.testing.expectEqual(expected_body_bytes[point], decoded.value.body.bytes.len);
+            try std.testing.expectEqualStrings(expected_body_hashes[point], &std.fmt.bytesToHex(digest(decoded.value.body.bytes), .lower));
+            std.debug.print("context baseline turns={d} reads={d} bytes={d} body_bytes={d} body_sha256={s}\n", .{ turn + 1, objects.reads, objects.read_bytes, decoded.value.body.bytes.len, std.fmt.bytesToHex(digest(decoded.value.body.bytes), .lower) });
+        }
+    }
 }
