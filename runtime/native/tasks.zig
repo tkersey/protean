@@ -428,7 +428,7 @@ pub fn Service(comptime Types: type) type {
             const driver = try evaluator.Driver.start(self.allocator, self.program, .{ .initial_args = input_bytes });
             self.active = .{ .task = task_id, .execution_revision = 0, .driver = driver };
             errdefer self.retire(a) catch {
-                self.store().fenced = true;
+                self.store().fence();
             };
             const outcome = try driver.drive(a, .none, 0);
             defer a.free(outcome);
@@ -732,7 +732,7 @@ pub fn Service(comptime Types: type) type {
             defer a.free(encoded);
             // Kosmos may now be ahead of storage. Any failure below fences all
             // further effects; restart uses the old checkpoint and saved reply.
-            errdefer self.store().fenced = true;
+            errdefer self.store().fence();
             var outcome = try data.invocation.decode(data.invocation.Outcome, a, encoded);
             defer outcome.deinit();
             if (outcome.value == .needs_capacity) return error.Capacity;
@@ -961,7 +961,7 @@ pub fn Service(comptime Types: type) type {
 
         fn capture(self: *Self, a: std.mem.Allocator, work: Work, raw: []const u8) !void {
             defer self.releaseWork();
-            errdefer self.store().fenced = true;
+            errdefer self.store().fence();
             // Publication failure fences this owner. The durable dispatched
             // occurrence then recovers as unknown, never as permission to retry.
             if (work.prepared == null) return error.InvalidPreparedRequest;
@@ -1054,7 +1054,7 @@ pub fn Service(comptime Types: type) type {
             try self.currentWork(work);
             if (work.entry.declaration.capture != null) return self.capture(a, work, reply);
             defer self.releaseWork();
-            errdefer self.store().fenced = true;
+            errdefer self.store().fence();
             var schema = try data.schema.decode(a, work.entry.resume_schema);
             defer schema.deinit();
             try data.schema.validateValue(a, schema.descriptor, reply);
@@ -1078,7 +1078,7 @@ pub fn Service(comptime Types: type) type {
         pub fn unknown(self: *Self, a: std.mem.Allocator, work: Work) !void {
             try self.currentWork(work);
             defer self.releaseWork();
-            errdefer self.store().fenced = true;
+            errdefer self.store().fence();
             var decoded = try self.task(a, work.task);
             defer decoded.deinit();
             var value = decoded.value;
@@ -1543,7 +1543,7 @@ pub fn Service(comptime Types: type) type {
             try self.validatePendingMessages(a, value);
             const driver = try self.resident(a, value);
             errdefer self.retire(a) catch {
-                self.store().fenced = true;
+                self.store().fence();
             };
             const observed = try driver.drive(a, .none, 0);
             defer a.free(observed);

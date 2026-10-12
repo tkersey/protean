@@ -945,10 +945,12 @@ fn largeArtifactBatch(service: *native.tasks.Service(T), task_id: [16]u8) !void 
     const encoded = try protean.contracts.encodeOwned(Artifact, a, .{ .id = id, .task = task_id, .value = reference, .media_type = .{ .bytes = "application/json" }, .schema_id = .{ .bytes = "artifact-test.json.v1" } });
     defer a.free(encoded);
     const record = try store.putObject(encoded);
+    store.invalidateIntegrity();
     try store.database.run("INSERT INTO records VALUES('artifact',?,?,?)", &.{ .{ .blob = &id }, .{ .blob = &task_id }, .{ .blob = &record.digest } });
     try service.namespace.commit("test.large-artifact");
     defer {
         store.begin() catch unreachable;
+        store.invalidateIntegrity();
         store.database.run("DELETE FROM records WHERE kind='artifact' AND id=? AND task=?", &.{ .{ .blob = &id }, .{ .blob = &task_id } }) catch unreachable;
         store.database.run("UPDATE tasks SET body=? WHERE id=?", &.{ .{ .blob = &original_reference.digest }, .{ .blob = &task_id } }) catch unreachable;
         service.namespace.commit("test.remove-large-artifact") catch unreachable;

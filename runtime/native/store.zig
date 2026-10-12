@@ -51,6 +51,11 @@ pub const Store = struct {
     head: Head,
     transaction: bool = false,
     fenced: bool = false,
+    /// Independent of append generations: unrelated owner commits preserve
+    /// validation facts, while a loss of custody invalidates all of them.
+    integrity_epoch: u64 = 1,
+    data_version: u64 = 0,
+    sealed_generation: ?u64 = null,
 
     /// The namespace owner has already authenticated the directory, acquired
     /// its OS lock and decided whether this is a new or existing database.
@@ -79,19 +84,61 @@ pub const Store = struct {
         const parent = try query.bytes(3);
         const head = try query.bytes(4);
         if (parent.len != 32 or head.len != 32) return error.CorruptState;
-        return .{ .allocator = a, .database = database, .head = .{ .generation = @intCast(generation), .parent = parent[0..32].*, .digest = head[0..32].* } };
+        var store: Store = .{ .allocator = a, .database = database, .head = .{ .generation = @intCast(generation), .parent = parent[0..32].*, .digest = head[0..32].* } };
+        store.data_version = try store.scalar("PRAGMA data_version");
+        return store;
     }
 
+    /// Supported replacement/corruption hooks must call this before mutation.
+    /// Invalidating custody never grants validation authority for the new epoch.
+    pub fn invalidateIntegrity(self: *Store) void {
+        self.sealed_generation = null;
+        self.integrity_epoch = std.math.add(u64, self.integrity_epoch, 1) catch {
+            self.fenced = true;
+            return;
+        };
+    }
+    pub fn fence(self: *Store) void {
+        if (!self.fenced) self.invalidateIntegrity();
+        self.fenced = true;
+    }
+    fn corrupt(self: *Store) error{CorruptState} {
+        self.fence();
+        return error.CorruptState;
+    }
+    pub fn checkIntegrity(self: *Store) !void {
+        if (self.fenced) return error.StorageUnavailable;
+        errdefer self.fence();
+        if (try self.scalar("PRAGMA data_version") != self.data_version) return error.CorruptState;
+    }
+    /// Namespace calls this only after verifying or durably publishing its seal.
+    /// SQL commit alone cannot make a new head available for validation reuse.
+    pub fn confirmSealed(self: *Store, head: Head) !void {
+        try self.checkIntegrity();
+        if (self.transaction or !std.meta.eql(head, self.head)) return error.InvalidState;
+        self.sealed_generation = head.generation;
+    }
+    /// Publication custody only; callers must separately validate the complete
+    /// dependency closure before retaining any semantic validation facts.
+    pub fn publicationEpoch(self: *Store) !u64 {
+        try self.checkIntegrity();
+        if (self.transaction or self.sealed_generation != self.head.generation) return error.InvalidState;
+        return self.integrity_epoch;
+    }
     pub fn begin(self: *Store) !void {
         if (self.fenced) return error.StorageUnavailable;
         if (self.transaction) return error.Busy;
         try self.database.exec("BEGIN IMMEDIATE;");
         self.transaction = true;
+        errdefer self.rollback();
+        // Acquire the writer lock before checking. Another connection cannot
+        // slip a change between this custody check and authoritative writes.
+        try self.checkIntegrity();
     }
     pub fn rollback(self: *Store) void {
         if (!self.transaction) return;
         self.database.exec("ROLLBACK;") catch {
-            self.fenced = true;
+            self.fence();
         };
         self.transaction = false;
     }
@@ -115,15 +162,16 @@ pub const Store = struct {
         hash.final(&next.digest);
         try self.database.run("UPDATE meta SET generation=?,parent=?,head=? WHERE singleton=1 AND generation=? AND head=?", &.{ .{ .integer = @intCast(next.generation) }, .{ .blob = &next.parent }, .{ .blob = &next.digest }, .{ .integer = @intCast(self.head.generation) }, .{ .blob = &self.head.digest } });
         if (try self.database.changes() != 1) {
-            self.fenced = true;
+            self.fence();
             return error.CorruptState;
         }
         self.database.exec("COMMIT;") catch |err| {
-            self.fenced = true;
+            self.fence();
             return err;
         };
         self.transaction = false;
         self.head = next;
+        self.sealed_generation = null;
         return next;
     }
     fn scalar(self: *Store, comptime sql: [:0]const u8) !u64 {
@@ -236,7 +284,7 @@ pub const Store = struct {
         try blob.close();
         var observed: Digest = undefined;
         hash_abi.protean_native_sha256_final(&hash, &observed);
-        if (!std.mem.eql(u8, &observed, &ref.digest)) return error.CorruptState;
+        if (!std.mem.eql(u8, &observed, &ref.digest)) return self.corrupt();
     }
     /// Private occurrence lookup. Public artifact reads require a separate
     /// task/audience-bound artifact record, never a bare content digest.
@@ -256,7 +304,7 @@ pub const Store = struct {
         }
         closed = true;
         try blob.close();
-        if (!std.mem.eql(u8, &digest(bytes), &id)) return error.CorruptState;
+        if (!std.mem.eql(u8, &digest(bytes), &id)) return self.corrupt();
         return bytes;
     }
     fn objectLocation(self: *Store, id: Digest, limit: ?usize) !struct { row: i64, bytes: usize } {
@@ -558,6 +606,7 @@ test "objects and immutable admission receipts commit together or disappear toge
     const reopened = try Store.init(a, db, false, @splat(7));
     try std.testing.expectEqualDeep(head, reopened.head);
     try std.testing.expectError(error.CorruptState, Store.init(a, db, false, @splat(8)));
+    store.invalidateIntegrity();
     try db.run("UPDATE operations SET task=? WHERE id='request-1'", &.{.{ .blob = &@as(state.TaskId, @splat(3)) }});
     try std.testing.expectError(error.CorruptState, store.receipt(a, "request-1", digest("submit/input")));
     try db.run("UPDATE operations SET task=? WHERE id='request-1'", &.{.{ .blob = &@as(state.TaskId, @splat(2)) }});
@@ -628,6 +677,7 @@ test "file-backed objects cross former allocation limits and retain chunk integr
         try store.objectRange(largest, largest.bytes, &.{});
         try std.testing.expectError(error.InvalidParams, store.objectRange(largest, largest.bytes, &range));
         try std.testing.expectError(error.Capacity, store.object(a, largest, fixture_bytes - 1));
+        store.invalidateIntegrity();
         try store.begin();
         const location = try store.objectLocation(largest.digest, fixture_bytes);
         var blob = try db.openBlob("objects", "body", location.row, true);
@@ -638,6 +688,11 @@ test "file-backed objects cross former allocation limits and retain chunk integr
         try std.testing.expectError(error.CorruptState, store.objectRange(largest, 0, &range));
         try std.testing.expectError(error.CorruptState, store.objectRange(largest, 0, &.{}));
         try std.testing.expectError(error.CorruptState, store.object(a, largest, fixture_bytes));
+        try std.testing.expect(store.fenced);
+        try std.testing.expectError(error.StorageUnavailable, store.begin());
+        // Reopening does not make corrupt bytes valid: duplicate admission
+        // still checks the entire stored object before trusting it.
+        store = try Store.init(a, db, false, @splat(7));
         try store.begin();
         try std.testing.expectError(error.CorruptState, store.putObject(bytes[0..fixture_bytes]));
         store.rollback();
@@ -665,4 +720,78 @@ test "actual SQLite storage exhaustion rolls back unpublished objects" {
     // reopen; recovery must not turn uncertainty into a fresh admission.
     try std.testing.expect(store.fenced);
     try std.testing.expectError(error.StorageUnavailable, store.begin());
+}
+
+test "integrity epochs survive owner appends but require each committed head to be sealed" {
+    const a = std.testing.allocator;
+    const db = try sqlite.Database.open(a, ":memory:", true);
+    defer db.destroy() catch unreachable;
+    defer db.close() catch unreachable;
+    var store = try Store.init(a, db, true, @splat(7));
+    try std.testing.expectError(error.InvalidState, store.publicationEpoch());
+    try store.confirmSealed(store.head);
+    const epoch = try store.publicationEpoch();
+    for (0..3) |_| {
+        try store.begin();
+        try std.testing.expectError(error.InvalidState, store.publicationEpoch());
+        _ = try store.putObject("unchanged immutable object");
+        const head = try store.commit("owner-append");
+        try std.testing.expectEqual(epoch, store.integrity_epoch);
+        try std.testing.expectError(error.InvalidState, store.publicationEpoch());
+        var stale = head;
+        stale.generation -= 1;
+        try std.testing.expectError(error.InvalidState, store.confirmSealed(stale));
+        try store.confirmSealed(head);
+        try std.testing.expectEqual(epoch, try store.publicationEpoch());
+    }
+    try store.begin();
+    _ = try store.putObject("unpublished descendant");
+    store.rollback();
+    try std.testing.expectEqual(epoch, try store.publicationEpoch());
+    store.invalidateIntegrity();
+    try std.testing.expectEqual(epoch + 1, store.integrity_epoch);
+    try std.testing.expectError(error.InvalidState, store.publicationEpoch());
+    store.fence();
+    try std.testing.expectEqual(epoch + 2, store.integrity_epoch);
+    try std.testing.expectError(error.StorageUnavailable, store.begin());
+}
+
+test "external SQLite commits fence both validation reuse and the next write transaction" {
+    const c = @import("native_c");
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var buffer: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(io, &buffer);
+    for (0..2) |mode| {
+        const path = try std.fmt.allocPrintSentinel(a, "{s}/external-{d}.sqlite", .{ buffer[0..length], mode }, 0);
+        defer a.free(path);
+        const db = try sqlite.Database.open(a, path, true);
+        defer db.destroy() catch unreachable;
+        defer db.close() catch unreachable;
+        var store = try Store.init(a, db, true, @splat(7));
+        try store.confirmSealed(store.head);
+        const epoch = try store.publicationEpoch();
+        // A second raw connection deliberately violates namespace ownership.
+        // The production Database wrapper itself still admits one owner only.
+        var peer: ?*c.sqlite3 = null;
+        try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open_v2(path.ptr, &peer, c.SQLITE_OPEN_READWRITE, null));
+        defer std.debug.assert(c.sqlite3_close(peer) == c.SQLITE_OK);
+        try store.begin();
+        try std.testing.expectEqual(c.SQLITE_BUSY, c.sqlite3_exec(peer, "INSERT INTO objects VALUES(zeroblob(32),x'01')", null, null, null));
+        store.rollback();
+        try std.testing.expectEqual(epoch, try store.publicationEpoch());
+        try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_exec(peer, "INSERT INTO objects VALUES(zeroblob(32),x'01')", null, null, null));
+        if (mode == 0) {
+            try std.testing.expectError(error.CorruptState, store.publicationEpoch());
+        } else {
+            // No prior read poll: begin checks while holding the writer lock.
+            try std.testing.expectError(error.CorruptState, store.begin());
+        }
+        try std.testing.expect(store.fenced and !store.transaction);
+        try std.testing.expectEqual(epoch + 1, store.integrity_epoch);
+        try std.testing.expectEqual(@as(u64, 0), store.head.generation);
+        try std.testing.expectError(error.StorageUnavailable, store.begin());
+    }
 }

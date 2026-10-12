@@ -226,11 +226,12 @@ pub const Namespace = struct {
                 try self.seal();
             } else return error.RollbackDetected;
         }
+        try self.store.confirmSealed(self.store.head);
         return self;
     }
 
     fn seal(self: *Namespace) !void {
-        errdefer self.store.fenced = true;
+        errdefer self.store.fence();
         // A leftover temporary seal is never authoritative. Check its type and
         // ownership before replacing it; no symlink or hardlink is truncated.
         if (openFile(self.directory, "seal.next", c.O_RDONLY)) |fd| {
@@ -250,6 +251,7 @@ pub const Namespace = struct {
     pub fn commit(self: *Namespace, transition: []const u8) !void {
         _ = try self.store.commit(transition);
         try self.seal();
+        try self.store.confirmSealed(self.store.head);
     }
     /// The task owner joins all workers and retires residents first.
     pub fn close(self: *Namespace) !void {
@@ -309,6 +311,7 @@ test "namespace refuses a database older than its published seal" {
     try owner.store.begin();
     try owner.commit("one");
     // Inject a stale database generation without rolling back its external seal.
+    owner.store.invalidateIntegrity();
     try owner.database.run("UPDATE meta SET generation=0,parent=?,head=? WHERE singleton=1", &.{ .{ .blob = &original.parent }, .{ .blob = &original.digest } });
     try owner.close();
     live = false;
@@ -327,4 +330,40 @@ test "namespace rejects an ancestor another principal could replace" {
     const path = try std.fmt.allocPrint(a, "{s}/shared/state", .{buffer[0..length]});
     defer a.free(path);
     try std.testing.expectError(error.UnsafeStatePath, Namespace.open(a, io, path));
+}
+
+test "seal failure invalidates custody after SQL commit and recovery publishes the same head" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var buffer: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(io, &buffer);
+    const path = try std.fmt.allocPrint(a, "{s}/seal-failure", .{buffer[0..length]});
+    defer a.free(path);
+    var owner = try Namespace.open(a, io, path);
+    var live = true;
+    defer if (live) owner.close() catch unreachable;
+    const epoch = try owner.store.publicationEpoch();
+    try owner.store.begin();
+    const object = try owner.store.putObject("durable but not yet sealed");
+    // A directory at the temporary seal name makes safe publication fail.
+    try std.testing.expectEqual(@as(c_int, 0), c.mkdirat(owner.directory, "seal.next", 0o700));
+    try std.testing.expectError(error.UnsafeStatePath, owner.commit("seal-failure"));
+    const committed = owner.store.head;
+    try std.testing.expectEqual(@as(u64, 1), committed.generation);
+    try std.testing.expectEqual(epoch + 1, owner.store.integrity_epoch);
+    try std.testing.expect(owner.store.fenced and !owner.store.transaction);
+    try std.testing.expectError(error.StorageUnavailable, owner.store.publicationEpoch());
+    try std.testing.expectError(error.StorageUnavailable, owner.store.begin());
+    try std.testing.expectEqual(@as(c_int, 0), c.unlinkat(owner.directory, "seal.next", c.AT_REMOVEDIR));
+    try owner.close();
+    live = false;
+    var recovered = try Namespace.open(a, io, path);
+    defer recovered.close() catch unreachable;
+    try std.testing.expectEqualDeep(committed, recovered.store.head);
+    _ = try recovered.store.publicationEpoch();
+    const bytes = try recovered.store.object(a, object, null);
+    defer a.free(bytes);
+    try std.testing.expectEqualStrings("durable but not yet sealed", bytes);
 }
