@@ -241,7 +241,7 @@ pub const Capture = struct {
 
 /// Recovery is a new observation about one original attempt. The original
 /// ambiguous occurrence and every predecessor body remain private audit roots.
-pub const RecoveryRequest = enum { rederive };
+pub const RecoveryRequest = enum { rederive, lookup };
 pub const Reconciliation = struct {
     version: u32 = 1,
     id: Digest,
@@ -261,13 +261,18 @@ pub const Reconciliation = struct {
     capability: Name,
     mechanism: Name,
     mechanism_version: u32,
-    provenance: enum { none, rederived },
+    provenance: enum { none, rederived, authentic, authoritative },
     outcome: union(enum) {
-        unresolved: enum { unsupported, unavailable },
+        unresolved: enum { unsupported, unavailable, interrupted, inconclusive, rejected },
         capture_admitted: Reference,
         reply_settled: Reference,
+        pending,
+        not_sent: Reference,
     },
     previous: ?Reference = null,
+    selection: RecoveryRequest = .rederive,
+    owner_epoch: ?Digest = null,
+    evidence: ?Reference = null,
 };
 
 /// Decode historical owners instead of trusting dependency rows or treating
@@ -294,26 +299,42 @@ pub fn visitReconciliationHistory(a: std.mem.Allocator, store: anytype, current:
         if (!std.meta.eql(captured.value.task, current.task) or !std.meta.eql(captured.value.attempt, current.attempt) or !std.meta.eql(captured.value.occurrence, current.occurrence) or current.prepared == null or !std.meta.eql(captured.value.request, current.prepared.?) or captured.value.projection != null) return error.CorruptState;
         try collector.typed(Capture, ref, captured.value);
     }
+    if (current.selection == .rederive and (current.owner_epoch != null or current.evidence != null)) return error.CorruptState;
     switch (current.outcome) {
-        .unresolved => if (current.provenance != .none or current.previous != null) return error.CorruptState,
-        .capture_admitted => if (current.provenance != .rederived or current.prepared == null or current.previous != null) return error.CorruptState,
-        .reply_settled => if (current.provenance != .rederived) return error.CorruptState,
+        .pending => if (current.selection != .lookup or current.owner_epoch == null or current.provenance != .none or current.previous != null or current.evidence != null) return error.CorruptState,
+        .unresolved => if (current.provenance != .none) return error.CorruptState,
+        .capture_admitted, .reply_settled => {
+            const provenance: @FieldType(Reconciliation, "provenance") = if (current.selection == .rederive) .rederived else .authentic;
+            if (current.provenance != provenance) return error.CorruptState;
+            if (current.outcome == .capture_admitted and current.prepared == null) return error.CorruptState;
+            if (current.selection == .lookup and (current.evidence == null or current.owner_epoch == null)) return error.CorruptState;
+        },
+        .not_sent => |proof| if (current.selection != .lookup or current.provenance != .authoritative or current.evidence == null or !std.meta.eql(proof, current.evidence.?) or current.owner_epoch == null) return error.CorruptState,
     }
+    if (current.outcome != .pending and current.owner_epoch != null and current.previous == null) return error.CorruptState;
+    if (current.selection == .rederive and current.outcome != .reply_settled and current.previous != null) return error.CorruptState;
     if (current.previous) |ref| {
         const bytes = try store.object(a, ref, null);
         defer a.free(bytes);
         var prior = try contracts.decodeOwned(Reconciliation, a, bytes);
         defer prior.deinit();
-        // Pure capture recovery has exactly two publications. A predecessor
-        // cannot fabricate a chain, change operation identity, or erase roots.
-        if (current.outcome != .reply_settled or prior.value.outcome != .capture_admitted or prior.value.previous != null) return error.CorruptState;
+        // The transition graph is acyclic: pending -> completed, and then
+        // capture_admitted -> reply_settled. No history-depth quota is needed.
+        if (prior.value.outcome == .pending) {
+            if (current.outcome == .pending or current.outcome == .reply_settled) return error.CorruptState;
+        } else if (prior.value.outcome == .capture_admitted) {
+            if (current.outcome != .reply_settled or current.provenance != prior.value.provenance or !std.meta.eql(current.evidence, prior.value.evidence)) return error.CorruptState;
+        } else return error.CorruptState;
         var normalized = current;
         normalized.outcome = prior.value.outcome;
-        normalized.previous = null;
+        normalized.previous = prior.value.previous;
+        normalized.provenance = prior.value.provenance;
+        normalized.evidence = prior.value.evidence;
         const expected = try contracts.encodeOwned(Reconciliation, a, normalized);
         defer a.free(expected);
         if (!std.mem.eql(u8, expected, bytes)) return error.CorruptState;
         try collector.typed(Reconciliation, ref, prior.value);
+        try visitReconciliationHistory(a, store, prior.value, collector);
     }
 }
 

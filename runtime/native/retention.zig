@@ -196,6 +196,8 @@ const Audit = struct {
         }
     }
     fn reconciliations(self: *Audit) !void {
+        var pending_owners = std.AutoHashMap(Key, void).init(self.a);
+        defer pending_owners.deinit();
         for (self.records.keys()) |key| {
             if (key.kind != .reconciliation) continue;
             if (!self.recovery_receipts.contains(key)) return error.CorruptState;
@@ -216,11 +218,20 @@ const Audit = struct {
             if (!std.meta.eql(request.value.request_identity, occurrence_value.value.request)) return error.CorruptState;
             const entry = try self.handlers.resolve(request.value, self.image);
             if (!same(entry.declaration.identity, item.capability.bytes)) return error.CorruptState;
-            if (item.provenance == .rederived) {
+            if (item.provenance != .none or item.owner_epoch != null) {
                 const adapter = entry.declaration.recovery orelse return error.CorruptState;
                 if (!same(adapter.identity, item.mechanism.bytes) or adapter.version != item.mechanism_version) return error.CorruptState;
+                if (item.selection == .lookup and adapter.lookup == null) return error.CorruptState;
+                if (item.selection == .rederive and adapter.rederive == null) return error.CorruptState;
             }
             switch (item.outcome) {
+                .pending => {
+                    const saved = occurrence_value.value;
+                    if (saved.state != .unknown or !std.meta.eql(saved.state.unknown.id, item.attempt) or task.value.current_occurrence == null or !std.meta.eql(task.value.current_occurrence.?, item.occurrence)) return error.CorruptState;
+                    const owner_key: Key = .{ .kind = .occurrence, .task = key.task, .id = item.occurrence };
+                    if ((try pending_owners.getOrPut(owner_key)).found_existing) return error.CorruptState;
+                },
+                .not_sent => {},
                 .unresolved => {},
                 .capture_admitted => |ref| {
                     const pending = occurrence_value.value.state;
@@ -242,6 +253,27 @@ const Audit = struct {
                         if (capture.value.reconciliation == null or !std.meta.eql(capture.value.reconciliation.?, key.id) or capture.value.projection == null or !std.meta.eql(capture.value.projection.?.reply, ref) or item.previous == null) return error.CorruptState;
                     }
                 },
+            }
+            if (item.provenance == .authentic or item.provenance == .authoritative) {
+                const evidence = try self.body(item.evidence orelse return error.CorruptState);
+                const input = registry.RecoveryInput.fromReconciliation(item, request.value.request_identity, entry.declaration.inference);
+                const finding = try self.store.project(registry.RecoveryFinding, self.a, .{ .task = key.task, .tenant = task.value.tenant.bytes, .profile = try self.body(item.profile), .application = self.image, .resources = item.resources.items }, struct {
+                    handlers: registry.Registry,
+                    input: registry.RecoveryInput,
+                    evidence: []const u8,
+                    pub fn run(this: @This(), ctx: registry.ProjectionContext) !registry.RecoveryFinding {
+                        return this.handlers.verifyRecovery(ctx, this.input, this.evidence);
+                    }
+                }{ .handlers = self.handlers, .input = input, .evidence = evidence });
+                if (item.provenance == .authoritative) {
+                    if (finding != .not_sent) return error.CorruptState;
+                } else {
+                    if (finding != .capture) return error.CorruptState;
+                    var captured = try self.record(.capture, key.task, item.attempt);
+                    defer captured.deinit();
+                    const ref = captured.value.response orelse return error.CorruptState;
+                    if (ref.bytes != finding.capture.len or !std.meta.eql(ref.digest, storage.digest(finding.capture))) return error.CorruptState;
+                }
             }
         }
     }

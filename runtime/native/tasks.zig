@@ -83,6 +83,7 @@ pub const Work = struct {
     profile: []const u8 = &.{},
     entry: registry.Entry,
     cleanup: bool,
+    recovery: ?struct { id: state.Digest, body: []const u8 } = null,
 };
 pub const Step = union(enum) { idle, progressed, waiting, work: Work };
 const Active = struct { task: state.TaskId, execution_revision: u64, driver: *evaluator.Driver };
@@ -283,6 +284,21 @@ pub fn Service(comptime Types: type) type {
                 try self.store().putRecord(occurrence.Occurrence, "occurrence", current, id, lost);
                 try self.event(&value, .delivery_unknown, "{}");
                 try self.persist(value, previous, "process.recover-unknown");
+            }
+            for (ids) |id| {
+                var decoded = self.task(a, id) catch |err| switch (err) {
+                    error.Denied => continue,
+                    else => return err,
+                };
+                defer decoded.deinit();
+                const current = decoded.value.current_occurrence orelse continue;
+                var saved = try self.record(occurrence.Occurrence, a, "occurrence", current, id);
+                defer saved.deinit();
+                if (saved.value.state != .unknown) continue;
+                const pending = try self.pendingRecovery(a, id, current, saved.value.state.unknown.id) orelse continue;
+                var item = try self.record(state.Reconciliation, a, "reconciliation", pending, id);
+                defer item.deinit();
+                try self.finishRecovery(a, decoded.value, saved.value, item.value, null, .interrupted);
             }
         }
         fn record(self: *Self, comptime T: type, a: std.mem.Allocator, comptime kind: []const u8, id: state.Digest, task_id: state.TaskId) !contracts.Decoded(T) {
@@ -574,7 +590,13 @@ pub fn Service(comptime Types: type) type {
             const entry = self.handlers.resolve(request.value, self.application.image_identity) catch |err| switch (err) {
                 error.MissingCapability, error.CapabilitySchemaMismatch, error.Denied => return result,
             };
-            if (entry.declaration.recovery != null) result.mechanisms = &.{.rederive};
+            if (entry.declaration.recovery) |adapter| {
+                const can_lookup = adapter.lookup != null and blk: {
+                    _ = self.handlers.admit(request.value, self.profile.authority, self.application.image_identity, registry.resourceIdentity(self.application.image_identity, value.profile.digest, value.resources.items)) catch break :blk false;
+                    break :blk true;
+                };
+                result.mechanisms = if (adapter.rederive != null) (if (can_lookup) &.{ .rederive, .lookup } else &.{.rederive}) else if (can_lookup) &.{.lookup} else &.{};
+            }
             return result;
         }
 
@@ -584,8 +606,9 @@ pub fn Service(comptime Types: type) type {
             return self.record(state.Reconciliation, a, "reconciliation", id, task_id);
         }
 
-        /// Admit an explicit pure recovery operation. Receipt lookup precedes
-        /// revision/state checks; replay cannot compute or dispatch again.
+        /// Admit explicit recovery. Receipt lookup precedes revision/state
+        /// checks; pure computation completes locally, while asynchronous
+        /// lookup gets a sealed pending record before the worker may start.
         pub fn reconcile(self: *Self, a: std.mem.Allocator, id: []const u8, task_id: state.TaskId, expected: u64, occurrence_id: state.Digest, attempt_id: state.Digest, recovery: state.RecoveryRequest) !Admission {
             const request_digest = try reconcileDigest(a, task_id, expected, occurrence_id, attempt_id, recovery);
             if (try self.replay(a, id, request_digest)) |prior| return prior;
@@ -599,6 +622,7 @@ pub fn Service(comptime Types: type) type {
             defer pending.deinit();
             if (pending.value.state != .unknown) return error.UnsettledOccurrence;
             if (!same(&pending.value.state.unknown.id, &attempt_id)) return error.StaleOccurrence;
+            if (try self.pendingRecovery(a, task_id, occurrence_id, attempt_id) != null) return error.UnsettledOccurrence;
             var attempt = try self.record(state.Attempt, a, "attempt", attempt_id, task_id);
             defer attempt.deinit();
             const request_bytes = try self.store().object(a, attempt.value.request, null);
@@ -606,14 +630,25 @@ pub fn Service(comptime Types: type) type {
             var original_request = try data.invocation.decode(data.invocation.Request, a, request_bytes);
             defer original_request.deinit();
             const entry = try self.handlers.resolve(original_request.value, self.application.image_identity);
-            const recovered: ?registry.Rederived = self.rederiveUnknown(a, task_id, occurrence_id, attempt_id) catch |err| switch (err) {
+            const lookup = recovery == .lookup and if (entry.declaration.recovery) |adapter| adapter.lookup != null else false;
+            if (lookup) {
+                _ = try self.handlers.admit(original_request.value, self.profile.authority, self.application.image_identity, registry.resourceIdentity(self.application.image_identity, value.profile.digest, value.resources.items));
+                if (entry.declaration.capture) |adapter| {
+                    const prepared = try self.store().object(a, attempt.value.prepared orelse return error.CorruptState, null);
+                    defer a.free(prepared);
+                    const expected_prepared = try self.prepareProjection(a, value, adapter, original_request.value.binding.payload);
+                    defer a.free(expected_prepared);
+                    if (!same(prepared, expected_prepared)) return error.CorruptState;
+                }
+            }
+            const recovered: ?registry.Rederived = if (recovery == .rederive) self.rederiveUnknown(a, task_id, occurrence_id, attempt_id) catch |err| switch (err) {
                 error.UnsupportedRecovery => null,
                 else => return err,
-            };
+            } else null;
             defer if (recovered) |result| switch (result) {
                 inline else => |bytes| a.free(bytes),
             };
-            if (recovered != null) {
+            if (recovered != null or lookup) {
                 try self.ensureOwnershipCapacity(task_id);
                 try self.runnable.ensureUnusedCapacity(self.allocator, 1);
             }
@@ -641,7 +676,18 @@ pub fn Service(comptime Types: type) type {
                 .mechanism_version = if (entry.declaration.recovery) |adapter| adapter.version else 0,
                 .provenance = if (recovered != null) .rederived else .none,
                 .outcome = .{ .unresolved = .unsupported },
+                .selection = recovery,
+                .owner_epoch = if (lookup) self.owner_epoch else null,
             };
+            if (lookup) {
+                result.outcome = .pending;
+                value.schedule = .queued;
+                value.blocker = null;
+                if (try self.store().recordBytes(a, "capture", attempt_id, task_id)) |prior| {
+                    defer a.free(prior);
+                    result.original_capture = try self.store().putObject(prior);
+                }
+            }
             if (recovered) |bytes| {
                 const binding: occurrence.Binding = .{ .id = occurrence_id, .task = task_id, .request = pending.value.request };
                 const next = switch (bytes) {
@@ -673,11 +719,115 @@ pub fn Service(comptime Types: type) type {
             try self.event(&value, .reconciled, event_data);
             const admitted = try self.recoveryReceipt(a, .reconcile, id, request_digest, value, .reconciled, null, null, reconciliation_id);
             try self.persist(value, expected, "task.reconcile");
-            if (recovered != null) {
+            if (recovered != null or lookup) {
                 try self.runnableAdd(task_id);
                 self.claim(task_id);
             }
             return admitted;
+        }
+
+        fn pendingRecovery(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, occurrence_id: state.Digest, attempt_id: state.Digest) !?state.Digest {
+            var rows = try self.store().database.prepare("SELECT id FROM records WHERE kind='reconciliation' AND task=?", &.{.{ .blob = &task_id }});
+            defer rows.deinit();
+            var result: ?state.Digest = null;
+            while (try rows.step() == .row) {
+                const bytes = try rows.bytes(0);
+                if (bytes.len != 32) return error.CorruptState;
+                var item = try self.record(state.Reconciliation, a, "reconciliation", bytes[0..32].*, task_id);
+                defer item.deinit();
+                if (item.value.outcome != .pending) continue;
+                if (result != null or !same(&item.value.occurrence, &occurrence_id) or !same(&item.value.attempt, &attempt_id)) return error.CorruptState;
+                result = item.value.id;
+            }
+            return result;
+        }
+
+        fn recoveryWork(self: *Self, a: std.mem.Allocator, value: state.Task, pending: occurrence.Occurrence, id: state.Digest) !Step {
+            if (self.work != null) return .idle;
+            var saved = try self.record(state.Reconciliation, a, "reconciliation", id, value.id);
+            defer saved.deinit();
+            const item = saved.value;
+            if (item.outcome != .pending or item.owner_epoch == null or !same(&item.owner_epoch.?, &self.owner_epoch)) return error.CorruptState;
+            const request = try self.store().object(self.allocator, item.request, null);
+            errdefer self.allocator.free(request);
+            var decoded = try data.invocation.decode(data.invocation.Request, a, request);
+            defer decoded.deinit();
+            const entry = self.handlers.admit(decoded.value, self.profile.authority, self.application.image_identity, registry.resourceIdentity(self.application.image_identity, value.profile.digest, value.resources.items)) catch {
+                try self.finishRecovery(a, value, pending, item, null, .unavailable);
+                self.allocator.free(request);
+                return .progressed;
+            };
+            const prepared = if (item.prepared) |ref| try self.store().object(self.allocator, ref, null) else null;
+            errdefer if (prepared) |bytes| self.allocator.free(bytes);
+            const profile = try self.store().object(self.allocator, value.profile, null);
+            errdefer self.allocator.free(profile);
+            const body = try contracts.encodeOwned(state.Reconciliation, self.allocator, item);
+            self.work = .{ .owner_epoch = self.owner_epoch, .task = value.id, .occurrence = pending.id, .attempt = item.attempt, .request = request, .prepared = prepared, .profile = profile, .entry = entry, .cleanup = false, .recovery = .{ .id = id, .body = body } };
+            return .{ .work = self.work.? };
+        }
+
+        fn finishRecovery(self: *Self, a: std.mem.Allocator, initial: state.Task, pending: occurrence.Occurrence, original: state.Reconciliation, evidence: ?[]const u8, failure: @FieldType(@FieldType(state.Reconciliation, "outcome"), "unresolved")) !void {
+            if (original.outcome != .pending or pending.state != .unknown or !same(&pending.state.unknown.id, &original.attempt) or initial.current_occurrence == null or !same(&initial.current_occurrence.?, &original.occurrence)) return error.StaleOccurrence;
+            var arena = std.heap.ArenaAllocator.init(a);
+            defer arena.deinit();
+            var reason = failure;
+            const verified: ?registry.RecoveryFinding = if (evidence) |bytes| self.store().project(registry.RecoveryFinding, arena.allocator(), self.projectionBinding(initial), struct {
+                handlers: registry.Registry,
+                item: state.Reconciliation,
+                request_identity: state.Digest,
+                evidence: []const u8,
+                pub fn run(this: @This(), ctx: registry.ProjectionContext) !registry.RecoveryFinding {
+                    const request_bytes = try ctx.object(this.item.request, std.math.cast(usize, this.item.request.bytes) orelse return error.Capacity);
+                    var request = try data.invocation.decode(data.invocation.Request, ctx.allocator, request_bytes);
+                    defer request.deinit();
+                    const entry = try this.handlers.resolve(request.value, ctx.application.?);
+                    return this.handlers.verifyRecovery(ctx, registry.RecoveryInput.fromReconciliation(this.item, this.request_identity, entry.declaration.inference), this.evidence);
+                }
+            }{ .handlers = self.handlers, .item = original, .request_identity = pending.request, .evidence = bytes }) catch |err| blk: {
+                if (err == error.OutOfMemory or err == error.Capacity) return err;
+                reason = .rejected;
+                break :blk null;
+            } else null;
+            const advancing = if (verified) |finding| finding != .inconclusive else false;
+            if (advancing) try self.runnable.ensureUnusedCapacity(self.allocator, 1);
+            var value = initial;
+            value.revision = try std.math.add(u64, value.revision, 1);
+            value.schedule = .parked;
+            value.blocker = .unavailable_environment;
+            try self.store().begin();
+            defer self.store().rollback();
+            var result = original;
+            result.previous = try self.snapshotRecord(state.Reconciliation, a, "reconciliation", original.id, value.id);
+            result.evidence = if (evidence) |bytes| try self.store().putObject(bytes) else null;
+            result.outcome = .{ .unresolved = reason };
+            if (verified) |finding| switch (finding) {
+                .inconclusive => result.outcome = .{ .unresolved = .inconclusive },
+                .capture => |raw| {
+                    const capture_value: state.Capture = .{ .task = value.id, .occurrence = pending.id, .attempt = original.attempt, .request = original.prepared orelse return error.CorruptState, .response = try self.store().putObject(raw), .disposition = .complete, .reconciliation = original.id };
+                    if (try self.store().recordBytes(a, "capture", original.attempt, value.id)) |prior| {
+                        defer a.free(prior);
+                        if (original.original_capture == null) return error.CorruptState;
+                        try self.store().putRecord(state.Capture, "capture", original.attempt, value.id, capture_value);
+                    } else try self.store().createRecord(state.Capture, "capture", original.attempt, value.id, capture_value);
+                    result.provenance = .authentic;
+                    result.outcome = .{ .capture_admitted = capture_value.response.? };
+                    try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, value.id, try occurrence.recoveredCapture(pending, .{ .id = pending.id, .task = value.id, .request = pending.request }, original.attempt));
+                    value.schedule = .queued;
+                    value.blocker = null;
+                },
+                .not_sent => {
+                    result.provenance = .authoritative;
+                    result.outcome = .{ .not_sent = result.evidence.? };
+                    try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, value.id, try occurrence.recoveredNotSent(pending, .{ .id = pending.id, .task = value.id, .request = pending.request }, original.attempt));
+                    if (value.cancellation != null) {
+                        value.schedule = .queued;
+                        value.blocker = null;
+                    }
+                },
+            };
+            try self.store().putRecord(state.Reconciliation, "reconciliation", result.id, value.id, result);
+            try self.persist(value, initial.revision, "recovery.complete");
+            if (value.schedule == .queued) try self.runnableAdd(value.id) else self.runnableRemove(value.id);
         }
 
         fn snapshotRecord(self: *Self, comptime T: type, a: std.mem.Allocator, comptime kind: []const u8, id: state.Digest, task_id: state.TaskId) !state.Reference {
@@ -883,7 +1033,11 @@ pub fn Service(comptime Types: type) type {
                 const binding: occurrence.Binding = .{ .id = pending.id, .task = id, .request = pending.request };
                 switch (pending.state) {
                     .captured => return self.interpretCapture(a, value, pending),
-                    .unknown => return self.blocked(a, value, .unavailable_environment),
+                    .unknown => |attempt| {
+                        if (self.work) |work| if (work.recovery != null and same(&work.task, &id) and same(&work.occurrence, &pending.id) and same(&work.attempt, &attempt.id)) return .idle;
+                        if (try self.pendingRecovery(a, value.id, pending.id, attempt.id)) |recovery_id| return self.recoveryWork(a, value, pending, recovery_id);
+                        return self.blocked(a, value, .unavailable_environment);
+                    },
                     .dispatching => |attempt| {
                         // This worker still owns the attempt even when another
                         // task now owns the sole physical Kosmos resident.
@@ -1264,17 +1418,34 @@ pub fn Service(comptime Types: type) type {
             const current = self.work orelse return error.StaleOccurrence;
             if (!same(&self.owner_epoch, &work.owner_epoch) or !same(&current.owner_epoch, &work.owner_epoch) or
                 !same(&current.task, &work.task) or !same(&current.occurrence, &work.occurrence) or !same(&current.attempt, &work.attempt)) return error.StaleOccurrence;
+            if ((current.recovery != null) != (work.recovery != null)) return error.StaleOccurrence;
+            if (current.recovery) |item| if (!same(&item.id, &work.recovery.?.id)) return error.StaleOccurrence;
         }
         fn releaseWork(self: *Self) void {
             self.allocator.free(self.work.?.request);
             if (self.work.?.prepared) |body| self.allocator.free(body);
             self.allocator.free(self.work.?.profile);
+            if (self.work.?.recovery) |item| self.allocator.free(item.body);
             self.work = null;
+        }
+        fn completeRecoveryWork(self: *Self, a: std.mem.Allocator, work: Work, evidence: ?[]const u8) !void {
+            try self.currentWork(work);
+            defer self.releaseWork();
+            errdefer self.store().fence();
+            var value = try self.task(a, work.task);
+            defer value.deinit();
+            var pending = try self.record(occurrence.Occurrence, a, "occurrence", work.occurrence, work.task);
+            defer pending.deinit();
+            var item = try self.record(state.Reconciliation, a, "reconciliation", work.recovery.?.id, work.task);
+            defer item.deinit();
+            if (item.value.owner_epoch == null or !same(&item.value.owner_epoch.?, &work.owner_epoch) or !same(&item.value.attempt, &work.attempt) or !same(&item.value.occurrence, &work.occurrence)) return error.StaleOccurrence;
+            try self.finishRecovery(a, value.value, pending.value, item.value, evidence, .unavailable);
         }
         /// A worker has returned and will no longer access this work item.
         /// Acquisition is published before any subsequent Kosmos consumption.
         pub fn acquire(self: *Self, a: std.mem.Allocator, work: Work, reply: []const u8) !void {
             try self.currentWork(work);
+            if (work.recovery != null) return self.completeRecoveryWork(a, work, reply);
             if (work.entry.declaration.capture != null) return self.capture(a, work, reply);
             defer self.releaseWork();
             errdefer self.store().fence();
@@ -1302,6 +1473,7 @@ pub fn Service(comptime Types: type) type {
         }
         pub fn unknown(self: *Self, a: std.mem.Allocator, work: Work) !void {
             try self.currentWork(work);
+            if (work.recovery != null) return self.completeRecoveryWork(a, work, null);
             defer self.releaseWork();
             errdefer self.store().fence();
             var decoded = try self.task(a, work.task);
@@ -1326,6 +1498,7 @@ pub fn Service(comptime Types: type) type {
 
         pub fn notSent(self: *Self, a: std.mem.Allocator, work: Work) !void {
             try self.currentWork(work);
+            if (work.recovery != null) return self.completeRecoveryWork(a, work, null);
             defer self.releaseWork();
             errdefer self.store().fence();
             var decoded = try self.task(a, work.task);
@@ -1438,7 +1611,7 @@ pub fn Service(comptime Types: type) type {
                     var recovery = try self.record(state.Reconciliation, temporary, "reconciliation", id, value.id);
                     defer recovery.deinit();
                     if (recovery.value.admission_revision == 0) return error.InvalidArchive;
-                    const expected_digest = try reconcileDigest(temporary, value.id, recovery.value.admission_revision - 1, recovery.value.occurrence, recovery.value.attempt, .rederive);
+                    const expected_digest = try reconcileDigest(temporary, value.id, recovery.value.admission_revision - 1, recovery.value.occurrence, recovery.value.attempt, recovery.value.selection);
                     if (!same(&expected_digest, &receipt_value.request_digest)) return error.InvalidArchive;
                 }
             }
@@ -1782,6 +1955,9 @@ pub fn Service(comptime Types: type) type {
             try self.event(&value, .imported, try json.canonical(a, event_data));
             const admitted = try self.receipt(a, .import_checkpoint, id, request, value, .imported, null, null);
             try self.persist(value, previous, "checkpoint.import");
+            // Imported pending lookups have no live worker in this owner.
+            // A crash before this ordinary transition is handled on reopen.
+            try self.recover(a);
             return admitted;
         }
 

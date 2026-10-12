@@ -560,7 +560,7 @@ fn driveHuman(comptime Types: type, a: std.mem.Allocator, service: *tasks.Servic
         if (slot.future != null) {
             var task = try service.task(frame, slot.work.task);
             defer task.deinit();
-            if (task.value.cancellation != null and !slot.work.cleanup) slot.cancel();
+            if (task.value.cancellation != null and !slot.work.cleanup and slot.work.recovery == null) slot.cancel();
             if (slot.finished()) {
                 try slot.join();
                 if (slot.reply) |reply| try service.acquire(frame, slot.work, reply) else if (!slot.invoked) try service.notSent(frame, slot.work) else try service.unknown(frame, slot.work);
@@ -868,7 +868,7 @@ fn serve(comptime Types: type, io: std.Io, a: std.mem.Allocator, connection: *Co
                 var task = try service.task(frame, slot.work.task);
                 defer task.deinit();
                 const deadline_near = if (shutdown_at) |start| time - start >= connection.limits.output_stall_ms - 100 else false;
-                if ((task.value.cancellation != null and !slot.work.cleanup) or (shutdown_at != null and mode == .park) or deadline_near) slot.cancel();
+                if ((task.value.cancellation != null and !slot.work.cleanup and slot.work.recovery == null) or (shutdown_at != null and mode == .park) or deadline_near) slot.cancel();
                 if (slot.finished()) {
                     try slot.join();
                     if (slot.reply) |reply| try service.acquire(frame, slot.work, reply) else if (!slot.invoked) {

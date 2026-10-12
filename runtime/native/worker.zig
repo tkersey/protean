@@ -57,6 +57,13 @@ pub const Worker = struct {
         const ctx: registry.Context = .{ .allocator = a, .io = self.io, .authority = &self.authority, .task_id = &id, .profile = self.work.profile, .environment = self.environment, .cancellation = &self.cancellation };
         try ctx.checkCancellation();
         self.invoked = true;
+        if (self.work.recovery) |item| {
+            var saved = try @import("protean_contracts").decodeOwned(@import("state.zig").Reconciliation, a, item.body);
+            defer saved.deinit();
+            const adapter = self.work.entry.declaration.recovery orelse return error.UnsupportedRecovery;
+            const lookup = adapter.lookup orelse return error.UnsupportedRecovery;
+            return lookup.acquire(ctx, registry.RecoveryInput.fromReconciliation(saved.value, request.value.request_identity, self.work.entry.declaration.inference), request.value.binding.payload, self.work.prepared);
+        }
         if (self.work.entry.declaration.capture) |adapter| {
             return switch (try adapter.acquire(ctx, self.work.prepared orelse return error.InvalidPreparedRequest)) {
                 .captured => |bytes| bytes,

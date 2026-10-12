@@ -124,14 +124,35 @@ pub const RecoveryInput = struct {
     resources: []const ObjectReference,
     capability: []const u8,
     inference: bool,
+
+    pub fn fromReconciliation(item: state.Reconciliation, identity: state.Digest, inference: bool) RecoveryInput {
+        return .{ .task = item.task, .occurrence = item.occurrence, .attempt = item.attempt, .request_identity = identity, .request = item.request, .prepared = item.prepared, .profile = item.profile, .resources = item.resources.items, .capability = item.capability.bytes, .inference = inference };
+    }
 };
 pub const Rederived = union(enum) { capture: []const u8, reply: []const u8 };
+pub const RecoveryFinding = union(enum) {
+    /// Exact historical bytes authenticated by the compiled verifier.
+    capture: []const u8,
+    not_sent,
+    inconclusive,
+};
+pub const ReceiptLookup = struct {
+    /// Read-only authoritative receipt retrieval. This callback must never
+    /// invoke the original effect. Native adapters remain trusted code.
+    /// Return complete receipt/proof bytes. Ancillary verifier inputs must be
+    /// in the original frozen resource closure, so evidence is archive-complete.
+    acquire: *const fn (Context, RecoveryInput, []const u8, ?[]const u8) anyerror![]u8,
+    /// The owner verifies returned evidence under the original immutable
+    /// bindings before any occurrence transition. Neither callback has Store.
+    verify: *const fn (ProjectionContext, RecoveryInput, []const u8) anyerror!RecoveryFinding,
+};
 pub const RecoveryAdapter = struct {
     identity: []const u8,
     version: u32,
     /// Pure computation: only immutable objects and original prepared bytes.
     /// No Context, IO, credentials, live filesystem, or environment handle.
-    rederive: *const fn (ProjectionContext, RecoveryInput, []const u8, ?[]const u8) anyerror![]u8,
+    rederive: ?*const fn (ProjectionContext, RecoveryInput, []const u8, ?[]const u8) anyerror![]u8 = null,
+    lookup: ?ReceiptLookup = null,
 };
 
 pub const Grant = struct {
@@ -224,7 +245,7 @@ pub const Registry = struct {
             if (declaration.kind == .leaf and declaration.invoke == null and declaration.capture == null) return error.InvalidCapability;
             if (declaration.capture != null and (declaration.kind != .leaf or !declaration.background or declaration.invoke != null)) return error.InvalidCapability;
             if (declaration.recovery) |recovery| {
-                if (declaration.kind != .leaf or recovery.identity.len == 0 or recovery.version == 0) return error.InvalidCapability;
+                if (declaration.kind != .leaf or recovery.identity.len == 0 or recovery.version == 0 or (recovery.rederive == null and recovery.lookup == null)) return error.InvalidCapability;
             }
             if (declaration.kind == .question and (declaration.present == null or declaration.answer == null or declaration.answer_schema_id == null)) return error.InvalidCapability;
             entry.* = .{
@@ -275,6 +296,12 @@ pub const Registry = struct {
     /// The task owner must still admit the same unknown occurrence/attempt and
     /// durably record rederivation provenance before consuming these bytes.
     pub fn rederive(self: Registry, ctx: ProjectionContext, input: RecoveryInput) !Rederived {
+        return self.recover(false, ctx, input, null);
+    }
+    pub fn verifyRecovery(self: Registry, ctx: ProjectionContext, input: RecoveryInput, evidence: []const u8) !RecoveryFinding {
+        return self.recover(true, ctx, input, evidence);
+    }
+    fn recover(self: Registry, comptime lookup: bool, ctx: ProjectionContext, input: RecoveryInput, evidence: ?[]const u8) !(if (lookup) RecoveryFinding else Rederived) {
         const image = ctx.application orelse return error.InvalidRecovery;
         if (!std.meta.eql(ctx.task, input.task) or input.profile.bytes != ctx.profile.len or
             !std.meta.eql(input.profile.digest, @import("store.zig").digest(ctx.profile)) or
@@ -295,10 +322,16 @@ pub const Registry = struct {
             const derived = try capture.prepare(ctx, request.value.binding.payload);
             defer ctx.allocator.free(derived);
             if (!std.mem.eql(u8, original, derived)) return error.InvalidPreparedRequest;
-            return .{ .capture = try adapter.rederive(ctx, input, request.value.binding.payload, original) };
+        } else if (prepared != null) return error.InvalidRecovery;
+        if (lookup) {
+            const verifier = adapter.lookup orelse return error.UnsupportedRecovery;
+            const result = try verifier.verify(ctx, input, evidence.?);
+            if (result == .capture and entry.declaration.capture == null) return error.InvalidRecovery;
+            return result;
         }
-        if (prepared != null) return error.InvalidRecovery;
-        const reply = try adapter.rederive(ctx, input, request.value.binding.payload, null);
+        const rederive_result = adapter.rederive orelse return error.UnsupportedRecovery;
+        if (entry.declaration.capture != null) return .{ .capture = try rederive_result(ctx, input, request.value.binding.payload, prepared) };
+        const reply = try rederive_result(ctx, input, request.value.binding.payload, null);
         errdefer ctx.allocator.free(reply);
         var schema = try data.schema.decode(ctx.allocator, entry.resume_schema);
         defer schema.deinit();

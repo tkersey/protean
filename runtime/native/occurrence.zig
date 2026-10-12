@@ -121,6 +121,17 @@ pub fn recoveredCapture(value: Occurrence, binding: Binding, attempt: Digest) Er
     return next;
 }
 
+/// Only the recovery admission owner may publish authoritative non-invocation
+/// proof. This preserves the attempt; explicit resume creates its successor.
+pub fn recoveredNotSent(value: Occurrence, binding: Binding, attempt: Digest) Error!Occurrence {
+    try current(value, binding);
+    if (value.state != .unknown) return error.UnsettledOccurrence;
+    if (!equal(value.state.unknown.id, attempt)) return error.StaleOccurrence;
+    var next = value;
+    next.state = .{ .not_sent = .{ .id = attempt } };
+    return next;
+}
+
 pub fn answered(value: Occurrence, binding: Binding, question: Digest, pending_digest: Digest, answer: Digest, reply: Digest, cancellation_pending: bool) Error!Occurrence {
     try current(value, binding);
     if (cancellation_pending) return error.CancellationPending;

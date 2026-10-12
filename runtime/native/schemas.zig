@@ -361,7 +361,7 @@ pub fn documentVersion(a: std.mem.Allocator, application: json.Value, limits: pr
             if (comptime std.mem.eql(u8, name, "task.message")) admitted = try extend(a, admitted, &.{.{ "message_id", digest }}, &.{});
             if (comptime std.mem.eql(u8, name, "task.respond")) admitted = try extend(a, admitted, &.{.{ "question_id", digest }}, &.{});
             if (comptime std.mem.eql(u8, name, "task.reconcile")) {
-                const recovery = try shape(a, &.{ .{ "reconciliation_id", digest }, .{ "occurrence_id", digest }, .{ "attempt_id", digest }, .{ "status", try enumeration(a, &.{ "unresolved", "capture_admitted", "reply_settled" }) }, .{ "provenance", try enumeration(a, &.{ "none", "rederived" }) }, .{ "mechanism", try text(a, 1, 128) }, .{ "mechanism_version", try counter(a, std.math.maxInt(u32)) }, .{ "reason", try nullable(a, try enumeration(a, &.{ "unsupported", "unavailable" })) } }, &.{});
+                const recovery = try shape(a, &.{ .{ "reconciliation_id", digest }, .{ "occurrence_id", digest }, .{ "attempt_id", digest }, .{ "status", try enumeration(a, &.{ "unresolved", "capture_admitted", "reply_settled", "pending", "not_sent" }) }, .{ "provenance", try enumeration(a, &.{ "none", "rederived", "authentic", "authoritative" }) }, .{ "mechanism", try text(a, 1, 128) }, .{ "mechanism_version", try counter(a, std.math.maxInt(u32)) }, .{ "reason", try nullable(a, try enumeration(a, &.{ "unsupported", "unavailable", "interrupted", "inconclusive", "rejected" })) } }, &.{});
                 admitted = try extend(a, admitted, &.{.{ "reconciliation", recovery }}, &.{});
             }
             try json.put(a, &definitions, name ++ ".result", admitted);

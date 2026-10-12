@@ -1903,3 +1903,345 @@ test "eligible round robin progresses pure question inbox cancellation and repli
     try std.testing.expectEqual(0, try namespace.store.capabilityAttempts(no_dispatch.receipt.task, "fair.leaf.v1"));
     try std.testing.expect(try service.pump(frame) == .idle);
 }
+
+const LookupFixture = struct {
+    const C = protean.contracts;
+    const State = native.testing.state;
+    const Kind = enum { capture, not_sent, inconclusive };
+    const Body = struct { binding: [32]u8, kind: Kind, raw: C.Bytes(null) };
+    const Evidence = struct { body: Body, signature: [32]u8 };
+    hold: std.atomic.Value(bool) = .init(false),
+    started: std.atomic.Value(bool) = .init(false),
+    calls: std.atomic.Value(u32) = .init(0),
+    kind: Kind = .capture,
+
+    fn binding(a: std.mem.Allocator, input: native.registry.RecoveryInput) ![32]u8 {
+        const Bound = struct { task: [16]u8, occurrence: [32]u8, attempt: [32]u8, request_identity: [32]u8, request: State.Reference, prepared: ?State.Reference, profile: State.Reference, resources: C.Vector(State.Reference, null), capability: C.Text(128), inference: bool };
+        const bytes = try C.encodeOwned(Bound, a, .{ .task = input.task, .occurrence = input.occurrence, .attempt = input.attempt, .request_identity = input.request_identity, .request = input.request, .prepared = input.prepared, .profile = input.profile, .resources = .{ .items = input.resources }, .capability = .{ .bytes = input.capability }, .inference = input.inference });
+        defer a.free(bytes);
+        var result: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &result, .{});
+        return result;
+    }
+    fn sign(a: std.mem.Allocator, body: Body) ![32]u8 {
+        const bytes = try C.encodeOwned(Body, a, body);
+        defer a.free(bytes);
+        var mac: [32]u8 = undefined;
+        std.crypto.auth.hmac.sha2.HmacSha256.create(&mac, bytes, "private synthetic receipt authority");
+        return mac;
+    }
+    fn receipt(a: std.mem.Allocator, input: native.registry.RecoveryInput, kind: Kind) ![]u8 {
+        const raw = try C.encodeOwned(u32, a, 99);
+        defer a.free(raw);
+        const body: Body = .{ .binding = try binding(a, input), .kind = kind, .raw = .{ .bytes = raw } };
+        return C.encodeOwned(Evidence, a, .{ .body = body, .signature = try sign(a, body) });
+    }
+    fn lookup(ctx: native.Context, input: native.registry.RecoveryInput, _: []const u8, _: ?[]const u8) ![]u8 {
+        const self: *LookupFixture = @ptrCast(@alignCast(ctx.environment.?));
+        _ = self.calls.fetchAdd(1, .acq_rel);
+        self.started.store(true, .release);
+        while (self.hold.load(.acquire)) {
+            try ctx.checkCancellation();
+            try ctx.io.sleep(.fromMilliseconds(1), .awake);
+        }
+        return receipt(ctx.allocator, input, self.kind);
+    }
+    fn verify(ctx: native.registry.ProjectionContext, input: native.registry.RecoveryInput, bytes: []const u8) !native.registry.RecoveryFinding {
+        var decoded = try C.decodeOwned(Evidence, ctx.allocator, bytes);
+        defer decoded.deinit();
+        if (!std.meta.eql(decoded.value.signature, try sign(ctx.allocator, decoded.value.body)) or !std.meta.eql(decoded.value.body.binding, try binding(ctx.allocator, input))) return error.InvalidReceipt;
+        return switch (decoded.value.body.kind) {
+            .capture => .{ .capture = try ctx.allocator.dupe(u8, decoded.value.body.raw.bytes) },
+            .not_sent => .not_sent,
+            .inconclusive => .inconclusive,
+        };
+    }
+    fn forbidden(_: native.Context, _: []const u8) !native.registry.Acquisition {
+        return error.OriginalEffectMustNotRun;
+    }
+    fn interpret(ctx: native.registry.ProjectionContext, _: []const u8, _: []const u8, raw: []const u8) !native.registry.Projection {
+        var value = try C.decodeOwned(u32, ctx.allocator, raw);
+        defer value.deinit();
+        if (value.value != 99) return error.InvalidCapture;
+        return .{ .reply = try ctx.allocator.dupe(u8, raw), .output_tokens = 7 };
+    }
+};
+
+fn lookupUnknown(service: *native.tasks.Service(FairTypes), a: std.mem.Allocator, id: []const u8) !native.tasks.Work {
+    _ = try service.submit(a, id, 1);
+    for (0..20) |_| {
+        const step = try service.pump(a);
+        if (step == .work) {
+            // Return only stable IDs; the service owns and releases all bytes.
+            var work = step.work;
+            try service.unknown(a, work);
+            work.request = &.{};
+            work.prepared = null;
+            work.profile = &.{};
+            return work;
+        }
+    }
+    return error.MissingWork;
+}
+
+fn awaitLookup(io: std.Io, worker: *native.testing.Worker) !void {
+    const deadline = std.Io.Clock.awake.now(io).toMilliseconds() + 5000;
+    while (!worker.finished()) {
+        if (std.Io.Clock.awake.now(io).toMilliseconds() >= deadline) return error.TestTimeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try worker.join();
+}
+
+test "receipt lookup retains exclusive admission and verifies evidence through the existing worker" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const State = native.testing.state;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const frame = arena.allocator();
+    var compiled = try protean.compile(a, protean.system(.{ .InitialArgs = u32, .Result = u32, .Failure = void, .application = FairApplication }));
+    defer compiled.deinit();
+    const image = try frame.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
+    _ = try compiled.encode(a, image);
+    const admitted_image = try horos.data.program_image.Admitted.decode(a, image);
+    defer admitted_image.deinit();
+    const manifest = try ownerManifest(frame, image, admitted_image.identity(), "lookup-owner");
+    const assets: native.discovery.Assets = .{ .image = image, .application = "lookup-owner", .manifest = manifest };
+    var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "unit", .image_identity = admitted_image.identity() };
+    defer application.deinit();
+    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
+    var leaf = native.leaf(u32, u32, .{ .identity = "fair.leaf.v1", .resource_role = "local", .inference = true }, increment);
+    leaf.capture = .{ .prepare = FairCapture.prepare, .acquire = LookupFixture.forbidden, .interpret = LookupFixture.interpret, .dependencies = native.registry.opaqueProjection };
+    leaf.invoke = null;
+    leaf.background = true;
+    leaf.recovery = .{ .identity = "signed-fixture-receipt.v1", .version = 1, .lookup = .{ .acquire = LookupFixture.lookup, .verify = LookupFixture.verify } };
+    var handlers = try native.Registry.init(a, &.{ leaf, native.question(u32, u32, .{ .identity = "fair.question.v1", .resource_role = "user", .answer_schema_id = "fair.answer.v1" }, FairCapture.present), native.inbox.declaration(u32) });
+    defer handlers.deinit();
+    var fixture: LookupFixture = .{};
+    var grants: [3]native.registry.Grant = undefined;
+    const profile: native.tasks.Profile = .{ .id = "lookup", .runtime_identity = @splat(42), .bytes = "frozen-profile", .environment = &fixture, .authority = .{ .grants = &grants, .principal = "test", .tenant = "test", .inference = true } };
+    for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(frame, application.image_identity) };
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var buffer: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(io, &buffer);
+    const path = try std.fmt.allocPrint(frame, "{s}/lookup", .{buffer[0..length]});
+    var namespace = try native.Namespace.open(a, io, path);
+    defer namespace.close() catch unreachable;
+    var service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    defer service.close(frame) catch unreachable;
+    // A real reopen drops the original worker; the original effect callback
+    // is forbidden throughout this fixture.
+    const original = try lookupUnknown(&service, frame, "original");
+    try service.close(frame);
+    try namespace.close();
+    namespace = try native.Namespace.open(a, io, path);
+    service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    var before = try service.task(frame, original.task);
+    defer before.deinit();
+    const revision = before.value.revision;
+    service.profile.authority.grants = &.{};
+    const head = namespace.store.head;
+    try std.testing.expectError(error.Denied, service.reconcile(frame, "lookup", original.task, revision, original.occurrence, original.attempt, .lookup));
+    try std.testing.expectEqualDeep(head, namespace.store.head);
+    service.profile.authority.grants = &grants;
+    const admission = try service.reconcile(frame, "lookup", original.task, revision, original.occurrence, original.attempt, .lookup);
+    const id = admission.receipt.reconciliation.?;
+    var pending = try service.reconciliation(frame, original.task, id);
+    defer pending.deinit();
+    try std.testing.expect(pending.value.outcome == .pending);
+    try std.testing.expectEqual(0, fixture.calls.load(.acquire));
+    try std.testing.expect((try service.reconcile(frame, "lookup", original.task, revision, original.occurrence, original.attempt, .lookup)).replayed);
+    try std.testing.expectError(error.OperationConflict, service.reconcile(frame, "lookup", original.task, revision, original.occurrence, original.attempt, .rederive));
+    try std.testing.expectError(error.UnsettledOccurrence, service.reconcile(frame, "competitor", original.task, admission.receipt.revision, original.occurrence, original.attempt, .lookup));
+    fixture.hold.store(true, .release);
+    const work = (try service.pump(frame)).work;
+    const worker = try native.testing.Worker.init(a, io);
+    defer worker.deinit(a) catch unreachable;
+    try worker.start(work, service.profile.authority, &fixture);
+    defer if (worker.future != null) {
+        fixture.hold.store(false, .release);
+        awaitLookup(io, worker) catch unreachable;
+        service.unknown(frame, work) catch unreachable;
+        worker.release() catch unreachable;
+    };
+    const deadline = std.Io.Clock.awake.now(io).toMilliseconds() + 5000;
+    while (!fixture.started.load(.acquire)) {
+        if (std.Io.Clock.awake.now(io).toMilliseconds() >= deadline) return error.TestTimeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    _ = try service.message(frame, "during-lookup", original.task, 11);
+    _ = try service.requestCancel(frame, "cancel-during-lookup", original.task, "stop");
+    const peer = try service.submit(frame, "lookup-peer", 4);
+    for (0..6) |_| try std.testing.expect(try service.pump(frame) != .work);
+    var peer_result = try service.task(frame, peer.receipt.task);
+    defer peer_result.deinit();
+    try std.testing.expect(peer_result.value.outcome_kind == .completed);
+    try std.testing.expect((try service.reconcile(frame, "lookup", original.task, revision, original.occurrence, original.attempt, .lookup)).replayed);
+    try std.testing.expectEqual(1, fixture.calls.load(.acquire));
+    fixture.hold.store(false, .release);
+    try awaitLookup(io, worker);
+    const evidence = worker.reply orelse return error.MissingEvidence;
+    inline for (.{ "owner_epoch", "task", "occurrence", "attempt" }) |field| {
+        var stale = work;
+        @field(stale, field)[0] ^= 1;
+        try std.testing.expectError(error.StaleOccurrence, service.acquire(frame, stale, evidence));
+    }
+    var stale = work;
+    stale.recovery.?.id[0] ^= 1;
+    try std.testing.expectError(error.StaleOccurrence, service.acquire(frame, stale, evidence));
+    try service.acquire(frame, work, evidence);
+    try worker.release();
+    try std.testing.expectError(error.StaleOccurrence, service.acquire(frame, work, &.{}));
+    var capture = try service.reconciliation(frame, original.task, id);
+    defer capture.deinit();
+    try std.testing.expect(capture.value.outcome == .capture_admitted and capture.value.provenance == .authentic);
+    try std.testing.expect(capture.value.evidence != null and capture.value.previous != null);
+    try std.testing.expectError(error.ArtifactUnavailable, service.projectedArtifact(frame, original.task, capture.value.evidence.?.digest));
+    try std.testing.expectError(error.ArtifactUnavailable, service.projectedArtifact(frame, original.task, capture.value.outcome.capture_admitted.digest));
+    for (0..6) |_| try std.testing.expect(try service.pump(frame) != .work);
+    var settled = try service.reconciliation(frame, original.task, id);
+    defer settled.deinit();
+    try std.testing.expect(settled.value.outcome == .reply_settled);
+    var charged = try service.task(frame, original.task);
+    defer charged.deinit();
+    try std.testing.expectEqual(before.value.inference_attempts, charged.value.inference_attempts);
+    try std.testing.expectEqual(before.value.inference_request_bytes, charged.value.inference_request_bytes);
+    try std.testing.expectEqual(7, charged.value.inference_output_tokens);
+    try std.testing.expect(charged.value.cancellation != null);
+    try std.testing.expect((try service.reconcile(frame, "lookup", original.task, revision, original.occurrence, original.attempt, .lookup)).replayed);
+    _ = try namespace.store.auditRetention(handlers, application.image_identity);
+    // Durable admission with no worker survives a restart as interrupted.
+    const interrupted = try lookupUnknown(&service, frame, "interrupt-original");
+    var interrupt_task = try service.task(frame, interrupted.task);
+    defer interrupt_task.deinit();
+    const admitted = try service.reconcile(frame, "interrupted-lookup", interrupted.task, interrupt_task.value.revision, interrupted.occurrence, interrupted.attempt, .lookup);
+    const pending_archive = try std.fmt.allocPrint(frame, "{s}/pending.agnx", .{buffer[0..length]});
+    _ = try service.exportCheckpoint(frame, interrupted.task, pending_archive);
+    const settled_archive = try std.fmt.allocPrint(frame, "{s}/settled.agnx", .{buffer[0..length]});
+    _ = try service.exportCheckpoint(frame, original.task, settled_archive);
+    try service.close(frame);
+    try namespace.close();
+    for ([_][]const u8{ pending_archive, settled_archive }, 0..) |archive_path, index| {
+        const target = try std.fmt.allocPrint(frame, "{s}/import-{d}", .{ buffer[0..length], index });
+        var copied_namespace = try native.Namespace.open(a, io, target);
+        defer copied_namespace.close() catch unreachable;
+        var copied = try native.tasks.Service(FairTypes).init(a, io, &copied_namespace, assets, &application, handlers, profile);
+        defer copied.close(frame) catch unreachable;
+        _ = try copied.importCheckpoint(frame, "import-recovery", archive_path);
+        try std.testing.expect(try copied.pump(frame) == .idle);
+        const task_id = if (index == 0) interrupted.task else original.task;
+        const recovery_id = if (index == 0) admitted.receipt.reconciliation.? else id;
+        var recovery = try copied.reconciliation(frame, task_id, recovery_id);
+        defer recovery.deinit();
+        if (index == 0) {
+            try std.testing.expect(recovery.value.outcome == .unresolved and recovery.value.outcome.unresolved == .interrupted);
+            try std.testing.expect((try copied.reconcile(frame, "interrupted-lookup", task_id, interrupt_task.value.revision, interrupted.occurrence, interrupted.attempt, .lookup)).replayed);
+        } else {
+            try std.testing.expect(recovery.value.outcome == .reply_settled and recovery.value.provenance == .authentic);
+            try std.testing.expectError(error.ArtifactUnavailable, copied.projectedArtifact(frame, task_id, recovery.value.evidence.?.digest));
+            try std.testing.expect((try copied.reconcile(frame, "lookup", task_id, revision, original.occurrence, original.attempt, .lookup)).replayed);
+        }
+        try std.testing.expectError(error.ArtifactUnavailable, copied.projectedArtifact(frame, task_id, recovery.value.original_occurrence.digest));
+        _ = try copied_namespace.store.auditRetention(handlers, application.image_identity);
+        try std.testing.expectEqual(1, fixture.calls.load(.acquire));
+    }
+    namespace = try native.Namespace.open(a, io, path);
+    service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    var lost = try service.reconciliation(frame, interrupted.task, admitted.receipt.reconciliation.?);
+    defer lost.deinit();
+    try std.testing.expect(lost.value.outcome == .unresolved and lost.value.outcome.unresolved == .interrupted);
+    try std.testing.expectEqual(1, fixture.calls.load(.acquire));
+    try std.testing.expect((try service.reconcile(frame, "interrupted-lookup", interrupted.task, interrupt_task.value.revision, interrupted.occurrence, interrupted.attempt, .lookup)).replayed);
+    try std.testing.expect(try service.pump(frame) == .idle);
+    // A new explicit lookup can establish non-invocation. It does not dispatch
+    // a new effect; only a later explicit resume could create another attempt.
+    var resumed = try service.task(frame, interrupted.task);
+    defer resumed.deinit();
+    const proof_admission = try service.reconcile(frame, "proof-not-sent", interrupted.task, resumed.value.revision, interrupted.occurrence, interrupted.attempt, .lookup);
+    const proof_work = (try service.pump(frame)).work;
+    fixture.kind = .not_sent;
+    try worker.start(proof_work, service.profile.authority, &fixture);
+    try awaitLookup(io, worker);
+    try service.acquire(frame, proof_work, worker.reply.?);
+    try worker.release();
+    var proof = try service.reconciliation(frame, interrupted.task, proof_admission.receipt.reconciliation.?);
+    defer proof.deinit();
+    try std.testing.expect(proof.value.outcome == .not_sent and proof.value.provenance == .authoritative);
+    try std.testing.expect(try service.pump(frame) == .idle);
+    _ = try service.requestCancel(frame, "cancel-proven-not-sent", interrupted.task, "stop");
+    for (0..6) |_| try std.testing.expect(try service.pump(frame) != .work);
+    var cancelled = try service.task(frame, interrupted.task);
+    defer cancelled.deinit();
+    try std.testing.expect(cancelled.value.outcome_kind == .cancelled);
+    try std.testing.expectEqual(1, cancelled.value.inference_attempts);
+    _ = try namespace.store.auditRetention(handlers, application.image_identity);
+    for ([_][]const u8{ "fabricated", "foreign", "prepared", "profile", "inconclusive", "unavailable", "revoked" }) |scenario| {
+        const subject = try lookupUnknown(&service, frame, scenario);
+        var subject_task = try service.task(frame, subject.task);
+        defer subject_task.deinit();
+        const operation_id = try std.fmt.allocPrint(frame, "lookup-{s}", .{scenario});
+        const accepted = try service.reconcile(frame, operation_id, subject.task, subject_task.value.revision, subject.occurrence, subject.attempt, .lookup);
+        if (std.mem.eql(u8, scenario, "revoked")) {
+            service.profile.authority.grants = &.{};
+            try std.testing.expect(try service.pump(frame) == .progressed);
+            service.profile.authority.grants = &grants;
+        } else {
+            const selected = (try service.pump(frame)).work;
+            if (std.mem.eql(u8, scenario, "unavailable")) {
+                // Failure to start/read the lookup is never historical proof
+                // that the original invocation did not run.
+                try service.notSent(frame, selected);
+            } else {
+                var record = try protean.contracts.decodeOwned(State.Reconciliation, frame, selected.recovery.?.body);
+                defer record.deinit();
+                var request = try protocol.decode(protocol.Request, frame, selected.request);
+                defer request.deinit();
+                var input = native.registry.RecoveryInput.fromReconciliation(record.value, request.value.request_identity, true);
+                if (std.mem.eql(u8, scenario, "foreign")) input.task[0] ^= 1;
+                if (std.mem.eql(u8, scenario, "prepared")) input.prepared.?.digest[0] ^= 1;
+                if (std.mem.eql(u8, scenario, "profile")) input.profile.digest[0] ^= 1;
+                const evidence_bytes = if (std.mem.eql(u8, scenario, "fabricated")) "fabricated receipt" else try LookupFixture.receipt(frame, input, if (std.mem.eql(u8, scenario, "inconclusive")) .inconclusive else .capture);
+                try service.acquire(frame, selected, evidence_bytes);
+            }
+        }
+        var result = try service.reconciliation(frame, subject.task, accepted.receipt.reconciliation.?);
+        defer result.deinit();
+        try std.testing.expect(result.value.outcome == .unresolved);
+        const reason = result.value.outcome.unresolved;
+        if (std.mem.eql(u8, scenario, "unavailable") or std.mem.eql(u8, scenario, "revoked")) {
+            try std.testing.expect(reason == .unavailable);
+        } else if (std.mem.eql(u8, scenario, "inconclusive")) {
+            try std.testing.expect(reason == .inconclusive);
+        } else try std.testing.expect(reason == .rejected);
+        var unchanged = try service.task(frame, subject.task);
+        defer unchanged.deinit();
+        try std.testing.expectEqual(.unknown, try service.status(frame, unchanged.value));
+        try std.testing.expectEqual(subject_task.value.inference_attempts, unchanged.value.inference_attempts);
+        try std.testing.expectEqual(subject_task.value.inference_request_bytes, unchanged.value.inference_request_bytes);
+        try std.testing.expectEqual(0, unchanged.value.inference_output_tokens);
+        try std.testing.expect((try service.reconcile(frame, operation_id, subject.task, subject_task.value.revision, subject.occurrence, subject.attempt, .lookup)).replayed);
+        if (result.value.evidence) |proof_ref| try std.testing.expectError(error.ArtifactUnavailable, service.projectedArtifact(frame, subject.task, proof_ref.digest));
+    }
+    try std.testing.expectEqual(2, fixture.calls.load(.acquire));
+    _ = try namespace.store.auditRetention(handlers, application.image_identity);
+    const fenced = try lookupUnknown(&service, frame, "fenced-original");
+    var fenced_task = try service.task(frame, fenced.task);
+    defer fenced_task.deinit();
+    const fenced_admission = try service.reconcile(frame, "fenced-lookup", fenced.task, fenced_task.value.revision, fenced.occurrence, fenced.attempt, .lookup);
+    const fenced_work = (try service.pump(frame)).work;
+    const sealed = namespace.store.head;
+    namespace.store.fence();
+    try std.testing.expectError(error.StorageUnavailable, service.acquire(frame, fenced_work, "late evidence"));
+    try std.testing.expectEqualDeep(sealed, namespace.store.head);
+    try service.close(frame);
+    try namespace.close();
+    namespace = try native.Namespace.open(a, io, path);
+    service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    var abandoned = try service.reconciliation(frame, fenced.task, fenced_admission.receipt.reconciliation.?);
+    defer abandoned.deinit();
+    try std.testing.expect(abandoned.value.outcome == .unresolved and abandoned.value.outcome.unresolved == .interrupted);
+    try std.testing.expectError(error.StaleOccurrence, service.acquire(frame, fenced_work, "late evidence"));
+    try std.testing.expectEqual(2, fixture.calls.load(.acquire));
+}

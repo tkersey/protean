@@ -195,8 +195,9 @@ For an unknown occurrence, 2.1 status includes `recovery` with its original
 `task.reconcile` with those IDs, `task_id`, `expected_revision`, a stable
 `client_operation_id`, and `recovery: {"mechanism":"rederive"}`. Keep all
 parameters unchanged when replaying that operation. The receipt identifies the
-reconciliation and reports its current `unresolved`, `capture_admitted`, or
-`reply_settled` status. Capture admission alone does not establish a typed reply.
+reconciliation and reports its current `pending`, `unresolved`, `capture_admitted`,
+`reply_settled`, or `not_sent` status. Capture admission alone does not establish
+a typed reply. Replay the unchanged operation to read its current status.
 
 Pure recovery is compiled for frozen snapshot operations and admitted generated
 tools. It reconstructs the original request from retained inputs; it does not
@@ -204,7 +205,21 @@ invoke the original environmental adapter. Original ambiguous-delivery history,
 prepared inputs and captures remain private, including after archive import.
 The provider currently has no receipt-retrieval adapter: its mechanism list is
 empty and a rederivation request records an unresolved result without another
-inference attempt. Asynchronous receipt lookup is not implemented yet.
+inference attempt.
+
+A capability with a compiled receipt adapter also advertises `lookup` when its
+current grant permits retrieval. Selecting it seals a pending reconciliation and
+receipt before dispatch through the existing worker. Replays cannot launch another
+lookup, and a competing operation for that attempt conflicts while one is pending.
+The pure verifier authenticates returned evidence against the original request,
+prepared bytes, task, attempt, frozen profile, and ordered resources. Only verified
+capture evidence or non-invocation proof can change the occurrence; inconclusive,
+unavailable, or rejected evidence preserves unknown delivery. Non-invocation proof
+permits cancellation, while another dispatch still requires explicit resume.
+Message and cancellation revisions do not invalidate the lookup's completion.
+Restart or import marks a pending lookup interrupted without invoking a provider.
+Evidence and predecessor reconciliation bodies stay private and are verified again
+during archive admission and cold retention audit.
 
 ## Saved state and portability
 
