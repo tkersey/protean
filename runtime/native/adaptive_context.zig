@@ -7,6 +7,27 @@ const json = @import("json.zig");
 const responses = @import("responses.zig");
 const storage = @import("store.zig");
 
+/// Process-local semantic facts, owned and retired by Store. Only the pure
+/// validator below inserts entries; portable records never encode this cache.
+pub const Cache = struct {
+    const Key = struct { validator: *const u8, binding: [32]u8, reference: [32]u8 };
+    const Entry = struct { root: registry.ObjectReference, epoch: u64, bytes: []u8 };
+    entries: std.AutoHashMapUnmanaged(Key, Entry) = .empty,
+    hits: u64 = 0,
+    misses: u64 = 0,
+    ancestry_bytes: u64 = 0,
+    history_bytes: u64 = 0,
+    object_reads: u64 = 0,
+    object_bytes: u64 = 0,
+
+    pub fn deinit(self: *Cache, a: std.mem.Allocator) void {
+        var values = self.entries.valueIterator();
+        while (values.next()) |entry| a.free(entry.bytes);
+        self.entries.deinit(a);
+        self.* = .{};
+    }
+};
+
 fn equal(left: []const u8, right: []const u8) bool {
     return std.mem.eql(u8, left, right);
 }
@@ -61,6 +82,22 @@ pub fn Projection(comptime P: type) type {
         const History = @import("adaptive_history.zig").History(P);
         const Admission = @import("adaptive_responses.zig").Admission(P);
         const Ref = @typeInfo(@FieldType(P.AdaptiveResult, "replay")).optional.child;
+        // Address identity is unique to this exact P instantiation, including
+        // declaration order and codec meaning. It is never serialized.
+        var validator_identity: u8 = 0;
+        const Validation = struct { allocator: std.mem.Allocator, decoded: contracts.Decoded(P.AdaptiveContext), root: registry.ObjectReference, epoch: ?u64 };
+        pub const ValidatedContext = opaque {
+            pub fn value(self: *const ValidatedContext) P.AdaptiveContext {
+                const owned: *const Validation = @ptrCast(@alignCast(self));
+                return owned.decoded.value;
+            }
+            pub fn deinit(self: *ValidatedContext) void {
+                const owned: *Validation = @ptrCast(@alignCast(self));
+                const a = owned.allocator;
+                owned.decoded.deinit();
+                a.destroy(owned);
+            }
+        };
         pub const Rendered = struct {
             history_base: ?History.Loaded,
             unchanged_prefix: bool,
@@ -75,9 +112,13 @@ pub fn Projection(comptime P: type) type {
             prior_request: ?@FieldType(P.AdaptiveContext, "source_request"),
         };
 
-        pub fn open(ctx: registry.ProjectionContext, reference: Ref, audience: []const u8) !contracts.Decoded(P.AdaptiveContext) {
+        fn binding(ctx: registry.ProjectionContext, reference: Ref, audience: []const u8) !void {
             if (!equal(reference.schema.bytes, P.adaptive_context_identity) or !equal(&reference.policy, &storage.digest(ctx.profile)) or
                 !equal(&reference.task, &ctx.task) or !equal(reference.tenant.bytes, ctx.tenant) or !equal(reference.audience.bytes, audience)) return error.InvalidContext;
+        }
+
+        pub fn open(ctx: registry.ProjectionContext, reference: Ref, audience: []const u8) !contracts.Decoded(P.AdaptiveContext) {
+            try binding(ctx, reference, audience);
             const bytes = try read(ctx, reference.object);
             defer ctx.allocator.free(bytes);
             var decoded = try contracts.decodeOwned(P.AdaptiveContext, ctx.allocator, bytes);
@@ -107,6 +148,103 @@ pub fn Projection(comptime P: type) type {
                 request.invocation.parameters.reasoning.?.effort != value.top_effort) return error.InvalidContext;
             _ = try Admission.select(ctx.allocator, frozen, request);
             return decoded;
+        }
+
+        fn validationKey(ctx: registry.ProjectionContext, reference: Ref, audience: []const u8, catalog_digest: [32]u8) !Cache.Key {
+            try binding(ctx, reference, audience);
+            const encoded = try contracts.encodeOwned(Ref, ctx.allocator, reference);
+            defer ctx.allocator.free(encoded);
+            var hash = std.crypto.hash.sha2.Sha256.init(.{});
+            hash.update(&ctx.task);
+            hash.update(&storage.digest(ctx.tenant));
+            hash.update(&storage.digest(ctx.profile));
+            hash.update(&storage.digest(audience));
+            hash.update(&catalog_digest);
+            if (ctx.application) |application| hash.update(&application);
+            var bound: [32]u8 = undefined;
+            hash.final(&bound);
+            return .{ .validator = &validator_identity, .binding = bound, .reference = storage.digest(encoded) };
+        }
+
+        /// The ReadView supplies an owner only after checking its snapshot,
+        /// seal, cold retention audit, application and integrity epoch. All
+        /// semantic admission lives here; no caller can assert a cached result.
+        pub fn validate(ctx: registry.ProjectionContext, reference: Ref, audience: []const u8, catalog: P.AdaptiveCatalog, reader: *History.Reader, owner: ?*storage.Store) !*ValidatedContext {
+            const a = ctx.allocator;
+            const catalog_bytes = try contracts.encodeOwned(P.AdaptiveCatalog, a, catalog);
+            defer a.free(catalog_bytes);
+            const catalog_digest = storage.digest(catalog_bytes);
+            const frozen = try Admission.policy(a, ctx.profile);
+            if (catalog_bytes.len != frozen.catalog.bytes or !equal(&catalog_digest, &frozen.catalog.digest) or
+                !equal(audience, frozen.audience.bytes)) return error.InvalidContext;
+            const Pending = struct { key: Cache.Key, root: registry.ObjectReference, bytes: []u8 };
+            var staged: std.ArrayList(Pending) = .empty;
+            defer {
+                for (staged.items) |entry| a.free(entry.bytes);
+                staged.deinit(a);
+            }
+            var first: ?contracts.Decoded(P.AdaptiveContext) = null;
+            errdefer if (first) |*decoded| decoded.deinit();
+            var links = std.heap.ArenaAllocator.init(a);
+            defer links.deinit();
+            var cursor: ?Ref = reference;
+            while (cursor) |current| {
+                const key = try validationKey(ctx, current, audience, catalog_digest);
+                if (owner) |store| {
+                    if (store.context_cache.entries.get(key)) |entry| {
+                        if (entry.epoch != store.integrity_epoch or entry.root.bytes != current.object.bytes or !equal(&entry.root.digest, &current.object.digest)) return error.InvalidState;
+                        store.context_cache.hits +|= 1;
+                        if (first == null) first = try contracts.decodeOwned(P.AdaptiveContext, a, entry.bytes);
+                        break;
+                    }
+                    store.context_cache.misses +|= 1;
+                }
+                var decoded = try open(ctx, current, audience);
+                var transferred = false;
+                defer if (!transferred) decoded.deinit();
+                const value = decoded.value;
+                try reader.validate(value.history, value.plan, catalog);
+                if (owner) |store| {
+                    store.context_cache.ancestry_bytes +|= current.object.bytes +| value.source_capture.bytes +| value.source_request.bytes;
+                    try store.checkDependencies(P.AdaptiveContext, @TypeOf(current.object), .{ .digest = current.object.digest, .bytes = current.object.bytes }, value);
+                    const bytes = try contracts.encodeOwned(P.AdaptiveContext, a, value);
+                    errdefer a.free(bytes);
+                    try staged.append(a, .{ .key = key, .root = .{ .digest = current.object.digest, .bytes = current.object.bytes }, .bytes = bytes });
+                }
+                cursor = value.plan.prior;
+                if (cursor) |*parent| {
+                    if (parent.watermark != value.plan.watermark) return error.InvalidContext;
+                    // Ancestor decoders are released as we walk, so own the
+                    // incoming reference's variable fields for the next step.
+                    parent.schema.bytes = try links.allocator().dupe(u8, parent.schema.bytes);
+                    parent.tenant.bytes = try links.allocator().dupe(u8, parent.tenant.bytes);
+                    parent.audience.bytes = try links.allocator().dupe(u8, parent.audience.bytes);
+                }
+                if (first == null) {
+                    first = decoded;
+                    transferred = true;
+                }
+            }
+            const result = try a.create(Validation);
+            errdefer a.destroy(result);
+            if (owner) |store| {
+                try reader.checkRetention(store);
+                // Prepare every allocation before publishing any new fact.
+                // Failure preserves pre-existing ancestor entries and leaves
+                // no reusable partial verification of this chain.
+                var owned: std.ArrayList(Pending) = .empty;
+                defer owned.deinit(a);
+                errdefer for (owned.items) |entry| store.allocator.free(entry.bytes);
+                for (staged.items) |entry| {
+                    const bytes = try store.allocator.dupe(u8, entry.bytes);
+                    errdefer store.allocator.free(bytes);
+                    try owned.append(a, .{ .key = entry.key, .root = entry.root, .bytes = bytes });
+                }
+                try store.context_cache.entries.ensureUnusedCapacity(store.allocator, std.math.cast(u32, owned.items.len) orelse return error.Capacity);
+                for (owned.items) |entry| store.context_cache.entries.putAssumeCapacityNoClobber(entry.key, .{ .root = entry.root, .epoch = store.integrity_epoch, .bytes = entry.bytes });
+            }
+            result.* = .{ .allocator = a, .decoded = first.?, .root = .{ .digest = reference.object.digest, .bytes = reference.object.bytes }, .epoch = if (owner) |store| store.integrity_epoch else null };
+            return @ptrCast(result);
         }
 
         fn tool(a: std.mem.Allocator, declaration: P.ToolDeclaration) !json.Value {
@@ -400,31 +538,14 @@ pub fn Projection(comptime P: type) type {
             var history_base: ?History.Loaded = null;
             var reader: History.Reader = .{ .ctx = ctx };
             defer reader.deinit();
-            var previous: ?contracts.Decoded(P.AdaptiveContext) = null;
-            defer if (previous) |*saved| saved.deinit();
+            var previous: ?*ValidatedContext = null;
+            defer if (previous) |saved| saved.deinit();
             var same_epoch = false;
             var same_profile = false;
             var new_start: usize = 0;
             if (request.plan.prior) |ref| {
-                previous = try open(ctx, ref, frozen.audience.bytes);
-                var parent = previous.?.value.plan.prior;
-                var watermark = previous.?.value.plan.watermark;
-                // open proves each watermark is its parent watermark plus
-                // one, so ancestry strictly descends without a depth quota.
-                while (parent) |ancestor| {
-                    if (ancestor.watermark != watermark) return error.InvalidContext;
-                    var saved = try open(ctx, ancestor, frozen.audience.bytes);
-                    defer saved.deinit();
-                    try reader.validate(saved.value.history, saved.value.plan, catalog);
-                    parent = saved.value.plan.prior;
-                    if (parent) |*next| {
-                        next.schema.bytes = try a.dupe(u8, next.schema.bytes);
-                        next.tenant.bytes = try a.dupe(u8, next.tenant.bytes);
-                        next.audience.bytes = try a.dupe(u8, next.audience.bytes);
-                    }
-                    watermark = saved.value.plan.watermark;
-                }
-                const old = previous.?.value;
+                previous = try ctx.objects.context(P, ctx, ref, frozen.audience.bytes, catalog, &reader);
+                const old = previous.?.value();
                 if (request.plan.watermark != old.watermark or request.selection.control_revision < old.selection.control_revision) return error.InvalidContext;
                 same_epoch = request.plan.epoch == old.plan.epoch;
                 same_profile = equal(&request.selection.profile_digest, &old.selection.profile_digest);
@@ -454,7 +575,7 @@ pub fn Projection(comptime P: type) type {
                 try settle(a, &history, request, selected.profile.explicit_cache);
                 try fillOrigins(a, &origins, history.array.items.len, request.plan.watermark);
             }
-            if (same_epoch and request.selection.effective_effort != previous.?.value.selection.effective_effort) {
+            if (same_epoch and request.selection.effective_effort != previous.?.value().selection.effective_effort) {
                 if (!selected.profile.effort_update) return error.IncompatibleProfile;
                 if (history.array.items.len != 0 and kind(history.array.items[history.array.items.len - 1], "configuration_update")) return error.InvalidContext;
                 var update = json.object();
@@ -526,7 +647,7 @@ pub fn Projection(comptime P: type) type {
             var observed_skills: std.ArrayList(u64) = .empty;
             for (exposed, 0..) |seen, index| if (seen) try observed_skills.append(a, @intCast(index));
             const reasoning_skills: P.ReasoningSkills = .{ .items = observed_skills.items };
-            return .{ .history_base = history_base, .unchanged_prefix = same_epoch, .history = history, .origins = origins, .reasoning_skills = reasoning_skills, .input = input, .core_tools = core, .prior_response_id = if (same_profile) if (previous.?.value.response_id) |id| try a.dupe(u8, id.bytes) else null else null, .prior_request = if (previous) |saved| saved.value.source_request else null };
+            return .{ .history_base = history_base, .unchanged_prefix = same_epoch, .history = history, .origins = origins, .reasoning_skills = reasoning_skills, .input = input, .core_tools = core, .prior_response_id = if (same_profile) if (previous.?.value().response_id) |id| try a.dupe(u8, id.bytes) else null else null, .prior_request = if (previous) |saved| saved.value().source_request else null };
         }
 
         fn markLatest(a: std.mem.Allocator, history: *json.Value, start: usize) !void {

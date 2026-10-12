@@ -29,6 +29,12 @@ pub fn History(comptime P: type) type {
                 while (entries.next()) |entry| entry.value.deinit();
                 self.chunks.deinit(self.ctx.allocator);
             }
+            pub fn checkRetention(self: *Reader, store: *storage.Store) !void {
+                var entries = self.chunks.iterator();
+                while (entries.next()) |entry| {
+                    try store.checkDependencies(P.HistoryChunk, @FieldType(P.HistoryReference, "object"), .{ .digest = entry.key_ptr.*, .bytes = entry.value_ptr.bytes }, entry.value_ptr.value.value);
+                }
+            }
             fn chunk(self: *Reader, reference: P.HistoryReference) !P.HistoryChunk {
                 const a = self.ctx.allocator;
                 if (reference.event_count == 0 or reference.object.bytes == 0) return error.InvalidContext;
@@ -39,6 +45,7 @@ pub fn History(comptime P: type) type {
                 }
                 const bytes = try self.ctx.object(.{ .digest = reference.object.digest, .bytes = reference.object.bytes }, std.math.cast(usize, reference.object.bytes) orelse return error.Capacity);
                 defer a.free(bytes);
+                self.ctx.objects.historyRead(bytes.len);
                 if (bytes.len != reference.object.bytes or !std.mem.eql(u8, &storage.digest(bytes), &reference.object.digest)) return error.InvalidContext;
                 var decoded = try contracts.decodeOwned(P.HistoryChunk, a, bytes);
                 errdefer decoded.deinit();

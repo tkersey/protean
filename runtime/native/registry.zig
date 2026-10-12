@@ -15,6 +15,8 @@ pub const ObjectReference = state.Reference;
 pub const ReadView = struct {
     source: *anyopaque,
     read_object: *const fn (*anyopaque, std.mem.Allocator, state.Reference, usize) anyerror![]u8,
+    /// Store-owned scoped capability; never supplied by a generic reader.
+    native_scope: ?*anyopaque = null,
 
     pub fn validating(source: *anyopaque, read_object: *const fn (*anyopaque, std.mem.Allocator, state.Reference, usize) anyerror![]u8) ReadView {
         return .{ .source = source, .read_object = read_object };
@@ -22,6 +24,14 @@ pub const ReadView = struct {
 
     pub fn object(self: ReadView, a: std.mem.Allocator, ref: state.Reference, limit: usize) ![]u8 {
         return self.read_object(self.source, a, ref, limit);
+    }
+
+    pub fn context(self: ReadView, comptime P: type, ctx: ProjectionContext, reference: anytype, audience: []const u8, catalog: P.AdaptiveCatalog, reader: *@import("adaptive_history.zig").History(P).Reader) !*@import("adaptive_context.zig").Projection(P).ValidatedContext {
+        return @import("store.zig").Store.validateContext(P, self.native_scope, ctx, reference, audience, catalog, reader);
+    }
+
+    pub fn historyRead(self: ReadView, bytes: usize) void {
+        if (self.native_scope) |source| @import("store.zig").Store.recordHistoryRead(source, bytes);
     }
 };
 

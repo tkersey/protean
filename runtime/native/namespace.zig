@@ -256,6 +256,7 @@ pub const Namespace = struct {
     /// The task owner joins all workers and retires residents first.
     pub fn close(self: *Namespace) !void {
         self.store.rollback();
+        self.store.deinit();
         try self.database.close();
         try self.database.destroy();
         _ = c.close(self.lock);

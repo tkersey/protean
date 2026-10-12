@@ -57,6 +57,9 @@ pub const Store = struct {
     data_version: u64 = 0,
     sealed_generation: ?u64 = null,
     projecting: bool = false,
+    context_cache: @import("adaptive_context.zig").Cache = .{},
+    retention_epoch: ?u64 = null,
+    retention_image: ?Digest = null,
 
     /// The namespace owner has already authenticated the directory, acquired
     /// its OS lock and decided whether this is a new or existing database.
@@ -101,6 +104,9 @@ pub const Store = struct {
     /// Supported replacement/corruption hooks must call this before mutation.
     /// Invalidating custody never grants validation authority for the new epoch.
     pub fn invalidateIntegrity(self: *Store) void {
+        self.context_cache.deinit(self.allocator);
+        self.retention_epoch = null;
+        self.retention_image = null;
         self.sealed_generation = null;
         self.integrity_epoch = std.math.add(u64, self.integrity_epoch, 1) catch {
             self.fenced = true;
@@ -140,10 +146,19 @@ pub const Store = struct {
         const opened = !self.transaction;
         if (opened) try self.begin();
         defer if (opened) self.rollback();
-        return @import("retention.zig").verify(self, handlers, image) catch |err| {
+        const statistics = @import("retention.zig").verify(self, handlers, image) catch |err| {
             if (err != error.OutOfMemory and err != error.Capacity) self.fence();
             return err;
         };
+        if (opened and self.sealed_generation == self.head.generation) {
+            self.retention_epoch = self.integrity_epoch;
+            self.retention_image = image;
+        }
+        return statistics;
+    }
+
+    pub fn deinit(self: *Store) void {
+        self.context_cache.deinit(self.allocator);
     }
 
     /// Run a pure projection under one read snapshot, releasing it before the
@@ -152,14 +167,14 @@ pub const Store = struct {
     /// Store. Results belong to the caller's projection arena; the view cannot
     /// escape this call. No semantic validation lease is granted by a snapshot.
     pub fn project(self: *Store, comptime Result: type, a: std.mem.Allocator, binding: @import("registry.zig").ProjectionBinding, operation: anytype) !Result {
-        var scope = try ProjectionScope.open(self);
+        var scope = try ProjectionScope.open(self, binding);
         const result = operation.run(@as(@import("registry.zig").ProjectionContext, .{
             .allocator = a,
             .task = binding.task,
             .tenant = binding.tenant,
             .profile = binding.profile,
             .application = binding.application,
-            .objects = .validating(&scope, ProjectionScope.read),
+            .objects = .{ .source = &scope, .read_object = ProjectionScope.read, .native_scope = &scope },
         }));
         // Check and release even when the pure adapter failed. A malformed
         // proposed descendant does not invalidate intact committed ancestors.
@@ -171,8 +186,9 @@ pub const Store = struct {
         store: *Store,
         epoch: u64,
         opened: bool,
+        binding: @import("registry.zig").ProjectionBinding,
 
-        fn open(self: *Store) !ProjectionScope {
+        fn open(self: *Store, binding: @import("registry.zig").ProjectionBinding) !ProjectionScope {
             if (self.projecting) return error.Busy;
             try self.checkIntegrity();
             const opened = !self.transaction;
@@ -183,13 +199,16 @@ pub const Store = struct {
             if (try self.scalar("SELECT generation FROM meta WHERE singleton=1") != self.head.generation) return self.corrupt();
             try self.checkIntegrity();
             self.projecting = true;
-            return .{ .store = self, .epoch = self.integrity_epoch, .opened = opened };
+            return .{ .store = self, .epoch = self.integrity_epoch, .opened = opened, .binding = binding };
         }
 
         fn read(source: *anyopaque, a: std.mem.Allocator, ref: state.Reference, limit: usize) ![]u8 {
             const scope: *ProjectionScope = @ptrCast(@alignCast(source));
             if (!scope.store.projecting or scope.store.fenced or scope.epoch != scope.store.integrity_epoch) return error.InvalidState;
-            return scope.store.object(a, ref, limit);
+            const bytes = try scope.store.object(a, ref, limit);
+            scope.store.context_cache.object_reads +|= 1;
+            scope.store.context_cache.object_bytes +|= bytes.len;
+            return bytes;
         }
 
         fn finish(self: *ProjectionScope) !void {
@@ -203,6 +222,50 @@ pub const Store = struct {
             if (self.epoch != owner.integrity_epoch) return error.InvalidState;
         }
     };
+
+    /// Called only by ReadView and the pure context validator. The scoped view
+    /// selects custody; adapters cannot populate the validation cache.
+    pub fn validateContext(comptime P: type, source: ?*anyopaque, ctx: @import("registry.zig").ProjectionContext, reference: anytype, audience: []const u8, catalog: P.AdaptiveCatalog, reader: *@import("adaptive_history.zig").History(P).Reader) !*@import("adaptive_context.zig").Projection(P).ValidatedContext {
+        var owner: ?*Store = null;
+        if (source) |pointer| {
+            const scope: *ProjectionScope = @ptrCast(@alignCast(pointer));
+            const store = scope.store;
+            if (!store.projecting or store.fenced or scope.epoch != store.integrity_epoch) return error.InvalidState;
+            if (ctx.objects.source != pointer or ctx.objects.read_object != ProjectionScope.read or
+                reader.ctx.objects.source != pointer or reader.ctx.objects.read_object != ProjectionScope.read) return error.InvalidContext;
+            if (!std.meta.eql(ctx.task, scope.binding.task) or !std.mem.eql(u8, ctx.tenant, scope.binding.tenant) or
+                !std.mem.eql(u8, ctx.profile, scope.binding.profile) or ctx.application == null or
+                !std.meta.eql(ctx.application.?, scope.binding.application)) return error.InvalidContext;
+            if (scope.opened and store.sealed_generation == store.head.generation and
+                store.retention_epoch == scope.epoch and store.retention_image != null and
+                std.meta.eql(store.retention_image.?, scope.binding.application)) owner = store;
+        }
+        return @import("adaptive_context.zig").Projection(P).validate(ctx, reference, audience, catalog, reader, owner);
+    }
+
+    pub fn recordHistoryRead(source: *anyopaque, bytes: usize) void {
+        const scope: *ProjectionScope = @ptrCast(@alignCast(source));
+        scope.store.context_cache.history_bytes +|= bytes;
+    }
+
+    /// Derive expected edges from the exact decoded codec, never from an
+    /// imported edge list. A context lease requires this check for every newly
+    /// admitted root and history chunk before trusting their retained closure.
+    pub fn checkDependencies(self: *Store, comptime T: type, comptime Ref: type, parent: state.Reference, value: T) !void {
+        var sink = struct {
+            store: *Store,
+            parent: state.Reference,
+            pub fn add(this: *@This(), child: state.Reference) !void {
+                var row = try this.store.database.prepare("SELECT parent_bytes,child_bytes FROM dependencies WHERE parent=? AND child=?", &.{ .{ .blob = &this.parent.digest }, .{ .blob = &child.digest } });
+                defer row.deinit();
+                if (try row.step() != .row or try row.integer(0) != this.parent.bytes or try row.integer(1) != child.bytes) return this.store.corrupt();
+            }
+            pub fn reply(_: *@This(), _: occurrence.Acquired) !void {
+                @compileError("context dependencies cannot contain host occurrence replies");
+            }
+        }{ .store = self, .parent = parent };
+        try state.visitReferencesAs(T, Ref, value, &sink);
+    }
 
     pub fn begin(self: *Store) !void {
         if (self.fenced) return error.StorageUnavailable;

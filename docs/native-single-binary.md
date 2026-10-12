@@ -126,8 +126,31 @@ Raw captures remain valid retained data even when interpretation would reject
 them. A missing edge or altered object fences the owner. This audit grants no
 public artifact access and performs no environmental acquisition.
 
-This is cold retention validation. Context preparation still performs full
-semantic ancestry validation; owned validation reuse is not enabled yet.
+After this cold retention validation, native context preparation can reuse
+checked ancestry within the Store's integrity epoch. The pure validator alone
+creates an opaque validated context. Its cache binds the exact codec and
+declaration order, catalog meaning, complete reference, task, tenant, audience,
+profile and application. Each entry retains the dependency root and epoch.
+Unrecognized roots must pass semantic validation and checks of every derived
+root/history dependency edge before their facts become reusable. Only committed,
+sealed storage can populate the cache; import verification uses full validation.
+Reopen, replacement, integrity invalidation and fencing discard the cache.
+Unrelated owner commits preserve it, as does ordinary descendant rejection.
+
+Warm preparation reads the current visible history once and validates new
+lineage up to an already checked ancestor. It does not reread all historical
+captures and prepared requests. Every actual object read still checks its hash;
+the cold audit remains required on reopen, import and export. This does not
+promise discovery of an arbitrary disk bit flip in unread historical bytes
+before every provider request. Validation facts confer no artifact access.
+
+The committed 128-turn fixture reads 129 objects / 60,146 bytes on warm
+preparation (one catalog plus each visible history chunk), versus 513 objects /
+3,113,116 bytes through the generic v6 reader. Warm ancestry-validation bytes
+are zero at 1, 8, 16, 32, 64 and 128 turns; the exact prepared provider-body
+hashes agree in both paths. These are returned-object byte counts, not disk I/O
+or a latency claim. Exact prepared requests remain fully journaled.
+
 Native preparation and interpretation now borrow a scoped read view. The Store
 establishes a SQLite snapshot before checking the integrity epoch, rejects owner
 writes during projection, and releases the snapshot even when the adapter fails.

@@ -35,8 +35,12 @@ fn digest(bytes: []const u8) [32]u8 {
 }
 test "chunked adaptive projection preserves history and appends without prefixes" {
     try Fixture(CurrentProfile).preservation();
-    try Fixture(CurrentProfile).scaling();
+    try Fixture(CurrentProfile).scaling(false);
 }
+test "owned adaptive projection reuses checked ancestry in one integrity epoch" {
+    try Fixture(CurrentProfile).scaling(true);
+}
+
 fn Fixture(comptime P: type) type {
     return struct {
         const Adapter = native.adaptive_responses.Adapter(P);
@@ -411,10 +415,39 @@ fn Fixture(comptime P: type) type {
             try std.testing.expect(std.mem.indexOf(u8, unloaded_http, "AFTER-DEACTIVATION-OPAQUE") == null);
         }
 
-        pub fn scaling() !void {
+        fn prepare(ns: ?*native.Namespace, ctx: native.registry.ProjectionContext, payload: []const u8) ![]u8 {
+            const owner = ns orelse return Adapter.prepare(ctx, payload);
+            return owner.store.project([]u8, ctx.allocator, .{ .task = ctx.task, .tenant = ctx.tenant, .profile = ctx.profile, .application = @splat(8) }, struct {
+                payload: []const u8,
+                pub fn run(this: @This(), view: native.registry.ProjectionContext) ![]u8 {
+                    return Adapter.prepare(view, this.payload);
+                }
+            }{ .payload = payload });
+        }
+        fn interpret(ns: ?*native.Namespace, ctx: native.registry.ProjectionContext, payload: []const u8, prepared: []const u8, raw: []const u8) !native.registry.Projection {
+            const owner = ns orelse return Adapter.interpret(ctx, payload, prepared, raw);
+            return owner.store.project(native.registry.Projection, ctx.allocator, .{ .task = ctx.task, .tenant = ctx.tenant, .profile = ctx.profile, .application = @splat(8) }, struct {
+                payload: []const u8,
+                prepared: []const u8,
+                raw: []const u8,
+                pub fn run(this: @This(), view: native.registry.ProjectionContext) !native.registry.Projection {
+                    return Adapter.interpret(view, this.payload, this.prepared, this.raw);
+                }
+            }{ .payload = payload, .prepared = prepared, .raw = raw });
+        }
+
+        pub fn scaling(comptime owned: bool) !void {
             var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
             defer arena.deinit();
             const a = arena.allocator();
+            var temporary = std.testing.tmpDir(.{});
+            defer temporary.cleanup();
+            var path_buffer: [4096]u8 = undefined;
+            const path_length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+            const path = try std.fmt.allocPrint(a, "{s}/owned", .{path_buffer[0..path_length]});
+            var namespace: ?native.Namespace = if (owned) try native.Namespace.open(std.testing.allocator, std.testing.io, path) else null;
+            defer if (namespace) |*ns| ns.close() catch unreachable;
+            const ns = if (namespace) |*value| value else null;
             var objects: Objects = .{};
             const catalog = try objects.add(a, try contracts.encodeOwned(P.AdaptiveCatalog, a, .{ .skills = .{ .items = &.{} } }));
             const inference: model.AdaptiveInferenceProfile = .{
@@ -480,6 +513,16 @@ fn Fixture(comptime P: type) type {
             try std.testing.expectEqualStrings("e3d9173da4bc09371f08de6633fecc77714cfa16e1ed9d5bf83b85be8b1110c1", &std.fmt.bytesToHex(digest(profile), .lower));
             try std.testing.expectEqualStrings("6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d", &std.fmt.bytesToHex(catalog.digest, .lower));
             std.debug.print("context baseline profile_sha256={s} catalog_sha256={s}\n", .{ std.fmt.bytesToHex(digest(profile), .lower), std.fmt.bytesToHex(catalog.digest, .lower) });
+            if (ns) |owner| {
+                try owner.store.begin();
+                _ = try owner.store.putObject(objects.items.items[0]);
+                try owner.commit("catalog");
+                var handlers = try native.Registry.init(a, &.{Adapter.declaration()});
+                defer handlers.deinit();
+                _ = try owner.store.auditRetention(handlers, @splat(8));
+            }
+            var retained_objects: usize = objects.items.items.len;
+            var history_bytes: usize = 0;
             var previous_history: ?P.HistoryReference = null;
             var first_root: ?@TypeOf(catalog) = null;
             for (0..128) |turn| {
@@ -487,22 +530,25 @@ fn Fixture(comptime P: type) type {
                 defer step.deinit();
                 ctx.allocator = step.allocator();
                 const encoded = try contracts.encodeOwned(P.AdaptiveRequest, ctx.allocator, request);
-                const prepared = try Adapter.prepare(ctx, encoded);
+                const prepared = try prepare(ns, ctx, encoded);
                 _ = try objects.add(a, try a.dupe(u8, prepared));
                 const call_id = try std.fmt.allocPrint(a, "probe-{d}", .{turn});
                 const body = try std.fmt.allocPrint(ctx.allocator, "{{\"status\":\"completed\",\"error\":null,\"output\":[{{\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"opaque\"}},{{\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"{s}\",\"name\":\"finish\",\"arguments\":\"{{\\\"value\\\":1}}\"}}]}}", .{call_id});
                 const raw = try contracts.encodeOwned(native.responses.Raw, ctx.allocator, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = body } });
                 _ = try objects.add(a, try a.dupe(u8, raw));
                 const before_interpret = objects.reads;
-                const projection = try Adapter.interpret(ctx, encoded, prepared, raw);
+                const ancestry_before = if (ns) |owner| owner.store.context_cache.ancestry_bytes else 0;
+                const projection = try interpret(ns, ctx, encoded, prepared, raw);
                 try checkDependencies(ctx.allocator, projection);
                 // Interpretation derives the prepared body and retained history once.
                 // The predecessor made two catalog reads and two ancestry traversals.
-                try std.testing.expectEqual(1 + @as(usize, 4) * turn, objects.reads - before_interpret);
+                if (ns) |owner| {
+                    try std.testing.expectEqual(ancestry_before, owner.store.context_cache.ancestry_bytes);
+                } else try std.testing.expectEqual(1 + @as(usize, 4) * turn, objects.reads - before_interpret);
                 if (turn == 0) {
                     const forged = try ctx.allocator.dupe(u8, prepared);
                     forged[forged.len - 1] ^= 1;
-                    try std.testing.expectError(error.InvalidCapture, Adapter.interpret(ctx, encoded, forged, raw));
+                    try std.testing.expectError(error.InvalidCapture, interpret(ns, ctx, encoded, forged, raw));
                 }
                 {
                     try std.testing.expectEqual(@as(usize, 2), projection.objects.len);
@@ -518,6 +564,14 @@ fn Fixture(comptime P: type) type {
                     previous_history = root.value.history;
                 }
                 for (projection.objects) |object| _ = try objects.add(a, try a.dupe(u8, object));
+                history_bytes += projection.objects[0].len;
+                if (ns) |owner| {
+                    try owner.store.begin();
+                    for (objects.items.items[retained_objects..]) |bytes| _ = try owner.store.putObject(bytes);
+                    try owner.store.retainProjection(Adapter.declaration().capture.?.dependencies, projection.objects);
+                    try owner.commit("context");
+                    retained_objects = objects.items.items.len;
+                }
                 const result = try contracts.decodeOwned(P.AdaptiveResult, a, projection.reply);
                 try std.testing.expectEqual(.complete, result.value.replay_status);
                 request.plan.prior = result.value.replay;
@@ -527,18 +581,137 @@ fn Fixture(comptime P: type) type {
                 const settled = try a.alloc(P.ToolResult, 1);
                 settled[0] = .{ .call_id = .{ .bytes = call_id }, .output = .{ .bytes = "Observation retained." } };
                 request.results.items = settled;
+                if (owned and turn == 2) {
+                    const owner = ns.?;
+                    const entries = owner.store.context_cache.entries.count();
+                    const allocator = owner.store.allocator;
+                    owner.store.allocator = std.testing.failing_allocator;
+                    {
+                        defer owner.store.allocator = allocator;
+                        try std.testing.expectError(error.OutOfMemory, prepare(ns, ctx, try contracts.encodeOwned(P.AdaptiveRequest, ctx.allocator, request)));
+                    }
+                    try std.testing.expectEqual(entries, owner.store.context_cache.entries.count());
+                    try std.testing.expect(!owner.store.fenced and !owner.store.projecting);
+                }
                 if (std.mem.indexOfScalar(usize, &points, turn + 1)) |point| {
                     objects.reads = 0;
                     objects.read_bytes = 0;
                     const next = try contracts.encodeOwned(P.AdaptiveRequest, ctx.allocator, request);
-                    const measured = try Adapter.prepare(ctx, next);
+                    if (ns) |owner| {
+                        _ = try prepare(ns, ctx, next);
+                        owner.store.context_cache.ancestry_bytes = 0;
+                        owner.store.context_cache.history_bytes = 0;
+                        owner.store.context_cache.hits = 0;
+                        owner.store.context_cache.misses = 0;
+                        owner.store.context_cache.object_reads = 0;
+                        owner.store.context_cache.object_bytes = 0;
+                    }
+                    const measured = try prepare(ns, ctx, next);
                     const decoded = try contracts.decodeOwned(Adapter.Prepared, ctx.allocator, measured);
-                    try std.testing.expectEqual(1 + @as(usize, 4) * (turn + 1), objects.reads);
+                    if (ns) |owner| {
+                        const cache = &owner.store.context_cache;
+                        try std.testing.expectEqual(@as(u64, 0), cache.ancestry_bytes);
+                        try std.testing.expectEqual(@as(u64, 0), cache.misses);
+                        try std.testing.expectEqual(@as(u64, 1), cache.hits);
+                        try std.testing.expectEqual(history_bytes, cache.history_bytes);
+                        try std.testing.expectEqual(2 + turn, cache.object_reads);
+                        try std.testing.expectEqual(catalog.bytes + history_bytes, cache.object_bytes);
+                        std.debug.print("owned context turns={d} ancestry_bytes={d} history_bytes={d} hits={d} misses={d}\n", .{ turn + 1, cache.ancestry_bytes, cache.history_bytes, cache.hits, cache.misses });
+                    } else try std.testing.expectEqual(1 + @as(usize, 4) * (turn + 1), objects.reads);
                     try std.testing.expectEqual(expected_body_bytes[point], decoded.value.body.bytes.len);
                     try std.testing.expectEqualStrings(expected_body_hashes[point], &std.fmt.bytesToHex(digest(decoded.value.body.bytes), .lower));
-                    std.debug.print("context v{d} turns={d} reads={d} bytes={d} body_bytes={d} body_sha256={s}\n", .{ P.adaptive_context_version, turn + 1, objects.reads, objects.read_bytes, decoded.value.body.bytes.len, std.fmt.bytesToHex(digest(decoded.value.body.bytes), .lower) });
+                    std.debug.print("context v{d} turns={d} reads={d} bytes={d} body_bytes={d} body_sha256={s}\n", .{ P.adaptive_context_version, turn + 1, if (ns) |owner| owner.store.context_cache.object_reads else objects.reads, if (ns) |owner| owner.store.context_cache.object_bytes else objects.read_bytes, decoded.value.body.bytes.len, std.fmt.bytesToHex(digest(decoded.value.body.bytes), .lower) });
                 }
-                if (turn == 127) {
+                if (owned and turn == 127) {
+                    const owner = ns.?;
+                    const next = try contracts.encodeOwned(P.AdaptiveRequest, ctx.allocator, request);
+                    const entries = owner.store.context_cache.entries.count();
+                    // All incoming reference fields remain checked on hits.
+                    // A failed proposed descendant cannot discard good facts.
+                    for (0..10) |case| {
+                        var bad = request;
+                        const prior = &bad.plan.prior.?;
+                        switch (case) {
+                            0 => prior.object.bytes += 1,
+                            1 => prior.schema.bytes = "foreign.context",
+                            2 => prior.task[0] ^= 1,
+                            3 => prior.tenant.bytes = "another tenant",
+                            4 => prior.audience.bytes = "another audience",
+                            5 => prior.policy[0] ^= 1,
+                            6 => prior.selection[0] ^= 1,
+                            7 => prior.epoch += 1,
+                            8 => prior.eviction_generation += 1,
+                            9 => prior.watermark += 1,
+                            else => unreachable,
+                        }
+                        if (prepare(ns, ctx, try contracts.encodeOwned(P.AdaptiveRequest, ctx.allocator, bad))) |_| {
+                            return error.InvalidReferenceAccepted;
+                        } else |err| switch (err) {
+                            error.InvalidContext, error.CorruptState, error.IncompatibleProfile => {},
+                            else => return err,
+                        }
+                        try std.testing.expectEqual(entries, owner.store.context_cache.entries.count());
+                        const before = owner.store.context_cache.ancestry_bytes;
+                        _ = try prepare(ns, ctx, next);
+                        try std.testing.expectEqual(before, owner.store.context_cache.ancestry_bytes);
+                    }
+                    try owner.store.begin();
+                    try std.testing.expectError(error.Constraint, owner.store.database.run("DELETE FROM objects WHERE digest=?", &.{.{ .blob = &first_root.?.digest }}));
+                    owner.store.rollback();
+                    const before = owner.store.context_cache.ancestry_bytes;
+                    _ = try prepare(ns, ctx, next);
+                    try std.testing.expectEqual(before, owner.store.context_cache.ancestry_bytes);
+
+                    // The same bytes do not carry semantic authority across
+                    // codecs whose declaration indexes mean different tools.
+                    const Other = model.Profile(union(enum) { inspect: struct { value: u64 }, finish: struct { value: u64 } }, .{
+                        .{ .name = "inspect", .description = "Inspect an invariant." },
+                        .{ .name = "finish", .description = "Finish with evidence." },
+                    }, P.representation);
+                    const prior_hits = owner.store.context_cache.hits;
+                    const prior_reads = owner.store.context_cache.object_reads;
+                    const different = owner.store.project(void, ctx.allocator, .{ .task = ctx.task, .tenant = ctx.tenant, .profile = ctx.profile, .application = @splat(8) }, struct {
+                        reference: model.AdaptiveContextReference,
+                        pub fn run(this: @This(), view: native.registry.ProjectionContext) !void {
+                            var reader: native.testing.adaptive_history.History(Other).Reader = .{ .ctx = view };
+                            defer reader.deinit();
+                            const validated = try view.objects.context(Other, view, this.reference, "fixture", .{ .skills = .{ .items = &.{} } }, &reader);
+                            defer validated.deinit();
+                        }
+                    }{ .reference = request.plan.prior.? });
+                    different catch |err| switch (err) {
+                        error.InvalidContext, error.IncompatibleProfile => {},
+                        else => return err,
+                    };
+                    try std.testing.expectEqual(prior_hits, owner.store.context_cache.hits);
+                    try std.testing.expect(owner.store.context_cache.object_reads > prior_reads);
+
+                    // Reopen starts with no process-local semantic facts.
+                    try owner.close();
+                    owner.* = try native.Namespace.open(std.testing.allocator, std.testing.io, path);
+                    try std.testing.expectEqual(@as(u32, 0), owner.store.context_cache.entries.count());
+                    var handlers = try native.Registry.init(a, &.{Adapter.declaration()});
+                    defer handlers.deinit();
+                    _ = try owner.store.auditRetention(handlers, @splat(8));
+                    _ = try prepare(ns, ctx, next);
+                    try std.testing.expect(owner.store.context_cache.ancestry_bytes > 0);
+                    try std.testing.expectEqual(entries, owner.store.context_cache.entries.count());
+
+                    // A supported corruption hook revokes every fact. Even an
+                    // unindexed requested root must prove its derived edges
+                    // before the validator can mint another lease.
+                    owner.store.invalidateIntegrity();
+                    try owner.store.begin();
+                    try owner.store.database.run("DELETE FROM dependencies WHERE parent=?", &.{.{ .blob = &first_root.?.digest }});
+                    try owner.commit("corrupt retention fixture");
+                    _ = try owner.store.auditRetention(handlers, @splat(8));
+                    // The missing edge fences the owner; the scope's final
+                    // integrity check reports that storage is unavailable.
+                    try std.testing.expectError(error.StorageUnavailable, prepare(ns, ctx, next));
+                    try std.testing.expect(owner.store.fenced);
+                    try std.testing.expectEqual(@as(u32, 0), owner.store.context_cache.entries.count());
+                }
+                if (turn == 127 and !owned) {
                     try chunkRejections(ctx, &objects, request);
                     const initial_bytes = try ctx.object(.{ .digest = first_root.?.digest, .bytes = first_root.?.bytes }, @intCast(first_root.?.bytes));
                     var initial = try contracts.decodeOwned(P.AdaptiveContext, ctx.allocator, initial_bytes);
