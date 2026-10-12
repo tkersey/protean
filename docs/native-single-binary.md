@@ -123,10 +123,16 @@ accepted message until its authored consumption or terminal disposition.
 
 ## Saved state and portability
 
+This release starts fresh with state format 12, adaptive invocation v11, and
+adaptive context v6. Replace disposable example state directories and rerun the
+example. State-format 11 databases and archives, v5 contexts, and old adaptive
+application continuations are not migrated or supported by this release. The
+current examples have one implementation; no private v5 execution bundle is kept.
+
 A saved task is bound to its exact image, runtime artifact, schemas, profile,
 resources, and application identity. New binaries do not inherit resume authority
-from an equal version string. Keep the original pinned executable to operate an
-existing task. This consolidation introduces no automatic migration or hot upgrade.
+from an equal version string. Within the current format, restart and recovery
+preserve those bindings and never automatically redispatch an ambiguous effect.
 
 Checkpoint export/import verifies canonical schemas, object closure, occurrences,
 captures, event facts, receipts, and compatibility before admission. A valid

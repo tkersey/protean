@@ -58,12 +58,11 @@ fn read(ctx: registry.ProjectionContext, reference: anytype) ![]u8 {
 
 pub fn Projection(comptime P: type) type {
     return struct {
-        const chunked = P.adaptive_context_version == 6;
-        const History = if (chunked) @import("adaptive_history.zig").History(P) else void;
+        const History = @import("adaptive_history.zig").History(P);
         const Admission = @import("adaptive_responses.zig").Admission(P);
         const Ref = @typeInfo(@FieldType(P.AdaptiveResult, "replay")).optional.child;
         pub const Rendered = struct {
-            history_base: if (chunked) ?History.Loaded else void,
+            history_base: ?History.Loaded,
             unchanged_prefix: bool,
             /// Committed events, without the transient material of this call.
             history: json.Value,
@@ -94,21 +93,19 @@ pub fn Projection(comptime P: type) type {
             defer ctx.allocator.free(raw);
             const prepared = try read(ctx, value.source_request);
             defer ctx.allocator.free(prepared);
-            if (chunked) {
-                // A root cannot select a different catalog, epoch, or profile
-                // from the exact request retained as its source evidence.
-                var source = try contracts.decodeOwned(P.AdaptivePrepared, ctx.allocator, prepared);
-                defer source.deinit();
-                const request = source.value.request;
-                const frozen = try Admission.policy(ctx.allocator, ctx.profile);
-                if (source.value.version != 1 or !equal(&request.policy, &value.policy) or
-                    !same(request.plan.catalog, frozen.catalog) or
-                    !try encodedEqual(ctx.allocator, @TypeOf(value.plan), value.plan, request.plan) or
-                    !try encodedEqual(ctx.allocator, @TypeOf(value.selection), value.selection, request.selection) or
-                    request.invocation.parameters.reasoning == null or
-                    request.invocation.parameters.reasoning.?.effort != value.top_effort) return error.InvalidContext;
-                _ = try Admission.select(ctx.allocator, frozen, request);
-            }
+            // A root cannot select a different catalog, epoch, or profile
+            // from the exact request retained as its source evidence.
+            var source = try contracts.decodeOwned(P.AdaptivePrepared, ctx.allocator, prepared);
+            defer source.deinit();
+            const request = source.value.request;
+            const frozen = try Admission.policy(ctx.allocator, ctx.profile);
+            if (source.value.version != 1 or !equal(&request.policy, &value.policy) or
+                !same(request.plan.catalog, frozen.catalog) or
+                !try encodedEqual(ctx.allocator, @TypeOf(value.plan), value.plan, request.plan) or
+                !try encodedEqual(ctx.allocator, @TypeOf(value.selection), value.selection, request.selection) or
+                request.invocation.parameters.reasoning == null or
+                request.invocation.parameters.reasoning.?.effort != value.top_effort) return error.InvalidContext;
+            _ = try Admission.select(ctx.allocator, frozen, request);
             return decoded;
         }
 
@@ -400,9 +397,9 @@ pub fn Projection(comptime P: type) type {
             const a = ctx.allocator;
             var history = list(a);
             var origins: std.ArrayList(P.ContextOrigin) = .empty;
-            var history_base: if (chunked) ?History.Loaded else void = if (chunked) null else {};
-            var reader: if (chunked) History.Reader else void = if (chunked) .{ .ctx = ctx } else {};
-            defer if (chunked) reader.deinit();
+            var history_base: ?History.Loaded = null;
+            var reader: History.Reader = .{ .ctx = ctx };
+            defer reader.deinit();
             var previous: ?contracts.Decoded(P.AdaptiveContext) = null;
             defer if (previous) |*saved| saved.deinit();
             var same_epoch = false;
@@ -418,7 +415,7 @@ pub fn Projection(comptime P: type) type {
                     if (ancestor.watermark != watermark) return error.InvalidContext;
                     var saved = try open(ctx, ancestor, frozen.audience.bytes);
                     defer saved.deinit();
-                    if (chunked) try reader.validate(saved.value.history, saved.value.plan, catalog);
+                    try reader.validate(saved.value.history, saved.value.plan, catalog);
                     parent = saved.value.plan.prior;
                     if (parent) |*next| {
                         next.schema.bytes = try a.dupe(u8, next.schema.bytes);
@@ -441,22 +438,9 @@ pub fn Projection(comptime P: type) type {
                         request.plan.eviction_generation != try std.math.add(u64, old.plan.eviction_generation, @intFromBool(removing))) return error.InvalidContext;
                     if (same_profile and request.plan.reason == .eviction and request.invocation.parameters.reasoning.?.effort.? != old.top_effort) return error.InvalidContext;
                 }
-                if (chunked) {
-                    history_base = try reader.load(old.history, old.plan, catalog);
-                    history = history_base.?.items;
-                    origins = history_base.?.origins;
-                } else {
-                    history = (try json.parse(a, old.items.bytes, .{ .bytes = old.items.bytes.len, .tokens = old.items.bytes.len, .members = old.items.bytes.len })).value;
-                    if (old.origins.items.len != history.array.items.len) return error.InvalidContext;
-                    for (old.origins.items) |origin| if (origin.watermark > old.plan.watermark) return error.InvalidContext;
-                    // Retained provenance owns its variable-length membership after
-                    // the previous context's decoding arena is released.
-                    for (old.origins.items) |origin| {
-                        var owned = origin;
-                        owned.reasoning_skills.items = try a.dupe(u64, origin.reasoning_skills.items);
-                        try origins.append(a, owned);
-                    }
-                }
+                history_base = try reader.load(old.history, old.plan, catalog);
+                history = history_base.?.items;
+                origins = history_base.?.origins;
                 new_start = history.array.items.len;
                 try settle(a, &history, request, selected.profile.explicit_cache);
                 try fillOrigins(a, &origins, history.array.items.len, request.plan.watermark);

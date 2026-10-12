@@ -27,7 +27,6 @@ runtime/native/https.zig
 runtime/native/identity.zig
 runtime/native/inbox.zig
 runtime/native/json.zig
-runtime/native/legacy_adaptive.zig
 runtime/native/namespace.zig
 runtime/native/occurrence.zig
 runtime/native/protocol.zig

@@ -128,6 +128,16 @@ fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition 
     };
     return .{ .captured = try contracts.encodeOwned(Captured, ctx.allocator, .{ .prepared = work.digest(bytes), .artifact = artifact, .program = program_bytes }) };
 }
+fn dependencies(a: std.mem.Allocator, objects: []const []const u8) ![]native.registry.Dependency {
+    if (objects.len > 2) return error.InvalidProjection;
+    var references: native.registry.ProjectionReferences = .{ .allocator = a };
+    defer references.deinit();
+    if (objects.len != 0) try references.object(t.ToolArtifact, t.model.ArtifactReference, objects[0], null);
+    // Program embeds its image and interfaces. Its catalog digest binds policy;
+    // it is not an object reference with an independently retained byte length.
+    if (objects.len == 2) try references.object(wire.Program, t.model.ArtifactReference, objects[1], null);
+    return references.finish();
+}
 fn interpret(ctx: native.registry.ProjectionContext, request: []const u8, prepared_bytes: []const u8, captured_bytes: []const u8) !native.registry.Projection {
     var prepared = try contracts.decodeOwned(Prepared, ctx.allocator, prepared_bytes);
     defer prepared.deinit();
@@ -169,5 +179,5 @@ pub fn declaration(comptime build: bool) native.Declaration {
         fn schema(a: std.mem.Allocator) ![]u8 {
             return native.values.schemaBytes(t.ToolReply, a);
         }
-    }.schema, .capture = .{ .prepare = if (build) prepareBuild else prepareRun, .acquire = acquire, .interpret = interpret } };
+    }.schema, .capture = .{ .prepare = if (build) prepareBuild else prepareRun, .acquire = acquire, .interpret = interpret, .dependencies = dependencies } };
 }

@@ -30,7 +30,43 @@ pub const Projection = struct {
     objects: []const []const u8 = &.{},
     output_tokens: ?u64 = null,
 };
+/// Pure, registered codec output. These edges are derived from decoded object
+/// types by the selected adapter; projection callers cannot attach edge claims.
+pub const Dependency = struct { parent: ObjectReference, child: ObjectReference };
+pub const DependencyDecoder = *const fn (std.mem.Allocator, []const []const u8) anyerror![]Dependency;
+pub const ProjectionReferences = struct {
+    allocator: std.mem.Allocator,
+    edges: std.ArrayList(Dependency) = .empty,
+
+    pub fn deinit(self: *ProjectionReferences) void {
+        self.edges.deinit(self.allocator);
+    }
+    pub fn object(self: *ProjectionReferences, comptime T: type, comptime Ref: type, bytes: []const u8, comptime identity: ?[]const u8) !void {
+        var decoded = try contracts.decodeOwned(T, self.allocator, bytes);
+        defer decoded.deinit();
+        if (identity) |expected| if (!std.mem.eql(u8, decoded.value.schema.bytes, expected)) return error.InvalidProjection;
+        var sink = struct {
+            collector: *ProjectionReferences,
+            parent: ObjectReference,
+            pub fn add(this: *@This(), child: ObjectReference) !void {
+                try this.collector.edges.append(this.collector.allocator, .{ .parent = this.parent, .child = child });
+            }
+            pub fn reply(_: *@This(), _: @import("occurrence.zig").Acquired) !void {
+                @compileError("host occurrence replies require the host dependency codec");
+            }
+        }{ .collector = self, .parent = .{ .digest = @import("store.zig").digest(bytes), .bytes = bytes.len } };
+        try state.visitReferencesAs(T, Ref, decoded.value, &sink);
+    }
+    pub fn finish(self: *ProjectionReferences) ![]Dependency {
+        return self.edges.toOwnedSlice(self.allocator);
+    }
+};
+/// Explicit registration for a projection whose objects contain no references.
+pub fn opaqueProjection(_: std.mem.Allocator, _: []const []const u8) ![]Dependency {
+    return &.{};
+}
 pub const CaptureAdapter = struct {
+    dependencies: DependencyDecoder,
     prepare: *const fn (ProjectionContext, []const u8) anyerror![]u8,
     acquire: *const fn (Context, []const u8) anyerror!Acquisition,
     interpret: *const fn (ProjectionContext, []const u8, []const u8, []const u8) anyerror!Projection,

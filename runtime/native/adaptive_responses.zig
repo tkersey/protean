@@ -173,7 +173,17 @@ pub fn Adapter(comptime P: type) type {
                 fn schema(a: std.mem.Allocator) ![]u8 {
                     return values.schemaBytes(P.AdaptiveResult, a);
                 }
-            }.schema, .capture = .{ .prepare = prepare, .acquire = acquire, .interpret = interpret } };
+            }.schema, .capture = .{ .prepare = prepare, .acquire = acquire, .interpret = interpret, .dependencies = dependencies } };
+        }
+
+        fn dependencies(a: std.mem.Allocator, objects: []const []const u8) ![]registry.Dependency {
+            var references: registry.ProjectionReferences = .{ .allocator = a };
+            defer references.deinit();
+            if (objects.len == 0) return references.finish();
+            const Ref = @FieldType(P.AdaptiveContext, "source_capture");
+            for (objects[0 .. objects.len - 1]) |bytes| try references.object(P.HistoryChunk, Ref, bytes, @import("adaptive_history.zig").identity);
+            try references.object(P.AdaptiveContext, Ref, objects[objects.len - 1], P.adaptive_context_identity);
+            return references.finish();
         }
 
         pub fn prepare(ctx: registry.ProjectionContext, bytes: []const u8) ![]u8 {
@@ -386,14 +396,9 @@ pub fn Adapter(comptime P: type) type {
             context.source_request = .{ .digest = storage.digest(prepared_bytes), .bytes = prepared_bytes.len };
             context.response_id = response_id;
             var objects: std.ArrayList([]const u8) = .empty;
-            if (P.adaptive_context_version == 6) {
-                const published = try @import("adaptive_history.zig").History(P).publish(ctx, projected.history_base, projected.unchanged_prefix, projected.history, projected.origins.items, request.value.plan, catalog.value);
-                context.history = published.root;
-                try objects.appendSlice(ctx.allocator, published.objects);
-            } else {
-                context.items = .{ .bytes = try json.canonical(ctx.allocator, projected.history) };
-                context.origins = .{ .items = projected.origins.items };
-            }
+            const published = try @import("adaptive_history.zig").History(P).publish(ctx, projected.history_base, projected.unchanged_prefix, projected.history, projected.origins.items, request.value.plan, catalog.value);
+            context.history = published.root;
+            try objects.appendSlice(ctx.allocator, published.objects);
             const artifact = try contracts.encodeOwned(P.AdaptiveContext, ctx.allocator, context);
             try objects.append(ctx.allocator, artifact);
             return encode(ctx, .{ .result = normalized, .replay_status = .complete, .usage = observed.value, .replay = .{

@@ -403,7 +403,7 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
     var increment_declaration = native.leaf(u32, u32, .{ .identity = "task-owner.increment.v1", .resource_role = "local" }, increment);
     if (captured) {
         increment_declaration.background = true;
-        increment_declaration.capture = .{ .prepare = CapturingIncrement.prepare, .acquire = CapturingIncrement.invoke, .interpret = CapturingIncrement.interpret };
+        increment_declaration.capture = .{ .prepare = CapturingIncrement.prepare, .acquire = CapturingIncrement.invoke, .interpret = CapturingIncrement.interpret, .dependencies = native.registry.opaqueProjection };
         increment_declaration.invoke = null;
     }
     var handlers = try native.Registry.init(a, &.{

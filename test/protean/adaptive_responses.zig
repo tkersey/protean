@@ -7,7 +7,6 @@ const CurrentProfile = model.Profile(union(enum) { finish: struct { value: u64 }
     .{ .name = "finish", .description = "Finish with evidence." },
     .{ .name = "inspect", .description = "Inspect an invariant." },
 }, .{ .model_id_bytes = 128, .temperature_bytes = 32, .maximum_messages = 4, .message_bytes = 1024, .maximum_output_items = 8, .call_id_bytes = 64, .arguments_json_bytes = 256, .result_text_bytes = 1024, .provider_response_bytes = 4096, .maximum_adaptive_reply_bytes = 1024 });
-const LegacyProfile = native.testing.legacy_adaptive.Profile(CurrentProfile);
 const Ref = model.ArtifactReference;
 const Objects = struct {
     items: std.ArrayList([]const u8) = .empty,
@@ -34,10 +33,6 @@ fn digest(bytes: []const u8) [32]u8 {
     std.crypto.hash.sha2.Sha256.hash(bytes, &out, .{});
     return out;
 }
-test "legacy adaptive projection preserves skill ownership and exact v5 ancestry" {
-    try Fixture(LegacyProfile).preservation();
-    try Fixture(LegacyProfile).scaling();
-}
 test "chunked adaptive projection preserves history and appends without prefixes" {
     try Fixture(CurrentProfile).preservation();
     try Fixture(CurrentProfile).scaling();
@@ -46,6 +41,39 @@ fn Fixture(comptime P: type) type {
     return struct {
         const Adapter = native.adaptive_responses.Adapter(P);
         const Admission = native.adaptive_responses.Admission(P);
+        fn expectDependency(edges: []const native.registry.Dependency, bytes: []const u8, child: Ref) !void {
+            for (edges) |edge| {
+                if (std.mem.eql(u8, &edge.parent.digest, &digest(bytes)) and edge.parent.bytes == bytes.len and
+                    std.mem.eql(u8, &edge.child.digest, &child.digest) and edge.child.bytes == child.bytes) return;
+            }
+            return error.MissingProjectionDependency;
+        }
+        fn checkDependencies(a: std.mem.Allocator, projection: native.registry.Projection) !void {
+            const codec = Adapter.declaration().capture.?.dependencies;
+            const edges = try codec(a, projection.objects);
+            defer a.free(edges);
+            if (projection.objects.len == 0) {
+                try std.testing.expectEqual(@as(usize, 0), edges.len);
+                return;
+            }
+            const bytes = projection.objects[projection.objects.len - 1];
+            var root = try contracts.decodeOwned(P.AdaptiveContext, a, bytes);
+            defer root.deinit();
+            try expectDependency(edges, bytes, root.value.source_capture);
+            try expectDependency(edges, bytes, root.value.source_request);
+            try expectDependency(edges, bytes, root.value.plan.catalog);
+            if (root.value.plan.prior) |prior| try expectDependency(edges, bytes, prior.object);
+            if (root.value.history) |history| try expectDependency(edges, bytes, history.object);
+            for (projection.objects[0 .. projection.objects.len - 1]) |chunk_bytes| {
+                var chunk = try contracts.decodeOwned(P.HistoryChunk, a, chunk_bytes);
+                defer chunk.deinit();
+                if (chunk.value.previous) |previous| try expectDependency(edges, chunk_bytes, previous.object);
+            }
+            root.value.schema.bytes = "agent.model.context.responses.adaptive.v5";
+            const wrong_schema = try contracts.encodeOwned(P.AdaptiveContext, a, root.value);
+            defer a.free(wrong_schema);
+            try std.testing.expectError(error.InvalidProjection, codec(a, &.{wrong_schema}));
+        }
         fn http(a: std.mem.Allocator, prepared: []const u8) !native.json.Value {
             var decoded = try contracts.decodeOwned(Adapter.Prepared, a, prepared);
             defer decoded.deinit();
@@ -59,6 +87,7 @@ fn Fixture(comptime P: type) type {
             const raw = try contracts.encodeOwned(native.responses.Raw, a, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = call } });
             _ = try objects.add(a, raw);
             const projection = try Adapter.interpret(ctx, encoded, prepared, raw);
+            try checkDependencies(a, projection);
             for (projection.objects) |object| _ = try objects.add(a, object);
             const decoded = try contracts.decodeOwned(P.AdaptiveResult, a, projection.reply);
             return decoded.value; // The fixture's arena owns all returned slices.
@@ -233,7 +262,7 @@ fn Fixture(comptime P: type) type {
             request.plan.prior = second.replay;
             request.plan.watermark = second.replay.?.watermark;
             request.results.items = &.{.{ .call_id = .{ .bytes = "call-2" }, .output = .{ .bytes = "Observed invariant retained." } }};
-            if (P.adaptive_context_version == 6) try skillOriginRejections(ctx, &objects, request);
+            try skillOriginRejections(ctx, &objects, request);
             loaded[0].active = false;
             request.offered = .{ true, false };
             request.selection.control_revision = 2;
@@ -438,7 +467,7 @@ fn Fixture(comptime P: type) type {
             // These count returned bytes, not disk I/O or latency. The in-memory object
             // lookup deliberately makes no production performance claim.
             const points = [_]usize{ 1, 8, 16, 32, 64, 128 };
-            const expected_reads = [_]usize{ 2555, 42749, 131122, 444178, 1615626, 6141317 };
+            // Historical v5 read bytes: 2555, 42749, 131122, 444178, 1615626, 6141317.
             const expected_body_bytes = [_]usize{ 1271, 3616, 6308, 11700, 22484, 44108 };
             const expected_body_hashes = [_][]const u8{
                 "6ae7cd9e95eb22ae14dfac797dfb456b6146ac05045a25e1c8c188ccbbd788fd",
@@ -451,7 +480,7 @@ fn Fixture(comptime P: type) type {
             try std.testing.expectEqualStrings("e3d9173da4bc09371f08de6633fecc77714cfa16e1ed9d5bf83b85be8b1110c1", &std.fmt.bytesToHex(digest(profile), .lower));
             try std.testing.expectEqualStrings("6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d", &std.fmt.bytesToHex(catalog.digest, .lower));
             std.debug.print("context baseline profile_sha256={s} catalog_sha256={s}\n", .{ std.fmt.bytesToHex(digest(profile), .lower), std.fmt.bytesToHex(catalog.digest, .lower) });
-            var previous_history: if (P.adaptive_context_version == 6) ?P.HistoryReference else void = if (P.adaptive_context_version == 6) null else {};
+            var previous_history: ?P.HistoryReference = null;
             var first_root: ?@TypeOf(catalog) = null;
             for (0..128) |turn| {
                 var step = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -466,15 +495,16 @@ fn Fixture(comptime P: type) type {
                 _ = try objects.add(a, try a.dupe(u8, raw));
                 const before_interpret = objects.reads;
                 const projection = try Adapter.interpret(ctx, encoded, prepared, raw);
+                try checkDependencies(ctx.allocator, projection);
                 // Interpretation derives the prepared body and retained history once.
                 // The predecessor made two catalog reads and two ancestry traversals.
-                try std.testing.expectEqual(1 + @as(usize, if (P.adaptive_context_version == 5) 3 else 4) * turn, objects.reads - before_interpret);
+                try std.testing.expectEqual(1 + @as(usize, 4) * turn, objects.reads - before_interpret);
                 if (turn == 0) {
                     const forged = try ctx.allocator.dupe(u8, prepared);
                     forged[forged.len - 1] ^= 1;
                     try std.testing.expectError(error.InvalidCapture, Adapter.interpret(ctx, encoded, forged, raw));
                 }
-                if (P.adaptive_context_version == 6) {
+                {
                     try std.testing.expectEqual(@as(usize, 2), projection.objects.len);
                     var root = try contracts.decodeOwned(P.AdaptiveContext, ctx.allocator, projection.objects[1]);
                     defer root.deinit();
@@ -503,13 +533,12 @@ fn Fixture(comptime P: type) type {
                     const next = try contracts.encodeOwned(P.AdaptiveRequest, ctx.allocator, request);
                     const measured = try Adapter.prepare(ctx, next);
                     const decoded = try contracts.decodeOwned(Adapter.Prepared, ctx.allocator, measured);
-                    try std.testing.expectEqual(1 + @as(usize, if (P.adaptive_context_version == 5) 3 else 4) * (turn + 1), objects.reads);
-                    if (P.adaptive_context_version == 5) try std.testing.expectEqual(expected_reads[point], objects.read_bytes);
+                    try std.testing.expectEqual(1 + @as(usize, 4) * (turn + 1), objects.reads);
                     try std.testing.expectEqual(expected_body_bytes[point], decoded.value.body.bytes.len);
                     try std.testing.expectEqualStrings(expected_body_hashes[point], &std.fmt.bytesToHex(digest(decoded.value.body.bytes), .lower));
                     std.debug.print("context v{d} turns={d} reads={d} bytes={d} body_bytes={d} body_sha256={s}\n", .{ P.adaptive_context_version, turn + 1, objects.reads, objects.read_bytes, decoded.value.body.bytes.len, std.fmt.bytesToHex(digest(decoded.value.body.bytes), .lower) });
                 }
-                if (P.adaptive_context_version == 6 and turn == 127) {
+                if (turn == 127) {
                     try chunkRejections(ctx, &objects, request);
                     const initial_bytes = try ctx.object(.{ .digest = first_root.?.digest, .bytes = first_root.?.bytes }, @intCast(first_root.?.bytes));
                     var initial = try contracts.decodeOwned(P.AdaptiveContext, ctx.allocator, initial_bytes);

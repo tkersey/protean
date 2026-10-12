@@ -13,19 +13,24 @@ pub const Reference = struct { digest: Digest, bytes: u64 };
 /// Store retention. Opaque payloads need their registered application codec;
 /// byte arrays and JSON never acquire reference meaning from their shape.
 pub fn visitReferences(comptime T: type, value: T, collector: anytype) anyerror!void {
-    if (T == Reference) return collector.add(value);
+    return visitReferencesAs(T, Reference, value, collector);
+}
+/// Application codecs supply their exact nominal reference type. Matching
+/// field names alone never makes an unrelated application value a reference.
+pub fn visitReferencesAs(comptime T: type, comptime Ref: type, value: T, collector: anytype) anyerror!void {
+    if (T == Ref) return collector.add(.{ .digest = value.digest, .bytes = value.bytes });
     if (T == occurrence.Acquired) try collector.reply(value);
     switch (@typeInfo(T)) {
-        .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| try visitReferences(Field, @field(value, name), collector),
-        .optional => |info| if (value) |child| try visitReferences(info.child, child, collector),
+        .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| try visitReferencesAs(Field, Ref, @field(value, name), collector),
+        .optional => |info| if (value) |child| try visitReferencesAs(info.child, Ref, child, collector),
         .@"union" => |info| inline for (info.field_names, info.field_types) |name, Field| {
-            if (std.mem.eql(u8, @tagName(value), name)) try visitReferences(Field, @field(value, name), collector);
+            if (std.mem.eql(u8, @tagName(value), name)) try visitReferencesAs(Field, Ref, @field(value, name), collector);
         },
         .pointer => |info| if (info.size == .slice and info.child != u8) {
-            for (value) |child| try visitReferences(info.child, child, collector);
+            for (value) |child| try visitReferencesAs(info.child, Ref, child, collector);
         },
         .array => |info| if (info.child != u8) {
-            for (value) |child| try visitReferences(info.child, child, collector);
+            for (value) |child| try visitReferencesAs(info.child, Ref, child, collector);
         },
         else => {},
     }

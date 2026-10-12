@@ -6,7 +6,7 @@ const contracts = @import("protean_contracts");
 const registry = @import("registry.zig");
 const storage = @import("store.zig");
 const json = @import("json.zig");
-const identity = "agent.model.context.history.chunk.v1";
+pub const identity = "agent.model.context.history.chunk.v1";
 
 pub fn History(comptime P: type) type {
     return struct {

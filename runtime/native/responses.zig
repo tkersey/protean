@@ -114,7 +114,7 @@ pub fn Adapter(comptime P: type) type {
                 fn schema(a: std.mem.Allocator) ![]u8 {
                     return values.schemaBytes(P.ReferenceResult, a);
                 }
-            }.schema, .capture = .{ .prepare = prepare, .acquire = acquire, .interpret = interpret } };
+            }.schema, .capture = .{ .prepare = prepare, .acquire = acquire, .interpret = interpret, .dependencies = dependencies } };
         }
 
         fn bind(ctx: registry.ProjectionContext, request: P.ReferenceRequest, config: Settings) !void {
@@ -188,6 +188,14 @@ pub fn Adapter(comptime P: type) type {
                 try input.array.append(item);
             }
             return input;
+        }
+
+        fn dependencies(a: std.mem.Allocator, objects: []const []const u8) ![]registry.Dependency {
+            if (objects.len > 1) return error.InvalidProjection;
+            var references: registry.ProjectionReferences = .{ .allocator = a };
+            defer references.deinit();
+            for (objects) |bytes| try references.object(P.Context, @FieldType(P.Context, "source_capture"), bytes, P.context_identity);
+            return references.finish();
         }
 
         pub fn prepare(ctx: registry.ProjectionContext, bytes: []const u8) ![]u8 {

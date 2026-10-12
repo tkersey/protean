@@ -114,6 +114,13 @@ fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition 
     ctx.checkCancellation() catch |err| return .{ .definitely_not_sent = err };
     return .{ .captured = try ctx.allocator.dupe(u8, bytes) };
 }
+fn dependencies(a: std.mem.Allocator, objects: []const []const u8) ![]native.registry.Dependency {
+    if (objects.len > 1) return error.InvalidProjection;
+    var references: native.registry.ProjectionReferences = .{ .allocator = a };
+    defer references.deinit();
+    if (objects.len != 0) try references.object(t.WorkArtifact, t.model.ArtifactReference, objects[0], null);
+    return references.finish();
+}
 fn interpret(ctx: native.registry.ProjectionContext, request: []const u8, prepared: []const u8, captured: []const u8) !native.registry.Projection {
     if (!same(prepared, captured) or !same(try prepare(ctx, request), prepared)) return error.InvalidCapture;
     var record = try contracts.decodeOwned(t.WorkArtifact, ctx.allocator, prepared);
@@ -133,7 +140,7 @@ pub fn declaration() native.Declaration {
         fn schema(a: std.mem.Allocator) ![]u8 {
             return native.values.schemaBytes(t.WorkReply, a);
         }
-    }.schema, .capture = .{ .prepare = prepareWork, .acquire = acquire, .interpret = interpret } };
+    }.schema, .capture = .{ .prepare = prepareWork, .acquire = acquire, .interpret = interpret, .dependencies = dependencies } };
 }
 fn prepareInspection(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
     var request = try contracts.decodeOwned(t.WorkRequest, ctx.allocator, bytes);

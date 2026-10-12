@@ -20,7 +20,10 @@ pub fn reportFailure(err: anyerror) u8 {
     if (flags < 0 or c.fcntl(c.STDERR_FILENO, c.F_SETFL, flags | c.O_NONBLOCK) < 0) return 74;
     defer _ = c.fcntl(c.STDERR_FILENO, c.F_SETFL, flags);
     var buffer: [192]u8 = undefined;
-    const message = std.fmt.bufPrint(&buffer, "protean: {s}\n", .{@errorName(err)}) catch return 74;
+    const message = if (err == error.UnsupportedStateFormat)
+        "protean: unsupported state format; use a fresh state directory for this release\n"
+    else
+        std.fmt.bufPrint(&buffer, "protean: {s}\n", .{@errorName(err)}) catch return 74;
     _ = c.write(c.STDERR_FILENO, message.ptr, message.len);
     return 74;
 }
@@ -177,7 +180,7 @@ fn failureKind(err: anyerror) protocol.Kind {
         error.AnswerConflict => .AnswerConflict,
         error.CursorExpired => .CursorExpired,
         error.Capacity, error.OutOfMemory, error.Overloaded => .Overloaded,
-        error.TerminalTask, error.StaleRevision, error.UnsettledOccurrence, error.IncompatibleProfile, error.ShuttingDown, error.NonPortable, error.NonEmptyNamespace, error.AlreadyExists => .StateConflict,
+        error.TerminalTask, error.StaleRevision, error.UnsettledOccurrence, error.IncompatibleProfile, error.UnsupportedStateFormat, error.ShuttingDown, error.NonPortable, error.NonEmptyNamespace, error.AlreadyExists => .StateConflict,
         error.MissingArtifact, error.ArtifactUnavailable => .ArtifactUnavailable,
         error.UnsupportedCapability => .UnsupportedCapability,
         error.StorageUnavailable, error.CorruptState => .StorageUnavailable,

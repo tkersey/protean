@@ -1030,6 +1030,7 @@ pub fn Service(comptime Types: type) type {
             const objects = try a.alloc(state.Reference, result.objects.len);
             defer a.free(objects);
             for (result.objects, objects) |object, *reference| reference.* = try self.store().putObject(object);
+            try self.store().retainProjection(adapter.dependencies, result.objects);
             var projected = raw.value;
             projected.projection = .{ .reply = reply, .objects = .{ .items = objects }, .output_tokens = result.output_tokens };
             try self.store().putRecord(state.Capture, "capture", attempt_id, initial.id, projected);
@@ -1379,7 +1380,7 @@ pub fn Service(comptime Types: type) type {
         /// releases it even when the enclosing request allocator is an arena.
         /// A transferable capture must reproduce its committed reply, replay
         /// objects and usage through the same pure adapter, without acquisition.
-        fn validateCapturedProjections(self: *Self, value: state.Task, records: []const state.ArchiveRecord) !void {
+        fn validateCapturedProjections(self: *Self, value: state.Task, records: []const state.ArchiveRecord, mode: enum { inspect, retain }) !void {
             // Retained unsuccessful/rearmed attempts also need request/profile
             // coherence, even though they have no acquired response.
             for (records) |row| {
@@ -1438,6 +1439,7 @@ pub fn Service(comptime Types: type) type {
                 for (result.objects, projection.objects.items) |object, reference| {
                     if (object.len != reference.bytes or !same(&storage.digest(object), &reference.digest)) return error.CorruptState;
                 }
+                if (mode == .retain) try self.store().retainProjection(adapter.dependencies, result.objects);
                 var schema = try data.schema.decode(temporary, entry.resume_schema);
                 defer schema.deinit();
                 try data.schema.validateValue(temporary, schema.descriptor, result.reply);
@@ -1461,7 +1463,7 @@ pub fn Service(comptime Types: type) type {
                 const index = try self.store().archiveIndex(arena.allocator(), task_id, .{ .digest = storage.digest(self.assets.manifest), .bytes = self.assets.manifest.len });
                 try self.validateArchiveAdmissions(arena.allocator(), value.value, index);
                 try self.validateOccurrenceProvenance(arena.allocator(), value.value, index.records.items);
-                try self.validateCapturedProjections(value.value, index.records.items);
+                try self.validateCapturedProjections(value.value, index.records.items, .inspect);
             }
             return archive_api.write(self.allocator, self.io, self.store(), task_id, self.assets.manifest, path, self.namespace.directory);
         }
@@ -1508,7 +1510,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().restoreArchiveIndex(a, reader.manifest.value, value);
             try self.validateArchiveAdmissions(a, value, reader.manifest.value);
             try self.validateOccurrenceProvenance(a, value, reader.manifest.value.records.items);
-            try self.validateCapturedProjections(value, reader.manifest.value.records.items);
+            try self.validateCapturedProjections(value, reader.manifest.value.records.items, .retain);
             try self.validateImportedState(a, value, inspected.current);
             const previous = value.revision;
             value.revision = try std.math.add(u64, previous, 1);

@@ -84,7 +84,9 @@ pub const Store = struct {
         }
         var query = try database.prepare("SELECT format,namespace,generation,parent,head FROM meta WHERE singleton=1", &.{});
         defer query.deinit();
-        if (try query.step() != .row or try query.integer(0) != format or !std.mem.eql(u8, try query.bytes(1), &namespace)) return error.CorruptState;
+        if (try query.step() != .row) return error.CorruptState;
+        if (try query.integer(0) != format) return error.UnsupportedStateFormat;
+        if (!std.mem.eql(u8, try query.bytes(1), &namespace)) return error.CorruptState;
         const generation = try query.integer(2);
         if (generation < 0) return error.CorruptState;
         const parent = try query.bytes(3);
@@ -362,6 +364,22 @@ pub const Store = struct {
         const ref = try self.putObject(bytes);
         try self.retainValue(state.Receipt, ref, decoded.value);
         try self.database.run("INSERT INTO operations VALUES(?,?,?,?)", &.{ .{ .text = id }, .{ .blob = &request }, .{ .blob = &ref.digest }, .{ .blob = &decoded.value.task } });
+    }
+
+    /// The selected registry entry supplies a pure, compiled codec. Adapters
+    /// receive no Store capability, and Projection carries no asserted edges.
+    pub fn retainProjection(self: *Store, decode: @import("registry.zig").DependencyDecoder, objects: []const []const u8) !void {
+        try self.writing();
+        errdefer self.rollback();
+        const dependencies = try decode(self.allocator, objects);
+        defer self.allocator.free(dependencies);
+        var parents: std.AutoHashMap(Digest, u64) = .init(self.allocator);
+        defer parents.deinit();
+        for (objects) |bytes| try parents.put(digest(bytes), bytes.len);
+        for (dependencies) |edge| {
+            if ((parents.get(edge.parent.digest) orelse return error.InvalidProjection) != edge.parent.bytes) return error.InvalidProjection;
+            try self.retainReference(edge.parent, edge.child);
+        }
     }
 
     fn retainReference(self: *Store, parent: state.Reference, child: state.Reference) !void {
@@ -939,4 +957,100 @@ test "occurrence codec retains its digest-only acquired reply" {
     _ = try store.commit("acquired-reply");
     try std.testing.expectEqual(@as(u64, 3), try store.scalar("SELECT count(*) FROM dependencies"));
     try std.testing.expectError(error.Constraint, db.run("DELETE FROM objects WHERE digest=?", &.{.{ .blob = &reply.digest }}));
+}
+
+test "registered projection codecs retain nominal references and roll back incomplete closure" {
+    const registry = @import("registry.zig");
+    const Codec = struct {
+        const Ref = struct { digest: [32]u8, bytes: u64 };
+        const Lookalike = struct { digest: [32]u8, bytes: u64 };
+        const Body = struct {
+            schema: contracts.Utf8,
+            children: contracts.Vector(Ref, null),
+            unrelated: Lookalike,
+        };
+        fn decode(a: std.mem.Allocator, objects: []const []const u8) ![]registry.Dependency {
+            var references: registry.ProjectionReferences = .{ .allocator = a };
+            defer references.deinit();
+            for (objects) |bytes| try references.object(Body, Ref, bytes, "fixture.projection.v1");
+            return references.finish();
+        }
+        fn forged(a: std.mem.Allocator, _: []const []const u8) ![]registry.Dependency {
+            const edges = try a.alloc(registry.Dependency, 1);
+            edges[0] = .{ .parent = .{ .digest = @splat(9), .bytes = 1 }, .child = .{ .digest = @splat(8), .bytes = 1 } };
+            return edges;
+        }
+    };
+    const a = std.testing.allocator;
+    const db = try sqlite.Database.open(a, ":memory:", true);
+    defer db.destroy() catch unreachable;
+    defer db.close() catch unreachable;
+    var store = try Store.init(a, db, true, @splat(7));
+    try store.begin();
+    const child = try store.putObject("retained context history");
+    const nominal: Codec.Ref = .{ .digest = child.digest, .bytes = child.bytes };
+    var children = [_]Codec.Ref{ nominal, nominal };
+    var body: Codec.Body = .{
+        .schema = .{ .bytes = "fixture.projection.v1" },
+        .children = .{ .items = &children },
+        .unrelated = .{ .digest = @splat(1), .bytes = 123 },
+    };
+    const bytes = try contracts.encodeOwned(Codec.Body, a, body);
+    defer a.free(bytes);
+    _ = try store.putObject(bytes);
+    try store.retainProjection(Codec.decode, &.{bytes});
+    _ = try store.commit("context-projection");
+    try store.confirmSealed(store.head);
+    const epoch = try store.publicationEpoch();
+    // Duplicate nominal references coalesce; matching struct shape alone is
+    // not enough to claim that the unrelated value is an object dependency.
+    try std.testing.expectEqual(@as(u64, 1), try store.scalar("SELECT count(*) FROM dependencies"));
+    try std.testing.expectError(error.Constraint, db.run("DELETE FROM objects WHERE digest=?", &.{.{ .blob = &child.digest }}));
+    try std.testing.expectError(error.Constraint, db.run("UPDATE objects SET body=x'00' WHERE digest=?", &.{.{ .blob = &child.digest }}));
+    for (0..3) |case| {
+        children[1] = nominal;
+        body.schema.bytes = "fixture.projection.v1";
+        switch (case) {
+            0 => children[1].bytes += 1,
+            1 => children[1].digest = @splat(3),
+            2 => body.schema.bytes = "fixture.projection.v0",
+            else => unreachable,
+        }
+        const rejected = try contracts.encodeOwned(Codec.Body, a, body);
+        defer a.free(rejected);
+        try store.begin();
+        const reference = try store.putObject(rejected);
+        if (case < 2) {
+            try std.testing.expectError(error.Constraint, store.retainProjection(Codec.decode, &.{rejected}));
+        } else {
+            try std.testing.expectError(error.InvalidProjection, store.retainProjection(Codec.decode, &.{rejected}));
+        }
+        try std.testing.expect(!store.transaction);
+        try std.testing.expectEqual(@as(u64, 1), try store.scalar("SELECT count(*) FROM dependencies"));
+        try std.testing.expectError(error.MissingArtifact, store.object(a, reference, null));
+        try std.testing.expectEqual(epoch, try store.publicationEpoch());
+    }
+    try store.begin();
+    try std.testing.expectError(error.InvalidProjection, store.retainProjection(Codec.forged, &.{bytes}));
+    try std.testing.expect(!store.transaction);
+    try std.testing.expectEqual(epoch, try store.publicationEpoch());
+}
+
+test "old state formats require a fresh namespace without rewriting old records" {
+    const a = std.testing.allocator;
+    const db = try sqlite.Database.open(a, ":memory:", true);
+    defer db.destroy() catch unreachable;
+    defer db.close() catch unreachable;
+    try db.exec("CREATE TABLE meta(singleton INTEGER PRIMARY KEY, format INTEGER, namespace BLOB, generation INTEGER, parent BLOB, head BLOB);");
+    const namespace: Digest = @splat(7);
+    try db.run("INSERT INTO meta VALUES(1,11,?,0,?,?)", &.{ .{ .blob = &namespace }, .{ .blob = &namespace }, .{ .blob = &namespace } });
+    try std.testing.expectError(error.UnsupportedStateFormat, Store.init(a, db, false, namespace));
+    var query = try db.prepare("SELECT format FROM meta WHERE singleton=1", &.{});
+    defer query.deinit();
+    try std.testing.expectEqual(.row, try query.step());
+    try std.testing.expectEqual(@as(i64, 11), try query.integer(0));
+    var tables = try db.prepare("SELECT count(*) FROM sqlite_schema WHERE type='table'", &.{});
+    defer tables.deinit();
+    try std.testing.expectEqual(.row, try tables.step());
+    try std.testing.expectEqual(@as(i64, 1), try tables.integer(0));
 }

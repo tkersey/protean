@@ -50,7 +50,7 @@ pub fn declaration() native.Declaration {
         fn schema(a: std.mem.Allocator) ![]u8 {
             return native.values.schemaBytes(t.PreparationResult, a);
         }
-    }.schema, .capture = .{ .prepare = prepare, .acquire = acquire, .interpret = interpret } };
+    }.schema, .capture = .{ .prepare = prepare, .acquire = acquire, .interpret = interpret, .dependencies = dependencies } };
 }
 
 fn receiptText(a: std.mem.Allocator, receipt: t.ControlReceipt, control: t.controls.State) !P.ResultText {
@@ -252,6 +252,13 @@ fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition 
     return .{ .captured = try contracts.encodeOwned(t.PreparationCapture, ctx.allocator, .{
         .prepared = digest(bytes),
     }) };
+}
+fn dependencies(a: std.mem.Allocator, objects: []const []const u8) ![]native.registry.Dependency {
+    if (objects.len > 1) return error.InvalidProjection;
+    var references: native.registry.ProjectionReferences = .{ .allocator = a };
+    defer references.deinit();
+    if (objects.len != 0) try references.object(t.ReceiptArtifact, t.model.ArtifactReference, objects[0], null);
+    return references.finish();
 }
 fn interpret(ctx: native.registry.ProjectionContext, request: []const u8, prepared: []const u8, captured: []const u8) !native.registry.Projection {
     var observation = try contracts.decodeOwned(t.PreparationCapture, ctx.allocator, captured);
