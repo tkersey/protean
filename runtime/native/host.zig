@@ -72,7 +72,7 @@ fn Connection(comptime Types: type) type {
                 try json.put(a, &result, "server_instance_id", json.string(self.instance));
                 var info = json.object();
                 try json.put(a, &info, "name", json.string("Protean native host"));
-                try json.put(a, &info, "version", json.string("4.0.0"));
+                try json.put(a, &info, "version", json.string(@import("native_options").host_version));
                 try json.put(a, &result, "server_info", info);
                 try json.put(a, &result, "build_manifest_id", json.string(self.application.manifest_id));
                 try json.put(a, &result, "native_artifact_sha256", json.string(try a.dupe(u8, &std.fmt.bytesToHex(self.artifact_identity, .lower))));

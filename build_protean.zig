@@ -395,6 +395,7 @@ pub fn build(b: *std.Build) void {
 fn nativeEnvironment(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, kosmos: *std.Build.Module, data: *std.Build.Module, contracts: *std.Build.Module, admission: *std.Build.Module, sqlite_source: std.Build.LazyPath, gate: *std.Build.Step) *std.Build.Module {
     const options = b.addOptions();
     options.addOption(u32, "state_format", @import("build_native.zig").state_format);
+    options.addOption([]const u8, "host_version", @import("build.zig.zon").version);
     // The exact admitted 0.17 compiler still supplies build-time translate-c.
     // Keep translation bound to that target/compiler tuple; @cImport is gone.
     const translated = b.addTranslateC(.{
