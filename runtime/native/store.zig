@@ -56,6 +56,7 @@ pub const Store = struct {
     integrity_epoch: u64 = 1,
     data_version: u64 = 0,
     sealed_generation: ?u64 = null,
+    projecting: bool = false,
 
     /// The namespace owner has already authenticated the directory, acquired
     /// its OS lock and decided whether this is a new or existing database.
@@ -144,9 +145,68 @@ pub const Store = struct {
             return err;
         };
     }
+
+    /// Run a pure projection under one read snapshot, releasing it before the
+    /// caller can publish or dispatch environmental work. Import may borrow its
+    /// existing transaction, but projection code still cannot write through the
+    /// Store. Results belong to the caller's projection arena; the view cannot
+    /// escape this call. No semantic validation lease is granted by a snapshot.
+    pub fn project(self: *Store, comptime Result: type, a: std.mem.Allocator, binding: @import("registry.zig").ProjectionBinding, operation: anytype) !Result {
+        var scope = try ProjectionScope.open(self);
+        const result = operation.run(@as(@import("registry.zig").ProjectionContext, .{
+            .allocator = a,
+            .task = binding.task,
+            .tenant = binding.tenant,
+            .profile = binding.profile,
+            .application = binding.application,
+            .objects = .validating(&scope, ProjectionScope.read),
+        }));
+        // Check and release even when the pure adapter failed. A malformed
+        // proposed descendant does not invalidate intact committed ancestors.
+        try scope.finish();
+        return result;
+    }
+
+    const ProjectionScope = struct {
+        store: *Store,
+        epoch: u64,
+        opened: bool,
+
+        fn open(self: *Store) !ProjectionScope {
+            if (self.projecting) return error.Busy;
+            try self.checkIntegrity();
+            const opened = !self.transaction;
+            if (opened) try self.database.exec("BEGIN;");
+            errdefer if (opened) self.database.exec("ROLLBACK;") catch self.fence();
+            // BEGIN alone is deferred. Reading the head establishes the actual
+            // snapshot/shared lock before the external-change check.
+            if (try self.scalar("SELECT generation FROM meta WHERE singleton=1") != self.head.generation) return self.corrupt();
+            try self.checkIntegrity();
+            self.projecting = true;
+            return .{ .store = self, .epoch = self.integrity_epoch, .opened = opened };
+        }
+
+        fn read(source: *anyopaque, a: std.mem.Allocator, ref: state.Reference, limit: usize) ![]u8 {
+            const scope: *ProjectionScope = @ptrCast(@alignCast(source));
+            if (!scope.store.projecting or scope.store.fenced or scope.epoch != scope.store.integrity_epoch) return error.InvalidState;
+            return scope.store.object(a, ref, limit);
+        }
+
+        fn finish(self: *ProjectionScope) !void {
+            const owner = self.store;
+            defer owner.projecting = false;
+            if (self.opened) owner.database.exec("ROLLBACK;") catch |err| {
+                owner.fence();
+                return err;
+            };
+            try owner.checkIntegrity();
+            if (self.epoch != owner.integrity_epoch) return error.InvalidState;
+        }
+    };
+
     pub fn begin(self: *Store) !void {
         if (self.fenced) return error.StorageUnavailable;
-        if (self.transaction) return error.Busy;
+        if (self.transaction or self.projecting) return error.Busy;
         try self.database.exec("BEGIN IMMEDIATE;");
         self.transaction = true;
         errdefer self.rollback();
@@ -156,12 +216,16 @@ pub const Store = struct {
     }
     pub fn rollback(self: *Store) void {
         if (!self.transaction) return;
+        // A borrowed import snapshot must not silently disappear beneath a
+        // projection. Ordinary rollback after project returns preserves custody.
+        if (self.projecting) self.fence();
         self.database.exec("ROLLBACK;") catch {
             self.fence();
         };
         self.transaction = false;
     }
     fn writing(self: *Store) !void {
+        if (self.projecting) return error.Busy;
         if (self.fenced or !self.transaction) return error.InvalidState;
     }
 
@@ -840,6 +904,97 @@ test "integrity epochs survive owner appends but require each committed head to 
     store.fence();
     try std.testing.expectEqual(epoch + 2, store.integrity_epoch);
     try std.testing.expectError(error.StorageUnavailable, store.begin());
+}
+
+test "projection snapshots exclude writes and release on success rejection and allocation failure" {
+    const c = @import("native_c");
+    const registry = @import("registry.zig");
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var buffer: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(std.testing.io, &buffer);
+    const path = try std.fmt.allocPrintSentinel(a, "{s}/projection.sqlite", .{buffer[0..length]}, 0);
+    defer a.free(path);
+    const db = try sqlite.Database.open(a, path, true);
+    defer db.destroy() catch unreachable;
+    defer db.close() catch unreachable;
+    var store = try Store.init(a, db, true, @splat(7));
+    try store.begin();
+    const ref = try store.putObject("retained");
+    _ = try store.commit("fixture");
+    try store.confirmSealed(store.head);
+    const epoch = try store.publicationEpoch();
+    var peer: ?*c.sqlite3 = null;
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open_v2(path.ptr, &peer, c.SQLITE_OPEN_READWRITE, null));
+    defer std.debug.assert(c.sqlite3_close(peer) == c.SQLITE_OK);
+    const binding: registry.ProjectionBinding = .{ .task = @splat(9), .tenant = "tenant", .profile = "frozen profile", .application = @splat(8) };
+    const Check = struct {
+        store: *Store,
+        peer: ?*c.sqlite3,
+        reference: state.Reference,
+        failure: ?anyerror,
+        pub fn run(this: @This(), ctx: registry.ProjectionContext) !void {
+            try std.testing.expectEqual(@as(state.TaskId, @splat(9)), ctx.task);
+            try std.testing.expectEqualStrings("tenant", ctx.tenant);
+            try std.testing.expectEqualStrings("frozen profile", ctx.profile);
+            try std.testing.expectEqual(@as(Digest, @splat(8)), ctx.application.?);
+            const bytes = try ctx.object(this.reference, 8);
+            defer ctx.allocator.free(bytes);
+            try std.testing.expectEqualStrings("retained", bytes);
+            try std.testing.expectError(error.Busy, this.store.begin());
+            try std.testing.expectError(error.Busy, this.store.putObject("unpublished"));
+            try std.testing.expectError(error.Busy, this.store.commit("forbidden"));
+            try std.testing.expectEqual(c.SQLITE_BUSY, c.sqlite3_exec(this.peer, "INSERT INTO objects VALUES(zeroblob(32),x'01')", null, null, null));
+            if (this.failure) |failure| return failure;
+        }
+    };
+    for ([_]?anyerror{ null, error.InvalidContext, error.OutOfMemory }) |failure| {
+        for ([_]bool{ false, true }) |inside_import| {
+            if (inside_import) try store.begin();
+            const result = store.project(void, a, binding, Check{ .store = &store, .peer = peer, .reference = ref, .failure = failure });
+            if (failure) |expected| try std.testing.expectError(expected, result) else try result;
+            try std.testing.expectEqual(inside_import, store.transaction);
+            try std.testing.expect(!store.projecting and !store.fenced);
+            try std.testing.expectEqual(epoch, store.integrity_epoch);
+            if (inside_import) {
+                // A borrowed transaction survives both ordinary rejection and
+                // allocator failure, and is writable again after projection.
+                _ = try store.putObject("unpublished");
+                store.rollback();
+            } else {
+                try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_exec(peer, "BEGIN IMMEDIATE; ROLLBACK;", null, null, null));
+            }
+        }
+    }
+    try std.testing.expectEqual(epoch, try store.publicationEpoch());
+    // External mutation becomes possible only after the snapshot is released;
+    // it must still be rejected by the next authoritative publication fence.
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_exec(peer, "INSERT INTO objects VALUES(zeroblob(32),x'01')", null, null, null));
+    try std.testing.expectError(error.CorruptState, store.begin());
+    try std.testing.expect(store.fenced and !store.transaction and !store.projecting);
+}
+
+test "projection invalidation prevents returning a usable result" {
+    const a = std.testing.allocator;
+    const db = try sqlite.Database.open(a, ":memory:", true);
+    defer db.destroy() catch unreachable;
+    defer db.close() catch unreachable;
+    var store = try Store.init(a, db, true, @splat(7));
+    const binding: @import("registry.zig").ProjectionBinding = .{ .task = @splat(9), .tenant = "tenant", .profile = "profile", .application = @splat(8) };
+    const operation = struct {
+        store: *Store,
+        pub fn run(this: @This(), ctx: @import("registry.zig").ProjectionContext) !u32 {
+            this.store.invalidateIntegrity();
+            try std.testing.expectError(error.InvalidState, ctx.object(.{ .digest = @splat(0), .bytes = 0 }, 0));
+            return 42;
+        }
+    }{ .store = &store };
+    try std.testing.expectError(error.InvalidState, store.project(u32, a, binding, operation));
+    try std.testing.expect(!store.projecting and !store.transaction);
+    // No leaked SQLite transaction, even when the operation itself succeeded.
+    try store.begin();
+    store.rollback();
 }
 
 test "external SQLite commits fence both validation reuse and the next write transaction" {

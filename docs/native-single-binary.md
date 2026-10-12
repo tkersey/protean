@@ -128,6 +128,14 @@ public artifact access and performs no environmental acquisition.
 
 This is cold retention validation. Context preparation still performs full
 semantic ancestry validation; owned validation reuse is not enabled yet.
+Native preparation and interpretation now borrow a scoped read view. The Store
+establishes a SQLite snapshot before checking the integrity epoch, rejects owner
+writes during projection, and releases the snapshot even when the adapter fails.
+It checks integrity again before returning. Import verification borrows the
+import transaction without committing or rolling it back. No projection snapshot
+survives into provider I/O; the subsequent publication transaction independently
+checks integrity under its writer lock. Generic readers use the same read-view
+interface and continue to validate the complete context on every call.
 
 The task owner rotates among eligible tasks, with one resident and one physical
 worker. A held leaf does not prevent another task's pure steps, questions, inbox,

@@ -159,7 +159,7 @@ test "adaptive admission binds selected profiles and skill permissions to the fr
     var frozen = native.json.object();
     try native.json.put(a, &frozen, "adaptive", try native.values.toJson(P.AdaptivePolicy, a, policy));
     const policy_bytes = try native.json.canonical(a, frozen);
-    const ctx: native.registry.ProjectionContext = .{ .allocator = a, .task = @splat(7), .tenant = "fixture", .profile = policy_bytes, .objects = .{ .owner = &objects, .read = Objects.read } };
+    const ctx: native.registry.ProjectionContext = .{ .allocator = a, .task = @splat(7), .tenant = "fixture", .profile = policy_bytes, .objects = .validating(&objects, Objects.read) };
     const admitted = try Admission.policy(a, policy_bytes);
     var skills = try Admission.catalog(ctx, admitted);
     defer skills.deinit();
@@ -223,7 +223,7 @@ test "native Responses v1 independently specified capture corpus" {
     defer arena.deinit();
     const a = arena.allocator();
     var objects: Objects = .{};
-    const ctx: native.registry.ProjectionContext = .{ .allocator = a, .task = @splat(7), .tenant = "fixture", .profile = profile, .objects = .{ .owner = &objects, .read = Objects.read } };
+    const ctx: native.registry.ProjectionContext = .{ .allocator = a, .task = @splat(7), .tenant = "fixture", .profile = profile, .objects = .validating(&objects, Objects.read) };
     var handlers = try native.Registry.init(a, &.{Adapter.declaration()});
     defer handlers.deinit();
     const req = try contracts.encodeOwned(P.ReferenceRequest, a, request());

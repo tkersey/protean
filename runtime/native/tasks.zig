@@ -943,7 +943,7 @@ pub fn Service(comptime Types: type) type {
                 .leaf => {
                     var preparation = std.heap.ArenaAllocator.init(a);
                     defer preparation.deinit();
-                    const prepared = if (entry.declaration.capture) |adapter| adapter.prepare(self.projectionContext(preparation.allocator(), value), request.value.binding.payload) catch |err|
+                    const prepared = if (entry.declaration.capture) |adapter| self.prepareProjection(preparation.allocator(), value, adapter, request.value.binding.payload) catch |err|
                         return self.blocked(a, initial, switch (err) {
                             error.Capacity, error.OutOfMemory => .capacity,
                             error.MissingArtifact, error.CorruptObject => .missing_artifact,
@@ -973,13 +973,30 @@ pub fn Service(comptime Types: type) type {
             }
         }
 
-        fn projectionContext(self: *Self, a: std.mem.Allocator, value: state.Task) registry.ProjectionContext {
-            return .{ .allocator = a, .task = value.id, .tenant = value.tenant.bytes, .profile = self.profile.bytes, .objects = .{ .owner = self.store(), .read = struct {
-                fn read(owner: *anyopaque, allocator: std.mem.Allocator, ref: state.Reference, limit: usize) ![]u8 {
-                    const objects: *storage.Store = @ptrCast(@alignCast(owner));
-                    return objects.object(allocator, ref, limit);
+        fn projectionBinding(self: *Self, value: state.Task) registry.ProjectionBinding {
+            return .{ .task = value.id, .tenant = value.tenant.bytes, .profile = self.profile.bytes, .application = self.application.image_identity };
+        }
+
+        fn prepareProjection(self: *Self, a: std.mem.Allocator, value: state.Task, adapter: registry.CaptureAdapter, payload: []const u8) ![]u8 {
+            return self.store().project([]u8, a, self.projectionBinding(value), struct {
+                adapter: registry.CaptureAdapter,
+                payload: []const u8,
+                pub fn run(this: @This(), context: registry.ProjectionContext) ![]u8 {
+                    return this.adapter.prepare(context, this.payload);
                 }
-            }.read } };
+            }{ .adapter = adapter, .payload = payload });
+        }
+
+        fn interpretProjection(self: *Self, a: std.mem.Allocator, value: state.Task, adapter: registry.CaptureAdapter, payload: []const u8, prepared: []const u8, response: []const u8) !registry.Projection {
+            return self.store().project(registry.Projection, a, self.projectionBinding(value), struct {
+                adapter: registry.CaptureAdapter,
+                payload: []const u8,
+                prepared: []const u8,
+                response: []const u8,
+                pub fn run(this: @This(), context: registry.ProjectionContext) !registry.Projection {
+                    return this.adapter.interpret(context, this.payload, this.prepared, this.response);
+                }
+            }{ .adapter = adapter, .payload = payload, .prepared = prepared, .response = response });
         }
 
         fn capture(self: *Self, a: std.mem.Allocator, work: Work, raw: []const u8) !void {
@@ -1036,7 +1053,7 @@ pub fn Service(comptime Types: type) type {
             defer a.free(response);
             var projection_arena = std.heap.ArenaAllocator.init(a);
             defer projection_arena.deinit();
-            const result = adapter.interpret(self.projectionContext(projection_arena.allocator(), initial), request.value.binding.payload, rendered, response) catch
+            const result = self.interpretProjection(projection_arena.allocator(), initial, adapter, request.value.binding.payload, rendered, response) catch
                 return self.blocked(a, initial, .unavailable_environment);
             var schema = try data.schema.decode(a, entry.resume_schema);
             defer schema.deinit();
@@ -1463,11 +1480,10 @@ pub fn Service(comptime Types: type) type {
                 const entry = try self.handlers.resolve(request.value, self.application.image_identity);
                 if (!same(attempt.value.capability.bytes, entry.declaration.identity) or attempt.value.inference != entry.declaration.inference) return error.IncompatibleProfile;
                 const adapter = entry.declaration.capture orelse return error.IncompatibleProfile;
-                const context = self.projectionContext(temporary, value);
                 const rendered = try self.store().object(temporary, capture_value.request, null);
-                if (!same(rendered, try adapter.prepare(context, request.value.binding.payload))) return error.CorruptState;
+                if (!same(rendered, try self.prepareProjection(temporary, value, adapter, request.value.binding.payload))) return error.CorruptState;
                 const response = try self.store().object(temporary, capture_value.response.?, null);
-                const result = try adapter.interpret(context, request.value.binding.payload, rendered, response);
+                const result = try self.interpretProjection(temporary, value, adapter, request.value.binding.payload, rendered, response);
                 if (result.objects.len != projection.objects.items.len or result.output_tokens != projection.output_tokens) return error.CorruptState;
                 for (result.objects, projection.objects.items) |object, reference| {
                     if (object.len != reference.bytes or !same(&storage.digest(object), &reference.digest)) return error.CorruptState;

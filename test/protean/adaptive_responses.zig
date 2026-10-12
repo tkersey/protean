@@ -168,7 +168,7 @@ fn Fixture(comptime P: type) type {
             var frozen = native.json.object();
             try native.json.put(a, &frozen, "adaptive", try native.values.toJson(P.AdaptivePolicy, a, policy));
             const profile_bytes = try native.json.canonical(a, frozen);
-            const ctx: native.registry.ProjectionContext = .{ .allocator = a, .task = @splat(7), .tenant = "fixture", .profile = profile_bytes, .objects = .{ .owner = &objects, .read = Objects.read } };
+            const ctx: native.registry.ProjectionContext = .{ .allocator = a, .task = @splat(7), .tenant = "fixture", .profile = profile_bytes, .objects = .validating(&objects, Objects.read) };
             var handlers = try native.Registry.init(a, &.{Adapter.declaration()});
             defer handlers.deinit();
             const Model = protean.model(.{ .name = "adaptive-fixture", .model = "fixture-model-a", .parameters = .{ .max_output_tokens = @as(u32, 4096), .reasoning = .{ .effort = .medium } }, .protocol = struct {
@@ -445,7 +445,7 @@ fn Fixture(comptime P: type) type {
             var frozen = native.json.object();
             try native.json.put(a, &frozen, "adaptive", try native.values.toJson(P.AdaptivePolicy, a, policy));
             const profile = try native.json.canonical(a, frozen);
-            var ctx: native.registry.ProjectionContext = .{ .allocator = a, .task = @splat(7), .tenant = "fixture", .profile = profile, .objects = .{ .owner = &objects, .read = Objects.read } };
+            var ctx: native.registry.ProjectionContext = .{ .allocator = a, .task = @splat(7), .tenant = "fixture", .profile = profile, .objects = .validating(&objects, Objects.read) };
             const Model = protean.model(.{ .name = "adaptive-fixture", .model = "fixture-model-a", .parameters = .{ .max_output_tokens = @as(u32, 4096), .reasoning = .{ .effort = .medium } }, .protocol = struct {
                 pub const semantic_identity = model.protocol_identity;
             } });
@@ -665,7 +665,7 @@ test "history chunks share unchanged prefixes and span large events and call pai
     defer arena.deinit();
     const a = arena.allocator();
     var objects: Objects = .{};
-    const ctx: native.registry.ProjectionContext = .{ .allocator = a, .task = @splat(7), .tenant = "fixture", .profile = "", .objects = .{ .owner = &objects, .read = Objects.read } };
+    const ctx: native.registry.ProjectionContext = .{ .allocator = a, .task = @splat(7), .tenant = "fixture", .profile = "", .objects = .validating(&objects, Objects.read) };
     const catalog: P.AdaptiveCatalog = .{ .skills = .{ .items = &.{} } };
     const plan: model.AdaptivePlan = .{ .epoch = 0, .reason = .initial, .watermark = 0, .eviction_generation = 0, .prior = null, .catalog = .{ .digest = @splat(0), .bytes = 1 }, .skills = .{ .items = &.{} } };
     const message = (try native.json.parse(a, "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"retained\"}]}", .{})).value;

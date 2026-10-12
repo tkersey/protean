@@ -8,6 +8,30 @@ const json = @import("json.zig");
 const state = @import("state.zig");
 pub const ObjectReference = state.Reference;
 
+/// Read-only projection interface. Generic readers cannot establish retention
+/// custody: every projection must validate its complete context closure. Native
+/// readers are borrowed only for the duration of Store.project; neither kind
+/// may escape the projection call. The representation is private to its owners.
+pub const ReadView = struct {
+    source: *anyopaque,
+    read_object: *const fn (*anyopaque, std.mem.Allocator, state.Reference, usize) anyerror![]u8,
+
+    pub fn validating(source: *anyopaque, read_object: *const fn (*anyopaque, std.mem.Allocator, state.Reference, usize) anyerror![]u8) ReadView {
+        return .{ .source = source, .read_object = read_object };
+    }
+
+    pub fn object(self: ReadView, a: std.mem.Allocator, ref: state.Reference, limit: usize) ![]u8 {
+        return self.read_object(self.source, a, ref, limit);
+    }
+};
+
+pub const ProjectionBinding = struct {
+    task: state.TaskId,
+    tenant: []const u8,
+    profile: []const u8,
+    application: state.Digest,
+};
+
 /// Pure projection inputs: immutable objects and frozen task bindings, with no
 /// I/O, credentials, evaluator, or mutable store supplied to adapter code.
 pub const ProjectionContext = struct {
@@ -15,13 +39,11 @@ pub const ProjectionContext = struct {
     task: state.TaskId,
     tenant: []const u8,
     profile: []const u8,
-    objects: struct {
-        owner: *anyopaque,
-        read: *const fn (*anyopaque, std.mem.Allocator, state.Reference, usize) anyerror![]u8,
-    },
+    application: ?state.Digest = null,
+    objects: ReadView,
 
     pub fn object(self: ProjectionContext, ref: state.Reference, limit: usize) ![]u8 {
-        return self.objects.read(self.objects.owner, self.allocator, ref, limit);
+        return self.objects.object(self.allocator, ref, limit);
     }
 };
 pub const Projection = struct {
