@@ -9,6 +9,27 @@ pub const TaskId = occurrence.TaskId;
 pub const Name = contracts.Text(128);
 pub const Reason = contracts.Text(256);
 pub const Reference = struct { digest: Digest, bytes: u64 };
+/// Declared host references are the shared source for archive closure and
+/// Store retention. Opaque payloads need their registered application codec;
+/// byte arrays and JSON never acquire reference meaning from their shape.
+pub fn visitReferences(comptime T: type, value: T, collector: anytype) anyerror!void {
+    if (T == Reference) return collector.add(value);
+    if (T == occurrence.Acquired) try collector.reply(value);
+    switch (@typeInfo(T)) {
+        .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| try visitReferences(Field, @field(value, name), collector),
+        .optional => |info| if (value) |child| try visitReferences(info.child, child, collector),
+        .@"union" => |info| inline for (info.field_names, info.field_types) |name, Field| {
+            if (std.mem.eql(u8, @tagName(value), name)) try visitReferences(Field, @field(value, name), collector);
+        },
+        .pointer => |info| if (info.size == .slice and info.child != u8) {
+            for (value) |child| try visitReferences(info.child, child, collector);
+        },
+        .array => |info| if (info.child != u8) {
+            for (value) |child| try visitReferences(info.child, child, collector);
+        },
+        else => {},
+    }
+}
 pub const Outcome = enum { progressed, yielded, requested, completed, failed, cancelled };
 pub const Schedule = enum { queued, active, parked };
 pub const Status = enum { queued, running, waiting_input, parked, cancelling, blocked, unknown, completed, failed, cancelled };

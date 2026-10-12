@@ -67,6 +67,12 @@ pub const Store = struct {
             errdefer database.exec("ROLLBACK;") catch {};
             try database.exec(std.fmt.comptimePrint("CREATE TABLE meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1), format INTEGER NOT NULL CHECK(format={d}), namespace BLOB NOT NULL, generation INTEGER NOT NULL, parent BLOB NOT NULL, head BLOB NOT NULL);", .{format}) ++
                 \\CREATE TABLE objects(digest BLOB PRIMARY KEY CHECK(length(digest)=32), body BLOB NOT NULL);
+                \\CREATE TABLE dependencies(parent BLOB NOT NULL REFERENCES objects(digest), parent_bytes INTEGER NOT NULL CHECK(parent_bytes>=0), child BLOB NOT NULL REFERENCES objects(digest), child_bytes INTEGER NOT NULL CHECK(child_bytes>=0), PRIMARY KEY(parent,child)) WITHOUT ROWID;
+                \\CREATE INDEX dependency_children ON dependencies(child,parent);
+                \\CREATE TRIGGER dependency_lengths BEFORE INSERT ON dependencies BEGIN
+                \\  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM objects WHERE digest=NEW.parent AND length(body)=NEW.parent_bytes) OR NOT EXISTS(SELECT 1 FROM objects WHERE digest=NEW.child AND length(body)=NEW.child_bytes) THEN RAISE(ABORT,'invalid dependency length') END;
+                \\END;
+                \\CREATE TRIGGER retained_object_immutable BEFORE UPDATE ON objects WHEN EXISTS(SELECT 1 FROM dependencies WHERE parent=OLD.digest OR child=OLD.digest) OR EXISTS(SELECT 1 FROM tasks WHERE body=OLD.digest) OR EXISTS(SELECT 1 FROM records WHERE body=OLD.digest) OR EXISTS(SELECT 1 FROM events WHERE body=OLD.digest) OR EXISTS(SELECT 1 FROM operations WHERE receipt=OLD.digest) BEGIN SELECT RAISE(ABORT,'retained object is immutable'); END;
                 \\CREATE TABLE tasks(id BLOB PRIMARY KEY CHECK(length(id)=16), revision INTEGER NOT NULL, terminal INTEGER NOT NULL CHECK(terminal IN(0,1)), body BLOB NOT NULL REFERENCES objects(digest)) WITHOUT ROWID;
                 \\CREATE TABLE operations(id TEXT PRIMARY KEY, request BLOB NOT NULL CHECK(length(request)=32), receipt BLOB NOT NULL REFERENCES objects(digest), task BLOB NOT NULL CHECK(length(task)=16)) WITHOUT ROWID;
                 \\CREATE INDEX operation_tasks ON operations(task,id);
@@ -348,20 +354,50 @@ pub const Store = struct {
     }
     pub fn putReceipt(self: *Store, id: []const u8, request: Digest, bytes: []const u8) !void {
         try self.writing();
+        errdefer self.rollback();
         if (id.len == 0 or id.len > 128) return error.Capacity;
         var decoded = try contracts.decodeOwned(state.Receipt, self.allocator, bytes);
         defer decoded.deinit();
         if (!std.mem.eql(u8, &decoded.value.request_digest, &request)) return error.CorruptState;
         const ref = try self.putObject(bytes);
+        try self.retainValue(state.Receipt, ref, decoded.value);
         try self.database.run("INSERT INTO operations VALUES(?,?,?,?)", &.{ .{ .text = id }, .{ .blob = &request }, .{ .blob = &ref.digest }, .{ .blob = &decoded.value.task } });
+    }
+
+    fn retainReference(self: *Store, parent: state.Reference, child: state.Reference) !void {
+        try self.writing();
+        if (parent.bytes > std.math.maxInt(i64) or child.bytes > std.math.maxInt(i64)) return error.Capacity;
+        try self.database.run("INSERT OR IGNORE INTO dependencies VALUES(?,?,?,?)", &.{ .{ .blob = &parent.digest }, .{ .integer = @intCast(parent.bytes) }, .{ .blob = &child.digest }, .{ .integer = @intCast(child.bytes) } });
+    }
+    fn retainValue(self: *Store, comptime T: type, parent: state.Reference, value: T) !void {
+        var sink = struct {
+            store: *Store,
+            parent: state.Reference,
+            pub fn add(this: *@This(), child: state.Reference) !void {
+                try this.store.retainReference(this.parent, child);
+            }
+            pub fn reply(this: *@This(), acquired: occurrence.Acquired) !void {
+                try this.add(try this.store.objectReference(acquired.reply, null));
+            }
+        }{ .store = self, .parent = parent };
+        try state.visitReferences(T, value, &sink);
+    }
+    fn retainEncoded(self: *Store, comptime T: type, parent: state.Reference) !void {
+        const bytes = try self.object(self.allocator, parent, null);
+        defer self.allocator.free(bytes);
+        var decoded = try contracts.decodeOwned(T, self.allocator, bytes);
+        defer decoded.deinit();
+        try self.retainValue(T, parent, decoded.value);
     }
 
     pub fn putTask(self: *Store, task: state.Task, previous: ?u64) !void {
         try self.writing();
+        errdefer self.rollback();
         if (task.revision > std.math.maxInt(i64)) return error.Capacity;
         const body = try contracts.encodeOwned(state.Task, self.allocator, task);
         defer self.allocator.free(body);
         const ref = try self.putObject(body);
+        try self.retainValue(state.Task, ref, task);
         if (previous) |revision| {
             if (revision >= std.math.maxInt(i64) or task.revision != revision + 1) return error.StaleRevision;
             try self.database.run("UPDATE tasks SET revision=?,terminal=?,body=? WHERE id=? AND revision=?", &.{ .{ .integer = @intCast(task.revision) }, .{ .integer = @intFromBool(task.terminal()) }, .{ .blob = &ref.digest }, .{ .blob = &task.id }, .{ .integer = @intCast(revision) } });
@@ -386,18 +422,22 @@ pub const Store = struct {
         if (T != Record(kind)) @compileError("native record type/kind mismatch");
         if (comptime std.mem.eql(u8, kind, "artifact") or std.mem.eql(u8, kind, "attempt") or std.mem.eql(u8, kind, "origin")) @compileError("immutable native records are created once");
         try self.writing();
+        errdefer self.rollback();
         const body = try contracts.encodeOwned(T, self.allocator, value);
         defer self.allocator.free(body);
         const ref = try self.putObject(body);
+        try self.retainValue(T, ref, value);
         try self.database.run("UPDATE records SET body=? WHERE kind=? AND id=? AND task=?", &.{ .{ .blob = &ref.digest }, .{ .text = kind }, .{ .blob = &id }, .{ .blob = &task } });
         if (try self.database.changes() != 1) return error.CorruptState;
     }
     pub fn createRecord(self: *Store, comptime T: type, comptime kind: []const u8, id: Digest, task: state.TaskId, value: T) !void {
         if (T != Record(kind)) @compileError("native record type/kind mismatch");
         try self.writing();
+        errdefer self.rollback();
         const body = try contracts.encodeOwned(T, self.allocator, value);
         defer self.allocator.free(body);
         const ref = try self.putObject(body);
+        try self.retainValue(T, ref, value);
         try self.database.run("INSERT INTO records VALUES(?,?,?,?)", &.{ .{ .text = kind }, .{ .blob = &id }, .{ .blob = &task }, .{ .blob = &ref.digest } });
     }
     pub fn recordBytes(self: *Store, a: std.mem.Allocator, comptime kind: []const u8, id: Digest, task: state.TaskId) !?[]u8 {
@@ -527,14 +567,23 @@ pub const Store = struct {
     /// archived task ID and history; grants and resume remain caller-owned.
     pub fn restoreArchiveIndex(self: *Store, a: std.mem.Allocator, archive: state.Archive, task: state.Task) !void {
         try self.writing();
+        errdefer self.rollback();
+        self.invalidateIntegrity();
         if (self.head.generation != 0 or task.revision == 0 or task.revision > std.math.maxInt(i64) or try self.scalar("SELECT count(*) FROM tasks") != 0) return error.InvalidState;
         const bytes = try contracts.encodeOwned(state.Task, a, task);
         defer a.free(bytes);
         const body = try self.putObject(bytes);
+        try self.retainValue(state.Task, body, task);
         try self.database.run("INSERT INTO tasks VALUES(?,?,?,?)", &.{ .{ .blob = &task.id }, .{ .integer = @intCast(task.revision) }, .{ .integer = @intFromBool(task.terminal()) }, .{ .blob = &body.digest } });
-        for (archive.records.items) |row| try self.database.run("INSERT INTO records VALUES(?,?,?,?)", &.{ .{ .text = @tagName(row.kind) }, .{ .blob = &row.id }, .{ .blob = &task.id }, .{ .blob = &row.body.digest } });
+        for (archive.records.items) |row| {
+            inline for (@typeInfo(state.RecordKind).@"enum".field_names) |kind| {
+                if (row.kind == @field(state.RecordKind, kind)) try self.retainEncoded(Record(kind), row.body);
+            }
+            try self.database.run("INSERT INTO records VALUES(?,?,?,?)", &.{ .{ .text = @tagName(row.kind) }, .{ .blob = &row.id }, .{ .blob = &task.id }, .{ .blob = &row.body.digest } });
+        }
         for (archive.events.items) |row| {
             if (row.seq == 0 or row.seq > std.math.maxInt(i64) or row.revision == 0 or row.revision > task.revision) return error.CorruptState;
+            try self.retainEncoded(state.Event, row.body);
             try self.database.run("INSERT INTO events VALUES(?,?,?,?)", &.{ .{ .blob = &task.id }, .{ .integer = @intCast(row.seq) }, .{ .integer = @intCast(row.revision) }, .{ .blob = &row.body.digest } });
         }
         for (archive.operations.items) |row| {
@@ -545,11 +594,13 @@ pub const Store = struct {
     }
     pub fn putEvent(self: *Store, event: state.Event) !void {
         try self.writing();
+        errdefer self.rollback();
         if (event.seq == 0 or event.seq > std.math.maxInt(i64) or event.revision > std.math.maxInt(i64)) return error.Capacity;
         try @import("schemas.zig").validateEventData(self.allocator, event.kind, event.data.bytes);
         const body = try contracts.encodeOwned(state.Event, self.allocator, event);
         defer self.allocator.free(body);
         const ref = try self.putObject(body);
+        try self.retainValue(state.Event, ref, event);
         try self.database.run("INSERT INTO events VALUES(?,?,?,?)", &.{ .{ .blob = &event.task }, .{ .integer = @intCast(event.seq) }, .{ .integer = @intCast(event.revision) }, .{ .blob = &ref.digest } });
     }
     pub fn eventsAfter(self: *Store, a: std.mem.Allocator, task: state.TaskId, after: u64, limit: u32) ![][]u8 {
@@ -610,7 +661,13 @@ test "objects and immutable admission receipts commit together or disappear toge
     try db.run("UPDATE operations SET task=? WHERE id='request-1'", &.{.{ .blob = &@as(state.TaskId, @splat(3)) }});
     try std.testing.expectError(error.CorruptState, store.receipt(a, "request-1", digest("submit/input")));
     try db.run("UPDATE operations SET task=? WHERE id='request-1'", &.{.{ .blob = &@as(state.TaskId, @splat(2)) }});
-    try db.run("UPDATE objects SET body=? WHERE digest=?", &.{ .{ .blob = "changed receipt" }, .{ .blob = &digest(receipt_bytes) } });
+    try std.testing.expectError(error.Constraint, db.run("UPDATE objects SET body=? WHERE digest=?", &.{ .{ .blob = "changed receipt" }, .{ .blob = &digest(receipt_bytes) } }));
+    // Deliberate corruption bypasses SQL update triggers via the low-level
+    // blob API, after explicitly invalidating custody above.
+    const receipt_location = try store.objectLocation(digest(receipt_bytes), null);
+    var corrupted = try db.openBlob("objects", "body", receipt_location.row, true);
+    try corrupted.write(&.{receipt_bytes[0] ^ 1}, 0);
+    try corrupted.close();
     try std.testing.expectError(error.CorruptState, store.receipt(a, "request-1", digest("submit/input")));
 }
 
@@ -794,4 +851,92 @@ test "external SQLite commits fence both validation reuse and the next write tra
         try std.testing.expectEqual(@as(u64, 0), store.head.generation);
         try std.testing.expectError(error.StorageUnavailable, store.begin());
     }
+}
+
+fn retentionFixtureTask(reference: state.Reference) state.Task {
+    var task = std.mem.zeroes(state.Task);
+    task.id = @splat(2);
+    task.revision = 1;
+    task.profile = reference;
+    task.image = reference;
+    task.input = reference;
+    task.checkpoint = reference;
+    task.outcome = reference;
+    return task;
+}
+
+test "typed host roots retain exact dependencies including uninterpreted captures" {
+    const a = std.testing.allocator;
+    const db = try sqlite.Database.open(a, ":memory:", true);
+    defer db.destroy() catch unreachable;
+    defer db.close() catch unreachable;
+    var store = try Store.init(a, db, true, @splat(7));
+    try store.begin();
+    const input = try store.putObject("opaque fixture input");
+    const raw = try store.putObject("\xff\x00not an interpretable provider response");
+    const task = retentionFixtureTask(input);
+    try store.putTask(task, null);
+    const capture: state.Capture = .{ .task = task.id, .occurrence = @splat(3), .attempt = @splat(4), .request = input, .response = raw, .disposition = .complete };
+    try store.createRecord(state.Capture, "capture", @splat(4), task.id, capture);
+    const captured_body = (try store.recordBytes(a, "capture", @splat(4), task.id)).?;
+    defer a.free(captured_body);
+    const captured_ref: state.Reference = .{ .digest = digest(captured_body), .bytes = captured_body.len };
+    _ = try store.commit("uninterpreted-capture");
+    try store.confirmSealed(store.head);
+    const epoch = try store.publicationEpoch();
+    try std.testing.expectEqual(@as(u64, 3), try store.scalar("SELECT count(*) FROM dependencies"));
+    // Retention is private object custody, independent of interpretation or
+    // public artifact-disclosure permission.
+    try std.testing.expectError(error.Constraint, db.run("DELETE FROM objects WHERE digest=?", &.{.{ .blob = &raw.digest }}));
+    try std.testing.expectError(error.Constraint, db.run("UPDATE objects SET body=x'00' WHERE digest=?", &.{.{ .blob = &raw.digest }}));
+    var wrong = raw;
+    wrong.bytes += 1;
+    try store.begin();
+    try std.testing.expectError(error.Constraint, store.retainReference(captured_ref, wrong));
+    store.rollback();
+    try std.testing.expectEqual(epoch, try store.publicationEpoch());
+    // A missing child aborts publication and all previously inserted edges
+    // from the same attempt. An already committed ancestor stays usable.
+    var missing = capture;
+    missing.attempt = @splat(5);
+    missing.response = .{ .digest = @splat(9), .bytes = 1 };
+    const missing_body = try contracts.encodeOwned(state.Capture, a, missing);
+    defer a.free(missing_body);
+    try store.begin();
+    try std.testing.expectError(error.Constraint, store.createRecord(state.Capture, "capture", missing.attempt, task.id, missing));
+    try std.testing.expect(!store.transaction);
+    try std.testing.expectEqual(@as(u64, 3), try store.scalar("SELECT count(*) FROM dependencies"));
+    try std.testing.expect((try store.recordBytes(a, "capture", missing.attempt, task.id)) == null);
+    try std.testing.expectError(error.MissingArtifact, store.object(a, .{ .digest = digest(missing_body), .bytes = missing_body.len }, null));
+    try std.testing.expectEqual(epoch, try store.publicationEpoch());
+    // Updating the capture index does not release the old audit object's
+    // dependencies; both original capture bytes and the new projection remain.
+    var projected = capture;
+    projected.projection = .{ .reply = input, .objects = .{ .items = &.{raw} }, .output_tokens = null };
+    try store.begin();
+    try store.putRecord(state.Capture, "capture", capture.attempt, task.id, projected);
+    _ = try store.commit("project-capture");
+    try std.testing.expectEqual(@as(u64, 5), try store.scalar("SELECT count(*) FROM dependencies"));
+    try std.testing.expectError(error.Constraint, db.run("DELETE FROM objects WHERE digest=?", &.{.{ .blob = &captured_ref.digest }}));
+    const original = try store.object(a, captured_ref, null);
+    defer a.free(original);
+    try std.testing.expectEqualSlices(u8, captured_body, original);
+}
+
+test "occurrence codec retains its digest-only acquired reply" {
+    const a = std.testing.allocator;
+    const db = try sqlite.Database.open(a, ":memory:", true);
+    defer db.destroy() catch unreachable;
+    defer db.close() catch unreachable;
+    var store = try Store.init(a, db, true, @splat(7));
+    try store.begin();
+    const input = try store.putObject("request");
+    const reply = try store.putObject("reply");
+    const task = retentionFixtureTask(input);
+    try store.putTask(task, null);
+    const saved: occurrence.Occurrence = .{ .id = @splat(3), .task = task.id, .request = input.digest, .request_object = input, .state = .{ .settled_reply = .{ .attempt = @splat(4), .reply = reply.digest } } };
+    try store.createRecord(occurrence.Occurrence, "occurrence", saved.id, task.id, saved);
+    _ = try store.commit("acquired-reply");
+    try std.testing.expectEqual(@as(u64, 3), try store.scalar("SELECT count(*) FROM dependencies"));
+    try std.testing.expectError(error.Constraint, db.run("DELETE FROM objects WHERE digest=?", &.{.{ .blob = &reply.digest }}));
 }

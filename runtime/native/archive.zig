@@ -242,7 +242,7 @@ const Collector = struct {
     objects: std.AutoArrayHashMapUnmanaged(state.Digest, state.Reference) = .empty,
     bytes: u64 = 0,
 
-    fn add(self: *Collector, ref: state.Reference) !void {
+    pub fn add(self: *Collector, ref: state.Reference) !void {
         if (self.objects.get(ref.digest)) |prior| {
             if (prior.bytes != ref.bytes) return error.CorruptState;
             return;
@@ -261,23 +261,9 @@ const Collector = struct {
         self.bytes = try std.math.add(u64, self.bytes, ref.bytes);
     }
     fn visit(self: *Collector, comptime T: type, value: T) !void {
-        if (T == state.Reference) return self.add(value);
-        switch (@typeInfo(T)) {
-            .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| try self.visit(Field, @field(value, name)),
-            .optional => |info| if (value) |child| try self.visit(info.child, child),
-            .@"union" => |info| inline for (info.field_names, info.field_types) |name, Field| {
-                if (same(@tagName(value), name)) try self.visit(Field, @field(value, name));
-            },
-            .pointer => |info| if (info.size == .slice and info.child != u8) {
-                for (value) |child| try self.visit(info.child, child);
-            },
-            .array => |info| if (info.child != u8) {
-                for (value) |child| try self.visit(info.child, child);
-            },
-            else => {},
-        }
+        try state.visitReferences(T, value, self);
     }
-    fn reply(self: *Collector, value: occurrence.Acquired) !void {
+    pub fn reply(self: *Collector, value: occurrence.Acquired) !void {
         try self.add(try self.store.objectReference(value.reply, null));
     }
 };
@@ -441,8 +427,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
                 if (comptime same(kind, "occurrence")) {
                     switch (item.state) {
                         .dispatching, .unknown, .captured => return error.UnsettledOccurrence,
-                        .settled_reply => |acquired| try collector.reply(acquired),
-                        .admitted => |admitted| if (admitted == .reply) try collector.reply(admitted.reply),
+                        .settled_reply, .admitted => {},
                         else => {},
                     }
                     if (value.current_occurrence) |id| if (same(&id, &item.id)) {
