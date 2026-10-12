@@ -58,9 +58,13 @@ fn read(ctx: registry.ProjectionContext, reference: anytype) ![]u8 {
 
 pub fn Projection(comptime P: type) type {
     return struct {
+        const chunked = P.adaptive_context_version == 6;
+        const History = if (chunked) @import("adaptive_history.zig").History(P) else void;
         const Admission = @import("adaptive_responses.zig").Admission(P);
         const Ref = @typeInfo(@FieldType(P.AdaptiveResult, "replay")).optional.child;
         pub const Rendered = struct {
+            history_base: if (chunked) ?History.Loaded else void,
+            unchanged_prefix: bool,
             /// Committed events, without the transient material of this call.
             history: json.Value,
             origins: std.ArrayList(P.ContextOrigin),
@@ -87,9 +91,24 @@ pub fn Projection(comptime P: type) type {
             // These reads make loss of audit dependencies an error even when
             // an epoch deliberately does not replay their prompt material.
             const raw = try read(ctx, value.source_capture);
-            ctx.allocator.free(raw);
+            defer ctx.allocator.free(raw);
             const prepared = try read(ctx, value.source_request);
-            ctx.allocator.free(prepared);
+            defer ctx.allocator.free(prepared);
+            if (chunked) {
+                // A root cannot select a different catalog, epoch, or profile
+                // from the exact request retained as its source evidence.
+                var source = try contracts.decodeOwned(P.AdaptivePrepared, ctx.allocator, prepared);
+                defer source.deinit();
+                const request = source.value.request;
+                const frozen = try Admission.policy(ctx.allocator, ctx.profile);
+                if (source.value.version != 1 or !equal(&request.policy, &value.policy) or
+                    !same(request.plan.catalog, frozen.catalog) or
+                    !try encodedEqual(ctx.allocator, @TypeOf(value.plan), value.plan, request.plan) or
+                    !try encodedEqual(ctx.allocator, @TypeOf(value.selection), value.selection, request.selection) or
+                    request.invocation.parameters.reasoning == null or
+                    request.invocation.parameters.reasoning.?.effort != value.top_effort) return error.InvalidContext;
+                _ = try Admission.select(ctx.allocator, frozen, request);
+            }
             return decoded;
         }
 
@@ -139,17 +158,38 @@ pub fn Projection(comptime P: type) type {
         /// Check call/result pairing independently of normalization. Call IDs
         /// scope an unsettled exchange; an ID reused after settlement is not an
         /// idempotency key for a later acquired response.
-        pub fn pending(a: std.mem.Allocator, items: json.Value) !std.StringHashMap(void) {
-            if (items != .array) return error.InvalidContext;
-            var calls = std.StringHashMap(void).init(a);
-            errdefer calls.deinit();
-            var previous_update = false;
-            for (items.array.items) |item| {
+        /// Incremental grammar validation retains only unresolved call IDs.
+        /// It owns those IDs so chunk parsers can release each item immediately.
+        pub const Sequence = struct {
+            calls: std.StringHashMap(void),
+            previous_update: bool = false,
+
+            pub fn init(a: std.mem.Allocator) Sequence {
+                return .{ .calls = std.StringHashMap(void).init(a) };
+            }
+            pub fn deinit(self: *Sequence) void {
+                var keys = self.calls.keyIterator();
+                while (keys.next()) |key| self.calls.allocator.free(key.*);
+                self.calls.deinit();
+            }
+            pub fn count(self: Sequence) u32 {
+                return self.calls.count();
+            }
+            pub fn remove(self: *Sequence, id: []const u8) bool {
+                const entry = self.calls.fetchRemove(id) orelse return false;
+                self.calls.allocator.free(entry.key);
+                return true;
+            }
+            pub fn push(self: *Sequence, item: json.Value) !void {
+                const a = self.calls.allocator;
                 if (item != .object) return error.InvalidContext;
                 if (kind(item, "function_call")) {
                     _ = try responses.replayItem(a, item);
                     const id = try json.text(try field(item, "call_id"));
-                    if ((try calls.getOrPut(id)).found_existing) return error.InvalidContext;
+                    if (self.calls.contains(id)) return error.InvalidContext;
+                    const owned = try a.dupe(u8, id);
+                    errdefer a.free(owned);
+                    try self.calls.put(owned, {});
                 } else if (kind(item, "function_call_output")) {
                     try only(item, &.{ "type", "call_id", "output" });
                     const output = try field(item, "output");
@@ -157,9 +197,9 @@ pub fn Projection(comptime P: type) type {
                         if (output.array.items.len != 1) return error.InvalidContext;
                         try inputPart(output.array.items[0]);
                     } else _ = try json.text(output);
-                    if (!calls.remove(try json.text(try field(item, "call_id")))) return error.CallPairMismatch;
+                    if (!self.remove(try json.text(try field(item, "call_id")))) return error.CallPairMismatch;
                 } else if (kind(item, "additional_tools") or kind(item, "configuration_update") or json.get(item, "type") == null) {
-                    if (calls.count() != 0) return error.MissingCallResult;
+                    if (self.calls.count() != 0) return error.MissingCallResult;
                     if (kind(item, "additional_tools")) {
                         try only(item, &.{ "type", "role", "tools" });
                         if (!equal(try json.text(try field(item, "role")), "developer")) return error.InvalidContext;
@@ -173,7 +213,7 @@ pub fn Projection(comptime P: type) type {
                             _ = try json.text(try field(declaration, "description"));
                         }
                     } else if (kind(item, "configuration_update")) {
-                        if (previous_update) return error.InvalidContext;
+                        if (self.previous_update) return error.InvalidContext;
                         try only(item, &.{ "type", "reasoning" });
                         const reasoning = try field(item, "reasoning");
                         try only(reasoning, &.{"effort"});
@@ -189,9 +229,75 @@ pub fn Projection(comptime P: type) type {
                 } else {
                     _ = try responses.replayItem(a, item);
                 }
-                previous_update = kind(item, "configuration_update");
+                self.previous_update = kind(item, "configuration_update");
             }
-            return calls;
+        };
+
+        pub fn pending(a: std.mem.Allocator, items: json.Value) !Sequence {
+            if (items != .array) return error.InvalidContext;
+            var sequence = Sequence.init(a);
+            errdefer sequence.deinit();
+            for (items.array.items) |item| try sequence.push(item);
+            return sequence;
+        }
+
+        /// Origin is an explicit owner claim. Text equality can verify that
+        /// claim, but never creates it for an ordinary acquired message.
+        pub fn eventOrigin(a: std.mem.Allocator, item: json.Value, origin: P.ContextOrigin, plan: @FieldType(P.AdaptiveRequest, "plan"), catalog: P.AdaptiveCatalog) !void {
+            const reasoning = kind(item, "reasoning");
+            if (!reasoning) {
+                if (origin.reasoning_skills.items.len != 0) return error.InvalidContext;
+                for (origin.reasoning_tools) |seen| if (seen) return error.InvalidContext;
+            }
+            if (origin.resident_skill) |index| {
+                if (index >= catalog.skills.items.len or json.get(item, "type") != null or
+                    !equal(try json.text(try field(item, "role")), "developer")) return error.InvalidContext;
+                const skill = catalog.skills.items[@intCast(index)];
+                var admitted = false;
+                for (plan.skills.items) |loaded| {
+                    if (loaded.residency == .resident and loaded.introduced_at == origin.watermark and
+                        equal(loaded.skill_id.bytes, skill.id.bytes) and equal(loaded.version.bytes, skill.version.bytes) and
+                        same(loaded.resource, skill.instructions)) admitted = true;
+                }
+                if (!admitted) return error.InvalidContext;
+                const content = try field(item, "content");
+                if (content != .array or content.array.items.len != 1) return error.InvalidContext;
+                try inputPart(content.array.items[0]);
+                const text = try json.text(try field(content.array.items[0], "text"));
+                if (text.len != skill.instructions.bytes or !equal(&storage.digest(text), &skill.instructions.digest)) return error.InvalidContext;
+            }
+            for (origin.reasoning_skills.items) |index| {
+                if (index >= catalog.skills.items.len) return error.InvalidContext;
+                const skill = catalog.skills.items[@intCast(index)];
+                var exposed = false;
+                for (plan.skills.items) |loaded| {
+                    if ((loaded.residency == .resident or loaded.active) and loaded.introduced_at <= origin.watermark and
+                        equal(loaded.skill_id.bytes, skill.id.bytes) and equal(loaded.version.bytes, skill.version.bytes) and
+                        same(loaded.resource, skill.instructions)) exposed = true;
+                }
+                if (!exposed) return error.InvalidContext;
+            }
+            if (kind(item, "additional_tools")) {
+                const definitions = try field(item, "tools");
+                if (definitions != .array) return error.InvalidContext;
+                var seen: [P.declaration_count]bool = @splat(false);
+                for (definitions.array.items) |definition| {
+                    const index = try ordinal(try json.text(try field(definition, "name")));
+                    if (seen[index]) return error.InvalidContext;
+                    seen[index] = true;
+                    var materialized = false;
+                    for (plan.skills.items) |loaded| for (catalog.skills.items) |skill| {
+                        if (skill.tools[index] and equal(loaded.skill_id.bytes, skill.id.bytes) and
+                            equal(loaded.version.bytes, skill.version.bytes) and same(loaded.resource, skill.instructions)) materialized = true;
+                    };
+                    if (!materialized) return error.InvalidContext;
+                    const expected = try json.canonical(a, try tool(a, P.allDeclarations().items[index]));
+                    defer a.free(expected);
+                    const actual = try json.canonical(a, definition);
+                    defer a.free(actual);
+                    if (!equal(expected, actual)) return error.InvalidContext;
+                }
+            }
         }
 
         fn ordinal(name: []const u8) !usize {
@@ -294,6 +400,9 @@ pub fn Projection(comptime P: type) type {
             const a = ctx.allocator;
             var history = list(a);
             var origins: std.ArrayList(P.ContextOrigin) = .empty;
+            var history_base: if (chunked) ?History.Loaded else void = if (chunked) null else {};
+            var reader: if (chunked) History.Reader else void = if (chunked) .{ .ctx = ctx } else {};
+            defer if (chunked) reader.deinit();
             var previous: ?contracts.Decoded(P.AdaptiveContext) = null;
             defer if (previous) |*saved| saved.deinit();
             var same_epoch = false;
@@ -309,6 +418,7 @@ pub fn Projection(comptime P: type) type {
                     if (ancestor.watermark != watermark) return error.InvalidContext;
                     var saved = try open(ctx, ancestor, frozen.audience.bytes);
                     defer saved.deinit();
+                    if (chunked) try reader.validate(saved.value.history, saved.value.plan, catalog);
                     parent = saved.value.plan.prior;
                     if (parent) |*next| {
                         next.schema.bytes = try a.dupe(u8, next.schema.bytes);
@@ -331,15 +441,21 @@ pub fn Projection(comptime P: type) type {
                         request.plan.eviction_generation != try std.math.add(u64, old.plan.eviction_generation, @intFromBool(removing))) return error.InvalidContext;
                     if (same_profile and request.plan.reason == .eviction and request.invocation.parameters.reasoning.?.effort.? != old.top_effort) return error.InvalidContext;
                 }
-                history = (try json.parse(a, old.items.bytes, .{ .bytes = old.items.bytes.len, .tokens = old.items.bytes.len, .members = old.items.bytes.len })).value;
-                if (old.origins.items.len != history.array.items.len) return error.InvalidContext;
-                for (old.origins.items) |origin| if (origin.watermark > old.plan.watermark) return error.InvalidContext;
-                // Retained provenance owns its variable-length membership after
-                // the previous context's decoding arena is released.
-                for (old.origins.items) |origin| {
-                    var owned = origin;
-                    owned.reasoning_skills.items = try a.dupe(u64, origin.reasoning_skills.items);
-                    try origins.append(a, owned);
+                if (chunked) {
+                    history_base = try reader.load(old.history, old.plan, catalog);
+                    history = history_base.?.items;
+                    origins = history_base.?.origins;
+                } else {
+                    history = (try json.parse(a, old.items.bytes, .{ .bytes = old.items.bytes.len, .tokens = old.items.bytes.len, .members = old.items.bytes.len })).value;
+                    if (old.origins.items.len != history.array.items.len) return error.InvalidContext;
+                    for (old.origins.items) |origin| if (origin.watermark > old.plan.watermark) return error.InvalidContext;
+                    // Retained provenance owns its variable-length membership after
+                    // the previous context's decoding arena is released.
+                    for (old.origins.items) |origin| {
+                        var owned = origin;
+                        owned.reasoning_skills.items = try a.dupe(u64, origin.reasoning_skills.items);
+                        try origins.append(a, owned);
+                    }
                 }
                 new_start = history.array.items.len;
                 try settle(a, &history, request, selected.profile.explicit_cache);
@@ -426,7 +542,7 @@ pub fn Projection(comptime P: type) type {
             var observed_skills: std.ArrayList(u64) = .empty;
             for (exposed, 0..) |seen, index| if (seen) try observed_skills.append(a, @intCast(index));
             const reasoning_skills: P.ReasoningSkills = .{ .items = observed_skills.items };
-            return .{ .history = history, .origins = origins, .reasoning_skills = reasoning_skills, .input = input, .core_tools = core, .prior_response_id = if (same_profile) if (previous.?.value.response_id) |id| try a.dupe(u8, id.bytes) else null else null, .prior_request = if (previous) |saved| saved.value.source_request else null };
+            return .{ .history_base = history_base, .unchanged_prefix = same_epoch, .history = history, .origins = origins, .reasoning_skills = reasoning_skills, .input = input, .core_tools = core, .prior_response_id = if (same_profile) if (previous.?.value.response_id) |id| try a.dupe(u8, id.bytes) else null else null, .prior_request = if (previous) |saved| saved.value.source_request else null };
         }
 
         fn markLatest(a: std.mem.Allocator, history: *json.Value, start: usize) !void {

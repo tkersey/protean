@@ -11,6 +11,7 @@ examples/adaptive/tool_work.zig
 examples/adaptive/types.zig
 examples/adaptive/work.zig
 runtime/native/adaptive_context.zig
+runtime/native/adaptive_history.zig
 runtime/native/adaptive_responses.zig
 runtime/native/archive.zig
 runtime/native/client.zig
@@ -26,6 +27,7 @@ runtime/native/https.zig
 runtime/native/identity.zig
 runtime/native/inbox.zig
 runtime/native/json.zig
+runtime/native/legacy_adaptive.zig
 runtime/native/namespace.zig
 runtime/native/occurrence.zig
 runtime/native/protocol.zig

@@ -366,31 +366,36 @@ pub fn Adapter(comptime P: type) type {
             }
             var pending = Context.pending(ctx.allocator, projected.history) catch return unsupported(ctx, .unsupported_output_item, observed.value);
             pending.deinit();
-            const items = try json.canonical(ctx.allocator, projected.history);
             var response_id: ?contracts.Utf8 = null;
             if (json.get(body, "id")) |id| {
                 if (id != .string or id.string.len == 0) return unsupported(ctx, .unsupported_output_item, observed.value);
                 response_id = .{ .bytes = id.string };
             }
             const watermark = try std.math.add(u64, request.value.plan.watermark, 1);
-            const artifact = try contracts.encodeOwned(P.AdaptiveContext, ctx.allocator, .{
-                .schema = .{ .bytes = P.adaptive_context_identity },
-                .policy = request.value.policy,
-                .task = ctx.task,
-                .tenant = .{ .bytes = ctx.tenant },
-                .audience = policy.audience,
-                .selection = request.value.selection,
-                .top_effort = request.value.invocation.parameters.reasoning.?.effort.?,
-                .plan = request.value.plan,
-                .watermark = watermark,
-                .source_capture = .{ .digest = storage.digest(captured), .bytes = captured.len },
-                .source_request = .{ .digest = storage.digest(prepared_bytes), .bytes = prepared_bytes.len },
-                .response_id = response_id,
-                .items = .{ .bytes = items },
-                .origins = .{ .items = projected.origins.items },
-            });
-            const objects = try ctx.allocator.alloc([]const u8, 1);
-            objects[0] = artifact;
+            var context: P.AdaptiveContext = undefined;
+            context.schema = .{ .bytes = P.adaptive_context_identity };
+            context.policy = request.value.policy;
+            context.task = ctx.task;
+            context.tenant = .{ .bytes = ctx.tenant };
+            context.audience = policy.audience;
+            context.selection = request.value.selection;
+            context.top_effort = request.value.invocation.parameters.reasoning.?.effort.?;
+            context.plan = request.value.plan;
+            context.watermark = watermark;
+            context.source_capture = .{ .digest = storage.digest(captured), .bytes = captured.len };
+            context.source_request = .{ .digest = storage.digest(prepared_bytes), .bytes = prepared_bytes.len };
+            context.response_id = response_id;
+            var objects: std.ArrayList([]const u8) = .empty;
+            if (P.adaptive_context_version == 6) {
+                const published = try @import("adaptive_history.zig").History(P).publish(ctx, projected.history_base, projected.unchanged_prefix, projected.history, projected.origins.items, request.value.plan, catalog.value);
+                context.history = published.root;
+                try objects.appendSlice(ctx.allocator, published.objects);
+            } else {
+                context.items = .{ .bytes = try json.canonical(ctx.allocator, projected.history) };
+                context.origins = .{ .items = projected.origins.items };
+            }
+            const artifact = try contracts.encodeOwned(P.AdaptiveContext, ctx.allocator, context);
+            try objects.append(ctx.allocator, artifact);
             return encode(ctx, .{ .result = normalized, .replay_status = .complete, .usage = observed.value, .replay = .{
                 .object = .{ .digest = storage.digest(artifact), .bytes = artifact.len },
                 .schema = .{ .bytes = P.adaptive_context_identity },
@@ -402,7 +407,7 @@ pub fn Adapter(comptime P: type) type {
                 .epoch = request.value.plan.epoch,
                 .watermark = watermark,
                 .eviction_generation = request.value.plan.eviction_generation,
-            } }, objects);
+            } }, try objects.toOwnedSlice(ctx.allocator));
         }
     };
 }

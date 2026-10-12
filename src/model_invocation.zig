@@ -9,8 +9,8 @@ pub const semantic_identity = "agent.model.invoke.v7";
 pub const replay_semantic_identity = "agent.model.invoke.v8";
 pub const reference_semantic_identity = "agent.model.invoke.v9";
 pub const context_semantic_identity = "agent.model.context.responses.v2";
-pub const adaptive_semantic_identity = "agent.model.invoke.v10";
-pub const adaptive_context_semantic_identity = "agent.model.context.responses.adaptive.v5";
+pub const adaptive_semantic_identity = "agent.model.invoke.v11";
+pub const adaptive_context_semantic_identity = "agent.model.context.responses.adaptive.v6";
 pub const adaptive_policy_semantic_identity = "agent.model.policy.adaptive.v2";
 pub fn isModelIdentity(identity: []const u8) bool {
     // Retired model identities remain reserved; they cannot be relabeled as
@@ -22,6 +22,7 @@ pub fn isModelIdentity(identity: []const u8) bool {
         std.mem.eql(u8, identity, semantic_identity) or
         std.mem.eql(u8, identity, replay_semantic_identity) or
         std.mem.eql(u8, identity, reference_semantic_identity) or
+        std.mem.eql(u8, identity, "agent.model.invoke.v10") or
         std.mem.eql(u8, identity, adaptive_semantic_identity);
 }
 
@@ -245,6 +246,7 @@ pub fn Profile(
         pub const Context = ContextArtifact;
         pub const adaptive_identity = adaptive_semantic_identity;
         pub const adaptive_context_identity = adaptive_context_semantic_identity;
+        pub const adaptive_context_version: u8 = 6;
         pub const adaptive_policy_identity = adaptive_policy_semantic_identity;
         pub const AnswerType = Answer;
         pub const Interpretation = @import("model_interpretation.zig").Result(Answer);
@@ -387,8 +389,8 @@ pub fn Profile(
         pub const AdaptiveCatalog = struct {
             skills: contracts.Vector(AdaptiveSkill, null),
         };
-        /// Audit closure and rendered input are different sets. items contains
-        /// committed history, never copies of transient suffix injections.
+        /// Audit closure and rendered input are different sets. History contains
+        /// committed events, never copies of transient suffix injections.
         /// source_request retains the exact prepared request that did contain
         /// those injections, including their real ordering and provenance.
         pub const AdaptiveContext = struct {
@@ -404,11 +406,15 @@ pub fn Profile(
             source_capture: ArtifactReference,
             source_request: ArtifactReference,
             response_id: ?contracts.Utf8,
-            items: contracts.Bytes(null),
-            /// Origin is projection-owned, never inferred from provider text.
-            /// It distinguishes injected skill material from identical evidence
-            /// and records which responses could have observed an evicted skill.
-            origins: contracts.Vector(ContextOrigin, null),
+            history: ?HistoryReference,
+        };
+        pub const HistoryReference = struct { object: ArtifactReference, event_count: u64 };
+        pub const ContextEvent = struct { item: contracts.Bytes(null), origin: ContextOrigin };
+        pub const HistoryChunk = struct {
+            schema: contracts.Text(128),
+            previous: ?HistoryReference,
+            first_ordinal: u64,
+            events: contracts.Vector(ContextEvent, null),
         };
         pub const ReasoningSkills = contracts.Vector(u64, null);
         pub const ContextOrigin = struct { watermark: u64, resident_skill: ?u64 = null, reasoning_skills: ReasoningSkills = .{ .items = &.{} }, reasoning_tools: [declarations.len]bool = @splat(false) };

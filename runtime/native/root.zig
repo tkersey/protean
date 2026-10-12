@@ -36,4 +36,11 @@ test {
     _ = @import("namespace.zig");
     _ = @import("transport.zig");
     _ = @import("host.zig");
+    _ = @import("driver.zig");
 }
+
+// Private compatibility codecs are exposed only to the repository's test graph.
+pub const testing = if (@import("builtin").is_test) struct {
+    pub const adaptive_history = @import("adaptive_history.zig");
+    pub const legacy_adaptive = @import("legacy_adaptive.zig");
+} else struct {};
