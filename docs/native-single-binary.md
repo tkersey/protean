@@ -14,26 +14,23 @@ so it can authenticate sources before any dependency code is executed:
 zig run tools/native/dependencies.zig -- setup \
   conformance/protean/dependencies.lock.json \
   conformance/protean/native-dependencies.lock.json \
-  .protean-native/inputs-v6 "$(command -v zig)" --offline
+  .protean-native/inputs "$(command -v zig)"
 zig build protean -Doptimize=safe \
-  -Dhoros-source=.protean-native/inputs-v6/horos \
-  -Dkosmos-source=.protean-native/inputs-v6/kosmos \
-  -Dsqlite-source=.protean-native/inputs-v6/sqlite
+  -Dhoros-source=.protean-native/inputs/horos \
+  -Dkosmos-source=.protean-native/inputs/kosmos \
+  -Dsqlite-source=.protean-native/inputs/sqlite
 ```
 
-The development source tuple is Horos 5.0.0 at
-`f04359ca8b958a07d1bcc14748e35adfacd3ffed`, Kosmos 8.0.0 at
-`863af1ff776273cfa0d3e73ce72b58dceb36f3b1`, and SQLite 3.53.4. The versioned
-`agent-native-source-lock/v2` binds exact archives and complete source/package
-inventories. It intentionally contains no WASM delivery contract. Kosmos owns
-its optional JS/WASM release descriptor, which this build never rewrites.
+The development source tuple is Horos 5.0.0, Kosmos 8.0.0, and SQLite 3.53.4.
+The [source lock](../conformance/protean/dependencies.lock.json) records the
+exact immutable commits, authenticated GitHub archives, and complete
+source/package inventories under `agent-native-source-lock/v2`. Kosmos owns
+its separate optional JS/WASM release descriptor.
 
-These candidates are not yet published releases. The lock records authenticated
-local Git archives; remote transport identities and final release qualification
-remain pending. During development, supply exact extracted source copies with
-`-Dhoros-source` and `-Dkosmos-source`. Each override must match the complete
-locked inventory. The setup command above requires those pinned archives in its
-input directory until the remote artifacts are published.
+These source commits are publicly available; coordinated release tags remain
+unpublished. Setup downloads the pinned archives and authenticates their
+transport bytes and source contents. Extracted source overrides supplied through
+`-Dhoros-source` and `-Dkosmos-source` must match the complete locked inventory.
 
 Setup performs bounded HTTPS acquisition, authenticates before invoking `tar`
 or `unzip`, rejects links/special source entries, verifies complete source

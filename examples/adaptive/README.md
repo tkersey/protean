@@ -307,8 +307,8 @@ are consumed through the authored inbox only after the current call settles.
 
 The current adaptive contracts are `agent.model.invoke.v11`,
 `agent.model.context.responses.adaptive.v6` and `agent.model.policy.adaptive.v2`.
-Old saved tasks retain their original contracts and require their original
-compatible executable. Raw provider captures and opaque reasoning remain private.
+Replace old example databases and archives with fresh state under these contracts.
+Raw provider captures and opaque reasoning remain private.
 Absent usage remains unavailable. Explicit cache markers and unchanged request
 prefixes do not establish provider cache reuse.
 
