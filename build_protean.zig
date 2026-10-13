@@ -351,9 +351,8 @@ pub fn build(b: *std.Build) void {
         // These roots share exact module identities; compile their retained
         // tests together instead of rebuilding the same compiler eleven times.
         const native_suite = native_graph.module("test/protean/native_tests.zig");
-        // Keep unit assertions and safety checks without optimizing test code.
-        // The deployed applications and public API/HTTPS probe remain safe.
-        native_suite.optimize = .debug;
+        // Use the selected mode for history-validation tests as well as their
+        // runtime dependencies; safe retains assertions while optimizing replay.
         native_suite.strip = optimize != .debug;
         native_suite.addImport("kosmos", checked_kosmos);
         native_suite.addImport("protean_native", checked_environment);
