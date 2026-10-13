@@ -801,7 +801,7 @@ pub fn Service(comptime Types: type) type {
                 };
             }
             if (original.selection != .lookup) return error.InvalidRecovery;
-            const finding = try self.store().project(registry.RecoveryFinding, a, self.projectionBinding(initial), struct {
+            const finding = try self.store().project(registry.RecoveryFinding, a, self.handlers, self.projectionBinding(initial), struct {
                 handlers: registry.Registry,
                 input: registry.RecoveryInput,
                 evidence: []const u8,
@@ -903,7 +903,7 @@ pub fn Service(comptime Types: type) type {
             if (!same(&original.id, &attempt_id) or !same(&original.task, &task_id) or !same(&original.occurrence, &occurrence_id) or
                 !std.meta.eql(original.profile, value.profile) or !std.meta.eql(original.request, pending.value.request_object)) return error.CorruptState;
             const input: registry.RecoveryInput = .{ .task = task_id, .occurrence = occurrence_id, .attempt = attempt_id, .request_identity = pending.value.request, .request = original.request, .prepared = original.prepared, .profile = original.profile, .resources = value.resources.items, .capability = original.capability.bytes, .inference = original.inference };
-            return self.store().project(void, a, self.projectionBinding(value), struct {
+            return self.store().project(void, a, self.handlers, self.projectionBinding(value), struct {
                 handlers: registry.Registry,
                 input: registry.RecoveryInput,
                 pub fn run(this: @This(), ctx: registry.ProjectionContext) !void {
@@ -1348,7 +1348,7 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn prepareProjection(self: *Self, a: std.mem.Allocator, value: state.Task, adapter: registry.CaptureAdapter, payload: []const u8) ![]u8 {
-            return self.store().project([]u8, a, self.projectionBinding(value), struct {
+            return self.store().project([]u8, a, self.handlers, self.projectionBinding(value), struct {
                 adapter: registry.CaptureAdapter,
                 payload: []const u8,
                 pub fn run(this: @This(), context: registry.ProjectionContext) ![]u8 {
@@ -1358,7 +1358,7 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn interpretProjection(self: *Self, a: std.mem.Allocator, value: state.Task, adapter: registry.CaptureAdapter, payload: []const u8, prepared: []const u8, response: []const u8) !registry.Projection {
-            return self.store().project(registry.Projection, a, self.projectionBinding(value), struct {
+            return self.store().project(registry.Projection, a, self.handlers, self.projectionBinding(value), struct {
                 adapter: registry.CaptureAdapter,
                 payload: []const u8,
                 prepared: []const u8,

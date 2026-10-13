@@ -417,7 +417,9 @@ fn Fixture(comptime P: type) type {
 
         fn prepare(ns: ?*native.Namespace, ctx: native.registry.ProjectionContext, payload: []const u8) ![]u8 {
             const owner = ns orelse return Adapter.prepare(ctx, payload);
-            return owner.store.project([]u8, ctx.allocator, .{ .task = ctx.task, .tenant = ctx.tenant, .profile = ctx.profile, .application = @splat(8) }, struct {
+            var handlers = try native.Registry.init(ctx.allocator, &.{Adapter.declaration()});
+            defer handlers.deinit();
+            return owner.store.project([]u8, ctx.allocator, handlers, .{ .task = ctx.task, .tenant = ctx.tenant, .profile = ctx.profile, .application = @splat(8) }, struct {
                 payload: []const u8,
                 pub fn run(this: @This(), view: native.registry.ProjectionContext) ![]u8 {
                     return Adapter.prepare(view, this.payload);
@@ -426,7 +428,9 @@ fn Fixture(comptime P: type) type {
         }
         fn interpret(ns: ?*native.Namespace, ctx: native.registry.ProjectionContext, payload: []const u8, prepared: []const u8, raw: []const u8) !native.registry.Projection {
             const owner = ns orelse return Adapter.interpret(ctx, payload, prepared, raw);
-            return owner.store.project(native.registry.Projection, ctx.allocator, .{ .task = ctx.task, .tenant = ctx.tenant, .profile = ctx.profile, .application = @splat(8) }, struct {
+            var handlers = try native.Registry.init(ctx.allocator, &.{Adapter.declaration()});
+            defer handlers.deinit();
+            return owner.store.project(native.registry.Projection, ctx.allocator, handlers, .{ .task = ctx.task, .tenant = ctx.tenant, .profile = ctx.profile, .application = @splat(8) }, struct {
                 payload: []const u8,
                 prepared: []const u8,
                 raw: []const u8,
@@ -599,6 +603,25 @@ fn Fixture(comptime P: type) type {
                     objects.read_bytes = 0;
                     const next = try contracts.encodeOwned(P.AdaptiveRequest, ctx.allocator, request);
                     if (ns) |owner| {
+                        if (turn == 7 or turn == 15) {
+                            // Import's cold audit runs before publication. It
+                            // must not mint a lease inside that transaction,
+                            // but the next sealed projection must become warm.
+                            owner.store.invalidateIntegrity();
+                            try owner.store.begin();
+                            var handlers = try native.Registry.init(a, &.{Adapter.declaration()});
+                            defer handlers.deinit();
+                            _ = try owner.store.auditRetention(handlers, @splat(8));
+                            _ = try prepare(ns, ctx, next);
+                            try std.testing.expectEqual(@as(u32, 0), owner.store.context_cache.entries.count());
+                            if (turn == 15) {
+                                // A rejected import can roll back, followed by
+                                // a normal owner publication in the same epoch.
+                                owner.store.rollback();
+                                try owner.store.begin();
+                            }
+                            try owner.commit("cold validation handoff");
+                        }
                         _ = try prepare(ns, ctx, next);
                         owner.store.context_cache.ancestry_bytes = 0;
                         owner.store.context_cache.history_bytes = 0;
@@ -671,7 +694,9 @@ fn Fixture(comptime P: type) type {
                     }, P.representation);
                     const prior_hits = owner.store.context_cache.hits;
                     const prior_reads = owner.store.context_cache.object_reads;
-                    const different = owner.store.project(void, ctx.allocator, .{ .task = ctx.task, .tenant = ctx.tenant, .profile = ctx.profile, .application = @splat(8) }, struct {
+                    var view_handlers = try native.Registry.init(a, &.{Adapter.declaration()});
+                    defer view_handlers.deinit();
+                    const different = owner.store.project(void, ctx.allocator, view_handlers, .{ .task = ctx.task, .tenant = ctx.tenant, .profile = ctx.profile, .application = @splat(8) }, struct {
                         reference: model.AdaptiveContextReference,
                         pub fn run(this: @This(), view: native.registry.ProjectionContext) !void {
                             var reader: native.testing.adaptive_history.History(Other).Reader = .{ .ctx = view };

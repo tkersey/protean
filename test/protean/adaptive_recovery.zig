@@ -159,6 +159,10 @@ test "adaptive unload capture recovers under its original plan without another a
     try adaptiveRecovery(false, .none);
 }
 
+test "adaptive imported capture warms context validation without reopening its service" {
+    try adaptiveRecovery(false, .imported);
+}
+
 test "adaptive report correction preserves acquired evidence and retains a large complete report" {
     try adaptiveRecovery(true, .none);
 }
@@ -220,7 +224,7 @@ fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.d
     }, null, assets);
 }
 
-fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { none, snapshot, provider, malformed, tool_build, tool_run }) !void {
+fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { none, imported, snapshot, provider, malformed, tool_build, tool_run }) !void {
     const generated = recovery_probe == .tool_build or recovery_probe == .tool_run;
     var budget: kosmos.AllocationBudget = .{ .parent = std.testing.allocator, .limit = 64 * 1024 * 1024 };
     const a = budget.allocator();
@@ -255,7 +259,7 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
     var grants: [environment.handlers.len]native.registry.Grant = undefined;
     const profile: native.tasks.Profile = .{ .id = configured.id, .runtime_identity = @splat(73), .bytes = configured.bytes, .environment = configured.environment, .resources = configured.resources, .authority = .{ .grants = &grants, .principal = "adaptive-unit", .tenant = "local", .inference = true } };
     for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
-    const path = try std.fmt.allocPrint(permanent, "{s}/adaptive", .{buffer[0..length]});
+    var path = try std.fmt.allocPrint(permanent, "{s}/adaptive", .{buffer[0..length]});
     var namespace = try native.Namespace.open(a, io, path);
     var namespace_live = true;
     defer if (namespace_live) namespace.close() catch unreachable;
@@ -345,6 +349,30 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
             const context: native.Context = .{ .allocator = frame, .io = io, .authority = &profile.authority, .task_id = &std.fmt.bytesToHex(task, .lower), .profile = profile.bytes, .environment = profile.environment };
             const reply = if (work.entry.declaration.capture) |adapter| blk: {
                 maximum_prepared = @max(maximum_prepared, work.prepared.?.len);
+                if (recovery_probe == .imported and restarted and work.entry.declaration.inference) {
+                    errdefer service.unknown(frame, work) catch {};
+                    const projection = struct {
+                        adapter: native.registry.CaptureAdapter,
+                        payload: []const u8,
+                        pub fn run(this: @This(), ctx: native.registry.ProjectionContext) ![]u8 {
+                            return this.adapter.prepare(ctx, this.payload);
+                        }
+                    }{ .adapter = adapter, .payload = request.value.binding.payload };
+                    const binding: native.registry.ProjectionBinding = .{ .task = task, .tenant = profile.authority.tenant, .profile = profile.bytes, .application = application.image_identity, .resources = saved.value.resources.items };
+                    _ = try namespace.store.project([]u8, frame, handlers, binding, projection);
+                    const cache = &namespace.store.context_cache;
+                    cache.hits = 0;
+                    cache.misses = 0;
+                    cache.ancestry_bytes = 0;
+                    cache.object_reads = 0;
+                    cache.object_bytes = 0;
+                    const repeated = try namespace.store.project([]u8, frame, handlers, binding, projection);
+                    try std.testing.expectEqualSlices(u8, work.prepared.?, repeated);
+                    std.debug.print("same-service import model_calls={d} hits={d} misses={d} ancestry_bytes={d} reads={d} bytes={d}\n", .{ model_calls, cache.hits, cache.misses, cache.ancestry_bytes, cache.object_reads, cache.object_bytes });
+                    try std.testing.expectEqual(@as(u64, 1), cache.hits);
+                    try std.testing.expectEqual(@as(u64, 0), cache.misses);
+                    try std.testing.expectEqual(@as(u64, 0), cache.ancestry_bytes);
+                }
                 if (generated and work.entry.declaration.inference) {
                     var prepared = try protean.contracts.decodeOwned(t.P.AdaptivePrepared, frame, work.prepared.?);
                     defer prepared.deinit();
@@ -702,14 +730,18 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                 var capture = try protean.contracts.decodeOwned(CaptureRecord, frame, raw);
                 defer capture.deinit();
                 try std.testing.expect(capture.value.projection == null);
+                const imported_archive: ?[]const u8 = if (recovery_probe == .imported) try std.fmt.allocPrint(permanent, "{s}/captured.agnx", .{buffer[0..length]}) else null;
+                if (imported_archive) |archive_path| _ = try service.exportCheckpoint(frame, task, archive_path);
                 try service.close(frame);
                 service_live = false;
                 try namespace.close();
                 namespace_live = false;
+                if (imported_archive != null) path = try std.fmt.allocPrint(permanent, "{s}/imported", .{buffer[0..length]});
                 namespace = try native.Namespace.open(a, io, path);
                 namespace_live = true;
                 service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
                 service_live = true;
+                if (imported_archive) |archive_path| _ = try service.importCheckpoint(frame, "adaptive-capture-import", archive_path);
                 var current = try service.task(frame, task);
                 defer current.deinit();
                 _ = try service.resumeTask(frame, "adaptive-capture-resume", task, current.value.revision);

@@ -165,9 +165,15 @@ pub const Store = struct {
     /// Run a pure projection under one read snapshot, releasing it before the
     /// caller can publish or dispatch environmental work. Import may borrow its
     /// existing transaction, but projection code still cannot write through the
-    /// Store. Results belong to the caller's projection arena; the view cannot
-    /// escape this call. No semantic validation lease is granted by a snapshot.
-    pub fn project(self: *Store, comptime Result: type, a: std.mem.Allocator, binding: @import("registry.zig").ProjectionBinding, operation: anytype) !Result {
+    /// Store. A sealed view reconstructs missing cold retention facts through
+    /// the registered codecs before projection. Transaction-scoped import/audit
+    /// views still validate fully and cannot create reusable semantic facts.
+    /// Results belong to the caller's arena; the view cannot escape this call.
+    pub fn project(self: *Store, comptime Result: type, a: std.mem.Allocator, handlers: @import("registry.zig").Registry, binding: @import("registry.zig").ProjectionBinding, operation: anytype) anyerror!Result {
+        if (!self.transaction and self.sealed_generation == self.head.generation and
+            (self.retention_epoch != self.integrity_epoch or self.retention_image == null or
+                !std.meta.eql(self.retention_image.?, binding.application)))
+            _ = try self.auditRetention(handlers, binding.application);
         var scope = try ProjectionScope.open(self, binding);
         const result = operation.run(@as(@import("registry.zig").ProjectionContext, .{
             .allocator = a,
@@ -1029,7 +1035,9 @@ test "projection snapshots exclude writes and release on success rejection and a
     for ([_]?anyerror{ null, error.InvalidContext, error.OutOfMemory }) |failure| {
         for ([_]bool{ false, true }) |inside_import| {
             if (inside_import) try store.begin();
-            const result = store.project(void, a, binding, Check{ .store = &store, .peer = peer, .reference = ref, .failure = failure });
+            var handlers = try registry.Registry.init(a, &.{});
+            defer handlers.deinit();
+            const result = store.project(void, a, handlers, binding, Check{ .store = &store, .peer = peer, .reference = ref, .failure = failure });
             if (failure) |expected| try std.testing.expectError(expected, result) else try result;
             try std.testing.expectEqual(inside_import, store.transaction);
             try std.testing.expect(!store.projecting and !store.fenced);
@@ -1067,7 +1075,9 @@ test "projection invalidation prevents returning a usable result" {
             return 42;
         }
     }{ .store = &store };
-    try std.testing.expectError(error.InvalidState, store.project(u32, a, binding, operation));
+    var handlers = try @import("registry.zig").Registry.init(a, &.{});
+    defer handlers.deinit();
+    try std.testing.expectError(error.InvalidState, store.project(u32, a, handlers, binding, operation));
     try std.testing.expect(!store.projecting and !store.transaction);
     // No leaked SQLite transaction, even when the operation itself succeeded.
     try store.begin();

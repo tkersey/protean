@@ -134,6 +134,11 @@ profile and application. Each entry retains the dependency root and epoch.
 Unrecognized roots must pass semantic validation and checks of every derived
 root/history dependency edge before their facts become reusable. Only committed,
 sealed storage can populate the cache; import verification uses full validation.
+The Store projection boundary reconstructs missing cold retention validation
+through the registered codecs before a sealed read view can reuse context facts.
+Continuation in the importing service therefore warms normally without requiring
+an export or process restart. Transaction-scoped import and audit projections
+remain fully validating and cannot populate the context cache.
 Reopen, replacement, integrity invalidation and fencing discard the cache.
 Unrelated owner commits preserve it, as does ordinary descendant rejection.
 

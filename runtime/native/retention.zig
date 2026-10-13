@@ -268,7 +268,7 @@ const Audit = struct {
             if (item.provenance == .authentic or item.provenance == .authoritative) {
                 const evidence = try self.body(item.evidence orelse return error.CorruptState);
                 const input = registry.RecoveryInput.fromReconciliation(item, request.value.request_identity, entry.declaration.inference);
-                const finding = try self.store.project(registry.RecoveryFinding, self.a, .{ .task = key.task, .tenant = task.value.tenant.bytes, .profile = try self.body(item.profile), .application = image, .resources = item.resources.items }, struct {
+                const finding = try self.store.project(registry.RecoveryFinding, self.a, self.handlers, .{ .task = key.task, .tenant = task.value.tenant.bytes, .profile = try self.body(item.profile), .application = image, .resources = item.resources.items }, struct {
                     handlers: registry.Registry,
                     input: registry.RecoveryInput,
                     evidence: []const u8,
