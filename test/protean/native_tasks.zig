@@ -2460,16 +2460,22 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
     const length = try temporary.dir.realPath(io, &buffer);
     const path = try std.fmt.allocPrint(frame, "{s}/lookup", .{buffer[0..length]});
     var namespace = try native.Namespace.open(a, io, path);
-    defer namespace.close() catch unreachable;
+    var namespace_live = true;
+    defer if (namespace_live) namespace.close() catch unreachable;
     var service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
-    defer service.close(frame) catch unreachable;
+    var service_live = true;
+    defer if (service_live) service.close(frame) catch unreachable;
     // A real reopen drops the original worker; the original effect callback
     // is forbidden throughout this fixture.
     const original = try lookupUnknown(&service, frame, "original");
     try service.close(frame);
+    service_live = false;
     try namespace.close();
+    namespace_live = false;
     namespace = try native.Namespace.open(a, io, path);
+    namespace_live = true;
     service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    service_live = true;
     var before = try service.task(frame, original.task);
     defer before.deinit();
     const revision = before.value.revision;
@@ -2554,13 +2560,36 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
     const settled_archive = try std.fmt.allocPrint(frame, "{s}/settled.agnx", .{buffer[0..length]});
     _ = try service.exportCheckpoint(frame, original.task, settled_archive);
     try service.close(frame);
+    service_live = false;
     try namespace.close();
+    namespace_live = false;
     for ([_][]const u8{ pending_archive, settled_archive }, 0..) |archive_path, index| {
+        var incompatible_leaf = leaf;
+        incompatible_leaf.recovery.?.version += 1;
+        var incompatible_handlers = try native.Registry.init(a, &.{ incompatible_leaf, native.question(u32, u32, .{ .identity = "fair.question.v1", .resource_role = "user", .answer_schema_id = "fair.answer.v1" }, FairCapture.present), native.inbox.declaration(u32) });
+        defer incompatible_handlers.deinit();
+        // Rejection concerns unpublished archive data, not this clean owner.
+        // Keep the same registry while proving ordinary work remains admitted.
+        {
+            const rejected_target = try std.fmt.allocPrint(frame, "{s}/rejected-{d}", .{ buffer[0..length], index });
+            var rejected_namespace = try native.Namespace.open(a, io, rejected_target);
+            defer rejected_namespace.close() catch unreachable;
+            var rejected = try native.tasks.Service(FairTypes).init(a, io, &rejected_namespace, assets, &application, incompatible_handlers, profile);
+            defer rejected.close(frame) catch unreachable;
+            const before_import = rejected_namespace.store.head;
+            try std.testing.expectError(error.CorruptState, rejected.importCheckpoint(frame, "import-recovery", archive_path));
+            try std.testing.expectEqualDeep(before_import, rejected_namespace.store.head);
+            _ = try rejected.submit(frame, "after-rejected-import", 4);
+        }
         const target = try std.fmt.allocPrint(frame, "{s}/import-{d}", .{ buffer[0..length], index });
         var copied_namespace = try native.Namespace.open(a, io, target);
         defer copied_namespace.close() catch unreachable;
-        var copied = try native.tasks.Service(FairTypes).init(a, io, &copied_namespace, assets, &application, handlers, profile);
+        var copied = try native.tasks.Service(FairTypes).init(a, io, &copied_namespace, assets, &application, incompatible_handlers, profile);
         defer copied.close(frame) catch unreachable;
+        try std.testing.expectError(error.CorruptState, copied.importCheckpoint(frame, "import-recovery", archive_path));
+        // Select the compatible registry without reopening the rejected owner.
+        // The failed operation ID must remain available for the valid retry.
+        copied.handlers = handlers;
         _ = try copied.importCheckpoint(frame, "import-recovery", archive_path);
         try std.testing.expect(try copied.pump(frame) == .idle);
         const task_id = if (index == 0) interrupted.task else original.task;
@@ -2580,7 +2609,9 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
         try std.testing.expectEqual(1, fixture.calls.load(.acquire));
     }
     namespace = try native.Namespace.open(a, io, path);
+    namespace_live = true;
     service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    service_live = true;
     var lost = try service.reconciliation(frame, interrupted.task, admitted.receipt.reconciliation.?);
     defer lost.deinit();
     try std.testing.expect(lost.value.outcome == .unresolved and lost.value.outcome.unresolved == .interrupted);
@@ -2673,8 +2704,11 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
         try std.testing.expect(namespace.store.fenced);
         try std.testing.expect(service.work == null);
         try service.close(frame);
+        service_live = false;
         try namespace.close();
+        namespace_live = false;
         namespace = try native.Namespace.open(a, io, path);
+        namespace_live = true;
         // Before owner recovery, the failed verification has committed no
         // completed outcome. Reopen subsequently records interruption, never
         // evidence rejection or an automatic replacement lookup.
@@ -2682,6 +2716,7 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
         defer retained.deinit();
         try std.testing.expect(retained.value.outcome == .pending);
         service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+        service_live = true;
         var interrupted_result = try service.reconciliation(frame, subject.task, accepted.receipt.reconciliation.?);
         defer interrupted_result.deinit();
         try std.testing.expect(interrupted_result.value.outcome == .unresolved and interrupted_result.value.outcome.unresolved == .interrupted);
@@ -2703,9 +2738,13 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
     try std.testing.expectError(error.StorageUnavailable, service.acquire(frame, fenced_work, "late evidence"));
     try std.testing.expectEqualDeep(sealed, namespace.store.head);
     try service.close(frame);
+    service_live = false;
     try namespace.close();
+    namespace_live = false;
     namespace = try native.Namespace.open(a, io, path);
+    namespace_live = true;
     service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    service_live = true;
     var abandoned = try service.reconciliation(frame, fenced.task, fenced_admission.receipt.reconciliation.?);
     defer abandoned.deinit();
     try std.testing.expect(abandoned.value.outcome == .unresolved and abandoned.value.outcome.unresolved == .interrupted);
@@ -2732,9 +2771,13 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
     const rejected_archive = try std.fmt.allocPrint(frame, "{s}/authentic-invalid.agnx", .{buffer[0..length]});
     _ = try service.exportCheckpoint(frame, malformed.task, rejected_archive);
     try service.close(frame);
+    service_live = false;
     try namespace.close();
+    namespace_live = false;
     namespace = try native.Namespace.open(a, io, path);
+    namespace_live = true;
     service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    service_live = true;
     var retained_capture = try service.reconciliation(frame, malformed.task, malformed_admission.receipt.reconciliation.?);
     defer retained_capture.deinit();
     try std.testing.expectEqualDeep(rejected_capture.value.outcome, retained_capture.value.outcome);
@@ -2825,9 +2868,13 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
                 } else try namespace.store.database.exec("PRAGMA query_only=OFF;");
             }
             try service.close(frame);
+            service_live = false;
             try namespace.close();
+            namespace_live = false;
             namespace = try native.Namespace.open(a, io, path);
+            namespace_live = true;
             service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+            service_live = true;
             try std.testing.expect(try service.pump(frame) == .idle);
             var restored_task = try service.task(frame, subject.task);
             defer restored_task.deinit();

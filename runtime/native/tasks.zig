@@ -2015,7 +2015,11 @@ pub fn Service(comptime Types: type) type {
             try self.validateArchiveAdmissions(a, value, reader.manifest.value);
             try self.validateOccurrenceProvenance(a, value, reader.manifest.value.records.items);
             try self.validateCapturedProjections(value, reader.manifest.value.records.items, .retain);
-            _ = try self.store().auditRetention(self.handlers, self.application.image_identity);
+            // This transaction contains untrusted, unpublished archive data.
+            // Reuse the closure validator without treating semantic rejection
+            // as corruption of the committed namespace. Store integrity and
+            // rollback failures retain their own fencing behavior.
+            _ = try @import("retention.zig").verify(self.store(), self.handlers);
             try self.validateImportedState(a, value, inspected.current);
             const previous = value.revision;
             value.revision = try std.math.add(u64, previous, 1);

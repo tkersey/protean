@@ -125,6 +125,10 @@ transaction. Large opaque checkpoints and captures are hashed in streaming form.
 Raw captures remain valid retained data even when interpretation would reject
 them. A missing edge or altered object fences the owner. This audit grants no
 public artifact access and performs no environmental acquisition.
+Import uses the same closure validator on its unpublished transaction. Rejecting
+incompatible archive data rolls back without fencing the clean destination, so
+valid work or a compatible import can follow in the same service. Actual Store
+integrity, rollback, and publication failures retain their fencing behavior.
 
 After this cold retention validation, native context preparation can reuse
 checked ancestry within the Store's integrity epoch. The pure validator alone
