@@ -104,15 +104,16 @@ try {
   assert.equal(manifest.application_id, 'adaptive-agent');
   assert.equal(manifest.dependencies.world, lock.world.commit);
   assert.equal(manifest.dependencies.boundary, lock.boundary.commit);
+  const identity = Object.fromEntries(['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target'].map(key => [key, manifest[key]]));
   const reference = process.argv[3];
   if (reference) {
     const expected = JSON.parse(execFileSync(resolve(reference), ['describe-build'], {encoding: 'utf8'}));
-    for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target']) assert.deepEqual(manifest[key], expected[key], key);
+    for (const key of Object.keys(identity)) assert.deepEqual(identity[key], expected[key], key);
   }
   const demo = JSON.parse(run(executable, ['demo', '--offline', '--state-dir', join(scratch, 'state')]));
   assert.equal(demo.output.result.tag, 'report');
   assert.equal(demo.output.model_calls, '14');
-  console.log(JSON.stringify({downstream: 'public addNativeSystem', node_free_acquisition_build_install: true, package: packageHash, target: manifest.target, program: manifest.program_sha256, elapsed_seconds: (performance.now() - started) / 1000}));
+  console.log(JSON.stringify({downstream: 'public addNativeSystem', node_free_acquisition_build_install: true, package: packageHash, target: manifest.target, program: manifest.program_sha256, identity, elapsed_seconds: (performance.now() - started) / 1000}));
 } finally {
   rmSync(scratch, {recursive: true, force: true});
 }

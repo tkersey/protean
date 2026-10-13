@@ -101,15 +101,13 @@ jobs:
           if [ "${{ matrix.lane }}" = authoring ]; then
             zig build check-protean -Dnative=false -Doptimize=safe --summary all
           else
-            zig build protean -Doptimize=safe --summary all \
-              --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables
-            reference="$RUNNER_TEMP/protean-reference"
-            cp "$RUNNER_TEMP/protean-qualification/executables/protean" "$reference"
+            # Both checks build independently; compare their executed identities
+            # after completion instead of serializing behind a reference build.
             zig build check-native -Doptimize=safe --summary all \
               --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
               > "$RUNNER_TEMP/native-check.log" 2>&1 &
             native_pid=$!
-            node test/protean/installations.mjs .protean-native/inputs "$reference" \
+            node test/protean/installations.mjs .protean-native/inputs \
               > "$RUNNER_TEMP/downstream-check.log" 2>&1 &
             downstream_pid=$!
             result=0
@@ -117,7 +115,22 @@ jobs:
             wait "$downstream_pid" || result=1
             cat "$RUNNER_TEMP/native-check.log" "$RUNNER_TEMP/downstream-check.log"
             test "$result" -eq 0
-            cmp "$reference" "$RUNNER_TEMP/protean-qualification/executables/protean"
+            node --input-type=module - "$RUNNER_TEMP/protean-qualification/executables/protean" "$RUNNER_TEMP/downstream-check.log" "$RUNNER_TEMP/native-check.log" <<'JS'
+          import assert from 'node:assert/strict';
+          import {execFileSync} from 'node:child_process';
+          import {createHash} from 'node:crypto';
+          import {readFileSync} from 'node:fs';
+          const [binary, downstreamLog, nativeLog] = process.argv.slice(2);
+          const manifest = JSON.parse(execFileSync(binary, ['describe-build'], {encoding: 'utf8'}));
+          const downstream = JSON.parse(readFileSync(downstreamLog, 'utf8'));
+          for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target'])
+            assert.deepEqual(downstream.identity[key], manifest[key], key);
+          const executions = readFileSync(nativeLog, 'utf8').split('\n').filter(line => line.startsWith('{"native_deployment":')).map(line => JSON.parse(line));
+          assert.equal(executions.length, 1);
+          assert.equal(executions[0].passed, true);
+          assert.equal(executions[0].sha256, manifest.artifact_sha256);
+          assert.equal(createHash('sha256').update(readFileSync(binary)).digest('hex'), manifest.artifact_sha256);
+          JS
           fi
       - name: Package the executed adaptive application
         if: matrix.lane == 'native'
