@@ -237,6 +237,8 @@ pub fn Service(comptime Types: type) type {
             }
             if (value.blocker != null) return .blocked;
             if (value.cancellation != null) return .cancelling;
+            // Worker-owned execution is active while ineligible for another turn.
+            if (self.work) |work| if (same(&work.task, &value.id)) return .running;
             for (self.runnable.items) |id| if (same(&id, &value.id)) return if (value.schedule == .queued) .queued else .running;
             return .parked;
         }

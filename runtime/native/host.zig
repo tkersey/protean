@@ -301,6 +301,7 @@ pub fn run(comptime Types: type, comptime Environment: type, init: std.process.I
     if (state_path) |path| namespace = Namespace.open(a, init.io, path) catch |err| return switch (err) {
         error.Busy => 75,
         error.UnsafeStatePath, error.ForeignNamespace => 64,
+        error.UnsupportedStateFormat => return err,
         else => 74,
     };
     var profile_arena = std.heap.ArenaAllocator.init(a);

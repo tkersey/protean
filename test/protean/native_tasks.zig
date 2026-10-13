@@ -1817,7 +1817,16 @@ test "eligible round robin progresses pure question inbox cancellation and repli
     defer if (service_live) {
         if (service.work) |work| service.notSent(frame, work) catch unreachable;
     };
+    var client: native.client.Client(FairTypes) = .{ .service = &service };
+    var slow_params = native.json.object();
+    try native.json.put(frame, &slow_params, "task_id", native.json.string(try frame.dupe(u8, &std.fmt.bytesToHex(slow.receipt.task, .lower))));
+    try std.testing.expectEqualStrings("running", (try client.call(frame, .@"task.status", slow_params)).object.get("status").?.string);
     const queued = try service.submit(frame, "queued-leaf", 1);
+    {
+        var task = try service.task(frame, queued.receipt.task);
+        defer task.deinit();
+        try std.testing.expectEqual(.queued, try service.status(frame, task.value));
+    }
     const infinite = try service.submit(frame, "yielding-forever", 0);
     const finite = try service.submit(frame, "finite", 4);
     const question = try service.submit(frame, "question", 2);
@@ -1834,6 +1843,7 @@ test "eligible round robin progresses pure question inbox cancellation and repli
     try std.testing.expectEqualDeep(original_slow.value.checkpoint, unchanged_slow.value.checkpoint);
     try std.testing.expectEqual(original_slow.value.execution_revision, unchanged_slow.value.execution_revision);
     try std.testing.expect(unchanged_slow.value.revision > original_slow.value.revision);
+    try std.testing.expectEqualStrings("running", (try client.call(frame, .@"task.status", slow_params)).object.get("status").?.string);
     inline for (.{ .{ finite.receipt.task, .completed }, .{ inbox.receipt.task, .completed }, .{ cancelled.receipt.task, .cancelled } }) |expected| {
         var task = try service.task(frame, expected[0]);
         defer task.deinit();
@@ -1869,6 +1879,7 @@ test "eligible round robin progresses pure question inbox cancellation and repli
     var finished = try service.task(frame, slow.receipt.task);
     defer finished.deinit();
     try std.testing.expectEqual(.completed, finished.value.outcome_kind);
+    try std.testing.expectEqualStrings("completed", (try client.call(frame, .@"task.status", slow_params)).object.get("status").?.string);
     try std.testing.expectEqual(1, FairCapture.preparations);
     try std.testing.expectEqual(1, try namespace.store.capabilityAttempts(slow.receipt.task, "fair.leaf.v1"));
     try std.testing.expect(try service.pump(frame) == .idle);
