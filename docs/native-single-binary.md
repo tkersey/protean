@@ -167,6 +167,20 @@ preparing or charging another attempt. Callbacks bind the task, occurrence,
 attempt, and owner epoch. Owned tasks use the supplied allocator; there is no
 fixed task-count quota. Both native front ends use this scheduling owner.
 
+Queue waits are measured in scheduling opportunities, not milliseconds. A pump
+rotates each examined task to the back and returns after one actual transition;
+new admissions append behind existing continuations. With a fixed set of `N`
+continuously eligible tasks and continued host pumping, a task has at most `N-1`
+peer transitions ahead of its next turn. A drive executes at most 256 Kosmos
+steps; storage, restoration and adapter work do not have a wall-clock deadline.
+The deterministic native fixture checks both initial yielders reach execution
+revision 1 in two pumps and a newcomer cannot overtake queued continuations.
+With one acquisition held and six peers admitted, its 35-pump observation window
+shows pure/inbox completion, cancellation, question presentation and repeated
+yield progress; answering that question completes within the next eight pumps.
+Those windows are verified upper bounds for that fixture, not measured latency
+percentiles or a bound on arbitrary application completion.
+
 Each drive publishes an outcome and owning checkpoint receipt together. The
 Driver retains the receipt before storage publication, including if that commit
 fails and fences the namespace. Switching tasks transfers the committed receipt
