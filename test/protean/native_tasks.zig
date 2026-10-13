@@ -1997,6 +1997,16 @@ fn awaitLookup(io: std.Io, worker: *native.testing.Worker) !void {
 }
 
 test "pure recovery without a capture adapter settles the original typed binding after restart" {
+    try pureRecovery(.valid);
+}
+
+test "pure recovery retains unresolved derivations without swallowing resource or custody failures" {
+    for ([_]PureRecoveryCase{ .rejected, .malformed, .unsupported, .unavailable, .inconclusive, .cancelled, .capacity, .allocation, .corrupt, .storage, .busy, .invalid_state }) |scenario| try pureRecovery(scenario);
+}
+
+const PureRecoveryCase = enum { valid, rejected, malformed, unsupported, unavailable, inconclusive, cancelled, capacity, allocation, corrupt, storage, busy, invalid_state };
+
+fn pureRecovery(scenario: PureRecoveryCase) !void {
     const a = std.testing.allocator;
     const io = std.testing.io;
     var arena = std.heap.ArenaAllocator.init(a);
@@ -2019,6 +2029,22 @@ test "pure recovery without a capture adapter settles the original typed binding
         }
         fn rederive(ctx: native.registry.ProjectionContext, _: native.registry.RecoveryInput, payload: []const u8, prepared: ?[]const u8) ![]u8 {
             try std.testing.expect(prepared == null);
+            const selected = std.meta.stringToEnum(PureRecoveryCase, ctx.profile) orelse return error.InvalidProfile;
+            switch (selected) {
+                .valid => {},
+                .rejected => return error.ContradictoryEvidence,
+                .malformed => return ctx.allocator.dupe(u8, &.{0}),
+                .unsupported => return error.UnsupportedRecovery,
+                .unavailable => return error.RecoveryUnavailable,
+                .inconclusive => return error.RecoveryInconclusive,
+                .cancelled => return error.Canceled,
+                .capacity => return error.Capacity,
+                .allocation => return error.OutOfMemory,
+                .corrupt => return error.CorruptState,
+                .storage => return error.StorageUnavailable,
+                .busy => return error.Busy,
+                .invalid_state => return error.InvalidState,
+            }
             var input = try protean.contracts.decodeOwned(u32, ctx.allocator, payload);
             defer input.deinit();
             return protean.contracts.encodeOwned(u32, ctx.allocator, input.value + 1);
@@ -2029,7 +2055,7 @@ test "pure recovery without a capture adapter settles the original typed binding
     var handlers = try native.Registry.init(a, &.{ leaf, native.question(u32, u32, .{ .identity = "fair.question.v1", .resource_role = "user", .answer_schema_id = "fair.answer.v1" }, FairCapture.present), native.inbox.declaration(u32) });
     defer handlers.deinit();
     var grants: [3]native.registry.Grant = undefined;
-    const profile: native.tasks.Profile = .{ .id = "pure", .runtime_identity = @splat(42), .bytes = "frozen-profile", .authority = .{ .grants = &grants, .principal = "test", .tenant = "test" } };
+    const profile: native.tasks.Profile = .{ .id = "pure", .runtime_identity = @splat(42), .bytes = @tagName(scenario), .authority = .{ .grants = &grants, .principal = "test", .tenant = "test" } };
     for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(frame, application.image_identity) };
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -2047,9 +2073,57 @@ test "pure recovery without a capture adapter settles the original typed binding
     service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
     var unknown = try service.task(frame, original.task);
     defer unknown.deinit();
+    const before = namespace.store.head;
+    const original_attempt = (try namespace.store.recordBytes(frame, "attempt", original.attempt, original.task)).?;
+    if (scenario == .capacity or scenario == .allocation or scenario == .corrupt or scenario == .storage or scenario == .busy or scenario == .invalid_state) {
+        const expected_error = switch (scenario) {
+            .capacity => error.Capacity,
+            .allocation => error.OutOfMemory,
+            .corrupt => error.CorruptState,
+            .storage => error.StorageUnavailable,
+            .busy => error.Busy,
+            .invalid_state => error.InvalidState,
+            else => unreachable,
+        };
+        try std.testing.expectError(expected_error, service.reconcile(frame, "pure-recover", original.task, unknown.value.revision, original.occurrence, original.attempt, .rederive));
+        try std.testing.expectEqualDeep(before, namespace.store.head);
+        try std.testing.expectEqualStrings(original_attempt, (try namespace.store.recordBytes(frame, "attempt", original.attempt, original.task)).?);
+        return;
+    }
     const admitted = try service.reconcile(frame, "pure-recover", original.task, unknown.value.revision, original.occurrence, original.attempt, .rederive);
     var recovery = try service.reconciliation(frame, original.task, admitted.receipt.reconciliation.?);
     defer recovery.deinit();
+    if (scenario != .valid) {
+        try std.testing.expect(recovery.value.outcome == .unresolved and recovery.value.provenance == .none);
+        const expected: @TypeOf(recovery.value.outcome.unresolved) = switch (scenario) {
+            .rejected, .malformed => .rejected,
+            .unsupported => .unsupported,
+            .unavailable, .cancelled => .unavailable,
+            .inconclusive => .inconclusive,
+            else => unreachable,
+        };
+        try std.testing.expectEqual(expected, recovery.value.outcome.unresolved);
+        try std.testing.expectEqualStrings(original_attempt, (try namespace.store.recordBytes(frame, "attempt", original.attempt, original.task)).?);
+        var unresolved = try service.task(frame, original.task);
+        defer unresolved.deinit();
+        try std.testing.expectEqual(.unknown, try service.status(frame, unresolved.value));
+        try std.testing.expectEqual(unknown.value.inference_attempts, unresolved.value.inference_attempts);
+        try std.testing.expectEqual(unknown.value.inference_request_bytes, unresolved.value.inference_request_bytes);
+        try std.testing.expectEqual(unknown.value.inference_output_tokens, unresolved.value.inference_output_tokens);
+        try std.testing.expectError(error.UnsettledOccurrence, service.resumeTask(frame, "cannot-reissue", original.task, unresolved.value.revision));
+        try service.close(frame);
+        try namespace.close();
+        namespace = try native.Namespace.open(a, io, path);
+        service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+        const sealed = namespace.store.head;
+        const replay = try service.reconcile(frame, "pure-recover", original.task, unknown.value.revision, original.occurrence, original.attempt, .rederive);
+        try std.testing.expect(replay.replayed);
+        try std.testing.expectEqualDeep(admitted.receipt, replay.receipt);
+        try std.testing.expectEqualDeep(sealed, namespace.store.head);
+        try std.testing.expect(try service.pump(frame) == .idle);
+        _ = try namespace.store.auditRetention(handlers, application.image_identity);
+        return;
+    }
     try std.testing.expect(recovery.value.outcome == .reply_settled and recovery.value.provenance == .rederived);
     try std.testing.expect(recovery.value.prepared == null and recovery.value.original_capture == null);
     var original_occurrence = try protean.contracts.decodeOwned(native.testing.occurrence.Occurrence, frame, try namespace.store.object(frame, recovery.value.original_occurrence, null));

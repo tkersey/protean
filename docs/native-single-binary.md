@@ -207,6 +207,13 @@ The provider currently has no receipt-retrieval adapter: its mechanism list is
 empty and a rederivation request records an unresolved result without another
 inference attempt.
 
+An unavailable, inconclusive, or rejected pure derivation also records an
+unresolved result and preserves the unknown attempt. Replaying its operation
+returns that receipt after restart. Allocation and storage/custody failures
+remain operational errors; they do not certify an unresolved result or permit
+another invocation. Original request, prepared-input, and profile binding checks
+must pass before the registered derivation can produce an admitted result.
+
 A capability with a compiled receipt adapter also advertises `lookup` when its
 current grant permits retrieval. Selecting it seals a pending reconciliation and
 receipt before dispatch through the existing worker. Replays cannot launch another

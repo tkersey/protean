@@ -641,9 +641,16 @@ pub fn Service(comptime Types: type) type {
                     if (!same(prepared, expected_prepared)) return error.CorruptState;
                 }
             }
-            const recovered: ?registry.Rederived = if (recovery == .rederive) self.rederiveUnknown(a, task_id, occurrence_id, attempt_id) catch |err| switch (err) {
-                error.UnsupportedRecovery => null,
-                else => return err,
+            var unresolved: @FieldType(@FieldType(state.Reconciliation, "outcome"), "unresolved") = .unsupported;
+            const recovered: ?registry.Rederived = if (recovery == .rederive) self.rederiveUnknown(a, task_id, occurrence_id, attempt_id) catch |err| blk: {
+                unresolved = switch (err) {
+                    error.UnsupportedRecovery => .unsupported,
+                    error.RecoveryUnavailable => .unavailable,
+                    error.RecoveryInconclusive => .inconclusive,
+                    error.RecoveryRejected => .rejected,
+                    else => return err,
+                };
+                break :blk null;
             } else null;
             defer if (recovered) |result| switch (result) {
                 inline else => |bytes| a.free(bytes),
@@ -675,7 +682,7 @@ pub fn Service(comptime Types: type) type {
                 .mechanism = try name(if (entry.declaration.recovery) |adapter| adapter.identity else "unavailable"),
                 .mechanism_version = if (entry.declaration.recovery) |adapter| adapter.version else 0,
                 .provenance = if (recovered != null) .rederived else .none,
-                .outcome = .{ .unresolved = .unsupported },
+                .outcome = .{ .unresolved = unresolved },
                 .selection = recovery,
                 .owner_epoch = if (lookup) self.owner_epoch else null,
             };

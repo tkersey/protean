@@ -151,6 +151,9 @@ pub const RecoveryAdapter = struct {
     version: u32,
     /// Pure computation: only immutable objects and original prepared bytes.
     /// No Context, IO, credentials, live filesystem, or environment handle.
+    /// RecoveryUnavailable / RecoveryInconclusive report a missing result;
+    /// other semantic failures become RecoveryRejected after binding checks.
+    /// Resource and storage/custody failures remain operational errors.
     rederive: ?*const fn (ProjectionContext, RecoveryInput, []const u8, ?[]const u8) anyerror![]u8 = null,
     lookup: ?ReceiptLookup = null,
 };
@@ -330,15 +333,35 @@ pub const Registry = struct {
             return result;
         }
         const rederive_result = adapter.rederive orelse return error.UnsupportedRecovery;
-        if (entry.declaration.capture != null) return .{ .capture = try rederive_result(ctx, input, request.value.binding.payload, prepared) };
-        const reply = try rederive_result(ctx, input, request.value.binding.payload, null);
+        const reply = rederive_result(ctx, input, request.value.binding.payload, prepared) catch |err| return rederivationError(err);
         errdefer ctx.allocator.free(reply);
+        if (entry.declaration.capture != null) return .{ .capture = reply };
         var schema = try data.schema.decode(ctx.allocator, entry.resume_schema);
         defer schema.deinit();
-        try data.schema.validateValue(ctx.allocator, schema.descriptor, reply);
+        data.schema.validateValue(ctx.allocator, schema.descriptor, reply) catch |err| return rederivationError(err);
         return .{ .reply = reply };
     }
 };
+
+// Only the registered computation and its result validation pass here. Failures
+// establishing the original request/prepared/profile binding remain errors;
+// they cannot be turned into an admitted recovery of a different request.
+fn rederivationError(err: anyerror) anyerror {
+    return switch (err) {
+        error.OutOfMemory,
+        error.Capacity,
+        error.StorageUnavailable,
+        error.CorruptState,
+        error.InvalidState,
+        error.Busy,
+        error.UnsupportedRecovery,
+        error.RecoveryUnavailable,
+        error.RecoveryInconclusive,
+        => err,
+        error.Canceled => error.RecoveryUnavailable,
+        else => error.RecoveryRejected,
+    };
+}
 
 fn recoveryObject(ctx: ProjectionContext, ref: ObjectReference) ![]u8 {
     const bytes = try ctx.object(ref, std.math.cast(usize, ref.bytes) orelse return error.Capacity);
@@ -506,10 +529,7 @@ test "pure recovery binds frozen inputs and validates the original reply schema 
     try std.testing.expectError(error.Denied, registry.rederive(foreign, original));
     Handler.invalid_reply = true;
     defer Handler.invalid_reply = false;
-    if (registry.rederive(ctx, original)) |invalid| {
-        a.free(invalid.reply);
-        return error.InvalidReplyAccepted;
-    } else |err| try std.testing.expect(err != error.EnvironmentMustNotRun);
+    try std.testing.expectError(error.RecoveryRejected, registry.rederive(ctx, original));
 }
 
 test "schema-specialized capability families resolve independently of declaration order" {
