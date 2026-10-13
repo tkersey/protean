@@ -1,8 +1,11 @@
-# Horos 4 authoring in Protean 4
+# Canonical authoring in Protean 5
 
-Protean uses Horos's canonical shape-preserving authoring interface. Its native
-host and wire contracts remain unchanged: model invocation v7–v10, ABI 3, the
-current native host/build interfaces, and state format 11 keep their owners.
+Protean 5 uses Horos 5's canonical shape-preserving authoring interface. The
+current adaptive application uses invocation v11, context v6, output v4, and
+native state format 12. Disposable examples are recreated; retired adaptive v5
+tasks and state-format 11 databases are not migrated. See
+[saved state and portability](native-single-binary.md#saved-state-and-portability).
+The core ABI 3, BPI3, and PST3 identities remain unchanged.
 
 `Context.init(builder, registry)` creates one shared `context.author`.
 `context.schema(T)` returns `Schema(Shape(T))`; `context.literal(T, value)` returns
