@@ -243,6 +243,9 @@ automatically recomputing it. A new cancellation interrupts queued or running
 recovery while preserving unknown delivery. Cancellation requested before a later
 explicit reconciliation remains pending until recovery makes it legal to apply;
 it does not prevent that reconciliation from computing a result.
+If cancellation commits but interrupting queued recovery fails, the namespace is
+fenced until reopen marks that recovery interrupted. Retrying cancellation then
+returns its original receipt without dispatching recovery.
 
 A capability with a compiled receipt adapter also advertises `lookup` when its
 current grant permits retrieval. Selecting it seals a pending reconciliation and

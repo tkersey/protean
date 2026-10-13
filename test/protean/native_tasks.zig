@@ -2142,10 +2142,10 @@ test "pure recovery retains unresolved derivations without swallowing resource o
 }
 
 test "pure recovery work preserves peer progress cancellation and interrupted admission" {
-    for ([_]PureRecoveryCase{ .held, .held_cancel, .prior_cancel, .pending_cancel, .interrupted }) |scenario| try pureRecovery(scenario);
+    for ([_]PureRecoveryCase{ .held, .held_cancel, .prior_cancel, .pending_cancel, .pending_cancel_failure, .interrupted }) |scenario| try pureRecovery(scenario);
 }
 
-const PureRecoveryCase = enum { valid, rejected, malformed, unsupported, unavailable, inconclusive, cancelled, capacity, allocation, corrupt, storage, busy, invalid_state, unexpected, held, held_cancel, prior_cancel, pending_cancel, interrupted };
+const PureRecoveryCase = enum { valid, rejected, malformed, unsupported, unavailable, inconclusive, cancelled, capacity, allocation, corrupt, storage, busy, invalid_state, unexpected, held, held_cancel, prior_cancel, pending_cancel, pending_cancel_failure, interrupted };
 
 fn pureRecovery(scenario: PureRecoveryCase) !void {
     errdefer std.debug.print("pure recovery scenario: {s}\n", .{@tagName(scenario)});
@@ -2180,7 +2180,7 @@ fn pureRecovery(scenario: PureRecoveryCase) !void {
                 std.atomic.spinLoopHint();
             }
             switch (selected) {
-                .valid, .held, .held_cancel, .prior_cancel, .pending_cancel, .interrupted => {},
+                .valid, .held, .held_cancel, .prior_cancel, .pending_cancel, .pending_cancel_failure, .interrupted => {},
                 .rejected => return .rejected,
                 .malformed => return .{ .result = try ctx.allocator.dupe(u8, &.{0}) },
                 .unsupported => return .unsupported,
@@ -2235,9 +2235,40 @@ fn pureRecovery(scenario: PureRecoveryCase) !void {
         defer pending.deinit();
         try std.testing.expect(pending.value.outcome == .pending and pending.value.provenance == .none);
     }
-    if (scenario == .pending_cancel or scenario == .interrupted) {
+    if (scenario == .pending_cancel or scenario == .pending_cancel_failure or scenario == .interrupted) {
         if (scenario == .pending_cancel) {
             _ = try service.requestCancel(frame, "cancel-before-worker", original.task, "interrupt recovery");
+        } else if (scenario == .pending_cancel_failure) {
+            // Advance allocation failure through admission until cancellation
+            // commits. Earlier failures must roll back and remain retryable;
+            // a failure after that commit must prevent recovery dispatch.
+            const before_cancel = namespace.store.head;
+            var fail_index: usize = 0;
+            while (true) : (fail_index += 1) {
+                var failing = std.testing.FailingAllocator.init(frame, .{ .fail_index = fail_index });
+                _ = service.requestCancel(failing.allocator(), "cancel-before-worker", original.task, "interrupt recovery") catch |err| {
+                    try std.testing.expectEqual(error.OutOfMemory, err);
+                    if (namespace.store.head.generation == before_cancel.generation) {
+                        try std.testing.expect(!namespace.store.fenced);
+                        continue;
+                    }
+                    if (!namespace.store.fenced) std.debug.print("cancellation committed at allocation failure {d} but recovery can still dispatch\n", .{fail_index});
+                    try std.testing.expect(namespace.store.fenced);
+                    try std.testing.expectError(error.StorageUnavailable, service.pump(frame));
+                    try std.testing.expectError(error.StorageUnavailable, service.requestCancel(frame, "cancel-before-worker", original.task, "interrupt recovery"));
+                    break;
+                };
+                return error.ExpectedAllocationFailureAfterCancellationCommit;
+            }
+            try service.close(frame);
+            try namespace.close();
+            namespace = try native.Namespace.open(a, io, path);
+            service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+            const replay = try service.requestCancel(frame, "cancel-before-worker", original.task, "interrupt recovery");
+            try std.testing.expect(replay.replayed);
+            var cancelled = try service.task(frame, original.task);
+            defer cancelled.deinit();
+            try std.testing.expectEqualStrings("interrupt recovery", cancelled.value.cancellation.?.bytes);
         } else {
             const archive = try std.fmt.allocPrint(frame, "{s}/pending-pure.agnx", .{buffer[0..length]});
             _ = try service.exportCheckpoint(frame, original.task, archive);

@@ -544,6 +544,9 @@ pub fn Service(comptime Types: type) type {
             try self.event(&value, .cancellation_requested, "{}");
             const admitted = try self.receipt(a, .cancel, id, request, value, .cancellation_requested, null, null);
             try self.persist(value, previous, "task.cancel");
+            // The receipt now survives retries. If applying its cancellation
+            // fails, only restart recovery may resume this owner's work.
+            errdefer self.store().fence();
             if (self.work) |*work| if (same(&work.task, &task_id)) {
                 work.cancel_requested = true;
             };
