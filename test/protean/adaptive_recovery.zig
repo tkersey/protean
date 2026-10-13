@@ -175,7 +175,53 @@ test "adaptive malformed capture remains private and portable without claiming s
     try adaptiveRecovery(false, .malformed);
 }
 
-fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { none, snapshot, provider, malformed }) !void {
+test "adaptive generated tool construction rederives the exact capture through recovery admission" {
+    try adaptiveRecovery(false, .tool_build);
+}
+
+test "adaptive generated tool execution rederives retained code and inputs through recovery admission" {
+    try adaptiveRecovery(false, .tool_run);
+}
+
+fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.discovery.Assets, dir: std.Io.Dir, path: []const u8) !native.configuration.Admitted {
+    const base = try environment.configure(a, io, .{ .offline = true }, null, assets);
+    const policy = try native.adaptive_responses.Admission(t.P).policy(a, base.bytes);
+    try dir.createDir(io, "snapshot", .default_dir);
+    try dir.writeFile(io, .{ .sub_path = "snapshot/input.zig", .data = "pub const retained = true;\n" });
+    const config: t.ConfigurationV3 = .{
+        .schema = .{ .bytes = "adaptive-agent.configuration.v3" },
+        .adaptive = .{
+            .workspace = .{ .bytes = "generated-recovery" },
+            .snapshot_root = .{ .bytes = try std.fmt.allocPrint(a, "{s}/snapshot", .{path}) },
+            .endpoint = .{ .bytes = "https://127.0.0.1:1/v1/responses" },
+            .audience = .{ .bytes = "generated-recovery" },
+            .profiles = policy.profiles,
+            .initial_profile = .{ .bytes = "analysis" },
+            .initial_effort = .medium,
+            .skills = .{ .items = &.{} },
+        },
+        .tools = .{ .build = true, .run = true, .inputs = .{ .items = &.{.{
+            .id = .{ .bytes = "retained-table" },
+            .description = .{ .bytes = "Immutable generated-tool input" },
+            .rows = .{ .items = &.{.{ .id = 1, .key = 10, .value = 100, .group = 1 }} },
+            .relation = .{ .items = &.{.{ .id = 2, .key = 20, .value = 200, .group = 2 }} },
+            .selected = .{ .items = &.{10} },
+        }} } },
+    };
+    try dir.writeFile(io, .{ .sub_path = "config.json", .data = try native.json.canonical(a, try native.values.toJson(t.ConfigurationV3, a, config)) });
+    // Configuration admits local inputs normally. Provider acquisition is
+    // forbidden by the test registry, so no TLS or network operation occurs.
+    try dir.writeFile(io, .{ .sub_path = "unused-trust-root", .data = "unused by the synthetic provider" });
+    return environment.configure(a, io, .{
+        .offline = false,
+        .test_provider = true,
+        .config_path = try std.fmt.allocPrint(a, "{s}/config.json", .{path}),
+        .trust_root_path = try std.fmt.allocPrint(a, "{s}/unused-trust-root", .{path}),
+    }, null, assets);
+}
+
+fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { none, snapshot, provider, malformed, tool_build, tool_run }) !void {
+    const generated = recovery_probe == .tool_build or recovery_probe == .tool_run;
     var budget: kosmos.AllocationBudget = .{ .parent = std.testing.allocator, .limit = 64 * 1024 * 1024 };
     const a = budget.allocator();
     const io = std.testing.io;
@@ -191,16 +237,24 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
     var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "adaptive-unit", .image_identity = admitted_image.identity() };
     defer application.deinit();
     application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
-    var handlers = try native.Registry.init(a, &environment.handlers);
+    var declarations = environment.handlers;
+    if (generated) for (&declarations) |*entry| {
+        if (entry.inference) entry.capture.?.acquire = struct {
+            fn forbidden(_: native.Context, _: []const u8) !native.registry.Acquisition {
+                return error.ProviderAcquisitionForbidden;
+            }
+        }.forbidden;
+    };
+    var handlers = try native.Registry.init(a, &declarations);
     defer handlers.deinit();
-    const configured = try environment.configure(permanent, io, .{ .offline = true, .scratch_allocator = a }, null, assets);
-    var grants: [environment.handlers.len]native.registry.Grant = undefined;
-    const profile: native.tasks.Profile = .{ .id = configured.id, .runtime_identity = @splat(73), .bytes = configured.bytes, .environment = configured.environment, .resources = configured.resources, .authority = .{ .grants = &grants, .principal = "adaptive-unit", .tenant = "local", .inference = true } };
-    for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var buffer: [4096]u8 = undefined;
     const length = try temporary.dir.realPath(io, &buffer);
+    const configured = if (generated) try generatedToolConfiguration(permanent, io, assets, temporary.dir, buffer[0..length]) else try environment.configure(permanent, io, .{ .offline = true, .scratch_allocator = a }, null, assets);
+    var grants: [environment.handlers.len]native.registry.Grant = undefined;
+    const profile: native.tasks.Profile = .{ .id = configured.id, .runtime_identity = @splat(73), .bytes = configured.bytes, .environment = configured.environment, .resources = configured.resources, .authority = .{ .grants = &grants, .principal = "adaptive-unit", .tenant = "local", .inference = true } };
+    for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
     const path = try std.fmt.allocPrint(permanent, "{s}/adaptive", .{buffer[0..length]});
     var namespace = try native.Namespace.open(a, io, path);
     var namespace_live = true;
@@ -216,6 +270,7 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
     _ = try service.message(permanent, "large-followup-one", task, .{ .message = .{ .bytes = &long_followup } });
     _ = try service.message(permanent, "large-followup-two", task, .{ .message = .{ .bytes = &long_followup } });
     var model_calls: usize = 0;
+    var tool_acquisitions: usize = 0;
     var last_model_capture: ?[32]u8 = null;
     var restarted = false;
     var witnessed = false;
@@ -287,9 +342,37 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
             const work = step.work;
             var request = try protocol.decode(protocol.Request, frame, work.request);
             defer request.deinit();
-            const context: native.Context = .{ .allocator = frame, .io = io, .authority = &profile.authority, .task_id = "adaptive-unit", .profile = profile.bytes, .environment = profile.environment };
+            const context: native.Context = .{ .allocator = frame, .io = io, .authority = &profile.authority, .task_id = &std.fmt.bytesToHex(task, .lower), .profile = profile.bytes, .environment = profile.environment };
             const reply = if (work.entry.declaration.capture) |adapter| blk: {
                 maximum_prepared = @max(maximum_prepared, work.prepared.?.len);
+                if (generated and work.entry.declaration.inference) {
+                    var prepared = try protean.contracts.decodeOwned(t.P.AdaptivePrepared, frame, work.prepared.?);
+                    defer prepared.deinit();
+                    const name: []const u8 = switch (model_calls) {
+                        0 => "skill_set",
+                        1 => "tool_build",
+                        2 => "tool_run",
+                        else => return error.UnexpectedInference,
+                    };
+                    const arguments = switch (model_calls) {
+                        0 => "{\"operation\":\"load\",\"skill_id\":\"tool-construction\",\"version\":\"1\",\"residency\":\"resident\",\"expected_revision\":0,\"reason\":\"Recover admitted pure computations.\"}",
+                        1 => try std.json.Stringify.valueAlloc(frame, .{ .proposal_json = try constructionRecipe(frame, &.{.{ .component = "swap" }}) }, .{}),
+                        2 => blk_args: {
+                            const prior = prepared.value.request.results.items;
+                            try std.testing.expectEqual(1, prior.len);
+                            const built = (try native.json.parse(frame, prior[0].output.bytes, .{})).value;
+                            try std.testing.expectEqualStrings("structurally_admitted", built.object.get("disposition").?.string);
+                            const root = (try native.json.parse(frame, profile.bytes, .{})).value;
+                            const policy = try native.values.fromJson(t.ToolPolicy, frame, root.object.get("tool_construction").?);
+                            const input = policy.inputs.items[0].object;
+                            break :blk_args try std.json.Stringify.valueAlloc(frame, .{ .tool_ref = built.object.get("tool_ref").?.string, .input_ref = try std.fmt.allocPrint(frame, "{s}:{d}", .{ std.fmt.bytesToHex(input.digest, .lower), input.bytes }) }, .{});
+                        },
+                        else => unreachable,
+                    };
+                    const call = try std.fmt.allocPrint(frame, "generated-{d}", .{model_calls});
+                    const provider = try std.json.Stringify.valueAlloc(frame, .{ .status = "completed", .@"error" = @as(?u8, null), .output = .{.{ .type = "function_call", .status = "completed", .call_id = call, .name = name, .arguments = arguments }} }, .{});
+                    break :blk try protean.contracts.encodeOwned(native.responses.Raw, frame, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = provider } });
+                }
                 if (work.entry.declaration.inference and model_calls == 8) {
                     var prepared = try protean.contracts.decodeOwned(t.P.AdaptivePrepared, frame, work.prepared.?);
                     defer prepared.deinit();
@@ -339,6 +422,7 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                     const provider = try std.json.Stringify.valueAlloc(frame, .{ .id = call, .status = "completed", .@"error" = @as(?u8, null), .output = .{.{ .type = "function_call", .status = "completed", .call_id = call, .name = name, .arguments = arguments }} }, .{});
                     break :blk try protean.contracts.encodeOwned(native.responses.Raw, frame, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = provider } });
                 }
+                if (generated and (std.mem.eql(u8, work.entry.declaration.identity, t.tool_build_identity) or std.mem.eql(u8, work.entry.declaration.identity, t.tool_run_identity))) tool_acquisitions += 1;
                 const acquired = try adapter.acquire(context, work.prepared.?);
                 if (acquired != .captured) return error.UnexpectedAcquisitionFailure;
                 break :blk acquired.captured;
@@ -401,7 +485,10 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                 _ = try imported.exportCheckpoint(frame, task, second_archive);
                 return;
             }
-            if ((recovery_probe == .snapshot and work.entry.declaration.recovery != null) or (recovery_probe == .provider and inference)) {
+            if ((recovery_probe == .snapshot and work.entry.declaration.recovery != null) or (recovery_probe == .provider and inference) or
+                (recovery_probe == .tool_build and std.mem.eql(u8, work.entry.declaration.identity, t.tool_build_identity)) or
+                (recovery_probe == .tool_run and std.mem.eql(u8, work.entry.declaration.identity, t.tool_run_identity)))
+            {
                 const occurrence_id = work.occurrence;
                 const attempt_id = work.attempt;
                 try service.unknown(frame, work);
@@ -516,6 +603,26 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                         defer interpreted.deinit();
                         try std.testing.expect(interpreted.value.outcome == .reply_settled);
                         try std.testing.expect(interpreted.value.previous != null);
+                        if (generated) {
+                            const bound = try copy_namespace.store.object(frame, interpreted.value.outcome.reply_settled, null);
+                            var result = try protocol.decode(protocol.Result, frame, bound);
+                            defer result.deinit();
+                            var tool_reply = try protean.contracts.decodeOwned(t.ToolReply, frame, result.value.value);
+                            defer tool_reply.deinit();
+                            const artifact = try copy_namespace.store.object(frame, .{ .digest = tool_reply.value.artifact.digest, .bytes = tool_reply.value.artifact.bytes }, null);
+                            var tool_artifact = try protean.contracts.decodeOwned(t.ToolArtifact, frame, artifact);
+                            defer tool_artifact.deinit();
+                            if (recovery_probe == .tool_build) {
+                                try std.testing.expect(tool_artifact.value.outcome == .built and tool_reply.value.program != null);
+                            } else {
+                                try std.testing.expect(tool_artifact.value.outcome == .ran and tool_reply.value.evidence != null);
+                                var table = try protean.contracts.decodeOwned(t.tool_types.Table, frame, tool_artifact.value.outcome.ran.value.bytes);
+                                defer table.deinit();
+                                try std.testing.expectEqualDeep(&[_]t.tool_types.Row{auditRow(2, 20, 200, 2)}, table.value.rows.items);
+                                try std.testing.expectEqualDeep(&[_]t.tool_types.Row{auditRow(1, 10, 100, 1)}, table.value.relation.items);
+                            }
+                            try std.testing.expectEqual(@as(usize, if (recovery_probe == .tool_build) 1 else 2), tool_acquisitions);
+                        }
                     }
                 }
                 namespace = try native.Namespace.open(a, io, path);

@@ -1931,7 +1931,10 @@ const LookupFixture = struct {
         return mac;
     }
     fn receipt(a: std.mem.Allocator, input: native.registry.RecoveryInput, kind: Kind) ![]u8 {
-        const raw = try C.encodeOwned(u32, a, 99);
+        return receiptValue(a, input, kind, 99);
+    }
+    fn receiptValue(a: std.mem.Allocator, input: native.registry.RecoveryInput, kind: Kind, value: u32) ![]u8 {
+        const raw = try C.encodeOwned(u32, a, value);
         defer a.free(raw);
         const body: Body = .{ .binding = try binding(a, input), .kind = kind, .raw = .{ .bytes = raw } };
         return C.encodeOwned(Evidence, a, .{ .body = body, .signature = try sign(a, body) });
@@ -1991,6 +1994,79 @@ fn awaitLookup(io: std.Io, worker: *native.testing.Worker) !void {
         try io.sleep(.fromMilliseconds(1), .awake);
     }
     try worker.join();
+}
+
+test "pure recovery without a capture adapter settles the original typed binding after restart" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const frame = arena.allocator();
+    var compiled = try protean.compile(a, protean.system(.{ .InitialArgs = u32, .Result = u32, .Failure = void, .application = FairApplication }));
+    defer compiled.deinit();
+    const image = try frame.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
+    _ = try compiled.encode(a, image);
+    const admitted_image = try horos.data.program_image.Admitted.decode(a, image);
+    defer admitted_image.deinit();
+    const manifest = try ownerManifest(frame, image, admitted_image.identity(), "pure-recovery-owner");
+    const assets: native.discovery.Assets = .{ .image = image, .application = "pure-recovery-owner", .manifest = manifest };
+    var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "unit", .image_identity = admitted_image.identity() };
+    defer application.deinit();
+    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
+    const Pure = struct {
+        fn invoke(_: native.Context, _: u32) !u32 {
+            return error.OriginalInvocationForbidden;
+        }
+        fn rederive(ctx: native.registry.ProjectionContext, _: native.registry.RecoveryInput, payload: []const u8, prepared: ?[]const u8) ![]u8 {
+            try std.testing.expect(prepared == null);
+            var input = try protean.contracts.decodeOwned(u32, ctx.allocator, payload);
+            defer input.deinit();
+            return protean.contracts.encodeOwned(u32, ctx.allocator, input.value + 1);
+        }
+    };
+    var leaf = native.leaf(u32, u32, .{ .identity = "fair.leaf.v1", .resource_role = "local" }, Pure.invoke);
+    leaf.recovery = .{ .identity = "pure-increment.recovery.v1", .version = 1, .rederive = Pure.rederive };
+    var handlers = try native.Registry.init(a, &.{ leaf, native.question(u32, u32, .{ .identity = "fair.question.v1", .resource_role = "user", .answer_schema_id = "fair.answer.v1" }, FairCapture.present), native.inbox.declaration(u32) });
+    defer handlers.deinit();
+    var grants: [3]native.registry.Grant = undefined;
+    const profile: native.tasks.Profile = .{ .id = "pure", .runtime_identity = @splat(42), .bytes = "frozen-profile", .authority = .{ .grants = &grants, .principal = "test", .tenant = "test" } };
+    for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(frame, application.image_identity) };
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var buffer: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(io, &buffer);
+    const path = try std.fmt.allocPrint(frame, "{s}/pure", .{buffer[0..length]});
+    var namespace = try native.Namespace.open(a, io, path);
+    defer namespace.close() catch unreachable;
+    var service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    defer service.close(frame) catch unreachable;
+    const original = try lookupUnknown(&service, frame, "pure-original");
+    try service.close(frame);
+    try namespace.close();
+    namespace = try native.Namespace.open(a, io, path);
+    service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    var unknown = try service.task(frame, original.task);
+    defer unknown.deinit();
+    const admitted = try service.reconcile(frame, "pure-recover", original.task, unknown.value.revision, original.occurrence, original.attempt, .rederive);
+    var recovery = try service.reconciliation(frame, original.task, admitted.receipt.reconciliation.?);
+    defer recovery.deinit();
+    try std.testing.expect(recovery.value.outcome == .reply_settled and recovery.value.provenance == .rederived);
+    try std.testing.expect(recovery.value.prepared == null and recovery.value.original_capture == null);
+    var original_occurrence = try protean.contracts.decodeOwned(native.testing.occurrence.Occurrence, frame, try namespace.store.object(frame, recovery.value.original_occurrence, null));
+    defer original_occurrence.deinit();
+    try std.testing.expect(original_occurrence.value.state == .unknown);
+    var bound = try protocol.decode(protocol.Result, frame, try namespace.store.object(frame, recovery.value.outcome.reply_settled, null));
+    defer bound.deinit();
+    try std.testing.expectEqualSlices(u8, &original_occurrence.value.request, &bound.value.request_identity);
+    try std.testing.expectEqualSlices(u8, &.{ 2, 0, 0, 0 }, bound.value.value);
+    for (0..8) |_| try std.testing.expect(try service.pump(frame) != .work);
+    var completed = try service.task(frame, original.task);
+    defer completed.deinit();
+    try std.testing.expect(completed.value.outcome_kind == .completed);
+    try std.testing.expectEqualSlices(u8, bound.value.value, try namespace.store.object(frame, completed.value.result.?, null));
+    try std.testing.expectEqual(1, try namespace.store.capabilityAttempts(original.task, "fair.leaf.v1"));
+    try std.testing.expect((try service.reconcile(frame, "pure-recover", original.task, unknown.value.revision, original.occurrence, original.attempt, .rederive)).replayed);
+    _ = try namespace.store.auditRetention(handlers, application.image_identity);
 }
 
 test "receipt lookup retains exclusive admission and verifies evidence through the existing worker" {
@@ -2244,4 +2320,158 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
     try std.testing.expect(abandoned.value.outcome == .unresolved and abandoned.value.outcome.unresolved == .interrupted);
     try std.testing.expectError(error.StaleOccurrence, service.acquire(frame, fenced_work, "late evidence"));
     try std.testing.expectEqual(2, fixture.calls.load(.acquire));
+
+    // Authentication does not certify interpretation. Retain the authentic
+    // bytes and admission even when the original interpreter rejects them.
+    const malformed = try lookupUnknown(&service, frame, "authentic-invalid-capture");
+    var malformed_task = try service.task(frame, malformed.task);
+    defer malformed_task.deinit();
+    const malformed_admission = try service.reconcile(frame, "lookup-invalid-capture", malformed.task, malformed_task.value.revision, malformed.occurrence, malformed.attempt, .lookup);
+    const malformed_work = (try service.pump(frame)).work;
+    var malformed_record = try protean.contracts.decodeOwned(State.Reconciliation, frame, malformed_work.recovery.?.body);
+    defer malformed_record.deinit();
+    var malformed_request = try protocol.decode(protocol.Request, frame, malformed_work.request);
+    defer malformed_request.deinit();
+    const malformed_evidence = try LookupFixture.receiptValue(frame, native.registry.RecoveryInput.fromReconciliation(malformed_record.value, malformed_request.value.request_identity, true), .capture, 98);
+    try service.acquire(frame, malformed_work, malformed_evidence);
+    try std.testing.expect(try service.pump(frame) == .waiting);
+    var rejected_capture = try service.reconciliation(frame, malformed.task, malformed_admission.receipt.reconciliation.?);
+    defer rejected_capture.deinit();
+    try std.testing.expect(rejected_capture.value.outcome == .capture_admitted and rejected_capture.value.provenance == .authentic);
+    const rejected_archive = try std.fmt.allocPrint(frame, "{s}/authentic-invalid.agnx", .{buffer[0..length]});
+    _ = try service.exportCheckpoint(frame, malformed.task, rejected_archive);
+    try service.close(frame);
+    try namespace.close();
+    namespace = try native.Namespace.open(a, io, path);
+    service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    var retained_capture = try service.reconciliation(frame, malformed.task, malformed_admission.receipt.reconciliation.?);
+    defer retained_capture.deinit();
+    try std.testing.expectEqualDeep(rejected_capture.value.outcome, retained_capture.value.outcome);
+    var retry_capture = try service.task(frame, malformed.task);
+    defer retry_capture.deinit();
+    _ = try service.resumeTask(frame, "retry-invalid-capture", malformed.task, retry_capture.value.revision);
+    try std.testing.expect(try service.pump(frame) == .waiting);
+    var still_unsettled = try service.task(frame, malformed.task);
+    defer still_unsettled.deinit();
+    try std.testing.expectEqual(0, still_unsettled.value.inference_output_tokens);
+    try std.testing.expectEqual(1, still_unsettled.value.inference_attempts);
+    _ = try namespace.store.auditRetention(handlers, application.image_identity);
+
+    // Exercise both sides of the durable boundary at each recovery publication.
+    // A rejected write leaves the previous record; a failed seal leaves the
+    // entire committed successor, which reopen must recover without new I/O.
+    const Stage = enum { admission, capture, settlement };
+    const Fault = enum { write, commit, seal };
+    for ([_]Stage{ .admission, .capture, .settlement }) |stage| {
+        for ([_]Fault{ .write, .commit, .seal }) |fault| {
+            const seal_failure = fault == .seal;
+            const label = try std.fmt.allocPrint(frame, "{s}-{s}", .{ @tagName(stage), @tagName(fault) });
+            const subject = try lookupUnknown(&service, frame, label);
+            var subject_task = try service.task(frame, subject.task);
+            defer subject_task.deinit();
+            const operation_id = try std.fmt.allocPrint(frame, "lookup-{s}", .{label});
+            var recovery_id: ?State.Digest = null;
+            var selected: ?native.tasks.Work = null;
+            var acquired: ?[]const u8 = null;
+            if (stage != .admission) {
+                const accepted = try service.reconcile(frame, operation_id, subject.task, subject_task.value.revision, subject.occurrence, subject.attempt, .lookup);
+                recovery_id = accepted.receipt.reconciliation.?;
+                selected = (try service.pump(frame)).work;
+                var record = try protean.contracts.decodeOwned(State.Reconciliation, frame, selected.?.recovery.?.body);
+                defer record.deinit();
+                var request = try protocol.decode(protocol.Request, frame, selected.?.request);
+                defer request.deinit();
+                acquired = try LookupFixture.receipt(frame, native.registry.RecoveryInput.fromReconciliation(record.value, request.value.request_identity, true), .capture);
+                if (stage == .settlement) try service.acquire(frame, selected.?, acquired.?);
+            }
+            const previous_head = namespace.store.head;
+            if (seal_failure) {
+                try temporary.dir.createDir(io, "lookup/seal.next", .default_dir);
+            } else if (fault == .commit) {
+                // A deferred foreign-key violation permits every statement
+                // and fails the actual COMMIT. The temporary trigger affects
+                // only this connection; its insert rolls back with the operation.
+                // Use a declared deferred constraint: read-snapshot rollback
+                // during admission resets PRAGMA defer_foreign_keys.
+                try namespace.store.database.exec(
+                    \\CREATE TEMP TABLE recovery_parent(id INTEGER PRIMARY KEY);
+                    \\CREATE TEMP TABLE recovery_child(parent INTEGER REFERENCES recovery_parent(id) DEFERRABLE INITIALLY DEFERRED);
+                );
+                if (stage == .admission) {
+                    try namespace.store.database.exec(
+                        \\CREATE TEMP TRIGGER recovery_commit_failure AFTER INSERT ON operations BEGIN
+                        \\INSERT INTO recovery_child VALUES(1);
+                        \\END;
+                    );
+                } else try namespace.store.database.exec(
+                    \\CREATE TEMP TRIGGER recovery_commit_failure AFTER UPDATE OF body ON records WHEN NEW.kind='reconciliation' BEGIN
+                    \\INSERT INTO recovery_child VALUES(1);
+                    \\END;
+                );
+            } else try namespace.store.database.exec("PRAGMA query_only=ON;");
+            const expected_error = switch (fault) {
+                .write => error.StorageUnavailable,
+                .commit => error.Constraint,
+                .seal => error.UnsafeStatePath,
+            };
+            switch (stage) {
+                .admission => try std.testing.expectError(expected_error, service.reconcile(frame, operation_id, subject.task, subject_task.value.revision, subject.occurrence, subject.attempt, .lookup)),
+                .capture => try std.testing.expectError(expected_error, service.acquire(frame, selected.?, acquired.?)),
+                .settlement => try std.testing.expectError(expected_error, service.pump(frame)),
+            }
+            try std.testing.expect(service.work == null);
+            if (seal_failure) {
+                try std.testing.expectEqual(previous_head.generation + 1, namespace.store.head.generation);
+                try std.testing.expect(namespace.store.fenced);
+                try std.testing.expectError(error.StorageUnavailable, service.pump(frame));
+                try temporary.dir.deleteTree(io, "lookup/seal.next");
+            } else {
+                try std.testing.expectEqualDeep(previous_head, namespace.store.head);
+                if (fault == .commit) {
+                    try std.testing.expect(namespace.store.fenced);
+                    try std.testing.expectError(error.StorageUnavailable, service.pump(frame));
+                    try namespace.store.database.exec("DROP TRIGGER recovery_commit_failure;");
+                } else try namespace.store.database.exec("PRAGMA query_only=OFF;");
+            }
+            try service.close(frame);
+            try namespace.close();
+            namespace = try native.Namespace.open(a, io, path);
+            service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+            try std.testing.expect(try service.pump(frame) == .idle);
+            var restored_task = try service.task(frame, subject.task);
+            defer restored_task.deinit();
+            try std.testing.expectEqual(subject_task.value.inference_attempts, restored_task.value.inference_attempts);
+            try std.testing.expectEqual(subject_task.value.inference_request_bytes, restored_task.value.inference_request_bytes);
+            const settled_reply = stage == .settlement and seal_failure;
+            const captured_reply = stage == .settlement or (stage == .capture and seal_failure);
+            try std.testing.expectEqual(@as(u64, if (settled_reply) 7 else 0), restored_task.value.inference_output_tokens);
+            const occurrence_bytes = (try namespace.store.recordBytes(frame, "occurrence", subject.occurrence, subject.task)).?;
+            var restored_occurrence = try protean.contracts.decodeOwned(native.testing.occurrence.Occurrence, frame, occurrence_bytes);
+            defer restored_occurrence.deinit();
+            if (settled_reply) {
+                try std.testing.expect(restored_occurrence.value.state == .settled_reply);
+            } else if (captured_reply) {
+                try std.testing.expect(restored_occurrence.value.state == .captured);
+            } else try std.testing.expect(restored_occurrence.value.state == .unknown);
+            const replay = try service.reconcile(frame, operation_id, subject.task, subject_task.value.revision, subject.occurrence, subject.attempt, .lookup);
+            try std.testing.expectEqual(stage != .admission or seal_failure, replay.replayed);
+            if (recovery_id) |saved_id| try std.testing.expectEqualSlices(u8, &saved_id, &replay.receipt.reconciliation.?);
+            var restored_recovery = try service.reconciliation(frame, subject.task, replay.receipt.reconciliation.?);
+            defer restored_recovery.deinit();
+            if (settled_reply) {
+                try std.testing.expect(restored_recovery.value.outcome == .reply_settled);
+            } else if (captured_reply) {
+                try std.testing.expect(restored_recovery.value.outcome == .capture_admitted);
+            } else if (replay.replayed) {
+                try std.testing.expect(restored_recovery.value.outcome == .unresolved and restored_recovery.value.outcome.unresolved == .interrupted);
+            } else {
+                // The failed pre-commit admission left no receipt or work.
+                // Its explicit retry is the first admitted lookup.
+                try std.testing.expect(restored_recovery.value.outcome == .pending);
+                try service.notSent(frame, (try service.pump(frame)).work);
+            }
+            _ = try namespace.store.auditRetention(handlers, application.image_identity);
+            try std.testing.expectEqual(2, fixture.calls.load(.acquire));
+        }
+    }
 }
