@@ -135,6 +135,8 @@ pub const RecoveryFinding = union(enum) {
     capture: []const u8,
     not_sent,
     inconclusive,
+    unavailable,
+    rejected,
 };
 pub const ReceiptLookup = struct {
     /// Read-only authoritative receipt retrieval. This callback must never
@@ -144,6 +146,8 @@ pub const ReceiptLookup = struct {
     acquire: *const fn (Context, RecoveryInput, []const u8, ?[]const u8) anyerror![]u8,
     /// The owner verifies returned evidence under the original immutable
     /// bindings before any occurrence transition. Neither callback has Store.
+    /// Semantic non-results are explicit RecoveryFinding values. Errors mean
+    /// verification failed operationally and must not finalize reconciliation.
     verify: *const fn (ProjectionContext, RecoveryInput, []const u8) anyerror!RecoveryFinding,
 };
 pub const RecoveryAdapter = struct {

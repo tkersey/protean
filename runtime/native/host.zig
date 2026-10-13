@@ -36,6 +36,7 @@ fn Connection(comptime Types: type) type {
         initialized: bool = false,
         closing: bool = false,
         shutdown: ?Shutdown = null,
+        recovery_offset: usize = 0,
         limits: protocol.Limits = .{},
         client: ?*client_api.Client(Types) = null,
         launch_profile: ?discovery.LaunchProfile = null,
@@ -598,20 +599,31 @@ fn requestIds(value: json.Value, buffer: *[16]transport_api.Id) []const transpor
     return buffer[0..count];
 }
 
-/// Queue pressure leaves orderly closure pending under the existing drain
-/// deadline. Publish only after the writer can reserve a complete frame.
+/// Parking freezes owned membership before disclosure. Emit bounded recovery
+/// pages, ending with exactly one server.closed frame. Advance only after the
+/// writer owns the page; backpressure leaves the next ID and closure pending.
 fn queueClosed(comptime Types: type, frame: std.mem.Allocator, connection: *Connection(Types), transport: *transport_api.Transport, mode: Shutdown, code: u8) !bool {
     if (!transport.canAdmit()) return false;
+    const owned: []const [16]u8 = if (connection.client) |client| client.service.owned.items else &.{};
+    // Each fixed-width ID occupies 35 bytes including its separator. The fixed
+    // envelope (including LF) fits 256 bytes for every mode/disposition. The
+    // page cap also keeps structural tokens below the JSON frame profile.
+    const page_limit = @min(connection.limits.recovery_task_page, (transport.limits.frame_bytes -| 256) / 35);
+    const remaining = owned.len - connection.recovery_offset;
+    if (remaining != 0 and page_limit == 0) return error.Capacity;
+    const end = connection.recovery_offset + @min(remaining, page_limit);
+    const complete = end == owned.len;
     var params = json.object();
     try json.put(frame, &params, "mode", json.string(@tagName(mode)));
     try json.put(frame, &params, "disposition", json.string(if (code == 2) "incomplete" else if (mode == .cancel) "cancelled" else "parked"));
     var pending: std.array_list.Managed(json.Value) = .init(frame);
-    if (connection.client) |client| for (client.service.owned.items) |id| {
+    for (owned[connection.recovery_offset..end]) |id| {
         try pending.append(json.string(try frame.dupe(u8, &std.fmt.bytesToHex(id, .lower))));
-    };
+    }
     try json.put(frame, &params, "recovery_tasks", .{ .array = pending });
-    try transport.enqueue(try json.frame(frame, try protocol.notification(frame, "server.closed", params)), &.{}, connection.client != null);
-    return true;
+    try transport.enqueue(try json.frame(frame, try protocol.notification(frame, if (complete) "server.closed" else "server.recovery", params)), &.{}, connection.client != null);
+    connection.recovery_offset = end;
+    return complete;
 }
 
 /// Task settlement and complete protocol delivery are separate exit obligations.
@@ -635,7 +647,7 @@ test "shutdown deadline preserves task and delivery failure distinctions" {
     try std.testing.expectEqual(2, shutdownDisposition(0, false, false));
 }
 
-test "orderly close waits through full slot and byte queues without losing acknowledgments" {
+test "orderly close preserves every recovery ID through full slot and byte queues" {
     const a = std.testing.allocator;
     const io = std.testing.io;
     const Types = struct {};
@@ -651,71 +663,62 @@ test "orderly close waits through full slot and byte queues without losing ackno
     defer _ = c.close(pipes[1]);
     for (pipes) |fd| try std.testing.expect(c.fcntl(fd, c.F_SETFL, c.O_NONBLOCK) >= 0);
     try std.testing.expectEqual(1, c.dup2(pipes[1], 1));
-    for ([_]bool{ false, true }) |byte_pressure| {
-        var arena = std.heap.ArenaAllocator.init(a);
-        defer arena.deinit();
-        const frame = arena.allocator();
-        var transport = try transport_api.Transport.init(a, io, .{ .frame_bytes = 1024, .outbound_bytes = 4096 });
-        defer transport.deinit();
-        var connection: Connection(Types) = .{ .application = undefined, .instance = "test", .artifact_identity = @splat(0) };
-        var expected: std.ArrayList(u8) = .empty;
-        defer expected.deinit(a);
-        const count: usize = if (byte_pressure) 4 else 64;
-        const ids = [_]transport_api.Id{try transport_api.Id.from(json.string("shutdown"))};
-        for (0..count) |index| {
-            const body = if (index + 1 == count) "{\"id\":\"shutdown\",\"result\":{}}" else "{\"method\":\"task.event\"}";
-            var padded: [1023]u8 = @splat(' ');
-            @memcpy(padded[0..body.len], body);
-            const bytes = if (byte_pressure) &padded else body;
-            try transport.enqueue(bytes, if (index + 1 == count) &ids else &.{}, false);
-            try expected.appendSlice(a, bytes);
-            try expected.append(a, '\n');
-        }
-        var buffer: [4096]u8 = @splat('x');
-        while (true) {
-            const written = c.write(1, &buffer, buffer.len);
-            if (written < 0) {
-                try std.testing.expectEqual(.AGAIN, std.c.errno(written));
-                break;
+    for ([_]usize{ 0, 1, 40, 1024, 30_000 }) |task_count| {
+        for ([_]bool{ false, true }) |byte_pressure| {
+            var arena = std.heap.ArenaAllocator.init(a);
+            defer arena.deinit();
+            const frame = arena.allocator();
+            const frame_bytes: usize = if (task_count < 30_000) 1024 else (protocol.Limits{}).frame_bytes;
+            var transport = try transport_api.Transport.init(a, io, .{ .frame_bytes = frame_bytes, .outbound_bytes = 4 * frame_bytes });
+            defer transport.deinit();
+            // Closure projects only the stable owned IDs, without touching stored
+            // task bodies. Real admission/parking is covered by the task-owner tests.
+            var service: tasks.Service(Types) = undefined;
+            service.owned = .empty;
+            defer service.owned.deinit(a);
+            try service.owned.resize(a, task_count);
+            for (service.owned.items, 0..) |*id, index| std.mem.writeInt(u128, id, index, .little);
+            var client: client_api.Client(Types) = .{ .service = &service };
+            var connection: Connection(Types) = .{ .application = undefined, .instance = "test", .artifact_identity = @splat(0), .client = if (task_count == 0) null else &client };
+            var expected: std.ArrayList(u8) = .empty;
+            defer expected.deinit(a);
+            const count: usize = if (byte_pressure) 4 else 64;
+            const ids = [_]transport_api.Id{try transport_api.Id.from(json.string("shutdown"))};
+            for (0..count) |index| {
+                const body = if (index + 1 == count) "{\"id\":\"shutdown\",\"result\":{}}" else "{\"method\":\"task.event\"}";
+                const padded = try frame.alloc(u8, if (byte_pressure) frame_bytes - 1 else body.len);
+                @memset(padded, ' ');
+                @memcpy(padded[0..body.len], body);
+                const bytes = if (byte_pressure) padded else body;
+                try transport.enqueue(bytes, if (index + 1 == count) &ids else &.{}, false);
+                try expected.appendSlice(a, bytes);
+                try expected.append(a, '\n');
             }
-            try std.testing.expect(written > 0);
-        }
-        // A pipe may reject an atomic large write before its last byte fits.
-        while (true) {
-            const written = c.write(1, &buffer, 1);
-            if (written < 0) {
-                try std.testing.expectEqual(.AGAIN, std.c.errno(written));
-                break;
+            var buffer: [4096]u8 = @splat('x');
+            while (true) {
+                const written = c.write(1, &buffer, buffer.len);
+                if (written < 0) {
+                    try std.testing.expectEqual(.AGAIN, std.c.errno(written));
+                    break;
+                }
+                try std.testing.expect(written > 0);
             }
-            try std.testing.expectEqual(1, written);
-        }
-        try transport.flush(true);
-        try std.testing.expectEqual(count, transport.count);
-        for (0..2) |_| try std.testing.expect(!try queueClosed(Types, frame, &connection, &transport, .park, 0));
-        try std.testing.expectEqual(count, transport.count);
-        try std.testing.expectEqual(expected.items.len, transport.queued_bytes);
-        // The peer resumes within the unchanged deadline. Remove only the
-        // pipe filler, then let Transport itself retire queued frames.
-        while (true) {
-            const read = c.read(pipes[0], &buffer, buffer.len);
-            if (read < 0) {
-                try std.testing.expectEqual(.AGAIN, std.c.errno(read));
-                break;
+            // A pipe may reject an atomic large write before its last byte fits.
+            while (true) {
+                const written = c.write(1, &buffer, 1);
+                if (written < 0) {
+                    try std.testing.expectEqual(.AGAIN, std.c.errno(written));
+                    break;
+                }
+                try std.testing.expectEqual(1, written);
             }
-            try std.testing.expect(read > 0);
-        }
-        try transport.flush(true);
-        if (!byte_pressure) {
-            // Successful writes reset the stall clock without completing the
-            // queue. A hard deadline here is still an I/O failure.
-            try std.testing.expect(transport.count > 0 and transport.count < count);
-            try std.testing.expect(transport.output_progress != null);
-            try std.testing.expectEqual(74, shutdownDisposition(0, true, transport.count != 0));
-        }
-        try std.testing.expect(try queueClosed(Types, frame, &connection, &transport, .park, 0));
-        var received: std.ArrayList(u8) = .empty;
-        defer received.deinit(a);
-        for (0..128) |_| {
+            try transport.flush(true);
+            try std.testing.expectEqual(count, transport.count);
+            for (0..2) |_| try std.testing.expect(!try queueClosed(Types, frame, &connection, &transport, .park, 0));
+            try std.testing.expectEqual(count, transport.count);
+            try std.testing.expectEqual(expected.items.len, transport.queued_bytes);
+            // The peer resumes within the unchanged deadline. Remove only the
+            // pipe filler, then let Transport itself retire queued frames.
             while (true) {
                 const read = c.read(pipes[0], &buffer, buffer.len);
                 if (read < 0) {
@@ -723,26 +726,63 @@ test "orderly close waits through full slot and byte queues without losing ackno
                     break;
                 }
                 try std.testing.expect(read > 0);
-                try received.appendSlice(a, buffer[0..@intCast(read)]);
             }
-            if (transport.count == 0) break;
             try transport.flush(true);
+            if (!byte_pressure) {
+                // Successful writes reset the stall clock without completing the
+                // queue. A hard deadline here is still an I/O failure.
+                try std.testing.expect(transport.count > 0 and transport.count < count);
+                try std.testing.expect(transport.output_progress != null);
+                try std.testing.expectEqual(74, shutdownDisposition(0, true, transport.count != 0));
+            }
+            var closed = try queueClosed(Types, frame, &connection, &transport, .park, 0);
+            var received: std.ArrayList(u8) = .empty;
+            defer received.deinit(a);
+            for (0..4096) |_| {
+                while (true) {
+                    const read = c.read(pipes[0], &buffer, buffer.len);
+                    if (read < 0) {
+                        try std.testing.expectEqual(.AGAIN, std.c.errno(read));
+                        break;
+                    }
+                    try std.testing.expect(read > 0);
+                    try received.appendSlice(a, buffer[0..@intCast(read)]);
+                }
+                if (transport.count == 0 and closed) break;
+                try transport.flush(true);
+                if (!closed) closed = try queueClosed(Types, frame, &connection, &transport, .park, 0);
+            }
+            try std.testing.expect(closed);
+            try std.testing.expectEqual(0, transport.count);
+            try std.testing.expectEqual(0, transport.queued_bytes);
+            try std.testing.expectEqual(0, transport.outstanding);
+            try std.testing.expectEqual(0, shutdownDisposition(0, true, transport.count != 0));
+            try std.testing.expect(received.items.len > expected.items.len);
+            try std.testing.expectEqualSlices(u8, expected.items, received.items[0..expected.items.len]);
+            const last = received.items[expected.items.len..];
+            if (task_count <= 1) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, last, "\n"));
+            var lines = std.mem.tokenizeScalar(u8, last, '\n');
+            var recovered: usize = 0;
+            var closures: usize = 0;
+            while (lines.next()) |line| {
+                var notice = try json.parse(a, line, .{});
+                defer notice.deinit();
+                const final = lines.peek() == null;
+                try std.testing.expectEqualStrings(if (final) "server.closed" else "server.recovery", notice.value.object.get("method").?.string);
+                if (final) closures += 1;
+                const params = notice.value.object.get("params").?;
+                try std.testing.expectEqualStrings("park", params.object.get("mode").?.string);
+                try std.testing.expectEqualStrings("parked", params.object.get("disposition").?.string);
+                if (!final) try std.testing.expect(params.object.get("recovery_tasks").?.array.items.len != 0);
+                for (params.object.get("recovery_tasks").?.array.items) |id| {
+                    try std.testing.expect(recovered < task_count);
+                    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(service.owned.items[recovered], .lower), id.string);
+                    recovered += 1;
+                }
+            }
+            try std.testing.expectEqual(task_count, recovered);
+            try std.testing.expectEqual(1, closures);
         }
-        try std.testing.expectEqual(0, transport.count);
-        try std.testing.expectEqual(0, transport.queued_bytes);
-        try std.testing.expectEqual(0, transport.outstanding);
-        try std.testing.expectEqual(0, shutdownDisposition(0, true, transport.count != 0));
-        try std.testing.expect(received.items.len > expected.items.len);
-        try std.testing.expectEqualSlices(u8, expected.items, received.items[0..expected.items.len]);
-        const last = received.items[expected.items.len..];
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, last, "\n"));
-        var notice = try json.parse(a, last, .{});
-        defer notice.deinit();
-        try std.testing.expectEqualStrings("server.closed", notice.value.object.get("method").?.string);
-        const params = notice.value.object.get("params").?;
-        try std.testing.expectEqualStrings("park", params.object.get("mode").?.string);
-        try std.testing.expectEqualStrings("parked", params.object.get("disposition").?.string);
-        try std.testing.expectEqual(0, params.object.get("recovery_tasks").?.array.items.len);
     }
 }
 

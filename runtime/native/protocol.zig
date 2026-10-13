@@ -38,6 +38,7 @@ pub const Limits = struct {
     event_page: usize = 128,
     subscriptions: usize = 16,
     pending_message_page: usize = 16,
+    recovery_task_page: usize = 1024,
     incomplete_frame_ms: u32 = 30_000,
     output_stall_ms: u32 = 5000,
 };

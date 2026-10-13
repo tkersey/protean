@@ -192,6 +192,15 @@ bounded `pending_messages` view with `pending_messages_truncated`; `task.events`
 provides the complete message history in pages. The inbox itself retains every
 accepted message until its authored consumption or terminal disposition.
 
+Orderly shutdown discloses every owned recovery task in order through bounded
+`server.recovery` notifications followed by one `server.closed` notification.
+Each carries `mode`, `disposition`, and a `recovery_tasks` page; concatenate the
+pages, including the final one, for the complete list. A small or empty list needs
+only `server.closed`. Pages contain at most the advertised `recovery_task_page`
+IDs and advance only after entering the output queue. Frame limits, backpressure,
+and the existing shutdown delivery deadline remain physical transport boundaries;
+they do not limit retained task count or remove durable recovery records.
+
 ### Explicit recovery
 
 Initialization requires an offer containing `agent-host/2.1`; clients offering
@@ -233,6 +242,10 @@ prepared bytes, task, attempt, frozen profile, and ordered resources. Only verif
 capture evidence or non-invocation proof can change the occurrence; inconclusive,
 unavailable, or rejected evidence preserves unknown delivery. Non-invocation proof
 permits cancellation, while another dispatch still requires explicit resume.
+Receipt verifiers return semantic non-results explicitly as `RecoveryFinding`
+values. Any verifier or input-read error remains an operational failure: it
+does not commit a completed reconciliation, and restart records the pending
+lookup as interrupted. Errors never certify rejected evidence.
 Message and cancellation revisions do not invalidate the lookup's completion.
 Restart or import marks a pending lookup interrupted without invoking a provider.
 Evidence and predecessor reconciliation bodies stay private and are verified again

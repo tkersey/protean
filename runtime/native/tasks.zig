@@ -777,8 +777,7 @@ pub fn Service(comptime Types: type) type {
             if (original.outcome != .pending or pending.state != .unknown or !same(&pending.state.unknown.id, &original.attempt) or initial.current_occurrence == null or !same(&initial.current_occurrence.?, &original.occurrence)) return error.StaleOccurrence;
             var arena = std.heap.ArenaAllocator.init(a);
             defer arena.deinit();
-            var reason = failure;
-            const verified: ?registry.RecoveryFinding = if (evidence) |bytes| self.store().project(registry.RecoveryFinding, arena.allocator(), self.projectionBinding(initial), struct {
+            const verified: ?registry.RecoveryFinding = if (evidence) |bytes| try self.store().project(registry.RecoveryFinding, arena.allocator(), self.projectionBinding(initial), struct {
                 handlers: registry.Registry,
                 item: state.Reconciliation,
                 request_identity: state.Digest,
@@ -790,12 +789,8 @@ pub fn Service(comptime Types: type) type {
                     const entry = try this.handlers.resolve(request.value, ctx.application.?);
                     return this.handlers.verifyRecovery(ctx, registry.RecoveryInput.fromReconciliation(this.item, this.request_identity, entry.declaration.inference), this.evidence);
                 }
-            }{ .handlers = self.handlers, .item = original, .request_identity = pending.request, .evidence = bytes }) catch |err| blk: {
-                if (err == error.OutOfMemory or err == error.Capacity) return err;
-                reason = .rejected;
-                break :blk null;
-            } else null;
-            const advancing = if (verified) |finding| finding != .inconclusive else false;
+            }{ .handlers = self.handlers, .item = original, .request_identity = pending.request, .evidence = bytes }) else null;
+            const advancing = if (verified) |finding| finding == .capture or finding == .not_sent else false;
             if (advancing) try self.runnable.ensureUnusedCapacity(self.allocator, 1);
             var value = initial;
             value.revision = try std.math.add(u64, value.revision, 1);
@@ -806,9 +801,11 @@ pub fn Service(comptime Types: type) type {
             var result = original;
             result.previous = try self.snapshotRecord(state.Reconciliation, a, "reconciliation", original.id, value.id);
             result.evidence = if (evidence) |bytes| try self.store().putObject(bytes) else null;
-            result.outcome = .{ .unresolved = reason };
+            result.outcome = .{ .unresolved = failure };
             if (verified) |finding| switch (finding) {
                 .inconclusive => result.outcome = .{ .unresolved = .inconclusive },
+                .unavailable => result.outcome = .{ .unresolved = .unavailable },
+                .rejected => result.outcome = .{ .unresolved = .rejected },
                 .capture => |raw| {
                     const capture_value: state.Capture = .{ .task = value.id, .occurrence = pending.id, .attempt = original.attempt, .request = original.prepared orelse return error.CorruptState, .response = try self.store().putObject(raw), .disposition = .complete, .reconciliation = original.id };
                     if (try self.store().recordBytes(a, "capture", original.attempt, value.id)) |prior| {

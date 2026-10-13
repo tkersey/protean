@@ -393,8 +393,10 @@ pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.
     try json.put(a, &definitions, "task.event", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "method", try constant(a, "task.event") }, .{ "params", event_params } }, &.{}));
     const closed_params = try shape(a, &.{ .{ "subscription_id", id }, .{ "task_id", id }, .{ "reason", try constant(a, "CursorExpired") }, .{ "earliest_available_seq", count }, .{ "high_water_seq", count } }, &.{});
     try json.put(a, &definitions, "subscription.closed", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "method", try constant(a, "subscription.closed") }, .{ "params", closed_params } }, &.{}));
-    const server_closed = try shape(a, &.{ .{ "mode", try enumeration(a, &.{ "park", "cancel" }) }, .{ "disposition", try enumeration(a, &.{ "parked", "cancelled", "incomplete" }) }, .{ "recovery_tasks", try array(a, id, null) } }, &.{});
-    try json.put(a, &definitions, "server.closed", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "method", try constant(a, "server.closed") }, .{ "params", server_closed } }, &.{}));
+    const server_closed = try shape(a, &.{ .{ "mode", try enumeration(a, &.{ "park", "cancel" }) }, .{ "disposition", try enumeration(a, &.{ "parked", "cancelled", "incomplete" }) }, .{ "recovery_tasks", try array(a, id, limits.recovery_task_page) } }, &.{});
+    for ([_][]const u8{ "server.recovery", "server.closed" }) |method| {
+        try json.put(a, &definitions, method, try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "method", try constant(a, method) }, .{ "params", server_closed } }, &.{}));
+    }
     var limit_properties: std.array_list.Managed(Property) = .init(a);
     inline for (@typeInfo(protocol.Limits).@"struct".field_names) |name| {
         var property = json.object();

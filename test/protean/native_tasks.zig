@@ -1907,7 +1907,7 @@ test "eligible round robin progresses pure question inbox cancellation and repli
 pub const LookupFixture = struct {
     const C = protean.contracts;
     const State = native.testing.state;
-    const Kind = enum { capture, not_sent, inconclusive };
+    const Kind = enum { capture, not_sent, inconclusive, unavailable, rejected };
     const Body = struct { binding: [32]u8, kind: Kind, raw: C.Bytes(null) };
     const Evidence = struct { body: Body, signature: [32]u8 };
     hold: std.atomic.Value(bool) = .init(false),
@@ -1949,14 +1949,24 @@ pub const LookupFixture = struct {
         }
         return receipt(ctx.allocator, input, self.kind);
     }
+    const verification_failures = [_]anyerror{ error.StorageUnavailable, error.CorruptState, error.Busy, error.InvalidState, error.OutOfMemory, error.Capacity, error.VerifierReadFailed };
+
     pub fn verify(ctx: native.registry.ProjectionContext, input: native.registry.RecoveryInput, bytes: []const u8) !native.registry.RecoveryFinding {
-        var decoded = try C.decodeOwned(Evidence, ctx.allocator, bytes);
+        // Inject failures after the owner admitted the original bindings. The
+        // final case deliberately has no special meaning to the task owner.
+        for (verification_failures) |failure| if (std.mem.eql(u8, bytes, @errorName(failure))) return failure;
+        var decoded = C.decodeOwned(Evidence, ctx.allocator, bytes) catch |err| switch (err) {
+            error.OutOfMemory, error.Capacity => return err,
+            else => return .rejected,
+        };
         defer decoded.deinit();
-        if (!std.meta.eql(decoded.value.signature, try sign(ctx.allocator, decoded.value.body)) or !std.meta.eql(decoded.value.body.binding, try binding(ctx.allocator, input))) return error.InvalidReceipt;
+        if (!std.meta.eql(decoded.value.signature, try sign(ctx.allocator, decoded.value.body)) or !std.meta.eql(decoded.value.body.binding, try binding(ctx.allocator, input))) return .rejected;
         return switch (decoded.value.body.kind) {
             .capture => .{ .capture = try ctx.allocator.dupe(u8, decoded.value.body.raw.bytes) },
             .not_sent => .not_sent,
             .inconclusive => .inconclusive,
+            .unavailable => .unavailable,
+            .rejected => .rejected,
         };
     }
     fn forbidden(_: native.Context, _: []const u8) !native.registry.Acquisition {
@@ -2327,7 +2337,7 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
     try std.testing.expect(cancelled.value.outcome_kind == .cancelled);
     try std.testing.expectEqual(1, cancelled.value.inference_attempts);
     _ = try namespace.store.auditRetention(handlers, application.image_identity);
-    for ([_][]const u8{ "fabricated", "foreign", "prepared", "profile", "inconclusive", "unavailable", "revoked" }) |scenario| {
+    for ([_][]const u8{ "fabricated", "foreign", "prepared", "profile", "inconclusive", "verifier-unavailable", "rejected", "unavailable", "revoked" }) |scenario| {
         const subject = try lookupUnknown(&service, frame, scenario);
         var subject_task = try service.task(frame, subject.task);
         defer subject_task.deinit();
@@ -2352,7 +2362,8 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
                 if (std.mem.eql(u8, scenario, "foreign")) input.task[0] ^= 1;
                 if (std.mem.eql(u8, scenario, "prepared")) input.prepared.?.digest[0] ^= 1;
                 if (std.mem.eql(u8, scenario, "profile")) input.profile.digest[0] ^= 1;
-                const evidence_bytes = if (std.mem.eql(u8, scenario, "fabricated")) "fabricated receipt" else try LookupFixture.receipt(frame, input, if (std.mem.eql(u8, scenario, "inconclusive")) .inconclusive else .capture);
+                const kind: LookupFixture.Kind = if (std.mem.eql(u8, scenario, "verifier-unavailable")) .unavailable else std.meta.stringToEnum(LookupFixture.Kind, scenario) orelse .capture;
+                const evidence_bytes = if (std.mem.eql(u8, scenario, "fabricated")) "fabricated receipt" else try LookupFixture.receipt(frame, input, kind);
                 try service.acquire(frame, selected, evidence_bytes);
             }
         }
@@ -2360,7 +2371,7 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
         defer result.deinit();
         try std.testing.expect(result.value.outcome == .unresolved);
         const reason = result.value.outcome.unresolved;
-        if (std.mem.eql(u8, scenario, "unavailable") or std.mem.eql(u8, scenario, "revoked")) {
+        if (std.mem.eql(u8, scenario, "unavailable") or std.mem.eql(u8, scenario, "verifier-unavailable") or std.mem.eql(u8, scenario, "revoked")) {
             try std.testing.expect(reason == .unavailable);
         } else if (std.mem.eql(u8, scenario, "inconclusive")) {
             try std.testing.expect(reason == .inconclusive);
@@ -2376,6 +2387,40 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
     }
     try std.testing.expectEqual(2, fixture.calls.load(.acquire));
     _ = try namespace.store.auditRetention(handlers, application.image_identity);
+    for (LookupFixture.verification_failures) |failure| {
+        const operation = try std.fmt.allocPrint(frame, "verify-{s}", .{@errorName(failure)});
+        const subject = try lookupUnknown(&service, frame, operation);
+        var unknown = try service.task(frame, subject.task);
+        defer unknown.deinit();
+        const recovery_operation = try std.fmt.allocPrint(frame, "recover-{s}", .{@errorName(failure)});
+        const accepted = try service.reconcile(frame, recovery_operation, subject.task, unknown.value.revision, subject.occurrence, subject.attempt, .lookup);
+        const selected = (try service.pump(frame)).work;
+        const before_failure = namespace.store.head;
+        try std.testing.expectError(failure, service.acquire(frame, selected, @errorName(failure)));
+        try std.testing.expectEqualDeep(before_failure, namespace.store.head);
+        try std.testing.expect(namespace.store.fenced);
+        try std.testing.expect(service.work == null);
+        try service.close(frame);
+        try namespace.close();
+        namespace = try native.Namespace.open(a, io, path);
+        // Before owner recovery, the failed verification has committed no
+        // completed outcome. Reopen subsequently records interruption, never
+        // evidence rejection or an automatic replacement lookup.
+        var retained = try protean.contracts.decodeOwned(State.Reconciliation, frame, (try namespace.store.recordBytes(frame, "reconciliation", accepted.receipt.reconciliation.?, subject.task)).?);
+        defer retained.deinit();
+        try std.testing.expect(retained.value.outcome == .pending);
+        service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+        var interrupted_result = try service.reconciliation(frame, subject.task, accepted.receipt.reconciliation.?);
+        defer interrupted_result.deinit();
+        try std.testing.expect(interrupted_result.value.outcome == .unresolved and interrupted_result.value.outcome.unresolved == .interrupted);
+        var unchanged = try service.task(frame, subject.task);
+        defer unchanged.deinit();
+        try std.testing.expectEqual(.unknown, try service.status(frame, unchanged.value));
+        try std.testing.expectEqual(unknown.value.inference_attempts, unchanged.value.inference_attempts);
+        try std.testing.expect((try service.reconcile(frame, recovery_operation, subject.task, unknown.value.revision, subject.occurrence, subject.attempt, .lookup)).replayed);
+        try std.testing.expect(try service.pump(frame) == .idle);
+    }
+    try std.testing.expectEqual(2, fixture.calls.load(.acquire));
     const fenced = try lookupUnknown(&service, frame, "fenced-original");
     var fenced_task = try service.task(frame, fenced.task);
     defer fenced_task.deinit();
