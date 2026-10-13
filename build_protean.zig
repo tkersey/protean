@@ -377,6 +377,26 @@ pub fn build(b: *std.Build) void {
         native_unit_tests.init(b, .{ .existing = checked_environment });
         native_unit_tests.optimize = .debug;
         native_graph.testModule(native_product, native_unit_tests);
+        const crash_module = native_graph.module("test/protean/native_recovery_crash.zig");
+        crash_module.optimize = .debug;
+        crash_module.strip = optimize != .debug;
+        crash_module.addImport("kosmos", checked_kosmos);
+        crash_module.addImport("protean_native", checked_environment);
+        // Private history/Worker access stays in the test graph. The Node
+        // controller owns process death and independent reopen.
+        const crash_probe = b.addTest(.{
+            .name = "protean-recovery-crash",
+            .root_module = crash_module,
+            .filters = &.{"process-crash-controller-only"},
+            .use_llvm = if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) false else null,
+        });
+        crash_probe.step.dependOn(&native_guard.step);
+        const crash_check = nodeCommand(b);
+        crash_check.addArgs(&.{ "node", "test/protean/native_recovery_crash.mjs" });
+        crash_check.addFileArg2(crash_probe.getEmittedBin(), .{ .make_absolute = true });
+        crash_check.has_side_effects = true;
+        b.step("check-native-recovery-crash", "Kill and reopen native occurrence/recovery owners at durable boundaries").dependOn(&crash_check.step);
+        native_product.dependOn(&crash_check.step);
     } else {
         const missing = b.addFail("enable -Dnative=true with authenticated Kosmos and SQLite sources");
         native_checks.dependOn(&missing.step);

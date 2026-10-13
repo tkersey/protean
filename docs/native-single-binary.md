@@ -254,7 +254,6 @@ Export refuses an occurrence with an active environmental dispatch.
 
 Distributed adaptive mobility is not delivered. Copying an archive does not
 transfer exclusive custody, credentials, or authority over ambiguous effects.
-Old deployment stores and published archives are untouched by source retirement.
 
 ## Verification boundaries
 
@@ -263,6 +262,13 @@ wire fixtures. `check-native` checks native owners plus the adaptive and HTTPS
 peers. The peers run copied binaries under OS execution/file boundaries, using
 controlled provider replies, real transport, kills/restarts, cancellation, tool
 construction/reuse, and independently altered archives. No paid model calls run.
+
+`check-native-recovery-crash`, included in `check-native`, kills the owner process
+at 16 original-acquisition and receipt-lookup boundaries. Two fresh processes
+reopen each surviving namespace and check occurrence state, interruption status,
+exact capture retention, receipt replay, private evidence access, and token
+accounting. Recovery never repeats an original invocation or starts a lookup
+without a new explicit admission.
 
 `node test/protean/installations.mjs` drives a clean public downstream build. Node
 stays outside the product boundary; absolute Node/Python launches are denied

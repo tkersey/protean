@@ -1678,7 +1678,7 @@ test "completed result beyond the former wire-read ceiling remains publicly retr
     }
 }
 
-const FairTypes = struct {
+pub const FairTypes = struct {
     pub const application_id = "fair-owner-test";
     pub const input_schema_id = "fair.input.v1";
     pub const output_schema_id = "fair.output.v1";
@@ -1689,7 +1689,7 @@ const FairTypes = struct {
     pub const Failure = void;
     pub const Message = u32;
 };
-const FairApplication = struct {
+pub const FairApplication = struct {
     pub fn emit(c: protean.Context) !horos.source.Module {
         const b = c.builder;
         const number = try b.scalar(u32);
@@ -1904,7 +1904,7 @@ test "eligible round robin progresses pure question inbox cancellation and repli
     try std.testing.expect(try service.pump(frame) == .idle);
 }
 
-const LookupFixture = struct {
+pub const LookupFixture = struct {
     const C = protean.contracts;
     const State = native.testing.state;
     const Kind = enum { capture, not_sent, inconclusive };
@@ -1930,7 +1930,7 @@ const LookupFixture = struct {
         std.crypto.auth.hmac.sha2.HmacSha256.create(&mac, bytes, "private synthetic receipt authority");
         return mac;
     }
-    fn receipt(a: std.mem.Allocator, input: native.registry.RecoveryInput, kind: Kind) ![]u8 {
+    pub fn receipt(a: std.mem.Allocator, input: native.registry.RecoveryInput, kind: Kind) ![]u8 {
         return receiptValue(a, input, kind, 99);
     }
     fn receiptValue(a: std.mem.Allocator, input: native.registry.RecoveryInput, kind: Kind, value: u32) ![]u8 {
@@ -1949,7 +1949,7 @@ const LookupFixture = struct {
         }
         return receipt(ctx.allocator, input, self.kind);
     }
-    fn verify(ctx: native.registry.ProjectionContext, input: native.registry.RecoveryInput, bytes: []const u8) !native.registry.RecoveryFinding {
+    pub fn verify(ctx: native.registry.ProjectionContext, input: native.registry.RecoveryInput, bytes: []const u8) !native.registry.RecoveryFinding {
         var decoded = try C.decodeOwned(Evidence, ctx.allocator, bytes);
         defer decoded.deinit();
         if (!std.meta.eql(decoded.value.signature, try sign(ctx.allocator, decoded.value.body)) or !std.meta.eql(decoded.value.body.binding, try binding(ctx.allocator, input))) return error.InvalidReceipt;
@@ -1962,7 +1962,7 @@ const LookupFixture = struct {
     fn forbidden(_: native.Context, _: []const u8) !native.registry.Acquisition {
         return error.OriginalEffectMustNotRun;
     }
-    fn interpret(ctx: native.registry.ProjectionContext, _: []const u8, _: []const u8, raw: []const u8) !native.registry.Projection {
+    pub fn interpret(ctx: native.registry.ProjectionContext, _: []const u8, _: []const u8, raw: []const u8) !native.registry.Projection {
         var value = try C.decodeOwned(u32, ctx.allocator, raw);
         defer value.deinit();
         if (value.value != 99) return error.InvalidCapture;
