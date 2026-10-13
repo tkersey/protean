@@ -76,7 +76,7 @@ try {
     const target = join(exportRoot, file); mkdirSync(dirname(target), {recursive: true}); copyFileSync(join(root, file), target);
   }
   const packageHash = run(zig, ['fetch', exportRoot]);
-  assert.match(packageHash, /^protean-4\.0\.0-[A-Za-z0-9_-]+$/);
+  assert.match(packageHash, /^protean-5\.0\.0-[A-Za-z0-9_-]+$/);
   const packageDir = join(scratch, 'package'); mkdirSync(packageDir);
   run('/usr/bin/tar', ['-xzf', join(cache, 'p', `${packageHash}.tar.gz`), '-C', packageDir]);
   const source = join(packageDir, packageHash);
@@ -110,7 +110,7 @@ try {
     for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target']) assert.deepEqual(manifest[key], expected[key], key);
   }
   const demo = JSON.parse(run(executable, ['demo', '--offline', '--state-dir', join(scratch, 'state')]));
-  assert.equal(demo.output.disposition, 'report');
+  assert.equal(demo.output.result.tag, 'report');
   assert.equal(demo.output.model_calls, '14');
   console.log(JSON.stringify({downstream: 'public addNativeSystem', node_free_acquisition_build_install: true, package: packageHash, target: manifest.target, program: manifest.program_sha256, elapsed_seconds: (performance.now() - started) / 1000}));
 } finally {

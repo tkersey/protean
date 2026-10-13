@@ -566,6 +566,7 @@ fn Fixture(comptime P: type) type {
                 for (projection.objects) |object| _ = try objects.add(a, try a.dupe(u8, object));
                 history_bytes += projection.objects[0].len;
                 if (ns) |owner| {
+                    if (turn == 1) try publicationFailures(owner, temporary.dir, path, ctx, encoded, objects.items.items[retained_objects..], projection.objects);
                     try owner.store.begin();
                     for (objects.items.items[retained_objects..]) |bytes| _ = try owner.store.putObject(bytes);
                     try owner.store.retainProjection(Adapter.declaration().capture.?.dependencies, projection.objects);
@@ -726,6 +727,81 @@ fn Fixture(comptime P: type) type {
                 }
             }
         }
+        fn publicationFailures(owner: *native.Namespace, directory: std.Io.Dir, path: []const u8, ctx: native.registry.ProjectionContext, request: []const u8, unpublished: []const []const u8, projected: []const []const u8) !void {
+            const Fault = enum { chunk, root, allocation, dependency, commit, seal };
+            const root: native.testing.state.Reference = .{ .digest = digest(projected[1]), .bytes = projected[1].len };
+            for ([_]Fault{ .chunk, .root, .allocation, .dependency, .commit, .seal }) |fault| {
+                const previous = owner.store.head;
+                const entries = owner.store.context_cache.entries.count();
+                if (fault == .chunk or fault == .root) {
+                    const rejected = digest(projected[if (fault == .chunk) 0 else 1]);
+                    try owner.store.database.exec("CREATE TEMP TABLE context_rejected(digest BLOB);");
+                    try owner.store.database.run("INSERT INTO context_rejected VALUES(?)", &.{.{ .blob = &rejected }});
+                    try owner.store.database.exec("CREATE TEMP TRIGGER context_write_failure BEFORE INSERT ON objects WHEN NEW.digest IN(SELECT digest FROM context_rejected) BEGIN SELECT RAISE(ABORT,'context object fault'); END;");
+                } else if (fault == .dependency) {
+                    try owner.store.database.exec("CREATE TEMP TRIGGER context_write_failure BEFORE INSERT ON dependencies BEGIN SELECT RAISE(ABORT,'context dependency fault'); END;");
+                } else if (fault == .commit) {
+                    try owner.store.database.exec(
+                        \\CREATE TEMP TABLE context_parent(id INTEGER PRIMARY KEY);
+                        \\CREATE TEMP TABLE context_child(parent INTEGER REFERENCES context_parent(id) DEFERRABLE INITIALLY DEFERRED);
+                        \\CREATE TEMP TRIGGER context_commit_failure AFTER UPDATE ON meta BEGIN INSERT INTO context_child VALUES(1); END;
+                    );
+                } else if (fault == .seal) try directory.createDir(std.testing.io, "owned/seal.next", .default_dir);
+
+                const operation = struct {
+                    fn run(ns: *native.Namespace, objects: []const []const u8, projection: []const []const u8, allocation: bool) !void {
+                        try ns.store.begin();
+                        for (objects) |bytes| _ = try ns.store.putObject(bytes);
+                        const original = ns.store.allocator;
+                        defer ns.store.allocator = original;
+                        if (allocation) ns.store.allocator = std.testing.failing_allocator;
+                        try ns.store.retainProjection(Adapter.declaration().capture.?.dependencies, projection);
+                        try ns.commit("context fault fixture");
+                    }
+                };
+                try std.testing.expectError(switch (fault) {
+                    .chunk, .root, .dependency, .commit => error.Constraint,
+                    .allocation => error.OutOfMemory,
+                    .seal => error.UnsafeStatePath,
+                }, operation.run(owner, unpublished, projected, fault == .allocation));
+                owner.store.rollback();
+                if (fault == .commit or fault == .seal) {
+                    try std.testing.expect(owner.store.fenced);
+                    try std.testing.expectEqual(@as(u32, 0), owner.store.context_cache.entries.count());
+                    try std.testing.expectError(error.StorageUnavailable, prepare(owner, ctx, request));
+                    if (fault == .seal) {
+                        try std.testing.expectEqual(previous.generation + 1, owner.store.head.generation);
+                        try directory.deleteTree(std.testing.io, "owned/seal.next");
+                    } else try std.testing.expectEqualDeep(previous, owner.store.head);
+                    try owner.close();
+                    owner.* = try native.Namespace.open(std.testing.allocator, std.testing.io, path);
+                    try std.testing.expectEqual(@as(u32, 0), owner.store.context_cache.entries.count());
+                    var handlers = try native.Registry.init(ctx.allocator, &.{Adapter.declaration()});
+                    defer handlers.deinit();
+                    _ = try owner.store.auditRetention(handlers, @splat(8));
+                } else {
+                    try std.testing.expectEqualDeep(previous, owner.store.head);
+                    try std.testing.expect(!owner.store.fenced);
+                    try std.testing.expectEqual(entries, owner.store.context_cache.entries.count());
+                    if (fault != .allocation) try owner.store.database.exec("DROP TRIGGER context_write_failure;");
+                    if (fault == .chunk or fault == .root) try owner.store.database.exec("DROP TABLE context_rejected;");
+                }
+                if (fault == .seal) {
+                    // The SQL commit is complete: reopen repairs its seal, and
+                    // the full chunk/root closure survives without a cached lease.
+                    const bytes = try owner.store.object(ctx.allocator, root, null);
+                    try std.testing.expectEqualSlices(u8, projected[1], bytes);
+                    var value = try contracts.decodeOwned(P.AdaptiveContext, ctx.allocator, bytes);
+                    defer value.deinit();
+                    try owner.store.checkDependencies(P.AdaptiveContext, Ref, root, value.value);
+                } else {
+                    for (projected) |bytes| try std.testing.expectError(error.MissingArtifact, owner.store.object(ctx.allocator, .{ .digest = digest(bytes), .bytes = bytes.len }, null));
+                }
+                // Rejected descendants do not poison the committed ancestor.
+                _ = try prepare(owner, ctx, request);
+            }
+        }
+
         fn skillOriginRejections(ctx: native.registry.ProjectionContext, objects: *Objects, request: P.AdaptiveRequest) !void {
             const a = ctx.allocator;
             const reference = request.plan.prior.?;
