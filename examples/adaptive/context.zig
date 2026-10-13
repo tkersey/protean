@@ -78,7 +78,7 @@ fn controlSource(ctx: native.registry.ProjectionContext, state: t.State, subject
     defer raw.deinit();
     const response = (try native.json.parse(ctx.allocator, raw.value.body.bytes, .{ .bytes = raw.value.body.bytes.len, .tokens = raw.value.body.bytes.len, .members = raw.value.body.bytes.len })).value;
     const output = native.json.get(response, "output") orelse return error.InvalidCapture;
-    const normalized = try native.responses.Adapter(P).normalize(ctx.allocator, prepared.value.request.invocation, output);
+    const normalized = try native.responses.OutputNormalizer(P).normalize(ctx.allocator, prepared.value.request.invocation, output);
     if (normalized != .output) return error.InvalidCapture;
     var found = false;
     for (normalized.output.items.items) |item| if (item == .function_call and equal(item.function_call.call_id.bytes, subject.call_id.bytes)) {

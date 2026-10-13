@@ -80,7 +80,7 @@ const System = protean.system(.{ .InitialArgs = u64, .Result = u64, .Failure = v
 test "internal model participants cannot enter through a read-tool alias" {
     // Horos accepts this typed effectful component, but that does not grant
     // Protean model authority. A matching label and schema must not bypass it.
-    Tool.identity = "agent.model.invoke.v3";
+    Tool.identity = "agent.model.invoke.v11";
     defer Tool.identity = "fixture/compiled-read";
     Tool.bytes = try objectNamed(false, false, false, Tool.identity);
     defer a.free(Tool.bytes);

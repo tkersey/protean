@@ -1,29 +1,17 @@
-//! Protean 4 semantic model effects. Values are constructed by authored BPI3;
+//! Protean 5 semantic model invocation. Values are constructed by authored BPI3;
 //! the environment only marshals the declared provider protocol and normalizes.
 const std = @import("std");
 const contracts = @import("protean_contracts");
 const codecs = @import("model_codec.zig");
 const models = @import("model.zig");
 
-pub const semantic_identity = "agent.model.invoke.v7";
-pub const replay_semantic_identity = "agent.model.invoke.v8";
-pub const reference_semantic_identity = "agent.model.invoke.v9";
-pub const context_semantic_identity = "agent.model.context.responses.v2";
-pub const adaptive_semantic_identity = "agent.model.invoke.v11";
+pub const semantic_identity = "agent.model.invoke.v11";
 pub const adaptive_context_semantic_identity = "agent.model.context.responses.adaptive.v6";
 pub const adaptive_policy_semantic_identity = "agent.model.policy.adaptive.v2";
 pub fn isModelIdentity(identity: []const u8) bool {
-    // Retired model identities remain reserved; they cannot be relabeled as
-    // ordinary read effects merely because this build uses newer wire contracts.
-    return std.mem.eql(u8, identity, "agent.model.invoke.v3") or
-        std.mem.eql(u8, identity, "agent.model.invoke.v4") or
-        std.mem.eql(u8, identity, "agent.model.invoke.v5") or
-        std.mem.eql(u8, identity, "agent.model.invoke.v6") or
-        std.mem.eql(u8, identity, semantic_identity) or
-        std.mem.eql(u8, identity, replay_semantic_identity) or
-        std.mem.eql(u8, identity, reference_semantic_identity) or
-        std.mem.eql(u8, identity, "agent.model.invoke.v10") or
-        std.mem.eql(u8, identity, adaptive_semantic_identity);
+    // Reserve the model namespace against raw leaf-effect relabeling. Only v11
+    // has a producer and reader; reservation does not provide legacy decoding.
+    return std.mem.startsWith(u8, identity, "agent.model.invoke.");
 }
 
 /// Selection is subordinate to the immutable task policy. Neither the selected
@@ -94,37 +82,8 @@ pub const AdaptiveUsage = struct {
 /// Captured HTTP response, before provider interpretation. The environment
 /// retains these bytes separately from its bounded model result projection.
 pub const CapturedResponse = contracts.CapturedResponse;
-/// Immutable environmental data, not an authorization token. The environment
-/// checks every binding and the full closure before rendering another request.
-/// Sequence bounds describe the half-open range of ordered replay items.
-pub const ContextReference = struct {
-    digest: [32]u8,
-    bytes: u64,
-    schema: contracts.Text(128),
-    profile: [32]u8,
-    task: [16]u8,
-    tenant: contracts.Text(128),
-    audience: contracts.Text(128),
-    first: u64,
-    next: u64,
-};
 pub const ArtifactReference = struct { digest: [32]u8, bytes: u64 };
-/// Context bindings are inside the hashed artifact too. A caller cannot relabel
-/// another task's bytes merely by changing the fields of an external reference.
-pub const ContextArtifact = struct {
-    schema: contracts.Text(128),
-    profile: [32]u8,
-    task: [16]u8,
-    tenant: contracts.Text(128),
-    audience: contracts.Text(128),
-    first: u64,
-    next: u64,
-    source_capture: ArtifactReference,
-    parent: ?ArtifactReference,
-    items: contracts.Bytes(null),
-};
 pub const ReplayStatus = enum { complete, unsupported, capacity };
-pub const Usage = struct { input_tokens: u64, output_tokens: u64, cached_input_tokens: ?u64 };
 pub const protocol_identity = "agent.model.protocol.openai-responses-v2";
 pub const MessageRole = enum { system, developer, user, assistant };
 pub const TruncationPolicy = enum { disabled };
@@ -241,10 +200,7 @@ pub fn Profile(
     };
     return struct {
         const Self = @This();
-        pub const reference_identity = reference_semantic_identity;
-        pub const context_identity = context_semantic_identity;
-        pub const Context = ContextArtifact;
-        pub const adaptive_identity = adaptive_semantic_identity;
+        pub const identity = semantic_identity;
         pub const adaptive_context_identity = adaptive_context_semantic_identity;
         pub const adaptive_context_version: u8 = 6;
         pub const adaptive_policy_identity = adaptive_policy_semantic_identity;
@@ -287,7 +243,7 @@ pub fn Profile(
             argument_codec: ArgumentCodec,
         };
         pub const Tools = contracts.Vector(ToolDeclaration, declarations.len);
-        /// Ordered product fields are the v7 application contract.
+        /// Invocation settings nested inside the sole v11 request contract.
         pub const Request = struct {
             protocol: ProtocolIdentity,
             model: ModelId,
@@ -325,38 +281,9 @@ pub fn Profile(
             unsupported_response: UnsupportedResponse,
         };
 
-        // Inline replay shares the versioned invocation/result contract.
-        // Opaque provider items remain ordinary data, never host closures.
-        pub const ReplayBytes = contracts.Bytes(null);
         pub const ToolResult = struct { call_id: CallId, output: ResultText };
-        pub const ReplayRequest = struct {
-            invocation: Request,
-            replay: ReplayBytes,
-            results: contracts.Vector(ToolResult, schemaBound(limits.maximum_output_items)),
-        };
-        pub const ReplayResult = struct {
-            result: Result,
-            replay: ReplayBytes,
-            replay_status: ReplayStatus,
-            usage: ?Usage,
-        };
 
-        // Reference replay retains large captures and
-        // replay stay in the task owner's immutable store instead of PST3.
-        pub const ReferenceRequest = struct {
-            invocation: Request,
-            replay: ?ContextReference,
-            results: contracts.Vector(ToolResult, schemaBound(limits.maximum_output_items)),
-            profile: [32]u8,
-        };
-        pub const ReferenceResult = struct {
-            result: Result,
-            replay: ?ContextReference,
-            replay_status: ReplayStatus,
-            usage: ?Usage,
-        };
-
-        /// v6 independently represents definition residency and call authority.
+        /// v11 independently represents definition residency and call authority.
         /// The checked responder replaces invocation.tools from materialized,
         /// and replaces offered from its separately captured argument. All
         /// definitions still come from this compiled answer catalog.
@@ -573,44 +500,12 @@ pub fn Profile(
             };
         }
 
-        /// A shared ordinary external effect declaration, without a native handler.
         pub fn declare(builder: anytype) !u64 {
-            const payload = try contracts.schema(Request, builder);
-            const result = try contracts.schema(Result, builder);
-            const slot = try builder.specialization(u64, semantic_identity, .{ payload, result });
-            if (slot.cached) |cached| return cached;
-            const effect = try builder.effect(.{
-                .identity = semantic_identity,
-                .payload = payload,
-                .result = result,
-            });
-            return slot.finish(builder, effect);
-        }
-
-        pub fn declareReplay(builder: anytype) !u64 {
-            const payload = try contracts.schema(ReplayRequest, builder);
-            const result = try contracts.schema(ReplayResult, builder);
-            const slot = try builder.specialization(u64, replay_semantic_identity, .{ payload, result });
-            if (slot.cached) |cached| return cached;
-            const effect = try builder.effect(.{ .identity = replay_semantic_identity, .payload = payload, .result = result });
-            return slot.finish(builder, effect);
-        }
-
-        pub fn declareReference(builder: anytype) !u64 {
-            const payload = try contracts.schema(ReferenceRequest, builder);
-            const result = try contracts.schema(ReferenceResult, builder);
-            const slot = try builder.specialization(u64, reference_semantic_identity, .{ payload, result });
-            if (slot.cached) |cached| return cached;
-            const effect = try builder.effect(.{ .identity = reference_semantic_identity, .payload = payload, .result = result });
-            return slot.finish(builder, effect);
-        }
-
-        pub fn declareAdaptive(builder: anytype) !u64 {
             const payload = try contracts.schema(AdaptiveRequest, builder);
             const result = try contracts.schema(AdaptiveResult, builder);
-            const slot = try builder.specialization(u64, adaptive_semantic_identity, .{ payload, result });
+            const slot = try builder.specialization(u64, semantic_identity, .{ payload, result });
             if (slot.cached) |cached| return cached;
-            const effect = try builder.effect(.{ .identity = adaptive_semantic_identity, .payload = payload, .result = result });
+            const effect = try builder.effect(.{ .identity = semantic_identity, .payload = payload, .result = result });
             return slot.finish(builder, effect);
         }
 

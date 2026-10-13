@@ -97,7 +97,7 @@ test "report model arguments decode nested records and exact numeric citations s
     for (cases) |case| {
         const bytes = try std.json.Stringify.valueAlloc(a, .{.{ .type = "function_call", .status = "completed", .call_id = "report", .name = "report", .arguments = case.arguments }}, .{});
         const parsed = try native.json.parse(a, bytes, .{ .bytes = bytes.len, .tokens = bytes.len });
-        const normalized = try native.responses.Adapter(t.P).normalize(a, invocation, parsed.value);
+        const normalized = try native.responses.OutputNormalizer(t.P).normalize(a, invocation, parsed.value);
         const decoded = normalized.output.items.items[0].function_call.decoded_action;
         if (case.failure) |failure| {
             try std.testing.expectEqual(failure, decoded.invalid);

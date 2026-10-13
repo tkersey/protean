@@ -1,8 +1,9 @@
 # Adaptive Responses contract (v11)
 
 `agent.model.invoke.v11` binds inference selection and context projection to the
-existing model/responder owner. The shared invocation is v7, inline replay v8,
-and reference replay v9. Earlier saved contracts require their original build.
+existing model/responder owner. It is the sole invocation contract. Old
+invocation producers, replay readers, and disposable examples are replaced;
+there is no invocation migration or compatibility adapter.
 The reference consumer is [Protean](../examples/adaptive/README.md).
 
 ## Authored API and execution
@@ -10,8 +11,8 @@ The reference consumer is [Protean](../examples/adaptive/README.md).
 Horos authors and checks the program; native Kosmos executes its continuation.
 
 `protean.adaptive_controls.defineInference` and `defineSkill(P, ...)` construct
-reusable control transitions. `P.declareAdaptive` and
-`protean.responders.defineAdaptiveModelObserved(P, ...)` provide the admitted model
+reusable control transitions. `P.declare` and
+`protean.responders.defineModelObserved(P, ...)` provide the admitted model
 effect and checked continuation. These owners are independent of the repository
 example. Consumers compose them through existing Protean/Horos authoring;
 Kosmos executes the emitted BPI3 and owns its saved continuation.
@@ -40,14 +41,14 @@ polish is deferred, not a blocker on the reusable API or reference integration.
 | `AdaptiveContextReference` | Content reference plus schema, policy, inference selection, task, tenant, audience, epoch, watermark, and eviction bindings. |
 
 The additional identities are `agent.model.context.responses.adaptive.v6` and
-`agent.model.policy.adaptive.v2`. The v9
-`agent.model.context.responses.v2` reference is not an adaptive reference.
+`agent.model.policy.adaptive.v2`. Every model effect uses the same v11
+request/result envelope and the v6 context reference.
 
 ## Requests and checked actions
 
 `P.AdaptiveRequest` contains the ordinary invocation, frozen policy digest,
 selection, projection plan, materialized mask, offered mask, and settled tool
-results. `defineAdaptiveModelObserved` derives definitions from the compiled
+results. `defineModelObserved` derives definitions from the compiled
 catalog and captures the original offered set with the continuation.
 
 The three sets have distinct meanings:

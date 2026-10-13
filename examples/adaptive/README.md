@@ -14,8 +14,8 @@ obligations to proof surfaces and exact-head PR evidence.
 ## Author and build
 
 The reusable owners are `protean.adaptive_controls.defineInference`,
-`protean.adaptive_controls.defineSkill(P, ...)`, `P.declareAdaptive`, and
-`protean.responders.defineAdaptiveModelObserved`. They build ordinary Horos
+`protean.adaptive_controls.defineSkill(P, ...)`, `P.declare`, and
+`protean.responders.defineModelObserved`. They build ordinary Horos
 computations and checked contracts. [`definition.zig`](definition.zig) composes
 them with this consumer's task, evidence, question, inbox and completion logic;
 [`types.zig`](types.zig) supplies its actions and ordinary schemas. Model choice,
@@ -88,7 +88,7 @@ part of task resources or prepared provider requests.
 
 For an interactive continuing task, launch `serve --transport stdio` with those
 same configuration, authorization, credential and state flags. The
-`agent-host/2.0` interface and CLI share the same image and task owner. Questions
+`agent-host/2.1` interface and CLI share the same image and task owner. Questions
 require the returned identity/revision/digest; queued `task.message` follow-ups
 use a distinct interface. Stable operation IDs support lost-ack retries. Unknown
 external delivery never authorizes another provider attempt.

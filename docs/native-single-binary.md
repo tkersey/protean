@@ -187,7 +187,7 @@ fails and fences the namespace. Switching tasks transfers the committed receipt
 without serializing the state again. Receipts convey only local native custody;
 durable copies remain ordinary data under the namespace owner.
 
-Both `agent-host/2.0` and `agent-host/2.1` retain bounded transport windows: framed RPC, output
+`agent-host/2.1` retains bounded transport windows: framed RPC, output
 backpressure, and artifact/event pages. These do
 not accumulate into task-lifetime allowances. Parked tasks and archive records
 have no application count cap. Status reports `pending_message_count` and a
@@ -197,12 +197,11 @@ accepted message until its authored consumption or terminal disposition.
 
 ### Explicit recovery
 
-Initialization selects 2.1 when offered, with 2.0 retained for existing clients.
-Discovery returns the negotiated method set and matching immutable protocol
-schema. The existing 2.0 request fields and status/result shapes remain closed;
-`task.reconcile` is available only in 2.1. A 2.0 event query or subscription that
-would encounter a 2.1 reconciliation event returns `UnsupportedCapability`;
-status and result remain readable. Use 2.1 to read that recovery history.
+Initialization requires an offer containing `agent-host/2.1`; clients offering
+only older versions are rejected with the supported version. Discovery publishes
+one method set and one immutable protocol schema, including `task.reconcile`,
+recovery availability, and reconciliation events. The client JSON mapping is
+`agent-client-values/1.1` for every application, including nested optionals.
 
 For an unknown occurrence, 2.1 status includes `recovery` with its original
 `occurrence_id`, `attempt_id`, and available `mechanisms`. Submit

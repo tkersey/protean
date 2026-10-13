@@ -17,72 +17,19 @@ pub fn ModelFunction(comptime P: type, comptime Request: type, comptime Result: 
 /// result is candidate data, never a grant or an executable operation.
 pub fn ModelObservation(comptime P: type, comptime batch: bool) type {
     return struct {
-        normalized: P.Result,
-        interpretation: if (batch) P.BatchInterpretation else P.Interpretation,
-    };
-}
-
-pub fn ReplayModelObservation(comptime P: type, comptime batch: bool) type {
-    return struct {
-        normalized: P.ReplayResult,
-        interpretation: if (batch) P.BatchInterpretation else P.Interpretation,
-    };
-}
-
-pub fn ReferenceModelObservation(comptime P: type, comptime batch: bool) type {
-    return struct {
-        normalized: P.ReferenceResult,
-        interpretation: if (batch) P.BatchInterpretation else P.Interpretation,
-    };
-}
-
-pub fn AdaptiveModelObservation(comptime P: type, comptime batch: bool) type {
-    return struct {
         normalized: P.AdaptiveResult,
         interpretation: if (batch) P.BatchInterpretation else P.Interpretation,
     };
 }
 
-const Format = enum {
-    plain,
-    inline_replay,
-    reference,
-    adaptive,
-
-    fn Request(comptime format: Format, comptime P: type) type {
-        return switch (format) {
-            .plain => P.Request,
-            .inline_replay => P.ReplayRequest,
-            .reference => P.ReferenceRequest,
-            .adaptive => P.AdaptiveRequest,
-        };
-    }
-    fn Result(comptime format: Format, comptime P: type) type {
-        return switch (format) {
-            .plain => P.Result,
-            .inline_replay => P.ReplayResult,
-            .reference => P.ReferenceResult,
-            .adaptive => P.AdaptiveResult,
-        };
-    }
-    fn Observation(comptime format: Format, comptime P: type, comptime batch: bool) type {
-        return switch (format) {
-            .plain => ModelObservation(P, batch),
-            .inline_replay => ReplayModelObservation(P, batch),
-            .reference => ReferenceModelObservation(P, batch),
-            .adaptive => AdaptiveModelObservation(P, batch),
-        };
-    }
-};
-
-/// Declare a shared `(P.Request, [P.declaration_count]bool) -> Interpretation`
-/// computation. The request is a semantic configuration template: its `tools`
-/// field is intentionally replaced with the closed catalog filtered by offered.
+/// Declare a shared `(P.AdaptiveRequest, [P.declaration_count]bool) -> Interpretation`
+/// computation. The request carries v11 selection and context; its nested `tools`
+/// field is replaced with the closed catalog filtered by materialized definitions.
 /// Other fields are preserved; incompatible normalization bounds take `failure`
 /// before external I/O. Selection and the very same offered value
 /// are captured before suspension and used to admit the normalized result.
 /// `failure` is a literal of the enclosing module's failure schema.
-pub fn defineModel(comptime P: type, c: authoring.Context, failure: anytype, comptime batch: bool) !*const ModelFunction(P, P.Request, if (batch) P.BatchInterpretation else P.Interpretation) {
+pub fn defineModel(comptime P: type, c: authoring.Context, failure: anytype, comptime batch: bool) !*const ModelFunction(P, P.AdaptiveRequest, if (batch) P.BatchInterpretation else P.Interpretation) {
     const observed = try defineModelObserved(P, c, failure, batch);
     const t = c.author;
     const b = c.builder;
@@ -90,7 +37,7 @@ pub fn defineModel(comptime P: type, c: authoring.Context, failure: anytype, com
     const instance = try b.specialization(Id, "agent.model.candidate-projection/v3", .{ @intFromPtr(t), observed_id });
     const result = try c.schema(if (batch) P.BatchInterpretation else P.Interpretation);
     const effect = try typed.interop.operation(t, b.functions.items[@intCast(observed_id)].effects[0]);
-    const signature = try t.callable(.{ .request = try c.schema(P.Request), .offered = try c.schema([P.declaration_count]bool) }, result, .{effect}, .{ .use = .reusable });
+    const signature = try t.callable(.{ .request = try c.schema(P.AdaptiveRequest), .offered = try c.schema([P.declaration_count]bool) }, result, .{effect}, .{ .use = .reusable });
     if (instance.cached) |cached| return typed.interop.refineFunction(t, try typed.interop.declaredFunction(t, cached), signature);
     const handle = try t.functionFor("model candidate", signature);
     const body = try t.body(handle);
@@ -100,42 +47,20 @@ pub fn defineModel(comptime P: type, c: authoring.Context, failure: anytype, com
     return handle;
 }
 
-pub fn defineModelObserved(comptime P: type, c: authoring.Context, failure: anytype, comptime batch: bool) !*const ModelFunction(P, P.Request, ModelObservation(P, batch)) {
-    return defineObserved(P, c, failure, batch, .plain);
-}
-pub fn defineReplayModelObserved(comptime P: type, c: authoring.Context, failure: anytype, comptime batch: bool) !*const ModelFunction(P, P.ReplayRequest, ReplayModelObservation(P, batch)) {
-    return defineObserved(P, c, failure, batch, .inline_replay);
-}
-pub fn defineReferenceModelObserved(comptime P: type, c: authoring.Context, failure: anytype, comptime batch: bool) !*const ModelFunction(P, P.ReferenceRequest, ReferenceModelObservation(P, batch)) {
-    return defineObserved(P, c, failure, batch, .reference);
-}
-pub fn defineAdaptiveModelObserved(comptime P: type, c: authoring.Context, failure: anytype, comptime batch: bool) !*const ModelFunction(P, P.AdaptiveRequest, AdaptiveModelObservation(P, batch)) {
-    return defineObserved(P, c, failure, batch, .adaptive);
-}
-fn defineObserved(comptime P: type, c: authoring.Context, failure: anytype, comptime batch: bool, comptime format: Format) !*const ModelFunction(P, format.Request(P), format.Observation(P, batch)) {
+pub fn defineModelObserved(comptime P: type, c: authoring.Context, failure: anytype, comptime batch: bool) !*const ModelFunction(P, P.AdaptiveRequest, ModelObservation(P, batch)) {
     const b = c.builder;
     const t = c.author;
-    const effect = switch (format) {
-        .plain => try P.declare(b),
-        .inline_replay => try P.declareReplay(b),
-        .reference => try P.declareReference(b),
-        .adaptive => try P.declareAdaptive(b),
-    };
+    const effect = try P.declare(b);
     try c.registry.classify(effect, .model);
-    const operation = try typed.interop.externalOperation(t, effect, try c.schema(format.Request(P)), try c.schema(format.Result(P)));
+    const operation = try typed.interop.externalOperation(t, effect, try c.schema(P.AdaptiveRequest), try c.schema(P.AdaptiveResult));
     const fault = try typed.interop.literalFailure(t, failure);
-    const instance = try b.specialization(Id, switch (format) {
-        .plain => "agent.model.observed-responder/v3",
-        .inline_replay => "agent.model.observed-responder/v4",
-        .reference => "agent.model.observed-responder/v5",
-        .adaptive => "agent.model.observed-responder/v6",
-    }, .{ @intFromPtr(t), @typeName(P), effect, try typed.interop.failureLiteralId(t, fault), batch });
-    const signature = try t.callable(.{ .request = try c.schema(format.Request(P)), .offered = try c.schema([P.declaration_count]bool) }, try c.schema(format.Observation(P, batch)), .{operation}, .{ .use = .reusable });
+    const instance = try b.specialization(Id, "agent.model.observed-responder/v6", .{ @intFromPtr(t), @typeName(P), effect, try typed.interop.failureLiteralId(t, fault), batch });
+    const signature = try t.callable(.{ .request = try c.schema(P.AdaptiveRequest), .offered = try c.schema([P.declaration_count]bool) }, try c.schema(ModelObservation(P, batch)), .{operation}, .{ .use = .reusable });
     if (instance.cached) |cached| return typed.interop.refineFunction(t, try typed.interop.declaredFunction(t, cached), signature);
     const interpreter = if (batch) try P.interpretAll(c) else try P.interpreter(c);
     const handle = try t.functionFor("observed model response", signature);
     const function = try typed.interop.functionId(t, handle);
-    const g = Generator(P, batch, format, @TypeOf(fault), @TypeOf(failure)){ .context = c, .typed_context = t, .handle = handle, .function = function, .fault = fault, .failure = failure };
+    const g = Generator(P, batch, @TypeOf(fault), @TypeOf(failure)){ .context = c, .typed_context = t, .handle = handle, .function = function, .fault = fault, .failure = failure };
     try t.define(handle, try g.emitBody(operation, interpreter));
     _ = try instance.finish(b, function);
     return handle;
@@ -171,50 +96,47 @@ pub fn invokeModelObserved(
     } });
 }
 
-fn Generator(comptime P: type, comptime batch: bool, comptime format: Format, comptime Fault: type, comptime Failure: type) type {
+fn Generator(comptime P: type, comptime batch: bool, comptime Fault: type, comptime Failure: type) type {
     return struct {
         context: authoring.Context,
         typed_context: *typed.Context,
-        handle: *const ModelFunction(P, format.Request(P), format.Observation(P, batch)),
+        handle: *const ModelFunction(P, P.AdaptiveRequest, ModelObservation(P, batch)),
         function: Id,
         fault: Fault,
         failure: Failure,
         const G = @This();
-        const Request = format.Request(P);
-        const Result = format.Result(P);
-        const replay = format != .plain;
 
         fn rejectWhen(g: G, body: anytype, invalid: V(bool)) !void {
             const rejected = try body.branch();
             const accepted = try body.branch();
             _ = try body.conditional(invalid, try rejected.fail(try g.context.schema(void), g.failure), try accepted.ret(try accepted.constant(void, {})));
         }
-        fn emitBody(g: G, operation: anytype, interpreter: anytype) !*const typed.Computation(typed.Shape(format.Observation(P, batch))) {
+        fn emitBody(g: G, operation: anytype, interpreter: anytype) !*const typed.Computation(typed.Shape(ModelObservation(P, batch))) {
             const root = try g.typed_context.body(g.handle);
             const envelope = try root.parameter("request");
-            const template = if (replay) try root.field(envelope, "invocation") else envelope;
+            const template = try root.field(envelope, "invocation");
             const offered = try root.parameter("offered");
-            const materialized = if (format == .adaptive) try root.field(envelope, "materialized") else offered;
-            if (format == .adaptive) try g.checkMaterialized(root, materialized, offered);
+            const materialized = try root.field(envelope, "materialized");
+            try g.checkMaterialized(root, materialized, offered);
             var tools = try g.context.literal(P.Tools, .{ .items = &.{} });
             for (0..P.declaration_count) |index| tools = try g.filter(root, materialized, index, tools);
             const selection = try root.field(template, "selection");
             try g.checkTemplate(root, template, selection);
             const invocation = try g.request(root, template, tools);
-            const payload = if (format == .adaptive) try root.update(envelope, .{ .invocation = invocation, .offered = offered }) else if (replay) try root.update(envelope, .{ .invocation = invocation }) else invocation;
+            const payload = try root.update(envelope, .{ .invocation = invocation, .offered = offered });
             const site = try typed.interop.performSite(root, operation, payload);
             try g.context.registry.protectSite(g.function, site.term, try typed.interop.operationId(g.typed_context, operation));
             const observation = site.value;
-            const normalized = if (replay) try root.field(observation, "result") else observation;
+            const normalized = try root.field(observation, "result");
             const interpreted = try root.call(interpreter, .{ .result = normalized, .offered = offered, .selection = selection });
-            const admitted = if (replay) blk: {
+            const admitted = blk: {
                 const good = try root.branch();
                 const lost = try root.branch();
                 const Interpretation = if (batch) P.BatchInterpretation else P.Interpretation;
                 const status = try root.field(observation, "replay_status");
                 break :blk try root.conditional(try root.equal(try root.enumTag(status), try root.constant(u32, @backingInt(@import("model_invocation.zig").ReplayStatus.complete))), try good.ret(interpreted), try lost.ret(try g.context.literal(Interpretation, .{ .rejected = .unsupported })));
-            } else interpreted;
-            return root.ret(try root.product(try g.context.schema(format.Observation(P, batch)), .{ .normalized = observation, .interpretation = admitted }));
+            };
+            return root.ret(try root.product(try g.context.schema(ModelObservation(P, batch)), .{ .normalized = observation, .interpretation = admitted }));
         }
         fn member(_: G, body: anytype, set: V([P.declaration_count]bool), index: usize) !V(bool) {
             const item = try body.sequenceGet(set, try body.constant(u64, index));

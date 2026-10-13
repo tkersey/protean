@@ -5,6 +5,7 @@ import {join} from 'node:path';
 import {deployment} from './native_deployment.mjs';
 import {readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
+import {ProteanClient} from '../support/stdio-client.mts';
 import {verifyAdaptiveNative} from './adaptive_native_peer.mjs';
 
 const image = readFileSync(process.argv[4]), application = JSON.parse(readFileSync(process.argv[3], 'utf8'));
@@ -23,6 +24,17 @@ try {
   assert.equal(manifest.format, 'agent-native-build/v2');
   assert.equal(manifest.application_id, 'adaptive-agent');
   assert.equal(manifest.protocol, 'agent-host/2.1');
+  assert.equal(manifest.client_mapping, 'agent-client-values/1.1');
+  assert.equal(application.client_mapping, 'agent-client-values/1.1');
+  const retired = new ProteanClient(app.command, ['--offline', '--state-dir', join(app.data, 'retired client')], {cwd: app.data, env: {PATH: '/nonexistent'}});
+  try {
+    await assert.rejects(retired.initialize(['agent-host/2.0']), error => {
+      assert.equal(error.data?.kind, 'ProtocolState');
+      assert.deepEqual(error.data.supported_versions, ['agent-host/2.1']);
+      return true;
+    });
+  } finally { await retired.close(); }
+
   assert.equal(manifest.compiler.version, '0.17.0');
   assert.equal(manifest.artifact_sha256, createHash('sha256').update(readFileSync(app.executable)).digest('hex'));
   assert.equal(manifest.program_sha256, application.program_sha256);

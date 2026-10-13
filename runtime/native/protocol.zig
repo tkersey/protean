@@ -2,42 +2,26 @@
 const std = @import("std");
 const json = @import("json.zig");
 pub const version = "agent-host/2.1";
-pub const Version = enum {
-    v2_0,
-    v2_1,
+/// Validate the offer list completely, then accept only the current contract.
+pub fn accepts(versions: json.Value) !bool {
+    if (versions != .array or versions.array.items.len == 0 or versions.array.items.len > 16) return error.InvalidParams;
+    var accepted = false;
+    for (versions.array.items) |item| {
+        if (item != .string or item.string.len > 128) return error.InvalidParams;
+        accepted = accepted or std.mem.eql(u8, item.string, version);
+    }
+    return accepted;
+}
 
-    pub fn name(self: Version) []const u8 {
-        return switch (self) {
-            .v2_0 => "agent-host/2.0",
-            .v2_1 => version,
-        };
-    }
-    pub fn supports(self: Version, method: Method) bool {
-        return self == .v2_1 or method != .@"task.reconcile";
-    }
-    pub fn negotiate(versions: json.Value) !?Version {
-        if (versions != .array or versions.array.items.len == 0 or versions.array.items.len > 16) return error.InvalidParams;
-        var selected: ?Version = null;
-        for (versions.array.items) |item| {
-            if (item != .string or item.string.len > 128) return error.InvalidParams;
-            if (std.mem.eql(u8, item.string, Version.v2_1.name())) selected = .v2_1;
-            if (selected == null and std.mem.eql(u8, item.string, Version.v2_0.name())) selected = .v2_0;
-        }
-        return selected;
-    }
-};
-
-test "negotiation prefers 2.1 and leaves reconciliation unavailable to 2.0" {
+test "initialization accepts only 2.1 and validates the entire offer list" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const offers = [_][]const u8{ "[\"agent-host/2.0\"]", "[\"agent-host/2.0\",\"agent-host/2.1\"]", "[\"agent-host/2.1\",\"agent-host/2.0\"]", "[\"agent-host/9.0\"]" };
-    const expected = [_]?Version{ .v2_0, .v2_1, .v2_1, null };
-    for (offers, expected) |bytes, selected| try std.testing.expectEqual(selected, try Version.negotiate((try json.parse(a, bytes, .{})).value));
-    try std.testing.expectError(error.InvalidParams, Version.negotiate((try json.parse(a, "[\"agent-host/2.1\",17]", .{})).value));
-    const request = (try json.parse(a, "{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"method\":\"task.reconcile\",\"params\":{\"client_operation_id\":\"r\",\"task_id\":\"task\",\"expected_revision\":\"1\",\"occurrence_id\":\"occurrence\",\"attempt_id\":\"attempt\",\"recovery\":{\"mechanism\":\"rederive\"}}}", .{})).value;
-    try std.testing.expectEqual(Kind.MethodNotFound, admitVersion(request, .{}, false, .v2_0).failure.kind);
-    try std.testing.expect(admitVersion(request, .{}, false, .v2_1) == .call);
+    const offers = [_][]const u8{ "[\"agent-host/2.0\"]", "[\"agent-host/2.0\",\"agent-host/2.1\"]", "[\"agent-host/2.1\"]", "[\"agent-host/9.0\"]" };
+    for (offers, [_]bool{ false, true, true, false }) |bytes, expected|
+        try std.testing.expectEqual(expected, try accepts((try json.parse(a, bytes, .{})).value));
+    for ([_][]const u8{ "[]", "null", "[\"agent-host/2.1\",17]" }) |bytes|
+        try std.testing.expectError(error.InvalidParams, accepts((try json.parse(a, bytes, .{})).value));
 }
 
 pub const Limits = struct {
@@ -200,9 +184,6 @@ fn validId(value: json.Value, limit: usize) bool {
 }
 
 pub fn admit(value: json.Value, limits: Limits, batch: bool) Admitted {
-    return admitVersion(value, limits, batch, .v2_1);
-}
-pub fn admitVersion(value: json.Value, limits: Limits, batch: bool, selected: Version) Admitted {
     closed(value, .{ .required = &.{ "jsonrpc", "method" }, .optional = &.{ "id", "params" } }) catch
         return .{ .failure = .{ .kind = .InvalidRequest } };
     const rpc = value.object.get("jsonrpc").?;
@@ -215,7 +196,6 @@ pub fn admitVersion(value: json.Value, limits: Limits, batch: bool, selected: Ve
     if (!validId(id, limits.id_bytes)) return .{ .failure = .{ .kind = .InvalidRequest } };
     const params = value.object.get("params") orelse return .{ .failure = .{ .id = id, .kind = .InvalidParams } };
     const method = std.meta.stringToEnum(Method, name.string) orelse return .{ .failure = .{ .id = id, .kind = .MethodNotFound } };
-    if (!selected.supports(method)) return .{ .failure = .{ .id = id, .kind = .MethodNotFound } };
     if (batch and method == .initialize) return .{ .failure = .{ .id = id, .kind = .InvalidRequest } };
     closed(params, fields(method)) catch return .{ .failure = .{ .id = id, .kind = .InvalidParams } };
     return .{ .call = .{ .id = id, .method = method, .params = params } };

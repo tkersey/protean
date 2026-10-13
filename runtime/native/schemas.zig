@@ -43,16 +43,6 @@ fn enumSchema(comptime T: type, a: std.mem.Allocator) !json.Value {
     try json.put(a, &result, "enum", .{ .array = items });
     return result;
 }
-fn versionedEnum(comptime T: type, a: std.mem.Allocator, selected: protocol.Version) !json.Value {
-    var items: std.array_list.Managed(json.Value) = .init(a);
-    inline for (@typeInfo(T).@"enum".field_names) |name| {
-        const available = if (T == protocol.Method) selected.supports(@field(T, name)) else selected == .v2_1 or !std.mem.eql(u8, name, "reconciled");
-        if (available) try items.append(json.string(name));
-    }
-    var result = json.object();
-    try json.put(a, &result, "enum", .{ .array = items });
-    return result;
-}
 fn shape(a: std.mem.Allocator, properties: []const Property, optional: []const []const u8) !json.Value {
     var fields = json.object();
     var required: std.array_list.Managed(json.Value) = .init(a);
@@ -280,9 +270,6 @@ pub fn validateEventData(a: std.mem.Allocator, kind: state.EventType, bytes: []c
 }
 
 pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.Limits) !json.Value {
-    return documentVersion(a, application, limits, .v2_1);
-}
-pub fn documentVersion(a: std.mem.Allocator, application: json.Value, limits: protocol.Limits, selected: protocol.Version) !json.Value {
     var definitions = json.object();
     try json.put(a, &definitions, "id128", try literal(a, "{\"type\":\"string\",\"pattern\":\"^[0-9a-fA-F]{32}(?![\\\\s\\\\S])\"}"));
     try json.put(a, &definitions, "digest", try literal(a, "{\"type\":\"string\",\"pattern\":\"^[0-9a-fA-F]{64}(?![\\\\s\\\\S])\"}"));
@@ -305,10 +292,8 @@ pub fn documentVersion(a: std.mem.Allocator, application: json.Value, limits: pr
         .{ "high_water_seq", count },                   .{ "blocker", try nullable(a, try enumSchema(state.Blocker, a)) }, .{ "cancellation", try nullable(a, try text(a, 0, 256)) }, .{ "pending_messages", try array(a, message, limits.pending_message_page) },
         .{ "pending_message_count", count },            .{ "pending_messages_truncated", boolean },                        .{ "message_history", try constant(a, "task.events") },    .{ "question", try nullable(a, question) },
     }, &.{});
-    if (selected == .v2_1) {
-        const availability = try shape(a, &.{ .{ "occurrence_id", digest }, .{ "attempt_id", digest }, .{ "mechanisms", try array(a, try enumSchema(state.RecoveryRequest, a), null) } }, &.{});
-        snapshot = try extend(a, snapshot, &.{.{ "recovery", try nullable(a, availability) }}, &.{});
-    }
+    const availability = try shape(a, &.{ .{ "occurrence_id", digest }, .{ "attempt_id", digest }, .{ "mechanisms", try array(a, try enumSchema(state.RecoveryRequest, a), null) } }, &.{});
+    snapshot = try extend(a, snapshot, &.{.{ "recovery", try nullable(a, availability) }}, &.{});
     try json.put(a, &definitions, "snapshot", snapshot);
     const artifact = try shape(a, &.{ .{ "artifact_id", digest }, .{ "sha256", digest }, .{ "bytes", count }, .{ "media_type", try constant(a, "application/json") }, .{ "schema_id", try text(a, 1, 128) }, .{ "retention", try constant(a, "state-namespace") } }, &.{});
     var outcomes: std.array_list.Managed(json.Value) = .init(a);
@@ -356,57 +341,46 @@ pub fn documentVersion(a: std.mem.Allocator, application: json.Value, limits: pr
     try json.put(a, &task_result, "allOf", result_cases);
     try json.put(a, &definitions, "task.result.result", task_result);
     inline for (.{ "task.submit", "task.message", "task.respond", "task.cancel", "task.resume", "task.reconcile" }) |name| {
-        if (selected.supports(@field(protocol.Method, name))) {
-            var admitted = try extend(a, snapshot, &.{ .{ "receipt_id", digest }, .{ "receipt_revision", count }, .{ "replayed", boolean }, .{ "disposition", try versionedEnum(state.Disposition, a, selected) } }, &.{});
-            if (comptime std.mem.eql(u8, name, "task.message")) admitted = try extend(a, admitted, &.{.{ "message_id", digest }}, &.{});
-            if (comptime std.mem.eql(u8, name, "task.respond")) admitted = try extend(a, admitted, &.{.{ "question_id", digest }}, &.{});
-            if (comptime std.mem.eql(u8, name, "task.reconcile")) {
-                const recovery = try shape(a, &.{ .{ "reconciliation_id", digest }, .{ "occurrence_id", digest }, .{ "attempt_id", digest }, .{ "status", try enumeration(a, &.{ "unresolved", "capture_admitted", "reply_settled", "pending", "not_sent" }) }, .{ "provenance", try enumeration(a, &.{ "none", "rederived", "authentic", "authoritative" }) }, .{ "mechanism", try text(a, 1, 128) }, .{ "mechanism_version", try counter(a, std.math.maxInt(u32)) }, .{ "reason", try nullable(a, try enumeration(a, &.{ "unsupported", "unavailable", "interrupted", "inconclusive", "rejected" })) } }, &.{});
-                admitted = try extend(a, admitted, &.{.{ "reconciliation", recovery }}, &.{});
-            }
-            try json.put(a, &definitions, name ++ ".result", admitted);
+        var admitted = try extend(a, snapshot, &.{ .{ "receipt_id", digest }, .{ "receipt_revision", count }, .{ "replayed", boolean }, .{ "disposition", try enumSchema(state.Disposition, a) } }, &.{});
+        if (comptime std.mem.eql(u8, name, "task.message")) admitted = try extend(a, admitted, &.{.{ "message_id", digest }}, &.{});
+        if (comptime std.mem.eql(u8, name, "task.respond")) admitted = try extend(a, admitted, &.{.{ "question_id", digest }}, &.{});
+        if (comptime std.mem.eql(u8, name, "task.reconcile")) {
+            const recovery = try shape(a, &.{ .{ "reconciliation_id", digest }, .{ "occurrence_id", digest }, .{ "attempt_id", digest }, .{ "status", try enumeration(a, &.{ "unresolved", "capture_admitted", "reply_settled", "pending", "not_sent" }) }, .{ "provenance", try enumeration(a, &.{ "none", "rederived", "authentic", "authoritative" }) }, .{ "mechanism", try text(a, 1, 128) }, .{ "mechanism_version", try counter(a, std.math.maxInt(u32)) }, .{ "reason", try nullable(a, try enumeration(a, &.{ "unsupported", "unavailable", "interrupted", "inconclusive", "rejected" })) } }, &.{});
+            admitted = try extend(a, admitted, &.{.{ "reconciliation", recovery }}, &.{});
         }
+        try json.put(a, &definitions, name ++ ".result", admitted);
     }
-    var event_schema = try shape(a, &.{ .{ "task_id", id }, .{ "seq", count }, .{ "revision", count }, .{ "type", try versionedEnum(state.EventType, a, selected) }, .{ "data", try literal(a, "{\"type\":\"object\"}") } }, &.{});
+    var event_schema = try shape(a, &.{ .{ "task_id", id }, .{ "seq", count }, .{ "revision", count }, .{ "type", try enumSchema(state.EventType, a) }, .{ "data", try literal(a, "{\"type\":\"object\"}") } }, &.{});
     var event_cases: std.array_list.Managed(json.Value) = .init(a);
     inline for (@typeInfo(state.EventType).@"enum".field_names) |name| {
         const kind = @field(state.EventType, name);
-        if (selected == .v2_1 or kind != .reconciled) {
-            const payload = try eventPayload(a, kind);
-            var condition = json.object();
-            var when = json.object();
-            var when_properties = json.object();
-            try json.put(a, &when_properties, "type", try constant(a, name));
-            try json.put(a, &when, "properties", when_properties);
-            var then = json.object();
-            var then_properties = json.object();
-            try json.put(a, &then_properties, "data", payload);
-            try json.put(a, &then, "properties", then_properties);
-            try json.put(a, &condition, "if", when);
-            try json.put(a, &condition, "then", then);
-            try event_cases.append(condition);
-        }
+        const payload = try eventPayload(a, kind);
+        var condition = json.object();
+        var when = json.object();
+        var when_properties = json.object();
+        try json.put(a, &when_properties, "type", try constant(a, name));
+        try json.put(a, &when, "properties", when_properties);
+        var then = json.object();
+        var then_properties = json.object();
+        try json.put(a, &then_properties, "data", payload);
+        try json.put(a, &then, "properties", then_properties);
+        try json.put(a, &condition, "if", when);
+        try json.put(a, &condition, "then", then);
+        try event_cases.append(condition);
     }
     try json.put(a, &event_schema, "allOf", .{ .array = event_cases });
     try json.put(a, &definitions, "event", event_schema);
     const event = try reference(a, "event");
     inline for (@typeInfo(protocol.Method).@"enum".field_names) |name| {
         const method = @field(protocol.Method, name);
-        if (selected.supports(method)) {
-            const fields = protocol.fields(method);
-            var properties: std.array_list.Managed(Property) = .init(a);
-            for (fields.required) |key| try properties.append(.{ key, try parameter(a, method, key, application, limits) });
-            for (fields.optional) |key| try properties.append(.{ key, try parameter(a, method, key, application, limits) });
-            var params = try shape(a, properties.items, fields.optional);
-            if (method == .describe and selected == .v2_0) {
-                var cursor = try counter(a, @typeInfo(protocol.Method).@"enum".field_names.len - 1);
-                try json.put(a, &cursor, "default", json.string("0"));
-                try json.put(a, params.object.getPtr("properties").?, "cursor", cursor);
-            }
-            if (method == .@"artifact.read") try json.put(a, &params, "dependentRequired", try literal(a, "{\"question_id\":[\"task_id\"]}"));
-            try json.put(a, &definitions, name ++ ".params", params);
-            try json.put(a, &definitions, name ++ ".request", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "id", try reference(a, "rpc_id") }, .{ "method", try constant(a, name) }, .{ "params", params } }, &.{}));
-        }
+        const fields = protocol.fields(method);
+        var properties: std.array_list.Managed(Property) = .init(a);
+        for (fields.required) |key| try properties.append(.{ key, try parameter(a, method, key, application, limits) });
+        for (fields.optional) |key| try properties.append(.{ key, try parameter(a, method, key, application, limits) });
+        var params = try shape(a, properties.items, fields.optional);
+        if (method == .@"artifact.read") try json.put(a, &params, "dependentRequired", try literal(a, "{\"question_id\":[\"task_id\"]}"));
+        try json.put(a, &definitions, name ++ ".params", params);
+        try json.put(a, &definitions, name ++ ".request", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "id", try reference(a, "rpc_id") }, .{ "method", try constant(a, name) }, .{ "params", params } }, &.{}));
     }
     try json.put(a, &definitions, "ping.result", try shape(a, &.{.{ "server_instance_id", id }}, &.{}));
     try json.put(a, &definitions, "task.status.result", snapshot);
@@ -428,11 +402,10 @@ pub fn documentVersion(a: std.mem.Allocator, application: json.Value, limits: pr
         try limit_properties.append(.{ name, property });
     }
     const limits_schema = try shape(a, limit_properties.items, &.{});
-    var capabilities = try shape(a, &.{ .{ "task_events", boolean }, .{ "message_input", boolean }, .{ "task_execution", boolean } }, &.{});
-    if (selected == .v2_1) capabilities = try extend(a, capabilities, &.{.{ "task_reconciliation", boolean }}, &.{});
+    const capabilities = try shape(a, &.{ .{ "task_events", boolean }, .{ "message_input", boolean }, .{ "task_execution", boolean }, .{ "task_reconciliation", boolean } }, &.{});
     const info = try shape(a, &.{ .{ "name", try text(a, 1, 128) }, .{ "version", try text(a, 1, 128) } }, &.{});
-    try json.put(a, &definitions, "initialize.result", try shape(a, &.{ .{ "protocol_version", try constant(a, selected.name()) }, .{ "server_instance_id", id }, .{ "server_info", info }, .{ "build_manifest_id", digest }, .{ "native_artifact_sha256", digest }, .{ "limits", limits_schema }, .{ "capabilities", capabilities } }, &.{}));
-    const method_description = try shape(a, &.{ .{ "name", try versionedEnum(protocol.Method, a, selected) }, .{ "required_fields", try array(a, try text(a, 1, 128), 16) }, .{ "optional_fields", try array(a, try text(a, 1, 128), 16) }, .{ "params_schema", try text(a, 1, 128) }, .{ "result_schema", try text(a, 1, 128) } }, &.{});
+    try json.put(a, &definitions, "initialize.result", try shape(a, &.{ .{ "protocol_version", try constant(a, protocol.version) }, .{ "server_instance_id", id }, .{ "server_info", info }, .{ "build_manifest_id", digest }, .{ "native_artifact_sha256", digest }, .{ "limits", limits_schema }, .{ "capabilities", capabilities } }, &.{}));
+    const method_description = try shape(a, &.{ .{ "name", try enumSchema(protocol.Method, a) }, .{ "required_fields", try array(a, try text(a, 1, 128), 16) }, .{ "optional_fields", try array(a, try text(a, 1, 128), 16) }, .{ "params_schema", try text(a, 1, 128) }, .{ "result_schema", try text(a, 1, 128) } }, &.{});
     var app_properties: std.array_list.Managed(Property) = .init(a);
     for ([_][]const u8{ "application_id", "application_version", "client_mapping" }) |key| try app_properties.append(.{ key, try constant(a, application.object.get(key).?.string) });
     const schema_reference = try shape(a, &.{ .{ "artifact_id", digest }, .{ "sha256", digest }, .{ "bytes", count }, .{ "media_type", try constant(a, "application/json") }, .{ "schema_id", try text(a, 1, 128) }, .{ "retention", try constant(a, "embedded") } }, &.{});
@@ -450,7 +423,7 @@ pub fn documentVersion(a: std.mem.Allocator, application: json.Value, limits: pr
         const kind = @field(protocol.Kind, name);
         var code = json.object();
         try json.put(a, &code, "const", try json.number(a, kind.code()));
-        var details = try shape(a, &.{ .{ "kind", try constant(a, name) }, .{ "recovery", if (kind == .CursorExpired) try constant(a, "read_status_or_result") else try enumeration(a, &.{ "correct_request", "reconnect", "retry_same_operation_or_inspect" }) }, .{ "supported_versions", try array(a, try enumeration(a, &.{ protocol.version, protocol.Version.v2_0.name() }), 2) } }, &.{"supported_versions"});
+        var details = try shape(a, &.{ .{ "kind", try constant(a, name) }, .{ "recovery", if (kind == .CursorExpired) try constant(a, "read_status_or_result") else try enumeration(a, &.{ "correct_request", "reconnect", "retry_same_operation_or_inspect" }) }, .{ "supported_versions", try array(a, try enumeration(a, &.{protocol.version}), 1) } }, &.{"supported_versions"});
         if (kind == .CursorExpired) details = try extend(a, details, &.{ .{ "earliest_available_seq", count }, .{ "high_water_seq", count } }, &.{});
         try errors.append(try shape(a, &.{ .{ "code", code }, .{ "message", try constant(a, name) }, .{ "data", details } }, &.{}));
     }
@@ -458,9 +431,7 @@ pub fn documentVersion(a: std.mem.Allocator, application: json.Value, limits: pr
     try json.put(a, &fault, "oneOf", .{ .array = errors });
     try json.put(a, &definitions, "error", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "id", try reference(a, "rpc_id") }, .{ "error", fault } }, &.{}));
     inline for (@typeInfo(protocol.Method).@"enum".field_names) |name| {
-        if (selected.supports(@field(protocol.Method, name))) {
-            try json.put(a, &definitions, name ++ ".response", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "id", try reference(a, "rpc_id") }, .{ "result", try reference(a, name ++ ".result") } }, &.{}));
-        }
+        try json.put(a, &definitions, name ++ ".response", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "id", try reference(a, "rpc_id") }, .{ "result", try reference(a, name ++ ".result") } }, &.{}));
     }
     var result = json.object();
     try json.put(a, &result, "$schema", json.string("https://json-schema.org/draft/2020-12/schema"));

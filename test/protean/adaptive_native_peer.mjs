@@ -220,12 +220,12 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
     assert.equal(result.status, 0, result.error ?? `${result.stderr}\n${result.stdout}`); return JSON.parse(result.stdout);
   };
   let client;
-  const launch = async (extra, selectedState = state, versions = ['agent-host/2.0']) => {
+  const launch = async (extra, selectedState = state, versions = ['agent-host/2.1']) => {
     client = new ProteanClient(app.command, ['--state-dir', selectedState, '--authorize-inference', '--test-provider', '--trust-root', trust, ...extra], {cwd: app.data, env: {PATH: '/nonexistent'}});
     const initialized = await client.initialize(versions);
     assert.equal(initialized.server_info.version, '5.0.0');
-    assert.equal(initialized.protocol_version, versions.includes('agent-host/2.1') ? 'agent-host/2.1' : 'agent-host/2.0');
-    assert.equal(Object.hasOwn(initialized.capabilities, 'task_reconciliation'), versions.includes('agent-host/2.1'));
+    assert.equal(initialized.protocol_version, 'agent-host/2.1');
+    assert.equal(Object.hasOwn(initialized.capabilities, 'task_reconciliation'), true);
     return client;
   };
   const artifact = async (taskId, ref) => {
@@ -496,46 +496,36 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
       }
       client = null;
       const milliseconds = performance.now() - stopStarted;
-      await launch(['--config', configPath], selectedState, method === 'protocol' ? ['agent-host/2.0', 'agent-host/2.1'] : ['agent-host/2.0']);
+      await launch(['--config', configPath], selectedState, ['agent-host/2.1']);
       const unknown = await client.call('task.status', {task_id: task.task_id});
       assert.equal(unknown.status, 'unknown'); assert.notEqual(unknown.cancellation, null);
       assert.equal((await client.call('task.submit', submission)).task_id, task.task_id);
       if (cancellation) assert.equal((await client.call('task.cancel', cancelParams)).receipt_id, cancellation.receipt_id);
       await assert.rejects(client.call('task.resume', {client_operation_id: 'no-unknown-retry', task_id: task.task_id, expected_revision: unknown.revision}), error => error.data?.kind === 'StateConflict');
-      if (method === 'protocol') {
-        assert.deepEqual(unknown.recovery.mechanisms, [], 'provider has no authoritative receipt retrieval');
-        assert.match(unknown.recovery.occurrence_id, /^[0-9a-f]{64}$/);
-        assert.match(unknown.recovery.attempt_id, /^[0-9a-f]{64}$/);
-        const description = await client.call('describe');
-        assert(description.methods.some(method => method.name === 'task.reconcile'));
-        const schemas = description.protocol_schema ?? JSON.parse((await artifact(null, description.protocol_schema_ref)).toString('utf8'));
-        assert.equal(schemas.$defs['initialize.result'].properties.protocol_version.const, 'agent-host/2.1');
-        assert.equal(schemas.$defs['task.reconcile.params'].additionalProperties, false);
-        assert.deepEqual(schemas.$defs['task.reconcile.params'].properties.recovery.required, ['mechanism']);
-        const recovery = {client_operation_id: 'recover-provider-once', task_id: task.task_id, expected_revision: unknown.revision,
-          occurrence_id: unknown.recovery.occurrence_id, attempt_id: unknown.recovery.attempt_id, recovery: {mechanism: 'rederive'}};
-        await assert.rejects(client.call('task.reconcile', {...recovery, recovery: {mechanism: 'rederive', safe_to_retry: true}}), error => error.data?.kind === 'InvalidParams');
-        const admitted = await client.call('task.reconcile', recovery);
-        assert.equal(admitted.status, 'unknown'); assert.equal(admitted.replayed, false);
-        assert.equal(admitted.reconciliation.status, 'unresolved');
-        assert.equal(admitted.reconciliation.reason, 'unsupported');
-        assert.equal(admitted.reconciliation.provenance, 'none');
-        assert.deepEqual(Object.keys(admitted.reconciliation).sort(), ['attempt_id', 'mechanism', 'mechanism_version', 'occurrence_id', 'provenance', 'reason', 'reconciliation_id', 'status']);
-        const replay = await client.call('task.reconcile', recovery);
-        assert.equal(replay.receipt_id, admitted.receipt_id); assert.equal(replay.replayed, true);
-        await assert.rejects(client.call('task.reconcile', {...recovery, expected_revision: admitted.revision}), error => error.data?.kind === 'OperationConflict');
-        const events = await client.call('task.events', {task_id: task.task_id, after_seq: unknown.high_water_seq});
-        assert(events.events.some(event => event.type === 'reconciled' && event.data.reconciliation_id === admitted.reconciliation.reconciliation_id));
-      } else {
-        assert.equal(Object.hasOwn(unknown, 'recovery'), false);
-        await assert.rejects(client.call('task.reconcile', {}), error => error.data?.kind === 'MethodNotFound');
-        const description = await client.call('describe');
-        assert(!description.methods.some(method => method.name === 'task.reconcile'));
-        const schemas = description.protocol_schema ?? JSON.parse((await artifact(null, description.protocol_schema_ref)).toString('utf8'));
-        assert.equal(schemas.$defs['initialize.result'].properties.protocol_version.const, 'agent-host/2.0');
-        assert.equal(Object.hasOwn(schemas.$defs, 'task.reconcile.params'), false);
-        assert.equal(Object.hasOwn(schemas.$defs.snapshot.properties, 'recovery'), false);
-      }
+      assert.deepEqual(unknown.recovery.mechanisms, [], 'provider has no authoritative receipt retrieval');
+      assert.match(unknown.recovery.occurrence_id, /^[0-9a-f]{64}$/);
+      assert.match(unknown.recovery.attempt_id, /^[0-9a-f]{64}$/);
+      const description = await client.call('describe');
+      assert(description.methods.some(method => method.name === 'task.reconcile'));
+      const schemas = description.protocol_schema ?? JSON.parse((await artifact(null, description.protocol_schema_ref)).toString('utf8'));
+      assert.equal(schemas.$defs['initialize.result'].properties.protocol_version.const, 'agent-host/2.1');
+      assert.equal(schemas.$defs['task.reconcile.params'].additionalProperties, false);
+      assert.deepEqual(schemas.$defs['task.reconcile.params'].properties.recovery.required, ['mechanism']);
+      const recovery = {client_operation_id: 'recover-provider-once', task_id: task.task_id, expected_revision: unknown.revision,
+        occurrence_id: unknown.recovery.occurrence_id, attempt_id: unknown.recovery.attempt_id, recovery: {mechanism: 'rederive'}};
+      await assert.rejects(client.call('task.reconcile', {...recovery, recovery: {mechanism: 'rederive', safe_to_retry: true}}), error => error.data?.kind === 'InvalidParams');
+      const admitted = await client.call('task.reconcile', recovery);
+      assert.equal(admitted.status, 'unknown'); assert.equal(admitted.replayed, false);
+      assert.equal(admitted.reconciliation.status, 'unresolved');
+      assert.equal(admitted.reconciliation.reason, 'unsupported');
+      assert.equal(admitted.reconciliation.provenance, 'none');
+      assert.deepEqual(Object.keys(admitted.reconciliation).sort(), ['attempt_id', 'mechanism', 'mechanism_version', 'occurrence_id', 'provenance', 'reason', 'reconciliation_id', 'status']);
+      const replay = await client.call('task.reconcile', recovery);
+      assert.equal(replay.receipt_id, admitted.receipt_id); assert.equal(replay.replayed, true);
+      await assert.rejects(client.call('task.reconcile', {...recovery, expected_revision: admitted.revision}), error => error.data?.kind === 'OperationConflict');
+      const events = await client.call('task.events', {task_id: task.task_id, after_seq: unknown.high_water_seq});
+      assert(events.events.some(event => event.type === 'reconciled' && event.data.reconciliation_id === admitted.reconciliation.reconciliation_id));
+
       assert.equal(alternateIndex, 1, 'unknown adaptive delivery cannot be retried');
       assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
       cancellations.push({method, milliseconds, provider_requests: alternateIndex, recovered_status: unknown.status});

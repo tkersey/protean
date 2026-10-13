@@ -25,7 +25,7 @@ pub const capabilities = .{
     .{ .identity = t.tool_run_identity, .resource_role = "tool-execution" },
     .{ .identity = t.question_identity, .resource_role = "user" },
     .{ .identity = protean.inbox.semantic_identity, .resource_role = "user" },
-    .{ .identity = P.adaptive_identity, .resource_role = "inference" },
+    .{ .identity = P.identity, .resource_role = "inference" },
 };
 pub const resources = .{
     .{ .id = "adaptive-agent.instructions", .version = "1", .media_type = "text/plain", .bytes = @embedFile("instructions.txt") },
@@ -85,7 +85,7 @@ const Application = struct {
             .tool_build = try context.external(t.tool_build_identity, try context.schema(t.ToolRequest), try context.schema(t.ToolReply), .read),
             .tool_run = try context.external(t.tool_run_identity, try context.schema(t.ToolRequest), try context.schema(t.ToolReply), .read),
             .inbox = try Inbox.declare(context),
-            .model = try a.interop.externalOperation(c, try P.declareAdaptive(context.builder), try context.schema(P.AdaptiveRequest), try context.schema(P.AdaptiveResult)),
+            .model = try a.interop.externalOperation(c, try P.declare(context.builder), try context.schema(P.AdaptiveRequest), try context.schema(P.AdaptiveResult)),
         };
         const loop = try c.function("adaptive repository investigation", .{ .bindings = try e.context.schema(t.PolicyView), .state = try e.context.schema(t.State) }, try e.context.schema(t.Output), .{ ops.prepare, ops.work, ops.ask, ops.inspect, ops.tool_build, ops.tool_run, ops.inbox, ops.model });
         const program: Program = .{
@@ -95,7 +95,7 @@ const Application = struct {
             .report = try @import("report.zig").define(context),
             .source_at = try c.function("source evidence at global index", .{ .evidence = try e.context.schema(t.EvidenceList), .index = try e.context.schema(u64) }, try e.context.schema(?t.SourceEvidenceReference), &.{}),
             .has_source = try c.function("source evidence availability", .{ .evidence = try e.context.schema(t.EvidenceList), .index = try e.context.schema(u64) }, try e.context.schema(bool), &.{}),
-            .responder = try protean.responders.defineAdaptiveModelObserved(P, context, try context.literal(t.Failure, .invalid_response), false),
+            .responder = try protean.responders.defineModelObserved(P, context, try context.literal(t.Failure, .invalid_response), false),
             .inference = try t.controls.defineInference(context, try context.literal(t.Failure, .capacity)),
             .skill = try t.controls.defineSkill(P, context, try context.literal(t.Failure, .capacity)),
         };
@@ -136,7 +136,7 @@ const Program = struct {
     report: *const @import("report.zig").Function,
     source_at: F(struct { evidence: t.EvidenceList, index: u64 }, ?t.SourceEvidenceReference),
     has_source: F(struct { evidence: t.EvidenceList, index: u64 }, bool),
-    responder: *const protean.responders.ModelFunction(P, P.AdaptiveRequest, protean.responders.AdaptiveModelObservation(P, false)),
+    responder: *const protean.responders.ModelFunction(P, P.AdaptiveRequest, protean.responders.ModelObservation(P, false)),
     inference: *const t.controls.Function(t.controls.InferenceInput),
     skill: *const t.controls.Function(t.controls.SkillInput(P)),
 

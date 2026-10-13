@@ -165,7 +165,7 @@ pub fn Adapter(comptime P: type) type {
         pub const Context = @import("adaptive_context.zig").Projection(P);
         pub const Prepared = P.AdaptivePrepared;
         pub fn declaration() registry.Declaration {
-            return .{ .identity = P.adaptive_identity, .resource_role = "inference", .kind = .leaf, .inference = true, .background = true, .payload_schema = struct {
+            return .{ .identity = P.identity, .resource_role = "inference", .kind = .leaf, .inference = true, .background = true, .payload_schema = struct {
                 fn schema(a: std.mem.Allocator) ![]u8 {
                     return values.schemaBytes(P.AdaptiveRequest, a);
                 }
@@ -366,7 +366,7 @@ pub fn Adapter(comptime P: type) type {
             const output = json.get(body, "output") orelse return unsupported(ctx, .unsupported_status, observed.value);
             if (output != .array) return unsupported(ctx, .unsupported_output_item, observed.value);
             if (contracts.exceeds(output.array.items.len, P.representation.maximum_output_items)) return unsupported(ctx, .normalization_limit, observed.value);
-            const normalized = responses.Adapter(P).normalize(ctx.allocator, request.value.invocation, output) catch |err| return unsupported(ctx, if (err == error.Capacity) .normalization_limit else if (err == error.MixedRefusal) .mixed_refusal else .unsupported_output_item, observed.value);
+            const normalized = responses.OutputNormalizer(P).normalize(ctx.allocator, request.value.invocation, output) catch |err| return unsupported(ctx, if (err == error.Capacity) .normalization_limit else if (err == error.MixedRefusal) .mixed_refusal else .unsupported_output_item, observed.value);
             if (!observed.valid) return unsupported(ctx, .unsupported_output_item, observed.value);
             var projected = projection.context;
             for (output.array.items) |item| {

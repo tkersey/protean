@@ -58,7 +58,7 @@ pub fn admitAction(ctx: native.registry.ProjectionContext, source_context: t.mod
     var raw = try contracts.decodeOwned(native.responses.Raw, ctx.allocator, captured);
     defer raw.deinit();
     const response = (try native.json.parse(ctx.allocator, raw.value.body.bytes, .{ .bytes = raw.value.body.bytes.len, .tokens = raw.value.body.bytes.len, .members = raw.value.body.bytes.len })).value;
-    const normalized = try native.responses.Adapter(P).normalize(ctx.allocator, prepared.value.request.invocation, native.json.get(response, "output") orelse return error.InvalidCapture);
+    const normalized = try native.responses.OutputNormalizer(P).normalize(ctx.allocator, prepared.value.request.invocation, native.json.get(response, "output") orelse return error.InvalidCapture);
     if (normalized != .output) return error.InvalidCapture;
     var found = false;
     for (normalized.output.items.items) |item| if (item == .function_call and same(item.function_call.call_id.bytes, call_id.bytes)) {

@@ -112,7 +112,7 @@ pub fn write(comptime definition: type, comptime types: type, init: std.process.
         .application_version = types.application_version,
         .program_sha256 = try digest(a, image),
         .program_identity = try a.dupe(u8, &std.fmt.bytesToHex(try horos.data.program_image.identity(a, compiled.program), .lower)),
-        .client_mapping = json_schema.clientMapping(.{ types.Input, types.Output, types.Failure, types.Answer, types.Message }),
+        .client_mapping = json_schema.client_mapping,
         .input = try schema(types.Input, a, types.input_schema_id),
         .output = try schema(types.Output, a, types.output_schema_id),
         .failure = try schema(types.Failure, a, types.failure_schema_id),

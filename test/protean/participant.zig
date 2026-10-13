@@ -19,13 +19,13 @@ pub const P = protean.model_invocation.Profile(Answer, .{
     .result_text_bytes = 128,
     .provider_response_bytes = 4096,
 });
-pub const Input = struct { request: P.Request, offered: [1]bool };
+pub const Input = struct { request: P.AdaptiveRequest, offered: [1]bool };
 
 fn producer(allocator: std.mem.Allocator, direct: bool) ![]u8 {
     var b = source.Builder.init(allocator);
     defer b.deinit();
     const unit = try b.scalar(void);
-    const request = try protean.contracts.schema(P.Request, &b);
+    const request = try protean.contracts.schema(P.AdaptiveRequest, &b);
     const offered = try protean.contracts.schema([1]bool, &b);
     const result = try protean.contracts.schema(P.Interpretation, &b);
     const effect = try P.declare(&b);
@@ -37,7 +37,7 @@ fn producer(allocator: std.mem.Allocator, direct: bool) ![]u8 {
     const answer = try b.variable(result);
     var body = try b.bind(answer, call, try b.pure(try b.reference(answer)));
     if (direct) {
-        const response = try b.variable(try protean.contracts.schema(P.Result, &b));
+        const response = try b.variable(try protean.contracts.schema(P.AdaptiveResult, &b));
         body = try b.bind(response, try b.term(.{ .perform = .{
             .effect = effect,
             .payload = try b.reference(b.parameter(entry, 0)),
@@ -69,7 +69,7 @@ const Application = struct {
     pub fn emit(c: protean.Context) !source.Module {
         const b = c.builder;
         const unit = try b.scalar(void);
-        const request = try horos_authoring.interop.schemaId(c.author, try c.schema(P.Request));
+        const request = try horos_authoring.interop.schemaId(c.author, try c.schema(P.AdaptiveRequest));
         const offered = try horos_authoring.interop.schemaId(c.author, try c.schema([1]bool));
         const result = try horos_authoring.interop.schemaId(c.author, try c.schema(P.Interpretation));
         const helper = try horos_authoring.interop.functionId(c.author, try protean.responders.defineModel(P, c, try c.literal(void, {}), false));
@@ -146,7 +146,7 @@ test "compiled participant uses the actual checked model responder through norma
     var compiled = try protean.compile(a, System);
     defer compiled.deinit();
     try std.testing.expectEqual(1, compiled.program.effects.len);
-    try std.testing.expectEqualStrings("agent.model.invoke.v7", compiled.program.effects[0].identity);
+    try std.testing.expectEqualStrings("agent.model.invoke.v11", compiled.program.effects[0].identity);
     const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
     defer a.free(image);
     _ = try compiled.encode(a, image);
@@ -203,7 +203,7 @@ test "participant admission owns the exact component bytes before caller mutatio
     var compiled = try protean.compile(a, System);
     defer compiled.deinit();
     try std.testing.expectEqual(@as(u8, 0xff), bytes[0]);
-    try std.testing.expectEqualStrings("agent.model.invoke.v7", compiled.program.effects[0].identity);
+    try std.testing.expectEqualStrings("agent.model.invoke.v11", compiled.program.effects[0].identity);
 }
 
 fn incomingOwnerType(b: *source.Builder, wrapped: bool) !struct { effect: source.Id, owner: source.Id, input: source.Id } {

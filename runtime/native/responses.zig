@@ -1,9 +1,8 @@
-//! Fixed-profile Responses projection. All actions remain ordinary proposals
+//! Responses transport and normalization. All actions remain ordinary proposals
 //! for the existing checked responder; this adapter never dispatches tools.
 const std = @import("std");
 const contracts = @import("protean_contracts");
 const registry = @import("registry.zig");
-const values = @import("values.zig");
 const json = @import("json.zig");
 const https = @import("https.zig");
 const storage = @import("store.zig");
@@ -48,15 +47,6 @@ fn only(value: json.Value, keys: []const []const u8) !void {
 fn list(a: std.mem.Allocator) json.Value {
     return .{ .array = .init(a) };
 }
-pub fn settings(a: std.mem.Allocator, profile: []const u8) !Settings {
-    const parsed = try json.parse(a, profile, .{ .bytes = profile.len, .tokens = profile.len, .members = profile.len });
-    const result = try values.fromJson(Settings, a, try field(parsed.value, "responses"));
-    if (result.model.bytes.len == 0 or result.audience.bytes.len == 0 or result.max_output_tokens == 0) return error.InvalidConfiguration;
-    // HTTPS validates the finite transport limits without making a connection.
-    _ = try (https.Config{ .endpoint = result.endpoint.bytes, .token = "validation", .request_limit = result.request_bytes, .response_limit = result.response_bytes, .timeout_ms = result.timeout_ms }).validate();
-    return result;
-}
-
 const ArgumentError = error{ WrongType, UnknownField, MissingField, IntegerRange, Capacity } || std.mem.Allocator.Error;
 fn argument(comptime T: type, a: std.mem.Allocator, value: json.Value) ArgumentError!T {
     if (comptime contracts.json.isText(T)) {
@@ -108,196 +98,9 @@ fn argument(comptime T: type, a: std.mem.Allocator, value: json.Value) ArgumentE
     };
 }
 
-pub fn Adapter(comptime P: type) type {
+/// Provider output grammar shared by the sole v11 adapter and pure recovery.
+pub fn OutputNormalizer(comptime P: type) type {
     return struct {
-        const Self = @This();
-        const Reference = @typeInfo(@FieldType(P.ReferenceRequest, "replay")).optional.child;
-
-        pub fn declaration() registry.Declaration {
-            return .{ .identity = P.reference_identity, .resource_role = "inference", .kind = .leaf, .inference = true, .background = true, .payload_schema = struct {
-                fn schema(a: std.mem.Allocator) ![]u8 {
-                    return values.schemaBytes(P.ReferenceRequest, a);
-                }
-            }.schema, .resume_schema = struct {
-                fn schema(a: std.mem.Allocator) ![]u8 {
-                    return values.schemaBytes(P.ReferenceResult, a);
-                }
-            }.schema, .capture = .{ .prepare = prepare, .acquire = acquire, .interpret = interpret, .dependencies = dependencies } };
-        }
-
-        fn bind(ctx: registry.ProjectionContext, request: P.ReferenceRequest, config: Settings) !void {
-            const invocation = request.invocation;
-            if (!equal(&request.profile, &storage.digest(ctx.profile)) or !equal(invocation.protocol.bytes, "agent.model.protocol.openai-responses-v2") or
-                !equal(invocation.model.bytes, config.model.bytes) or invocation.parameters.max_output_tokens != config.max_output_tokens or invocation.parameters.temperature != null or
-                invocation.response_policy.store or invocation.response_policy.stream or invocation.response_policy.background or
-                invocation.selection.parallel_calls or invocation.selection.maximum_calls > 1 or invocation.selection.minimum_calls > invocation.selection.maximum_calls or
-                invocation.maximum_provider_response_bytes != config.response_bytes or (P.representation.provider_response_bytes != null and (config.response_bytes == null or config.response_bytes.? > P.representation.provider_response_bytes.?))) return error.IncompatibleProfile;
-            const reasoning = invocation.parameters.reasoning orelse return error.IncompatibleProfile;
-            if (reasoning.effort == null or !equal(@tagName(reasoning.effort.?), config.effort.bytes) or reasoning.summary != null) return error.IncompatibleProfile;
-            const catalog = P.allDeclarations().items;
-            var previous: ?u32 = null;
-            for (invocation.tools.items) |tool| {
-                if (tool.action_ordinal >= catalog.len or (previous != null and tool.action_ordinal <= previous.?)) return error.InvalidDeclaration;
-                previous = tool.action_ordinal;
-                const expected = try contracts.encodeOwned(P.ToolDeclaration, ctx.allocator, catalog[tool.action_ordinal]);
-                const supplied = try contracts.encodeOwned(P.ToolDeclaration, ctx.allocator, tool);
-                if (!equal(expected, supplied)) return error.InvalidDeclaration;
-            }
-            if (!std.meta.eql(invocation.normalization_limits, P.normalizationLimits())) return error.IncompatibleProfile;
-        }
-
-        fn history(ctx: registry.ProjectionContext, request: P.ReferenceRequest, config: Settings) !json.Value {
-            var input = list(ctx.allocator);
-            if (request.replay) |ref| {
-                if (!equal(ref.schema.bytes, P.context_identity) or !equal(&ref.profile, &request.profile) or !equal(&ref.task, &ctx.task) or
-                    !equal(ref.tenant.bytes, ctx.tenant) or !equal(ref.audience.bytes, config.audience.bytes) or ref.first != 0) return error.InvalidContext;
-                var current: ?registry.ObjectReference = .{ .digest = ref.digest, .bytes = ref.bytes };
-                var previous_next = ref.next;
-                var first = true;
-                var visited: std.AutoHashMap([32]u8, void) = .init(ctx.allocator);
-                defer visited.deinit();
-                while (current) |reference| {
-                    if (visited.contains(reference.digest)) return error.InvalidContext;
-                    try visited.put(reference.digest, {});
-                    const bytes = try ctx.object(reference, std.math.cast(usize, reference.bytes) orelse return error.Capacity);
-                    defer ctx.allocator.free(bytes);
-                    var artifact = try contracts.decodeOwned(P.Context, ctx.allocator, bytes);
-                    defer artifact.deinit();
-                    const value = artifact.value;
-                    if (!equal(value.schema.bytes, ref.schema.bytes) or !equal(&value.profile, &ref.profile) or !equal(&value.task, &ref.task) or
-                        !equal(value.tenant.bytes, ref.tenant.bytes) or !equal(value.audience.bytes, ref.audience.bytes) or value.first != 0 or
-                        value.next > previous_next or (first and value.next != ref.next)) return error.InvalidContext;
-                    const raw = try ctx.object(.{ .digest = value.source_capture.digest, .bytes = value.source_capture.bytes }, std.math.cast(usize, value.source_capture.bytes) orelse return error.Capacity);
-                    ctx.allocator.free(raw);
-                    if (first) {
-                        const parsed = try json.parse(ctx.allocator, value.items.bytes, .{ .bytes = value.items.bytes.len, .tokens = value.items.bytes.len, .members = value.items.bytes.len });
-                        input = parsed.value;
-                        if (input != .array or input.array.items.len != ref.next) return error.InvalidContext;
-                    }
-                    previous_next = value.next;
-                    current = if (value.parent) |parent| .{ .digest = parent.digest, .bytes = parent.bytes } else null;
-                    first = false;
-                }
-            }
-            var pending = try replayCalls(ctx.allocator, input);
-            for (request.results.items) |result| {
-                if (!pending.remove(result.call_id.bytes)) return error.CallPairMismatch;
-                var item = json.object();
-                try json.put(ctx.allocator, &item, "type", json.string("function_call_output"));
-                try json.put(ctx.allocator, &item, "call_id", json.string(result.call_id.bytes));
-                try json.put(ctx.allocator, &item, "output", json.string(result.output.bytes));
-                try input.array.append(item);
-            }
-            if (pending.count() != 0) return error.MissingCallResult;
-            for (request.invocation.messages.items) |message| {
-                var item = json.object();
-                try json.put(ctx.allocator, &item, "role", json.string(@tagName(message.role)));
-                try json.put(ctx.allocator, &item, "content", json.string(message.content.bytes));
-                try input.array.append(item);
-            }
-            return input;
-        }
-
-        fn dependencies(a: std.mem.Allocator, objects: []const []const u8) ![]registry.Dependency {
-            if (objects.len > 1) return error.InvalidProjection;
-            var references: registry.ProjectionReferences = .{ .allocator = a };
-            defer references.deinit();
-            for (objects) |bytes| try references.object(P.Context, @FieldType(P.Context, "source_capture"), bytes, P.context_identity);
-            return references.finish();
-        }
-
-        pub fn prepare(ctx: registry.ProjectionContext, bytes: []const u8) ![]u8 {
-            var request = try contracts.decodeOwned(P.ReferenceRequest, ctx.allocator, bytes);
-            defer request.deinit();
-            const config = try settings(ctx.allocator, ctx.profile);
-            try bind(ctx, request.value, config);
-            var body = json.object();
-            try json.put(ctx.allocator, &body, "model", json.string(config.model.bytes));
-            try json.put(ctx.allocator, &body, "input", try history(ctx, request.value, config));
-            if (config.max_output_tokens) |maximum| try json.put(ctx.allocator, &body, "max_output_tokens", try json.number(ctx.allocator, maximum));
-            var reasoning = json.object();
-            try json.put(ctx.allocator, &reasoning, "effort", json.string(config.effort.bytes));
-            try json.put(ctx.allocator, &body, "reasoning", reasoning);
-            var tools = list(ctx.allocator);
-            for (request.value.invocation.tools.items) |tool| {
-                var item = json.object();
-                try json.put(ctx.allocator, &item, "type", json.string("function"));
-                try json.put(ctx.allocator, &item, "name", json.string(tool.name.bytes));
-                try json.put(ctx.allocator, &item, "description", json.string(tool.description.bytes));
-                const schema = try json.parse(ctx.allocator, tool.input_schema_json.bytes, .{});
-                try json.put(ctx.allocator, &item, "parameters", schema.value);
-                try json.put(ctx.allocator, &item, "strict", .{ .bool = tool.strict });
-                try tools.array.append(item);
-            }
-            try json.put(ctx.allocator, &body, "tools", tools);
-            const selection = request.value.invocation.selection;
-            try json.put(ctx.allocator, &body, "tool_choice", json.string(if (selection.maximum_calls == 0) "none" else if (selection.minimum_calls == 1) "required" else "auto"));
-            inline for (.{ "parallel_tool_calls", "store", "stream", "background" }) |key| try json.put(ctx.allocator, &body, key, .{ .bool = false });
-            try json.put(ctx.allocator, &body, "truncation", json.string("disabled"));
-            const rendered = try json.canonical(ctx.allocator, body);
-            if (contracts.exceeds(rendered.len, config.request_bytes)) return error.Capacity;
-            return rendered;
-        }
-
-        pub fn acquire(ctx: registry.Context, rendered: []const u8) !registry.Acquisition {
-            ctx.checkCancellation() catch |err| return .{ .definitely_not_sent = err };
-            const config = settings(ctx.allocator, ctx.profile) catch |err| return .{ .definitely_not_sent = err };
-            return acquireSettings(ctx, config, rendered);
-        }
-
-        const Interpreted = struct {
-            result: P.Result,
-            replay: ?Reference = null,
-            replay_status: @FieldType(P.ReferenceResult, "replay_status") = .unsupported,
-            objects: []const []const u8 = &.{},
-        };
-        fn encode(ctx: registry.ProjectionContext, interpreted: Interpreted, usage: @FieldType(P.ReferenceResult, "usage")) !registry.Projection {
-            const result: P.ReferenceResult = .{ .result = interpreted.result, .replay = interpreted.replay, .replay_status = interpreted.replay_status, .usage = usage };
-            return .{ .reply = try contracts.encodeOwned(P.ReferenceResult, ctx.allocator, result), .objects = interpreted.objects, .output_tokens = if (usage) |available| available.output_tokens else null };
-        }
-        fn unsupported(reason: @FieldType(P.Result, "unsupported_response")) Interpreted {
-            return .{ .result = .{ .unsupported_response = reason }, .replay_status = if (reason == .normalization_limit) .capacity else .unsupported };
-        }
-
-        pub fn interpret(ctx: registry.ProjectionContext, request_bytes: []const u8, rendered: []const u8, captured: []const u8) !registry.Projection {
-            var request = try contracts.decodeOwned(P.ReferenceRequest, ctx.allocator, request_bytes);
-            defer request.deinit();
-            const config = try settings(ctx.allocator, ctx.profile);
-            try bind(ctx, request.value, config);
-            if (!equal(try prepare(ctx, request_bytes), rendered)) return error.InvalidCapture;
-            var raw = try contracts.decodeOwned(Raw, ctx.allocator, captured);
-            defer raw.deinit();
-            if (raw.value.status < 200 or raw.value.status >= 300) return encode(ctx, .{ .result = .{ .provider_failure = .{ .kind = .http_status, .http_status = raw.value.status } } }, null);
-            if (!raw.value.identity_encoding) return encode(ctx, unsupported(.unsupported_output_item), null);
-            if (!std.unicode.utf8ValidateSlice(raw.value.body.bytes)) return encode(ctx, unsupported(.invalid_utf8), null);
-            const response = json.parse(ctx.allocator, raw.value.body.bytes, .{ .bytes = config.response_bytes orelse raw.value.body.bytes.len, .tokens = raw.value.body.bytes.len, .members = raw.value.body.bytes.len }) catch |err| return encode(ctx, unsupported(if (err == error.Capacity) .normalization_limit else .malformed_json), null);
-            const body = response.value;
-            // Returned usage is an observation of the captured response, not a
-            // consequence of accepting its actions or replay. Attach it once.
-            const usage = readUsage(body);
-            const interpreted = try interpretBody(ctx, request.value, config, captured, body, if (usage) |_| true else |_| false);
-            return encode(ctx, interpreted, usage catch null);
-        }
-
-        fn interpretBody(ctx: registry.ProjectionContext, request: P.ReferenceRequest, config: Settings, captured: []const u8, body: json.Value, usage_valid: bool) !Interpreted {
-            if (is(body, "status", "failed") or is(body, "status", "incomplete")) return .{ .result = .{ .provider_failure = .{ .kind = if (is(body, "status", "failed")) .response_failed else .response_incomplete, .http_status = 0 } } };
-            if (!is(body, "status", "completed") or (json.get(body, "error") orelse return unsupported(.unsupported_status)) != .null) return unsupported(.unsupported_status);
-            const output = field(body, "output") catch return unsupported(.unsupported_status);
-            if (output != .array) return unsupported(.unsupported_status);
-            if (contracts.exceeds(output.array.items.len, P.representation.maximum_output_items)) return unsupported(.normalization_limit);
-            const normalized = normalize(ctx.allocator, request.invocation, output) catch |err| return unsupported(if (err == error.Capacity) .normalization_limit else if (err == error.MixedRefusal) .mixed_refusal else .unsupported_output_item);
-            var input = try history(ctx, request, config);
-            for (output.array.items) |item| try input.array.append(try replayItem(ctx.allocator, item));
-            _ = replayCalls(ctx.allocator, input) catch return unsupported(.unsupported_output_item);
-            const replay = try json.canonical(ctx.allocator, input);
-            if (!usage_valid) return unsupported(.unsupported_output_item);
-            const artifact = try contracts.encodeOwned(P.Context, ctx.allocator, .{ .schema = .{ .bytes = P.context_identity }, .profile = request.profile, .task = ctx.task, .tenant = .{ .bytes = ctx.tenant }, .audience = config.audience, .first = 0, .next = input.array.items.len, .source_capture = .{ .digest = storage.digest(captured), .bytes = captured.len }, .parent = if (request.replay) |prior| .{ .digest = prior.digest, .bytes = prior.bytes } else null, .items = .{ .bytes = replay } });
-            const ref: Reference = .{ .digest = storage.digest(artifact), .bytes = artifact.len, .schema = .{ .bytes = P.context_identity }, .profile = request.profile, .task = ctx.task, .tenant = .{ .bytes = ctx.tenant }, .audience = config.audience, .first = 0, .next = input.array.items.len };
-            const objects = try ctx.allocator.alloc([]const u8, 1);
-            objects[0] = artifact;
-            return .{ .result = normalized, .replay = ref, .replay_status = .complete, .objects = objects };
-        }
-
         fn decodeAction(a: std.mem.Allocator, name: []const u8, arguments: []const u8) !P.DecodedAnswer {
             // Admission bounds count supplied fields, including duplicates,
             // before typed decoding, as in the retained shared contract.
@@ -344,8 +147,8 @@ pub fn Adapter(comptime P: type) type {
             return .{ .invalid = .unknown_field };
         }
 
-        /// Shared output grammar and exact argument codec. Version-specific
-        /// policy and context admission stay with their respective adapters.
+        /// Output grammar and exact argument codec. Policy and context admission
+        /// belong to the v11 adapter.
         pub fn normalize(a: std.mem.Allocator, invocation: P.Request, output: json.Value) !P.Result {
             var items: std.ArrayList(P.OutputItem) = .empty;
             var calls: usize = 0;
@@ -397,21 +200,6 @@ pub fn Adapter(comptime P: type) type {
             const encoded = try contracts.encodeOwned(P.OutputItems, a, .{ .items = items.items });
             return .{ .output = .{ .items = .{ .items = items.items }, .normalized_output_digest = storage.digest(encoded) } };
         }
-
-        fn readUsage(body: json.Value) !@FieldType(P.ReferenceResult, "usage") {
-            const usage = json.get(body, "usage") orelse return null;
-            if (usage == .null) return null;
-            const input = try count(try field(usage, "input_tokens"));
-            const output = try count(try field(usage, "output_tokens"));
-            var cached: ?u64 = null;
-            if (json.get(usage, "input_tokens_details")) |details| if (details != .null) {
-                if (json.get(details, "cached_tokens")) |value| if (value != .null) {
-                    cached = try count(value);
-                };
-            };
-            if (cached != null and cached.? > input) return error.UnsupportedResponse;
-            return .{ .input_tokens = input, .output_tokens = output, .cached_input_tokens = cached };
-        }
     };
 }
 
@@ -429,13 +217,6 @@ pub fn acquireSettings(ctx: registry.Context, config: Settings, rendered: []cons
     };
 }
 
-fn count(value: json.Value) !u64 {
-    if (value != .number_string) return error.UnsupportedResponse;
-    return json.numberInteger(u64, value.number_string);
-}
-
-/// Closed output-to-input grammar. Only these admitted item fields survive;
-/// the response envelope is never appended as input. Opaque bytes stay opaque.
 pub fn replayItem(a: std.mem.Allocator, item: json.Value) !json.Value {
     _ = a;
     if (is(item, "type", "function_call")) {
@@ -485,32 +266,4 @@ pub fn replayItem(a: std.mem.Allocator, item: json.Value) !json.Value {
     } else return error.UnsupportedResponse;
     if (json.get(item, "id")) |id| if (id != .string or id.string.len == 0) return error.UnsupportedResponse;
     return item;
-}
-
-fn replayCalls(a: std.mem.Allocator, input: json.Value) !std.StringHashMap(void) {
-    if (input != .array) return error.InvalidContext;
-    var seen = std.StringHashMap(void).init(a);
-    var pending = std.StringHashMap(void).init(a);
-    for (input.array.items) |item| {
-        if (is(item, "type", "function_call_output")) {
-            try only(item, &.{ "type", "call_id", "output" });
-            _ = try text(item, "output");
-            if (!pending.remove(try text(item, "call_id"))) return error.CallPairMismatch;
-        } else if (json.get(item, "type") == null) {
-            try only(item, &.{ "role", "content" });
-            const role = try text(item, "role");
-            if (!equal(role, "system") and !equal(role, "developer") and !equal(role, "user") and !equal(role, "assistant")) return error.UnsupportedResponse;
-            _ = try text(item, "content");
-            if (pending.count() != 0) return error.MissingCallResult;
-        } else {
-            _ = try replayItem(a, item);
-            if (is(item, "type", "function_call")) {
-                const id = try text(item, "call_id");
-                const entry = try seen.getOrPut(id);
-                if (entry.found_existing) return error.DuplicateCall;
-                try pending.put(id, {});
-            }
-        }
-    }
-    return pending;
 }

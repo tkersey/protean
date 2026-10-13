@@ -337,7 +337,7 @@ fn Fixture(comptime P: type) type {
             graft.plan.prior.?.task[0] ^= 1;
             try std.testing.expectError(error.InvalidContext, Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, graft)));
             graft = request;
-            graft.plan.prior.?.schema.bytes = model.context_semantic_identity;
+            graft.plan.prior.?.schema.bytes = "agent.model.context.responses.v1";
             try std.testing.expectError(error.InvalidContext, Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, graft)));
             objects.denied = request.plan.prior.?.object.digest;
             try std.testing.expectError(error.MissingArtifact, Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, request)));

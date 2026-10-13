@@ -159,7 +159,7 @@ fn defineSample(c: protean.Context, t: Types) !void {
     } } });
     const input = try b.reference(b.parameter(t.sample, 0));
     const call = try b.term(.{ .call = .{ .function = interpreted, .arguments = &.{
-        try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(P.Request)), .field, &.{input}, 0),
+        try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(P.AdaptiveRequest)), .field, &.{input}, 0),
         try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema([1]bool)), .field, &.{input}, 1),
     } } });
     try b.define(t.sample, try b.bind(result, call, dispatch));

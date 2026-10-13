@@ -232,7 +232,5 @@ test "nested optional client values preserve every independent wire discriminant
             try std.testing.expectEqualSlices(u8, case.wire, try encodeClient(T, a, parsed.value));
         }
     }
-    try std.testing.expectEqualStrings("agent-client-values/1.0", schemas.clientMapping(.{ ?bool, struct { value: ?u32 }, contracts.Text(16), contracts.Bytes(4) }));
-    inline for (.{ ??bool, ???bool, ??void, [2]??bool, contracts.Vector(??bool, 2), struct { value: ??bool }, union(enum) { absent: void, value: ??bool } }) |T|
-        try std.testing.expectEqualStrings("agent-client-values/1.1", schemas.clientMapping(.{ void, T }));
+    try std.testing.expectEqualStrings("agent-client-values/1.1", schemas.client_mapping);
 }

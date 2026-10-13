@@ -14,22 +14,22 @@ const P = protean.model_invocation.Profile(union(enum) { choose: struct { value:
     .result_text_bytes = 256,
     .provider_response_bytes = 4096,
 });
-const Adapter = native.responses.Adapter(P);
+const Adapter = native.adaptive_responses.Adapter(P);
 const Q = protean.model_invocation.Profile(union(enum) { other: struct { flag: bool } }, .{.{ .name = "other", .description = "Choose a flag." }}, P.representation);
-const PairInput = struct { first: P.ReferenceRequest, second: Q.ReferenceRequest };
+const PairInput = struct { first: P.AdaptiveRequest, second: Q.AdaptiveRequest };
 const PairApplication = struct {
     pub fn emit(c: protean.Context) !@import("horos").source.Module {
         const b = c.builder;
         const unit = try horos_authoring.interop.schemaId(c.author, try c.schema(void));
-        const first = try horos_authoring.interop.functionId(c.author, try protean.responders.defineReferenceModelObserved(P, c, try c.literal(void, {}), false));
-        const second = try horos_authoring.interop.functionId(c.author, try protean.responders.defineReferenceModelObserved(Q, c, try c.literal(void, {}), false));
+        const first = try horos_authoring.interop.functionId(c.author, try protean.responders.defineModelObserved(P, c, try c.literal(void, {}), false));
+        const second = try horos_authoring.interop.functionId(c.author, try protean.responders.defineModelObserved(Q, c, try c.literal(void, {}), false));
         const entry = try b.declare(&.{try horos_authoring.interop.schemaId(c.author, try c.schema(PairInput))}, unit, &.{ b.functions.items[first].effects[0], b.functions.items[second].effects[0] }, &.{});
         const input = try b.reference(b.parameter(entry, 0));
-        const first_result = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(protean.responders.ReferenceModelObservation(P, false))));
-        const second_result = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(protean.responders.ReferenceModelObservation(Q, false))));
+        const first_result = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(protean.responders.ModelObservation(P, false))));
+        const second_result = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(protean.responders.ModelObservation(Q, false))));
         const offered = try horos_authoring.interop.valueId(c.author, try c.literal([1]bool, .{true}));
-        const call_first = try b.term(.{ .call = .{ .function = first, .arguments = &.{ try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(P.ReferenceRequest)), .field, &.{input}, 0), offered } } });
-        const call_second = try b.term(.{ .call = .{ .function = second, .arguments = &.{ try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(Q.ReferenceRequest)), .field, &.{input}, 1), offered } } });
+        const call_first = try b.term(.{ .call = .{ .function = first, .arguments = &.{ try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(P.AdaptiveRequest)), .field, &.{input}, 0), offered } } });
+        const call_second = try b.term(.{ .call = .{ .function = second, .arguments = &.{ try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(Q.AdaptiveRequest)), .field, &.{input}, 1), offered } } });
         try b.define(entry, try b.bind(first_result, call_first, try b.bind(second_result, call_second, try b.pure(try b.constant(void, {})))));
         return b.module(entry, unit);
     }
@@ -43,12 +43,12 @@ test "native emitter binds authored model specializations to exact schemas and r
     var compiled = try protean.compile(a, System);
     defer compiled.deinit();
     const emit = @import("native_asset_writer");
-    const identity = protean.model_invocation.reference_semantic_identity;
-    const first = .{ .identity = identity, .resource_role = "first-provider", .Payload = P.ReferenceRequest, .Reply = P.ReferenceResult };
-    const second = .{ .identity = identity, .resource_role = "second-provider", .Payload = Q.ReferenceRequest, .Reply = Q.ReferenceResult };
+    const identity = protean.model_invocation.semantic_identity;
+    const first = .{ .identity = identity, .resource_role = "first-provider", .Payload = P.AdaptiveRequest, .Reply = P.AdaptiveResult };
+    const second = .{ .identity = identity, .resource_role = "second-provider", .Payload = Q.AdaptiveRequest, .Reply = Q.AdaptiveResult };
     var first_handler = Adapter.declaration();
     first_handler.resource_role = first.resource_role;
-    var second_handler = native.responses.Adapter(Q).declaration();
+    var second_handler = native.adaptive_responses.Adapter(Q).declaration();
     second_handler.resource_role = second.resource_role;
     var handlers = try native.Registry.init(a, &.{ first_handler, second_handler });
     defer handlers.deinit();
@@ -65,25 +65,21 @@ test "native emitter binds authored model specializations to exact schemas and r
             try std.testing.expectEqual(1, matches);
         }
     }
-    const legacy = .{ .identity = identity, .resource_role = "shared-provider" };
-    const shared = try emit.capabilityMetadata(.{ legacy, legacy }, a, compiled.program);
+    const shared_role = .{ .identity = identity, .resource_role = "shared-provider" };
+    const shared = try emit.capabilityMetadata(.{ shared_role, shared_role }, a, compiled.program);
     try std.testing.expectEqual(2, shared.len);
     for (shared) |item| try std.testing.expectEqualStrings("shared-provider", item.resource_role);
-    try std.testing.expectError(error.AmbiguousNativeCapability, emit.capabilityMetadata(.{ legacy, .{ .identity = identity, .resource_role = "other-provider" } }, a, compiled.program));
+    try std.testing.expectError(error.AmbiguousNativeCapability, emit.capabilityMetadata(.{ shared_role, .{ .identity = identity, .resource_role = "other-provider" } }, a, compiled.program));
     try std.testing.expectError(error.UndeclaredNativeCapability, emit.capabilityMetadata(.{ first, first }, a, compiled.program));
 }
-const profile = "{\"responses\":{\"endpoint\":\"https://example.test/v1/responses\",\"audience\":\"openai-fixture\",\"model\":\"fixture-model\",\"effort\":\"medium\",\"max_output_tokens\":4096,\"request_bytes\":16384,\"response_bytes\":4096,\"timeout_ms\":1000}}";
 
 test "Responses cancellation before transport is definitely not sent" {
     var cancelled = std.atomic.Value(bool).init(true);
     const authority: native.registry.Authority = .{ .grants = &.{}, .principal = "fixture", .tenant = "fixture", .inference = true };
-    const ctx: native.registry.Context = .{ .allocator = std.testing.allocator, .io = std.testing.io, .authority = &authority, .task_id = "fixture", .profile = profile, .environment = null, .cancellation = &cancelled };
+    const ctx: native.registry.Context = .{ .allocator = std.testing.allocator, .io = std.testing.io, .authority = &authority, .task_id = "fixture", .profile = "{}", .environment = null, .cancellation = &cancelled };
     const result = try Adapter.acquire(ctx, "{}");
     try std.testing.expect(result == .definitely_not_sent);
     try std.testing.expectEqual(error.Canceled, result.definitely_not_sent);
-    const adaptive = try native.adaptive_responses.Adapter(P).acquire(ctx, "{}");
-    try std.testing.expect(adaptive == .definitely_not_sent);
-    try std.testing.expectEqual(error.Canceled, adaptive.definitely_not_sent);
 }
 
 fn digest(bytes: []const u8) [32]u8 {
@@ -92,18 +88,24 @@ fn digest(bytes: []const u8) [32]u8 {
     return out;
 }
 const Objects = struct {
+    items: std.ArrayList([]const u8) = .empty,
+    denied: ?[32]u8 = null,
     bytes: ?[]const u8 = null,
     raw: ?[]const u8 = null,
     fn read(owner: *anyopaque, a: std.mem.Allocator, ref: native.registry.ObjectReference, limit: usize) ![]u8 {
         const self: *Objects = @ptrCast(@alignCast(owner));
+        if (self.denied) |denied| if (std.mem.eql(u8, &denied, &ref.digest)) return error.MissingArtifact;
+        for (self.items.items) |bytes| {
+            if (bytes.len <= limit and bytes.len == ref.bytes and std.mem.eql(u8, &digest(bytes), &ref.digest)) return a.dupe(u8, bytes);
+        }
         for ([_]?[]const u8{ self.bytes, self.raw }) |candidate| if (candidate) |bytes| {
             if (bytes.len <= limit and bytes.len == ref.bytes and std.mem.eql(u8, &digest(bytes), &ref.digest)) return a.dupe(u8, bytes);
         };
         return error.MissingArtifact;
     }
 };
-fn request() P.ReferenceRequest {
-    return .{ .profile = digest(profile), .replay = null, .results = .{ .items = &.{} }, .invocation = .{
+fn invocation() P.Request {
+    return .{
         .protocol = .{ .bytes = protean.model_invocation.protocol_identity },
         .model = .{ .bytes = "fixture-model" },
         .parameters = .{ .max_output_tokens = 4096, .temperature = null, .reasoning = .{ .effort = .medium, .summary = null } },
@@ -113,7 +115,7 @@ fn request() P.ReferenceRequest {
         .response_policy = .{ .store = false, .stream = false, .background = false, .truncation = .disabled },
         .normalization_limits = P.normalizationLimits(),
         .maximum_provider_response_bytes = 4096,
-    } };
+    };
 }
 
 test "adaptive admission binds selected profiles and skill permissions to the frozen policy" {
@@ -177,7 +179,7 @@ test "adaptive admission binds selected profiles and skill permissions to the fr
         .introduced_at = 1,
     }};
     var adaptive: P.AdaptiveRequest = .{
-        .invocation = request().invocation,
+        .invocation = invocation(),
         .policy = digest(policy_bytes),
         .selection = .{ .profile_id = inference.id, .profile_digest = try Admission.profileDigest(a, inference), .effective_effort = .medium, .control_revision = 1 },
         .plan = .{ .epoch = 0, .reason = .initial, .watermark = 1, .eviction_generation = 0, .prior = null, .catalog = policy.catalog, .skills = .{ .items = &materialization } },
@@ -218,35 +220,85 @@ test "adaptive admission binds selected profiles and skill permissions to the fr
     try std.testing.expectError(error.MissingArtifact, Admission.bind(ctx, admitted, adaptive, skills.value));
 }
 
+fn fixture(a: std.mem.Allocator, objects: *Objects, request_bytes: u32) !struct { profile: []const u8, request: P.AdaptiveRequest } {
+    const catalog = try contracts.encodeOwned(P.AdaptiveCatalog, a, .{ .skills = .{ .items = &.{} } });
+    try objects.items.append(a, catalog);
+    const inference: protean.model_invocation.AdaptiveInferenceProfile = .{
+        .id = .{ .bytes = "analysis" },
+        .model = .{ .bytes = "fixture-model" },
+        .reasoning_mode = .standard,
+        .reasoning_context = .current_turn,
+        .efforts = .{ .items = &.{.medium} },
+        .effort_update = false,
+        .explicit_cache = false,
+        .additional_tools = false,
+        .cache_diagnostics = false,
+        .opaque_family = .{ .bytes = "fixture" },
+        .max_output_tokens = 4096,
+        .request_bytes = request_bytes,
+        .response_bytes = 4096,
+        .timeout_ms = 1000,
+    };
+    const policy: P.AdaptivePolicy = .{
+        .schema = .{ .bytes = P.adaptive_policy_identity },
+        .endpoint = .{ .bytes = "https://example.test/v1/responses" },
+        .audience = .{ .bytes = "fixture" },
+        .profiles = .{ .items = &.{inference} },
+        .catalog = .{ .digest = digest(catalog), .bytes = catalog.len },
+        .core_tools = .{true},
+        .permitted_tools = .{true},
+    };
+    var frozen = native.json.object();
+    try native.json.put(a, &frozen, "adaptive", try native.values.toJson(P.AdaptivePolicy, a, policy));
+    const profile_bytes = try native.json.canonical(a, frozen);
+    return .{ .profile = profile_bytes, .request = .{
+        .invocation = invocation(),
+        .policy = digest(profile_bytes),
+        .selection = .{ .profile_id = inference.id, .profile_digest = try native.adaptive_responses.Admission(P).profileDigest(a, inference), .effective_effort = .medium, .control_revision = 0 },
+        .plan = .{ .epoch = 0, .reason = .initial, .watermark = 0, .eviction_generation = 0, .prior = null, .catalog = policy.catalog, .skills = .{ .items = &.{} } },
+        .materialized = .{true},
+        .offered = .{true},
+        .results = .{ .items = &.{} },
+    } };
+}
+
 test "native Responses v1 independently specified capture corpus" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var objects: Objects = .{};
-    const ctx: native.registry.ProjectionContext = .{ .allocator = a, .task = @splat(7), .tenant = "fixture", .profile = profile, .objects = .validating(&objects, Objects.read) };
+    const initial = try fixture(a, &objects, 16384);
+    const ctx: native.registry.ProjectionContext = .{ .allocator = a, .task = @splat(7), .tenant = "fixture", .profile = initial.profile, .objects = .validating(&objects, Objects.read) };
     var handlers = try native.Registry.init(a, &.{Adapter.declaration()});
     defer handlers.deinit();
-    const req = try contracts.encodeOwned(P.ReferenceRequest, a, request());
+    const req = try contracts.encodeOwned(P.AdaptiveRequest, a, initial.request);
     const rendered = try Adapter.prepare(ctx, req);
-    const fixture = try native.json.parse(a, @embedFile("native-responses-v1.json"), .{});
+    const corpus = try native.json.parse(a, @embedFile("native-responses-v1.json"), .{});
     var compared: usize = 0;
-    const cases = fixture.value.object.get("cases").?.array.items;
+    const cases = corpus.value.object.get("cases").?.array.items;
     for (cases) |case| {
         const name = case.object.get("name").?.string;
         const raw = try contracts.encodeOwned(native.responses.Raw, a, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = case.object.get("body").?.string } });
         const projection = try Adapter.interpret(ctx, req, rendered, raw);
-        var result = try contracts.decodeOwned(P.ReferenceResult, a, projection.reply);
+        var result = try contracts.decodeOwned(P.AdaptiveResult, a, projection.reply);
         defer result.deinit();
         try std.testing.expectEqualStrings(case.object.get("result").?.string, @tagName(result.value.result));
         try std.testing.expectEqualStrings(case.object.get("replay").?.string, @tagName(result.value.replay_status));
         if (case.object.get("reason")) |reason| try std.testing.expectEqualStrings(reason.string, @tagName(result.value.result.unsupported_response));
         if (case.object.get("usage")) |expected| {
             const available = result.value.usage orelse return error.MissingUsage;
-            try std.testing.expectEqual(try native.json.numberInteger(u64, expected.object.get("input_tokens").?.number_string), available.input_tokens);
-            try std.testing.expectEqual(try native.json.numberInteger(u64, expected.object.get("output_tokens").?.number_string), available.output_tokens);
+            try std.testing.expectEqual(try native.json.numberInteger(u64, expected.object.get("input_tokens").?.number_string), available.input_tokens.?);
+            try std.testing.expectEqual(try native.json.numberInteger(u64, expected.object.get("output_tokens").?.number_string), available.output_tokens.?);
             try std.testing.expectEqual(try native.json.numberInteger(u64, expected.object.get("cached_input_tokens").?.number_string), available.cached_input_tokens.?);
-            try std.testing.expectEqual(@as(?u64, available.output_tokens), projection.output_tokens);
+            try std.testing.expectEqual(available.output_tokens, projection.output_tokens);
             try std.testing.expect(result.value.replay == null and projection.objects.len == 0);
+        }
+        if (case.object.get("usage_partial")) |expected| {
+            // v11 retains independently valid counters when another is malformed.
+            // Its existing adaptive corpus independently specifies partial usage.
+            const observed = try native.values.toJson(@TypeOf(result.value.usage), a, result.value.usage);
+            try std.testing.expectEqualStrings(try native.json.canonical(a, expected), try native.json.canonical(a, observed));
+            try std.testing.expect(projection.output_tokens == null);
         }
         if (case.object.get("usage_absent") != null) {
             try std.testing.expect(result.value.usage == null);
@@ -262,74 +314,77 @@ test "native Responses v1 independently specified capture corpus" {
         }
         if (std.mem.eql(u8, name, "reasoning and phase")) {
             try std.testing.expect(result.value.usage == null);
-            var artifact = try contracts.decodeOwned(P.Context, a, projection.objects[0]);
-            defer artifact.deinit();
-            const replay = try native.json.parse(a, artifact.value.items.bytes, .{});
-            try std.testing.expectEqualStrings("opaque+/=", replay.value.array.items[1].object.get("encrypted_content").?.string);
-            try std.testing.expectEqualStrings("commentary", replay.value.array.items[2].object.get("phase").?.string);
+            var chunk = try contracts.decodeOwned(P.HistoryChunk, a, projection.objects[0]);
+            defer chunk.deinit();
+            const reasoning = try native.json.parse(a, chunk.value.events.items[1].item.bytes, .{});
+            const message = try native.json.parse(a, chunk.value.events.items[2].item.bytes, .{});
+            try std.testing.expectEqualStrings("opaque+/=", reasoning.value.object.get("encrypted_content").?.string);
+            try std.testing.expectEqualStrings("commentary", message.value.object.get("phase").?.string);
         }
         // Two supplied fields exceed this profile's one-field bound before
         // duplicate-field decoding. The fixed wire fixture independently asserts it too.
         if (std.mem.eql(u8, name, "duplicate arguments")) try std.testing.expectEqual(.capacity, result.value.result.output.items.items[0].function_call.decoded_action.invalid);
         if (std.mem.eql(u8, name, "integral usage spellings")) {
-            try std.testing.expectEqual(@as(u64, 12), result.value.usage.?.input_tokens);
-            try std.testing.expectEqual(@as(u64, 7), result.value.usage.?.output_tokens);
+            try std.testing.expectEqual(@as(u64, 12), result.value.usage.?.input_tokens.?);
+            try std.testing.expectEqual(@as(u64, 7), result.value.usage.?.output_tokens.?);
             try std.testing.expectEqual(@as(?u64, 0), result.value.usage.?.cached_input_tokens);
             try std.testing.expectEqual(@as(?u64, 7), projection.output_tokens);
         }
         if (std.mem.eql(u8, name, "exact integer call")) {
             try std.testing.expectEqual(@as(u64, 9007199254740993), result.value.result.output.items.items[0].function_call.decoded_action.decoded.choose.value);
             try std.testing.expectEqual(@as(?u64, 0), result.value.usage.?.cached_input_tokens);
-            objects.bytes = projection.objects[0];
-            objects.raw = raw;
-            var next = request();
-            next.replay = result.value.replay;
+            try objects.items.appendSlice(a, projection.objects);
+            try objects.items.appendSlice(a, &.{ raw, rendered });
+            var next = initial.request;
+            next.plan.prior = result.value.replay;
+            next.plan.watermark = result.value.replay.?.watermark;
             next.invocation.messages = .{ .items = &.{.{ .role = .user, .content = .{ .bytes = "follow up" } }} };
-            const missing = try contracts.encodeOwned(P.ReferenceRequest, a, next);
+            const missing = try contracts.encodeOwned(P.AdaptiveRequest, a, next);
             try std.testing.expectError(error.MissingCallResult, Adapter.prepare(ctx, missing));
             next.results = .{ .items = &.{.{ .call_id = .{ .bytes = "call_1" }, .output = .{ .bytes = "acquired evidence" } }} };
-            const paired = try Adapter.prepare(ctx, try contracts.encodeOwned(P.ReferenceRequest, a, next));
-            const parsed = try native.json.parse(a, paired, .{});
+            const paired = try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, next));
+            var prepared = try contracts.decodeOwned(Adapter.Prepared, a, paired);
+            defer prepared.deinit();
+            const parsed = try native.json.parse(a, prepared.value.body.bytes, .{});
             const input = parsed.value.object.get("input").?.array.items;
             try std.testing.expectEqual(4, input.len);
             try std.testing.expectEqualStrings("function_call_output", input[2].object.get("type").?.string);
-            try std.testing.expectEqualStrings("follow up", input[3].object.get("content").?.string);
-            next.profile[0] ^= 1;
-            try std.testing.expectError(error.IncompatibleProfile, Adapter.prepare(ctx, try contracts.encodeOwned(P.ReferenceRequest, a, next)));
-            next.profile[0] ^= 1;
-            next.replay.?.task[0] ^= 1;
-            try std.testing.expectError(error.InvalidContext, Adapter.prepare(ctx, try contracts.encodeOwned(P.ReferenceRequest, a, next)));
-            next.replay.?.task[0] ^= 1;
-            objects.raw = null;
-            try std.testing.expectError(error.MissingArtifact, Adapter.prepare(ctx, try contracts.encodeOwned(P.ReferenceRequest, a, next)));
-            objects.raw = raw;
-            var artifact = try contracts.decodeOwned(P.Context, a, projection.objects[0]);
+            try std.testing.expectEqualStrings("follow up", input[3].object.get("content").?.array.items[0].object.get("text").?.string);
+            next.policy[0] ^= 1;
+            try std.testing.expectError(error.IncompatibleProfile, Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, next)));
+            next.policy[0] ^= 1;
+            next.plan.prior.?.task[0] ^= 1;
+            try std.testing.expectError(error.InvalidContext, Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, next)));
+            next.plan.prior.?.task[0] ^= 1;
+            objects.denied = digest(raw);
+            try std.testing.expectError(error.MissingArtifact, Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, next)));
+            objects.denied = null;
+            var artifact = try contracts.decodeOwned(P.AdaptiveContext, a, projection.objects[projection.objects.len - 1]);
             defer artifact.deinit();
             artifact.value.task[0] ^= 1;
-            const other_task = try contracts.encodeOwned(P.Context, a, artifact.value);
+            const other_task = try contracts.encodeOwned(P.AdaptiveContext, a, artifact.value);
             objects.bytes = other_task;
-            next.replay.?.digest = digest(other_task);
-            next.replay.?.bytes = other_task.len;
-            try std.testing.expectError(error.InvalidContext, Adapter.prepare(ctx, try contracts.encodeOwned(P.ReferenceRequest, a, next)));
+            next.plan.prior.?.object.digest = digest(other_task);
+            next.plan.prior.?.object.bytes = other_task.len;
+            try std.testing.expectError(error.InvalidContext, Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, next)));
             objects.bytes = null;
-            try std.testing.expectError(error.MissingArtifact, Adapter.prepare(ctx, try contracts.encodeOwned(P.ReferenceRequest, a, next)));
+            try std.testing.expectError(error.MissingArtifact, Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, next)));
         }
     }
     try std.testing.expectEqual(cases.len - 3, compared);
-    var bad = request();
+    var bad = initial.request;
     var tools = [_]P.ToolDeclaration{P.allDeclarations().items[0]};
     tools[0].strict = false;
     bad.invocation.tools = .{ .items = &tools };
-    try std.testing.expectError(error.InvalidDeclaration, Adapter.prepare(ctx, try contracts.encodeOwned(P.ReferenceRequest, a, bad)));
-    const too_small = try std.mem.replaceOwned(u8, a, profile, "16384", "1");
+    try std.testing.expectError(error.InvalidDeclaration, Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, bad)));
+    const too_small = try fixture(a, &objects, 1);
     var bounded = ctx;
-    bounded.profile = too_small;
-    bad = request();
-    bad.profile = digest(too_small);
-    try std.testing.expectError(error.Capacity, Adapter.prepare(bounded, try contracts.encodeOwned(P.ReferenceRequest, a, bad)));
+    bounded.profile = too_small.profile;
+    bad = too_small.request;
+    try std.testing.expectError(error.Capacity, Adapter.prepare(bounded, try contracts.encodeOwned(P.AdaptiveRequest, a, bad)));
     const throttled = try contracts.encodeOwned(native.responses.Raw, a, .{ .status = 429, .identity_encoding = true, .request_id = .{ .bytes = "http_429" }, .body = .{ .bytes = "{}" } });
     const failure = try Adapter.interpret(ctx, req, rendered, throttled);
-    var http = try contracts.decodeOwned(P.ReferenceResult, a, failure.reply);
+    var http = try contracts.decodeOwned(P.AdaptiveResult, a, failure.reply);
     defer http.deinit();
     try std.testing.expectEqual(.http_status, http.value.result.provider_failure.kind);
     try std.testing.expectEqual(429, http.value.result.provider_failure.http_status);

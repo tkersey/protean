@@ -71,7 +71,7 @@ test "compiled catalog composes coverage and orphan grouping and reuses exact BP
     const arguments = try std.json.Stringify.valueAlloc(a, .{ .proposal_json = swaps }, .{});
     const response = try std.json.Stringify.valueAlloc(a, .{.{ .type = "function_call", .status = "completed", .call_id = "large-recipe", .name = "tool_build", .arguments = arguments }}, .{});
     const parsed = try native.json.parse(a, response, .{ .bytes = response.len, .tokens = response.len });
-    const normalized = try native.responses.Adapter(t.P).normalize(a, invocation, parsed.value);
+    const normalized = try native.responses.OutputNormalizer(t.P).normalize(a, invocation, parsed.value);
     try std.testing.expectEqualStrings(swaps, normalized.output.items.items[0].function_call.decoded_action.decoded.tool_build.proposal_json.bytes);
 
     // Persistence round-trip keeps the exact image, recipe and task binding.
@@ -323,7 +323,7 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
             defer outcome.deinit();
             var request = try protocol.decode(protocol.Request, frame, outcome.value.requested.request);
             defer request.deinit();
-            if (std.mem.eql(u8, request.value.binding.semantic_identity, t.P.adaptive_identity)) {
+            if (std.mem.eql(u8, request.value.binding.semantic_identity, t.P.identity)) {
                 var adaptive = try protean.contracts.decodeOwned(t.P.AdaptiveRequest, frame, request.value.binding.payload);
                 defer adaptive.deinit();
                 if (adaptive.value.plan.watermark == 8) {
@@ -518,20 +518,17 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                 try std.testing.expectError(error.StaleOccurrence, service.rederiveUnknown(frame, task, occurrence_id, stale));
                 const revision = unchanged.value.revision;
                 var client: native.client.Client(t) = .{ .service = &service };
-                var legacy_client: native.client.Client(t) = .{ .service = &service, .protocol_version = .v2_0 };
                 var status_params = native.json.object();
                 try native.json.put(frame, &status_params, "task_id", native.json.string(try frame.dupe(u8, &std.fmt.bytesToHex(task, .lower))));
                 const status = try client.call(frame, .@"task.status", status_params);
                 const availability = status.object.get("recovery").?;
                 try std.testing.expectEqual(if (recovery_probe == .provider) @as(usize, 0) else 1, availability.object.get("mechanisms").?.array.items.len);
-                try std.testing.expect(!(try legacy_client.call(frame, .@"task.status", status_params)).object.contains("recovery"));
                 var params = try native.json.copy(frame, status_params);
                 try native.json.put(frame, &params, "client_operation_id", native.json.string("recover-original"));
                 try native.json.put(frame, &params, "expected_revision", native.json.string(try std.fmt.allocPrint(frame, "{d}", .{revision})));
                 try native.json.put(frame, &params, "occurrence_id", availability.object.get("occurrence_id").?);
                 try native.json.put(frame, &params, "attempt_id", availability.object.get("attempt_id").?);
                 try native.json.put(frame, &params, "recovery", (try native.json.parse(frame, "{\"mechanism\":\"rederive\"}", .{})).value);
-                try std.testing.expectError(error.UnsupportedCapability, legacy_client.call(frame, .@"task.reconcile", params));
                 var forged = try native.json.copy(frame, params);
                 try native.json.put(frame, forged.object.getPtr("recovery").?, "safe_to_retry", .{ .bool = true });
                 try std.testing.expectError(error.InvalidParams, client.call(frame, .@"task.reconcile", forged));
@@ -557,9 +554,7 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                 try std.testing.expect(recorded.value.provenance == (if (recovery_probe == .provider) .none else .rederived));
                 var history_params = try native.json.copy(frame, status_params);
                 try native.json.put(frame, &history_params, "after_seq", native.json.string("0"));
-                try std.testing.expectError(error.UnsupportedCapability, legacy_client.call(frame, .@"task.subscribe", history_params));
                 try native.json.put(frame, &history_params, "limit", try native.json.number(frame, 128));
-                try std.testing.expectError(error.UnsupportedCapability, legacy_client.call(frame, .@"task.events", history_params));
                 // Export at the actual unresolved/capture-admitted boundary.
                 // Import preserves private evidence and stays parked; it never
                 // acquires again or claims an uninterpreted response is settled.
@@ -790,7 +785,7 @@ fn continuedAttemptAccounting(parent: std.mem.Allocator, io: std.Io, assets: nat
         if (work.entry.declaration.inference) {
             try std.testing.expectEqual(unsent + 1, (try service.task(frame, task)).value.inference_attempts);
             if (unsent == 17) {
-                try std.testing.expectEqual(18, try namespace.store.capabilityAttempts(task, t.P.adaptive_identity));
+                try std.testing.expectEqual(18, try namespace.store.capabilityAttempts(task, t.P.identity));
                 try service.notSent(frame, work);
                 return;
             }

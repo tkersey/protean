@@ -72,8 +72,8 @@ test "model effect is ordinary and a typed question requires no executable tool"
     const first = try Question.declare(&builder);
     try std.testing.expectEqual(first, try Question.declare(&builder));
     try std.testing.expectEqualStrings(invocation.semantic_identity, builder.effects.items[@intCast(first)].identity);
-    const request = try contracts.schema(Question.Request, &builder);
-    const result = try contracts.schema(Question.Result, &builder);
+    const request = try contracts.schema(Question.AdaptiveRequest, &builder);
+    const result = try contracts.schema(Question.AdaptiveResult, &builder);
     try std.testing.expectEqual(request, builder.effects.items[@intCast(first)].payload);
     try std.testing.expectEqual(result, builder.effects.items[@intCast(first)].result);
     try std.testing.expect(builder.effects.items[@intCast(first)].external);
@@ -83,68 +83,39 @@ test "model effect is ordinary and a typed question requires no executable tool"
     try std.testing.expectEqualStrings("answer", Question.allDeclarations().items[0].name.bytes);
 }
 
-test "stateless replay is an additive bounded ordinary contract with exact legacy prefix" {
-    const result: Fixture.ReplayResult = .{
-        .result = .{ .refusal = .{ .bytes = "no" } },
-        .replay = .{ .bytes = "[]" },
-        .replay_status = .complete,
-        .usage = .{ .input_tokens = 7, .output_tokens = 3, .cached_input_tokens = 2 },
-    };
-    const encoded = try contracts.encodeOwned(Fixture.ReplayResult, std.testing.allocator, result);
-    defer std.testing.allocator.free(encoded);
-    try std.testing.expectEqualSlices(u8, &.{
-        1, 2, 'n', 'o', 2, '[', ']', 0, 0, 0, 0, 1,
-        7, 0, 0,   0,   0, 0,   0,   0, 3, 0, 0, 0,
-        0, 0, 0,   0,   1, 2,   0,   0, 0, 0, 0, 0,
-        0,
-    }, encoded);
-    var restored = try contracts.decodeOwned(Fixture.ReplayResult, std.testing.allocator, encoded);
-    defer restored.deinit();
-    try std.testing.expectEqualStrings("[]", restored.value.replay.bytes);
-    try std.testing.expectEqual(2, restored.value.usage.?.cached_input_tokens.?);
-    var builder = horos.source.Builder.init(std.testing.allocator);
-    defer builder.deinit();
-    const legacy = try Fixture.declare(&builder);
-    const replay = try Fixture.declareReplay(&builder);
-    try std.testing.expect(legacy != replay);
-    try std.testing.expectEqual(replay, try Fixture.declareReplay(&builder));
-    try std.testing.expectEqualStrings(invocation.replay_semantic_identity, builder.effects.items[@intCast(replay)].identity);
-    try std.testing.expectEqual(try contracts.schema(Fixture.ReplayRequest, &builder), builder.effects.items[@intCast(replay)].payload);
-    try std.testing.expectEqual(null, Fixture.ReplayBytes.max_length);
-}
-
-test "reference replay carries bounded bindings without copying provider history" {
-    const reference: invocation.ContextReference = .{
-        .digest = @splat(1),
-        .bytes = 1024 * 1024,
-        .schema = .{ .bytes = invocation.context_semantic_identity },
-        .profile = @splat(2),
+test "v11 is the sole model effect and retains current context bindings" {
+    const reference: invocation.AdaptiveContextReference = .{
+        .object = .{ .digest = @splat(1), .bytes = 1024 * 1024 },
+        .schema = .{ .bytes = invocation.adaptive_context_semantic_identity },
+        .policy = @splat(2),
+        .selection = @splat(4),
         .task = @splat(3),
         .tenant = .{ .bytes = "tenant" },
         .audience = .{ .bytes = "principal" },
-        .first = 0,
-        .next = 37,
+        .epoch = 2,
+        .watermark = 37,
+        .eviction_generation = 1,
     };
-    const result: Fixture.ReferenceResult = .{
+    const result: Fixture.AdaptiveResult = .{
         .result = .{ .refusal = .{ .bytes = "no" } },
         .replay = reference,
         .replay_status = .complete,
         .usage = null,
     };
-    const encoded = try contracts.encodeOwned(Fixture.ReferenceResult, std.testing.allocator, result);
+    const encoded = try contracts.encodeOwned(Fixture.AdaptiveResult, std.testing.allocator, result);
     defer std.testing.allocator.free(encoded);
     try std.testing.expect(encoded.len < 256);
-    var decoded = try contracts.decodeOwned(Fixture.ReferenceResult, std.testing.allocator, encoded);
+    var decoded = try contracts.decodeOwned(Fixture.AdaptiveResult, std.testing.allocator, encoded);
     defer decoded.deinit();
     try std.testing.expectEqualDeep(reference, decoded.value.replay.?);
     var builder = horos.source.Builder.init(std.testing.allocator);
     defer builder.deinit();
-    const v3 = try Fixture.declare(&builder);
-    const v4 = try Fixture.declareReplay(&builder);
-    const v5 = try Fixture.declareReference(&builder);
-    try std.testing.expect(v3 != v4 and v4 != v5 and v3 != v5);
-    try std.testing.expectEqualStrings(invocation.reference_semantic_identity, builder.effects.items[@intCast(v5)].identity);
-    try std.testing.expectEqual(v5, try Fixture.declareReference(&builder));
+    const effect = try Fixture.declare(&builder);
+    try std.testing.expectEqualStrings("agent.model.invoke.v11", builder.effects.items[@intCast(effect)].identity);
+    try std.testing.expectEqual(effect, try Fixture.declare(&builder));
+    try std.testing.expectEqual(@as(usize, 1), builder.effects.items.len);
+    try std.testing.expectEqual(try contracts.schema(Fixture.AdaptiveRequest, &builder), builder.effects.items[@intCast(effect)].payload);
+    try std.testing.expectEqual(try contracts.schema(Fixture.AdaptiveResult, &builder), builder.effects.items[@intCast(effect)].result);
 }
 
 test "nested tool codecs describe bounded vectors without changing flat field codecs" {
