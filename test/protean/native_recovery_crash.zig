@@ -154,7 +154,7 @@ test "process-crash-controller-only" {
     }
     try worker.join();
     try stopAt(if (witness.recovery == null) "original-acquired" else "lookup-acquired");
-    try service.acquire(a, work, worker.reply orelse return error.MissingReply);
+    try service.completeWork(a, work, worker.result orelse return error.MissingReply);
     try worker.release();
     try worker.deinit(a);
     try stopAt(if (witness.recovery == null) "original-captured" else "lookup-captured");

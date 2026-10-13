@@ -2017,17 +2017,138 @@ fn awaitLookup(io: std.Io, worker: *native.testing.Worker) !void {
     try worker.join();
 }
 
+test "retained captures and recovery remain readable under a different current image" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const frame = arena.allocator();
+    const Successor = struct {
+        pub fn emit(c: protean.Context) !horos.source.Module {
+            const b = c.builder;
+            const number = try b.scalar(u32);
+            const entry = try b.declare(&.{number}, number, &.{}, &.{});
+            try b.define(entry, try b.pure(try b.reference(b.parameter(entry, 0))));
+            return b.module(entry, try b.scalar(void));
+        }
+    };
+    var compiled = try protean.compile(a, protean.system(.{ .InitialArgs = u32, .Result = u32, .Failure = void, .application = FairApplication }));
+    defer compiled.deinit();
+    var successor = try protean.compile(a, protean.system(.{ .InitialArgs = u32, .Result = u32, .Failure = void, .application = Successor }));
+    defer successor.deinit();
+    const old_image = try frame.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
+    _ = try compiled.encode(a, old_image);
+    const new_image = try frame.alloc(u8, try horos.data.program_image.encodedLength(successor.program));
+    _ = try successor.encode(a, new_image);
+    const Pure = struct {
+        fn rederive(ctx: native.registry.RederivationContext, _: native.registry.RecoveryInput, payload: []const u8, _: ?[]const u8) !native.registry.RederivationFinding {
+            var input = try protean.contracts.decodeOwned(u32, ctx.allocator, payload);
+            defer input.deinit();
+            return .{ .result = try protean.contracts.encodeOwned(u32, ctx.allocator, input.value + 1) };
+        }
+    };
+    const Case = enum { captured, pure_reply, verified_capture };
+    for ([_]Case{ .captured, .pure_reply, .verified_capture }) |scenario| {
+        var leaf = native.leaf(u32, u32, .{ .identity = "fair.leaf.v1", .resource_role = "local" }, increment);
+        if (scenario == .pure_reply) {
+            leaf.recovery = .{ .identity = "pure-increment.recovery.v1", .version = 1, .rederive = Pure.rederive };
+        } else {
+            leaf.capture = .{ .prepare = FairCapture.prepare, .acquire = FairCapture.acquire, .interpret = FairCapture.interpret, .dependencies = native.registry.opaqueProjection };
+            leaf.invoke = null;
+            leaf.background = true;
+            if (scenario == .verified_capture) leaf.recovery = .{ .identity = "signed-fixture-receipt.v1", .version = 1, .lookup = .{ .acquire = LookupFixture.lookup, .verify = LookupFixture.verify } };
+        }
+        var handlers = try native.Registry.init(a, &.{ leaf, native.question(u32, u32, .{ .identity = "fair.question.v1", .resource_role = "user", .answer_schema_id = "fair.answer.v1" }, FairCapture.present), native.inbox.declaration(u32) });
+        defer handlers.deinit();
+        var grants: [3]native.registry.Grant = undefined;
+        const profile: native.tasks.Profile = .{ .id = "retained", .runtime_identity = @splat(42), .bytes = "retained-profile", .authority = .{ .grants = &grants, .principal = "test", .tenant = "test" } };
+        var temporary = std.testing.tmpDir(.{});
+        defer temporary.cleanup();
+        var buffer: [4096]u8 = undefined;
+        const length = try temporary.dir.realPath(io, &buffer);
+        const path = try std.fmt.allocPrint(frame, "{s}/retained", .{buffer[0..length]});
+        var task_id: [16]u8 = undefined;
+        var params = native.json.object();
+        var original_status: []const u8 = undefined;
+        var original_result: []const u8 = undefined;
+        for ([_][]const u8{ old_image, new_image }, 0..) |image, generation| {
+            const admitted = try horos.data.program_image.Admitted.decode(a, image);
+            defer admitted.deinit();
+            const manifest = try ownerManifest(frame, image, admitted.identity(), "retained-owner");
+            const assets: native.discovery.Assets = .{ .image = image, .application = "retained-owner", .manifest = manifest };
+            var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "unit", .image_identity = admitted.identity() };
+            defer application.deinit();
+            application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
+            for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(frame, application.image_identity) };
+            var namespace = try native.Namespace.open(a, io, path);
+            defer namespace.close() catch unreachable;
+            var service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+            defer service.close(frame) catch unreachable;
+            var client: native.client.Client(FairTypes) = .{ .service = &service };
+            if (generation == 0) {
+                task_id = (try service.submit(frame, "original", 1)).receipt.task;
+                try std.testing.expect(try service.pump(frame) == .progressed);
+                const work = (try service.pump(frame)).work;
+                if (scenario == .captured) {
+                    try service.acquire(frame, work, try protean.contracts.encodeOwned(u32, frame, 99));
+                } else {
+                    try service.unknown(frame, work);
+                    var unknown = try service.task(frame, task_id);
+                    defer unknown.deinit();
+                    _ = try service.reconcile(frame, "recover", task_id, unknown.value.revision, work.occurrence, work.attempt, if (scenario == .pure_reply) .rederive else .lookup);
+                    if (scenario == .pure_reply) {
+                        const computation = (try service.pump(frame)).work;
+                        const worker = try native.testing.Worker.init(a, io);
+                        defer worker.deinit(a) catch unreachable;
+                        try worker.start(computation, profile.authority, null);
+                        try awaitLookup(io, worker);
+                        defer worker.release() catch unreachable;
+                        try service.completeWork(frame, computation, worker.result.?);
+                    }
+                    if (scenario == .verified_capture) {
+                        const lookup = (try service.pump(frame)).work;
+                        var record = try protean.contracts.decodeOwned(native.testing.state.Reconciliation, frame, lookup.recovery.?.body);
+                        defer record.deinit();
+                        var request = try protocol.decode(protocol.Request, frame, lookup.request);
+                        defer request.deinit();
+                        try service.acquire(frame, lookup, try LookupFixture.receipt(frame, native.registry.RecoveryInput.fromReconciliation(record.value, request.value.request_identity, false), .capture));
+                    }
+                }
+                for (0..8) |_| try std.testing.expect(try service.pump(frame) != .work);
+                var completed = try service.task(frame, task_id);
+                defer completed.deinit();
+                try std.testing.expect(completed.value.outcome_kind == .completed);
+                try native.json.put(frame, &params, "task_id", native.json.string(try frame.dupe(u8, &std.fmt.bytesToHex(task_id, .lower))));
+                original_status = try native.json.canonical(frame, try client.call(frame, .@"task.status", params));
+                original_result = try native.json.canonical(frame, try client.call(frame, .@"task.result", params));
+            } else {
+                try std.testing.expectEqualStrings(original_status, try native.json.canonical(frame, try client.call(frame, .@"task.status", params)));
+                try std.testing.expectEqualStrings(original_result, try native.json.canonical(frame, try client.call(frame, .@"task.result", params)));
+                var retained = try service.task(frame, task_id);
+                defer retained.deinit();
+                try std.testing.expectError(error.IncompatibleProfile, service.resumeTask(frame, "incompatible-resume", task_id, retained.value.revision));
+                try std.testing.expect(!namespace.store.fenced);
+            }
+        }
+    }
+}
+
 test "pure recovery without a capture adapter settles the original typed binding after restart" {
     try pureRecovery(.valid);
 }
 
 test "pure recovery retains unresolved derivations without swallowing resource or custody failures" {
-    for ([_]PureRecoveryCase{ .rejected, .malformed, .unsupported, .unavailable, .inconclusive, .cancelled, .capacity, .allocation, .corrupt, .storage, .busy, .invalid_state }) |scenario| try pureRecovery(scenario);
+    for ([_]PureRecoveryCase{ .rejected, .malformed, .unsupported, .unavailable, .inconclusive, .cancelled, .capacity, .allocation, .corrupt, .storage, .busy, .invalid_state, .unexpected }) |scenario| try pureRecovery(scenario);
 }
 
-const PureRecoveryCase = enum { valid, rejected, malformed, unsupported, unavailable, inconclusive, cancelled, capacity, allocation, corrupt, storage, busy, invalid_state };
+test "pure recovery work preserves peer progress cancellation and interrupted admission" {
+    for ([_]PureRecoveryCase{ .held, .held_cancel, .prior_cancel, .pending_cancel, .interrupted }) |scenario| try pureRecovery(scenario);
+}
+
+const PureRecoveryCase = enum { valid, rejected, malformed, unsupported, unavailable, inconclusive, cancelled, capacity, allocation, corrupt, storage, busy, invalid_state, unexpected, held, held_cancel, prior_cancel, pending_cancel, interrupted };
 
 fn pureRecovery(scenario: PureRecoveryCase) !void {
+    errdefer std.debug.print("pure recovery scenario: {s}\n", .{@tagName(scenario)});
     const a = std.testing.allocator;
     const io = std.testing.io;
     var arena = std.heap.ArenaAllocator.init(a);
@@ -2048,16 +2169,23 @@ fn pureRecovery(scenario: PureRecoveryCase) !void {
         fn invoke(_: native.Context, _: u32) !u32 {
             return error.OriginalInvocationForbidden;
         }
-        fn rederive(ctx: native.registry.ProjectionContext, _: native.registry.RecoveryInput, payload: []const u8, prepared: ?[]const u8) ![]u8 {
+        var derivations: std.atomic.Value(u32) = .init(0);
+        var hold: std.atomic.Value(bool) = .init(false);
+        fn rederive(ctx: native.registry.RederivationContext, _: native.registry.RecoveryInput, payload: []const u8, prepared: ?[]const u8) !native.registry.RederivationFinding {
+            _ = derivations.fetchAdd(1, .acq_rel);
             try std.testing.expect(prepared == null);
             const selected = std.meta.stringToEnum(PureRecoveryCase, ctx.profile) orelse return error.InvalidProfile;
+            while (hold.load(.acquire)) {
+                try ctx.checkCancellation();
+                std.atomic.spinLoopHint();
+            }
             switch (selected) {
-                .valid => {},
-                .rejected => return error.ContradictoryEvidence,
-                .malformed => return ctx.allocator.dupe(u8, &.{0}),
-                .unsupported => return error.UnsupportedRecovery,
-                .unavailable => return error.RecoveryUnavailable,
-                .inconclusive => return error.RecoveryInconclusive,
+                .valid, .held, .held_cancel, .prior_cancel, .pending_cancel, .interrupted => {},
+                .rejected => return .rejected,
+                .malformed => return .{ .result = try ctx.allocator.dupe(u8, &.{0}) },
+                .unsupported => return .unsupported,
+                .unavailable => return .unavailable,
+                .inconclusive => return .inconclusive,
                 .cancelled => return error.Canceled,
                 .capacity => return error.Capacity,
                 .allocation => return error.OutOfMemory,
@@ -2065,12 +2193,16 @@ fn pureRecovery(scenario: PureRecoveryCase) !void {
                 .storage => return error.StorageUnavailable,
                 .busy => return error.Busy,
                 .invalid_state => return error.InvalidState,
+                .unexpected => return error.InjectedRederivationFailure,
             }
             var input = try protean.contracts.decodeOwned(u32, ctx.allocator, payload);
             defer input.deinit();
-            return protean.contracts.encodeOwned(u32, ctx.allocator, input.value + 1);
+            return .{ .result = try protean.contracts.encodeOwned(u32, ctx.allocator, input.value + 1) };
         }
     };
+    Pure.derivations.store(0, .release);
+    Pure.hold.store(scenario == .held or scenario == .held_cancel, .release);
+    defer Pure.hold.store(false, .release);
     var leaf = native.leaf(u32, u32, .{ .identity = "fair.leaf.v1", .resource_role = "local" }, Pure.invoke);
     leaf.recovery = .{ .identity = "pure-increment.recovery.v1", .version = 1, .rederive = Pure.rederive };
     var handlers = try native.Registry.init(a, &.{ leaf, native.question(u32, u32, .{ .identity = "fair.question.v1", .resource_role = "user", .answer_schema_id = "fair.answer.v1" }, FairCapture.present), native.inbox.declaration(u32) });
@@ -2094,9 +2226,94 @@ fn pureRecovery(scenario: PureRecoveryCase) !void {
     service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
     var unknown = try service.task(frame, original.task);
     defer unknown.deinit();
-    const before = namespace.store.head;
+    const expected_revision = if (scenario == .prior_cancel) (try service.requestCancel(frame, "prior-cancel", original.task, "settle then cancel")).receipt.revision else unknown.value.revision;
     const original_attempt = (try namespace.store.recordBytes(frame, "attempt", original.attempt, original.task)).?;
-    if (scenario == .capacity or scenario == .allocation or scenario == .corrupt or scenario == .storage or scenario == .busy or scenario == .invalid_state) {
+    const admitted = try service.reconcile(frame, "pure-recover", original.task, expected_revision, original.occurrence, original.attempt, .rederive);
+    try std.testing.expectEqual(@as(u32, 0), Pure.derivations.load(.acquire));
+    {
+        var pending = try service.reconciliation(frame, original.task, admitted.receipt.reconciliation.?);
+        defer pending.deinit();
+        try std.testing.expect(pending.value.outcome == .pending and pending.value.provenance == .none);
+    }
+    if (scenario == .pending_cancel or scenario == .interrupted) {
+        if (scenario == .pending_cancel) {
+            _ = try service.requestCancel(frame, "cancel-before-worker", original.task, "interrupt recovery");
+        } else {
+            const archive = try std.fmt.allocPrint(frame, "{s}/pending-pure.agnx", .{buffer[0..length]});
+            _ = try service.exportCheckpoint(frame, original.task, archive);
+            try service.close(frame);
+            try namespace.close();
+            {
+                const copy_path = try std.fmt.allocPrint(frame, "{s}/imported-pure", .{buffer[0..length]});
+                var copy_namespace = try native.Namespace.open(a, io, copy_path);
+                defer copy_namespace.close() catch unreachable;
+                var copy = try native.tasks.Service(FairTypes).init(a, io, &copy_namespace, assets, &application, handlers, profile);
+                defer copy.close(frame) catch unreachable;
+                _ = try copy.importCheckpoint(frame, "import-pure", archive);
+                var copied = try copy.reconciliation(frame, original.task, admitted.receipt.reconciliation.?);
+                defer copied.deinit();
+                try std.testing.expect(copied.value.outcome == .unresolved and copied.value.outcome.unresolved == .interrupted);
+                try std.testing.expect(try copy.pump(frame) == .idle);
+            }
+            namespace = try native.Namespace.open(a, io, path);
+            service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+        }
+        var stopped = try service.reconciliation(frame, original.task, admitted.receipt.reconciliation.?);
+        defer stopped.deinit();
+        try std.testing.expect(stopped.value.outcome == .unresolved and stopped.value.provenance == .none);
+        const expected: @TypeOf(stopped.value.outcome.unresolved) = if (scenario == .pending_cancel) .unavailable else .interrupted;
+        try std.testing.expectEqual(expected, stopped.value.outcome.unresolved);
+        try std.testing.expectEqual(@as(u32, 0), Pure.derivations.load(.acquire));
+        try std.testing.expect(try service.pump(frame) == .idle);
+        const replay = try service.reconcile(frame, "pure-recover", original.task, expected_revision, original.occurrence, original.attempt, .rederive);
+        try std.testing.expect(replay.replayed);
+        try std.testing.expectEqualDeep(admitted.receipt, replay.receipt);
+        _ = try namespace.store.auditRetention(handlers, application.image_identity);
+        return;
+    }
+    const before = namespace.store.head;
+    const work = (try service.pump(frame)).work;
+    const worker = try native.testing.Worker.init(a, io);
+    defer worker.deinit(a) catch unreachable;
+    try worker.start(work, profile.authority, null);
+    defer if (worker.future != null) {
+        Pure.hold.store(false, .release);
+        worker.cancel();
+        awaitLookup(io, worker) catch unreachable;
+        service.notSent(frame, work) catch {};
+        worker.release() catch unreachable;
+    };
+    try std.testing.expect(!try service.shouldCancelWork(work));
+    if (scenario == .held or scenario == .held_cancel) {
+        const deadline = std.Io.Clock.awake.now(io).toMilliseconds() + 5000;
+        while (Pure.derivations.load(.acquire) == 0) {
+            if (std.Io.Clock.awake.now(io).toMilliseconds() >= deadline) return error.TestTimeout;
+            try io.sleep(.fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(!worker.finished());
+        const peer = try service.submit(frame, "pure-peer", 4);
+        const cancelled_peer = try service.submit(frame, "cancelled-peer", 0);
+        _ = try service.requestCancel(frame, "peer-cancel", cancelled_peer.receipt.task, "peer only");
+        _ = try service.message(frame, "recovery-message", original.task, 7);
+        try std.testing.expect(!try service.shouldCancelWork(work));
+        for (0..8) |_| try std.testing.expect(try service.pump(frame) != .work);
+        var client: native.client.Client(FairTypes) = .{ .service = &service };
+        for ([_]struct { id: [16]u8, status: []const u8 }{ .{ .id = original.task, .status = "unknown" }, .{ .id = peer.receipt.task, .status = "completed" }, .{ .id = cancelled_peer.receipt.task, .status = "cancelled" } }) |observation| {
+            var params = native.json.object();
+            try native.json.put(frame, &params, "task_id", native.json.string(try frame.dupe(u8, &std.fmt.bytesToHex(observation.id, .lower))));
+            try std.testing.expectEqualStrings(observation.status, (try client.call(frame, .@"task.status", params)).object.get("status").?.string);
+        }
+        try std.testing.expect((try service.reconcile(frame, "pure-recover", original.task, expected_revision, original.occurrence, original.attempt, .rederive)).replayed);
+        try std.testing.expectEqual(@as(u32, 1), Pure.derivations.load(.acquire));
+        if (scenario == .held_cancel) {
+            _ = try service.requestCancel(frame, "cancel-rederivation", original.task, "stop new computation");
+            try std.testing.expect(try service.shouldCancelWork(work));
+            worker.cancel();
+        } else Pure.hold.store(false, .release);
+    }
+    try awaitLookup(io, worker);
+    defer worker.release() catch unreachable;
+    if (scenario == .capacity or scenario == .allocation or scenario == .corrupt or scenario == .storage or scenario == .busy or scenario == .invalid_state or scenario == .unexpected) {
         const expected_error = switch (scenario) {
             .capacity => error.Capacity,
             .allocation => error.OutOfMemory,
@@ -2104,22 +2321,31 @@ fn pureRecovery(scenario: PureRecoveryCase) !void {
             .storage => error.StorageUnavailable,
             .busy => error.Busy,
             .invalid_state => error.InvalidState,
+            .unexpected => error.InjectedRederivationFailure,
             else => unreachable,
         };
-        try std.testing.expectError(expected_error, service.reconcile(frame, "pure-recover", original.task, unknown.value.revision, original.occurrence, original.attempt, .rederive));
+        try std.testing.expectError(expected_error, service.completeWork(frame, work, worker.result.?));
         try std.testing.expectEqualDeep(before, namespace.store.head);
+        try std.testing.expect(namespace.store.fenced and service.work == null);
+        try service.close(frame);
+        try namespace.close();
+        namespace = try native.Namespace.open(a, io, path);
+        service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+        var interrupted = try service.reconciliation(frame, original.task, admitted.receipt.reconciliation.?);
+        defer interrupted.deinit();
+        try std.testing.expect(interrupted.value.outcome == .unresolved and interrupted.value.outcome.unresolved == .interrupted);
         try std.testing.expectEqualStrings(original_attempt, (try namespace.store.recordBytes(frame, "attempt", original.attempt, original.task)).?);
         return;
     }
-    const admitted = try service.reconcile(frame, "pure-recover", original.task, unknown.value.revision, original.occurrence, original.attempt, .rederive);
+    try service.completeWork(frame, work, worker.result.?);
     var recovery = try service.reconciliation(frame, original.task, admitted.receipt.reconciliation.?);
     defer recovery.deinit();
-    if (scenario != .valid) {
+    if (scenario != .valid and scenario != .held and scenario != .prior_cancel) {
         try std.testing.expect(recovery.value.outcome == .unresolved and recovery.value.provenance == .none);
         const expected: @TypeOf(recovery.value.outcome.unresolved) = switch (scenario) {
             .rejected, .malformed => .rejected,
             .unsupported => .unsupported,
-            .unavailable, .cancelled => .unavailable,
+            .unavailable, .cancelled, .held_cancel => .unavailable,
             .inconclusive => .inconclusive,
             else => unreachable,
         };
@@ -2137,7 +2363,7 @@ fn pureRecovery(scenario: PureRecoveryCase) !void {
         namespace = try native.Namespace.open(a, io, path);
         service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
         const sealed = namespace.store.head;
-        const replay = try service.reconcile(frame, "pure-recover", original.task, unknown.value.revision, original.occurrence, original.attempt, .rederive);
+        const replay = try service.reconcile(frame, "pure-recover", original.task, expected_revision, original.occurrence, original.attempt, .rederive);
         try std.testing.expect(replay.replayed);
         try std.testing.expectEqualDeep(admitted.receipt, replay.receipt);
         try std.testing.expectEqualDeep(sealed, namespace.store.head);
@@ -2157,10 +2383,14 @@ fn pureRecovery(scenario: PureRecoveryCase) !void {
     for (0..8) |_| try std.testing.expect(try service.pump(frame) != .work);
     var completed = try service.task(frame, original.task);
     defer completed.deinit();
-    try std.testing.expect(completed.value.outcome_kind == .completed);
-    try std.testing.expectEqualSlices(u8, bound.value.value, try namespace.store.object(frame, completed.value.result.?, null));
+    if (scenario == .prior_cancel) {
+        try std.testing.expect(completed.value.outcome_kind == .cancelled and completed.value.cancellation_applied);
+    } else {
+        try std.testing.expect(completed.value.outcome_kind == .completed);
+        try std.testing.expectEqualSlices(u8, bound.value.value, try namespace.store.object(frame, completed.value.result.?, null));
+    }
     try std.testing.expectEqual(1, try namespace.store.capabilityAttempts(original.task, "fair.leaf.v1"));
-    try std.testing.expect((try service.reconcile(frame, "pure-recover", original.task, unknown.value.revision, original.occurrence, original.attempt, .rederive)).replayed);
+    try std.testing.expect((try service.reconcile(frame, "pure-recover", original.task, expected_revision, original.occurrence, original.attempt, .rederive)).replayed);
     _ = try namespace.store.auditRetention(handlers, application.image_identity);
 }
 
@@ -2253,7 +2483,7 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
     try std.testing.expectEqual(1, fixture.calls.load(.acquire));
     fixture.hold.store(false, .release);
     try awaitLookup(io, worker);
-    const evidence = worker.reply orelse return error.MissingEvidence;
+    const evidence = (worker.result orelse return error.MissingEvidence).acquired;
     inline for (.{ "owner_epoch", "task", "occurrence", "attempt" }) |field| {
         var stale = work;
         @field(stale, field)[0] ^= 1;
@@ -2335,7 +2565,7 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
     fixture.kind = .not_sent;
     try worker.start(proof_work, service.profile.authority, &fixture);
     try awaitLookup(io, worker);
-    try service.acquire(frame, proof_work, worker.reply.?);
+    try service.completeWork(frame, proof_work, worker.result.?);
     try worker.release();
     var proof = try service.reconciliation(frame, interrupted.task, proof_admission.receipt.reconciliation.?);
     defer proof.deinit();

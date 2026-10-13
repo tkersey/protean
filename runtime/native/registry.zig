@@ -129,7 +129,25 @@ pub const RecoveryInput = struct {
         return .{ .task = item.task, .occurrence = item.occurrence, .attempt = item.attempt, .request_identity = identity, .request = item.request, .prepared = item.prepared, .profile = item.profile, .resources = item.resources.items, .capability = item.capability.bytes, .inference = inference };
     }
 };
-pub const Rederived = union(enum) { capture: []const u8, reply: []const u8 };
+/// Worker-owned pure inputs. Object access and projection leases stay with the
+/// admission owner; artifact-dependent computations use frozen prepared bytes.
+pub const RederivationContext = struct {
+    allocator: std.mem.Allocator,
+    task: state.TaskId,
+    profile: []const u8,
+    cancellation: *const std.atomic.Value(bool),
+
+    pub fn checkCancellation(self: RederivationContext) !void {
+        if (self.cancellation.load(.acquire)) return error.Canceled;
+    }
+};
+pub const RederivationFinding = union(enum) {
+    result: []const u8,
+    unsupported,
+    unavailable,
+    inconclusive,
+    rejected,
+};
 pub const RecoveryFinding = union(enum) {
     /// Exact historical bytes authenticated by the compiled verifier.
     capture: []const u8,
@@ -153,12 +171,11 @@ pub const ReceiptLookup = struct {
 pub const RecoveryAdapter = struct {
     identity: []const u8,
     version: u32,
-    /// Pure computation: only immutable objects and original prepared bytes.
-    /// No Context, IO, credentials, live filesystem, or environment handle.
-    /// RecoveryUnavailable / RecoveryInconclusive report a missing result;
-    /// other semantic failures become RecoveryRejected after binding checks.
-    /// Resource and storage/custody failures remain operational errors.
-    rederive: ?*const fn (ProjectionContext, RecoveryInput, []const u8, ?[]const u8) anyerror![]u8 = null,
+    /// Pure worker computation over the admitted request and prepared bytes.
+    /// No projection reader, IO, credentials, or environment handle escapes.
+    /// Non-results are explicit; errors remain operational failures. Cancellation
+    /// interrupts this new computation without resolving historical delivery.
+    rederive: ?*const fn (RederivationContext, RecoveryInput, []const u8, ?[]const u8) anyerror!RederivationFinding = null,
     lookup: ?ReceiptLookup = null,
 };
 
@@ -298,17 +315,15 @@ pub const Registry = struct {
         return if (known_identity) error.CapabilitySchemaMismatch else error.MissingCapability;
     }
 
-    /// Reconstruct the original pure result without invoking its environmental
-    /// adapter. This returns newly derived bytes, not historical delivery proof.
-    /// The task owner must still admit the same unknown occurrence/attempt and
-    /// durably record rederivation provenance before consuming these bytes.
-    pub fn rederive(self: Registry, ctx: ProjectionContext, input: RecoveryInput) !Rederived {
+    /// Validate frozen inputs before durable recovery admission. Computation
+    /// runs later on the worker, after this borrowed projection view expires.
+    pub fn validateRederivation(self: Registry, ctx: ProjectionContext, input: RecoveryInput) !void {
         return self.recover(false, ctx, input, null);
     }
     pub fn verifyRecovery(self: Registry, ctx: ProjectionContext, input: RecoveryInput, evidence: []const u8) !RecoveryFinding {
         return self.recover(true, ctx, input, evidence);
     }
-    fn recover(self: Registry, comptime lookup: bool, ctx: ProjectionContext, input: RecoveryInput, evidence: ?[]const u8) !(if (lookup) RecoveryFinding else Rederived) {
+    fn recover(self: Registry, comptime lookup: bool, ctx: ProjectionContext, input: RecoveryInput, evidence: ?[]const u8) !(if (lookup) RecoveryFinding else void) {
         const image = ctx.application orelse return error.InvalidRecovery;
         if (!std.meta.eql(ctx.task, input.task) or input.profile.bytes != ctx.profile.len or
             !std.meta.eql(input.profile.digest, @import("store.zig").digest(ctx.profile)) or
@@ -336,36 +351,9 @@ pub const Registry = struct {
             if (result == .capture and entry.declaration.capture == null) return error.InvalidRecovery;
             return result;
         }
-        const rederive_result = adapter.rederive orelse return error.UnsupportedRecovery;
-        const reply = rederive_result(ctx, input, request.value.binding.payload, prepared) catch |err| return rederivationError(err);
-        errdefer ctx.allocator.free(reply);
-        if (entry.declaration.capture != null) return .{ .capture = reply };
-        var schema = try data.schema.decode(ctx.allocator, entry.resume_schema);
-        defer schema.deinit();
-        data.schema.validateValue(ctx.allocator, schema.descriptor, reply) catch |err| return rederivationError(err);
-        return .{ .reply = reply };
+        if (adapter.rederive == null) return error.UnsupportedRecovery;
     }
 };
-
-// Only the registered computation and its result validation pass here. Failures
-// establishing the original request/prepared/profile binding remain errors;
-// they cannot be turned into an admitted recovery of a different request.
-fn rederivationError(err: anyerror) anyerror {
-    return switch (err) {
-        error.OutOfMemory,
-        error.Capacity,
-        error.StorageUnavailable,
-        error.CorruptState,
-        error.InvalidState,
-        error.Busy,
-        error.UnsupportedRecovery,
-        error.RecoveryUnavailable,
-        error.RecoveryInconclusive,
-        => err,
-        error.Canceled => error.RecoveryUnavailable,
-        else => error.RecoveryRejected,
-    };
-}
 
 fn recoveryObject(ctx: ProjectionContext, ref: ObjectReference) ![]u8 {
     const bytes = try ctx.object(ref, std.math.cast(usize, ref.bytes) orelse return error.Capacity);
@@ -477,20 +465,15 @@ test "capability admission requires the complete schema and current resource gra
     try std.testing.expectError(error.CapabilitySchemaMismatch, registry.admit(wrong, authority, @splat(1), resource));
 }
 
-test "pure recovery binds frozen inputs and validates the original reply schema without invocation" {
+test "pure recovery admission binds frozen inputs without computation or invocation" {
     const a = std.testing.allocator;
     const storage = @import("store.zig");
     const Handler = struct {
-        var invalid_reply: bool = false;
         fn invoke(_: Context, _: u32) !u32 {
             return error.EnvironmentMustNotRun;
         }
-        fn rederive(ctx: ProjectionContext, _: RecoveryInput, payload: []const u8, prepared: ?[]const u8) ![]u8 {
-            try std.testing.expect(prepared == null);
-            if (invalid_reply) return ctx.allocator.dupe(u8, &.{0});
-            var input = try contracts.decodeOwned(u32, ctx.allocator, payload);
-            defer input.deinit();
-            return contracts.encodeOwned(u32, ctx.allocator, input.value + 1);
+        fn rederive(_: RederivationContext, _: RecoveryInput, _: []const u8, _: ?[]const u8) !RederivationFinding {
+            return error.ComputationMustWaitForWorker;
         }
     };
     var declaration = leaf(u32, u32, .{ .identity = "pure-increment.v1", .resource_role = "frozen" }, Handler.invoke);
@@ -511,9 +494,7 @@ test "pure recovery binds frozen inputs and validates the original reply schema 
     const resources: []const ObjectReference = &.{ .{ .digest = @splat(3), .bytes = 17 }, .{ .digest = @splat(4), .bytes = 19 } };
     const ctx: ProjectionContext = .{ .allocator = a, .task = @splat(9), .tenant = "test", .profile = "frozen profile", .application = @splat(1), .resources = resources, .objects = .validating(&object, @TypeOf(object).read) };
     const original: RecoveryInput = .{ .task = ctx.task, .occurrence = @splat(5), .attempt = @splat(6), .request_identity = request.request_identity, .request = .{ .digest = storage.digest(encoded), .bytes = encoded.len }, .prepared = null, .profile = .{ .digest = storage.digest(ctx.profile), .bytes = ctx.profile.len }, .resources = resources, .capability = declaration.identity, .inference = false };
-    const result = try registry.rederive(ctx, original);
-    defer a.free(result.reply);
-    try std.testing.expectEqualSlices(u8, &.{ 8, 0, 0, 0 }, result.reply);
+    try registry.validateRederivation(ctx, original);
     for (0..7) |case| {
         var input = original;
         switch (case) {
@@ -526,14 +507,11 @@ test "pure recovery binds frozen inputs and validates the original reply schema 
             6 => input.inference = true,
             else => unreachable,
         }
-        try std.testing.expectError(error.InvalidRecovery, registry.rederive(ctx, input));
+        try std.testing.expectError(error.InvalidRecovery, registry.validateRederivation(ctx, input));
     }
     var foreign = ctx;
     foreign.application = @splat(7);
-    try std.testing.expectError(error.Denied, registry.rederive(foreign, original));
-    Handler.invalid_reply = true;
-    defer Handler.invalid_reply = false;
-    try std.testing.expectError(error.RecoveryRejected, registry.rederive(ctx, original));
+    try std.testing.expectError(error.Denied, registry.validateRederivation(foreign, original));
 }
 
 test "schema-specialized capability families resolve independently of declaration order" {

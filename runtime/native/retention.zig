@@ -26,10 +26,10 @@ const Audit = struct {
     a: std.mem.Allocator,
     store: *storage.Store,
     handlers: registry.Registry,
-    image: Digest,
     objects: std.AutoArrayHashMapUnmanaged(Digest, Object) = .empty,
     edges: std.AutoHashMapUnmanaged(Edge, void) = .empty,
-    tasks: std.AutoHashMapUnmanaged(state.TaskId, struct { revision: u64, profile: Ref, body: Ref }) = .empty,
+    images: std.AutoHashMapUnmanaged(Digest, Digest) = .empty,
+    tasks: std.AutoHashMapUnmanaged(state.TaskId, struct { revision: u64, profile: Ref, body: Ref, image: Ref }) = .empty,
     records: std.AutoArrayHashMapUnmanaged(Key, Ref) = .empty,
     recovery_receipts: std.AutoHashMapUnmanaged(Key, void) = .empty,
     statistics: Statistics = .{},
@@ -59,6 +59,16 @@ const Audit = struct {
         try self.add(child);
         try self.edges.put(self.a, .{ .parent = parent.digest, .child = child.digest }, {});
     }
+    fn imageIdentity(self: *Audit, ref: Ref) !Digest {
+        try self.add(ref);
+        if (self.images.get(ref.digest)) |identity| return identity;
+        // A saved request belongs to its task's canonical program, independently
+        // of the launching executable. Raw object hashes are not program IDs.
+        var decoded = try data.program_image.decode(self.store.allocator, try self.body(ref));
+        defer decoded.deinit();
+        try self.images.put(self.a, ref.digest, decoded.identity);
+        return decoded.identity;
+    }
     fn value(self: *Audit, comptime T: type, parent: Ref, input: T) !void {
         var sink = struct {
             audit: *Audit,
@@ -82,7 +92,7 @@ const Audit = struct {
             defer decoded.deinit();
             const task = decoded.value;
             if (!same(&task.id, &id) or task.revision != try rows.integer(1) or @intFromBool(task.terminal()) != try rows.integer(2)) return error.CorruptState;
-            try self.tasks.put(self.a, id, .{ .revision = task.revision, .profile = task.profile, .body = ref });
+            try self.tasks.put(self.a, id, .{ .revision = task.revision, .profile = task.profile, .body = ref, .image = task.image });
             try self.value(state.Task, ref, task);
         }
     }
@@ -174,7 +184,7 @@ const Audit = struct {
             var request = try data.invocation.decode(data.invocation.Request, self.a, try self.body(attempt.value.request));
             defer request.deinit();
             if (!same(&request.value.request_identity, &saved.value.request)) return error.CorruptState;
-            const entry = try self.handlers.resolve(request.value, self.image);
+            const entry = try self.handlers.resolve(request.value, try self.imageIdentity(owner.image));
             if (!same(entry.declaration.identity, attempt.value.capability.bytes) or entry.declaration.inference != attempt.value.inference) return error.CorruptState;
             const adapter = entry.declaration.capture orelse return error.CorruptState;
             if ((capture.disposition == .complete) != (capture.response != null)) return error.CorruptState;
@@ -216,7 +226,8 @@ const Audit = struct {
             var request = try data.invocation.decode(data.invocation.Request, self.a, try self.body(item.request));
             defer request.deinit();
             if (!std.meta.eql(request.value.request_identity, occurrence_value.value.request)) return error.CorruptState;
-            const entry = try self.handlers.resolve(request.value, self.image);
+            const image = try self.imageIdentity(owner.image);
+            const entry = try self.handlers.resolve(request.value, image);
             if (!same(entry.declaration.identity, item.capability.bytes)) return error.CorruptState;
             if (item.provenance != .none or item.owner_epoch != null) {
                 const adapter = entry.declaration.recovery orelse return error.CorruptState;
@@ -257,7 +268,7 @@ const Audit = struct {
             if (item.provenance == .authentic or item.provenance == .authoritative) {
                 const evidence = try self.body(item.evidence orelse return error.CorruptState);
                 const input = registry.RecoveryInput.fromReconciliation(item, request.value.request_identity, entry.declaration.inference);
-                const finding = try self.store.project(registry.RecoveryFinding, self.a, .{ .task = key.task, .tenant = task.value.tenant.bytes, .profile = try self.body(item.profile), .application = self.image, .resources = item.resources.items }, struct {
+                const finding = try self.store.project(registry.RecoveryFinding, self.a, .{ .task = key.task, .tenant = task.value.tenant.bytes, .profile = try self.body(item.profile), .application = image, .resources = item.resources.items }, struct {
                     handlers: registry.Registry,
                     input: registry.RecoveryInput,
                     evidence: []const u8,
@@ -300,11 +311,11 @@ const Audit = struct {
 
 /// Caller holds the Store transaction for a stable database view. No projection
 /// interpretation, provider acquisition, grants, or artifact disclosure occurs.
-pub fn verify(store: *storage.Store, handlers: registry.Registry, image: Digest) !Statistics {
+pub fn verify(store: *storage.Store, handlers: registry.Registry) !Statistics {
     if (!store.transaction) return error.InvalidState;
     var arena = std.heap.ArenaAllocator.init(store.allocator);
     defer arena.deinit();
-    var audit: Audit = .{ .a = arena.allocator(), .store = store, .handlers = handlers, .image = image };
+    var audit: Audit = .{ .a = arena.allocator(), .store = store, .handlers = handlers };
     try audit.taskRoots();
     try audit.recordRoots();
     try audit.otherRoots();

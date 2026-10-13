@@ -142,13 +142,13 @@ fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition 
     if (!same(&prepared.policy, &work.digest(ctx.profile)) or !same(ctx.task_id, &std.fmt.bytesToHex(prepared.task, .lower))) return error.InvalidPreparedRequest;
     return .{ .captured = try encodeCapture(ctx.allocator, ctx.profile, ctx.cancellation, bytes, prepared, false) };
 }
-fn rederive(ctx: native.registry.ProjectionContext, _: native.registry.RecoveryInput, _: []const u8, original: ?[]const u8) ![]u8 {
+fn rederive(ctx: native.registry.RederivationContext, _: native.registry.RecoveryInput, _: []const u8, original: ?[]const u8) !native.registry.RederivationFinding {
     const bytes = original orelse return error.InvalidPreparedRequest;
     var decoded = try contracts.decodeOwned(Prepared, ctx.allocator, bytes);
     defer decoded.deinit();
     const prepared = decoded.value;
     if (!same(&prepared.task, &ctx.task) or !same(&prepared.policy, &work.digest(ctx.profile))) return error.InvalidPreparedRequest;
-    return encodeCapture(ctx.allocator, ctx.profile, null, bytes, prepared, true);
+    return .{ .result = try encodeCapture(ctx.allocator, ctx.profile, ctx.cancellation, bytes, prepared, true) };
 }
 
 fn dependencies(a: std.mem.Allocator, objects: []const []const u8) ![]native.registry.Dependency {

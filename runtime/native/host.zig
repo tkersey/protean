@@ -555,12 +555,10 @@ fn driveHuman(comptime Types: type, a: std.mem.Allocator, service: *tasks.Servic
             _ = try service.requestCancel(frame, operation, id, "human requested cancellation");
         }
         if (slot.future != null) {
-            var task = try service.task(frame, slot.work.task);
-            defer task.deinit();
-            if (task.value.cancellation != null and !slot.work.cleanup and slot.work.recovery == null) slot.cancel();
+            if (try service.shouldCancelWork(slot.work)) slot.cancel();
             if (slot.finished()) {
                 try slot.join();
-                if (slot.reply) |reply| try service.acquire(frame, slot.work, reply) else if (!slot.invoked) try service.notSent(frame, slot.work) else try service.unknown(frame, slot.work);
+                try service.completeWork(frame, slot.work, slot.result orelse .not_sent);
                 try slot.release();
             }
         }
@@ -901,18 +899,13 @@ fn serve(comptime Types: type, io: std.Io, a: std.mem.Allocator, connection: *Co
                 cancelled_owned = true;
             }
             if (slot.future != null) {
-                var task = try service.task(frame, slot.work.task);
-                defer task.deinit();
                 const deadline_near = if (shutdown_at) |start| time - start >= connection.limits.output_stall_ms - 100 else false;
-                if ((task.value.cancellation != null and !slot.work.cleanup and slot.work.recovery == null) or (shutdown_at != null and mode == .park) or deadline_near) slot.cancel();
+                if ((try service.shouldCancelWork(slot.work)) or (shutdown_at != null and mode == .park) or deadline_near) slot.cancel();
                 if (slot.finished()) {
                     try slot.join();
-                    if (slot.reply) |reply| try service.acquire(frame, slot.work, reply) else if (!slot.invoked) {
-                        try service.notSent(frame, slot.work);
-                    } else {
-                        try service.unknown(frame, slot.work);
-                        if (shutdown_at != null and code == 0) code = 2;
-                    }
+                    const result = slot.result orelse .not_sent;
+                    try service.completeWork(frame, slot.work, result);
+                    if (result == .unknown and shutdown_at != null and code == 0) code = 2;
                     try slot.release();
                     progressed = true;
                 }

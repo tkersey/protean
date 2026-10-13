@@ -1,4 +1,4 @@
-//! One environmental I/O slot. Its private allocation region and immutable
+//! One environmental or pure recovery slot. Its private region and immutable
 //! request outlive join; it never holds a Store or a Resident pointer.
 const std = @import("std");
 const data = @import("horos_data");
@@ -18,7 +18,9 @@ pub const Worker = struct {
     joined: std.atomic.Value(bool) = .init(false),
     cancellation: std.atomic.Value(bool) = .init(false),
     invoked: bool = false,
-    reply: ?[]const u8 = null,
+    result: ?tasks.WorkResult = null,
+    /// Diagnostic detail for an ordinary acquisition classified as unknown or
+    /// not sent. The tagged result alone controls durable publication.
     failure: ?anyerror = null,
 
     pub fn init(a: std.mem.Allocator, io: std.Io) !*Worker {
@@ -37,7 +39,7 @@ pub const Worker = struct {
         self.work = work;
         self.authority = authority;
         self.environment = environment;
-        self.reply = null;
+        self.result = null;
         self.failure = null;
         self.invoked = false;
         self.done.store(false, .release);
@@ -49,10 +51,25 @@ pub const Worker = struct {
             return err;
         };
     }
-    fn invoke(self: *Worker) ![]const u8 {
+    fn invoke(self: *Worker) !tasks.WorkResult {
         const a = self.arena.allocator();
         var request = try data.invocation.decode(data.invocation.Request, a, self.work.request);
         defer request.deinit();
+        if (self.work.recovery) |item| {
+            var saved = try @import("protean_contracts").decodeOwned(@import("state.zig").Reconciliation, a, item.body);
+            defer saved.deinit();
+            if (saved.value.selection == .rederive) {
+                const ctx: registry.RederivationContext = .{ .allocator = a, .task = self.work.task, .profile = self.work.profile, .cancellation = &self.cancellation };
+                if (self.cancellation.load(.acquire)) return .{ .rederived = .unavailable };
+                const adapter = self.work.entry.declaration.recovery orelse return .{ .failure = error.UnsupportedRecovery };
+                const rederive = adapter.rederive orelse return .{ .failure = error.UnsupportedRecovery };
+                const finding = rederive(ctx, registry.RecoveryInput.fromReconciliation(saved.value, request.value.request_identity, self.work.entry.declaration.inference), request.value.binding.payload, self.work.prepared) catch |err| return switch (err) {
+                    error.Canceled => .{ .rederived = .unavailable },
+                    else => .{ .failure = err },
+                };
+                return .{ .rederived = finding };
+            }
+        }
         const id = std.fmt.bytesToHex(self.work.task, .lower);
         const ctx: registry.Context = .{ .allocator = a, .io = self.io, .authority = &self.authority, .task_id = &id, .profile = self.work.profile, .environment = self.environment, .cancellation = &self.cancellation };
         try ctx.checkCancellation();
@@ -62,11 +79,11 @@ pub const Worker = struct {
             defer saved.deinit();
             const adapter = self.work.entry.declaration.recovery orelse return error.UnsupportedRecovery;
             const lookup = adapter.lookup orelse return error.UnsupportedRecovery;
-            return lookup.acquire(ctx, registry.RecoveryInput.fromReconciliation(saved.value, request.value.request_identity, self.work.entry.declaration.inference), request.value.binding.payload, self.work.prepared);
+            return .{ .acquired = try lookup.acquire(ctx, registry.RecoveryInput.fromReconciliation(saved.value, request.value.request_identity, self.work.entry.declaration.inference), request.value.binding.payload, self.work.prepared) };
         }
         if (self.work.entry.declaration.capture) |adapter| {
             return switch (try adapter.acquire(ctx, self.work.prepared orelse return error.InvalidPreparedRequest)) {
-                .captured => |bytes| bytes,
+                .captured => |bytes| .{ .acquired = bytes },
                 .definitely_not_sent => |err| blk: {
                     self.invoked = false;
                     break :blk err;
@@ -74,13 +91,16 @@ pub const Worker = struct {
                 .unknown => |err| err,
             };
         }
-        return self.work.entry.declaration.invoke.?(ctx, self.work.prepared orelse request.value.binding.payload);
+        return .{ .acquired = try self.work.entry.declaration.invoke.?(ctx, self.work.prepared orelse request.value.binding.payload) };
     }
     fn execute(self: *Worker) void {
         defer self.done.store(true, .release);
-        self.reply = self.invoke() catch |err| {
+        self.result = self.invoke() catch |err| blk: {
             self.failure = err;
-            return;
+            // Failure decoding retained recovery inputs is operational, not
+            // evidence that recovery was unavailable or the old effect unsent.
+            if (self.work.recovery != null and !self.invoked and err != error.Canceled) break :blk .{ .failure = err };
+            break :blk if (self.invoked) .unknown else .not_sent;
         };
     }
     fn cancelJoin(self: *Worker) void {
@@ -108,7 +128,7 @@ pub const Worker = struct {
     pub fn release(self: *Worker) !void {
         if (self.future != null) return error.Busy;
         self.arena.deinit();
-        self.reply = null;
+        self.result = null;
         self.failure = null;
     }
 };

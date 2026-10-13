@@ -34,13 +34,9 @@ pub fn run(comptime Types: type, comptime Environment: type, a: std.mem.Allocato
                 while (!slot.finished()) _ = c.poll(null, 0, 1);
                 try slot.join();
                 defer slot.release() catch unreachable;
-                if (slot.reply) |reply| {
-                    try service.acquire(frame, work, reply);
-                } else {
-                    const err = slot.failure orelse error.DemoDidNotComplete;
-                    if (slot.invoked) try service.unknown(frame, work) else try service.notSent(frame, work);
-                    return err;
-                }
+                const result = slot.result orelse .not_sent;
+                try service.completeWork(frame, work, result);
+                if (result == .unknown or result == .not_sent) return slot.failure orelse error.DemoDidNotComplete;
                 effects += 1;
             },
             .waiting => {

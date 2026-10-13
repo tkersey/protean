@@ -501,13 +501,6 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                 service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
                 service_live = true;
                 const before = namespace.store.head;
-                if (recovery_probe == .provider) {
-                    try std.testing.expectError(error.UnsupportedRecovery, service.rederiveUnknown(frame, task, occurrence_id, attempt_id));
-                } else {
-                    const derived = try service.rederiveUnknown(frame, task, occurrence_id, attempt_id);
-                    try std.testing.expect(derived == .capture);
-                    try std.testing.expectEqualSlices(u8, reply, derived.capture);
-                }
                 try std.testing.expectEqualDeep(before, namespace.store.head);
                 var unchanged = try service.task(frame, task);
                 defer unchanged.deinit();
@@ -515,7 +508,7 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                 try std.testing.expectError(error.UnsettledOccurrence, service.resumeTask(frame, "recovery-does-not-settle", task, unchanged.value.revision));
                 var stale = attempt_id;
                 stale[0] ^= 1;
-                try std.testing.expectError(error.StaleOccurrence, service.rederiveUnknown(frame, task, occurrence_id, stale));
+                try std.testing.expectError(error.StaleOccurrence, service.reconcile(frame, "stale-recovery", task, unchanged.value.revision, occurrence_id, stale, .rederive));
                 const revision = unchanged.value.revision;
                 var client: native.client.Client(t) = .{ .service = &service };
                 var status_params = native.json.object();
@@ -536,7 +529,7 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                 const public_admission = try client.call(frame, .@"task.reconcile", params);
                 try std.testing.expect(!public_admission.object.get("replayed").?.bool);
                 const public_recovery = public_admission.object.get("reconciliation").?;
-                try std.testing.expectEqualStrings(if (recovery_probe == .provider) "unresolved" else "capture_admitted", public_recovery.object.get("status").?.string);
+                try std.testing.expectEqualStrings(if (recovery_probe == .provider) "unresolved" else "pending", public_recovery.object.get("status").?.string);
                 try std.testing.expectEqual(8, public_recovery.object.count());
                 const admitted = try service.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive);
                 const reconciliation_id = admitted.receipt.reconciliation.?;
@@ -546,6 +539,22 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                 try std.testing.expectEqualDeep(admitted.receipt.id, replayed.receipt.id);
                 try std.testing.expectEqualDeep(committed, namespace.store.head);
                 try std.testing.expectError(error.OperationConflict, service.reconcile(frame, "recover-original", task, revision + 1, occurrence_id, attempt_id, .rederive));
+                if (recovery_probe != .provider) {
+                    const computation = (try service.pump(frame)).work;
+                    const worker = try native.testing.Worker.init(a, io);
+                    defer worker.deinit(a) catch unreachable;
+                    try worker.start(computation, profile.authority, null);
+                    const deadline = std.Io.Clock.awake.now(io).toMilliseconds() + 5000;
+                    while (!worker.finished()) {
+                        if (std.Io.Clock.awake.now(io).toMilliseconds() >= deadline) return error.WorkerTimeout;
+                        try io.sleep(.fromMilliseconds(1), .awake);
+                    }
+                    try worker.join();
+                    defer worker.release() catch unreachable;
+                    try std.testing.expect(worker.result.? == .rederived);
+                    try std.testing.expectEqualSlices(u8, reply, worker.result.?.rederived.result);
+                    try service.completeWork(frame, computation, worker.result.?);
+                }
                 const State = native.testing.state;
                 var recorded = try protean.contracts.decodeOwned(State.Reconciliation, frame, (try namespace.store.recordBytes(frame, "reconciliation", reconciliation_id, task)).?);
                 defer recorded.deinit();

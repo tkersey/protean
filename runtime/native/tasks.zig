@@ -83,8 +83,19 @@ pub const Work = struct {
     profile: []const u8 = &.{},
     entry: registry.Entry,
     cleanup: bool,
+    /// A new cancellation request for this physical work, not prior task intent.
+    cancel_requested: bool = false,
     recovery: ?struct { id: state.Digest, body: []const u8 } = null,
 };
+pub const WorkResult = union(enum) {
+    acquired: []const u8,
+    rederived: registry.RederivationFinding,
+    not_sent,
+    unknown,
+    failure: anyerror,
+};
+const RecoveryCompletion = union(enum) { evidence: []const u8, rederived: registry.RederivationFinding };
+const Recovered = union(enum) { capture: []const u8, reply: []const u8, not_sent, unsupported, unavailable, inconclusive, rejected };
 pub const Step = union(enum) { idle, progressed, waiting, work: Work };
 const Active = struct { task: state.TaskId, execution_revision: u64, driver: *evaluator.Driver };
 
@@ -533,6 +544,27 @@ pub fn Service(comptime Types: type) type {
             try self.event(&value, .cancellation_requested, "{}");
             const admitted = try self.receipt(a, .cancel, id, request, value, .cancellation_requested, null, null);
             try self.persist(value, previous, "task.cancel");
+            if (self.work) |*work| if (same(&work.task, &task_id)) {
+                work.cancel_requested = true;
+            };
+            // A new cancellation can also interrupt admitted recovery before
+            // it acquires the worker. Prior cancellation intent does not abort
+            // a later explicit recovery needed to settle unknown delivery.
+            if (!value.terminal() and (self.work == null or !same(&self.work.?.task, &task_id))) {
+                if (value.current_occurrence) |current| {
+                    var pending = try self.record(occurrence.Occurrence, a, "occurrence", current, task_id);
+                    defer pending.deinit();
+                    if (pending.value.state == .unknown) {
+                        if (try self.pendingRecovery(a, task_id, current, pending.value.state.unknown.id)) |recovery_id| {
+                            var recovery = try self.record(state.Reconciliation, a, "reconciliation", recovery_id, task_id);
+                            defer recovery.deinit();
+                            try self.finishRecovery(a, value, pending.value, recovery.value, null, .unavailable);
+                            self.claim(task_id);
+                            return admitted;
+                        }
+                    }
+                }
+            }
             if (!value.terminal()) {
                 if (self.work == null or !same(&self.work.?.task, &task_id)) try self.runnableAdd(task_id);
                 self.claim(task_id);
@@ -643,21 +675,10 @@ pub fn Service(comptime Types: type) type {
                     if (!same(prepared, expected_prepared)) return error.CorruptState;
                 }
             }
-            var unresolved: @FieldType(@FieldType(state.Reconciliation, "outcome"), "unresolved") = .unsupported;
-            const recovered: ?registry.Rederived = if (recovery == .rederive) self.rederiveUnknown(a, task_id, occurrence_id, attempt_id) catch |err| blk: {
-                unresolved = switch (err) {
-                    error.UnsupportedRecovery => .unsupported,
-                    error.RecoveryUnavailable => .unavailable,
-                    error.RecoveryInconclusive => .inconclusive,
-                    error.RecoveryRejected => .rejected,
-                    else => return err,
-                };
-                break :blk null;
-            } else null;
-            defer if (recovered) |result| switch (result) {
-                inline else => |bytes| a.free(bytes),
-            };
-            if (recovered != null or lookup) {
+            const rederive = recovery == .rederive and if (entry.declaration.recovery) |adapter| adapter.rederive != null else false;
+            if (rederive) try self.validateRederivation(a, task_id, occurrence_id, attempt_id);
+            const asynchronous = lookup or rederive;
+            if (asynchronous) {
                 try self.ensureOwnershipCapacity(task_id);
                 try self.runnable.ensureUnusedCapacity(self.allocator, 1);
             }
@@ -683,12 +704,12 @@ pub fn Service(comptime Types: type) type {
                 .capability = attempt.value.capability,
                 .mechanism = try name(if (entry.declaration.recovery) |adapter| adapter.identity else "unavailable"),
                 .mechanism_version = if (entry.declaration.recovery) |adapter| adapter.version else 0,
-                .provenance = if (recovered != null) .rederived else .none,
-                .outcome = .{ .unresolved = unresolved },
+                .provenance = .none,
+                .outcome = .{ .unresolved = .unsupported },
                 .selection = recovery,
-                .owner_epoch = if (lookup) self.owner_epoch else null,
+                .owner_epoch = if (asynchronous) self.owner_epoch else null,
             };
-            if (lookup) {
+            if (asynchronous) {
                 result.outcome = .pending;
                 value.schedule = .queued;
                 value.blocker = null;
@@ -697,38 +718,13 @@ pub fn Service(comptime Types: type) type {
                     result.original_capture = try self.store().putObject(prior);
                 }
             }
-            if (recovered) |bytes| {
-                const binding: occurrence.Binding = .{ .id = occurrence_id, .task = task_id, .request = pending.value.request };
-                const next = switch (bytes) {
-                    .capture => |raw| blk: {
-                        const capture_value: state.Capture = .{ .task = task_id, .occurrence = occurrence_id, .attempt = attempt_id, .request = attempt.value.prepared orelse return error.InvalidPreparedRequest, .response = try self.store().putObject(raw), .disposition = .complete, .reconciliation = reconciliation_id };
-                        if (try self.store().recordBytes(a, "capture", attempt_id, task_id)) |prior| {
-                            defer a.free(prior);
-                            result.original_capture = try self.store().putObject(prior);
-                            try self.store().putRecord(state.Capture, "capture", attempt_id, task_id, capture_value);
-                        } else try self.store().createRecord(state.Capture, "capture", attempt_id, task_id, capture_value);
-                        result.outcome = .{ .capture_admitted = capture_value.response.? };
-                        break :blk try occurrence.recoveredCapture(pending.value, binding, attempt_id);
-                    },
-                    .reply => |reply| blk: {
-                        const bound = try data.invocation.encodeOwned(data.invocation.Result, a, .{ .request_identity = pending.value.request, .value = reply });
-                        defer a.free(bound);
-                        const ref = try self.store().putObject(bound);
-                        result.outcome = .{ .reply_settled = ref };
-                        break :blk try occurrence.acquired(pending.value, binding, attempt_id, ref.digest);
-                    },
-                };
-                try self.store().putRecord(occurrence.Occurrence, "occurrence", occurrence_id, task_id, next);
-                value.schedule = .queued;
-                value.blocker = null;
-            }
             try self.store().createRecord(state.Reconciliation, "reconciliation", reconciliation_id, task_id, result);
             const event_data = try std.fmt.allocPrint(a, "{{\"reconciliation_id\":\"{s}\"}}", .{std.fmt.bytesToHex(reconciliation_id, .lower)});
             defer a.free(event_data);
             try self.event(&value, .reconciled, event_data);
             const admitted = try self.recoveryReceipt(a, .reconcile, id, request_digest, value, .reconciled, null, null, reconciliation_id);
             try self.persist(value, expected, "task.reconcile");
-            if (recovered != null or lookup) {
+            if (asynchronous) {
                 try self.runnableAdd(task_id);
                 self.claim(task_id);
             }
@@ -761,7 +757,7 @@ pub fn Service(comptime Types: type) type {
             errdefer self.allocator.free(request);
             var decoded = try data.invocation.decode(data.invocation.Request, a, request);
             defer decoded.deinit();
-            const entry = self.handlers.admit(decoded.value, self.profile.authority, self.application.image_identity, registry.resourceIdentity(self.application.image_identity, value.profile.digest, value.resources.items)) catch {
+            const entry = if (item.selection == .rederive) try self.handlers.resolve(decoded.value, self.application.image_identity) else self.handlers.admit(decoded.value, self.profile.authority, self.application.image_identity, registry.resourceIdentity(self.application.image_identity, value.profile.digest, value.resources.items)) catch {
                 try self.finishRecovery(a, value, pending, item, null, .unavailable);
                 self.allocator.free(request);
                 return .progressed;
@@ -775,24 +771,56 @@ pub fn Service(comptime Types: type) type {
             return .{ .work = self.work.? };
         }
 
-        fn finishRecovery(self: *Self, a: std.mem.Allocator, initial: state.Task, pending: occurrence.Occurrence, original: state.Reconciliation, evidence: ?[]const u8, failure: @FieldType(@FieldType(state.Reconciliation, "outcome"), "unresolved")) !void {
+        fn recoveryFinding(self: *Self, a: std.mem.Allocator, initial: state.Task, original: state.Reconciliation, identity: state.Digest, completion: RecoveryCompletion) !Recovered {
+            const request_bytes = try self.store().object(a, original.request, null);
+            defer a.free(request_bytes);
+            var request = try data.invocation.decode(data.invocation.Request, a, request_bytes);
+            defer request.deinit();
+            if (!same(&request.value.request_identity, &identity)) return error.InvalidRecovery;
+            const entry = try self.handlers.resolve(request.value, self.application.image_identity);
+            if (completion == .rederived) {
+                if (original.selection != .rederive or entry.declaration.recovery == null or entry.declaration.recovery.?.rederive == null) return error.InvalidRecovery;
+                return switch (completion.rederived) {
+                    .unsupported => .unsupported,
+                    .unavailable => .unavailable,
+                    .inconclusive => .inconclusive,
+                    .rejected => .rejected,
+                    .result => |bytes| blk: {
+                        if (entry.declaration.capture != null) break :blk .{ .capture = bytes };
+                        var schema = try data.schema.decode(a, entry.resume_schema);
+                        defer schema.deinit();
+                        data.schema.validateValue(a, schema.descriptor, bytes) catch |err| switch (err) {
+                            error.OutOfMemory, error.Capacity => return err,
+                            else => return .rejected,
+                        };
+                        break :blk .{ .reply = bytes };
+                    },
+                };
+            }
+            if (original.selection != .lookup) return error.InvalidRecovery;
+            const finding = try self.store().project(registry.RecoveryFinding, a, self.projectionBinding(initial), struct {
+                handlers: registry.Registry,
+                input: registry.RecoveryInput,
+                evidence: []const u8,
+                pub fn run(this: @This(), ctx: registry.ProjectionContext) !registry.RecoveryFinding {
+                    return this.handlers.verifyRecovery(ctx, this.input, this.evidence);
+                }
+            }{ .handlers = self.handlers, .input = registry.RecoveryInput.fromReconciliation(original, identity, entry.declaration.inference), .evidence = completion.evidence });
+            return switch (finding) {
+                .capture => |bytes| .{ .capture = bytes },
+                .not_sent => .not_sent,
+                .inconclusive => .inconclusive,
+                .unavailable => .unavailable,
+                .rejected => .rejected,
+            };
+        }
+
+        fn finishRecovery(self: *Self, a: std.mem.Allocator, initial: state.Task, pending: occurrence.Occurrence, original: state.Reconciliation, completion: ?RecoveryCompletion, failure: @FieldType(@FieldType(state.Reconciliation, "outcome"), "unresolved")) !void {
             if (original.outcome != .pending or pending.state != .unknown or !same(&pending.state.unknown.id, &original.attempt) or initial.current_occurrence == null or !same(&initial.current_occurrence.?, &original.occurrence)) return error.StaleOccurrence;
             var arena = std.heap.ArenaAllocator.init(a);
             defer arena.deinit();
-            const verified: ?registry.RecoveryFinding = if (evidence) |bytes| try self.store().project(registry.RecoveryFinding, arena.allocator(), self.projectionBinding(initial), struct {
-                handlers: registry.Registry,
-                item: state.Reconciliation,
-                request_identity: state.Digest,
-                evidence: []const u8,
-                pub fn run(this: @This(), ctx: registry.ProjectionContext) !registry.RecoveryFinding {
-                    const request_bytes = try ctx.object(this.item.request, std.math.cast(usize, this.item.request.bytes) orelse return error.Capacity);
-                    var request = try data.invocation.decode(data.invocation.Request, ctx.allocator, request_bytes);
-                    defer request.deinit();
-                    const entry = try this.handlers.resolve(request.value, ctx.application.?);
-                    return this.handlers.verifyRecovery(ctx, registry.RecoveryInput.fromReconciliation(this.item, this.request_identity, entry.declaration.inference), this.evidence);
-                }
-            }{ .handlers = self.handlers, .item = original, .request_identity = pending.request, .evidence = bytes }) else null;
-            const advancing = if (verified) |finding| finding == .capture or finding == .not_sent else false;
+            const verified: ?Recovered = if (completion) |result| try self.recoveryFinding(arena.allocator(), initial, original, pending.request, result) else null;
+            const advancing = if (verified) |finding| finding == .capture or finding == .reply or finding == .not_sent else false;
             if (advancing) try self.runnable.ensureUnusedCapacity(self.allocator, 1);
             var value = initial;
             value.revision = try std.math.add(u64, value.revision, 1);
@@ -802,9 +830,10 @@ pub fn Service(comptime Types: type) type {
             defer self.store().rollback();
             var result = original;
             result.previous = try self.snapshotRecord(state.Reconciliation, a, "reconciliation", original.id, value.id);
-            result.evidence = if (evidence) |bytes| try self.store().putObject(bytes) else null;
+            result.evidence = if (completion != null and completion.? == .evidence) try self.store().putObject(completion.?.evidence) else null;
             result.outcome = .{ .unresolved = failure };
             if (verified) |finding| switch (finding) {
+                .unsupported => result.outcome = .{ .unresolved = .unsupported },
                 .inconclusive => result.outcome = .{ .unresolved = .inconclusive },
                 .unavailable => result.outcome = .{ .unresolved = .unavailable },
                 .rejected => result.outcome = .{ .unresolved = .rejected },
@@ -815,9 +844,19 @@ pub fn Service(comptime Types: type) type {
                         if (original.original_capture == null) return error.CorruptState;
                         try self.store().putRecord(state.Capture, "capture", original.attempt, value.id, capture_value);
                     } else try self.store().createRecord(state.Capture, "capture", original.attempt, value.id, capture_value);
-                    result.provenance = .authentic;
+                    result.provenance = if (original.selection == .rederive) .rederived else .authentic;
                     result.outcome = .{ .capture_admitted = capture_value.response.? };
                     try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, value.id, try occurrence.recoveredCapture(pending, .{ .id = pending.id, .task = value.id, .request = pending.request }, original.attempt));
+                    value.schedule = .queued;
+                    value.blocker = null;
+                },
+                .reply => |bytes| {
+                    const bound = try data.invocation.encodeOwned(data.invocation.Result, a, .{ .request_identity = pending.request, .value = bytes });
+                    defer a.free(bound);
+                    const ref = try self.store().putObject(bound);
+                    result.provenance = .rederived;
+                    result.outcome = .{ .reply_settled = ref };
+                    try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, value.id, try occurrence.acquired(pending, .{ .id = pending.id, .task = value.id, .request = pending.request }, original.attempt, ref.digest));
                     value.schedule = .queued;
                     value.blocker = null;
                 },
@@ -843,11 +882,9 @@ pub fn Service(comptime Types: type) type {
             return self.store().putObject(bytes);
         }
 
-        /// Pure half of reconciliation. It reconstructs from the original
-        /// retained attempt, without acquiring again or changing UNKNOWN.
-        /// Result bytes remain private until a reconciliation admission owner
-        /// records their provenance and performs the occurrence transition.
-        pub fn rederiveUnknown(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, occurrence_id: state.Digest, attempt_id: state.Digest) !registry.Rederived {
+        /// Check the original immutable inputs before sealing recovery admission.
+        /// No computation or borrowed projection view escapes this call.
+        fn validateRederivation(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, occurrence_id: state.Digest, attempt_id: state.Digest) !void {
             var decoded = try self.task(a, task_id);
             defer decoded.deinit();
             const value = decoded.value;
@@ -863,11 +900,11 @@ pub fn Service(comptime Types: type) type {
             if (!same(&original.id, &attempt_id) or !same(&original.task, &task_id) or !same(&original.occurrence, &occurrence_id) or
                 !std.meta.eql(original.profile, value.profile) or !std.meta.eql(original.request, pending.value.request_object)) return error.CorruptState;
             const input: registry.RecoveryInput = .{ .task = task_id, .occurrence = occurrence_id, .attempt = attempt_id, .request_identity = pending.value.request, .request = original.request, .prepared = original.prepared, .profile = original.profile, .resources = value.resources.items, .capability = original.capability.bytes, .inference = original.inference };
-            return self.store().project(registry.Rederived, a, self.projectionBinding(value), struct {
+            return self.store().project(void, a, self.projectionBinding(value), struct {
                 handlers: registry.Registry,
                 input: registry.RecoveryInput,
-                pub fn run(this: @This(), ctx: registry.ProjectionContext) !registry.Rederived {
-                    return this.handlers.rederive(ctx, this.input);
+                pub fn run(this: @This(), ctx: registry.ProjectionContext) !void {
+                    return this.handlers.validateRederivation(ctx, this.input);
                 }
             }{ .handlers = self.handlers, .input = input });
         }
@@ -1434,7 +1471,32 @@ pub fn Service(comptime Types: type) type {
             if (self.work.?.recovery) |item| self.allocator.free(item.body);
             self.work = null;
         }
-        fn completeRecoveryWork(self: *Self, a: std.mem.Allocator, work: Work, evidence: ?[]const u8) !void {
+        pub fn shouldCancelWork(self: *Self, work: Work) !bool {
+            try self.currentWork(work);
+            return !work.cleanup and self.work.?.cancel_requested;
+        }
+
+        /// All front ends publish a joined worker through this same owner.
+        pub fn completeWork(self: *Self, a: std.mem.Allocator, work: Work, result: WorkResult) !void {
+            switch (result) {
+                .acquired => |bytes| return self.acquire(a, work, bytes),
+                .not_sent => return self.notSent(a, work),
+                .unknown => return self.unknown(a, work),
+                .rederived => |finding| {
+                    try self.currentWork(work);
+                    if (work.recovery == null) return error.InvalidRecovery;
+                    return self.completeRecoveryWork(a, work, .{ .rederived = finding });
+                },
+                .failure => |err| {
+                    try self.currentWork(work);
+                    self.releaseWork();
+                    self.store().fence();
+                    return err;
+                },
+            }
+        }
+
+        fn completeRecoveryWork(self: *Self, a: std.mem.Allocator, work: Work, completion: ?RecoveryCompletion) !void {
             try self.currentWork(work);
             defer self.releaseWork();
             errdefer self.store().fence();
@@ -1445,13 +1507,13 @@ pub fn Service(comptime Types: type) type {
             var item = try self.record(state.Reconciliation, a, "reconciliation", work.recovery.?.id, work.task);
             defer item.deinit();
             if (item.value.owner_epoch == null or !same(&item.value.owner_epoch.?, &work.owner_epoch) or !same(&item.value.attempt, &work.attempt) or !same(&item.value.occurrence, &work.occurrence)) return error.StaleOccurrence;
-            try self.finishRecovery(a, value.value, pending.value, item.value, evidence, .unavailable);
+            try self.finishRecovery(a, value.value, pending.value, item.value, completion, .unavailable);
         }
         /// A worker has returned and will no longer access this work item.
         /// Acquisition is published before any subsequent Kosmos consumption.
         pub fn acquire(self: *Self, a: std.mem.Allocator, work: Work, reply: []const u8) !void {
             try self.currentWork(work);
-            if (work.recovery != null) return self.completeRecoveryWork(a, work, reply);
+            if (work.recovery != null) return self.completeRecoveryWork(a, work, .{ .evidence = reply });
             if (work.entry.declaration.capture != null) return self.capture(a, work, reply);
             defer self.releaseWork();
             errdefer self.store().fence();

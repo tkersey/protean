@@ -114,10 +114,11 @@ fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition 
     ctx.checkCancellation() catch |err| return .{ .definitely_not_sent = err };
     return .{ .captured = try ctx.allocator.dupe(u8, bytes) };
 }
-fn rederive(ctx: native.registry.ProjectionContext, _: native.registry.RecoveryInput, _: []const u8, prepared: ?[]const u8) ![]u8 {
-    // Registry.rederive has checked exact equality with the pure snapshot
+fn rederive(ctx: native.registry.RederivationContext, _: native.registry.RecoveryInput, _: []const u8, prepared: ?[]const u8) !native.registry.RederivationFinding {
+    // Admission checked exact equality with the pure snapshot
     // preparation. Normal acquisition merely copies these same bytes.
-    return ctx.allocator.dupe(u8, prepared orelse return error.InvalidPreparedRequest);
+    try ctx.checkCancellation();
+    return .{ .result = try ctx.allocator.dupe(u8, prepared orelse return error.InvalidPreparedRequest) };
 }
 fn dependencies(a: std.mem.Allocator, objects: []const []const u8) ![]native.registry.Dependency {
     if (objects.len > 1) return error.InvalidProjection;

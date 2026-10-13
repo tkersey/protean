@@ -147,7 +147,7 @@ pub const Store = struct {
         const opened = !self.transaction;
         if (opened) try self.begin();
         defer if (opened) self.rollback();
-        const statistics = @import("retention.zig").verify(self, handlers, image) catch |err| {
+        const statistics = @import("retention.zig").verify(self, handlers) catch |err| {
             if (err != error.OutOfMemory and err != error.Capacity) self.fence();
             return err;
         };

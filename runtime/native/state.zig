@@ -299,20 +299,20 @@ pub fn visitReconciliationHistory(a: std.mem.Allocator, store: anytype, current:
         if (!std.meta.eql(captured.value.task, current.task) or !std.meta.eql(captured.value.attempt, current.attempt) or !std.meta.eql(captured.value.occurrence, current.occurrence) or current.prepared == null or !std.meta.eql(captured.value.request, current.prepared.?) or captured.value.projection != null) return error.CorruptState;
         try collector.typed(Capture, ref, captured.value);
     }
-    if (current.selection == .rederive and (current.owner_epoch != null or current.evidence != null)) return error.CorruptState;
+    if (current.selection == .rederive and current.evidence != null) return error.CorruptState;
     switch (current.outcome) {
-        .pending => if (current.selection != .lookup or current.owner_epoch == null or current.provenance != .none or current.previous != null or current.evidence != null) return error.CorruptState,
+        .pending => if (current.owner_epoch == null or current.provenance != .none or current.previous != null or current.evidence != null) return error.CorruptState,
         .unresolved => if (current.provenance != .none) return error.CorruptState,
         .capture_admitted, .reply_settled => {
             const provenance: @FieldType(Reconciliation, "provenance") = if (current.selection == .rederive) .rederived else .authentic;
             if (current.provenance != provenance) return error.CorruptState;
+            if (current.owner_epoch == null) return error.CorruptState;
             if (current.outcome == .capture_admitted and current.prepared == null) return error.CorruptState;
             if (current.selection == .lookup and (current.evidence == null or current.owner_epoch == null)) return error.CorruptState;
         },
         .not_sent => |proof| if (current.selection != .lookup or current.provenance != .authoritative or current.evidence == null or !std.meta.eql(proof, current.evidence.?) or current.owner_epoch == null) return error.CorruptState,
     }
     if (current.outcome != .pending and current.owner_epoch != null and current.previous == null) return error.CorruptState;
-    if (current.selection == .rederive and current.outcome != .reply_settled and current.previous != null) return error.CorruptState;
     if (current.previous) |ref| {
         const bytes = try store.object(a, ref, null);
         defer a.free(bytes);
@@ -321,7 +321,7 @@ pub fn visitReconciliationHistory(a: std.mem.Allocator, store: anytype, current:
         // The transition graph is acyclic: pending -> completed, and then
         // capture_admitted -> reply_settled. No history-depth quota is needed.
         if (prior.value.outcome == .pending) {
-            if (current.outcome == .pending or current.outcome == .reply_settled) return error.CorruptState;
+            if (current.outcome == .pending or (current.outcome == .reply_settled and current.selection != .rederive)) return error.CorruptState;
         } else if (prior.value.outcome == .capture_admitted) {
             if (current.outcome != .reply_settled or current.provenance != prior.value.provenance or !std.meta.eql(current.evidence, prior.value.evidence)) return error.CorruptState;
         } else return error.CorruptState;

@@ -116,7 +116,10 @@ external call. No finite reserve promises publication of an unknown-size reply.
 
 Opening a task service, importing, and exporting reconstruct the retained
 dependency graph from canonical task, record, event, and operation bodies and
-the compiled projection codecs. The audit checks stored dependency edges and
+the compiled projection codecs. Saved requests bind to the program identity
+decoded from their task's retained image; the launching image does not determine
+that historical binding. Registered capability and schema checks still apply.
+The audit checks stored dependency edges and
 their lengths, and hashes each distinct reachable object once under one database
 transaction. Large opaque checkpoints and captures are hashed in streaming form.
 Raw captures remain valid retained data even when interpretation would reject
@@ -219,19 +222,27 @@ reconciliation and reports its current `pending`, `unresolved`, `capture_admitte
 a typed reply. Replay the unchanged operation to read its current status.
 
 Pure recovery is compiled for frozen snapshot operations and admitted generated
-tools. It reconstructs the original request from retained inputs; it does not
-invoke the original environmental adapter. Original ambiguous-delivery history,
+tools. Admission validates the original bindings and seals a pending reconciliation
+before scheduling computation on the existing worker. The callback receives owned
+request, prepared-input, and profile bytes plus a cancellation signal; it has no
+Store reader or environmental authority. The control loop and unrelated eligible
+tasks continue while recovery runs. It does not invoke the original environmental
+adapter. Original ambiguous-delivery history,
 prepared inputs and captures remain private, including after archive import.
 The provider currently has no receipt-retrieval adapter: its mechanism list is
 empty and a rederivation request records an unresolved result without another
 inference attempt.
 
-An unavailable, inconclusive, or rejected pure derivation also records an
+An unsupported, unavailable, inconclusive, or rejected pure derivation records an
 unresolved result and preserves the unknown attempt. Replaying its operation
-returns that receipt after restart. Allocation and storage/custody failures
-remain operational errors; they do not certify an unresolved result or permit
-another invocation. Original request, prepared-input, and profile binding checks
-must pass before the registered derivation can produce an admitted result.
+returns that receipt after restart. Callbacks return these non-results explicitly;
+errors remain operational failures and leave the pending reconciliation for
+restart to mark interrupted. They do not certify a semantic non-result or permit
+another invocation. Restart and import interrupt pending recovery without
+automatically recomputing it. A new cancellation interrupts queued or running
+recovery while preserving unknown delivery. Cancellation requested before a later
+explicit reconciliation remains pending until recovery makes it legal to apply;
+it does not prevent that reconciliation from computing a result.
 
 A capability with a compiled receipt adapter also advertises `lookup` when its
 current grant permits retrieval. Selecting it seals a pending reconciliation and
