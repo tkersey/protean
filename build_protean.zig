@@ -351,8 +351,8 @@ pub fn build(b: *std.Build) void {
         // These roots share exact module identities; compile their retained
         // tests together instead of rebuilding the same compiler eleven times.
         const native_suite = native_graph.module("test/protean/native_tests.zig");
-        // Use the selected mode for history-validation tests as well as their
-        // runtime dependencies; safe retains assertions while optimizing replay.
+        // Keep the general suite on the fast compilation path.
+        native_suite.optimize = .debug;
         native_suite.strip = optimize != .debug;
         native_suite.addImport("kosmos", checked_kosmos);
         native_suite.addImport("protean_native", checked_environment);
@@ -369,6 +369,17 @@ pub fn build(b: *std.Build) void {
         native_suite.addAnonymousImport("adaptive_application", .{ .root_source_file = adaptive_application });
         native_suite.addImport("native_asset_writer", native_graph.module("tools/native/emit.zig"));
         native_graph.testModule(native_product, native_suite);
+        // History validation dominates test execution. Optimize its existing
+        // cases with LLVM while preserving the requested mode, including Debug.
+        const adaptive_response_suite = native_graph.module("test/protean/adaptive_responses.zig");
+        adaptive_response_suite.strip = optimize != .debug;
+        adaptive_response_suite.addImport("protean_native", checked_environment);
+        const adaptive_response_tests = b.addTest(.{
+            .root_module = adaptive_response_suite,
+            .use_llvm = if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) optimize != .debug else null,
+        });
+        adaptive_response_tests.step.dependOn(native_graph.gate);
+        native_product.dependOn(&b.addRunArtifact(adaptive_response_tests).step);
         // Zig does not collect test declarations from named dependency modules.
         // Run the runtime's own root explicitly; the integration root above
         // independently exercises its public task owner with authored programs.
