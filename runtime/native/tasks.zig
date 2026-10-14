@@ -146,6 +146,9 @@ pub fn Service(comptime Types: type) type {
         /// Only this process's explicit admissions/resumes are runnable. Merely
         /// opening a namespace never resumes a persisted task.
         runnable: std.ArrayList(state.TaskId) = .empty,
+        /// Logical queue order is items[cursor..] followed by items[0..cursor].
+        /// Advancing a turn must not move every remaining ID.
+        runnable_cursor: usize = 0,
         /// Unsettled cleanup retains ownership, but never runnable work.
         owned: std.ArrayList(state.TaskId) = .empty,
         owner_epoch: state.Digest = undefined,
@@ -367,7 +370,18 @@ pub fn Service(comptime Types: type) type {
         }
         fn runnableAdd(self: *Self, id: state.TaskId) !void {
             for (self.runnable.items) |item| if (same(&item, &id)) return;
-            try self.runnable.append(self.allocator, id);
+            try self.runnable.ensureUnusedCapacity(self.allocator, 1);
+            self.runnableAppendAssumeCapacity(id);
+        }
+        fn runnableAppendAssumeCapacity(self: *Self, id: state.TaskId) void {
+            if (self.runnable_cursor == 0) {
+                self.runnable.appendAssumeCapacity(id);
+            } else {
+                // Insert immediately before the logical head, preserving that
+                // head's position after insertion. New work is always last.
+                self.runnable.insertAssumeCapacity(self.runnable_cursor, id);
+                self.runnable_cursor += 1;
+            }
         }
         fn ensureOwnershipCapacity(self: *Self, id: ?state.TaskId) !void {
             if (id) |existing| for (self.owned.items) |prior| {
@@ -389,6 +403,8 @@ pub fn Service(comptime Types: type) type {
         fn runnableRemove(self: *Self, id: state.TaskId) void {
             for (self.runnable.items, 0..) |item, i| if (same(&item, &id)) {
                 _ = self.runnable.orderedRemove(i);
+                if (i < self.runnable_cursor) self.runnable_cursor -= 1;
+                if (self.runnable_cursor == self.runnable.items.len) self.runnable_cursor = 0;
                 return;
             };
         }
@@ -522,7 +538,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().putEvent(.{ .task = task_id, .seq = 1, .revision = 1, .kind = .accepted, .data = .{ .bytes = "{}" } });
             const admitted = try self.receipt(a, .submit, id, request, value, .accepted, null, null);
             try self.namespace.commit("task.submit");
-            self.runnable.appendAssumeCapacity(task_id);
+            self.runnableAppendAssumeCapacity(task_id);
             self.claim(task_id);
             return admitted;
         }
@@ -1049,8 +1065,9 @@ pub fn Service(comptime Types: type) type {
             // Each actual transition yields back to the host control channel.
             const count = self.runnable.items.len;
             for (0..count) |_| {
-                const id = self.runnable.orderedRemove(0);
-                self.runnable.appendAssumeCapacity(id);
+                const id = self.runnable.items[self.runnable_cursor];
+                self.runnable_cursor += 1;
+                if (self.runnable_cursor == self.runnable.items.len) self.runnable_cursor = 0;
                 const step = try self.pumpTask(a, id);
                 if (step != .idle) return step;
             }
@@ -2151,7 +2168,8 @@ pub fn Service(comptime Types: type) type {
 
         pub fn park(self: *Self, a: std.mem.Allocator) !void {
             if (self.work != null) return error.Busy;
-            for (self.runnable.items) |id| {
+            for (0..self.runnable.items.len) |offset| {
+                const id = self.runnable.items[(self.runnable_cursor + offset) % self.runnable.items.len];
                 var decoded = try self.task(a, id);
                 defer decoded.deinit();
                 var value = decoded.value;
@@ -2165,6 +2183,7 @@ pub fn Service(comptime Types: type) type {
                 try self.persist(value, previous, "task.park");
             }
             self.runnable.clearRetainingCapacity();
+            self.runnable_cursor = 0;
             try self.retire(a);
         }
     };

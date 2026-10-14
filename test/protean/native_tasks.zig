@@ -1883,6 +1883,29 @@ test "eligible round robin progresses pure question inbox cancellation and repli
     try std.testing.expectEqual(1, FairCapture.preparations);
     try std.testing.expectEqual(1, try namespace.store.capabilityAttempts(slow.receipt.task, "fair.leaf.v1"));
     try std.testing.expect(try service.pump(frame) == .idle);
+    // Park across a partial round, then resume in the opposite order using the
+    // same owner. Old scheduling position must not survive the empty queue.
+    const park_first = try service.submit(frame, "park-first", 0);
+    const park_second = try service.submit(frame, "park-second", 0);
+    try std.testing.expect(try service.pump(frame) == .progressed);
+    try service.park(frame);
+    inline for (.{ .{ park_second.receipt.task, "resume-second" }, .{ park_first.receipt.task, "resume-first" } }) |item| {
+        var task = try service.task(frame, item[0]);
+        defer task.deinit();
+        _ = try service.resumeTask(frame, item[1], item[0], task.value.revision);
+    }
+    try std.testing.expect(try service.pump(frame) == .progressed);
+    var resumed_first = try service.task(frame, park_first.receipt.task);
+    defer resumed_first.deinit();
+    var resumed_second = try service.task(frame, park_second.receipt.task);
+    defer resumed_second.deinit();
+    try std.testing.expectEqual(1, resumed_first.value.execution_revision);
+    try std.testing.expectEqual(1, resumed_second.value.execution_revision);
+    _ = try service.requestCancel(frame, "cancel-park-first", park_first.receipt.task, "stop");
+    _ = try service.requestCancel(frame, "cancel-park-second", park_second.receipt.task, "stop");
+    try std.testing.expect(try service.pump(frame) == .progressed);
+    try std.testing.expect(try service.pump(frame) == .progressed);
+    try std.testing.expect(try service.pump(frame) == .idle);
     // Stop writes only after both admissions. A quantum may publish to Kosmos,
     // but its failed store publication must fence every task and retain custody.
     const rollback = try service.submit(frame, "rollback-quantum", 4);

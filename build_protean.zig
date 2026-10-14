@@ -214,6 +214,7 @@ pub fn build(b: *std.Build) void {
     const native_checks = b.step("check-native", "Check native and custody contracts against the selected Kosmos");
     const native_product = b.step("check-native-product", "Qualify the native adaptive application on the selected supported platform");
     const native_consumer = b.step("check-native-https", "Check native HTTPS against an independent endpoint");
+    const scheduler_benchmark = b.step("bench-native-scheduler", "Measure idle Service scans with a held worker");
     native_checks.dependOn(native_product);
     native_product.dependOn(native_consumer);
     if (native_enabled) {
@@ -369,6 +370,20 @@ pub fn build(b: *std.Build) void {
         native_suite.addAnonymousImport("adaptive_application", .{ .root_source_file = adaptive_application });
         native_suite.addImport("native_asset_writer", native_graph.module("tools/native/emit.zig"));
         native_graph.testModule(native_product, native_suite);
+        // Reuse the fixture's complete import graph; keep the measured root in
+        // the requested optimization mode rather than the general suite's Debug.
+        const scheduler_module = b.allocator.create(std.Build.Module) catch @panic("out of memory");
+        scheduler_module.init(b, .{ .existing = native_suite });
+        scheduler_module.root_source_file = b.path("test/protean/native_scheduler_benchmark.zig");
+        scheduler_module.optimize = optimize;
+        const scheduler_tests = b.addTest(.{
+            .root_module = scheduler_module,
+            .filters = &.{"native scheduler backlog benchmark"},
+        });
+        scheduler_tests.step.dependOn(&native_guard.step);
+        const scheduler_run = b.addRunArtifact(scheduler_tests);
+        scheduler_run.has_side_effects = true;
+        scheduler_benchmark.dependOn(&scheduler_run.step);
         // History validation dominates test execution. Optimize its existing
         // cases with LLVM while preserving the requested mode, including Debug.
         const adaptive_response_suite = native_graph.module("test/protean/adaptive_responses.zig");
@@ -411,6 +426,7 @@ pub fn build(b: *std.Build) void {
         const missing = b.addFail("enable -Dnative=true with authenticated Kosmos and SQLite sources");
         native_checks.dependOn(&missing.step);
         native_consumer.dependOn(&missing.step);
+        scheduler_benchmark.dependOn(&missing.step);
     }
     const pure = nodeCommand(b);
     pure.addArgs(&.{ "node", "--test", "test/protean/values.test.mjs" });

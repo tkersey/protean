@@ -110,6 +110,7 @@ test/protean/model_unknown_parameter.zig
 test/protean/model_unsupported_codec.zig
 test/protean/native_recovery_crash.zig
 test/protean/native_responses.zig
+test/protean/native_scheduler_benchmark.zig
 test/protean/native_tasks.zig
 test/protean/native_tests.zig
 test/protean/observation.zig

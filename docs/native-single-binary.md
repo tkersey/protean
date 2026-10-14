@@ -177,7 +177,7 @@ attempt, and owner epoch. Owned tasks use the supplied allocator; there is no
 fixed task-count quota. Both native front ends use this scheduling owner.
 
 Queue waits are measured in scheduling opportunities, not milliseconds. A pump
-rotates each examined task to the back and returns after one actual transition;
+advances each examined task to the logical back and returns after one actual transition;
 new admissions append behind existing continuations. With a fixed set of `N`
 continuously eligible tasks and continued host pumping, a task has at most `N-1`
 peer transitions ahead of its next turn. A drive executes at most 256 Kosmos
@@ -189,6 +189,36 @@ shows pure/inbox completion, cancellation, question presentation and repeated
 yield progress; answering that question completes within the next eight pumps.
 Those windows are verified upper bounds for that fixture, not measured latency
 percentiles or a bound on arbitrary application completion.
+
+The runnable list keeps a cursor instead of shifting every ID on each probe.
+An idle scan visits the current list once without copying the list for every
+waiting leaf. New admissions still enter at the logical tail; removal and parking
+preserve that order. Membership updates remain linear, and each idle probe still
+reads and validates its task and occurrence through the Store.
+
+`zig build bench-native-scheduler -Doptimize=safe` measures this Service path with
+the same authenticated native inputs as `check-native`. It holds an acquisition
+slot and measures seven warmed idle scans at 256, 1,024, 4,096 and 16,384 ready
+leaves. Setup, durable admissions and post-scan checks are outside the timer. The
+fixture verifies unchanged durable state, no additional acquisition attempts and
+retained worker identity. It is an opt-in measurement, without a timing threshold
+in the correctness suite; it does not measure provider latency or the host loop.
+
+On arm64 macOS 27.2 with Zig 0.17.0 Safe, alternating two process runs per
+implementation gave these medians over 14 warmed scans per size:
+
+| Ready leaves | Prior rotation (ms) | Cursor (ms) |
+| ---: | ---: | ---: |
+| 256 | 9.317 | 8.982 |
+| 1,024 | 36.526 | 37.220 |
+| 4,096 | 155.678 | 148.692 |
+| 16,384 | 743.775 | 662.181 |
+
+The 16,384-task samples ranged from 721.7–810.4 ms before and 641.4–706.7 ms
+after. Smaller-case ranges overlapped, so this does not establish a speedup for
+every size. The cursor removes about 4 GiB of ID shifting per 16,384-task idle
+scan; Store reads and decoding remain. Admissions and removals still perform
+linear membership work, and admission may shift IDs to preserve the logical tail.
 
 Each drive publishes an outcome and owning checkpoint receipt together. The
 Driver retains the receipt before storage publication, including if that commit
