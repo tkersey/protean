@@ -25,7 +25,7 @@ pub const capabilities = .{
     .{ .identity = t.tool_run_identity, .resource_role = "tool-execution" },
     .{ .identity = t.question_identity, .resource_role = "user" },
     .{ .identity = protean.inbox.semantic_identity, .resource_role = "user" },
-    .{ .identity = P.adaptive_identity, .resource_role = "inference" },
+    .{ .identity = P.identity, .resource_role = "inference" },
 };
 pub const resources = .{
     .{ .id = "adaptive-agent.instructions", .version = "1", .media_type = "text/plain", .bytes = @embedFile("instructions.txt") },
@@ -49,8 +49,8 @@ const Emit = struct {
     fn widen(e: Emit, b: anytype, comptime T: type, value: anytype) !V(T) {
         return b.blobConcat(try e.context.schema(T), try e.context.literal(T, .{ .bytes = "" }), value, try e.failure());
     }
-    fn finish(e: Emit, b: anytype, state: V(t.State), disposition: @FieldType(t.Output, "disposition"), summary: V(t.Summary), evidence: V(t.EvidenceList)) !V(t.Output) {
-        return b.product(try e.context.schema(t.Output), .{ .disposition = try e.context.literal(@FieldType(t.Output, "disposition"), disposition), .summary = summary, .evidence = evidence, .programs = try b.field(state, "programs"), .control = try b.field(state, "control"), .receipts = try b.field(state, "receipts"), .model_calls = try b.field(state, "model_calls"), .work_calls = try b.field(state, "work_calls") });
+    fn finish(e: Emit, b: anytype, state: V(t.State), comptime kind: std.meta.Tag(t.Result), value: anytype) !V(t.Output) {
+        return b.product(try e.context.schema(t.Output), .{ .result = try b.variant(try e.context.schema(t.Result), @tagName(kind), value), .evidence = try b.field(state, "evidence"), .programs = try b.field(state, "programs"), .control = try b.field(state, "control"), .receipts = try b.field(state, "receipts"), .model_calls = try b.field(state, "model_calls"), .work_calls = try b.field(state, "work_calls") });
     }
     fn message(e: Emit, b: anytype, role: protean.model_invocation.MessageRole, text: V(P.MessageText)) !V(P.Message) {
         return b.product(try e.context.schema(P.Message), .{ .role = try e.context.literal(protean.model_invocation.MessageRole, role), .content = text });
@@ -85,16 +85,17 @@ const Application = struct {
             .tool_build = try context.external(t.tool_build_identity, try context.schema(t.ToolRequest), try context.schema(t.ToolReply), .read),
             .tool_run = try context.external(t.tool_run_identity, try context.schema(t.ToolRequest), try context.schema(t.ToolReply), .read),
             .inbox = try Inbox.declare(context),
-            .model = try a.interop.externalOperation(c, try P.declareAdaptive(context.builder), try context.schema(P.AdaptiveRequest), try context.schema(P.AdaptiveResult)),
+            .model = try a.interop.externalOperation(c, try P.declare(context.builder), try context.schema(P.AdaptiveRequest), try context.schema(P.AdaptiveResult)),
         };
         const loop = try c.function("adaptive repository investigation", .{ .bindings = try e.context.schema(t.PolicyView), .state = try e.context.schema(t.State) }, try e.context.schema(t.Output), .{ ops.prepare, ops.work, ops.ask, ops.inspect, ops.tool_build, ops.tool_run, ops.inbox, ops.model });
         const program: Program = .{
             .e = e,
             .ops = ops,
             .loop = loop,
+            .report = try @import("report.zig").define(context),
             .source_at = try c.function("source evidence at global index", .{ .evidence = try e.context.schema(t.EvidenceList), .index = try e.context.schema(u64) }, try e.context.schema(?t.SourceEvidenceReference), &.{}),
             .has_source = try c.function("source evidence availability", .{ .evidence = try e.context.schema(t.EvidenceList), .index = try e.context.schema(u64) }, try e.context.schema(bool), &.{}),
-            .responder = try protean.responders.defineAdaptiveModelObserved(P, context, try context.literal(t.Failure, .invalid_response), false),
+            .responder = try protean.responders.defineModelObserved(P, context, try context.literal(t.Failure, .invalid_response), false),
             .inference = try t.controls.defineInference(context, try context.literal(t.Failure, .capacity)),
             .skill = try t.controls.defineSkill(P, context, try context.literal(t.Failure, .capacity)),
         };
@@ -132,9 +133,10 @@ const Program = struct {
     e: Emit,
     ops: Ops,
     loop: F(struct { bindings: t.PolicyView, state: t.State }, t.Output),
+    report: *const @import("report.zig").Function,
     source_at: F(struct { evidence: t.EvidenceList, index: u64 }, ?t.SourceEvidenceReference),
     has_source: F(struct { evidence: t.EvidenceList, index: u64 }, bool),
-    responder: *const protean.responders.ModelFunction(P, P.AdaptiveRequest, protean.responders.AdaptiveModelObservation(P, false)),
+    responder: *const protean.responders.ModelFunction(P, P.AdaptiveRequest, protean.responders.ModelObservation(P, false)),
     inference: *const t.controls.Function(t.controls.InferenceInput),
     skill: *const t.controls.Function(t.controls.SkillInput(P)),
 
@@ -171,7 +173,7 @@ const Program = struct {
         return b.sequenceValue(try p.e.context.schema([P.declaration_count]bool), &offered);
     }
     fn stopped(p: Program, b: anytype, state: anytype, reason: []const u8) !V(t.Output) {
-        return p.e.finish(b, state, .capacity, try p.e.context.literal(t.Summary, .{ .bytes = reason }), try b.field(state, "evidence"));
+        return p.e.finish(b, state, .capacity, try p.e.context.literal(t.Summary, .{ .bytes = reason }));
     }
     fn defineLoop(p: Program) !void {
         const e = p.e;
@@ -211,7 +213,20 @@ const Program = struct {
             @field(cases, name) = try selected.ret(try p.dispatchAction(selected.body(), bindings, next, call_id, selected.payload(), index));
         }
         const refusal = refused.body();
-        const unavailable = try e.finish(refusal, counted, .no_result, try e.context.literal(t.Summary, .{ .bytes = "The response did not contain one admissible action with complete replay." }), try refusal.field(state, "evidence"));
+        const failed_result = try refusal.field(normalized, "result");
+        const FailureCases = comptime blk: {
+            const names = @typeInfo(P.Result).@"union".field_names;
+            var types: [names.len]type = undefined;
+            for (names, 0..) |name, i| types[i] = @TypeOf(try (try refusal.caseOf(failed_result, name)).ret(@as(V(t.Output), undefined)));
+            break :blk native.Fields(names, &types);
+        };
+        var failure_cases: FailureCases = undefined;
+        inline for (@typeInfo(P.Result).@"union".field_names) |name| {
+            const selected = try refusal.caseOf(failed_result, name);
+            const text = if (comptime std.mem.eql(u8, name, "refusal")) try e.widen(selected.body(), t.Summary, selected.payload()) else try e.context.literal(t.Summary, .{ .bytes = "The response did not contain one admissible action with complete replay." });
+            @field(failure_cases, name) = try selected.ret(try e.finish(selected.body(), counted, if (comptime std.mem.eql(u8, name, "refusal")) .refusal else .no_result, text));
+        }
+        const unavailable = try refusal.match(failed_result, failure_cases);
         const result = try work.match(interpretation, .{ .accepted = try accepted.ret(try chosen.match(action, cases)), .rejected = try refused.ret(unavailable) });
         const prepared = try active.match(preparation, .{ .ready = try ready.ret(result), .rejected = try rejected.ret(try p.stopped(rejected.body(), state, "The next context cannot be prepared within the admitted policy and capacity.")) });
         try e.author.define(p.loop, try b.ret(prepared));
@@ -270,12 +285,15 @@ const Program = struct {
                 return p.toolResult(b, bindings, state, call_id, try b.variant(try e.context.schema(t.ResultValue), "inline_text", try b.field(answer, "message")));
             },
             3 => {
-                const selected = try b.sequenceGet(try b.field(state, "evidence"), try b.field(value, "evidence_index"));
-                const some = try b.caseOf(selected, "some");
-                const none = try b.caseOf(selected, "none");
-                return b.match(selected, .{ .some = try some.ret(try e.finish(some.body(), state, .report, try some.body().field(value, "summary"), try some.body().sequenceValue(try e.context.schema(t.EvidenceList), &.{some.payload()}))), .none = try none.ret(try e.finish(none.body(), state, .no_result, try e.context.literal(t.Summary, .{ .bytes = "The proposed report referenced evidence that was not acquired." }), try none.body().field(state, "evidence"))) });
+                const checked = try b.call(p.report, .{ .report = value, .evidence_count = try b.sequenceLength(try b.field(state, "evidence")) });
+                const rejected = try b.caseOf(checked, "some");
+                const accepted = try b.caseOf(checked, "none");
+                const failed = rejected.body();
+                const reply = try failed.product(try e.context.schema(t.PendingResult), .{ .call_id = call_id, .output = try failed.variant(try e.context.schema(t.ResultValue), "report_rejection", rejected.payload()) });
+                const corrected = try failed.update(state, .{ .results = try failed.sequenceValue(try e.context.schema(t.PendingResults), &.{reply}) });
+                return b.match(checked, .{ .some = try rejected.ret(try p.resumeTask(failed, bindings, corrected)), .none = try accepted.ret(try e.finish(accepted.body(), state, .report, value)) });
             },
-            4 => return e.finish(b, state, .no_result, try e.widen(b, t.Summary, try b.field(value, "reason")), try b.field(state, "evidence")),
+            4 => return e.finish(b, state, .no_result, try e.widen(b, t.Summary, try b.field(value, "reason"))),
             5, 6 => return p.control(b, bindings, state, call_id, value, index == 5),
             t.ordinal("tool_build"), t.ordinal("tool_run") => {
                 const build = comptime index == t.ordinal("tool_build");

@@ -26,7 +26,7 @@ const P = model.Profile(Answer, .{
     .result_text_bytes = 128,
     .provider_response_bytes = 4096,
 });
-const Input = struct { request: P.Request, offered: [2]bool };
+const Input = struct { request: P.AdaptiveRequest, offered: [2]bool };
 const PairInput = struct { first: Input, second: Input };
 const PairResult = struct { first: P.Interpretation, second: P.Interpretation };
 const single: model.Selection = .{
@@ -40,7 +40,7 @@ const batch: model.Selection = .{
     .parallel_calls = true,
 };
 
-fn template(tools: []const P.ToolDeclaration, selection: model.Selection) P.Request {
+fn invocation(tools: []const P.ToolDeclaration, selection: model.Selection) P.Request {
     return .{
         .protocol = .{ .bytes = model.protocol_identity },
         .model = .{ .bytes = "custody-model" },
@@ -63,6 +63,18 @@ fn template(tools: []const P.ToolDeclaration, selection: model.Selection) P.Requ
         },
         .normalization_limits = P.normalizationLimits(),
         .maximum_provider_response_bytes = 3072,
+    };
+}
+
+fn template(tools: []const P.ToolDeclaration, selection: model.Selection) P.AdaptiveRequest {
+    return .{
+        .invocation = invocation(tools, selection),
+        .policy = @splat(9),
+        .selection = .{ .profile_id = .{ .bytes = "fixture" }, .profile_digest = @splat(7), .effective_effort = .low, .control_revision = 0 },
+        .plan = .{ .epoch = 0, .reason = .initial, .watermark = 0, .eviction_generation = 0, .prior = null, .catalog = .{ .digest = @splat(5), .bytes = 1 }, .skills = .{ .items = &.{} } },
+        .materialized = @splat(true),
+        .offered = @splat(true),
+        .results = .{ .items = &.{} },
     };
 }
 
@@ -95,14 +107,14 @@ test "protected Protean source rejects raw model emission with forged request-ti
     const context = try protean.Context.init(&b, &registry);
     const effect = try P.declare(&b);
     try registry.classify(effect, .model);
-    const entry = try b.declare(&.{try contracts.schema(P.Request, &b)}, try contracts.schema(P.Interpretation, &b), &.{effect}, &.{});
-    const normalized = try b.variable(try contracts.schema(P.Result, &b));
+    const entry = try b.declare(&.{try contracts.schema(P.AdaptiveRequest, &b)}, try contracts.schema(P.Interpretation, &b), &.{effect}, &.{});
+    const normalized = try b.variable(try contracts.schema(P.AdaptiveResult, &b));
     const request = try b.reference(b.parameter(entry, 0));
     const raw = try b.term(.{ .perform = .{ .effect = effect, .payload = request } });
     const forged = try b.term(.{ .call = .{
         .function = try horos.authoring.interop.functionId(context.author, try P.interpreter(context)),
         .arguments = &.{
-            try b.reference(normalized),
+            try b.primitive(try contracts.schema(P.Result, &b), .field, &.{try b.reference(normalized)}, 0),
             try horos.authoring.interop.valueId(context.author, try context.literal([2]bool, .{ true, true })),
             try horos.authoring.interop.valueId(context.author, try context.literal(model.Selection, single)),
         },
@@ -124,7 +136,7 @@ test "reserved model identity cannot evade custody by omitted or read classifica
         defer registry.deinit();
         const effect = try P.declare(&b);
         if (role) |classification| try registry.classify(effect, classification);
-        const entry = try b.declare(&.{try contracts.schema(P.Request, &b)}, try contracts.schema(P.Result, &b), &.{effect}, &.{});
+        const entry = try b.declare(&.{try contracts.schema(P.AdaptiveRequest, &b)}, try contracts.schema(P.AdaptiveResult, &b), &.{effect}, &.{});
         try b.define(entry, try b.term(.{ .perform = .{
             .effect = effect,
             .payload = try b.reference(b.parameter(entry, 0)),
@@ -165,7 +177,7 @@ test "observed model result preserves normalized provenance and typed recovery d
     var observed = try finish(Observation, compiled.program, parked, success);
     defer observed.deinit();
     try std.testing.expectEqual(42, observed.value.interpretation.accepted.choose.value);
-    try expectNormalized(success, observed.value.normalized);
+    try expectNormalized(success, observed.value.normalized.result);
     const Case = struct { reply: P.Result, rejection: P.InterpretationFailure };
     const cases = [_]Case{
         .{ .reply = result(&.{call(.other, 73)}), .rejection = .unoffered },
@@ -180,7 +192,7 @@ test "observed model result preserves normalized provenance and typed recovery d
         var rejected = try finish(Observation, compiled.program, parked, case.reply);
         defer rejected.deinit();
         try std.testing.expectEqual(case.rejection, rejected.value.interpretation.rejected);
-        try expectNormalized(case.reply, rejected.value.normalized);
+        try expectNormalized(case.reply, rejected.value.normalized.result);
     }
 }
 
@@ -215,9 +227,10 @@ fn expectRequest(outcome: kosmos.invocation.Outcome, value: Input) !void {
     const request = request_owner_0.value;
     try std.testing.expectEqualStrings(model.semantic_identity, request.binding.semantic_identity);
     var expected = value.request;
-    expected.tools = try P.declarationsValue(allocator, value.offered);
-    defer allocator.free(expected.tools.items);
-    const expected_bytes = try contracts.encodeOwned(P.Request, allocator, expected);
+    expected.invocation.tools = try P.declarationsValue(allocator, value.request.materialized);
+    defer allocator.free(expected.invocation.tools.items);
+    expected.offered = value.offered;
+    const expected_bytes = try contracts.encodeOwned(P.AdaptiveRequest, allocator, expected);
     defer allocator.free(expected_bytes);
     // Comparing the complete payload also checks parameters, message order,
     // selection, response policy, and normalization/representation limits.
@@ -263,7 +276,7 @@ fn resumeResult(
     );
     defer request_owner_1.deinit();
     const request = request_owner_1.value;
-    const value = try contracts.encodeOwned(Result, allocator, reply);
+    const value = if (Result == P.Result) try contracts.encodeOwned(P.AdaptiveResult, allocator, .{ .result = reply, .replay = null, .replay_status = .complete, .usage = null }) else try contracts.encodeOwned(Result, allocator, reply);
     defer allocator.free(value);
     const bound: data.invocation.Result = .{
         .request_identity = request.request_identity,
@@ -346,17 +359,17 @@ test "dynamic normalization bounds preserve reply-schema compatibility before mo
                     .request = template(&.{}, single),
                     .offered = .{ true, false },
                 };
-                if (@typeInfo(@FieldType(@TypeOf(value.request.normalization_limits), field)) == .optional) @field(value.request.normalization_limits, field).? += 1 else @field(value.request.normalization_limits, field) += 1;
+                if (@typeInfo(@FieldType(@TypeOf(value.request.invocation.normalization_limits), field)) == .optional) @field(value.request.invocation.normalization_limits, field).? += 1 else @field(value.request.invocation.normalization_limits, field) += 1;
                 var rejected = try start(compiled.program, value);
                 defer rejected.deinit();
                 try std.testing.expect(rejected.record == .failed);
                 try std.testing.expectEqualSlices(u8, &.{}, rejected.record.failed.value);
-                if (@typeInfo(@FieldType(@TypeOf(value.request.normalization_limits), field)) == .optional) @field(value.request.normalization_limits, field).? -= 1 else @field(value.request.normalization_limits, field) -= 1;
+                if (@typeInfo(@FieldType(@TypeOf(value.request.invocation.normalization_limits), field)) == .optional) @field(value.request.invocation.normalization_limits, field).? -= 1 else @field(value.request.invocation.normalization_limits, field) -= 1;
                 var exact = try start(compiled.program, value);
                 defer exact.deinit();
                 try expectRequest(exact, value);
-                @field(value.request.normalization_limits, field) = 0;
-                value.request.selection = .{
+                @field(value.request.invocation.normalization_limits, field) = 0;
+                value.request.invocation.selection = .{
                     .minimum_calls = 0,
                     .maximum_calls = 0,
                     .parallel_calls = false,
@@ -374,19 +387,19 @@ test "dynamic normalization bounds preserve reply-schema compatibility before mo
                 .request = template(&.{}, single),
                 .offered = .{ true, false },
             };
-            independent.request.normalization_limits.maximum_argument_name_bytes += 1;
-            independent.request.normalization_limits.maximum_argument_fields += 1;
-            independent.request.maximum_provider_response_bytes = P.representation.provider_response_bytes.? + 1;
+            independent.request.invocation.normalization_limits.maximum_argument_name_bytes += 1;
+            independent.request.invocation.normalization_limits.maximum_argument_fields += 1;
+            independent.request.invocation.maximum_provider_response_bytes = P.representation.provider_response_bytes.? + 1;
             var admitted = try start(compiled.program, independent);
             defer admitted.deinit();
             try expectRequest(admitted, independent);
             for (0..3) |case| {
                 var invalid = independent;
                 switch (case) {
-                    0 => invalid.request.selection.minimum_calls = 2,
-                    1 => invalid.request.selection.maximum_calls =
-                        invalid.request.normalization_limits.maximum_output_items.? + 1,
-                    2 => invalid.request.maximum_provider_response_bytes = 0,
+                    0 => invalid.request.invocation.selection.minimum_calls = 2,
+                    1 => invalid.request.invocation.selection.maximum_calls =
+                        invalid.request.invocation.normalization_limits.maximum_output_items.? + 1,
+                    2 => invalid.request.invocation.maximum_provider_response_bytes = 0,
                     else => unreachable,
                 }
                 var rejected = try start(compiled.program, invalid);
@@ -453,7 +466,7 @@ test "batch responder retains ordered candidates and enforces captured call poli
     };
     for (policies, reasons) |policy, reason| {
         var changed = value;
-        changed.request.selection = policy;
+        changed.request.invocation.selection = policy;
         var pending = try start(compiled.program, changed);
         defer pending.deinit();
         try expectRequest(pending, changed);
@@ -493,7 +506,7 @@ fn pairCall(c: protean.Context, value: source.Id) !source.Id {
         c,
         try c.builder.constant(void, {}),
         false,
-        try c.builder.primitive(try contracts.schema(P.Request, c.builder), .field, &.{value}, 0),
+        try c.builder.primitive(try contracts.schema(P.AdaptiveRequest, c.builder), .field, &.{value}, 0),
         try c.builder.primitive(try contracts.schema([2]bool, c.builder), .field, &.{value}, 1),
     );
 }
@@ -589,7 +602,7 @@ fn expectSharedSchema(comptime Q: type, program: data.activation.Program) !void 
 
 test "model responder executes indexes 31 32 and 63 while an unoffered declaration rejects" {
     const Q = Many();
-    const ManyInput = struct { request: Q.Request, offered: [64]bool };
+    const ManyInput = struct { request: Q.AdaptiveRequest, offered: [64]bool };
     const FixtureModel = protean.model(.{
         .name = "many",
         .model = "many-custody-model",
@@ -606,7 +619,7 @@ test "model responder executes indexes 31 32 and 63 while an unoffered declarati
     offered[63] = true;
     const request = try Q.templateValue(FixtureModel, .{ .items = &.{} }, single);
     const bytes = try contracts.encodeOwned(ManyInput, allocator, .{
-        .request = request,
+        .request = .{ .invocation = request, .policy = @splat(9), .selection = template(&.{}, single).selection, .plan = template(&.{}, single).plan, .materialized = offered, .offered = offered, .results = .{ .items = &.{} } },
         .offered = offered,
     });
     defer allocator.free(bytes);
@@ -626,19 +639,19 @@ test "model responder executes indexes 31 32 and 63 while an unoffered declarati
     );
     defer request_owner_2.deinit();
     const external = request_owner_2.value;
-    var payload = try contracts.decodeOwned(Q.Request, allocator, external.binding.payload);
+    var payload = try contracts.decodeOwned(Q.AdaptiveRequest, allocator, external.binding.payload);
     defer payload.deinit();
     try std.testing.expectEqualStrings(model.semantic_identity, external.binding.semantic_identity);
-    try std.testing.expectEqual(3, payload.value.tools.items.len);
+    try std.testing.expectEqual(3, payload.value.invocation.tools.items.len);
     inline for (.{ 31, 32, 63 }, 0..) |index, position| {
-        const declaration = payload.value.tools.items[position];
+        const declaration = payload.value.invocation.tools.items[position];
         try std.testing.expectEqual(index, declaration.action_ordinal);
         try std.testing.expectEqual(index * 2 + 3, declaration.action_tag);
         const name = std.fmt.comptimePrint("tool_{d}", .{index});
         try std.testing.expectEqualStrings(name, declaration.name.bytes);
     }
     inline for (.{ 31, 32, 63, 0 }) |index| {
-        var outcome = try resumeResult(Q.Result, compiled.program, parked, manyReply(Q, index));
+        var outcome = try resumeResult(Q.AdaptiveResult, compiled.program, parked, .{ .result = manyReply(Q, index), .replay = null, .replay_status = .complete, .usage = null });
         defer outcome.deinit();
         try std.testing.expect(outcome.record == .completed);
         var observed = try contracts.decodeOwned(Q.Interpretation, allocator, outcome.record.completed);
@@ -652,137 +665,13 @@ test "model responder executes indexes 31 32 and 63 while an unoffered declarati
     }
 }
 
-test "stateless replay responder retains opaque data while protecting the request-time offer" {
-    var b = source.Builder.init(allocator);
-    defer b.deinit();
-    var registry = protean.admission.Registry.init(b.allocator());
-    defer registry.deinit();
-    const c = try protean.Context.init(&b, &registry);
-    const entry_handle = try protean.responders.defineReplayModelObserved(P, c, try c.literal(void, {}), false);
-    const entry = try horos.authoring.interop.functionId(c.author, entry_handle);
-    const module = b.module(entry, try b.scalar(void));
-    try protean.admission.verify(allocator, module, &registry);
-    var compiled = try horos.program.compile(allocator, module);
-    defer compiled.deinit();
-    const ReplayInput = struct { request: P.ReplayRequest, offered: [2]bool };
-    const input: ReplayInput = .{ .request = .{ .invocation = template(&.{}, single), .replay = .{ .bytes = "[]" }, .results = .{ .items = &.{} } }, .offered = .{ true, false } };
-    const args = try contracts.encodeOwned(ReplayInput, allocator, input);
-    defer allocator.free(args);
-    const image = try allocator.alloc(u8, try data.program_image.encodedLength(compiled.program));
-    defer allocator.free(image);
-    _ = try data.program_image.encode(allocator, compiled.program, image);
-    var parked = try kosmos.invocation.invoke(allocator, .{ .image = image, .instance = .{ .initial_args = args } });
-    defer parked.deinit();
-    try std.testing.expect(parked.record == .requested);
-    var request = try data.invocation.decode(data.invocation.Request, allocator, parked.record.requested.request);
-    defer request.deinit();
-    try std.testing.expectEqualStrings(model.replay_semantic_identity, request.value.binding.semantic_identity);
-    var payload = try contracts.decodeOwned(P.ReplayRequest, allocator, request.value.binding.payload);
-    defer payload.deinit();
-    try std.testing.expectEqual(1, payload.value.invocation.tools.items.len);
-    try std.testing.expectEqualStrings("choose", payload.value.invocation.tools.items[0].name.bytes);
-    const Observation = protean.responders.ReplayModelObservation(P, false);
-    for ([_]model.ReplayStatus{ .complete, .unsupported, .capacity }) |status| {
-        const reply: P.ReplayResult = .{ .result = result(&.{call(.choose, 42)}), .replay = .{ .bytes = "opaque synthetic replay" }, .replay_status = status, .usage = null };
-        var finished = try resumeResult(P.ReplayResult, compiled.program, parked, reply);
-        defer finished.deinit();
-        try std.testing.expect(finished.record == .completed);
-        var observed = try contracts.decodeOwned(Observation, allocator, finished.record.completed);
-        defer observed.deinit();
-        try std.testing.expectEqualStrings(reply.replay.bytes, observed.value.normalized.replay.bytes);
-        if (status == .complete) try std.testing.expectEqual(42, observed.value.interpretation.accepted.choose.value) else try std.testing.expectEqual(.unsupported, observed.value.interpretation.rejected);
-    }
-    const unoffered: P.ReplayResult = .{ .result = result(&.{call(.other, 73)}), .replay = .{ .bytes = "[]" }, .replay_status = .complete, .usage = null };
-    var refused = try resumeResult(P.ReplayResult, compiled.program, parked, unoffered);
-    defer refused.deinit();
-    var observation = try contracts.decodeOwned(Observation, allocator, refused.record.completed);
-    defer observation.deinit();
-    try std.testing.expectEqual(.unoffered, observation.value.interpretation.rejected);
-}
-
-test "replay model identity cannot bypass the protected responder" {
-    inline for (.{ @as(?protean.admission.Role, null), @as(?protean.admission.Role, .read), @as(?protean.admission.Role, .model) }) |role| {
-        var b = source.Builder.init(allocator);
-        defer b.deinit();
-        var registry = protean.admission.Registry.init(b.allocator());
-        defer registry.deinit();
-        const effect = try P.declareReplay(&b);
-        if (role) |classification| try registry.classify(effect, classification);
-        const entry = try b.declare(&.{try contracts.schema(P.ReplayRequest, &b)}, try contracts.schema(P.ReplayResult, &b), &.{effect}, &.{});
-        try b.define(entry, try b.term(.{ .perform = .{ .effect = effect, .payload = try b.reference(b.parameter(entry, 0)) } }));
-        try std.testing.expectError(if (role == .model) error.ProtectedEffectBypass else error.EffectRoleMismatch, protean.admission.verify(allocator, b.module(entry, try b.scalar(void)), &registry));
-    }
-}
-
-test "reference responder preserves frozen bindings and the exact request-time offer" {
-    var b = source.Builder.init(allocator);
-    defer b.deinit();
-    var registry = protean.admission.Registry.init(b.allocator());
-    defer registry.deinit();
-    const c = try protean.Context.init(&b, &registry);
-    const entry_handle = try protean.responders.defineReferenceModelObserved(P, c, try c.literal(void, {}), false);
-    const entry = try horos.authoring.interop.functionId(c.author, entry_handle);
-    const module = b.module(entry, try b.scalar(void));
-    try protean.admission.verify(allocator, module, &registry);
-    var compiled = try horos.program.compile(allocator, module);
-    defer compiled.deinit();
-    const ReferenceInput = struct { request: P.ReferenceRequest, offered: [2]bool };
-    const input: ReferenceInput = .{ .request = .{ .invocation = template(&.{}, single), .replay = null, .results = .{ .items = &.{} }, .profile = @splat(9) }, .offered = .{ true, false } };
-    const args = try contracts.encodeOwned(ReferenceInput, allocator, input);
-    defer allocator.free(args);
-    const image = try allocator.alloc(u8, try data.program_image.encodedLength(compiled.program));
-    defer allocator.free(image);
-    _ = try data.program_image.encode(allocator, compiled.program, image);
-    var parked = try kosmos.invocation.invoke(allocator, .{ .image = image, .instance = .{ .initial_args = args } });
-    defer parked.deinit();
-    try std.testing.expect(parked.record == .requested);
-    var request = try data.invocation.decode(data.invocation.Request, allocator, parked.record.requested.request);
-    defer request.deinit();
-    try std.testing.expectEqualStrings(model.reference_semantic_identity, request.value.binding.semantic_identity);
-    var payload = try contracts.decodeOwned(P.ReferenceRequest, allocator, request.value.binding.payload);
-    defer payload.deinit();
-    try std.testing.expectEqualSlices(u8, &input.request.profile, &payload.value.profile);
-    try std.testing.expectEqual(1, payload.value.invocation.tools.items.len);
-    try std.testing.expectEqualStrings("choose", payload.value.invocation.tools.items[0].name.bytes);
-    const reference: model.ContextReference = .{ .digest = @splat(1), .bytes = 1234, .schema = .{ .bytes = model.context_semantic_identity }, .profile = @splat(9), .task = @splat(2), .tenant = .{ .bytes = "local" }, .audience = .{ .bytes = "owner" }, .first = 0, .next = 2 };
-    inline for (.{ .complete, .unsupported, .capacity }) |status| {
-        const reply: P.ReferenceResult = .{ .result = result(&.{call(.choose, 42)}), .replay = reference, .replay_status = status, .usage = null };
-        var finished = try resumeResult(P.ReferenceResult, compiled.program, parked, reply);
-        defer finished.deinit();
-        var observed = try contracts.decodeOwned(protean.responders.ReferenceModelObservation(P, false), allocator, finished.record.completed);
-        defer observed.deinit();
-        try std.testing.expectEqualDeep(reference, observed.value.normalized.replay.?);
-        if (status == .complete) try std.testing.expectEqual(42, observed.value.interpretation.accepted.choose.value) else try std.testing.expectEqual(.unsupported, observed.value.interpretation.rejected);
-    }
-    const unoffered: P.ReferenceResult = .{ .result = result(&.{call(.other, 73)}), .replay = reference, .replay_status = .complete, .usage = null };
-    var refused = try resumeResult(P.ReferenceResult, compiled.program, parked, unoffered);
-    defer refused.deinit();
-    var observation = try contracts.decodeOwned(protean.responders.ReferenceModelObservation(P, false), allocator, refused.record.completed);
-    defer observation.deinit();
-    try std.testing.expectEqual(.unoffered, observation.value.interpretation.rejected);
-}
-
-test "reference model identity cannot bypass the protected responder" {
-    inline for (.{ @as(?protean.admission.Role, null), @as(?protean.admission.Role, .read), @as(?protean.admission.Role, .model) }) |role| {
-        var b = source.Builder.init(allocator);
-        defer b.deinit();
-        var registry = protean.admission.Registry.init(b.allocator());
-        defer registry.deinit();
-        const effect = try P.declareReference(&b);
-        if (role) |classification| try registry.classify(effect, classification);
-        const entry = try b.declare(&.{try contracts.schema(P.ReferenceRequest, &b)}, try contracts.schema(P.ReferenceResult, &b), &.{effect}, &.{});
-        try b.define(entry, try b.term(.{ .perform = .{ .effect = effect, .payload = try b.reference(b.parameter(entry, 0)) } }));
-        try std.testing.expectError(if (role == .model) error.ProtectedEffectBypass else error.EffectRoleMismatch, protean.admission.verify(allocator, b.module(entry, try b.scalar(void)), &registry));
-    }
-}
-
 test "adaptive responder keeps definitions separate from original call authority" {
     var b = source.Builder.init(allocator);
     defer b.deinit();
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
     const c = try protean.Context.init(&b, &registry);
-    const entry_handle = try protean.responders.defineAdaptiveModelObserved(P, c, try c.literal(void, {}), false);
+    const entry_handle = try protean.responders.defineModelObserved(P, c, try c.literal(void, {}), false);
     const entry = try horos.authoring.interop.functionId(c.author, entry_handle);
     const module = b.module(entry, try b.scalar(void));
     try protean.admission.verify(allocator, module, &registry);
@@ -791,7 +680,7 @@ test "adaptive responder keeps definitions separate from original call authority
     const AdaptiveInput = struct { request: P.AdaptiveRequest, offered: [2]bool };
     var input: AdaptiveInput = .{
         .request = .{
-            .invocation = template(&.{}, single),
+            .invocation = invocation(&.{}, single),
             .policy = @splat(9),
             .selection = .{ .profile_id = .{ .bytes = "analysis" }, .profile_digest = @splat(7), .effective_effort = .high, .control_revision = 4 },
             .plan = .{
@@ -820,7 +709,7 @@ test "adaptive responder keeps definitions separate from original call authority
     try std.testing.expect(parked.record == .requested);
     var request = try data.invocation.decode(data.invocation.Request, allocator, parked.record.requested.request);
     defer request.deinit();
-    try std.testing.expectEqualStrings(model.adaptive_semantic_identity, request.value.binding.semantic_identity);
+    try std.testing.expectEqualStrings(model.semantic_identity, request.value.binding.semantic_identity);
     var payload = try contracts.decodeOwned(P.AdaptiveRequest, allocator, request.value.binding.payload);
     defer payload.deinit();
     try std.testing.expectEqualDeep(input.request.selection, payload.value.selection);
@@ -833,9 +722,19 @@ test "adaptive responder keeps definitions separate from original call authority
         const reply: P.AdaptiveResult = .{ .result = result(&.{call(answer, 42)}), .replay = null, .replay_status = .complete, .usage = null };
         var finished = try resumeResult(P.AdaptiveResult, compiled.program, parked, reply);
         defer finished.deinit();
-        var observation = try contracts.decodeOwned(protean.responders.AdaptiveModelObservation(P, false), allocator, finished.record.completed);
+        var observation = try contracts.decodeOwned(protean.responders.ModelObservation(P, false), allocator, finished.record.completed);
         defer observation.deinit();
         if (answer == .choose) try std.testing.expectEqual(42, observation.value.interpretation.accepted.choose.value) else try std.testing.expectEqual(.unoffered, observation.value.interpretation.rejected);
+    }
+    const reference: model.AdaptiveContextReference = .{ .object = .{ .digest = @splat(1), .bytes = 1234 }, .schema = .{ .bytes = model.adaptive_context_semantic_identity }, .policy = @splat(9), .selection = @splat(7), .task = @splat(2), .tenant = .{ .bytes = "local" }, .audience = .{ .bytes = "owner" }, .epoch = 3, .watermark = 12, .eviction_generation = 2 };
+    for ([_]model.ReplayStatus{ .complete, .unsupported, .capacity }) |status| {
+        const reply: P.AdaptiveResult = .{ .result = result(&.{call(.choose, 42)}), .replay = reference, .replay_status = status, .usage = null };
+        var finished = try resumeResult(P.AdaptiveResult, compiled.program, parked, reply);
+        defer finished.deinit();
+        var observed = try contracts.decodeOwned(protean.responders.ModelObservation(P, false), allocator, finished.record.completed);
+        defer observed.deinit();
+        try std.testing.expectEqualDeep(reference, observed.value.normalized.replay.?);
+        if (status == .complete) try std.testing.expectEqual(42, observed.value.interpretation.accepted.choose.value) else try std.testing.expectEqual(.unsupported, observed.value.interpretation.rejected);
     }
     // An offered action without a materialized definition fails before I/O.
     input.request.materialized = .{ false, true };
@@ -852,7 +751,7 @@ test "adaptive model identity cannot bypass the protected responder" {
         defer b.deinit();
         var registry = protean.admission.Registry.init(b.allocator());
         defer registry.deinit();
-        const effect = try P.declareAdaptive(&b);
+        const effect = try P.declare(&b);
         if (role) |classification| try registry.classify(effect, classification);
         const entry = try b.declare(&.{try contracts.schema(P.AdaptiveRequest, &b)}, try contracts.schema(P.AdaptiveResult, &b), &.{effect}, &.{});
         try b.define(entry, try b.term(.{ .perform = .{ .effect = effect, .payload = try b.reference(b.parameter(entry, 0)) } }));

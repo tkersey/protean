@@ -43,7 +43,7 @@ export function readArchive(bytes) {
     return bytes;
   };
   const schemas = new Map(definitions.map(([name, reference]) => [name, decodeSchema(object(reference))]));
-  assert.deepEqual([...schemas.keys()], ['task', 'event', 'receipt', 'occurrence', 'question', 'message', 'artifact', 'capture', 'attempt', 'origin']);
+  assert.deepEqual([...schemas.keys()], ['task', 'event', 'receipt', 'occurrence', 'question', 'message', 'artifact', 'capture', 'attempt', 'origin', 'reconciliation']);
   const taskValue = decodeValue(schemas.get('task'), object(taskReference));
   assert.equal(taskValue.length, taskFields.length);
   const task = Object.fromEntries(taskFields.map((name, index) => [name, taskValue[index]]));
@@ -114,7 +114,7 @@ export function tamperedAdaptiveControl(bytes, capturedResponseSchema) {
     if (row[0] !== 4) continue;
     const attemptRow = archive.manifest[6].find(([kind, id]) => kind === 5 && Buffer.from(id).equals(Buffer.from(row[1])));
     const attempt = decodeValue(archive.schemas.get('attempt'), archive.object(attemptRow[2]));
-    if (attempt[5] !== 'agent.model.invoke.v10') continue;
+    if (attempt[5] !== 'agent.model.invoke.v11') continue;
     const capture = decodeValue(archive.schemas.get('capture'), archive.object(row[2]));
     const raw = decodeValue(capturedResponseSchema, archive.object(capture[4].value));
     const body = JSON.parse(Buffer.from(raw[3]).toString('utf8'));
@@ -139,7 +139,7 @@ function pruneObjects(archive) {
   };
   visit(archive.manifest.slice(3, 10));
   visit(archive.taskValue);
-  const kinds = ['occurrence', 'question', 'message', 'artifact', 'capture', 'attempt', 'origin'];
+  const kinds = ['occurrence', 'question', 'message', 'artifact', 'capture', 'attempt', 'origin', 'reconciliation'];
   for (const [kind,, reference] of archive.manifest[6]) {
     const value = decodeValue(archive.schemas.get(kinds[kind]), archive.object(reference));
     visit(value);

@@ -253,7 +253,7 @@ fn manifest(c: Context, args: []const []const u8) !void {
     const lock = try lockAt(c, args[2]);
     try equal(try text(application, "program_sha256"), try c.digest(image));
     const mapping = try text(application, "client_mapping");
-    if (!std.mem.eql(u8, mapping, "agent-client-values/1.0") and !std.mem.eql(u8, mapping, "agent-client-values/1.1")) return error.InvalidMetadata;
+    if (!std.mem.eql(u8, mapping, "agent-client-values/1.1")) return error.InvalidMetadata;
     var sqlite = try verifySqlite(c, args[6], args[14]);
     try equal(args[7], "system");
     try equal(args[9], "filesystem");
@@ -289,7 +289,7 @@ fn manifest(c: Context, args: []const []const u8) !void {
         .application_id = try text(application, "application_id"),
         .application_version = try text(application, "application_version"),
         .native_host_contract = "agent-native-host/2.0",
-        .protocol = "agent-host/2.0",
+        .protocol = "agent-host/2.1",
         .client_mapping = mapping,
         .state_format = args[10],
         .storage = "filesystem capacity and linked SQLite limits",

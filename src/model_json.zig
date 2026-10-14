@@ -5,26 +5,9 @@ pub fn taggedOptional(comptime T: type) bool {
     return @typeInfo(T) == .optional and @typeInfo(@typeInfo(T).optional.child) == .optional;
 }
 
-fn containsTaggedOptional(comptime T: type) bool {
-    if (comptime native.wrapped(T)) {
-        return if (T.protean_value_kind == .vector) containsTaggedOptional(T.Child) else false;
-    }
-    return switch (@typeInfo(T)) {
-        .optional => |info| taggedOptional(T) or containsTaggedOptional(info.child),
-        .array => |info| containsTaggedOptional(info.child),
-        inline .@"struct", .@"union" => |info| blk: {
-            inline for (info.field_types) |Field| if (containsTaggedOptional(Field)) break :blk true;
-            break :blk false;
-        },
-        else => false,
-    };
-}
+/// The sole native client JSON mapping, including tagged nested optionals.
+pub const client_mapping = "agent-client-values/1.1";
 
-/// Preserve the existing mapping identity when no client representation changes.
-pub fn clientMapping(comptime types: anytype) []const u8 {
-    inline for (types) |T| if (containsTaggedOptional(T)) return "agent-client-values/1.1";
-    return "agent-client-values/1.0";
-}
 pub fn isText(comptime T: type) bool {
     return comptime native.wrapped(T) and
         T.protean_value_kind == .text;
@@ -112,6 +95,17 @@ fn writeSchema(comptime T: type, writer: anytype) void {
         writeUnsigned(writer, maximumTextBytes(T));
         writer.raw(" bytes; maxLength is an additional character-count bound.\",\"maxLength\":");
         writeUnsigned(writer, maximumTextBytes(T));
+        writer.byte('}');
+        return;
+    }
+    if (comptime native.wrapped(T) and T.protean_value_kind == .vector) {
+        writer.raw("{\"type\":\"array\"");
+        if (T.max_length) |maximum| {
+            writer.raw(",\"maxItems\":");
+            writeUnsigned(writer, maximum);
+        }
+        writer.raw(",\"items\":");
+        writeSchema(T.Child, writer);
         writer.byte('}');
         return;
     }
@@ -361,6 +355,12 @@ fn maximumValueBytes(comptime T: type) ?usize {
     if (comptime isText(T)) {
         const maximum = T.max_length orelse return null;
         return 2 + 6 * maximum;
+    }
+    if (comptime native.wrapped(T) and T.protean_value_kind == .vector) {
+        const maximum = T.max_length orelse return null;
+        if (maximum == 0) return 2;
+        const child = maximumValueBytes(T.Child) orelse return null;
+        return 2 + maximum * child + (maximum - 1);
     }
     return switch (@typeInfo(T)) {
         .void => 2,

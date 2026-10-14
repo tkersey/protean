@@ -29,8 +29,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [authoring, native]
-    runs-on: ${{ matrix.lane == 'native' && 'ubuntu-22.04' || 'ubuntu-24.04' }}
+        lane: [authoring, native, downstream]
+    runs-on: ${{ matrix.lane != 'authoring' && 'ubuntu-22.04' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     env:
       ZIG_DEBUG_CMD: '1'
@@ -53,9 +53,9 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .zig-cache-upload
-          key: zig-adaptive-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            zig-adaptive-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
+            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
       - name: Prepare compiler scratch and native isolation tools
         run: |
           if [ -d .zig-cache-upload ]; then
@@ -65,7 +65,7 @@ jobs:
           mkdir -p .zig-cache/tmp
           packages=()
           command -v rg >/dev/null || packages+=(ripgrep)
-          if [ "${{ matrix.lane }}" = native ]; then
+          if [ "${{ matrix.lane }}" != authoring ]; then
             test -x /usr/bin/bwrap || packages+=(bubblewrap)
             test -x /usr/bin/strace || packages+=(strace)
           fi
@@ -78,7 +78,7 @@ jobs:
               sudo apt-get install --yes --no-install-recommends "${packages[@]}"
             fi
           fi
-          if [ "${{ matrix.lane }}" = native ]; then
+          if [ "${{ matrix.lane }}" != authoring ]; then
             /usr/bin/bwrap --unshare-user --ro-bind / / /usr/bin/true
           fi
       - name: Restore locked native transport bytes
@@ -89,6 +89,7 @@ jobs:
             .protean-native/inputs/*.zip
           key: protean-native-archives-v2-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}
       - name: Authenticate and provision selected native inputs
+        if: matrix.lane != 'downstream'
         run: |
           options=()
           if [ "${{ matrix.lane }}" = authoring ]; then options+=(--authoring-only); fi
@@ -100,25 +101,43 @@ jobs:
         run: |
           if [ "${{ matrix.lane }}" = authoring ]; then
             zig build check-protean -Dnative=false -Doptimize=safe --summary all
+          elif [ "${{ matrix.lane }}" = downstream ]; then
+            # The downstream witness authenticates its own inputs and builds
+            # independently, without competing with native tests on one runner.
+            node test/protean/installations.mjs .protean-native/inputs \
+              > "$RUNNER_TEMP/downstream-identity.json"
+            cat "$RUNNER_TEMP/downstream-identity.json"
           else
-            zig build protean -Doptimize=safe --summary all \
-              --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables
-            reference="$RUNNER_TEMP/protean-reference"
-            cp "$RUNNER_TEMP/protean-qualification/executables/protean" "$reference"
+            result=0
             zig build check-native -Doptimize=safe --summary all \
               --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
-              > "$RUNNER_TEMP/native-check.log" 2>&1 &
-            native_pid=$!
-            node test/protean/installations.mjs .protean-native/inputs "$reference" \
-              > "$RUNNER_TEMP/downstream-check.log" 2>&1 &
-            downstream_pid=$!
-            result=0
-            wait "$native_pid" || result=1
-            wait "$downstream_pid" || result=1
-            cat "$RUNNER_TEMP/native-check.log" "$RUNNER_TEMP/downstream-check.log"
+              > "$RUNNER_TEMP/native-check.log" 2>&1 || result=$?
+            cat "$RUNNER_TEMP/native-check.log"
             test "$result" -eq 0
-            cmp "$reference" "$RUNNER_TEMP/protean-qualification/executables/protean"
+            node --input-type=module - "$RUNNER_TEMP/protean-qualification/executables/protean" "$RUNNER_TEMP/native-check.log" "$RUNNER_TEMP/native-identity.json" <<'JS'
+          import assert from 'node:assert/strict';
+          import {execFileSync} from 'node:child_process';
+          import {createHash} from 'node:crypto';
+          import {readFileSync, writeFileSync} from 'node:fs';
+          const [binary, nativeLog, output] = process.argv.slice(2);
+          const manifest = JSON.parse(execFileSync(binary, ['describe-build'], {encoding: 'utf8'}));
+          const executions = readFileSync(nativeLog, 'utf8').split('\n').filter(line => line.startsWith('{"native_deployment":')).map(line => JSON.parse(line));
+          assert.equal(executions.length, 1);
+          assert.equal(executions[0].passed, true);
+          assert.equal(executions[0].sha256, manifest.artifact_sha256);
+          assert.equal(createHash('sha256').update(readFileSync(binary)).digest('hex'), manifest.artifact_sha256);
+          const identity = Object.fromEntries(['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target'].map(key => [key, manifest[key]]));
+          writeFileSync(output, JSON.stringify({identity}));
+          JS
           fi
+      - name: Retain independently qualified build identity
+        if: matrix.lane != 'authoring'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: ${{ runner.temp }}/${{ matrix.lane }}-identity.json
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
       - name: Package the executed adaptive application
         if: matrix.lane == 'native'
         run: |
@@ -161,7 +180,7 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .zig-cache-upload
-          key: zig-adaptive-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
   native:
     name: native
     needs: [source, qualify]
@@ -169,6 +188,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: needs.source.result == 'success' && needs.qualify.result == 'success'
+        with:
+          node-version: '26.9.0'
       - name: Require complete qualification within the existing workflow budget
         env:
           GH_TOKEN: ${{ github.token }}
@@ -179,6 +202,29 @@ jobs:
         run: |
           test "$SOURCE" = success
           test "$QUALIFICATION" = success
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {execFileSync} from 'node:child_process';
+          import {createHash} from 'node:crypto';
+          const repo = process.env.GH_REPO;
+          const api = path => execFileSync('gh', ['api', `repos/${repo}/${path}`]);
+          const artifacts = JSON.parse(api(`actions/runs/${process.env.RUN_ID}/artifacts?per_page=100`)).artifacts;
+          const load = lane => {
+            const matches = artifacts.filter(value => value.name === `${lane}-identity.json`);
+            assert.equal(matches.length, 1);
+            const artifact = matches[0];
+            assert.equal(artifact.expired, false);
+            const bytes = api(`actions/artifacts/${artifact.id}/zip`);
+            assert.equal(`sha256:${createHash('sha256').update(bytes).digest('hex')}`, artifact.digest);
+            return JSON.parse(bytes).identity;
+          };
+          const native = load('native'), downstream = load('downstream');
+          for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target']) {
+            assert.notEqual(native[key], undefined, key);
+            assert.deepEqual(downstream[key], native[key], key);
+          }
+          console.log('Independent native and downstream build identities agree.');
+          JS
           started="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq .run_started_at)"
           elapsed=$(( $(date +%s) - $(date -d "$started" +%s) ))
           echo "Complete workflow before terminal gate: ${elapsed}s (target 300s, maximum 360s)" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -124,7 +124,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
           if (index === 0) call = skill('load', 0);
           if (index === 1) call = ['tool_build', {proposal_json: JSON.stringify(subject.recipe)}];
           if (index === 2) { const built = output(1); assert.equal(built.disposition, 'structurally_admitted', JSON.stringify(built)); subject.program = built.tool_ref; call = ['tool_run', {tool_ref: subject.program, input_ref: subject.inputs[0].input_ref}]; }
-          if (index === 3) { const result = output(2); assert.equal(result.disposition, 'completed', JSON.stringify(result)); assert.deepEqual(result.value.rows.map(row => [row.group, row.value]), [['3', '2'], ['4', '1']]); call = ['report', {summary: 'Three unsupported source records, grouped into counts two and one.', evidence_index: 0}]; }
+          if (index === 3) { const result = output(2); assert.equal(result.disposition, 'completed', JSON.stringify(result)); assert.deepEqual(result.value.rows.map(row => [row.group, row.value]), [['3', '2'], ['4', '1']]); call = ['report', {summary: 'Three unsupported source records, grouped into counts two and one.', claims: [{kind: 'observation', statement: 'Three unsupported source records, grouped into counts two and one.', reasoning: '', evidence_indices: [0]}], limitations: []}]; }
           assert(index <= 3);
         } else {
           if (index === 0) call = skill('load', 0);
@@ -165,7 +165,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
             assert(offered.has('skill_set'), 'control revisions remain available beyond sixteen');
             call = skill(index % 2 === 1 ? 'load' : 'unload', index - 20, 'repository-orientation');
           }
-          if (index === 37) call = ['report', {summary: 'The same admitted program continued auditing both inputs after restart; the second input agrees.', evidence_index: 12}];
+          if (index === 37) call = ['report', {summary: 'The same admitted program continued auditing both inputs after restart; the second input agrees.', claims: [{kind: 'observation', statement: 'The source range and second generated audit are acquired.', reasoning: '', evidence_indices: [1, 12]}, {kind: 'inference', statement: 'The retained program supports comparing both audit results.', reasoning: 'The first and last generated evidence entries reference that program.', evidence_indices: [0, 12]}, {kind: 'hypothesis', statement: 'Other inputs may reveal additional discrepancies.', reasoning: 'Only the admitted inputs were exercised.', evidence_indices: []}], limitations: ['The report establishes no universal correctness claim.']}];
           assert(index <= 37);
         }
         assert(call);
@@ -220,20 +220,25 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
     assert.equal(result.status, 0, result.error ?? `${result.stderr}\n${result.stdout}`); return JSON.parse(result.stdout);
   };
   let client;
-  const launch = async (extra, selectedState = state) => {
+  const launch = async (extra, selectedState = state, versions = ['agent-host/2.1']) => {
     client = new ProteanClient(app.command, ['--state-dir', selectedState, '--authorize-inference', '--test-provider', '--trust-root', trust, ...extra], {cwd: app.data, env: {PATH: '/nonexistent'}});
-    const initialized = await client.initialize();
-    assert.equal(initialized.server_info.version, '4.0.0');
+    const initialized = await client.initialize(versions);
+    assert.equal(initialized.server_info.version, '5.0.0');
+    assert.equal(initialized.protocol_version, 'agent-host/2.1');
+    assert.equal(Object.hasOwn(initialized.capabilities, 'task_reconciliation'), true);
     return client;
   };
   const artifact = async (taskId, ref) => {
-    const id = typeof ref === 'string' ? ref.split(':')[0] : Buffer.from(ref.digest).toString('hex');
+    const id = typeof ref === 'string' ? ref.split(':')[0] : ref.artifact_id ?? Buffer.from(ref.digest).toString('hex');
+    const expectedHash = ref.sha256 ?? id;
     const chunks = []; let offset = '0', done = false;
     while (!done) {
-      const chunk = await client.call('artifact.read', {task_id: taskId, artifact_id: id, offset, length: '32768'});
-      assert.equal(chunk.sha256, id); chunks.push(Buffer.from(chunk.data, 'base64url')); offset = chunk.next_offset; done = chunk.eof;
+      const chunk = await client.call('artifact.read', {...(taskId === null ? {} : {task_id: taskId}), artifact_id: id, offset, length: '32768'});
+      assert.equal(chunk.sha256, expectedHash); chunks.push(Buffer.from(chunk.data, 'base64url')); offset = chunk.next_offset; done = chunk.eof;
     }
-    const bytes = Buffer.concat(chunks); assert.equal(hash(bytes), id); return bytes;
+    const bytes = Buffer.concat(chunks); assert.equal(hash(bytes), expectedHash);
+    if (typeof ref !== 'string') assert.equal(BigInt(bytes.length), BigInt(ref.bytes));
+    return bytes;
   };
   try {
     invoke('validate', '--config', configPath); assert.equal(requests.length, 0);
@@ -320,7 +325,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
     const imported = invoke('import-checkpoint', '--state-dir', importedState, '--input', archivePath, '--operation-id', 'adaptive-import');
     assert.equal(imported.task_id, accepted.task_id);
     assert.deepEqual(invoke('result', '--state-dir', importedState, '--task-id', accepted.task_id).outcome.value, result.outcome.value);
-    const schemas = Object.fromEntries(['AdaptivePrepared', 'CapturedResponse', 'AdaptiveResult', 'AdaptiveContext', 'PreparationProduct', 'PreparationCapture', 'PreparationResult', 'WorkReply', 'WorkArtifact']
+    const schemas = Object.fromEntries(['AdaptivePrepared', 'CapturedResponse', 'AdaptiveResult', 'AdaptiveContext', 'HistoryChunk', 'PreparationProduct', 'PreparationCapture', 'PreparationResult', 'WorkReply', 'WorkArtifact']
       .map(name => [name, contract(asset, name)]));
     assert.equal(archive.task.resources.length, skillBodies.length + 2);
     for (const [index, skill] of skillBodies.entries()) assert.equal(archive.object(archive.task.resources[index + 1]).toString('utf8'), skill.body);
@@ -343,7 +348,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
       const identity = attempt[5], prepared = archive.object(capture[3]), rawBytes = archive.object(capture[4].value);
       const replyBytes = resultValue(archive.object(capture[6].value[0]));
       assert.equal(capture[5], 0); assert.equal(capture[6].tag, 1);
-      if (identity === 'agent.model.invoke.v10') {
+      if (identity === 'agent.model.invoke.v11') {
         const envelope = decodeValue(schemas.AdaptivePrepared, prepared);
         assert.equal(envelope.length, 3); assert.equal(envelope[0], 1);
         const request = envelope[1], plan = request[3], index = Number(plan[2]);
@@ -370,18 +375,32 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
         assert(Buffer.from(call[2]).equals(Buffer.from(expectedCall.arguments)), 'argument JSON bytes are preserved exactly');
         assert.equal(call[3], toolNames.indexOf(expectedCall.name));
         const context = decodeValue(schemas.AdaptiveContext, archive.object(reply[1].value[0]));
-        assert.equal(context.length, 14); assert.deepEqual(context[2], archive.task.id);
-        assert.equal(context[0], 'agent.model.context.responses.adaptive.v5'); assert.deepEqual(context[1], request[1]);
+        assert.equal(context.length, 13); assert.deepEqual(context[2], archive.task.id);
+        assert.equal(context[0], 'agent.model.context.responses.adaptive.v6'); assert.deepEqual(context[1], request[1]);
         assert.equal(context[3], archive.task.tenant); assert.equal(context[4], frozenProfile.adaptive.audience);
         assert.equal(context[6], request[2][2]);
         assert.deepEqual(context[5], request[2]); assert.deepEqual(context[7], plan); assert.equal(context[8], BigInt(index + 1));
         assert.deepEqual(context[9], reference(rawBytes)); assert.deepEqual(context[10], reference(prepared));
         assert.deepEqual(context[11], {tag: 1, value: fixture[index].id});
         const transientBodies = plan[6].filter(skill => skill[3] === 1 && skill[4]).map(skill => skillBodies.find(body => body.id === skill[1]).body);
-        assert.equal(context[13].length, JSON.parse(Buffer.from(context[12]).toString('utf8')).length);
-        assert(context[13].every(origin => origin[0] <= plan[2]), 'history origins cannot claim future exposure');
+        const chunks = [], visitedChunks = new Set();
+        let history = context[12];
+        const eventCount = history.tag === 1 ? history.value[1] : 0n;
+        while (history.tag === 1) {
+          const [ref, count] = history.value, identity = Buffer.from(ref[0]).toString('hex');
+          assert(!visitedChunks.has(identity), 'history chain is acyclic'); visitedChunks.add(identity);
+          const chunk = decodeValue(schemas.HistoryChunk, archive.object(ref));
+          assert.equal(chunk[0], 'agent.model.context.history.chunk.v1');
+          assert(chunk[3].length > 0); assert.equal(chunk[2] + BigInt(chunk[3].length), count);
+          assert.equal(chunk[2], chunk[1].tag === 1 ? chunk[1].value[1] : 0n);
+          if (chunk[1].tag === 1) assert(chunk[1].value[1] < count);
+          chunks.push(chunk[3]); history = chunk[1];
+        }
+        const events = chunks.reverse().flat();
+        assert.equal(BigInt(events.length), eventCount);
+        assert(events.every(([, origin]) => origin[0] <= plan[2]), 'history origins cannot claim future exposure');
         const committedInput = requests[index].body.input.filter(item => !(item.role === 'developer' && item.content?.length === 1 && transientBodies.includes(item.content[0]?.text)));
-        assert.deepEqual(JSON.parse(Buffer.from(context[12]).toString('utf8')), [...committedInput, ...fixture[index].output], 'ordered replay appends original output without retaining transient injection');
+        assert.deepEqual(events.map(([item]) => JSON.parse(Buffer.from(item).toString('utf8'))), [...committedInput, ...fixture[index].output], 'ordered replay appends original output without retaining transient injection');
         captureRows.push({request, http: requests[index].body});
         providerProjections++;
       } else {
@@ -427,7 +446,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
       input: {schema_id: 'adaptive-agent.input.v2', value: {task: 'Reject inspection after its skill is deactivated.'}}});
     const deniedResult = await until(() => client.call('task.result', {task_id: deniedTask.task_id}), value => value.ready);
     if (providerFailure) throw providerFailure;
-    assert.equal(alternateIndex, 8); assert.equal(deniedResult.outcome.value.disposition, 'no_result');
+    assert.equal(alternateIndex, 8); assert.equal(deniedResult.outcome.value.result.tag, 'no_result');
     assert.equal(deniedResult.outcome.value.model_calls, '8'); assert.equal(deniedResult.outcome.value.work_calls, '3');
     assert.equal(deniedResult.outcome.value.control.skills[0].active, false);
     assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
@@ -439,7 +458,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
       if (kind !== 4) continue;
       const attemptRow = deniedArchive.manifest[6].find(([tag, candidate]) => tag === 5 && Buffer.from(candidate).equals(Buffer.from(id)));
       const attempt = decodeValue(deniedArchive.schemas.get('attempt'), deniedArchive.object(attemptRow[2]));
-      if (attempt[5] !== 'agent.model.invoke.v10') continue;
+      if (attempt[5] !== 'agent.model.invoke.v11') continue;
       const capture = decodeValue(deniedArchive.schemas.get('capture'), deniedArchive.object(ref));
       const request = decodeValue(schemas.AdaptivePrepared, deniedArchive.object(capture[3]))[1];
       if (request[3][2] !== 7n) continue;
@@ -477,12 +496,36 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
       }
       client = null;
       const milliseconds = performance.now() - stopStarted;
-      await launch(['--config', configPath], selectedState);
+      await launch(['--config', configPath], selectedState, ['agent-host/2.1']);
       const unknown = await client.call('task.status', {task_id: task.task_id});
       assert.equal(unknown.status, 'unknown'); assert.notEqual(unknown.cancellation, null);
       assert.equal((await client.call('task.submit', submission)).task_id, task.task_id);
       if (cancellation) assert.equal((await client.call('task.cancel', cancelParams)).receipt_id, cancellation.receipt_id);
       await assert.rejects(client.call('task.resume', {client_operation_id: 'no-unknown-retry', task_id: task.task_id, expected_revision: unknown.revision}), error => error.data?.kind === 'StateConflict');
+      assert.deepEqual(unknown.recovery.mechanisms, [], 'provider has no authoritative receipt retrieval');
+      assert.match(unknown.recovery.occurrence_id, /^[0-9a-f]{64}$/);
+      assert.match(unknown.recovery.attempt_id, /^[0-9a-f]{64}$/);
+      const description = await client.call('describe');
+      assert(description.methods.some(method => method.name === 'task.reconcile'));
+      const schemas = description.protocol_schema ?? JSON.parse((await artifact(null, description.protocol_schema_ref)).toString('utf8'));
+      assert.equal(schemas.$defs['initialize.result'].properties.protocol_version.const, 'agent-host/2.1');
+      assert.equal(schemas.$defs['task.reconcile.params'].additionalProperties, false);
+      assert.deepEqual(schemas.$defs['task.reconcile.params'].properties.recovery.required, ['mechanism']);
+      const recovery = {client_operation_id: 'recover-provider-once', task_id: task.task_id, expected_revision: unknown.revision,
+        occurrence_id: unknown.recovery.occurrence_id, attempt_id: unknown.recovery.attempt_id, recovery: {mechanism: 'rederive'}};
+      await assert.rejects(client.call('task.reconcile', {...recovery, recovery: {mechanism: 'rederive', safe_to_retry: true}}), error => error.data?.kind === 'InvalidParams');
+      const admitted = await client.call('task.reconcile', recovery);
+      assert.equal(admitted.status, 'unknown'); assert.equal(admitted.replayed, false);
+      assert.equal(admitted.reconciliation.status, 'unresolved');
+      assert.equal(admitted.reconciliation.reason, 'unsupported');
+      assert.equal(admitted.reconciliation.provenance, 'none');
+      assert.deepEqual(Object.keys(admitted.reconciliation).sort(), ['attempt_id', 'mechanism', 'mechanism_version', 'occurrence_id', 'provenance', 'reason', 'reconciliation_id', 'status']);
+      const replay = await client.call('task.reconcile', recovery);
+      assert.equal(replay.receipt_id, admitted.receipt_id); assert.equal(replay.replayed, true);
+      await assert.rejects(client.call('task.reconcile', {...recovery, expected_revision: admitted.revision}), error => error.data?.kind === 'OperationConflict');
+      const events = await client.call('task.events', {task_id: task.task_id, after_seq: unknown.high_water_seq});
+      assert(events.events.some(event => event.type === 'reconciled' && event.data.reconciliation_id === admitted.reconciliation.reconciliation_id));
+
       assert.equal(alternateIndex, 1, 'unknown adaptive delivery cannot be retried');
       assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
       cancellations.push({method, milliseconds, provider_requests: alternateIndex, recovered_status: unknown.status});
@@ -535,7 +578,7 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
           if (kind !== 4) continue;
           const row = exported.manifest[6].find(([kind, candidate]) => kind === 5 && Buffer.from(candidate).equals(Buffer.from(id)));
           const attempt = decodeValue(exported.schemas.get('attempt'), exported.object(row[2]));
-          if (attempt[5] !== 'agent.model.invoke.v10') continue;
+          if (attempt[5] !== 'agent.model.invoke.v11') continue;
           const capture = decodeValue(exported.schemas.get('capture'), exported.object(ref));
           for (const privateRef of [capture[4].value, ...capture[6].value[1]]) {
             await assert.rejects(client.call('artifact.read', {task_id: task.task_id, artifact_id: Buffer.from(privateRef[0]).toString('hex'), offset: '0', length: '1'}), error => error.data?.kind === 'ArtifactUnavailable');
@@ -551,8 +594,12 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
       }
       const result = await until(() => client.call('task.result', {task_id: task.task_id}), value => value.ready, 2000);
       if (providerFailure) throw providerFailure;
+      if (result.outcome.value_ref) {
+        assert.equal(result.outcome.value_ref.schema_id, 'adaptive-agent.output.v4');
+        result.outcome.value = JSON.parse((await artifact(task.task_id, result.outcome.value_ref)).toString('utf8'));
+      }
       if (name === 'tools-reuse' || name === 'tools-reverse') {
-        assert.equal(result.outcome.value.disposition, 'report');
+        assert.equal(result.outcome.value.result.tag, 'report');
         assert.equal(result.outcome.value.programs.length, 1);
         assert.equal(result.outcome.value.evidence[0].tag, 'generated');
         const program = result.outcome.value.programs[0];
@@ -561,12 +608,12 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
         const evidence = decodeValue(contract(asset, 'ToolArtifact'), await artifact(task.task_id, result.outcome.value.evidence[0].value.object));
         assert.equal(evidence[3].tag, 1, 'public evidence is the acquired run result');
       } else {
-        assert.equal(result.outcome.value.disposition, 'no_result');
+        assert.equal(result.outcome.value.result.tag, 'no_result');
         assert.equal(result.outcome.value.programs.length, 0);
         assert.equal(result.outcome.value.work_calls, name === 'tools-disabled' ? '0' : '1');
       }
-      if (name === 'tools-reuse') { retainedProgram = toolSubject.program; retainedState = selectedState; assert.equal(alternateIndex, 38); assert.equal(result.outcome.value.model_calls, '38'); assert.equal(result.outcome.value.evidence.length, 1, 'report selects acquired evidence at global index twelve'); assert.equal(result.outcome.value.control.selection.control_revision, '17'); assert.equal(result.outcome.value.control.skills.length, 0); }
-      toolRuns.push({scenario: name, provider_calls: alternateIndex, disposition: result.outcome.value.disposition});
+      if (name === 'tools-reuse') { retainedProgram = toolSubject.program; retainedState = selectedState; assert.equal(alternateIndex, 38); assert.equal(result.outcome.value.model_calls, '38'); assert.equal(result.outcome.value.evidence.length, 13, 'report retains every acquired evidence entry'); assert.deepEqual(result.outcome.value.result.value.claims[0].evidence_indices, ['1', '12']); assert.equal(result.outcome.value.evidence[1].tag, 'source'); assert.equal(result.outcome.value.evidence[12].tag, 'generated'); assert.equal(result.outcome.value.control.selection.control_revision, '17'); assert.equal(result.outcome.value.control.skills.length, 0); }
+      toolRuns.push({scenario: name, provider_calls: alternateIndex, disposition: result.outcome.value.result.tag});
       assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
     }
     assertAdaptiveCaptures(captureRows, skillBodies);

@@ -1,52 +1,33 @@
 # Native Responses core
 
-`protean_native.responses.Adapter(Profile)` implements the shared
-`agent.model.invoke.v5` contract. `Profile` is the existing
-`protean.model_invocation.Profile`, including its derived argument codecs and
-checked responder. Native code renders requests and returns proposed values;
-the authored responder retains tool selection and authorization.
+`protean_native.adaptive_responses.Adapter(Profile)` implements the sole
+`agent.model.invoke.v11` contract. `Profile` is
+`protean.model_invocation.Profile`; `declare` and `defineModelObserved` construct
+the checked model boundary. Native code renders requests and returns proposed
+values; the authored responder retains call selection and authorization.
 
-The enclosing frozen task profile contains a closed `responses` object:
-
-```json
-{
-  "responses": {
-    "endpoint": "https://api.openai.com/v1/responses",
-    "audience": "openai",
-    "model": "EXPLICIT_APPROVED_MODEL",
-    "effort": "medium",
-    "max_output_tokens": 4096,
-    "request_bytes": 262144,
-    "response_bytes": 524288,
-    "timeout_ms": 30000
-  }
-}
-```
-
-This illustrates the schema, not a selected or authorized live profile. Admission
-must choose a supported model and freeze the complete non-secret task profile.
-The invocation's profile digest, model, reasoning effort, response limits,
-declarations and codecs must match. Credential bytes are supplied separately
-through `responses.Environment`, together with the explicitly approved endpoint;
-they never enter the rendered body, checkpoint, profile or capture. The HTTPS
-transport uses system trust or an explicitly supplied DER trust root. No
-environment-variable credential discovery, proxy discovery, redirects or retry
-occurs. Each call has finite request/response limits and a cancellation deadline.
+The frozen task profile contains the approved adaptive policy, inference
+profiles, and skill catalog described in the [v11 contract](model-invocation-v11.md).
+The request binds its policy digest, selected profile, materialized definitions,
+offered calls, and context plan. Credential bytes are supplied separately through
+`responses.Environment`, together with the explicitly approved endpoint; they
+never enter the rendered body, checkpoint, profile, or capture. HTTPS uses system
+trust or an explicitly supplied DER trust root. Credential discovery, redirects,
+and automatic retries are absent. Transport bounds and deadlines are optional
+caller-selected physical policies.
 
 The core sends foreground, nonstreaming, `store: false` requests with truncation
 disabled and `parallel_tool_calls: false`. It admits at most one function call
 per response and rejects the whole batch otherwise. It does not use provider
 conversation IDs or `previous_response_id`.
 
-Context objects use the shared ordinary `ContextArtifact` codec and contain the
-ordered JSON input-compatible items, their source capture and prior context.
-Their immutable payload repeats the subject bindings, so relabeling a reference
-cannot reassign another task's history. References bind
-their digest, length, schema, frozen profile, task, tenant, audience and half-open
-item range. The core resolves and checks those bindings and the bounded chain's
-capture/context closure before rendering. Every
-outstanding call requires one result with its original call ID before new
-messages enter the next request. Missing context cannot trigger fresh inference.
+Context v6 stores immutable history chunks and roots with exact prepared-request
+and capture ancestry. References bind the object, schema, policy, selection,
+task, tenant, audience, epoch, watermark, and eviction generation. Owned
+projection checks the complete closure before reusing validation within its
+integrity epoch; generic readers validate on each projection. Every outstanding
+call requires its original result before continuing. Missing context rejects
+rather than triggering fresh inference.
 
 Supported replay items are text messages, completed function calls/results,
 assistant messages with supported phase values, and reasoning items containing
@@ -75,7 +56,7 @@ retired JS normalizer is no longer executed or shipped. Native whole-batch,
 Unicode and missing-call-ID behavior retain explicit independent expectations.
 The controlled HTTPS peer checks chain, hostname and expiry rejection, response
 size and truncation, deadlines, exact bodies and no retries/redirects.
-[Protean](../examples/adaptive/README.md) uses the native v6 adapter
+[Protean](../examples/adaptive/README.md) uses the native v11 adapter
 and the same capture, recovery and transport owners. Current exact-head proof
 surfaces are listed in the [acceptance map](adaptive-responses-acceptance.md).
 Live inference requires separate authorization and is not claimed here.

@@ -10,6 +10,7 @@ const Storage = struct {
     own_program: bool,
     resident: kosmos.Resident,
     live: bool,
+    checkpoint: ?*kosmos.Checkpoint,
 };
 
 const ProgramStorage = struct {
@@ -65,37 +66,50 @@ pub const Driver = opaque {
         };
         program.storage().residents += 1;
         owner.live = true;
+        owner.checkpoint = null;
         return @ptrCast(owner);
     }
 
-    pub fn drive(self: *Driver, output: std.mem.Allocator, control: data.invocation.Control, quantum: u64) ![]u8 {
+    /// The outcome belongs to output. The checkpoint remains owned here until
+    /// the next successful drive or retirement, including after storage fails.
+    pub const Publication = struct { outcome: []u8, checkpoint: []const u8 };
+
+    pub fn drive(self: *Driver, output: std.mem.Allocator, control: data.invocation.Control, quantum: u64) !Publication {
         const owner = self.storage();
         if (!owner.live) return error.InvalidState;
-        return owner.resident.driveEncoded(output, control, .{ .quantum = quantum });
-    }
-    pub fn checkpoint(self: *Driver, output: std.mem.Allocator) ![]u8 {
-        const owner = self.storage();
-        if (!owner.live) return error.InvalidState;
-        return owner.resident.checkpoint(output);
+        var published = try owner.resident.publish(.{ .encoded = output }, control, .{ .quantum = quantum, .checkpoint = .receipt });
+        const checkpoint = published.takeCheckpoint().?;
+        if (owner.checkpoint) |previous| previous.deinit();
+        owner.checkpoint = checkpoint;
+        return .{ .outcome = published.outcome.encoded, .checkpoint = checkpoint.bytes() };
     }
     pub fn close(self: *Driver) !void {
         const owner = self.storage();
         if (!owner.live) return error.InvalidState;
         try owner.resident.close();
+        if (owner.checkpoint) |checkpoint| checkpoint.deinit();
+        owner.checkpoint = null;
         owner.live = false;
         owner.program.storage().residents -= 1;
         if (owner.own_program) try owner.program.close();
     }
     /// The task owner may call this only after publishing a checkpoint, or for
     /// an explicitly nondurable demo. A failure leaves the resident owned/live.
-    pub fn retire(self: *Driver, output: std.mem.Allocator) ![]u8 {
+    pub fn retire(self: *Driver) !void {
         const owner = self.storage();
         if (!owner.live) return error.InvalidState;
-        const state = try owner.resident.takeCheckpoint(output);
+        if (owner.checkpoint) |checkpoint| {
+            try owner.resident.transferCheckpoint(checkpoint);
+            checkpoint.deinit();
+            owner.checkpoint = null;
+        } else {
+            // A newly restored resident may be retired before its first drive.
+            const state = try owner.resident.takeCheckpoint(owner.parent);
+            owner.parent.free(state);
+        }
         owner.live = false;
         owner.program.storage().residents -= 1;
         if (owner.own_program) try owner.program.close();
-        return state;
     }
     /// Retired handles remain allocated until the enclosing owner drops them,
     /// allowing all ordinary operations after close to reject before access.
@@ -105,3 +119,48 @@ pub const Driver = opaque {
         owner.parent.destroy(owner);
     }
 };
+
+test "driver retains one publication across output lifetime and failed drive then transfers without allocation" {
+    const a = std.testing.allocator;
+    // Historical yielding bytes identity, also exercised by Kosmos's public
+    // large-state restoration tests. The original image is not recompiled.
+    var image: [52]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&image, "41424c5f4250493303000000200000000000000001000001020a0000000100000100010000020000070100000000000000000000");
+    var failing = std.testing.FailingAllocator.init(a, .{});
+    const driver = try Driver.open(failing.allocator(), &image, .{ .initial_args = &.{ 1, 42 } });
+    defer driver.destroy() catch unreachable;
+    var statistics: kosmos.Statistics = .{};
+    try driver.storage().resident.setStatistics(&statistics);
+    var checkpoint: []u8 = undefined;
+    {
+        var frame = std.heap.ArenaAllocator.init(a);
+        defer frame.deinit();
+        const published = try driver.drive(frame.allocator(), .none, 256);
+        var outcome = try data.invocation.decode(data.invocation.Outcome, a, published.outcome);
+        defer outcome.deinit();
+        try std.testing.expect(outcome.value == .yielded);
+        checkpoint = try a.dupe(u8, published.checkpoint);
+    }
+    defer a.free(checkpoint);
+    try std.testing.expectEqual(1, statistics.state_projections);
+    const receipt = driver.storage().checkpoint.?;
+    try std.testing.expectEqualSlices(u8, checkpoint, receipt.bytes());
+    var no_output = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, driver.drive(no_output.allocator(), .resume_yield, 256));
+    try std.testing.expectEqual(receipt, driver.storage().checkpoint.?);
+    try std.testing.expectEqualSlices(u8, checkpoint, receipt.bytes());
+    const before = statistics.state_projections;
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    try driver.retire();
+    try std.testing.expectEqual(before, statistics.state_projections);
+    try std.testing.expectError(error.InvalidState, driver.drive(a, .none, 0));
+    const restored = try Driver.open(a, &image, .{ .state = checkpoint });
+    defer restored.destroy() catch unreachable;
+    const complete = try restored.drive(a, .resume_yield, 256);
+    defer a.free(complete.outcome);
+    var outcome = try data.invocation.decode(data.invocation.Outcome, a, complete.outcome);
+    defer outcome.deinit();
+    try std.testing.expectEqualSlices(u8, &.{ 1, 42 }, outcome.value.completed);
+    try restored.close();
+}

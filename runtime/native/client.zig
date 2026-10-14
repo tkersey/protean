@@ -106,6 +106,16 @@ pub fn Client(comptime Types: type) type {
             }
             try json.put(a, &result, "pending_messages", .{ .array = messages });
             try json.put(a, &result, "pending_messages_truncated", .{ .bool = messages.items.len != task.messages.items.len });
+            var recovery: json.Value = .null;
+            if (try self.service.recoveryAvailability(a, id)) |available| {
+                recovery = json.object();
+                try json.put(a, &recovery, "occurrence_id", try hexadecimal(a, available.occurrence));
+                try json.put(a, &recovery, "attempt_id", try hexadecimal(a, available.attempt));
+                var mechanisms: std.array_list.Managed(json.Value) = .init(a);
+                for (available.mechanisms) |mechanism| try mechanisms.append(json.string(@tagName(mechanism)));
+                try json.put(a, &recovery, "mechanisms", .{ .array = mechanisms });
+            }
+            try json.put(a, &result, "recovery", recovery);
             return result;
         }
 
@@ -134,6 +144,21 @@ pub fn Client(comptime Types: type) type {
             try json.put(a, &result, "disposition", json.string(@tagName(admitted.receipt.disposition)));
             if (admitted.receipt.message) |id| try json.put(a, &result, "message_id", try hexadecimal(a, id));
             if (admitted.receipt.question) |id| try json.put(a, &result, "question_id", try hexadecimal(a, id));
+            if (admitted.receipt.reconciliation) |id| {
+                var decoded = try self.service.reconciliation(a, admitted.receipt.task, id);
+                defer decoded.deinit();
+                const saved = decoded.value;
+                var recovery = json.object();
+                try json.put(a, &recovery, "reconciliation_id", try hexadecimal(a, id));
+                try json.put(a, &recovery, "occurrence_id", try hexadecimal(a, saved.occurrence));
+                try json.put(a, &recovery, "attempt_id", try hexadecimal(a, saved.attempt));
+                try json.put(a, &recovery, "status", json.string(@tagName(saved.outcome)));
+                try json.put(a, &recovery, "provenance", json.string(@tagName(saved.provenance)));
+                try json.put(a, &recovery, "mechanism", json.string(try a.dupe(u8, saved.mechanism.bytes)));
+                try json.put(a, &recovery, "mechanism_version", try counter(a, saved.mechanism_version));
+                try json.put(a, &recovery, "reason", if (saved.outcome == .unresolved) json.string(@tagName(saved.outcome.unresolved)) else .null);
+                try json.put(a, &result, "reconciliation", recovery);
+            }
             return result;
         }
 
@@ -345,6 +370,13 @@ pub fn Client(comptime Types: type) type {
                 },
                 .@"task.cancel" => return self.admission(a, try self.service.requestCancel(a, try operationId(params), try identifier(16, try field(params, "task_id")), if (json.get(params, "reason")) |reason| try json.text(reason) else "client requested cancellation")),
                 .@"task.resume" => return self.admission(a, try self.service.resumeTask(a, try operationId(params), try identifier(16, try field(params, "task_id")), try json.decimal(u64, try field(params, "expected_revision")))),
+                .@"task.reconcile" => {
+                    try protocol.closed(params, protocol.fields(method));
+                    const recovery = try field(params, "recovery");
+                    try protocol.closed(recovery, .{ .required = &.{"mechanism"} });
+                    const mechanism = std.meta.stringToEnum(state.RecoveryRequest, try json.text(try field(recovery, "mechanism"))) orelse return error.InvalidParams;
+                    return self.admission(a, try self.service.reconcile(a, try operationId(params), try identifier(16, try field(params, "task_id")), try json.decimal(u64, try field(params, "expected_revision")), try identifier(32, try field(params, "occurrence_id")), try identifier(32, try field(params, "attempt_id")), mechanism));
+                },
                 .@"task.status" => return self.snapshot(a, try identifier(16, try field(params, "task_id"))),
                 .@"task.result" => return self.taskResult(a, try identifier(16, try field(params, "task_id"))),
                 .@"task.events" => {

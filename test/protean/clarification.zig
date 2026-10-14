@@ -366,6 +366,7 @@ fn call(b: *source.Builder, function: Id, arguments: []const Id) !Id {
 }
 
 fn respond(outcome: *kosmos.invocation.Outcome, program: horos.data.activation.Program, comptime T: type, value: T, statistics: ?*kosmos.Statistics) !void {
+    if (T == P.Result) return respond(outcome, program, P.AdaptiveResult, .{ .result = value, .replay = null, .replay_status = .complete, .usage = null }, statistics);
     const protocol = horos.data.invocation;
     var request_owner_0 = try protocol.decode(protocol.Request, a, outcome.record.requested.request);
     defer request_owner_0.deinit();
@@ -443,9 +444,9 @@ test "protected composition resumes captured futures, groups non-tail results, a
             );
             defer decoded_request_0.deinit();
             const request = decoded_request_0.value;
-            var received = try protean.contracts.decodeOwned(P.Request, a, request.binding.payload);
+            var received = try protean.contracts.decodeOwned(P.AdaptiveRequest, a, request.binding.payload);
             defer received.deinit();
-            const messages = received.value.messages.items;
+            const messages = received.value.invocation.messages.items;
             try std.testing.expectEqual(@as(usize, 3), messages.len);
             try std.testing.expectEqualStrings("77", messages[0].content.bytes);
             try std.testing.expectEqualStrings(if (id == 1) "1" else "2", messages[1].content.bytes);
@@ -527,7 +528,21 @@ fn numericRequest(c: protean.Context, values: []const Id) !Id {
     inline for (@typeInfo(P.Request).@"struct".field_names, @typeInfo(P.Request).@"struct".field_types, 0..) |field_name, FieldType, i| {
         fields[i] = if (i == 3) try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(P.Messages)), .sequence, messages, 0) else try horos_authoring.interop.valueId(c.author, try c.literal(FieldType, @field(template, field_name)));
     }
-    return b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(P.Request)), .product, &fields, 0);
+    const invocation = try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(P.Request)), .product, &fields, 0);
+    const envelope: P.AdaptiveRequest = .{
+        .invocation = template,
+        .policy = @splat(9),
+        .selection = .{ .profile_id = .{ .bytes = "fixture" }, .profile_digest = @splat(7), .effective_effort = .medium, .control_revision = 0 },
+        .plan = .{ .epoch = 0, .reason = .initial, .watermark = 0, .eviction_generation = 0, .prior = null, .catalog = .{ .digest = @splat(0), .bytes = 0 }, .skills = .{ .items = &.{} } },
+        .materialized = @splat(true),
+        .offered = @splat(true),
+        .results = .{ .items = &.{} },
+    };
+    var outer: [@typeInfo(P.AdaptiveRequest).@"struct".field_names.len]Id = undefined;
+    inline for (@typeInfo(P.AdaptiveRequest).@"struct".field_names, @typeInfo(P.AdaptiveRequest).@"struct".field_types, 0..) |name, T, i| {
+        outer[i] = if (i == 0) invocation else try horos_authoring.interop.valueId(c.author, try c.literal(T, @field(envelope, name)));
+    }
+    return b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(P.AdaptiveRequest)), .product, &outer, 0);
 }
 
 test "equal scores cannot conceal different operative keys" {
@@ -592,10 +607,10 @@ fn growingDomain(count: usize) !void {
         defer decoded_request_2.deinit();
         const request = decoded_request_2.value;
         try std.testing.expectEqualStrings(protean.model_invocation.semantic_identity, request.binding.semantic_identity);
-        var context = try protean.contracts.decodeOwned(P.Request, a, request.binding.payload);
+        var context = try protean.contracts.decodeOwned(P.AdaptiveRequest, a, request.binding.payload);
         defer context.deinit();
-        try std.testing.expectEqualStrings("99", context.value.messages.items[0].content.bytes);
-        try std.testing.expectEqualStrings("11", context.value.messages.items[2].content.bytes);
+        try std.testing.expectEqualStrings("99", context.value.invocation.messages.items[0].content.bytes);
+        try std.testing.expectEqualStrings("11", context.value.invocation.messages.items[2].content.bytes);
         try respond(&outcome, f.compiled.program, P.Result, .{ .output = .{
             .items = .{ .items = &items },
             .normalized_output_digest = @as([32]u8, @splat(0)),

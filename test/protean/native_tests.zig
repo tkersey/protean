@@ -1,7 +1,7 @@
 //! Native semantic checks with one shared Kosmos/Protean module graph.
 test {
     _ = @import("adaptive_controls.zig");
-    _ = @import("adaptive_responses.zig");
+    _ = @import("adaptive_reports.zig");
     _ = @import("adaptive_recovery.zig");
     _ = @import("native_tasks.zig");
     _ = @import("native_responses.zig");

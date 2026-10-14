@@ -4,6 +4,7 @@ build_protean.zig
 examples/adaptive/context.zig
 examples/adaptive/definition.zig
 examples/adaptive/environment.zig
+examples/adaptive/report.zig
 examples/adaptive/tool_catalog.zig
 examples/adaptive/tool_resources.zig
 examples/adaptive/tool_types.zig
@@ -11,6 +12,7 @@ examples/adaptive/tool_work.zig
 examples/adaptive/types.zig
 examples/adaptive/work.zig
 runtime/native/adaptive_context.zig
+runtime/native/adaptive_history.zig
 runtime/native/adaptive_responses.zig
 runtime/native/archive.zig
 runtime/native/client.zig
@@ -32,6 +34,7 @@ runtime/native/protocol.zig
 runtime/native/registry.zig
 runtime/native/repository.zig
 runtime/native/responses.zig
+runtime/native/retention.zig
 runtime/native/root.zig
 runtime/native/schemas.zig
 runtime/native/sqlite.zig
@@ -82,6 +85,7 @@ test/authoring_tests.zig
 test/consumers/adaptive/build.zig
 test/protean/adaptive_controls.zig
 test/protean/adaptive_recovery.zig
+test/protean/adaptive_reports.zig
 test/protean/adaptive_responses.zig
 test/protean/admission.zig
 test/protean/approval_equality.zig
@@ -104,7 +108,9 @@ test/protean/model_runtime_callback.zig
 test/protean/model_unknown_field.zig
 test/protean/model_unknown_parameter.zig
 test/protean/model_unsupported_codec.zig
+test/protean/native_recovery_crash.zig
 test/protean/native_responses.zig
+test/protean/native_scheduler_benchmark.zig
 test/protean/native_tasks.zig
 test/protean/native_tests.zig
 test/protean/observation.zig

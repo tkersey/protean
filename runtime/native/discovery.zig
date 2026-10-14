@@ -107,7 +107,7 @@ pub const Application = struct {
         try sameField(metadata.value, "format", "agent-native-application/v1");
         try sameField(metadata.value, "application_id", Types.application_id);
         try sameField(metadata.value, "application_version", Types.application_version);
-        const client_mapping = values.schemas.clientMapping(.{ Types.Input, Types.Output, Types.Failure, Types.Answer, Types.Message });
+        const client_mapping = values.schemas.client_mapping;
         try sameField(metadata.value, "client_mapping", client_mapping);
         sameField(metadata.value, "program_sha256", try digest(storage, assets.image)) catch return error.ApplicationProgramDigestMismatch;
         try sameField(manifest.value, "format", "agent-native-build/v2");
@@ -147,7 +147,7 @@ pub const Application = struct {
         const protocol_schema = try @import("schemas.zig").document(storage, metadata.value, .{});
         const public_metadata = try publicMetadata(storage, metadata.value);
         const application_artifact = try Artifact.freeze(storage, public_metadata, "agent-native-discovery.application.v1");
-        const protocol_artifact = try Artifact.freeze(storage, protocol_schema, "agent-host.protocol-schema.v1");
+        const protocol_artifact = try Artifact.freeze(storage, protocol_schema, "agent-host.protocol-schema.v2");
         const manifest_id = try digest(storage, assets.manifest);
         const protocol_digest = try storage.dupe(u8, &std.fmt.bytesToHex(protocol_artifact.sha256, .lower));
         return .{ .arena = arena, .metadata = metadata.value, .manifest = manifest.value, .manifest_id = manifest_id, .image_identity = image_identity, .protocol_schema = protocol_schema, .protocol_schema_sha256 = protocol_digest, .public_metadata = public_metadata, .schema_artifacts = .{ application_artifact, protocol_artifact } };
@@ -172,6 +172,8 @@ pub const Application = struct {
     /// This projection is deliberately bounded; larger schema/resource assets
     /// are retained for the authorized artifact service rather than truncated.
     pub fn describe(self: Application, a: std.mem.Allocator, params: json.Value, launch: ?LaunchProfile) !json.Value {
+        const schema_artifact = self.schema_artifacts[1].?;
+        const protocol_schema = self.protocol_schema;
         if (json.get(params, "application_id")) |id| {
             const expected = try json.text(self.metadata.object.get("application_id").?);
             if (id != .string or !std.mem.eql(u8, id.string, expected)) return error.NotFound;
@@ -183,10 +185,12 @@ pub const Application = struct {
         } else 16;
         if (limit == 0 or limit > 16) return error.InvalidParams;
         const info = @typeInfo(protocol.Method).@"enum";
-        if (cursor > info.field_names.len) return error.InvalidParams;
-        const end = @min(info.field_names.len, cursor + limit);
+        const count = info.field_names.len;
+        if (cursor > count) return error.InvalidParams;
+        const end = @min(count, cursor + limit);
         var methods: std.array_list.Managed(json.Value) = .init(a);
-        inline for (info.field_names, 0..) |name, i| {
+        var i: usize = 0;
+        inline for (info.field_names) |name| {
             if (i >= cursor and i < end) {
                 var method = json.object();
                 try json.put(a, &method, "name", json.string(name));
@@ -201,10 +205,11 @@ pub const Application = struct {
                 try json.put(a, &method, "result_schema", json.string("#/$defs/" ++ name ++ ".result"));
                 try methods.append(method);
             }
+            i += 1;
         }
         var result = json.object();
         try json.put(a, &result, "methods", .{ .array = methods });
-        try json.put(a, &result, "next_cursor", if (end < info.field_names.len) json.string(try std.fmt.allocPrint(a, "{d}", .{end})) else .null);
+        try json.put(a, &result, "next_cursor", if (end < count) json.string(try std.fmt.allocPrint(a, "{d}", .{end})) else .null);
         var app = json.object();
         for ([_][]const u8{ "application_id", "application_version", "client_mapping" }) |key| try json.put(a, &app, key, self.public_metadata.object.get(key).?);
         try json.put(a, &app, "metadata_ref", try self.schema_artifacts[0].?.reference(a));
@@ -218,7 +223,7 @@ pub const Application = struct {
             try json.put(a, &profile, "resource_identity", json.string(try a.dupe(u8, &std.fmt.bytesToHex(admitted.resource_identity, .lower))));
         }
         try json.put(a, &result, "profile", profile);
-        const protocol_ref = try self.schema_artifacts[1].?.reference(a);
+        const protocol_ref = try schema_artifact.reference(a);
         try json.put(a, &result, "protocol_schema_ref", protocol_ref);
         if (!try fitsDescription(a, result)) return error.Capacity;
         // Inline only when the complete projection fits. Independent per-asset
@@ -227,9 +232,9 @@ pub const Application = struct {
             try json.put(a, &result, "application", self.public_metadata);
             if (!try fitsDescription(a, result)) try json.put(a, &result, "application", app);
         }
-        if (self.schema_artifacts[1].?.bytes.len <= (protocol.Limits{}).inline_bytes) {
+        if (schema_artifact.bytes.len <= (protocol.Limits{}).inline_bytes) {
             _ = result.object.swapRemove("protocol_schema_ref");
-            try json.put(a, &result, "protocol_schema", self.protocol_schema);
+            try json.put(a, &result, "protocol_schema", protocol_schema);
             if (!try fitsDescription(a, result)) {
                 _ = result.object.swapRemove("protocol_schema");
                 try json.put(a, &result, "protocol_schema_ref", protocol_ref);
@@ -281,7 +286,7 @@ test "oversized discovery stays bounded and its immutable schemas round-trip thr
     var metadata = json.object();
     try json.put(a, &metadata, "application_id", json.string("large-schema"));
     try json.put(a, &metadata, "application_version", json.string("1"));
-    try json.put(a, &metadata, "client_mapping", json.string("agent-client-values/1.0"));
+    try json.put(a, &metadata, "client_mapping", json.string("agent-client-values/1.1"));
     const padding = try a.alloc(u8, 70 * 1024);
     @memset(padding, 'x');
     var schema = json.object();
@@ -323,7 +328,7 @@ test "discovery budgets the combined description before composing a full batch" 
         var metadata = json.object();
         try json.put(a, &metadata, "application_id", json.string("combined-schema"));
         try json.put(a, &metadata, "application_version", json.string("1"));
-        try json.put(a, &metadata, "client_mapping", json.string("agent-client-values/1.0"));
+        try json.put(a, &metadata, "client_mapping", json.string("agent-client-values/1.1"));
         const padding = try a.alloc(u8, size);
         @memset(padding, 'x');
         var schema = json.object();
@@ -430,7 +435,7 @@ test "discovery preserves admitted capability counts in inline and referenced me
         var metadata = json.object();
         try json.put(a, &metadata, "application_id", json.string("many-capabilities"));
         try json.put(a, &metadata, "application_version", json.string("1"));
-        try json.put(a, &metadata, "client_mapping", json.string("agent-client-values/1.0"));
+        try json.put(a, &metadata, "client_mapping", json.string("agent-client-values/1.1"));
         const wire = try values.schemaBytes(u32, a);
         const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(wire.len));
         var schema = json.object();

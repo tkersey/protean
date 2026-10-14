@@ -242,7 +242,7 @@ const Collector = struct {
     objects: std.AutoArrayHashMapUnmanaged(state.Digest, state.Reference) = .empty,
     bytes: u64 = 0,
 
-    fn add(self: *Collector, ref: state.Reference) !void {
+    pub fn add(self: *Collector, ref: state.Reference) !void {
         if (self.objects.get(ref.digest)) |prior| {
             if (prior.bytes != ref.bytes) return error.CorruptState;
             return;
@@ -261,23 +261,13 @@ const Collector = struct {
         self.bytes = try std.math.add(u64, self.bytes, ref.bytes);
     }
     fn visit(self: *Collector, comptime T: type, value: T) !void {
-        if (T == state.Reference) return self.add(value);
-        switch (@typeInfo(T)) {
-            .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| try self.visit(Field, @field(value, name)),
-            .optional => |info| if (value) |child| try self.visit(info.child, child),
-            .@"union" => |info| inline for (info.field_names, info.field_types) |name, Field| {
-                if (same(@tagName(value), name)) try self.visit(Field, @field(value, name));
-            },
-            .pointer => |info| if (info.size == .slice and info.child != u8) {
-                for (value) |child| try self.visit(info.child, child);
-            },
-            .array => |info| if (info.child != u8) {
-                for (value) |child| try self.visit(info.child, child);
-            },
-            else => {},
-        }
+        try state.visitReferences(T, value, self);
     }
-    fn reply(self: *Collector, value: occurrence.Acquired) !void {
+    pub fn typed(self: *Collector, comptime T: type, ref: state.Reference, value: T) !void {
+        try self.add(ref);
+        try self.visit(T, value);
+    }
+    pub fn reply(self: *Collector, value: occurrence.Acquired) !void {
         try self.add(try self.store.objectReference(value.reply, null));
     }
 };
@@ -289,6 +279,7 @@ const AdmissionFact = struct {
     receipt: state.Digest,
     question: ?state.Digest,
     message: ?state.Digest,
+    reconciliation: ?state.Digest,
     event_seen: bool = false,
 };
 const AdmissionFacts = std.AutoHashMap(u64, AdmissionFact);
@@ -303,6 +294,7 @@ fn admissionMethod(kind: state.EventType) ?state.Method {
         .cancellation_requested => .cancel,
         .resumed => .@"resume",
         .imported => .import_checkpoint,
+        .reconciled => .reconcile,
         .input_required,
         .message_consumed,
         .message_not_consumed,
@@ -330,6 +322,16 @@ fn validateEventFacts(store: *storage.Store, archive: state.Archive, task: state
         if (admission == null or admission.?.method != method) return error.InvalidArchive;
     }
     const expected: json.Value = switch (event.kind) {
+        .reconciled => blk: {
+            const id = admission.?.reconciliation orelse return error.InvalidArchive;
+            const ref = record(archive, .reconciliation, id) orelse return error.InvalidArchive;
+            var decoded = try contracts.decodeOwned(state.Reconciliation, a, try store.object(a, ref, null));
+            defer decoded.deinit();
+            if (decoded.value.admission_revision != event.revision) return error.InvalidArchive;
+            var result = json.object();
+            try json.put(a, &result, "reconciliation_id", json.string(try a.dupe(u8, &std.fmt.bytesToHex(id, .lower))));
+            break :blk result;
+        },
         .completed, .failed, .cancelled => {
             if (!same(@tagName(event.kind), @tagName(task.outcome_kind))) return error.InvalidArchive;
             return null;
@@ -438,11 +440,11 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
                     if (!same(&published, &item.id)) return error.InvalidArchive;
                 } else if (!same(&item.task, &value.id)) return error.CorruptState;
                 try collector.visit(T, item);
+                if (T == state.Reconciliation) try state.visitReconciliationHistory(a, store, item, &collector);
                 if (comptime same(kind, "occurrence")) {
                     switch (item.state) {
-                        .dispatching, .unknown, .captured => return error.UnsettledOccurrence,
-                        .settled_reply => |acquired| try collector.reply(acquired),
-                        .admitted => |admitted| if (admitted == .reply) try collector.reply(admitted.reply),
+                        .dispatching => return error.UnsettledOccurrence,
+                        .settled_reply, .admitted => {},
                         else => {},
                     }
                     if (value.current_occurrence) |id| if (same(&id, &item.id)) {
@@ -455,7 +457,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
                         inference_bytes = try std.math.add(u64, inference_bytes, if (item.prepared) |body| body.bytes else item.request.bytes);
                     }
                 } else if (comptime same(kind, "capture")) {
-                    if (item.disposition != .complete or item.response == null or item.projection == null) return error.UnsettledOccurrence;
+                    if ((item.disposition == .complete) != (item.response != null) or (item.projection != null and item.disposition != .complete)) return error.CorruptState;
                     if (!same(&item.attempt, &row.id) or record(archive, .attempt, item.attempt) == null) return error.CorruptState;
                 } else if (comptime same(kind, "message")) {
                     // Pending membership is an equality, not just validation
@@ -496,10 +498,10 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         // A cancellation requested after termination need not create intent.
         if (decoded.value.method == .cancel and !value.terminal() and value.cancellation == null) return error.InvalidArchive;
         switch (decoded.value.method) {
-            .submit, .respond, .message, .@"resume" => last_nonterminal_revision = @max(last_nonterminal_revision, decoded.value.revision),
+            .submit, .respond, .message, .@"resume", .reconcile => last_nonterminal_revision = @max(last_nonterminal_revision, decoded.value.revision),
             .cancel, .import_checkpoint => {},
         }
-        const fact: AdmissionFact = .{ .method = decoded.value.method, .receipt = row.body.digest, .question = decoded.value.question, .message = decoded.value.message };
+        const fact: AdmissionFact = .{ .method = decoded.value.method, .receipt = row.body.digest, .question = decoded.value.question, .message = decoded.value.message, .reconciliation = decoded.value.reconciliation };
         const entry = try admissions.getOrPut(decoded.value.revision);
         if (entry.found_existing and !std.meta.eql(entry.value_ptr.*, fact)) return error.InvalidArchive;
         entry.value_ptr.* = fact;
@@ -514,6 +516,13 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         }
         if (decoded.value.method == .respond and decoded.value.question == null) return error.InvalidArchive;
         if (decoded.value.question) |id| if (record(archive, .question, id) == null) return error.InvalidArchive;
+        if ((decoded.value.method == .reconcile) != (decoded.value.reconciliation != null)) return error.InvalidArchive;
+        if (decoded.value.reconciliation) |id| {
+            const ref = record(archive, .reconciliation, id) orelse return error.InvalidArchive;
+            var recovery = try contracts.decodeOwned(state.Reconciliation, a, try store.object(a, ref, null));
+            defer recovery.deinit();
+            if (recovery.value.admission_revision != decoded.value.revision or !std.meta.eql(recovery.value.request_digest, decoded.value.request_digest) or !same(recovery.value.client_operation_id.bytes, decoded.value.client_operation_id.bytes)) return error.InvalidArchive;
+        }
     }
     var next = value.event_floor;
     var revision: u64 = 0;

@@ -9,10 +9,36 @@ pub const TaskId = occurrence.TaskId;
 pub const Name = contracts.Text(128);
 pub const Reason = contracts.Text(256);
 pub const Reference = struct { digest: Digest, bytes: u64 };
+/// Declared host references are the shared source for archive closure and
+/// Store retention. Opaque payloads need their registered application codec;
+/// byte arrays and JSON never acquire reference meaning from their shape.
+pub fn visitReferences(comptime T: type, value: T, collector: anytype) anyerror!void {
+    return visitReferencesAs(T, Reference, value, collector);
+}
+/// Application codecs supply their exact nominal reference type. Matching
+/// field names alone never makes an unrelated application value a reference.
+pub fn visitReferencesAs(comptime T: type, comptime Ref: type, value: T, collector: anytype) anyerror!void {
+    if (T == Ref) return collector.add(.{ .digest = value.digest, .bytes = value.bytes });
+    if (T == occurrence.Acquired) try collector.reply(value);
+    switch (@typeInfo(T)) {
+        .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| try visitReferencesAs(Field, Ref, @field(value, name), collector),
+        .optional => |info| if (value) |child| try visitReferencesAs(info.child, Ref, child, collector),
+        .@"union" => |info| inline for (info.field_names, info.field_types) |name, Field| {
+            if (std.mem.eql(u8, @tagName(value), name)) try visitReferencesAs(Field, Ref, @field(value, name), collector);
+        },
+        .pointer => |info| if (info.size == .slice and info.child != u8) {
+            for (value) |child| try visitReferencesAs(info.child, Ref, child, collector);
+        },
+        .array => |info| if (info.child != u8) {
+            for (value) |child| try visitReferencesAs(info.child, Ref, child, collector);
+        },
+        else => {},
+    }
+}
 pub const Outcome = enum { progressed, yielded, requested, completed, failed, cancelled };
 pub const Schedule = enum { queued, active, parked };
 pub const Status = enum { queued, running, waiting_input, parked, cancelling, blocked, unknown, completed, failed, cancelled };
-pub const RecordKind = enum { occurrence, question, message, artifact, capture, attempt, origin };
+pub const RecordKind = enum { occurrence, question, message, artifact, capture, attempt, origin, reconciliation };
 pub const Blocker = enum { missing_capability, denied, capacity, missing_artifact, incompatible_profile, unavailable_environment };
 
 /// Growing task metadata retains immutable object identities without a count quota.
@@ -61,8 +87,8 @@ pub const Task = struct {
     }
 };
 
-pub const Method = enum { submit, message, respond, cancel, @"resume", import_checkpoint };
-pub const Disposition = enum { accepted, queued, answer_acquired, cancellation_requested, resumed, imported };
+pub const Method = enum { submit, message, respond, cancel, @"resume", import_checkpoint, reconcile };
+pub const Disposition = enum { accepted, queued, answer_acquired, cancellation_requested, resumed, imported, reconciled };
 pub const Receipt = struct {
     id: Digest,
     client_operation_id: Name,
@@ -73,6 +99,7 @@ pub const Receipt = struct {
     disposition: Disposition,
     message: ?Digest = null,
     question: ?Digest = null,
+    reconciliation: ?Digest = null,
 };
 
 pub const Question = struct {
@@ -164,6 +191,7 @@ pub const EventType = enum {
     failed,
     cancelled,
     imported,
+    reconciled,
 };
 pub const Event = struct {
     task: TaskId,
@@ -208,7 +236,107 @@ pub const Capture = struct {
         objects: contracts.Vector(Reference, null),
         output_tokens: ?u64,
     } = null,
+    reconciliation: ?Digest = null,
 };
+
+/// Recovery is a new observation about one original attempt. The original
+/// ambiguous occurrence and every predecessor body remain private audit roots.
+pub const RecoveryRequest = enum { rederive, lookup };
+pub const Reconciliation = struct {
+    version: u32 = 1,
+    id: Digest,
+    task: TaskId,
+    client_operation_id: Name,
+    request_digest: Digest,
+    admission_revision: u64,
+    occurrence: Digest,
+    attempt: Digest,
+    original_occurrence: Reference,
+    original_attempt: Reference,
+    original_capture: ?Reference = null,
+    request: Reference,
+    prepared: ?Reference,
+    profile: Reference,
+    resources: contracts.Vector(Reference, null),
+    capability: Name,
+    mechanism: Name,
+    mechanism_version: u32,
+    provenance: enum { none, rederived, authentic, authoritative },
+    outcome: union(enum) {
+        unresolved: enum { unsupported, unavailable, interrupted, inconclusive, rejected },
+        capture_admitted: Reference,
+        reply_settled: Reference,
+        pending,
+        not_sent: Reference,
+    },
+    previous: ?Reference = null,
+    selection: RecoveryRequest = .rederive,
+    owner_epoch: ?Digest = null,
+    evidence: ?Reference = null,
+};
+
+/// Decode historical owners instead of trusting dependency rows or treating
+/// their content hashes as sufficient proof of the retained closure.
+pub fn visitReconciliationHistory(a: std.mem.Allocator, store: anytype, current: Reconciliation, collector: anytype) anyerror!void {
+    if (current.version != 1 or current.admission_revision == 0) return error.CorruptState;
+    const occurrence_bytes = try store.object(a, current.original_occurrence, null);
+    defer a.free(occurrence_bytes);
+    var original = try contracts.decodeOwned(occurrence.Occurrence, a, occurrence_bytes);
+    defer original.deinit();
+    if (!std.meta.eql(original.value.task, current.task) or !std.meta.eql(original.value.id, current.occurrence) or original.value.state != .unknown or !std.meta.eql(original.value.state.unknown.id, current.attempt) or !std.meta.eql(original.value.request_object, current.request)) return error.CorruptState;
+    try collector.typed(occurrence.Occurrence, current.original_occurrence, original.value);
+    const attempt_bytes = try store.object(a, current.original_attempt, null);
+    defer a.free(attempt_bytes);
+    var attempt = try contracts.decodeOwned(Attempt, a, attempt_bytes);
+    defer attempt.deinit();
+    if (!std.meta.eql(attempt.value.task, current.task) or !std.meta.eql(attempt.value.id, current.attempt) or !std.meta.eql(attempt.value.occurrence, current.occurrence) or !std.meta.eql(attempt.value.request, current.request) or !std.meta.eql(attempt.value.prepared, current.prepared) or !std.meta.eql(attempt.value.profile, current.profile) or !std.mem.eql(u8, attempt.value.capability.bytes, current.capability.bytes)) return error.CorruptState;
+    try collector.typed(Attempt, current.original_attempt, attempt.value);
+    if (current.original_capture) |ref| {
+        const bytes = try store.object(a, ref, null);
+        defer a.free(bytes);
+        var captured = try contracts.decodeOwned(Capture, a, bytes);
+        defer captured.deinit();
+        if (!std.meta.eql(captured.value.task, current.task) or !std.meta.eql(captured.value.attempt, current.attempt) or !std.meta.eql(captured.value.occurrence, current.occurrence) or current.prepared == null or !std.meta.eql(captured.value.request, current.prepared.?) or captured.value.projection != null) return error.CorruptState;
+        try collector.typed(Capture, ref, captured.value);
+    }
+    if (current.selection == .rederive and current.evidence != null) return error.CorruptState;
+    switch (current.outcome) {
+        .pending => if (current.owner_epoch == null or current.provenance != .none or current.previous != null or current.evidence != null) return error.CorruptState,
+        .unresolved => if (current.provenance != .none) return error.CorruptState,
+        .capture_admitted, .reply_settled => {
+            const provenance: @FieldType(Reconciliation, "provenance") = if (current.selection == .rederive) .rederived else .authentic;
+            if (current.provenance != provenance) return error.CorruptState;
+            if (current.owner_epoch == null) return error.CorruptState;
+            if (current.outcome == .capture_admitted and current.prepared == null) return error.CorruptState;
+            if (current.selection == .lookup and (current.evidence == null or current.owner_epoch == null)) return error.CorruptState;
+        },
+        .not_sent => |proof| if (current.selection != .lookup or current.provenance != .authoritative or current.evidence == null or !std.meta.eql(proof, current.evidence.?) or current.owner_epoch == null) return error.CorruptState,
+    }
+    if (current.outcome != .pending and current.owner_epoch != null and current.previous == null) return error.CorruptState;
+    if (current.previous) |ref| {
+        const bytes = try store.object(a, ref, null);
+        defer a.free(bytes);
+        var prior = try contracts.decodeOwned(Reconciliation, a, bytes);
+        defer prior.deinit();
+        // The transition graph is acyclic: pending -> completed, and then
+        // capture_admitted -> reply_settled. No history-depth quota is needed.
+        if (prior.value.outcome == .pending) {
+            if (current.outcome == .pending or (current.outcome == .reply_settled and current.selection != .rederive)) return error.CorruptState;
+        } else if (prior.value.outcome == .capture_admitted) {
+            if (current.outcome != .reply_settled or current.provenance != prior.value.provenance or !std.meta.eql(current.evidence, prior.value.evidence)) return error.CorruptState;
+        } else return error.CorruptState;
+        var normalized = current;
+        normalized.outcome = prior.value.outcome;
+        normalized.previous = prior.value.previous;
+        normalized.provenance = prior.value.provenance;
+        normalized.evidence = prior.value.evidence;
+        const expected = try contracts.encodeOwned(Reconciliation, a, normalized);
+        defer a.free(expected);
+        if (!std.mem.eql(u8, expected, bytes)) return error.CorruptState;
+        try collector.typed(Reconciliation, ref, prior.value);
+        try visitReconciliationHistory(a, store, prior.value, collector);
+    }
+}
 
 pub const Origin = struct {
     id: Digest,

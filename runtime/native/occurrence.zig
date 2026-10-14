@@ -110,6 +110,28 @@ pub fn captured(value: Occurrence, binding: Binding, attempt: Digest) Error!Occu
     return next;
 }
 
+/// The Service calls this only after compiled recovery has supplied evidence.
+/// Ordinary capture, dispatch, cancel, and rearm cannot use this transition.
+pub fn recoveredCapture(value: Occurrence, binding: Binding, attempt: Digest) Error!Occurrence {
+    try current(value, binding);
+    if (value.state != .unknown) return error.UnsettledOccurrence;
+    if (!equal(value.state.unknown.id, attempt)) return error.StaleOccurrence;
+    var next = value;
+    next.state = .{ .captured = .{ .id = attempt } };
+    return next;
+}
+
+/// Only the recovery admission owner may publish authoritative non-invocation
+/// proof. This preserves the attempt; explicit resume creates its successor.
+pub fn recoveredNotSent(value: Occurrence, binding: Binding, attempt: Digest) Error!Occurrence {
+    try current(value, binding);
+    if (value.state != .unknown) return error.UnsettledOccurrence;
+    if (!equal(value.state.unknown.id, attempt)) return error.StaleOccurrence;
+    var next = value;
+    next.state = .{ .not_sent = .{ .id = attempt } };
+    return next;
+}
+
 pub fn answered(value: Occurrence, binding: Binding, question: Digest, pending_digest: Digest, answer: Digest, reply: Digest, cancellation_pending: bool) Error!Occurrence {
     try current(value, binding);
     if (cancellation_pending) return error.CancellationPending;
@@ -200,4 +222,20 @@ test "durable raw capture can only advance through interpretation, never redispa
     try std.testing.expectError(error.StaleOccurrence, acquired(raw, binding, @splat(5), @splat(6)));
     const reply = try acquired(raw, binding, @splat(4), @splat(6));
     try std.testing.expect((try consumed(reply, binding, .{ .reply = @splat(6) }, true)).state == .admitted);
+}
+
+test "recovery capture admission binds the original unknown attempt" {
+    const binding: Binding = .{ .id = @splat(1), .task = @splat(2), .request = @splat(3) };
+    const initial: Occurrence = .{ .id = binding.id, .task = binding.task, .request = binding.request, .request_object = .{ .digest = @splat(0), .bytes = 0 } };
+    const sent = try dispatch(initial, binding, @splat(4), false, false);
+    try std.testing.expectError(error.UnsettledOccurrence, recoveredCapture(sent, binding, @splat(4)));
+    const lost = try unknown(sent, binding, @splat(4));
+    try std.testing.expectError(error.UnsettledOccurrence, captured(lost, binding, @splat(4)));
+    try std.testing.expectError(error.StaleOccurrence, recoveredCapture(lost, binding, @splat(5)));
+    const recovered = try recoveredCapture(lost, binding, @splat(4));
+    try std.testing.expect(recovered.state == .captured);
+    try std.testing.expectError(error.UnsettledOccurrence, recoveredCapture(recovered, binding, @splat(4)));
+    try std.testing.expectError(error.UnsettledOccurrence, consumed(recovered, binding, .cancel, true));
+    try std.testing.expectError(error.UnsettledOccurrence, rearm(recovered, binding));
+    try std.testing.expect((try acquired(recovered, binding, @splat(4), @splat(6))).state == .settled_reply);
 }

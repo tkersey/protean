@@ -214,6 +214,7 @@ pub fn build(b: *std.Build) void {
     const native_checks = b.step("check-native", "Check native and custody contracts against the selected Kosmos");
     const native_product = b.step("check-native-product", "Qualify the native adaptive application on the selected supported platform");
     const native_consumer = b.step("check-native-https", "Check native HTTPS against an independent endpoint");
+    const scheduler_benchmark = b.step("bench-native-scheduler", "Measure idle Service scans with a held worker");
     native_checks.dependOn(native_product);
     native_product.dependOn(native_consumer);
     if (native_enabled) {
@@ -351,13 +352,15 @@ pub fn build(b: *std.Build) void {
         // These roots share exact module identities; compile their retained
         // tests together instead of rebuilding the same compiler eleven times.
         const native_suite = native_graph.module("test/protean/native_tests.zig");
-        // Keep unit assertions and safety checks without optimizing test code.
-        // The deployed applications and public API/HTTPS probe remain safe.
+        // Keep the general suite on the fast compilation path.
         native_suite.optimize = .debug;
         native_suite.strip = optimize != .debug;
         native_suite.addImport("kosmos", checked_kosmos);
         native_suite.addImport("protean_native", checked_environment);
         const adaptive_test_types = native_graph.module("examples/adaptive/types.zig");
+        const adaptive_report = native_graph.module("examples/adaptive/report.zig");
+        adaptive_report.addImport("application_types", adaptive_test_types);
+        native_suite.addImport("adaptive_report", adaptive_report);
         const adaptive_test_environment = native_graph.module("examples/adaptive/environment.zig");
         adaptive_test_environment.addImport("application_types", adaptive_test_types);
         adaptive_test_environment.addImport("protean_native", checked_environment);
@@ -367,6 +370,31 @@ pub fn build(b: *std.Build) void {
         native_suite.addAnonymousImport("adaptive_application", .{ .root_source_file = adaptive_application });
         native_suite.addImport("native_asset_writer", native_graph.module("tools/native/emit.zig"));
         native_graph.testModule(native_product, native_suite);
+        // Reuse the fixture's complete import graph; keep the measured root in
+        // the requested optimization mode rather than the general suite's Debug.
+        const scheduler_module = b.allocator.create(std.Build.Module) catch @panic("out of memory");
+        scheduler_module.init(b, .{ .existing = native_suite });
+        scheduler_module.root_source_file = b.path("test/protean/native_scheduler_benchmark.zig");
+        scheduler_module.optimize = optimize;
+        const scheduler_tests = b.addTest(.{
+            .root_module = scheduler_module,
+            .filters = &.{"native scheduler backlog benchmark"},
+        });
+        scheduler_tests.step.dependOn(&native_guard.step);
+        const scheduler_run = b.addRunArtifact(scheduler_tests);
+        scheduler_run.has_side_effects = true;
+        scheduler_benchmark.dependOn(&scheduler_run.step);
+        // History validation dominates test execution. Optimize its existing
+        // cases with LLVM while preserving the requested mode, including Debug.
+        const adaptive_response_suite = native_graph.module("test/protean/adaptive_responses.zig");
+        adaptive_response_suite.strip = optimize != .debug;
+        adaptive_response_suite.addImport("protean_native", checked_environment);
+        const adaptive_response_tests = b.addTest(.{
+            .root_module = adaptive_response_suite,
+            .use_llvm = if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) optimize != .debug else null,
+        });
+        adaptive_response_tests.step.dependOn(native_graph.gate);
+        native_product.dependOn(&b.addRunArtifact(adaptive_response_tests).step);
         // Zig does not collect test declarations from named dependency modules.
         // Run the runtime's own root explicitly; the integration root above
         // independently exercises its public task owner with authored programs.
@@ -374,10 +402,31 @@ pub fn build(b: *std.Build) void {
         native_unit_tests.init(b, .{ .existing = checked_environment });
         native_unit_tests.optimize = .debug;
         native_graph.testModule(native_product, native_unit_tests);
+        const crash_module = native_graph.module("test/protean/native_recovery_crash.zig");
+        crash_module.optimize = .debug;
+        crash_module.strip = optimize != .debug;
+        crash_module.addImport("kosmos", checked_kosmos);
+        crash_module.addImport("protean_native", checked_environment);
+        // Private history/Worker access stays in the test graph. The Node
+        // controller owns process death and independent reopen.
+        const crash_probe = b.addTest(.{
+            .name = "protean-recovery-crash",
+            .root_module = crash_module,
+            .filters = &.{"process-crash-controller-only"},
+            .use_llvm = if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) false else null,
+        });
+        crash_probe.step.dependOn(&native_guard.step);
+        const crash_check = nodeCommand(b);
+        crash_check.addArgs(&.{ "node", "test/protean/native_recovery_crash.mjs" });
+        crash_check.addFileArg2(crash_probe.getEmittedBin(), .{ .make_absolute = true });
+        crash_check.has_side_effects = true;
+        b.step("check-native-recovery-crash", "Kill and reopen native occurrence/recovery owners at durable boundaries").dependOn(&crash_check.step);
+        native_product.dependOn(&crash_check.step);
     } else {
         const missing = b.addFail("enable -Dnative=true with authenticated Kosmos and SQLite sources");
         native_checks.dependOn(&missing.step);
         native_consumer.dependOn(&missing.step);
+        scheduler_benchmark.dependOn(&missing.step);
     }
     const pure = nodeCommand(b);
     pure.addArgs(&.{ "node", "--test", "test/protean/values.test.mjs" });
@@ -392,6 +441,7 @@ pub fn build(b: *std.Build) void {
 fn nativeEnvironment(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, kosmos: *std.Build.Module, data: *std.Build.Module, contracts: *std.Build.Module, admission: *std.Build.Module, sqlite_source: std.Build.LazyPath, gate: *std.Build.Step) *std.Build.Module {
     const options = b.addOptions();
     options.addOption(u32, "state_format", @import("build_native.zig").state_format);
+    options.addOption([]const u8, "host_version", @import("build.zig.zon").version);
     // The exact admitted 0.17 compiler still supplies build-time translate-c.
     // Keep translation bound to that target/compiler tuple; @cImport is gone.
     const translated = b.addTranslateC(.{

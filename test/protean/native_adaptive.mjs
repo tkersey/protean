@@ -5,6 +5,8 @@ import {join} from 'node:path';
 import {deployment} from './native_deployment.mjs';
 import {readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
+import {DatabaseSync} from 'node:sqlite';
+import {ProteanClient} from '../support/stdio-client.mts';
 import {verifyAdaptiveNative} from './adaptive_native_peer.mjs';
 
 const image = readFileSync(process.argv[4]), application = JSON.parse(readFileSync(process.argv[3], 'utf8'));
@@ -22,7 +24,28 @@ try {
   const manifest = invoke('describe-build');
   assert.equal(manifest.format, 'agent-native-build/v2');
   assert.equal(manifest.application_id, 'adaptive-agent');
-  assert.equal(manifest.protocol, 'agent-host/2.0');
+  assert.equal(manifest.protocol, 'agent-host/2.1');
+  assert.equal(manifest.client_mapping, 'agent-client-values/1.1');
+  assert.equal(application.client_mapping, 'agent-client-values/1.1');
+  const retiredState = join(app.data, 'retired client');
+  const retired = new ProteanClient(app.command, ['--offline', '--state-dir', retiredState], {cwd: app.data, env: {PATH: '/nonexistent'}});
+  try {
+    await assert.rejects(retired.initialize(['agent-host/2.0']), error => {
+      assert.equal(error.data?.kind, 'ProtocolState');
+      assert.deepEqual(error.data.supported_versions, ['agent-host/2.1']);
+      return true;
+    });
+  } finally { await retired.close(); }
+  // A rejection fixture, not a historical task or migration witness. Exercise
+  // the executable's namespace-open error path before any task is admitted.
+  const retiredDb = new DatabaseSync(join(retiredState, 'state.sqlite'));
+  try { retiredDb.exec('PRAGMA ignore_check_constraints=ON; UPDATE meta SET format=11;'); }
+  finally { retiredDb.close(); }
+  const unsupported = spawnSync(app.command, ['status', '--offline', '--state-dir', retiredState], {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 30_000});
+  assert.equal(unsupported.status, 74, unsupported.error ?? unsupported.stderr);
+  assert.equal(unsupported.stdout, '');
+  assert.equal(unsupported.stderr, 'protean: unsupported state format; use a fresh state directory for this release\n');
+
   assert.equal(manifest.compiler.version, '0.17.0');
   assert.equal(manifest.artifact_sha256, createHash('sha256').update(readFileSync(app.executable)).digest('hex'));
   assert.equal(manifest.program_sha256, application.program_sha256);
@@ -33,7 +56,7 @@ try {
   assert(!JSON.stringify(manifest).includes(process.cwd()));
   const result = invoke('demo', '--offline', '--state-dir', join(app.data, 'adaptive state'));
   assert.equal(result.mode, 'offline-demo');
-  assert.equal(result.output.disposition, 'report');
+  assert.equal(result.output.result.tag, 'report');
   assert.equal(result.output.model_calls, '14');
   assert.equal(result.output.work_calls, '5');
   assert.equal(result.output.control.selection.profile_id, 'analysis');

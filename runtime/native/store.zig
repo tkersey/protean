@@ -42,6 +42,7 @@ pub fn Record(comptime kind: []const u8) type {
         .artifact => state.Artifact,
         .capture => state.Capture,
         .attempt => state.Attempt,
+        .reconciliation => state.Reconciliation,
         .origin => state.Origin,
     };
 }
@@ -51,6 +52,15 @@ pub const Store = struct {
     head: Head,
     transaction: bool = false,
     fenced: bool = false,
+    /// Independent of append generations: unrelated owner commits preserve
+    /// validation facts, while a loss of custody invalidates all of them.
+    integrity_epoch: u64 = 1,
+    data_version: u64 = 0,
+    sealed_generation: ?u64 = null,
+    projecting: bool = false,
+    context_cache: @import("adaptive_context.zig").Cache = .{},
+    retention_epoch: ?u64 = null,
+    retention_image: ?Digest = null,
 
     /// The namespace owner has already authenticated the directory, acquired
     /// its OS lock and decided whether this is a new or existing database.
@@ -62,6 +72,12 @@ pub const Store = struct {
             errdefer database.exec("ROLLBACK;") catch {};
             try database.exec(std.fmt.comptimePrint("CREATE TABLE meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1), format INTEGER NOT NULL CHECK(format={d}), namespace BLOB NOT NULL, generation INTEGER NOT NULL, parent BLOB NOT NULL, head BLOB NOT NULL);", .{format}) ++
                 \\CREATE TABLE objects(digest BLOB PRIMARY KEY CHECK(length(digest)=32), body BLOB NOT NULL);
+                \\CREATE TABLE dependencies(parent BLOB NOT NULL REFERENCES objects(digest), parent_bytes INTEGER NOT NULL CHECK(parent_bytes>=0), child BLOB NOT NULL REFERENCES objects(digest), child_bytes INTEGER NOT NULL CHECK(child_bytes>=0), PRIMARY KEY(parent,child)) WITHOUT ROWID;
+                \\CREATE INDEX dependency_children ON dependencies(child,parent);
+                \\CREATE TRIGGER dependency_lengths BEFORE INSERT ON dependencies BEGIN
+                \\  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM objects WHERE digest=NEW.parent AND length(body)=NEW.parent_bytes) OR NOT EXISTS(SELECT 1 FROM objects WHERE digest=NEW.child AND length(body)=NEW.child_bytes) THEN RAISE(ABORT,'invalid dependency length') END;
+                \\END;
+                \\CREATE TRIGGER retained_object_immutable BEFORE UPDATE ON objects WHEN EXISTS(SELECT 1 FROM dependencies WHERE parent=OLD.digest OR child=OLD.digest) OR EXISTS(SELECT 1 FROM tasks WHERE body=OLD.digest) OR EXISTS(SELECT 1 FROM records WHERE body=OLD.digest) OR EXISTS(SELECT 1 FROM events WHERE body=OLD.digest) OR EXISTS(SELECT 1 FROM operations WHERE receipt=OLD.digest) BEGIN SELECT RAISE(ABORT,'retained object is immutable'); END;
                 \\CREATE TABLE tasks(id BLOB PRIMARY KEY CHECK(length(id)=16), revision INTEGER NOT NULL, terminal INTEGER NOT NULL CHECK(terminal IN(0,1)), body BLOB NOT NULL REFERENCES objects(digest)) WITHOUT ROWID;
                 \\CREATE TABLE operations(id TEXT PRIMARY KEY, request BLOB NOT NULL CHECK(length(request)=32), receipt BLOB NOT NULL REFERENCES objects(digest), task BLOB NOT NULL CHECK(length(task)=16)) WITHOUT ROWID;
                 \\CREATE INDEX operation_tasks ON operations(task,id);
@@ -73,29 +89,214 @@ pub const Store = struct {
         }
         var query = try database.prepare("SELECT format,namespace,generation,parent,head FROM meta WHERE singleton=1", &.{});
         defer query.deinit();
-        if (try query.step() != .row or try query.integer(0) != format or !std.mem.eql(u8, try query.bytes(1), &namespace)) return error.CorruptState;
+        if (try query.step() != .row) return error.CorruptState;
+        if (try query.integer(0) != format) return error.UnsupportedStateFormat;
+        if (!std.mem.eql(u8, try query.bytes(1), &namespace)) return error.CorruptState;
         const generation = try query.integer(2);
         if (generation < 0) return error.CorruptState;
         const parent = try query.bytes(3);
         const head = try query.bytes(4);
         if (parent.len != 32 or head.len != 32) return error.CorruptState;
-        return .{ .allocator = a, .database = database, .head = .{ .generation = @intCast(generation), .parent = parent[0..32].*, .digest = head[0..32].* } };
+        var store: Store = .{ .allocator = a, .database = database, .head = .{ .generation = @intCast(generation), .parent = parent[0..32].*, .digest = head[0..32].* } };
+        store.data_version = try store.scalar("PRAGMA data_version");
+        return store;
+    }
+
+    /// Supported replacement/corruption hooks must call this before mutation.
+    /// Invalidating custody never grants validation authority for the new epoch.
+    pub fn invalidateIntegrity(self: *Store) void {
+        self.context_cache.deinit(self.allocator);
+        self.retention_epoch = null;
+        self.retention_image = null;
+        self.sealed_generation = null;
+        self.integrity_epoch = std.math.add(u64, self.integrity_epoch, 1) catch {
+            self.fenced = true;
+            return;
+        };
+    }
+    pub fn fence(self: *Store) void {
+        if (!self.fenced) self.invalidateIntegrity();
+        self.fenced = true;
+    }
+    fn corrupt(self: *Store) error{CorruptState} {
+        self.fence();
+        return error.CorruptState;
+    }
+    pub fn checkIntegrity(self: *Store) !void {
+        if (self.fenced) return error.StorageUnavailable;
+        errdefer self.fence();
+        if (try self.scalar("PRAGMA data_version") != self.data_version) return error.CorruptState;
+    }
+    /// Namespace calls this only after verifying or durably publishing its seal.
+    /// SQL commit alone cannot make a new head available for validation reuse.
+    pub fn confirmSealed(self: *Store, head: Head) !void {
+        try self.checkIntegrity();
+        if (self.transaction or !std.meta.eql(head, self.head)) return error.InvalidState;
+        self.sealed_generation = head.generation;
+    }
+    /// Publication custody only; callers must separately validate the complete
+    /// dependency closure before retaining any semantic validation facts.
+    pub fn publicationEpoch(self: *Store) !u64 {
+        try self.checkIntegrity();
+        if (self.transaction or self.sealed_generation != self.head.generation) return error.InvalidState;
+        return self.integrity_epoch;
+    }
+    /// Reconstruct dependency closure under one database snapshot. Reopening,
+    /// import and explicit audit never trust serialized retention metadata.
+    pub fn auditRetention(self: *Store, handlers: @import("registry.zig").Registry, image: Digest) !@import("retention.zig").Statistics {
+        const opened = !self.transaction;
+        if (opened) try self.begin();
+        defer if (opened) self.rollback();
+        const statistics = @import("retention.zig").verify(self, handlers) catch |err| {
+            if (err != error.OutOfMemory and err != error.Capacity) self.fence();
+            return err;
+        };
+        if (opened and self.sealed_generation == self.head.generation) {
+            self.retention_epoch = self.integrity_epoch;
+            self.retention_image = image;
+        }
+        return statistics;
+    }
+
+    pub fn deinit(self: *Store) void {
+        self.context_cache.deinit(self.allocator);
+    }
+
+    /// Run a pure projection under one read snapshot, releasing it before the
+    /// caller can publish or dispatch environmental work. Import may borrow its
+    /// existing transaction, but projection code still cannot write through the
+    /// Store. A sealed view reconstructs missing cold retention facts through
+    /// the registered codecs before projection. Transaction-scoped import/audit
+    /// views still validate fully and cannot create reusable semantic facts.
+    /// Results belong to the caller's arena; the view cannot escape this call.
+    pub fn project(self: *Store, comptime Result: type, a: std.mem.Allocator, handlers: @import("registry.zig").Registry, binding: @import("registry.zig").ProjectionBinding, operation: anytype) anyerror!Result {
+        if (!self.transaction and self.sealed_generation == self.head.generation and
+            (self.retention_epoch != self.integrity_epoch or self.retention_image == null or
+                !std.meta.eql(self.retention_image.?, binding.application)))
+            _ = try self.auditRetention(handlers, binding.application);
+        var scope = try ProjectionScope.open(self, binding);
+        const result = operation.run(@as(@import("registry.zig").ProjectionContext, .{
+            .allocator = a,
+            .task = binding.task,
+            .tenant = binding.tenant,
+            .profile = binding.profile,
+            .application = binding.application,
+            .resources = binding.resources,
+            .objects = .{ .source = &scope, .read_object = ProjectionScope.read, .native_scope = &scope },
+        }));
+        // Check and release even when the pure adapter failed. A malformed
+        // proposed descendant does not invalidate intact committed ancestors.
+        try scope.finish();
+        return result;
+    }
+
+    const ProjectionScope = struct {
+        store: *Store,
+        epoch: u64,
+        opened: bool,
+        binding: @import("registry.zig").ProjectionBinding,
+
+        fn open(self: *Store, binding: @import("registry.zig").ProjectionBinding) !ProjectionScope {
+            if (self.projecting) return error.Busy;
+            try self.checkIntegrity();
+            const opened = !self.transaction;
+            if (opened) try self.database.exec("BEGIN;");
+            errdefer if (opened) self.database.exec("ROLLBACK;") catch self.fence();
+            // BEGIN alone is deferred. Reading the head establishes the actual
+            // snapshot/shared lock before the external-change check.
+            if (try self.scalar("SELECT generation FROM meta WHERE singleton=1") != self.head.generation) return self.corrupt();
+            try self.checkIntegrity();
+            self.projecting = true;
+            return .{ .store = self, .epoch = self.integrity_epoch, .opened = opened, .binding = binding };
+        }
+
+        fn read(source: *anyopaque, a: std.mem.Allocator, ref: state.Reference, limit: usize) ![]u8 {
+            const scope: *ProjectionScope = @ptrCast(@alignCast(source));
+            if (!scope.store.projecting or scope.store.fenced or scope.epoch != scope.store.integrity_epoch) return error.InvalidState;
+            const bytes = try scope.store.object(a, ref, limit);
+            scope.store.context_cache.object_reads +|= 1;
+            scope.store.context_cache.object_bytes +|= bytes.len;
+            return bytes;
+        }
+
+        fn finish(self: *ProjectionScope) !void {
+            const owner = self.store;
+            defer owner.projecting = false;
+            if (self.opened) owner.database.exec("ROLLBACK;") catch |err| {
+                owner.fence();
+                return err;
+            };
+            try owner.checkIntegrity();
+            if (self.epoch != owner.integrity_epoch) return error.InvalidState;
+        }
+    };
+
+    /// Called only by ReadView and the pure context validator. The scoped view
+    /// selects custody; adapters cannot populate the validation cache.
+    pub fn validateContext(comptime P: type, source: ?*anyopaque, ctx: @import("registry.zig").ProjectionContext, reference: anytype, audience: []const u8, catalog: P.AdaptiveCatalog, reader: *@import("adaptive_history.zig").History(P).Reader) !*@import("adaptive_context.zig").Projection(P).ValidatedContext {
+        var owner: ?*Store = null;
+        if (source) |pointer| {
+            const scope: *ProjectionScope = @ptrCast(@alignCast(pointer));
+            const store = scope.store;
+            if (!store.projecting or store.fenced or scope.epoch != store.integrity_epoch) return error.InvalidState;
+            if (ctx.objects.source != pointer or ctx.objects.read_object != ProjectionScope.read or
+                reader.ctx.objects.source != pointer or reader.ctx.objects.read_object != ProjectionScope.read) return error.InvalidContext;
+            if (!std.meta.eql(ctx.task, scope.binding.task) or !std.mem.eql(u8, ctx.tenant, scope.binding.tenant) or
+                !std.mem.eql(u8, ctx.profile, scope.binding.profile) or ctx.application == null or
+                !std.meta.eql(ctx.application.?, scope.binding.application)) return error.InvalidContext;
+            if (scope.opened and store.sealed_generation == store.head.generation and
+                store.retention_epoch == scope.epoch and store.retention_image != null and
+                std.meta.eql(store.retention_image.?, scope.binding.application)) owner = store;
+        }
+        return @import("adaptive_context.zig").Projection(P).validate(ctx, reference, audience, catalog, reader, owner);
+    }
+
+    pub fn recordHistoryRead(source: *anyopaque, bytes: usize) void {
+        const scope: *ProjectionScope = @ptrCast(@alignCast(source));
+        scope.store.context_cache.history_bytes +|= bytes;
+    }
+
+    /// Derive expected edges from the exact decoded codec, never from an
+    /// imported edge list. A context lease requires this check for every newly
+    /// admitted root and history chunk before trusting their retained closure.
+    pub fn checkDependencies(self: *Store, comptime T: type, comptime Ref: type, parent: state.Reference, value: T) !void {
+        var sink = struct {
+            store: *Store,
+            parent: state.Reference,
+            pub fn add(this: *@This(), child: state.Reference) !void {
+                var row = try this.store.database.prepare("SELECT parent_bytes,child_bytes FROM dependencies WHERE parent=? AND child=?", &.{ .{ .blob = &this.parent.digest }, .{ .blob = &child.digest } });
+                defer row.deinit();
+                if (try row.step() != .row or try row.integer(0) != this.parent.bytes or try row.integer(1) != child.bytes) return this.store.corrupt();
+            }
+            pub fn reply(_: *@This(), _: occurrence.Acquired) !void {
+                @compileError("context dependencies cannot contain host occurrence replies");
+            }
+        }{ .store = self, .parent = parent };
+        try state.visitReferencesAs(T, Ref, value, &sink);
     }
 
     pub fn begin(self: *Store) !void {
         if (self.fenced) return error.StorageUnavailable;
-        if (self.transaction) return error.Busy;
+        if (self.transaction or self.projecting) return error.Busy;
         try self.database.exec("BEGIN IMMEDIATE;");
         self.transaction = true;
+        errdefer self.rollback();
+        // Acquire the writer lock before checking. Another connection cannot
+        // slip a change between this custody check and authoritative writes.
+        try self.checkIntegrity();
     }
     pub fn rollback(self: *Store) void {
         if (!self.transaction) return;
+        // A borrowed import snapshot must not silently disappear beneath a
+        // projection. Ordinary rollback after project returns preserves custody.
+        if (self.projecting) self.fence();
         self.database.exec("ROLLBACK;") catch {
-            self.fenced = true;
+            self.fence();
         };
         self.transaction = false;
     }
     fn writing(self: *Store) !void {
+        if (self.projecting) return error.Busy;
         if (self.fenced or !self.transaction) return error.InvalidState;
     }
 
@@ -115,15 +316,16 @@ pub const Store = struct {
         hash.final(&next.digest);
         try self.database.run("UPDATE meta SET generation=?,parent=?,head=? WHERE singleton=1 AND generation=? AND head=?", &.{ .{ .integer = @intCast(next.generation) }, .{ .blob = &next.parent }, .{ .blob = &next.digest }, .{ .integer = @intCast(self.head.generation) }, .{ .blob = &self.head.digest } });
         if (try self.database.changes() != 1) {
-            self.fenced = true;
+            self.fence();
             return error.CorruptState;
         }
         self.database.exec("COMMIT;") catch |err| {
-            self.fenced = true;
+            self.fence();
             return err;
         };
         self.transaction = false;
         self.head = next;
+        self.sealed_generation = null;
         return next;
     }
     fn scalar(self: *Store, comptime sql: [:0]const u8) !u64 {
@@ -236,7 +438,7 @@ pub const Store = struct {
         try blob.close();
         var observed: Digest = undefined;
         hash_abi.protean_native_sha256_final(&hash, &observed);
-        if (!std.mem.eql(u8, &observed, &ref.digest)) return error.CorruptState;
+        if (!std.mem.eql(u8, &observed, &ref.digest)) return self.corrupt();
     }
     /// Private occurrence lookup. Public artifact reads require a separate
     /// task/audience-bound artifact record, never a bare content digest.
@@ -256,7 +458,7 @@ pub const Store = struct {
         }
         closed = true;
         try blob.close();
-        if (!std.mem.eql(u8, &digest(bytes), &id)) return error.CorruptState;
+        if (!std.mem.eql(u8, &digest(bytes), &id)) return self.corrupt();
         return bytes;
     }
     fn objectLocation(self: *Store, id: Digest, limit: ?usize) !struct { row: i64, bytes: usize } {
@@ -300,20 +502,78 @@ pub const Store = struct {
     }
     pub fn putReceipt(self: *Store, id: []const u8, request: Digest, bytes: []const u8) !void {
         try self.writing();
+        errdefer self.rollback();
         if (id.len == 0 or id.len > 128) return error.Capacity;
         var decoded = try contracts.decodeOwned(state.Receipt, self.allocator, bytes);
         defer decoded.deinit();
         if (!std.mem.eql(u8, &decoded.value.request_digest, &request)) return error.CorruptState;
         const ref = try self.putObject(bytes);
+        try self.retainValue(state.Receipt, ref, decoded.value);
         try self.database.run("INSERT INTO operations VALUES(?,?,?,?)", &.{ .{ .text = id }, .{ .blob = &request }, .{ .blob = &ref.digest }, .{ .blob = &decoded.value.task } });
+    }
+
+    /// The selected registry entry supplies a pure, compiled codec. Adapters
+    /// receive no Store capability, and Projection carries no asserted edges.
+    pub fn retainProjection(self: *Store, decode: @import("registry.zig").DependencyDecoder, objects: []const []const u8) !void {
+        try self.writing();
+        errdefer self.rollback();
+        const dependencies = try decode(self.allocator, objects);
+        defer self.allocator.free(dependencies);
+        var parents: std.AutoHashMap(Digest, u64) = .init(self.allocator);
+        defer parents.deinit();
+        for (objects) |bytes| try parents.put(digest(bytes), bytes.len);
+        for (dependencies) |edge| {
+            if ((parents.get(edge.parent.digest) orelse return error.InvalidProjection) != edge.parent.bytes) return error.InvalidProjection;
+            try self.retainReference(edge.parent, edge.child);
+        }
+    }
+
+    fn retainReference(self: *Store, parent: state.Reference, child: state.Reference) !void {
+        try self.writing();
+        if (parent.bytes > std.math.maxInt(i64) or child.bytes > std.math.maxInt(i64)) return error.Capacity;
+        try self.database.run("INSERT OR IGNORE INTO dependencies VALUES(?,?,?,?)", &.{ .{ .blob = &parent.digest }, .{ .integer = @intCast(parent.bytes) }, .{ .blob = &child.digest }, .{ .integer = @intCast(child.bytes) } });
+    }
+    fn retainValue(self: *Store, comptime T: type, parent: state.Reference, value: T) !void {
+        try self.retainValueDirect(T, parent, value);
+        if (T == state.Reconciliation) {
+            var history = struct {
+                store: *Store,
+                pub fn typed(this: *@This(), comptime V: type, ref: state.Reference, item: V) !void {
+                    try this.store.retainValueDirect(V, ref, item);
+                }
+            }{ .store = self };
+            try state.visitReconciliationHistory(self.allocator, self, value, &history);
+        }
+    }
+    fn retainValueDirect(self: *Store, comptime T: type, parent: state.Reference, value: T) !void {
+        var sink = struct {
+            store: *Store,
+            parent: state.Reference,
+            pub fn add(this: *@This(), child: state.Reference) !void {
+                try this.store.retainReference(this.parent, child);
+            }
+            pub fn reply(this: *@This(), acquired: occurrence.Acquired) !void {
+                try this.add(try this.store.objectReference(acquired.reply, null));
+            }
+        }{ .store = self, .parent = parent };
+        try state.visitReferences(T, value, &sink);
+    }
+    fn retainEncoded(self: *Store, comptime T: type, parent: state.Reference) !void {
+        const bytes = try self.object(self.allocator, parent, null);
+        defer self.allocator.free(bytes);
+        var decoded = try contracts.decodeOwned(T, self.allocator, bytes);
+        defer decoded.deinit();
+        try self.retainValue(T, parent, decoded.value);
     }
 
     pub fn putTask(self: *Store, task: state.Task, previous: ?u64) !void {
         try self.writing();
+        errdefer self.rollback();
         if (task.revision > std.math.maxInt(i64)) return error.Capacity;
         const body = try contracts.encodeOwned(state.Task, self.allocator, task);
         defer self.allocator.free(body);
         const ref = try self.putObject(body);
+        try self.retainValue(state.Task, ref, task);
         if (previous) |revision| {
             if (revision >= std.math.maxInt(i64) or task.revision != revision + 1) return error.StaleRevision;
             try self.database.run("UPDATE tasks SET revision=?,terminal=?,body=? WHERE id=? AND revision=?", &.{ .{ .integer = @intCast(task.revision) }, .{ .integer = @intFromBool(task.terminal()) }, .{ .blob = &ref.digest }, .{ .blob = &task.id }, .{ .integer = @intCast(revision) } });
@@ -338,18 +598,22 @@ pub const Store = struct {
         if (T != Record(kind)) @compileError("native record type/kind mismatch");
         if (comptime std.mem.eql(u8, kind, "artifact") or std.mem.eql(u8, kind, "attempt") or std.mem.eql(u8, kind, "origin")) @compileError("immutable native records are created once");
         try self.writing();
+        errdefer self.rollback();
         const body = try contracts.encodeOwned(T, self.allocator, value);
         defer self.allocator.free(body);
         const ref = try self.putObject(body);
+        try self.retainValue(T, ref, value);
         try self.database.run("UPDATE records SET body=? WHERE kind=? AND id=? AND task=?", &.{ .{ .blob = &ref.digest }, .{ .text = kind }, .{ .blob = &id }, .{ .blob = &task } });
         if (try self.database.changes() != 1) return error.CorruptState;
     }
     pub fn createRecord(self: *Store, comptime T: type, comptime kind: []const u8, id: Digest, task: state.TaskId, value: T) !void {
         if (T != Record(kind)) @compileError("native record type/kind mismatch");
         try self.writing();
+        errdefer self.rollback();
         const body = try contracts.encodeOwned(T, self.allocator, value);
         defer self.allocator.free(body);
         const ref = try self.putObject(body);
+        try self.retainValue(T, ref, value);
         try self.database.run("INSERT INTO records VALUES(?,?,?,?)", &.{ .{ .text = kind }, .{ .blob = &id }, .{ .blob = &task }, .{ .blob = &ref.digest } });
     }
     pub fn recordBytes(self: *Store, a: std.mem.Allocator, comptime kind: []const u8, id: Digest, task: state.TaskId) !?[]u8 {
@@ -479,14 +743,23 @@ pub const Store = struct {
     /// archived task ID and history; grants and resume remain caller-owned.
     pub fn restoreArchiveIndex(self: *Store, a: std.mem.Allocator, archive: state.Archive, task: state.Task) !void {
         try self.writing();
+        errdefer self.rollback();
+        self.invalidateIntegrity();
         if (self.head.generation != 0 or task.revision == 0 or task.revision > std.math.maxInt(i64) or try self.scalar("SELECT count(*) FROM tasks") != 0) return error.InvalidState;
         const bytes = try contracts.encodeOwned(state.Task, a, task);
         defer a.free(bytes);
         const body = try self.putObject(bytes);
+        try self.retainValue(state.Task, body, task);
         try self.database.run("INSERT INTO tasks VALUES(?,?,?,?)", &.{ .{ .blob = &task.id }, .{ .integer = @intCast(task.revision) }, .{ .integer = @intFromBool(task.terminal()) }, .{ .blob = &body.digest } });
-        for (archive.records.items) |row| try self.database.run("INSERT INTO records VALUES(?,?,?,?)", &.{ .{ .text = @tagName(row.kind) }, .{ .blob = &row.id }, .{ .blob = &task.id }, .{ .blob = &row.body.digest } });
+        for (archive.records.items) |row| {
+            inline for (@typeInfo(state.RecordKind).@"enum".field_names) |kind| {
+                if (row.kind == @field(state.RecordKind, kind)) try self.retainEncoded(Record(kind), row.body);
+            }
+            try self.database.run("INSERT INTO records VALUES(?,?,?,?)", &.{ .{ .text = @tagName(row.kind) }, .{ .blob = &row.id }, .{ .blob = &task.id }, .{ .blob = &row.body.digest } });
+        }
         for (archive.events.items) |row| {
             if (row.seq == 0 or row.seq > std.math.maxInt(i64) or row.revision == 0 or row.revision > task.revision) return error.CorruptState;
+            try self.retainEncoded(state.Event, row.body);
             try self.database.run("INSERT INTO events VALUES(?,?,?,?)", &.{ .{ .blob = &task.id }, .{ .integer = @intCast(row.seq) }, .{ .integer = @intCast(row.revision) }, .{ .blob = &row.body.digest } });
         }
         for (archive.operations.items) |row| {
@@ -497,11 +770,13 @@ pub const Store = struct {
     }
     pub fn putEvent(self: *Store, event: state.Event) !void {
         try self.writing();
+        errdefer self.rollback();
         if (event.seq == 0 or event.seq > std.math.maxInt(i64) or event.revision > std.math.maxInt(i64)) return error.Capacity;
         try @import("schemas.zig").validateEventData(self.allocator, event.kind, event.data.bytes);
         const body = try contracts.encodeOwned(state.Event, self.allocator, event);
         defer self.allocator.free(body);
         const ref = try self.putObject(body);
+        try self.retainValue(state.Event, ref, event);
         try self.database.run("INSERT INTO events VALUES(?,?,?,?)", &.{ .{ .blob = &event.task }, .{ .integer = @intCast(event.seq) }, .{ .integer = @intCast(event.revision) }, .{ .blob = &ref.digest } });
     }
     pub fn eventsAfter(self: *Store, a: std.mem.Allocator, task: state.TaskId, after: u64, limit: u32) ![][]u8 {
@@ -558,10 +833,17 @@ test "objects and immutable admission receipts commit together or disappear toge
     const reopened = try Store.init(a, db, false, @splat(7));
     try std.testing.expectEqualDeep(head, reopened.head);
     try std.testing.expectError(error.CorruptState, Store.init(a, db, false, @splat(8)));
+    store.invalidateIntegrity();
     try db.run("UPDATE operations SET task=? WHERE id='request-1'", &.{.{ .blob = &@as(state.TaskId, @splat(3)) }});
     try std.testing.expectError(error.CorruptState, store.receipt(a, "request-1", digest("submit/input")));
     try db.run("UPDATE operations SET task=? WHERE id='request-1'", &.{.{ .blob = &@as(state.TaskId, @splat(2)) }});
-    try db.run("UPDATE objects SET body=? WHERE digest=?", &.{ .{ .blob = "changed receipt" }, .{ .blob = &digest(receipt_bytes) } });
+    try std.testing.expectError(error.Constraint, db.run("UPDATE objects SET body=? WHERE digest=?", &.{ .{ .blob = "changed receipt" }, .{ .blob = &digest(receipt_bytes) } }));
+    // Deliberate corruption bypasses SQL update triggers via the low-level
+    // blob API, after explicitly invalidating custody above.
+    const receipt_location = try store.objectLocation(digest(receipt_bytes), null);
+    var corrupted = try db.openBlob("objects", "body", receipt_location.row, true);
+    try corrupted.write(&.{receipt_bytes[0] ^ 1}, 0);
+    try corrupted.close();
     try std.testing.expectError(error.CorruptState, store.receipt(a, "request-1", digest("submit/input")));
 }
 
@@ -628,6 +910,7 @@ test "file-backed objects cross former allocation limits and retain chunk integr
         try store.objectRange(largest, largest.bytes, &.{});
         try std.testing.expectError(error.InvalidParams, store.objectRange(largest, largest.bytes, &range));
         try std.testing.expectError(error.Capacity, store.object(a, largest, fixture_bytes - 1));
+        store.invalidateIntegrity();
         try store.begin();
         const location = try store.objectLocation(largest.digest, fixture_bytes);
         var blob = try db.openBlob("objects", "body", location.row, true);
@@ -638,6 +921,11 @@ test "file-backed objects cross former allocation limits and retain chunk integr
         try std.testing.expectError(error.CorruptState, store.objectRange(largest, 0, &range));
         try std.testing.expectError(error.CorruptState, store.objectRange(largest, 0, &.{}));
         try std.testing.expectError(error.CorruptState, store.object(a, largest, fixture_bytes));
+        try std.testing.expect(store.fenced);
+        try std.testing.expectError(error.StorageUnavailable, store.begin());
+        // Reopening does not make corrupt bytes valid: duplicate admission
+        // still checks the entire stored object before trusting it.
+        store = try Store.init(a, db, false, @splat(7));
         try store.begin();
         try std.testing.expectError(error.CorruptState, store.putObject(bytes[0..fixture_bytes]));
         store.rollback();
@@ -665,4 +953,401 @@ test "actual SQLite storage exhaustion rolls back unpublished objects" {
     // reopen; recovery must not turn uncertainty into a fresh admission.
     try std.testing.expect(store.fenced);
     try std.testing.expectError(error.StorageUnavailable, store.begin());
+}
+
+test "integrity epochs survive owner appends but require each committed head to be sealed" {
+    const a = std.testing.allocator;
+    const db = try sqlite.Database.open(a, ":memory:", true);
+    defer db.destroy() catch unreachable;
+    defer db.close() catch unreachable;
+    var store = try Store.init(a, db, true, @splat(7));
+    try std.testing.expectError(error.InvalidState, store.publicationEpoch());
+    try store.confirmSealed(store.head);
+    const epoch = try store.publicationEpoch();
+    for (0..3) |_| {
+        try store.begin();
+        try std.testing.expectError(error.InvalidState, store.publicationEpoch());
+        _ = try store.putObject("unchanged immutable object");
+        const head = try store.commit("owner-append");
+        try std.testing.expectEqual(epoch, store.integrity_epoch);
+        try std.testing.expectError(error.InvalidState, store.publicationEpoch());
+        var stale = head;
+        stale.generation -= 1;
+        try std.testing.expectError(error.InvalidState, store.confirmSealed(stale));
+        try store.confirmSealed(head);
+        try std.testing.expectEqual(epoch, try store.publicationEpoch());
+    }
+    try store.begin();
+    _ = try store.putObject("unpublished descendant");
+    store.rollback();
+    try std.testing.expectEqual(epoch, try store.publicationEpoch());
+    store.invalidateIntegrity();
+    try std.testing.expectEqual(epoch + 1, store.integrity_epoch);
+    try std.testing.expectError(error.InvalidState, store.publicationEpoch());
+    store.fence();
+    try std.testing.expectEqual(epoch + 2, store.integrity_epoch);
+    try std.testing.expectError(error.StorageUnavailable, store.begin());
+}
+
+test "projection snapshots exclude writes and release on success rejection and allocation failure" {
+    const c = @import("native_c");
+    const registry = @import("registry.zig");
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var buffer: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(std.testing.io, &buffer);
+    const path = try std.fmt.allocPrintSentinel(a, "{s}/projection.sqlite", .{buffer[0..length]}, 0);
+    defer a.free(path);
+    const db = try sqlite.Database.open(a, path, true);
+    defer db.destroy() catch unreachable;
+    defer db.close() catch unreachable;
+    var store = try Store.init(a, db, true, @splat(7));
+    try store.begin();
+    const ref = try store.putObject("retained");
+    _ = try store.commit("fixture");
+    try store.confirmSealed(store.head);
+    const epoch = try store.publicationEpoch();
+    var peer: ?*c.sqlite3 = null;
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open_v2(path.ptr, &peer, c.SQLITE_OPEN_READWRITE, null));
+    defer std.debug.assert(c.sqlite3_close(peer) == c.SQLITE_OK);
+    const binding: registry.ProjectionBinding = .{ .task = @splat(9), .tenant = "tenant", .profile = "frozen profile", .application = @splat(8) };
+    const Check = struct {
+        store: *Store,
+        peer: ?*c.sqlite3,
+        reference: state.Reference,
+        failure: ?anyerror,
+        pub fn run(this: @This(), ctx: registry.ProjectionContext) !void {
+            try std.testing.expectEqual(@as(state.TaskId, @splat(9)), ctx.task);
+            try std.testing.expectEqualStrings("tenant", ctx.tenant);
+            try std.testing.expectEqualStrings("frozen profile", ctx.profile);
+            try std.testing.expectEqual(@as(Digest, @splat(8)), ctx.application.?);
+            const bytes = try ctx.object(this.reference, 8);
+            defer ctx.allocator.free(bytes);
+            try std.testing.expectEqualStrings("retained", bytes);
+            try std.testing.expectError(error.Busy, this.store.begin());
+            try std.testing.expectError(error.Busy, this.store.putObject("unpublished"));
+            try std.testing.expectError(error.Busy, this.store.commit("forbidden"));
+            try std.testing.expectEqual(c.SQLITE_BUSY, c.sqlite3_exec(this.peer, "INSERT INTO objects VALUES(zeroblob(32),x'01')", null, null, null));
+            if (this.failure) |failure| return failure;
+        }
+    };
+    for ([_]?anyerror{ null, error.InvalidContext, error.OutOfMemory }) |failure| {
+        for ([_]bool{ false, true }) |inside_import| {
+            if (inside_import) try store.begin();
+            var handlers = try registry.Registry.init(a, &.{});
+            defer handlers.deinit();
+            const result = store.project(void, a, handlers, binding, Check{ .store = &store, .peer = peer, .reference = ref, .failure = failure });
+            if (failure) |expected| try std.testing.expectError(expected, result) else try result;
+            try std.testing.expectEqual(inside_import, store.transaction);
+            try std.testing.expect(!store.projecting and !store.fenced);
+            try std.testing.expectEqual(epoch, store.integrity_epoch);
+            if (inside_import) {
+                // A borrowed transaction survives both ordinary rejection and
+                // allocator failure, and is writable again after projection.
+                _ = try store.putObject("unpublished");
+                store.rollback();
+            } else {
+                try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_exec(peer, "BEGIN IMMEDIATE; ROLLBACK;", null, null, null));
+            }
+        }
+    }
+    try std.testing.expectEqual(epoch, try store.publicationEpoch());
+    // External mutation becomes possible only after the snapshot is released;
+    // it must still be rejected by the next authoritative publication fence.
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_exec(peer, "INSERT INTO objects VALUES(zeroblob(32),x'01')", null, null, null));
+    try std.testing.expectError(error.CorruptState, store.begin());
+    try std.testing.expect(store.fenced and !store.transaction and !store.projecting);
+}
+
+test "projection invalidation prevents returning a usable result" {
+    const a = std.testing.allocator;
+    const db = try sqlite.Database.open(a, ":memory:", true);
+    defer db.destroy() catch unreachable;
+    defer db.close() catch unreachable;
+    var store = try Store.init(a, db, true, @splat(7));
+    const binding: @import("registry.zig").ProjectionBinding = .{ .task = @splat(9), .tenant = "tenant", .profile = "profile", .application = @splat(8) };
+    const operation = struct {
+        store: *Store,
+        pub fn run(this: @This(), ctx: @import("registry.zig").ProjectionContext) !u32 {
+            this.store.invalidateIntegrity();
+            try std.testing.expectError(error.InvalidState, ctx.object(.{ .digest = @splat(0), .bytes = 0 }, 0));
+            return 42;
+        }
+    }{ .store = &store };
+    var handlers = try @import("registry.zig").Registry.init(a, &.{});
+    defer handlers.deinit();
+    try std.testing.expectError(error.InvalidState, store.project(u32, a, handlers, binding, operation));
+    try std.testing.expect(!store.projecting and !store.transaction);
+    // No leaked SQLite transaction, even when the operation itself succeeded.
+    try store.begin();
+    store.rollback();
+}
+
+test "external SQLite commits fence both validation reuse and the next write transaction" {
+    const c = @import("native_c");
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var buffer: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(io, &buffer);
+    for (0..2) |mode| {
+        const path = try std.fmt.allocPrintSentinel(a, "{s}/external-{d}.sqlite", .{ buffer[0..length], mode }, 0);
+        defer a.free(path);
+        const db = try sqlite.Database.open(a, path, true);
+        defer db.destroy() catch unreachable;
+        defer db.close() catch unreachable;
+        var store = try Store.init(a, db, true, @splat(7));
+        try store.confirmSealed(store.head);
+        const epoch = try store.publicationEpoch();
+        // A second raw connection deliberately violates namespace ownership.
+        // The production Database wrapper itself still admits one owner only.
+        var peer: ?*c.sqlite3 = null;
+        try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open_v2(path.ptr, &peer, c.SQLITE_OPEN_READWRITE, null));
+        defer std.debug.assert(c.sqlite3_close(peer) == c.SQLITE_OK);
+        try store.begin();
+        try std.testing.expectEqual(c.SQLITE_BUSY, c.sqlite3_exec(peer, "INSERT INTO objects VALUES(zeroblob(32),x'01')", null, null, null));
+        store.rollback();
+        try std.testing.expectEqual(epoch, try store.publicationEpoch());
+        try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_exec(peer, "INSERT INTO objects VALUES(zeroblob(32),x'01')", null, null, null));
+        if (mode == 0) {
+            try std.testing.expectError(error.CorruptState, store.publicationEpoch());
+        } else {
+            // No prior read poll: begin checks while holding the writer lock.
+            try std.testing.expectError(error.CorruptState, store.begin());
+        }
+        try std.testing.expect(store.fenced and !store.transaction);
+        try std.testing.expectEqual(epoch + 1, store.integrity_epoch);
+        try std.testing.expectEqual(@as(u64, 0), store.head.generation);
+        try std.testing.expectError(error.StorageUnavailable, store.begin());
+    }
+}
+
+fn retentionFixtureTask(reference: state.Reference) state.Task {
+    var task = std.mem.zeroes(state.Task);
+    task.id = @splat(2);
+    task.revision = 1;
+    task.profile = reference;
+    task.image = reference;
+    task.input = reference;
+    task.checkpoint = reference;
+    task.outcome = reference;
+    return task;
+}
+
+test "typed host roots retain exact dependencies including uninterpreted captures" {
+    const a = std.testing.allocator;
+    const db = try sqlite.Database.open(a, ":memory:", true);
+    defer db.destroy() catch unreachable;
+    defer db.close() catch unreachable;
+    var store = try Store.init(a, db, true, @splat(7));
+    try store.begin();
+    const input = try store.putObject("opaque fixture input");
+    const raw = try store.putObject("\xff\x00not an interpretable provider response");
+    const task = retentionFixtureTask(input);
+    try store.putTask(task, null);
+    const capture: state.Capture = .{ .task = task.id, .occurrence = @splat(3), .attempt = @splat(4), .request = input, .response = raw, .disposition = .complete };
+    try store.createRecord(state.Capture, "capture", @splat(4), task.id, capture);
+    const captured_body = (try store.recordBytes(a, "capture", @splat(4), task.id)).?;
+    defer a.free(captured_body);
+    const captured_ref: state.Reference = .{ .digest = digest(captured_body), .bytes = captured_body.len };
+    _ = try store.commit("uninterpreted-capture");
+    try store.confirmSealed(store.head);
+    const epoch = try store.publicationEpoch();
+    try std.testing.expectEqual(@as(u64, 3), try store.scalar("SELECT count(*) FROM dependencies"));
+    // Retention is private object custody, independent of interpretation or
+    // public artifact-disclosure permission.
+    try std.testing.expectError(error.Constraint, db.run("DELETE FROM objects WHERE digest=?", &.{.{ .blob = &raw.digest }}));
+    try std.testing.expectError(error.Constraint, db.run("UPDATE objects SET body=x'00' WHERE digest=?", &.{.{ .blob = &raw.digest }}));
+    var wrong = raw;
+    wrong.bytes += 1;
+    try store.begin();
+    try std.testing.expectError(error.Constraint, store.retainReference(captured_ref, wrong));
+    store.rollback();
+    try std.testing.expectEqual(epoch, try store.publicationEpoch());
+    // A missing child aborts publication and all previously inserted edges
+    // from the same attempt. An already committed ancestor stays usable.
+    var missing = capture;
+    missing.attempt = @splat(5);
+    missing.response = .{ .digest = @splat(9), .bytes = 1 };
+    const missing_body = try contracts.encodeOwned(state.Capture, a, missing);
+    defer a.free(missing_body);
+    try store.begin();
+    try std.testing.expectError(error.Constraint, store.createRecord(state.Capture, "capture", missing.attempt, task.id, missing));
+    try std.testing.expect(!store.transaction);
+    try std.testing.expectEqual(@as(u64, 3), try store.scalar("SELECT count(*) FROM dependencies"));
+    try std.testing.expect((try store.recordBytes(a, "capture", missing.attempt, task.id)) == null);
+    try std.testing.expectError(error.MissingArtifact, store.object(a, .{ .digest = digest(missing_body), .bytes = missing_body.len }, null));
+    try std.testing.expectEqual(epoch, try store.publicationEpoch());
+    // Updating the capture index does not release the old audit object's
+    // dependencies; both original capture bytes and the new projection remain.
+    var projected = capture;
+    projected.projection = .{ .reply = input, .objects = .{ .items = &.{raw} }, .output_tokens = null };
+    try store.begin();
+    try store.putRecord(state.Capture, "capture", capture.attempt, task.id, projected);
+    _ = try store.commit("project-capture");
+    try std.testing.expectEqual(@as(u64, 5), try store.scalar("SELECT count(*) FROM dependencies"));
+    try std.testing.expectError(error.Constraint, db.run("DELETE FROM objects WHERE digest=?", &.{.{ .blob = &captured_ref.digest }}));
+    const original = try store.object(a, captured_ref, null);
+    defer a.free(original);
+    try std.testing.expectEqualSlices(u8, captured_body, original);
+}
+
+test "occurrence codec retains its digest-only acquired reply" {
+    const a = std.testing.allocator;
+    const db = try sqlite.Database.open(a, ":memory:", true);
+    defer db.destroy() catch unreachable;
+    defer db.close() catch unreachable;
+    var store = try Store.init(a, db, true, @splat(7));
+    try store.begin();
+    const input = try store.putObject("request");
+    const reply = try store.putObject("reply");
+    const task = retentionFixtureTask(input);
+    try store.putTask(task, null);
+    const saved: occurrence.Occurrence = .{ .id = @splat(3), .task = task.id, .request = input.digest, .request_object = input, .state = .{ .settled_reply = .{ .attempt = @splat(4), .reply = reply.digest } } };
+    try store.createRecord(occurrence.Occurrence, "occurrence", saved.id, task.id, saved);
+    _ = try store.commit("acquired-reply");
+    try std.testing.expectEqual(@as(u64, 3), try store.scalar("SELECT count(*) FROM dependencies"));
+    try std.testing.expectError(error.Constraint, db.run("DELETE FROM objects WHERE digest=?", &.{.{ .blob = &reply.digest }}));
+}
+
+test "registered projection codecs retain nominal references and roll back incomplete closure" {
+    const registry = @import("registry.zig");
+    const Codec = struct {
+        const Ref = struct { digest: [32]u8, bytes: u64 };
+        const Lookalike = struct { digest: [32]u8, bytes: u64 };
+        const Body = struct {
+            schema: contracts.Utf8,
+            children: contracts.Vector(Ref, null),
+            unrelated: Lookalike,
+        };
+        fn decode(a: std.mem.Allocator, objects: []const []const u8) ![]registry.Dependency {
+            var references: registry.ProjectionReferences = .{ .allocator = a };
+            defer references.deinit();
+            for (objects) |bytes| try references.object(Body, Ref, bytes, "fixture.projection.v1");
+            return references.finish();
+        }
+        fn forged(a: std.mem.Allocator, _: []const []const u8) ![]registry.Dependency {
+            const edges = try a.alloc(registry.Dependency, 1);
+            edges[0] = .{ .parent = .{ .digest = @splat(9), .bytes = 1 }, .child = .{ .digest = @splat(8), .bytes = 1 } };
+            return edges;
+        }
+    };
+    const a = std.testing.allocator;
+    const db = try sqlite.Database.open(a, ":memory:", true);
+    defer db.destroy() catch unreachable;
+    defer db.close() catch unreachable;
+    var store = try Store.init(a, db, true, @splat(7));
+    try store.begin();
+    const child = try store.putObject("retained context history");
+    const nominal: Codec.Ref = .{ .digest = child.digest, .bytes = child.bytes };
+    var children = [_]Codec.Ref{ nominal, nominal };
+    var body: Codec.Body = .{
+        .schema = .{ .bytes = "fixture.projection.v1" },
+        .children = .{ .items = &children },
+        .unrelated = .{ .digest = @splat(1), .bytes = 123 },
+    };
+    const bytes = try contracts.encodeOwned(Codec.Body, a, body);
+    defer a.free(bytes);
+    _ = try store.putObject(bytes);
+    try store.retainProjection(Codec.decode, &.{bytes});
+    _ = try store.commit("context-projection");
+    try store.confirmSealed(store.head);
+    const epoch = try store.publicationEpoch();
+    // Duplicate nominal references coalesce; matching struct shape alone is
+    // not enough to claim that the unrelated value is an object dependency.
+    try std.testing.expectEqual(@as(u64, 1), try store.scalar("SELECT count(*) FROM dependencies"));
+    try std.testing.expectError(error.Constraint, db.run("DELETE FROM objects WHERE digest=?", &.{.{ .blob = &child.digest }}));
+    try std.testing.expectError(error.Constraint, db.run("UPDATE objects SET body=x'00' WHERE digest=?", &.{.{ .blob = &child.digest }}));
+    for (0..3) |case| {
+        children[1] = nominal;
+        body.schema.bytes = "fixture.projection.v1";
+        switch (case) {
+            0 => children[1].bytes += 1,
+            1 => children[1].digest = @splat(3),
+            2 => body.schema.bytes = "fixture.projection.v0",
+            else => unreachable,
+        }
+        const rejected = try contracts.encodeOwned(Codec.Body, a, body);
+        defer a.free(rejected);
+        try store.begin();
+        const reference = try store.putObject(rejected);
+        if (case < 2) {
+            try std.testing.expectError(error.Constraint, store.retainProjection(Codec.decode, &.{rejected}));
+        } else {
+            try std.testing.expectError(error.InvalidProjection, store.retainProjection(Codec.decode, &.{rejected}));
+        }
+        try std.testing.expect(!store.transaction);
+        try std.testing.expectEqual(@as(u64, 1), try store.scalar("SELECT count(*) FROM dependencies"));
+        try std.testing.expectError(error.MissingArtifact, store.object(a, reference, null));
+        try std.testing.expectEqual(epoch, try store.publicationEpoch());
+    }
+    try store.begin();
+    try std.testing.expectError(error.InvalidProjection, store.retainProjection(Codec.forged, &.{bytes}));
+    try std.testing.expect(!store.transaction);
+    try std.testing.expectEqual(epoch, try store.publicationEpoch());
+}
+
+test "old state formats require a fresh namespace without rewriting old records" {
+    const a = std.testing.allocator;
+    const db = try sqlite.Database.open(a, ":memory:", true);
+    defer db.destroy() catch unreachable;
+    defer db.close() catch unreachable;
+    try db.exec("CREATE TABLE meta(singleton INTEGER PRIMARY KEY, format INTEGER, namespace BLOB, generation INTEGER, parent BLOB, head BLOB);");
+    const namespace: Digest = @splat(7);
+    try db.run("INSERT INTO meta VALUES(1,11,?,0,?,?)", &.{ .{ .blob = &namespace }, .{ .blob = &namespace }, .{ .blob = &namespace } });
+    try std.testing.expectError(error.UnsupportedStateFormat, Store.init(a, db, false, namespace));
+    var query = try db.prepare("SELECT format FROM meta WHERE singleton=1", &.{});
+    defer query.deinit();
+    try std.testing.expectEqual(.row, try query.step());
+    try std.testing.expectEqual(@as(i64, 11), try query.integer(0));
+    var tables = try db.prepare("SELECT count(*) FROM sqlite_schema WHERE type='table'", &.{});
+    defer tables.deinit();
+    try std.testing.expectEqual(.row, try tables.step());
+    try std.testing.expectEqual(@as(i64, 1), try tables.integer(0));
+}
+
+test "cold retention audit derives shared dependencies and detects missing edges and corrupt bodies" {
+    const registry = @import("registry.zig");
+    const a = std.testing.allocator;
+    var handlers = try registry.Registry.init(a, &.{});
+    defer handlers.deinit();
+    for (0..4) |scenario| {
+        const db = try sqlite.Database.open(a, ":memory:", true);
+        defer db.destroy() catch unreachable;
+        defer db.close() catch unreachable;
+        var store = try Store.init(a, db, true, @splat(9));
+        try store.begin();
+        const input = try store.putObject("shared immutable input");
+        const task = retentionFixtureTask(input);
+        try store.putTask(task, null);
+        const head = try store.commit("fixture");
+        try store.confirmSealed(head);
+        const statistics = try store.auditRetention(handlers, @splat(0));
+        try std.testing.expectEqual(2, statistics.objects);
+        try std.testing.expectEqual(1, statistics.edges);
+        try std.testing.expectEqual(head.generation, store.sealed_generation.?);
+        if (scenario == 0) {
+            store.allocator = std.testing.failing_allocator;
+            try std.testing.expectError(error.OutOfMemory, store.auditRetention(handlers, @splat(0)));
+            store.allocator = a;
+            try std.testing.expect(!store.fenced and !store.transaction);
+            try std.testing.expectEqual(head.generation, store.sealed_generation.?);
+            continue;
+        }
+        store.invalidateIntegrity();
+        switch (scenario) {
+            1 => try db.exec("DELETE FROM dependencies"),
+            2 => try db.exec("UPDATE dependencies SET child_bytes=child_bytes+1"),
+            3 => {
+                try db.exec("DROP TRIGGER retained_object_immutable");
+                try db.run("UPDATE objects SET body=? WHERE digest=?", &.{ .{ .blob = "altered immutable data" }, .{ .blob = &input.digest } });
+            },
+            else => unreachable,
+        }
+        try std.testing.expectError(error.CorruptState, store.auditRetention(handlers, @splat(0)));
+        try std.testing.expect(store.fenced);
+        try std.testing.expect(!store.transaction);
+    }
 }

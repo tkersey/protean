@@ -165,7 +165,7 @@ pub fn Adapter(comptime P: type) type {
         pub const Context = @import("adaptive_context.zig").Projection(P);
         pub const Prepared = P.AdaptivePrepared;
         pub fn declaration() registry.Declaration {
-            return .{ .identity = P.adaptive_identity, .resource_role = "inference", .kind = .leaf, .inference = true, .background = true, .payload_schema = struct {
+            return .{ .identity = P.identity, .resource_role = "inference", .kind = .leaf, .inference = true, .background = true, .payload_schema = struct {
                 fn schema(a: std.mem.Allocator) ![]u8 {
                     return values.schemaBytes(P.AdaptiveRequest, a);
                 }
@@ -173,7 +173,17 @@ pub fn Adapter(comptime P: type) type {
                 fn schema(a: std.mem.Allocator) ![]u8 {
                     return values.schemaBytes(P.AdaptiveResult, a);
                 }
-            }.schema, .capture = .{ .prepare = prepare, .acquire = acquire, .interpret = interpret } };
+            }.schema, .capture = .{ .prepare = prepare, .acquire = acquire, .interpret = interpret, .dependencies = dependencies } };
+        }
+
+        fn dependencies(a: std.mem.Allocator, objects: []const []const u8) ![]registry.Dependency {
+            var references: registry.ProjectionReferences = .{ .allocator = a };
+            defer references.deinit();
+            if (objects.len == 0) return references.finish();
+            const Ref = @FieldType(P.AdaptiveContext, "source_capture");
+            for (objects[0 .. objects.len - 1]) |bytes| try references.object(P.HistoryChunk, Ref, bytes, @import("adaptive_history.zig").identity);
+            try references.object(P.AdaptiveContext, Ref, objects[objects.len - 1], P.adaptive_context_identity);
+            return references.finish();
         }
 
         pub fn prepare(ctx: registry.ProjectionContext, bytes: []const u8) ![]u8 {
@@ -183,7 +193,14 @@ pub fn Adapter(comptime P: type) type {
             var catalog = try A.catalog(ctx, policy);
             defer catalog.deinit();
             const selected = try A.bind(ctx, policy, request.value, catalog.value);
-            const projected = try Context.render(ctx, request.value, policy, selected, catalog.value);
+            return (try project(ctx, request.value, policy, selected, catalog.value)).prepared;
+        }
+
+        const Projected = struct { prepared: []u8, context: Context.Rendered };
+        // Both consumers share one projection. The caller keeps decoded request
+        // and catalog owners alive until it has consumed this borrowed view.
+        fn project(ctx: registry.ProjectionContext, request: P.AdaptiveRequest, policy: A.Policy, selected: A.Selected, catalog: P.AdaptiveCatalog) !Projected {
+            const projected = try Context.render(ctx, request, policy, selected, catalog);
             const a = ctx.allocator;
             var body = json.object();
             try json.put(a, &body, "model", json.string(selected.transport.model.bytes));
@@ -196,13 +213,13 @@ pub fn Adapter(comptime P: type) type {
             try json.put(a, &reasoning, "context", json.string(@tagName(selected.profile.reasoning_context)));
             try json.put(a, &body, "reasoning", reasoning);
             var allowed: json.Value = .{ .array = .init(a) };
-            for (request.value.offered, P.allDeclarations().items) |offered, tool| if (offered) {
+            for (request.offered, P.allDeclarations().items) |offered, tool| if (offered) {
                 var item = json.object();
                 try json.put(a, &item, "type", json.string("function"));
                 try json.put(a, &item, "name", json.string(tool.name.bytes));
                 try allowed.array.append(item);
             };
-            const selection = request.value.invocation.selection;
+            const selection = request.invocation.selection;
             if (selection.maximum_calls == 0 or allowed.array.items.len == 0) {
                 if (selection.minimum_calls != 0) return error.InvalidDeclaration;
                 try json.put(a, &body, "tool_choice", json.string("none"));
@@ -223,7 +240,7 @@ pub fn Adapter(comptime P: type) type {
                 try json.put(a, &body, "prompt_cache_options", cache);
             }
             const rendered = try json.canonicalOptional(a, body, selected.transport.request_bytes);
-            return contracts.encodeOwned(Prepared, a, .{ .version = 1, .request = request.value, .body = .{ .bytes = rendered } });
+            return .{ .prepared = try contracts.encodeOwned(Prepared, a, .{ .version = 1, .request = request, .body = .{ .bytes = rendered } }), .context = projected };
         }
 
         pub fn acquire(ctx: registry.Context, bytes: []const u8) !registry.Acquisition {
@@ -327,13 +344,15 @@ pub fn Adapter(comptime P: type) type {
         }
 
         pub fn interpret(ctx: registry.ProjectionContext, request_bytes: []const u8, prepared_bytes: []const u8, captured: []const u8) !registry.Projection {
-            if (!equal(try prepare(ctx, request_bytes), prepared_bytes)) return error.InvalidCapture;
             var request = try contracts.decodeOwned(P.AdaptiveRequest, ctx.allocator, request_bytes);
             defer request.deinit();
             const policy = try A.policy(ctx.allocator, ctx.profile);
             var catalog = try A.catalog(ctx, policy);
             defer catalog.deinit();
             const selected = try A.bind(ctx, policy, request.value, catalog.value);
+            const projection = try project(ctx, request.value, policy, selected, catalog.value);
+            defer ctx.allocator.free(projection.prepared);
+            if (!equal(projection.prepared, prepared_bytes)) return error.InvalidCapture;
             var raw = try contracts.decodeOwned(responses.Raw, ctx.allocator, captured);
             defer raw.deinit();
             if (raw.value.status < 200 or raw.value.status >= 300) return encode(ctx, .{ .result = .{ .provider_failure = .{ .kind = .http_status, .http_status = raw.value.status } }, .replay = null, .replay_status = .unsupported, .usage = null }, &.{});
@@ -347,9 +366,9 @@ pub fn Adapter(comptime P: type) type {
             const output = json.get(body, "output") orelse return unsupported(ctx, .unsupported_status, observed.value);
             if (output != .array) return unsupported(ctx, .unsupported_output_item, observed.value);
             if (contracts.exceeds(output.array.items.len, P.representation.maximum_output_items)) return unsupported(ctx, .normalization_limit, observed.value);
-            const normalized = responses.Adapter(P).normalize(ctx.allocator, request.value.invocation, output) catch |err| return unsupported(ctx, if (err == error.Capacity) .normalization_limit else if (err == error.MixedRefusal) .mixed_refusal else .unsupported_output_item, observed.value);
+            const normalized = responses.OutputNormalizer(P).normalize(ctx.allocator, request.value.invocation, output) catch |err| return unsupported(ctx, if (err == error.Capacity) .normalization_limit else if (err == error.MixedRefusal) .mixed_refusal else .unsupported_output_item, observed.value);
             if (!observed.valid) return unsupported(ctx, .unsupported_output_item, observed.value);
-            var projected = try Context.render(ctx, request.value, policy, selected, catalog.value);
+            var projected = projection.context;
             for (output.array.items) |item| {
                 try projected.history.array.append(try responses.replayItem(ctx.allocator, item));
                 const reasoning_item = jsonTextEquals(item, "type", "reasoning");
@@ -357,31 +376,31 @@ pub fn Adapter(comptime P: type) type {
             }
             var pending = Context.pending(ctx.allocator, projected.history) catch return unsupported(ctx, .unsupported_output_item, observed.value);
             pending.deinit();
-            const items = try json.canonical(ctx.allocator, projected.history);
             var response_id: ?contracts.Utf8 = null;
             if (json.get(body, "id")) |id| {
                 if (id != .string or id.string.len == 0) return unsupported(ctx, .unsupported_output_item, observed.value);
                 response_id = .{ .bytes = id.string };
             }
             const watermark = try std.math.add(u64, request.value.plan.watermark, 1);
-            const artifact = try contracts.encodeOwned(P.AdaptiveContext, ctx.allocator, .{
-                .schema = .{ .bytes = P.adaptive_context_identity },
-                .policy = request.value.policy,
-                .task = ctx.task,
-                .tenant = .{ .bytes = ctx.tenant },
-                .audience = policy.audience,
-                .selection = request.value.selection,
-                .top_effort = request.value.invocation.parameters.reasoning.?.effort.?,
-                .plan = request.value.plan,
-                .watermark = watermark,
-                .source_capture = .{ .digest = storage.digest(captured), .bytes = captured.len },
-                .source_request = .{ .digest = storage.digest(prepared_bytes), .bytes = prepared_bytes.len },
-                .response_id = response_id,
-                .items = .{ .bytes = items },
-                .origins = .{ .items = projected.origins.items },
-            });
-            const objects = try ctx.allocator.alloc([]const u8, 1);
-            objects[0] = artifact;
+            var context: P.AdaptiveContext = undefined;
+            context.schema = .{ .bytes = P.adaptive_context_identity };
+            context.policy = request.value.policy;
+            context.task = ctx.task;
+            context.tenant = .{ .bytes = ctx.tenant };
+            context.audience = policy.audience;
+            context.selection = request.value.selection;
+            context.top_effort = request.value.invocation.parameters.reasoning.?.effort.?;
+            context.plan = request.value.plan;
+            context.watermark = watermark;
+            context.source_capture = .{ .digest = storage.digest(captured), .bytes = captured.len };
+            context.source_request = .{ .digest = storage.digest(prepared_bytes), .bytes = prepared_bytes.len };
+            context.response_id = response_id;
+            var objects: std.ArrayList([]const u8) = .empty;
+            const published = try @import("adaptive_history.zig").History(P).publish(ctx, projected.history_base, projected.unchanged_prefix, projected.history, projected.origins.items, request.value.plan, catalog.value);
+            context.history = published.root;
+            try objects.appendSlice(ctx.allocator, published.objects);
+            const artifact = try contracts.encodeOwned(P.AdaptiveContext, ctx.allocator, context);
+            try objects.append(ctx.allocator, artifact);
             return encode(ctx, .{ .result = normalized, .replay_status = .complete, .usage = observed.value, .replay = .{
                 .object = .{ .digest = storage.digest(artifact), .bytes = artifact.len },
                 .schema = .{ .bytes = P.adaptive_context_identity },
@@ -393,7 +412,7 @@ pub fn Adapter(comptime P: type) type {
                 .epoch = request.value.plan.epoch,
                 .watermark = watermark,
                 .eviction_generation = request.value.plan.eviction_generation,
-            } }, objects);
+            } }, try objects.toOwnedSlice(ctx.allocator));
         }
     };
 }

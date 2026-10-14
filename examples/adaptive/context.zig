@@ -50,7 +50,7 @@ pub fn declaration() native.Declaration {
         fn schema(a: std.mem.Allocator) ![]u8 {
             return native.values.schemaBytes(t.PreparationResult, a);
         }
-    }.schema, .capture = .{ .prepare = prepare, .acquire = acquire, .interpret = interpret } };
+    }.schema, .capture = .{ .prepare = prepare, .acquire = acquire, .interpret = interpret, .dependencies = dependencies } };
 }
 
 fn receiptText(a: std.mem.Allocator, receipt: t.ControlReceipt, control: t.controls.State) !P.ResultText {
@@ -78,7 +78,7 @@ fn controlSource(ctx: native.registry.ProjectionContext, state: t.State, subject
     defer raw.deinit();
     const response = (try native.json.parse(ctx.allocator, raw.value.body.bytes, .{ .bytes = raw.value.body.bytes.len, .tokens = raw.value.body.bytes.len, .members = raw.value.body.bytes.len })).value;
     const output = native.json.get(response, "output") orelse return error.InvalidCapture;
-    const normalized = try native.responses.Adapter(P).normalize(ctx.allocator, prepared.value.request.invocation, output);
+    const normalized = try native.responses.OutputNormalizer(P).normalize(ctx.allocator, prepared.value.request.invocation, output);
     if (normalized != .output) return error.InvalidCapture;
     var found = false;
     for (normalized.output.items.items) |item| if (item == .function_call and equal(item.function_call.call_id.bytes, subject.call_id.bytes)) {
@@ -118,6 +118,7 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
     for (resolved, pending.items) |*out, item| {
         const content: []const u8 = switch (item.output) {
             .inline_text => |value| value.bytes,
+            .report_rejection => |value| try native.json.canonical(a, try native.values.toJson(t.ReportRejection, a, value)),
             .work => |ref| blk: {
                 var record = try work.open(ctx, ref);
                 defer record.deinit();
@@ -252,6 +253,13 @@ fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition 
     return .{ .captured = try contracts.encodeOwned(t.PreparationCapture, ctx.allocator, .{
         .prepared = digest(bytes),
     }) };
+}
+fn dependencies(a: std.mem.Allocator, objects: []const []const u8) ![]native.registry.Dependency {
+    if (objects.len > 1) return error.InvalidProjection;
+    var references: native.registry.ProjectionReferences = .{ .allocator = a };
+    defer references.deinit();
+    if (objects.len != 0) try references.object(t.ReceiptArtifact, t.model.ArtifactReference, objects[0], null);
+    return references.finish();
 }
 fn interpret(ctx: native.registry.ProjectionContext, request: []const u8, prepared: []const u8, captured: []const u8) !native.registry.Projection {
     var observation = try contracts.decodeOwned(t.PreparationCapture, ctx.allocator, captured);

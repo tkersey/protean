@@ -201,7 +201,7 @@
         "status": "completed",
         "call_id": "offline-13",
         "name": "report",
-        "arguments": "{\"summary\":\"The fixture entry point has an empty body and performs no external operations.\",\"evidence_index\":0}"
+        "arguments": "{\"summary\":\"The fixture entry point has an empty body and performs no external operations.\",\"claims\":[{\"kind\":\"observation\",\"statement\":\"The fixture entry point has an empty body and performs no external operations.\",\"reasoning\":\"\",\"evidence_indices\":[0]}],\"limitations\":[]}"
       }
     ]
   }

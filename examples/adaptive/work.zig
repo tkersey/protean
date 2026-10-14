@@ -58,7 +58,7 @@ pub fn admitAction(ctx: native.registry.ProjectionContext, source_context: t.mod
     var raw = try contracts.decodeOwned(native.responses.Raw, ctx.allocator, captured);
     defer raw.deinit();
     const response = (try native.json.parse(ctx.allocator, raw.value.body.bytes, .{ .bytes = raw.value.body.bytes.len, .tokens = raw.value.body.bytes.len, .members = raw.value.body.bytes.len })).value;
-    const normalized = try native.responses.Adapter(P).normalize(ctx.allocator, prepared.value.request.invocation, native.json.get(response, "output") orelse return error.InvalidCapture);
+    const normalized = try native.responses.OutputNormalizer(P).normalize(ctx.allocator, prepared.value.request.invocation, native.json.get(response, "output") orelse return error.InvalidCapture);
     if (normalized != .output) return error.InvalidCapture;
     var found = false;
     for (normalized.output.items.items) |item| if (item == .function_call and same(item.function_call.call_id.bytes, call_id.bytes)) {
@@ -114,6 +114,19 @@ fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition 
     ctx.checkCancellation() catch |err| return .{ .definitely_not_sent = err };
     return .{ .captured = try ctx.allocator.dupe(u8, bytes) };
 }
+fn rederive(ctx: native.registry.RederivationContext, _: native.registry.RecoveryInput, _: []const u8, prepared: ?[]const u8) !native.registry.RederivationFinding {
+    // Admission checked exact equality with the pure snapshot
+    // preparation. Normal acquisition merely copies these same bytes.
+    try ctx.checkCancellation();
+    return .{ .result = try ctx.allocator.dupe(u8, prepared orelse return error.InvalidPreparedRequest) };
+}
+fn dependencies(a: std.mem.Allocator, objects: []const []const u8) ![]native.registry.Dependency {
+    if (objects.len > 1) return error.InvalidProjection;
+    var references: native.registry.ProjectionReferences = .{ .allocator = a };
+    defer references.deinit();
+    if (objects.len != 0) try references.object(t.WorkArtifact, t.model.ArtifactReference, objects[0], null);
+    return references.finish();
+}
 fn interpret(ctx: native.registry.ProjectionContext, request: []const u8, prepared: []const u8, captured: []const u8) !native.registry.Projection {
     if (!same(prepared, captured) or !same(try prepare(ctx, request), prepared)) return error.InvalidCapture;
     var record = try contracts.decodeOwned(t.WorkArtifact, ctx.allocator, prepared);
@@ -133,7 +146,7 @@ pub fn declaration() native.Declaration {
         fn schema(a: std.mem.Allocator) ![]u8 {
             return native.values.schemaBytes(t.WorkReply, a);
         }
-    }.schema, .capture = .{ .prepare = prepareWork, .acquire = acquire, .interpret = interpret } };
+    }.schema, .capture = .{ .prepare = prepareWork, .acquire = acquire, .interpret = interpret, .dependencies = dependencies }, .recovery = .{ .identity = "agent.recovery.frozen-snapshot.v1", .version = 1, .rederive = rederive } };
 }
 fn prepareInspection(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
     var request = try contracts.decodeOwned(t.WorkRequest, ctx.allocator, bytes);

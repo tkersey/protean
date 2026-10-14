@@ -1,7 +1,28 @@
-//! agent-host/2.0 admission. This layer cannot drive Kosmos or dispatch a tool.
+//! Versioned agent-host admission. This layer cannot drive Kosmos or dispatch a tool.
 const std = @import("std");
 const json = @import("json.zig");
-pub const version = "agent-host/2.0";
+pub const version = "agent-host/2.1";
+/// Validate the offer list completely, then accept only the current contract.
+pub fn accepts(versions: json.Value) !bool {
+    if (versions != .array or versions.array.items.len == 0 or versions.array.items.len > 16) return error.InvalidParams;
+    var accepted = false;
+    for (versions.array.items) |item| {
+        if (item != .string or item.string.len > 128) return error.InvalidParams;
+        accepted = accepted or std.mem.eql(u8, item.string, version);
+    }
+    return accepted;
+}
+
+test "initialization accepts only 2.1 and validates the entire offer list" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const offers = [_][]const u8{ "[\"agent-host/2.0\"]", "[\"agent-host/2.0\",\"agent-host/2.1\"]", "[\"agent-host/2.1\"]", "[\"agent-host/9.0\"]" };
+    for (offers, [_]bool{ false, true, true, false }) |bytes, expected|
+        try std.testing.expectEqual(expected, try accepts((try json.parse(a, bytes, .{})).value));
+    for ([_][]const u8{ "[]", "null", "[\"agent-host/2.1\",17]" }) |bytes|
+        try std.testing.expectError(error.InvalidParams, accepts((try json.parse(a, bytes, .{})).value));
+}
 
 pub const Limits = struct {
     frame_bytes: usize = 1024 * 1024,
@@ -16,8 +37,8 @@ pub const Limits = struct {
     artifact_chunk_bytes: usize = 32 * 1024,
     event_page: usize = 128,
     subscriptions: usize = 16,
-    owned_tasks: usize = 16,
     pending_message_page: usize = 16,
+    recovery_task_page: usize = 1024,
     incomplete_frame_ms: u32 = 30_000,
     output_stall_ms: u32 = 5000,
 };
@@ -111,6 +132,7 @@ pub const Method = enum {
     @"task.resume",
     @"artifact.read",
     shutdown,
+    @"task.reconcile",
 };
 
 pub const Fields = struct { required: []const []const u8, optional: []const []const u8 = &.{} };
@@ -128,6 +150,7 @@ pub fn fields(method: Method) Fields {
         .@"task.unsubscribe" => .{ .required = &.{"subscription_id"} },
         .@"task.cancel" => .{ .required = &.{ "client_operation_id", "task_id" }, .optional = &.{"reason"} },
         .@"task.resume" => .{ .required = &.{ "client_operation_id", "task_id", "expected_revision" } },
+        .@"task.reconcile" => .{ .required = &.{ "client_operation_id", "task_id", "expected_revision", "occurrence_id", "attempt_id", "recovery" } },
         .@"artifact.read" => .{ .required = &.{ "artifact_id", "offset", "length" }, .optional = &.{ "task_id", "question_id" } },
         .shutdown => .{ .required = &.{"mode"} },
     };

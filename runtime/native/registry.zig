@@ -8,6 +8,41 @@ const json = @import("json.zig");
 const state = @import("state.zig");
 pub const ObjectReference = state.Reference;
 
+/// Read-only projection interface. Generic readers cannot establish retention
+/// custody: every projection must validate its complete context closure. Native
+/// readers are borrowed only for the duration of Store.project; neither kind
+/// may escape the projection call. The representation is private to its owners.
+pub const ReadView = struct {
+    source: *anyopaque,
+    read_object: *const fn (*anyopaque, std.mem.Allocator, state.Reference, usize) anyerror![]u8,
+    /// Store-owned scoped capability; never supplied by a generic reader.
+    native_scope: ?*anyopaque = null,
+
+    pub fn validating(source: *anyopaque, read_object: *const fn (*anyopaque, std.mem.Allocator, state.Reference, usize) anyerror![]u8) ReadView {
+        return .{ .source = source, .read_object = read_object };
+    }
+
+    pub fn object(self: ReadView, a: std.mem.Allocator, ref: state.Reference, limit: usize) ![]u8 {
+        return self.read_object(self.source, a, ref, limit);
+    }
+
+    pub fn context(self: ReadView, comptime P: type, ctx: ProjectionContext, reference: anytype, audience: []const u8, catalog: P.AdaptiveCatalog, reader: *@import("adaptive_history.zig").History(P).Reader) !*@import("adaptive_context.zig").Projection(P).ValidatedContext {
+        return @import("store.zig").Store.validateContext(P, self.native_scope, ctx, reference, audience, catalog, reader);
+    }
+
+    pub fn historyRead(self: ReadView, bytes: usize) void {
+        if (self.native_scope) |source| @import("store.zig").Store.recordHistoryRead(source, bytes);
+    }
+};
+
+pub const ProjectionBinding = struct {
+    task: state.TaskId,
+    tenant: []const u8,
+    profile: []const u8,
+    application: state.Digest,
+    resources: []const ObjectReference = &.{},
+};
+
 /// Pure projection inputs: immutable objects and frozen task bindings, with no
 /// I/O, credentials, evaluator, or mutable store supplied to adapter code.
 pub const ProjectionContext = struct {
@@ -15,13 +50,12 @@ pub const ProjectionContext = struct {
     task: state.TaskId,
     tenant: []const u8,
     profile: []const u8,
-    objects: struct {
-        owner: *anyopaque,
-        read: *const fn (*anyopaque, std.mem.Allocator, state.Reference, usize) anyerror![]u8,
-    },
+    application: ?state.Digest = null,
+    resources: []const ObjectReference = &.{},
+    objects: ReadView,
 
     pub fn object(self: ProjectionContext, ref: state.Reference, limit: usize) ![]u8 {
-        return self.objects.read(self.objects.owner, self.allocator, ref, limit);
+        return self.objects.object(self.allocator, ref, limit);
     }
 };
 pub const Projection = struct {
@@ -30,7 +64,43 @@ pub const Projection = struct {
     objects: []const []const u8 = &.{},
     output_tokens: ?u64 = null,
 };
+/// Pure, registered codec output. These edges are derived from decoded object
+/// types by the selected adapter; projection callers cannot attach edge claims.
+pub const Dependency = struct { parent: ObjectReference, child: ObjectReference };
+pub const DependencyDecoder = *const fn (std.mem.Allocator, []const []const u8) anyerror![]Dependency;
+pub const ProjectionReferences = struct {
+    allocator: std.mem.Allocator,
+    edges: std.ArrayList(Dependency) = .empty,
+
+    pub fn deinit(self: *ProjectionReferences) void {
+        self.edges.deinit(self.allocator);
+    }
+    pub fn object(self: *ProjectionReferences, comptime T: type, comptime Ref: type, bytes: []const u8, comptime identity: ?[]const u8) !void {
+        var decoded = try contracts.decodeOwned(T, self.allocator, bytes);
+        defer decoded.deinit();
+        if (identity) |expected| if (!std.mem.eql(u8, decoded.value.schema.bytes, expected)) return error.InvalidProjection;
+        var sink = struct {
+            collector: *ProjectionReferences,
+            parent: ObjectReference,
+            pub fn add(this: *@This(), child: ObjectReference) !void {
+                try this.collector.edges.append(this.collector.allocator, .{ .parent = this.parent, .child = child });
+            }
+            pub fn reply(_: *@This(), _: @import("occurrence.zig").Acquired) !void {
+                @compileError("host occurrence replies require the host dependency codec");
+            }
+        }{ .collector = self, .parent = .{ .digest = @import("store.zig").digest(bytes), .bytes = bytes.len } };
+        try state.visitReferencesAs(T, Ref, decoded.value, &sink);
+    }
+    pub fn finish(self: *ProjectionReferences) ![]Dependency {
+        return self.edges.toOwnedSlice(self.allocator);
+    }
+};
+/// Explicit registration for a projection whose objects contain no references.
+pub fn opaqueProjection(_: std.mem.Allocator, _: []const []const u8) ![]Dependency {
+    return &.{};
+}
 pub const CaptureAdapter = struct {
+    dependencies: DependencyDecoder,
     prepare: *const fn (ProjectionContext, []const u8) anyerror![]u8,
     acquire: *const fn (Context, []const u8) anyerror!Acquisition,
     interpret: *const fn (ProjectionContext, []const u8, []const u8, []const u8) anyerror!Projection,
@@ -39,6 +109,74 @@ pub const Acquisition = union(enum) {
     captured: []const u8,
     definitely_not_sent: anyerror,
     unknown: anyerror,
+};
+
+/// Frozen occurrence inputs supplied by the task owner, never client-provided
+/// replacement answers. Logical attempt admission remains the Service's job.
+pub const RecoveryInput = struct {
+    task: state.TaskId,
+    occurrence: state.Digest,
+    attempt: state.Digest,
+    request_identity: state.Digest,
+    request: ObjectReference,
+    prepared: ?ObjectReference,
+    profile: ObjectReference,
+    resources: []const ObjectReference,
+    capability: []const u8,
+    inference: bool,
+
+    pub fn fromReconciliation(item: state.Reconciliation, identity: state.Digest, inference: bool) RecoveryInput {
+        return .{ .task = item.task, .occurrence = item.occurrence, .attempt = item.attempt, .request_identity = identity, .request = item.request, .prepared = item.prepared, .profile = item.profile, .resources = item.resources.items, .capability = item.capability.bytes, .inference = inference };
+    }
+};
+/// Worker-owned pure inputs. Object access and projection leases stay with the
+/// admission owner; artifact-dependent computations use frozen prepared bytes.
+pub const RederivationContext = struct {
+    allocator: std.mem.Allocator,
+    task: state.TaskId,
+    profile: []const u8,
+    cancellation: *const std.atomic.Value(bool),
+
+    pub fn checkCancellation(self: RederivationContext) !void {
+        if (self.cancellation.load(.acquire)) return error.Canceled;
+    }
+};
+pub const RederivationFinding = union(enum) {
+    result: []const u8,
+    unsupported,
+    unavailable,
+    inconclusive,
+    rejected,
+};
+pub const RecoveryFinding = union(enum) {
+    /// Exact historical bytes authenticated by the compiled verifier.
+    capture: []const u8,
+    not_sent,
+    inconclusive,
+    unavailable,
+    rejected,
+};
+pub const ReceiptLookup = struct {
+    /// Read-only authoritative receipt retrieval. This callback must never
+    /// invoke the original effect. Native adapters remain trusted code.
+    /// Return complete receipt/proof bytes. Ancillary verifier inputs must be
+    /// in the original frozen resource closure, so evidence is archive-complete.
+    acquire: *const fn (Context, RecoveryInput, []const u8, ?[]const u8) anyerror![]u8,
+    /// The owner verifies returned evidence under the original immutable
+    /// bindings before any occurrence transition. Neither callback has Store.
+    /// Semantic non-results are explicit RecoveryFinding values. Errors mean
+    /// verification failed operationally and must not finalize reconciliation.
+    verify: *const fn (ProjectionContext, RecoveryInput, []const u8) anyerror!RecoveryFinding,
+};
+pub const RecoveryAdapter = struct {
+    identity: []const u8,
+    version: u32,
+    /// Pure worker computation over the admitted request and prepared bytes.
+    /// No projection reader, IO, credentials, or environment handle escapes.
+    /// Non-results are explicit; errors remain operational failures. Cancellation
+    /// interrupts this new computation without resolving historical delivery.
+    rederive: ?*const fn (RederivationContext, RecoveryInput, []const u8, ?[]const u8) anyerror!RederivationFinding = null,
+    lookup: ?ReceiptLookup = null,
 };
 
 pub const Grant = struct {
@@ -98,6 +236,7 @@ pub const Declaration = struct {
     background: bool = false,
     /// acquire receives prepared bytes and returns an uninterpreted capture.
     capture: ?CaptureAdapter = null,
+    recovery: ?RecoveryAdapter = null,
     payload_schema: *const fn (std.mem.Allocator) anyerror![]u8,
     resume_schema: *const fn (std.mem.Allocator) anyerror![]u8,
     invoke: ?*const fn (Context, []const u8) anyerror![]u8 = null,
@@ -129,6 +268,9 @@ pub const Registry = struct {
             if (declaration.public_outputs and declaration.capture == null) return error.InvalidCapability;
             if (declaration.kind == .leaf and declaration.invoke == null and declaration.capture == null) return error.InvalidCapability;
             if (declaration.capture != null and (declaration.kind != .leaf or !declaration.background or declaration.invoke != null)) return error.InvalidCapability;
+            if (declaration.recovery) |recovery| {
+                if (declaration.kind != .leaf or recovery.identity.len == 0 or recovery.version == 0 or (recovery.rederive == null and recovery.lookup == null)) return error.InvalidCapability;
+            }
             if (declaration.kind == .question and (declaration.present == null or declaration.answer == null or declaration.answer_schema_id == null)) return error.InvalidCapability;
             entry.* = .{
                 .declaration = declaration,
@@ -172,7 +314,53 @@ pub const Registry = struct {
         }
         return if (known_identity) error.CapabilitySchemaMismatch else error.MissingCapability;
     }
+
+    /// Validate frozen inputs before durable recovery admission. Computation
+    /// runs later on the worker, after this borrowed projection view expires.
+    pub fn validateRederivation(self: Registry, ctx: ProjectionContext, input: RecoveryInput) !void {
+        return self.recover(false, ctx, input, null);
+    }
+    pub fn verifyRecovery(self: Registry, ctx: ProjectionContext, input: RecoveryInput, evidence: []const u8) !RecoveryFinding {
+        return self.recover(true, ctx, input, evidence);
+    }
+    fn recover(self: Registry, comptime lookup: bool, ctx: ProjectionContext, input: RecoveryInput, evidence: ?[]const u8) !(if (lookup) RecoveryFinding else void) {
+        const image = ctx.application orelse return error.InvalidRecovery;
+        if (!std.meta.eql(ctx.task, input.task) or input.profile.bytes != ctx.profile.len or
+            !std.meta.eql(input.profile.digest, @import("store.zig").digest(ctx.profile)) or
+            !std.meta.eql(ctx.resources.len, input.resources.len)) return error.InvalidRecovery;
+        for (ctx.resources, input.resources) |actual, expected| if (!std.meta.eql(actual, expected)) return error.InvalidRecovery;
+        const request_bytes = try recoveryObject(ctx, input.request);
+        defer ctx.allocator.free(request_bytes);
+        var request = try data.invocation.decode(data.invocation.Request, ctx.allocator, request_bytes);
+        defer request.deinit();
+        if (!std.meta.eql(request.value.request_identity, input.request_identity)) return error.InvalidRecovery;
+        const entry = try self.resolve(request.value, image);
+        if (!std.mem.eql(u8, input.capability, entry.declaration.identity) or input.inference != entry.declaration.inference) return error.InvalidRecovery;
+        const adapter = entry.declaration.recovery orelse return error.UnsupportedRecovery;
+        const prepared = if (input.prepared) |ref| try recoveryObject(ctx, ref) else null;
+        defer if (prepared) |bytes| ctx.allocator.free(bytes);
+        if (entry.declaration.capture) |capture| {
+            const original = prepared orelse return error.InvalidRecovery;
+            const derived = try capture.prepare(ctx, request.value.binding.payload);
+            defer ctx.allocator.free(derived);
+            if (!std.mem.eql(u8, original, derived)) return error.InvalidPreparedRequest;
+        } else if (prepared != null) return error.InvalidRecovery;
+        if (lookup) {
+            const verifier = adapter.lookup orelse return error.UnsupportedRecovery;
+            const result = try verifier.verify(ctx, input, evidence.?);
+            if (result == .capture and entry.declaration.capture == null) return error.InvalidRecovery;
+            return result;
+        }
+        if (adapter.rederive == null) return error.UnsupportedRecovery;
+    }
 };
+
+fn recoveryObject(ctx: ProjectionContext, ref: ObjectReference) ![]u8 {
+    const bytes = try ctx.object(ref, std.math.cast(usize, ref.bytes) orelse return error.Capacity);
+    errdefer ctx.allocator.free(bytes);
+    if (bytes.len != ref.bytes or !std.meta.eql(@import("store.zig").digest(bytes), ref.digest)) return error.InvalidRecovery;
+    return bytes;
+}
 
 pub fn leaf(comptime Payload: type, comptime Reply: type, comptime options: struct {
     identity: []const u8,
@@ -275,6 +463,55 @@ test "capability admission requires the complete schema and current resource gra
     var wrong = request;
     wrong.binding.resume_schema = &.{};
     try std.testing.expectError(error.CapabilitySchemaMismatch, registry.admit(wrong, authority, @splat(1), resource));
+}
+
+test "pure recovery admission binds frozen inputs without computation or invocation" {
+    const a = std.testing.allocator;
+    const storage = @import("store.zig");
+    const Handler = struct {
+        fn invoke(_: Context, _: u32) !u32 {
+            return error.EnvironmentMustNotRun;
+        }
+        fn rederive(_: RederivationContext, _: RecoveryInput, _: []const u8, _: ?[]const u8) !RederivationFinding {
+            return error.ComputationMustWaitForWorker;
+        }
+    };
+    var declaration = leaf(u32, u32, .{ .identity = "pure-increment.v1", .resource_role = "frozen" }, Handler.invoke);
+    declaration.recovery = .{ .identity = "pure-increment.recovery.v1", .version = 1, .rederive = Handler.rederive };
+    var registry = try Registry.init(a, &.{declaration});
+    defer registry.deinit();
+    const entry = registry.entries[0];
+    const request = try data.invocation.request(.{ .program_identity = @splat(1), .pending_state_digest = @splat(2), .effect = 0, .semantic_identity = declaration.identity, .payload_schema = entry.payload_schema, .resume_schema = entry.resume_schema, .payload = &.{ 7, 0, 0, 0 } });
+    const encoded = try data.invocation.encodeOwned(data.invocation.Request, a, request);
+    defer a.free(encoded);
+    var object = struct {
+        bytes: []const u8,
+        fn read(pointer: *anyopaque, allocator: std.mem.Allocator, _: ObjectReference, _: usize) ![]u8 {
+            const self: *@This() = @ptrCast(@alignCast(pointer));
+            return allocator.dupe(u8, self.bytes);
+        }
+    }{ .bytes = encoded };
+    const resources: []const ObjectReference = &.{ .{ .digest = @splat(3), .bytes = 17 }, .{ .digest = @splat(4), .bytes = 19 } };
+    const ctx: ProjectionContext = .{ .allocator = a, .task = @splat(9), .tenant = "test", .profile = "frozen profile", .application = @splat(1), .resources = resources, .objects = .validating(&object, @TypeOf(object).read) };
+    const original: RecoveryInput = .{ .task = ctx.task, .occurrence = @splat(5), .attempt = @splat(6), .request_identity = request.request_identity, .request = .{ .digest = storage.digest(encoded), .bytes = encoded.len }, .prepared = null, .profile = .{ .digest = storage.digest(ctx.profile), .bytes = ctx.profile.len }, .resources = resources, .capability = declaration.identity, .inference = false };
+    try registry.validateRederivation(ctx, original);
+    for (0..7) |case| {
+        var input = original;
+        switch (case) {
+            0 => input.task[0] ^= 1,
+            1 => input.profile.digest[0] ^= 1,
+            2 => input.profile.bytes += 1,
+            3 => input.resources = &.{ resources[1], resources[0] },
+            4 => input.request_identity[0] ^= 1,
+            5 => input.request.digest[0] ^= 1,
+            6 => input.inference = true,
+            else => unreachable,
+        }
+        try std.testing.expectError(error.InvalidRecovery, registry.validateRederivation(ctx, input));
+    }
+    var foreign = ctx;
+    foreign.application = @splat(7);
+    try std.testing.expectError(error.Denied, registry.validateRederivation(foreign, original));
 }
 
 test "schema-specialized capability families resolve independently of declaration order" {

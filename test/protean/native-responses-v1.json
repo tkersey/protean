@@ -165,7 +165,13 @@
       "body": "{\"status\":\"incomplete\",\"error\":null,\"output\":[],\"usage\":{\"input_tokens\":17,\"output_tokens\":\"9\"}}",
       "result": "provider_failure",
       "replay": "unsupported",
-      "usage_absent": true,
+      "usage_partial": {
+        "input_tokens": "17",
+        "output_tokens": null,
+        "cached_input_tokens": null,
+        "cache_write_tokens": null,
+        "reasoning_tokens": null
+      },
       "result_wire": "03020000000000"
     },
     {
