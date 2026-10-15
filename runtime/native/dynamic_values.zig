@@ -143,6 +143,21 @@ pub fn page(a: std.mem.Allocator, schema: []const u8, bytes: []const u8, request
     return @import("workspace_projection.zig").window(a, window, requested, total);
 }
 
+/// A preview is optional evidence beside an authoritative value reference.
+/// Valid compact values can have a JSON length outside the paging domain.
+/// Keep that diagnostic local; resource and storage failures still propagate.
+pub fn preview(a: std.mem.Allocator, schema: []const u8, bytes: []const u8) !json.Value {
+    return page(a, schema, bytes, .{}) catch |err| switch (err) {
+        error.Overflow => blk: {
+            var result = json.object();
+            try json.put(a, &result, "error", json.string("Overflow"));
+            try json.put(a, &result, "complete", .{ .bool = false });
+            break :blk result;
+        },
+        else => return err,
+    };
+}
+
 /// A request's selected values share a JSON-byte budget. Measure compact
 /// repetition before allocating a JSON node for each logical element. The
 /// caller still checks the final request, including envelopes and escaping.

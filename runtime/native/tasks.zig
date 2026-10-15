@@ -2714,9 +2714,15 @@ pub fn Service(comptime Types: type) type {
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatible(parent.value);
-            const observation = self.workspaceExecute(a, operation_id, task_id, admitted, basis) catch |err| {
+            const executed = self.workspaceExecute(a, operation_id, task_id, admitted, basis) catch |err| {
                 if (self.store().fenced or err == error.OutOfMemory or err == error.StorageUnavailable) return err;
                 return workspaceRejection(a, err);
+            };
+            // Admission is durable. Projection failures must never rewrite it
+            // as a rejected operation; callers can retry its retained receipt.
+            const observation = switch (executed) {
+                .observation => |value| value,
+                .admitted => |accepted| try self.workspaceAdmissionObservation(a, task_id, accepted),
             };
             const rejected = observation == .object and observation.object.contains("error");
             const selected = if (!rejected and command == .context and command.context == .select)
@@ -2739,7 +2745,9 @@ pub fn Service(comptime Types: type) type {
             return .{ .disposition = .rejected, .observation_json = .{ .bytes = try json.canonical(a, failure) } };
         }
 
-        fn workspaceExecute(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, authorized: workspace.Authorized, basis: ?workspace.ReadObservation) !json.Value {
+        const WorkspaceExecution = union(enum) { observation: json.Value, admitted: Admission };
+
+        fn workspaceExecute(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, authorized: workspace.Authorized, basis: ?workspace.ReadObservation) !WorkspaceExecution {
             const command = authorized.command;
             switch (command) {
                 .program => |program| switch (program) {
@@ -2760,7 +2768,7 @@ pub fn Service(comptime Types: type) type {
                             },
                         };
                         defer a.free(description);
-                        return wp.page(a, description, request.page);
+                        return .{ .observation = try wp.page(a, description, request.page) };
                     },
                     .build => |request| {
                         const text = switch (request.source) {
@@ -2777,9 +2785,9 @@ pub fn Service(comptime Types: type) type {
                             try json.put(a, &failure, "function", try values.toJson(@TypeOf(diagnostic.source.function), a, diagnostic.source.function));
                             try json.put(a, &failure, "term", try values.toJson(@TypeOf(diagnostic.source.term), a, diagnostic.source.term));
                             try json.put(a, &failure, "value", try values.toJson(@TypeOf(diagnostic.source.value), a, diagnostic.source.value));
-                            return failure;
+                            return .{ .observation = failure };
                         };
-                        return self.workspaceAdmissionObservation(a, task_id, admitted);
+                        return .{ .admitted = admitted };
                     },
                     .inspect => |request| {
                         const id = try wp.identity(request.program, .program);
@@ -2788,7 +2796,7 @@ pub fn Service(comptime Types: type) type {
                         const observed = try self.workspaceProgramObservation(a, id, program_value.value.description);
                         const text = try json.canonical(a, observed);
                         defer a.free(text);
-                        return wp.page(a, text, request.page);
+                        return .{ .observation = try wp.page(a, text, request.page) };
                     },
                 },
                 .work => |work_command| switch (work_command) {
@@ -2816,13 +2824,13 @@ pub fn Service(comptime Types: type) type {
                             },
                         };
                         defer a.free(input);
-                        return self.workspaceAdmissionObservation(a, task_id, try self.workspaceStartValue(a, operation_id, task_id, program_id, input, request.policy, origin));
+                        return .{ .admitted = try self.workspaceStartValue(a, operation_id, task_id, program_id, input, request.policy, origin) };
                     },
                     .inspect => |request| {
-                        if (basis) |frozen| return self.renderWorkspaceWorkObservation(a, frozen.works.works.items[0].?.work, frozen.works.works.items[0].?.occurrence, frozen.works.event_watermark);
+                        if (basis) |frozen| return .{ .observation = try self.renderWorkspaceWorkObservation(a, frozen.works.works.items[0].?.work, frozen.works.works.items[0].?.occurrence, frozen.works.event_watermark) };
                         var value = try self.workspaceWork(a, task_id, try wp.identity(request.work, .work));
                         defer value.deinit();
-                        return self.workspaceWorkObservation(a, value.value);
+                        return .{ .observation = try self.workspaceWorkObservation(a, value.value) };
                     },
                     .collect => |request| {
                         var result: json.Value = .{ .array = .init(a) };
@@ -2850,10 +2858,10 @@ pub fn Service(comptime Types: type) type {
                             defer value.deinit();
                             try result.array.append(try self.workspaceWorkObservation(a, value.value));
                         }
-                        return result;
+                        return .{ .observation = result };
                     },
                     .advance, .park, .delegate, .cancel => {
-                        if (work_command == .delegate and work_command.delegate.interpretation != .none) return self.workspaceAdmissionObservation(a, task_id, try self.workspaceDelegate(a, operation_id, task_id, authorized));
+                        if (work_command == .delegate and work_command.delegate.interpretation != .none) return .{ .admitted = try self.workspaceDelegate(a, operation_id, task_id, authorized) };
                         const expected = switch (work_command) {
                             .advance, .park => |v| v,
                             .delegate => |v| v.expected,
@@ -2868,7 +2876,7 @@ pub fn Service(comptime Types: type) type {
                             else => unreachable,
                         };
                         const admitted = try self.workspaceControl(a, operation_id, task_id, try wp.identity(expected.work, .work), expected.execution_revision, expected.control_revision, control);
-                        return self.workspaceAdmissionObservation(a, task_id, admitted);
+                        return .{ .admitted = admitted };
                     },
                     .wait => |request| {
                         var parent = try self.task(a, task_id);
@@ -2893,9 +2901,9 @@ pub fn Service(comptime Types: type) type {
                         try json.put(a, &result, "interrupted", .{ .bool = interrupted });
                         try json.put(a, &result, "event_watermark", try json.number(a, if (basis) |frozen| frozen.wait.event_watermark else parent.value.event_high));
                         try json.put(a, &result, "works", selected);
-                        return result;
+                        return .{ .observation = result };
                     },
-                    .interact => |request| return self.workspaceAdmissionObservation(a, task_id, try self.workspaceInteract(a, operation_id, task_id, request)),
+                    .interact => |request| return .{ .admitted = try self.workspaceInteract(a, operation_id, task_id, request) },
                 },
                 .context => |context| switch (context) {
                     .inspect => |request| {
@@ -2916,7 +2924,7 @@ pub fn Service(comptime Types: type) type {
                             }
                         }
                         try output.append("]");
-                        return output.finish(a);
+                        return .{ .observation = try output.finish(a) };
                     },
                     .expand => |request| {
                         if (request.reference.kind == .port) {
@@ -2924,7 +2932,7 @@ pub fn Service(comptime Types: type) type {
                             var port = try self.record(workspace.Port, a, "workspace_port", id, task_id);
                             defer port.deinit();
                             if (!std.meta.eql(port.value.id, id) or !std.meta.eql(port.value.task, task_id)) return error.CorruptState;
-                            return self.workspacePayloadPage(a, port.value.interface.payload, port.value.payload, request.page);
+                            return .{ .observation = try self.workspacePayloadPage(a, port.value.interface.payload, port.value.payload, request.page) };
                         }
                         if (request.reference.kind == .work) {
                             if (basis) |frozen| {
@@ -2936,7 +2944,7 @@ pub fn Service(comptime Types: type) type {
                                 if (outcome.value != .failed) return error.InvalidState;
                                 var program = try self.workspaceProgram(a, task_id, work.program);
                                 defer program.deinit();
-                                return self.workspacePayloadBytesPage(a, program.value.description.failure_schema, outcome.value.failed.value, request.page);
+                                return .{ .observation = try self.workspacePayloadBytesPage(a, program.value.description.failure_schema, outcome.value.failed.value, request.page) };
                             }
                             var work = try self.retainedWorkspaceWork(a, task_id, try wp.identity(request.reference, .work));
                             defer work.deinit();
@@ -2947,10 +2955,10 @@ pub fn Service(comptime Types: type) type {
                             if (outcome.value != .failed) return error.InvalidState;
                             var program = try self.workspaceProgram(a, task_id, work.value.program);
                             defer program.deinit();
-                            return self.workspacePayloadBytesPage(a, program.value.description.failure_schema, outcome.value.failed.value, request.page);
+                            return .{ .observation = try self.workspacePayloadBytesPage(a, program.value.description.failure_schema, outcome.value.failed.value, request.page) };
                         }
                         if (request.reference.kind == .view) {
-                            return self.workspaceViewObservation(a, task_id, try wp.identity(request.reference, .view), request.page);
+                            return .{ .observation = try self.workspaceViewObservation(a, task_id, try wp.identity(request.reference, .view), request.page) };
                         }
                         if (request.reference.kind == .provenance or request.reference.kind == .schema) {
                             const reference = try self.workspaceOwnedDescriptor(a, task_id, request.reference);
@@ -2963,21 +2971,21 @@ pub fn Service(comptime Types: type) type {
                             };
                             const text = try json.canonical(a, projected);
                             defer a.free(text);
-                            return wp.page(a, text, request.page);
+                            return .{ .observation = try wp.page(a, text, request.page) };
                         }
                         if (request.reference.kind == .source) {
                             const text = try self.workspaceSource(a, task_id, request.reference);
                             defer a.free(text);
-                            return wp.page(a, text, request.page);
+                            return .{ .observation = try wp.page(a, text, request.page) };
                         }
                         const value = try self.workspaceValueReference(a, task_id, request.reference);
                         const schema = try self.store().object(a, value.schema, null);
                         defer a.free(schema);
                         const bytes = try self.store().object(a, value.value, null);
                         defer a.free(bytes);
-                        return @import("dynamic_values.zig").page(a, schema, bytes, request.page);
+                        return .{ .observation = try @import("dynamic_values.zig").page(a, schema, bytes, request.page) };
                     },
-                    .materialize, .select => return self.workspaceAdmissionObservation(a, task_id, try self.workspaceContextMutation(a, operation_id, task_id, context, authorized.snapshot, authorized.input)),
+                    .materialize, .select => return .{ .admitted = try self.workspaceContextMutation(a, operation_id, task_id, context, authorized.snapshot, authorized.input) },
                 },
             }
         }
@@ -3081,7 +3089,7 @@ pub fn Service(comptime Types: type) type {
             if (outcome.value == .failed) {
                 var program = try self.workspaceProgram(a, value.task, value.program);
                 defer program.deinit();
-                try json.put(a, &result, "failure_preview", try self.workspacePayloadBytesPage(a, program.value.description.failure_schema, outcome.value.failed.value, .{}));
+                try json.put(a, &result, "failure_preview", try self.workspacePayloadPreview(a, program.value.description.failure_schema, outcome.value.failed.value));
                 try json.put(a, &result, "failure", try values.toJson(wc.Ref, a, try wp.reference(a, .work, value.id)));
             }
             try json.put(a, &result, "input", try values.toJson(wc.Ref, a, try wp.reference(a, .value, (value.input_value orelse return error.CorruptState).digest)));
@@ -3102,7 +3110,7 @@ pub fn Service(comptime Types: type) type {
                 defer a.free(schema);
                 const bytes = try self.store().object(a, ref, null);
                 defer a.free(bytes);
-                try json.put(a, &result, "result_preview", try @import("dynamic_values.zig").page(a, schema, bytes, .{}));
+                try json.put(a, &result, "result_preview", try @import("dynamic_values.zig").preview(a, schema, bytes));
             }
             return result;
         }
@@ -3120,8 +3128,16 @@ pub fn Service(comptime Types: type) type {
                 try json.put(a, &result, field ++ "_schema", try values.toJson(wc.Ref, a, try wp.reference(a, .schema, ref.digest)));
                 try json.put(a, &result, field ++ "_descriptor", try wp.schema(a, bytes));
             }
-            try json.put(a, &result, "preview", try self.workspacePayloadPage(a, port.interface.payload, port.payload, .{}));
+            const payload = try self.store().object(a, port.payload, null);
+            defer a.free(payload);
+            try json.put(a, &result, "preview", try self.workspacePayloadPreview(a, port.interface.payload, payload));
             return result;
+        }
+
+        fn workspacePayloadPreview(self: *Self, a: std.mem.Allocator, schema_ref: state.Reference, payload: []const u8) !json.Value {
+            const schema = try self.store().object(a, schema_ref, null);
+            defer a.free(schema);
+            return @import("dynamic_values.zig").preview(a, schema, payload);
         }
 
         fn workspacePayloadPage(self: *Self, a: std.mem.Allocator, schema_ref: state.Reference, payload_ref: state.Reference, page: wc.Page) !json.Value {
@@ -3336,7 +3352,7 @@ pub fn Service(comptime Types: type) type {
             try json.put(a, &result, "value", try values.toJson(wc.Ref, a, ref));
             try json.put(a, &result, "schema", try values.toJson(wc.Ref, a, try wp.reference(a, .schema, value.schema.digest)));
             try json.put(a, &result, "provenance", try values.toJson(wc.Ref, a, try wp.reference(a, .provenance, value.provenance.digest)));
-            try json.put(a, &result, "preview", try @import("dynamic_values.zig").page(a, schema, bytes, .{}));
+            try json.put(a, &result, "preview", try @import("dynamic_values.zig").preview(a, schema, bytes));
             const provenance = try self.store().object(a, value.provenance, null);
             defer a.free(provenance);
             var derivation = try contracts.decodeOwned(workspace.Derivation, a, provenance);
@@ -3923,7 +3939,7 @@ pub fn Service(comptime Types: type) type {
                                 const rearmed = before.control.delivery == .not_sent and before.control.instrument;
                                 if (actual.delivery != (if (rearmed) .ready else before.control.delivery)) return error.InvalidArchive;
                                 const runnable = actual.delivery == null or actual.delivery == .settled_reply or actual.delivery == .captured or (actual.delivery == .ready and actual.instrument);
-                                expected.schedule = if (runnable and policy.continuation == .owner_scheduled) .queued else .parked;
+                                expected.schedule = if (policy.continuation == .explicit_only) .parked else if (actual.delivery == .dispatching) .active else if (runnable) .queued else .parked;
                             },
                             .cancel => |reason| {
                                 if (expected.cancellation == null) expected.cancellation = reason;
@@ -5563,16 +5579,18 @@ pub fn Service(comptime Types: type) type {
                 .delegate => |policy| {
                     value.policy = policy;
                     var can_run = value.current_occurrence == null;
+                    var in_flight = false;
                     if (value.current_occurrence) |id| {
                         var pending = try self.record(occurrence.Occurrence, a, "occurrence", id, task_id);
                         defer pending.deinit();
+                        in_flight = pending.value.state == .dispatching;
                         can_run = pending.value.state == .settled_reply or pending.value.state == .captured or (pending.value.state == .ready and value.delegation != null);
                         if (pending.value.state == .not_sent and value.delegation != null) {
                             rearmed = try occurrence.rearm(pending.value, .{ .id = id, .task = task_id, .work = work_id, .request = pending.value.request });
                             can_run = true;
                         }
                     }
-                    value.schedule = if (can_run and policy.continuation == .owner_scheduled) .queued else .parked;
+                    value.schedule = if (policy.continuation == .explicit_only) .parked else if (in_flight) .active else if (can_run) .queued else .parked;
                 },
                 .advance, .cancel => unreachable,
             }

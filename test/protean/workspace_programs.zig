@@ -2102,6 +2102,20 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                 try std.testing.expectEqual(@as(usize, 1), dispatches);
                 try std.testing.expect(step.work.subject_work != null);
                 instrument_id = step.work.subject_work;
+                if (successful) {
+                    var active = try service.workspaceWork(scratch, parent.receipt.task, instrument_id.?);
+                    defer active.deinit();
+                    const operation_id = try std.fmt.allocPrint(scratch, "refresh-in-flight-{s}", .{suffix});
+                    const refreshed = try service.workspaceControl(scratch, operation_id, parent.receipt.task, instrument_id.?, active.value.execution_revision, active.value.control_revision, .{ .delegate = active.value.policy });
+                    const replayed = try service.workspaceControl(scratch, operation_id, parent.receipt.task, instrument_id.?, active.value.execution_revision, active.value.control_revision, .{ .delegate = active.value.policy });
+                    try std.testing.expectEqualDeep(refreshed.receipt, replayed.receipt);
+                    var current = try service.workspaceWork(scratch, parent.receipt.task, instrument_id.?);
+                    defer current.deinit();
+                    try std.testing.expectEqual(.active, current.value.schedule);
+                    try std.testing.expectEqual(active.value.execution_revision, current.value.execution_revision);
+                    try std.testing.expectEqual(active.value.control_revision + 1, current.value.control_revision);
+                    if (scenario == .snapshot_empty) _ = try service.workspaceControl(scratch, "park-in-flight", parent.receipt.task, instrument_id.?, current.value.execution_revision, current.value.control_revision, .park);
+                }
                 var root = try service.task(scratch, parent.receipt.task);
                 defer root.deinit();
                 try std.testing.expect(!std.meta.eql(root.value.current_occurrence, step.work.occurrence));
@@ -2156,6 +2170,13 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                     try worker.join();
                     try service.completeWork(scratch, step.work, worker.result.?);
                     try worker.release();
+                    if (scenario == .snapshot_empty) {
+                        var parked = try service.workspaceWork(scratch, parent.receipt.task, instrument_id.?);
+                        defer parked.deinit();
+                        try std.testing.expectEqual(.parked, parked.value.schedule);
+                        try std.testing.expect(parked.value.answer_value == null);
+                        _ = try service.workspaceControl(scratch, "resume-after-capture", parent.receipt.task, instrument_id.?, parked.value.execution_revision, parked.value.control_revision, .{ .delegate = parked.value.policy });
+                    }
                 } else {
                     const raw = try contracts.encodeOwned(native.responses.Raw, scratch, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = "{\"output\":[{\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"typed-answer\",\"name\":\"answer\",\"arguments\":\"{\\\"json_value\\\":\\\"\\\\\\\"42\\\\\\\"\\\"}\"}],\"usage\":{\"output_tokens\":7}}" } });
                     var response = try contracts.decodeOwned(native.responses.Raw, scratch, raw);
@@ -2344,6 +2365,94 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
         service_open = true;
         try std.testing.expectEqual(.idle, try service.pump(scratch));
     }
+    // Exercise automatic result, failure, port, and value previews through the
+    // actual controller occurrence, retained reply evidence, and archive replay.
+    for ([_]enum { result, failure, port }{ .result, .failure, .port }) |kind| {
+        const label = @tagName(kind);
+
+        const parent = try service.submit(scratch, try std.fmt.allocPrint(scratch, "overflow-parent-{s}", .{label}), {});
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const unit = try b.scalar(void);
+        const huge = try b.schema(.{ .array = .{ .element = unit, .length = 10_000_000_000_000_000_000 } });
+        const literal = try b.literal(.{ .schema = huge, .bytes = "" });
+        const effect = try b.effect(.{ .identity = "overflow-payload", .payload = huge, .result = unit, .external = false });
+        const entry = try b.declare(&.{unit}, if (kind == .result) huge else unit, if (kind == .port) &.{effect} else &.{}, &.{});
+        try b.define(entry, switch (kind) {
+            .result => try b.pure(literal),
+            .failure => try b.term(.{ .fail = literal }),
+            .port => try b.term(.{ .perform = .{ .effect = effect, .payload = literal } }),
+        });
+        const built = try service.workspaceCommand(scratch, try std.fmt.allocPrint(scratch, "overflow-build-{s}", .{label}), parent.receipt.task, .{ .program = .{ .build = .{
+            .source = .{ .json_text = .{ .bytes = try native.source_records.encode(scratch, b.module(entry, if (kind == .failure) huge else unit)) } },
+            .source_kind = .source_records,
+            .exposures = .{ .items = if (kind == .port) &.{.{ .effect = effect, .class = .input }} else &.{} },
+        } } });
+        try std.testing.expect(built.program != null);
+        var artifact = try service.workspaceProgram(scratch, parent.receipt.task, try nativeIdentity(built.program.?));
+        defer artifact.deinit();
+
+        _ = try service.message(scratch, try std.fmt.allocPrint(scratch, "overflow-message-{s}", .{label}), parent.receipt.task, .{ .work = .{ .start = .{
+            .program = built.program.?,
+            .input = .{ .inline_json = .{ .schema = try workspaceRef(scratch, .schema, artifact.value.description.input_schema.digest), .json_text = .{ .bytes = "{}" } } },
+            .policy = .{},
+        } } });
+        var reply: ?contracts.workspace.Reply = null;
+        for (0..32) |_| {
+            _ = try service.pump(scratch);
+            var query = try namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='workspace_reply'", &.{.{ .blob = &parent.receipt.task }});
+            defer query.deinit();
+            if (try query.step() != .row) continue;
+            const saved = (try contracts.decodeOwned(native.workspace.ReplyObservation, scratch, try query.bytes(0))).value;
+            try std.testing.expect(saved.evidence == .admitted);
+            const pending = (try contracts.decodeOwned(native.testing.occurrence.Occurrence, scratch, (try namespace.store.recordBytes(scratch, "occurrence", saved.id, saved.task)).?)).value;
+            try std.testing.expect(pending.state == .settled_reply);
+
+            var bound_reply = try data.invocation.decode(data.invocation.Result, scratch, try namespace.store.acquiredObject(scratch, pending.state.settled_reply.reply, null));
+            defer bound_reply.deinit();
+            reply = (try contracts.decodeOwned(contracts.workspace.Reply, scratch, bound_reply.value.value)).value;
+            break;
+        }
+        const observed = reply orelse return error.MissingOverflowReply;
+        try std.testing.expectEqual(.observed, observed.disposition);
+        const value = (try native.json.parse(scratch, observed.observation_json.bytes, .{})).value;
+        const preview = switch (kind) {
+            .result => value.object.get("result_preview").?,
+            .failure => value.object.get("failure_preview").?,
+            .port => value.object.get("port").?.object.get("preview").?,
+        };
+        try std.testing.expectEqualStrings("Overflow", preview.object.get("error").?.string);
+        try std.testing.expect(!preview.object.get("complete").?.bool);
+        if (kind == .result) {
+            const materialized = try service.workspaceCommand(scratch, "overflow-materialize", parent.receipt.task, .{ .context = .{ .materialize = .{ .input = .{ .value = .{ .reference = observed.evidence.? } }, .sources = .{ .items = &.{} } } } });
+            try std.testing.expectEqual(.observed, materialized.disposition);
+            const materialized_json = (try native.json.parse(scratch, materialized.observation_json.bytes, .{})).value;
+            try std.testing.expectEqualStrings("Overflow", materialized_json.object.get("preview").?.object.get("error").?.string);
+        }
+
+        for (0..32) |_| if (try service.pump(scratch) == .idle) break;
+        const archive_path = try std.fmt.allocPrint(scratch, "{s}/overflow-{s}.par", .{ path_buffer[0..length], label });
+
+        _ = try service.exportCheckpoint(scratch, parent.receipt.task, archive_path);
+        try service.close(a);
+        service_open = false;
+        try namespace.close();
+        namespace_open = false;
+        {
+            var imported_namespace = try native.Namespace.open(a, io, try std.fmt.allocPrint(scratch, "{s}/overflow-import-{s}", .{ path_buffer[0..length], label }));
+            defer imported_namespace.close() catch unreachable;
+            var imported = try native.tasks.Service(DelegateTypes).init(a, io, &imported_namespace, assets, &application, handlers, profile);
+            defer imported.close(a) catch unreachable;
+            _ = try imported.importCheckpoint(scratch, "overflow-import", archive_path);
+            try std.testing.expectEqual(.idle, try imported.pump(scratch));
+            try imported.validateWorkspace(scratch, parent.receipt.task);
+        }
+        namespace = try native.Namespace.open(a, io, path);
+        namespace_open = true;
+        service = try native.tasks.Service(DelegateTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+        service_open = true;
+        try std.testing.expectEqual(.idle, try service.pump(scratch));
+    }
 }
 
 fn nativeIdentity(ref: contracts.workspace.Ref) ![32]u8 {
@@ -2436,6 +2545,30 @@ test "deep recursive workspace values support input admission inspection expansi
     defer page.deinit();
     try std.testing.expect(!page.value.object.get("complete").?.bool);
     try std.testing.expectEqualStrings(text_value.items[0..16384], page.value.object.get("text").?.string);
+    const unpageable = try b.schema(.{ .array = .{ .element = unit, .length = 10_000_000_000_000_000_000 } });
+    const unpageable_entry = try b.declare(&.{unit}, unpageable, &.{}, &.{});
+    try b.define(unpageable_entry, try b.pure(try b.literal(.{ .schema = unpageable, .bytes = "" })));
+    const unpageable_program = try service.workspaceBuild(scratch, "unpageable-build", parent.receipt.task, try native.source_records.encode(scratch, b.module(unpageable_entry, unit)), &diagnostic);
+    var unpageable_artifact = try service.workspaceProgram(scratch, parent.receipt.task, unpageable_program.receipt.workspace.?);
+    defer unpageable_artifact.deinit();
+    const unpageable_command: contracts.workspace.Command = .{ .work = .{ .start = .{
+        .program = try workspaceRef(scratch, .program, unpageable_program.receipt.workspace.?),
+        .input = .{ .inline_json = .{ .schema = try workspaceRef(scratch, .schema, unpageable_artifact.value.description.input_schema.digest), .json_text = .{ .bytes = "{}" } } },
+        .policy = .{},
+    } } };
+    const unpageable_start = try service.workspaceCommand(scratch, "unpageable-start", parent.receipt.task, unpageable_command);
+    try std.testing.expectEqual(.observed, unpageable_start.disposition);
+    const unpageable_json = (try native.json.parse(scratch, unpageable_start.observation_json.bytes, .{})).value;
+    try std.testing.expectEqualStrings("completed", unpageable_json.object.get("outcome").?.string);
+    try std.testing.expectEqualStrings("Overflow", unpageable_json.object.get("result_preview").?.object.get("error").?.string);
+    try std.testing.expect(!unpageable_json.object.get("result_preview").?.object.get("complete").?.bool);
+    const unpageable_ref = try native.values.fromJson(contracts.workspace.Ref, scratch, unpageable_json.object.get("result").?);
+    const unpageable_replay = try service.workspaceCommand(scratch, "unpageable-start", parent.receipt.task, unpageable_command);
+    try std.testing.expectEqual(.observed, unpageable_replay.disposition);
+    try std.testing.expectEqualDeep(unpageable_start.evidence, unpageable_replay.evidence);
+    const unpageable_expand = try service.workspaceCommand(scratch, "unpageable-expand", parent.receipt.task, .{ .context = .{ .expand = .{ .reference = unpageable_ref, .page = .{} } } });
+    try std.testing.expectEqual(.rejected, unpageable_expand.disposition);
+    try service.validateWorkspace(scratch, parent.receipt.task);
     const enormous = try b.schema(.{ .array = .{ .element = unit, .length = 1_000_000_000 } });
     const enormous_entry = try b.declare(&.{enormous}, enormous, &.{}, &.{});
     try b.define(enormous_entry, try b.pure(try b.reference(b.parameter(enormous_entry, 0))));
@@ -2975,4 +3108,79 @@ test "WORK-14 workspace reads settle inside root cancellation cleanup" {
     var done = try service.task(scratch, parent.receipt.task);
     defer done.deinit();
     try std.testing.expectEqual(.cancelled, done.value.outcome_kind);
+}
+
+/// Fail exactly one allocation; persistent failure can hide an erroneous
+/// fallback because encoding that fallback also needs memory.
+const OneShotAllocator = struct {
+    backing: std.mem.Allocator,
+    fail_at: usize = std.math.maxInt(usize),
+    calls: usize = 0,
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const ordinal = self.calls;
+        self.calls += 1;
+        if (ordinal == self.fail_at) return null;
+        return self.backing.rawAlloc(len, alignment, ra);
+    }
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+    fn free(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(bytes, alignment, ra);
+    }
+};
+
+test "delegated model interpretation preserves transient allocation failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prepared = try contracts.encodeOwned(native.workspace_instrument.Prepared, a, .{
+        .schema = .{ .bytes = try native.values.schemaBytes(u64, a) },
+        .body = .{ .bytes = "" },
+        .model = .{ .profile_id = .{ .bytes = "fixture" }, .profile_digest = @splat(7), .settings = .{ .endpoint = .{ .bytes = "https://localhost/v1/responses" }, .audience = .{ .bytes = "fixture" }, .model = .{ .bytes = "fixture" }, .effort = .{ .bytes = "medium" }, .max_output_tokens = null, .request_bytes = null, .response_bytes = null, .timeout_ms = null }, .reasoning_mode = .{ .bytes = "standard" }, .reasoning_context = .{ .bytes = "auto" } },
+    });
+    const reader = struct {
+        fn read(_: *anyopaque, _: std.mem.Allocator, _: native.registry.ObjectReference, _: usize) ![]u8 {
+            return error.UnexpectedRead;
+        }
+    };
+    var marker: u8 = 0;
+    var context: native.registry.ProjectionContext = .{ .allocator = a, .task = @splat(0), .tenant = "fixture", .profile = "fixture", .objects = .validating(&marker, reader.read) };
+    const adapter = native.workspace_instrument.declaration(.model).capture.?;
+    for ([_][]const u8{
+        "{\"json_value\":\"\\\"42\\\"\"}",
+        "{\"json_\\u0076alue\":\"\\\"42\\\"\"}",
+        "{\"json_value\":\"{\"}",
+        "{\"json_value\":\"true\"}",
+        "{}",
+    }, 0..) |arguments, case| {
+        const body = try std.json.Stringify.valueAlloc(a, .{ .status = "completed", .@"error" = @as(?u8, null), .output = .{.{ .type = "function_call", .status = "completed", .call_id = "fixture", .name = "answer", .arguments = arguments }} }, .{});
+        const raw = try contracts.encodeOwned(native.responses.Raw, a, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = body } });
+        var counted: OneShotAllocator = .{ .backing = a };
+        context.allocator = counted.allocator();
+        const baseline = try adapter.interpret(context, "", prepared, raw);
+        var decoded = try contracts.decodeOwned(native.workspace_instrument.Output, a, baseline.reply);
+        defer decoded.deinit();
+        try std.testing.expectEqual(case < 2, decoded.value == .answer);
+        if (decoded.value == .answer) try std.testing.expectEqualStrings(try contracts.encodeOwned(u64, a, 42), decoded.value.answer.bytes);
+        for (0..counted.calls) |ordinal| {
+            var attempt = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer attempt.deinit();
+            var fault: OneShotAllocator = .{ .backing = attempt.allocator(), .fail_at = ordinal };
+            context.allocator = fault.allocator();
+            const actual = adapter.interpret(context, "", prepared, raw) catch |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                continue;
+            };
+            try std.testing.expectEqualStrings(baseline.reply, actual.reply);
+        }
+    }
 }

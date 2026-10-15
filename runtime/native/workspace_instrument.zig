@@ -221,9 +221,15 @@ fn interpret(ctx: registry.ProjectionContext, _: []const u8, rendered: []const u
     if (normalized == .output) for (normalized.output.items.items) |item| {
         if (item != .function_call or item.function_call.decoded_action != .decoded) continue;
         const text = item.function_call.decoded_action.decoded.answer.json_value.bytes;
-        var answer = json.parse(a, text, .{ .bytes = text.len, .depth = text.len, .tokens = text.len, .members = text.len }) catch continue;
+        var answer = json.parse(a, text, .{ .bytes = text.len, .depth = text.len, .tokens = text.len, .members = text.len }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue,
+        };
         defer answer.deinit();
-        const bytes = dynamic.encode(a, prepared.value.schema.bytes, answer.value) catch continue;
+        const bytes = dynamic.encode(a, prepared.value.schema.bytes, answer.value) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue,
+        };
         result = .{ .answer = .{ .bytes = bytes } };
     };
     var output_tokens: ?u64 = null;

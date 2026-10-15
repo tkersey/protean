@@ -47,7 +47,10 @@ remain separate checks.
 `context.expand` on a port pages its full payload. A failed work observation
 includes a `failure` reference; expanding it pages the full failure value.
 Inspection previews remain bounded, and every page reports its byte range and
-whether it reaches the end. These reads use the existing task-owned records.
+whether it reaches the end. If a compact value's expanded JSON length exceeds
+`u64`, its automatic preview reports `{"error":"Overflow","complete":false}`
+alongside the retained reference; explicit expansion reports `Overflow`.
+The operation remains admitted. These reads use the existing task-owned records.
 
 All authoritative workspace mutations commit through `workspaceCommit` or the
 existing occurrence transaction. Kernel publication happens before durable
