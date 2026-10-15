@@ -40,7 +40,7 @@ polish is deferred, not a blocker on the reusable API or reference integration.
 | `eviction_generation` | Authored exclusion fence. Every newly selected lineage must respect it. |
 | `AdaptiveContextReference` | Content reference plus schema, policy, inference selection, task, tenant, audience, epoch, watermark, and eviction bindings. |
 
-The additional identities are `agent.model.context.responses.adaptive.v6` and
+The additional identities are `agent.model.context.responses.adaptive.v7` and
 `agent.model.policy.adaptive.v2`. Every model effect uses the same v11
 request/result envelope and the v6 context reference.
 

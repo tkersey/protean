@@ -21,8 +21,7 @@ pub const capabilities = .{
     .{ .identity = t.prepare_identity, .resource_role = "context" },
     .{ .identity = t.work_identity, .resource_role = "snapshot" },
     .{ .identity = t.inspect_identity, .resource_role = "invariant-review" },
-    .{ .identity = t.tool_build_identity, .resource_role = "tool-construction" },
-    .{ .identity = t.tool_run_identity, .resource_role = "tool-execution" },
+    .{ .identity = t.workspace_identity, .resource_role = "workspace" },
     .{ .identity = t.question_identity, .resource_role = "user" },
     .{ .identity = protean.inbox.semantic_identity, .resource_role = "user" },
     .{ .identity = P.identity, .resource_role = "inference" },
@@ -63,8 +62,7 @@ const Ops = struct {
     work: Op(t.WorkRequest, t.WorkReply),
     ask: Op(t.Question, t.Answer),
     inspect: Op(t.WorkRequest, t.WorkReply),
-    tool_build: Op(t.ToolRequest, t.ToolReply),
-    tool_run: Op(t.ToolRequest, t.ToolReply),
+    workspace: Op(t.WorkspaceRequest, @import("protean_contracts").workspace.Reply),
     inbox: Op(void, Inbox.Reply),
     model: Op(P.AdaptiveRequest, P.AdaptiveResult),
 };
@@ -82,12 +80,11 @@ const Application = struct {
             .work = try context.external(t.work_identity, try context.schema(t.WorkRequest), try context.schema(t.WorkReply), .read),
             .ask = try context.external(t.question_identity, try context.schema(t.Question), try context.schema(t.Answer), .read),
             .inspect = try context.external(t.inspect_identity, try context.schema(t.WorkRequest), try context.schema(t.WorkReply), .read),
-            .tool_build = try context.external(t.tool_build_identity, try context.schema(t.ToolRequest), try context.schema(t.ToolReply), .read),
-            .tool_run = try context.external(t.tool_run_identity, try context.schema(t.ToolRequest), try context.schema(t.ToolReply), .read),
+            .workspace = try context.external(t.workspace_identity, try context.schema(t.WorkspaceRequest), try context.schema(@import("protean_contracts").workspace.Reply), .read),
             .inbox = try Inbox.declare(context),
             .model = try a.interop.externalOperation(c, try P.declare(context.builder), try context.schema(P.AdaptiveRequest), try context.schema(P.AdaptiveResult)),
         };
-        const loop = try c.function("adaptive repository investigation", .{ .bindings = try e.context.schema(t.PolicyView), .state = try e.context.schema(t.State) }, try e.context.schema(t.Output), .{ ops.prepare, ops.work, ops.ask, ops.inspect, ops.tool_build, ops.tool_run, ops.inbox, ops.model });
+        const loop = try c.function("adaptive repository investigation", .{ .bindings = try e.context.schema(t.PolicyView), .state = try e.context.schema(t.State) }, try e.context.schema(t.Output), .{ ops.prepare, ops.work, ops.ask, ops.inspect, ops.workspace, ops.inbox, ops.model });
         const program: Program = .{
             .e = e,
             .ops = ops,
@@ -101,7 +98,7 @@ const Application = struct {
         };
         try program.defineEvidence();
         try program.defineLoop();
-        const entry = try c.function("protean", .{ .input = try e.context.schema(t.Input) }, try e.context.schema(t.Output), .{ ops.bindings, ops.prepare, ops.work, ops.ask, ops.inspect, ops.tool_build, ops.tool_run, ops.inbox, ops.model });
+        const entry = try c.function("protean", .{ .input = try e.context.schema(t.Input) }, try e.context.schema(t.Output), .{ ops.bindings, ops.prepare, ops.work, ops.ask, ops.inspect, ops.workspace, ops.inbox, ops.model });
         const root = try c.body(entry);
         const frozen = try root.perform(ops.bindings, try root.constant(void, {}));
         const task = try root.field(try root.parameter("input"), "task");
@@ -148,8 +145,8 @@ const Program = struct {
         const absent = try b.caseOf(selected, "none");
         const item = present.payload();
         const source = try present.body().caseOf(item, "source");
-        const generated = try present.body().caseOf(item, "generated");
-        const projection = try present.body().match(item, .{ .source = try source.ret(try source.body().variant(try e.context.schema(?t.SourceEvidenceReference), "some", source.payload())), .generated = try generated.ret(try e.context.literal(?t.SourceEvidenceReference, null)) });
+        const workspace = try present.body().caseOf(item, "workspace");
+        const projection = try present.body().match(item, .{ .source = try source.ret(try source.body().variant(try e.context.schema(?t.SourceEvidenceReference), "some", source.payload())), .workspace = try workspace.ret(try e.context.literal(?t.SourceEvidenceReference, null)) });
         try e.author.define(p.source_at, try b.ret(try b.match(selected, .{ .some = try present.ret(projection), .none = try absent.ret(try e.context.literal(?t.SourceEvidenceReference, null)) })));
 
         const any = try e.author.body(p.has_source);
@@ -295,19 +292,39 @@ const Program = struct {
             },
             4 => return e.finish(b, state, .no_result, try e.widen(b, t.Summary, try b.field(value, "reason"))),
             5, 6 => return p.control(b, bindings, state, call_id, value, index == 5),
-            t.ordinal("tool_build"), t.ordinal("tool_run") => {
-                const build = comptime index == t.ordinal("tool_build");
-                const request = try b.product(try e.context.schema(t.ToolRequest), .{ .context = try b.variantPayload(try b.field(state, "replay"), "some", try e.failure()), .call_id = call_id, .action = try b.variant(try e.context.schema(@FieldType(t.ToolRequest, "action")), if (build) "build" else "run", value) });
-                const reply = try b.perform(if (build) p.ops.tool_build else p.ops.tool_run, request);
-                const program = try b.field(reply, "program");
-                const constructed = try b.caseOf(program, "some");
-                const absent = try b.caseOf(program, "none");
-                const retained = try b.match(program, .{ .some = try constructed.ret(try constructed.body().update(state, .{ .programs = try constructed.body().append(try constructed.body().field(state, "programs"), constructed.payload(), .{}) })), .none = try absent.ret(state) });
+            t.ordinal("program"), t.ordinal("work"), t.ordinal("context") => {
+                const command = comptime if (index == t.ordinal("program")) "program" else if (index == t.ordinal("work")) "work" else "context";
+                const request = try b.product(try e.context.schema(t.WorkspaceRequest), .{ .context = try b.variantPayload(try b.field(state, "replay"), "some", try e.failure()), .call_id = call_id, .action = try b.variant(try e.context.schema(@FieldType(t.WorkspaceRequest, "action")), command, try b.field(value, "command")) });
+                const reply = try b.perform(p.ops.workspace, request);
+                const selected = try b.field(reply, "selected_view");
+                const some = try b.caseOf(selected, "some");
+                const none = try b.caseOf(selected, "none");
+                const selecting = some.body();
+                const old_control = try selecting.field(state, "control");
+                const selected_control = try selecting.update(old_control, .{
+                    .epoch = try selecting.checkedAdd(try selecting.field(old_control, "epoch"), try selecting.constant(u64, 1), try e.failure()),
+                    .epoch_reason = try e.context.literal(t.model.EpochReason, .view_change),
+                });
+                var updated = try b.match(selected, .{
+                    .some = try some.ret(try selecting.update(state, .{ .selected_view = selected, .selected_view_at = try selecting.field(try selecting.variantPayload(try selecting.field(state, "replay"), "some", try e.failure()), "watermark"), .control = selected_control })),
+                    .none = try none.ret(state),
+                });
                 const evidence = try b.field(reply, "evidence");
-                const some = try b.caseOf(evidence, "some");
-                const none = try b.caseOf(evidence, "none");
-                const updated = try b.match(evidence, .{ .some = try some.ret(try some.body().update(retained, .{ .evidence = try some.body().append(try some.body().field(retained, "evidence"), try some.body().variant(try e.context.schema(t.EvidenceReference), "generated", some.payload()), .{}) })), .none = try none.ret(retained) });
-                return p.toolResult(b, bindings, updated, call_id, try b.variant(try e.context.schema(t.ResultValue), "tool", try b.field(reply, "artifact")));
+                const has_evidence = try b.caseOf(evidence, "some");
+                const no_evidence = try b.caseOf(evidence, "none");
+                const evidence_index = try b.match(evidence, .{ .some = try has_evidence.ret(try has_evidence.body().variant(try e.context.schema(?u64), "some", try b.sequenceLength(try b.field(state, "evidence")))), .none = try no_evidence.ret(try e.context.literal(?u64, null)) });
+                inline for (.{ "evidence", "program" }) |field| {
+                    const optional = try b.field(reply, field);
+                    const present = try b.caseOf(optional, "some");
+                    const absent = try b.caseOf(optional, "none");
+                    const target = comptime if (std.mem.eql(u8, field, "program")) "programs" else "evidence";
+                    const item = if (comptime std.mem.eql(u8, field, "program")) present.payload() else try present.body().variant(try e.context.schema(t.EvidenceReference), "workspace", present.payload());
+                    const appended = try present.body().append(try present.body().field(updated, target), item, .{});
+                    const changed = if (comptime std.mem.eql(u8, field, "program")) try present.body().update(updated, .{ .programs = appended }) else try present.body().update(updated, .{ .evidence = appended });
+                    updated = try b.match(optional, .{ .some = try present.ret(changed), .none = try absent.ret(updated) });
+                }
+                const result = try b.product(try e.context.schema(t.WorkspaceResult), .{ .reply = reply, .evidence_index = evidence_index });
+                return p.toolResult(b, bindings, updated, call_id, try b.variant(try e.context.schema(t.ResultValue), "workspace", result));
             },
             else => unreachable,
         }

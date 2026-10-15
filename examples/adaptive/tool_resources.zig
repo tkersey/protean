@@ -72,7 +72,7 @@ pub fn skillBody(a: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     }
     const rendered = try native.json.canonical(a, view);
     const body = try std.fmt.allocPrint(a, "{s}\n\n## Construction recipe contract\n" ++
-        "Encode an object matching this schema as proposal_json. " ++
+        "Encode an object matching this schema as program.build source.json_text with source_kind component_recipe. " ++
         "Use unique instance keys; endpoint instance fields refer to those keys. " ++
         "Bind required imports to supplied exports using the catalog's actual symbols. " ++
         "Use at least one instance and an acyclic inter-instance graph. Unknown fields reject.\n" ++

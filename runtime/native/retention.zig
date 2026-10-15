@@ -69,6 +69,24 @@ const Audit = struct {
         try self.images.put(self.a, ref.digest, decoded.identity);
         return decoded.identity;
     }
+    fn occurrenceImage(self: *Audit, saved: occurrence.Occurrence) !Digest {
+        var route = try self.record(.execution_route, saved.task, saved.id);
+        defer route.deinit();
+        if (!std.meta.eql(route.value.work, saved.work) or !std.meta.eql(route.value.task, saved.task) or !std.meta.eql(route.value.id, saved.id)) return error.CorruptState;
+        var image = self.tasks.get(saved.task).?.image;
+        if (saved.work) |id| {
+            var work = try self.record(.workspace_work, saved.task, id);
+            defer work.deinit();
+            var program = try self.record(.workspace_program, saved.task, try @import("workspace_state.zig").custodyId(self.a, saved.task, work.value.program));
+            defer program.deinit();
+            image = program.value.description.image;
+            if (!std.meta.eql(route.value.delegation, work.value.delegation)) return error.CorruptState;
+        }
+        if (!std.meta.eql(image, route.value.image)) return error.CorruptState;
+        const identity = try self.imageIdentity(image);
+        if (!std.meta.eql(identity, route.value.program_identity)) return error.CorruptState;
+        return identity;
+    }
     fn value(self: *Audit, comptime T: type, parent: Ref, input: T) !void {
         var sink = struct {
             audit: *Audit,
@@ -149,6 +167,7 @@ const Audit = struct {
                 const receipt = decoded.value;
                 if (!same(&receipt.task, &task) or !same(&receipt.request_digest, &request) or receipt.revision > owner.revision) return error.CorruptState;
                 try self.value(state.Receipt, ref, receipt);
+                try state.visitWorkspaceReceipt(self.a, self.store, receipt, self);
                 if ((receipt.method == .reconcile) != (receipt.reconciliation != null)) return error.CorruptState;
                 if (receipt.reconciliation) |id| {
                     var recovery = try self.record(.reconciliation, task, id);
@@ -184,8 +203,14 @@ const Audit = struct {
             var request = try data.invocation.decode(data.invocation.Request, self.a, try self.body(attempt.value.request));
             defer request.deinit();
             if (!same(&request.value.request_identity, &saved.value.request)) return error.CorruptState;
-            const entry = try self.handlers.resolve(request.value, try self.imageIdentity(owner.image));
+            const entry = try self.handlers.resolve(request.value, try self.occurrenceImage(saved.value));
             if (!same(entry.declaration.identity, attempt.value.capability.bytes) or entry.declaration.inference != attempt.value.inference) return error.CorruptState;
+            if (attempt.value.operation == .workspace_build) {
+                if (entry.declaration.kind != .workspace or attempt.value.inference or saved.value.work != null or
+                    (capture.disposition == .complete) != (capture.response != null)) return error.CorruptState;
+                if (capture.projection) |projection| if (projection.objects.items.len != 0 or projection.output_tokens != null) return error.CorruptState;
+                continue;
+            }
             const adapter = entry.declaration.capture orelse return error.CorruptState;
             if ((capture.disposition == .complete) != (capture.response != null)) return error.CorruptState;
             // Raw capture is durable before interpretation, including a response
@@ -226,7 +251,7 @@ const Audit = struct {
             var request = try data.invocation.decode(data.invocation.Request, self.a, try self.body(item.request));
             defer request.deinit();
             if (!std.meta.eql(request.value.request_identity, occurrence_value.value.request)) return error.CorruptState;
-            const image = try self.imageIdentity(owner.image);
+            const image = try self.occurrenceImage(occurrence_value.value);
             const entry = try self.handlers.resolve(request.value, image);
             if (!same(entry.declaration.identity, item.capability.bytes)) return error.CorruptState;
             if (item.provenance != .none or item.owner_epoch != null) {

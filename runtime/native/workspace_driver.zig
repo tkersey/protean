@@ -1,0 +1,260 @@
+//! Ordinary Horos handlers expose typed boundaries. Only Kosmos applies the
+//! retained resumptions; the native owner supplies ordinary exported commands.
+const std = @import("std");
+const horos = @import("horos");
+const data = @import("horos_data");
+const contracts = @import("protean_contracts");
+const source = horos.source;
+const Id = source.Id;
+pub const prefix = "protean.workspace.control/1/";
+pub const Port = struct {
+    identity: []const u8,
+    class: @FieldType(contracts.workspace.Exposure, "class"),
+    argument: Id,
+    observation: Id,
+};
+pub const Generated = struct {
+    builder: source.Builder,
+    module: source.Module,
+    ports: []const Port,
+    body: Id,
+    controls: []const Id,
+    pub fn deinit(self: *Generated) void {
+        self.builder.deinit();
+        self.* = undefined;
+    }
+};
+
+fn extendBound(b: *source.Builder, schema: Id, capability: Id) !void {
+    const bound = switch (b.schemas.items[@intCast(schema)].internal) {
+        .computation => |*value| &value.capture_bound,
+        .resumption => |*value| &value.capture_bound,
+        else => unreachable,
+    };
+    if (std.mem.indexOfScalar(Id, bound.*, capability) != null) return;
+    const extended = try b.allocator().alloc(Id, bound.*.len + 1);
+    @memcpy(extended[0..bound.*.len], bound.*);
+    extended[bound.*.len] = capability;
+    bound.* = extended;
+}
+
+const Induced = struct {
+    functions: []bool,
+    values: []bool,
+    terms: []bool,
+    fn any(flags: []const bool, ids: []const Id) bool {
+        for (ids) |id| if (flags[@intCast(id)]) return true;
+        return false;
+    }
+    fn optional(flags: []const bool, id: ?Id) bool {
+        return if (id) |value| flags[@intCast(value)] else false;
+    }
+    fn term(self: Induced, value: source.ast.Term, effect: Id) bool {
+        const v = self.values;
+        const t = self.terms;
+        return switch (value) {
+            .value, .dispose, .fail => |id| v[@intCast(id)],
+            .yield_then => |id| t[@intCast(id)],
+            .bind => |x| t[@intCast(x.value)] or t[@intCast(x.next)],
+            .conditional => |x| v[@intCast(x.condition)] or t[@intCast(x.when_true)] or t[@intCast(x.when_false)],
+            .call => |x| self.functions[@intCast(x.function)] or any(v, x.arguments),
+            .apply => |x| v[@intCast(x.computation)] or any(v, x.arguments),
+            .perform => |x| (x.effect == effect and x.capability == null) or optional(v, x.capability) or v[@intCast(x.payload)] or any(v, x.bodies) or any(v, x.use_site_capabilities),
+            .handle => |x| v[@intCast(x.body)] or any(v, x.arguments) or any(v, x.state),
+            .resume_value => |x| v[@intCast(x.resumption)] or v[@intCast(x.argument)],
+            .resume_with => |x| v[@intCast(x.resumption)] or v[@intCast(x.argument)] or any(v, x.state),
+            .resume_computation => |x| v[@intCast(x.resumption)] or v[@intCast(x.computation)],
+            .protect => |x| v[@intCast(x.body)] or v[@intCast(x.cleanup)] or any(v, x.arguments) or optional(v, x.resource),
+            .with_region => |x| v[@intCast(x.body)] or any(v, x.arguments),
+            .unpack_product => |x| v[@intCast(x.value)] or t[@intCast(x.body)],
+            .match_sum => |x| blk: {
+                if (v[@intCast(x.value)]) break :blk true;
+                for (x.cases) |case| if (t[@intCast(case.body)]) break :blk true;
+                break :blk false;
+            },
+        };
+    }
+};
+
+fn inducedCaptures(a: std.mem.Allocator, module: source.Module, effect: Id) !Induced {
+    const result: Induced = .{ .functions = try a.alloc(bool, module.functions.len), .values = try a.alloc(bool, module.values.len), .terms = try a.alloc(bool, module.terms.len) };
+    @memset(result.functions, false);
+    @memset(result.values, false);
+    @memset(result.terms, false);
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (module.values, result.values) |value, *needed| {
+            const now = switch (value.expression) {
+                .literal, .variable => false,
+                .lambda => |f| result.functions[@intCast(f)],
+                .primitive => |p| Induced.any(result.values, p.operands),
+            };
+            changed = (now and !needed.*) or changed;
+            needed.* = now;
+        }
+        for (module.terms, result.terms) |term, *needed| {
+            const now = result.term(term, effect);
+            changed = (now and !needed.*) or changed;
+            needed.* = now;
+        }
+        for (module.functions, result.functions) |function, *needed| {
+            const now = result.terms[@intCast(function.body.?)];
+            changed = (now and !needed.*) or changed;
+            needed.* = now;
+        }
+    }
+    return result;
+}
+
+pub fn generate(a: std.mem.Allocator, original: source.Module, requested: []const contracts.workspace.Exposure) !Generated {
+    var b = source.Builder.init(a);
+    errdefer b.deinit();
+    inline for (.{ "schemas", "constants", "effects", "handlers", "resources", "variables", "values", "terms", "functions" }) |field| try @field(b, field).appendSlice(b.allocator(), @field(original, field));
+    b.region_count = original.region_count;
+    const exposures = try b.allocator().dupe(contracts.workspace.Exposure, requested);
+    std.mem.sort(contracts.workspace.Exposure, exposures, {}, struct {
+        fn less(_: void, left: contracts.workspace.Exposure, right: contracts.workspace.Exposure) bool {
+            return left.effect < right.effect;
+        }
+    }.less);
+    const entry = original.functions[@intCast(original.entry)];
+    if (entry.parameters.len != 1) return error.InvalidInterface;
+    const input = original.variables[@intCast(entry.parameters[0])];
+    const result = entry.result;
+    const unit = try b.scalar(void);
+    const optional_result = try b.schema(.{ .sum = &.{ unit, result } });
+    const ports = try b.allocator().alloc(Port, exposures.len);
+    const effects = try b.allocator().alloc(Id, exposures.len);
+    const exposed = try b.allocator().alloc(Id, exposures.len);
+    const capabilities = try b.allocator().alloc(Id, exposures.len);
+    const port_payloads = try b.allocator().alloc(Id, exposures.len);
+    const port_commands = try b.allocator().alloc(Id, exposures.len);
+    for (exposures, 0..) |exposure, i| {
+        if (exposure.effect >= original.effects.len) return error.InvalidExposure;
+        for (exposures[0..i]) |prior| if (prior.effect == exposure.effect) return error.DuplicateExposure;
+        const operation = original.effects[@intCast(exposure.effect)];
+        if (operation.external or operation.bodies.len != 0) return error.InvalidExposure;
+        if (exposure.class == .alternative and operation.control_use != .multi) return error.InvalidExposure;
+        if (exposure.class == .observation and original.schemas[@intCast(operation.result)] != .unit) return error.InvalidObservationResult;
+        const identity = try std.fmt.allocPrint(b.allocator(), "{s}{d}", .{ prefix, exposure.effect });
+        const payload = if (exposure.class == .alternative) try b.schema(.{ .product = &.{ operation.payload, optional_result } }) else operation.payload;
+        const command = if (exposure.class == .alternative) try b.schema(.{ .sum = &.{ operation.result, unit } }) else operation.result;
+        effects[i] = try b.effect(.{ .identity = identity, .payload = payload, .result = command, .external = true });
+        exposed[i] = exposure.effect;
+        // Keep the induced capture distinct from original declared captures;
+        // schema interning here could repair an invalid original bound.
+        capabilities[i] = try b.reserveSchema();
+        try b.defineSchema(capabilities[i], .{ .internal = .{ .capability = exposure.effect } });
+        port_payloads[i] = payload;
+        port_commands[i] = command;
+        ports[i] = .{ .identity = identity, .class = exposure.class, .argument = operation.result, .observation = operation.payload };
+    }
+    // Preserve residual internal effects. Exposures intercept only explicitly
+    // selected operations, including their deep recursive visits.
+    var residual: std.ArrayList(Id) = .empty;
+    try residual.appendSlice(b.allocator(), effects);
+    // A selected descriptor can also name explicitly attached operations.
+    // Those may escape a shallow successor without targeting our capability.
+    // Keep their declared residual row; attachment identity governs handling.
+    try residual.appendSlice(b.allocator(), entry.effects);
+    std.mem.sort(Id, residual.items, {}, std.sort.asc(Id));
+    const root = try b.declare(&.{input}, result, residual.items, entry.regions);
+    const body = try b.declare(capabilities, result, entry.effects, entry.regions);
+    // Unattached selected operations are lexical holes supplied by this
+    // wrapper. Explicit capabilities keep their original attachment identity.
+    for (exposed, 0..) |effect, i| {
+        const capability = try b.reference(b.parameter(body, i));
+        for (b.terms.items[0..original.terms.len]) |*term| {
+            if (term.* == .perform and term.perform.effect == effect and term.perform.capability == null) term.perform.capability = capability;
+        }
+    }
+    // Compute only the new lexical dependencies. Existing capture contracts
+    // remain intact; unrelated closures must not acquire a capability bound
+    // that changes handler relevance merely because a port was requested.
+    for (exposed, capabilities) |effect, capability| {
+        const needed = try inducedCaptures(b.allocator(), original, effect);
+        for (original.values) |value| if (value.expression == .lambda and needed.functions[@intCast(value.expression.lambda)]) {
+            try extendBound(&b, value.schema, capability);
+        };
+        for (original.terms) |term| if (term == .handle and needed.values[@intCast(term.handle.body)]) {
+            for (original.handlers[@intCast(term.handle.handler)].clauses) |clause| try extendBound(&b, clause.resumption, capability);
+        };
+    }
+    const body_schema = try b.schema(.{ .internal = .{ .computation = .{ .parameters = capabilities, .result = result, .effects = entry.effects, .capture_bound = &.{input}, .regions = entry.regions } } });
+    try b.define(body, try b.term(.{ .call = .{ .function = original.entry, .arguments = &.{try b.reference(b.parameter(root, 0))} } }));
+    const returns = try b.declare(&.{result}, result, &.{}, &.{});
+    try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
+    const clauses = try b.allocator().alloc(data.program.Clause, exposures.len);
+    var capture_bound: std.ArrayList(Id) = .empty;
+    for (original.variables) |schema| if (std.mem.indexOfScalar(Id, capture_bound.items, schema) == null) try capture_bound.append(b.allocator(), schema);
+    for (capabilities) |schema| if (std.mem.indexOfScalar(Id, capture_bound.items, schema) == null) try capture_bound.append(b.allocator(), schema);
+    std.mem.sort(Id, capture_bound.items, {}, std.sort.asc(Id));
+    const traits = try data.traits.derive(b.allocator(), b.schemas.items);
+    var cloneable: std.ArrayList(Id) = .empty;
+    for (capture_bound.items) |schema| if (traits.clone[@intCast(schema)]) try cloneable.append(b.allocator(), schema);
+    const regions = try b.allocator().alloc(Id, @intCast(original.region_count));
+    for (regions, 0..) |*region, i| region.* = i;
+    var obligations = false;
+    for (original.terms) |term| if (term == .protect) {
+        obligations = true;
+        break;
+    };
+    const generated_schema_start = b.schemas.items.len;
+    for (exposures, clauses, 0..) |exposure, *clause, i| {
+        const operation = original.effects[@intCast(exposure.effect)];
+        const alternative = exposure.class == .alternative;
+        const token = try b.schema(.{ .internal = .{ .resumption = .{ .effect = exposure.effect, .input = operation.result, .answer = result, .effects = residual.items, .capture_bound = if (alternative or operation.control_use == .multi) cloneable.items else capture_bound.items, .handled = exposed, .owned_regions = regions, .mode = .deep, .use = if (alternative) .linear else operation.control_use, .obligations = !alternative and operation.control_use != .multi and obligations } } });
+        const function = try b.declare(&.{ operation.payload, token }, result, residual.items, entry.regions);
+        clause.* = .{ .effect = exposure.effect, .function = function, .resumption = token };
+        const payload = try b.reference(b.parameter(function, 0));
+        const owned = try b.reference(b.parameter(function, 1));
+        if (exposure.class != .alternative) {
+            const answer = try b.variable(operation.result);
+            try b.define(function, try b.bind(answer, try b.term(.{ .perform = .{ .effect = effects[i], .payload = payload } }), try b.term(.{ .resume_value = .{ .resumption = owned, .argument = try b.reference(answer) } })));
+            continue;
+        }
+        var template_type = b.schemas.items[@intCast(token)].internal.resumption;
+        template_type.use = .multi;
+        template_type.obligations = false;
+        const template = try b.schema(.{ .internal = .{ .resumption = template_type } });
+        const loop = try b.declare(&.{ operation.payload, template, optional_result }, result, residual.items, entry.regions);
+        const loop_payload = try b.reference(b.parameter(loop, 0));
+        const loop_template = try b.reference(b.parameter(loop, 1));
+        const last = try b.reference(b.parameter(loop, 2));
+        const request = try b.primitive(port_payloads[i], .product, &.{ loop_payload, last }, 0);
+        const command = try b.variable(port_commands[i]);
+        const argument = try b.variable(operation.result);
+        const finish = try b.variable(unit);
+        const branch_result = try b.variable(result);
+        const resumed = try b.term(.{ .resume_value = .{ .resumption = loop_template, .argument = try b.reference(argument) } });
+        const next = try b.term(.{ .call = .{ .function = loop, .arguments = &.{ loop_payload, loop_template, try b.primitive(optional_result, .variant, &.{try b.reference(branch_result)}, 1) } } });
+        const none = try b.variable(unit);
+        const some = try b.variable(result);
+        // Reusable templates carry no linear disposal obligation. Returning
+        // drops this reference; explicit dispose accepts only owned tokens.
+        const completed = try b.pure(try b.reference(some));
+        const no_result = try b.term(.{ .call = .{ .function = loop, .arguments = &.{ loop_payload, loop_template, last } } });
+        const stop = try b.term(.{ .match_sum = .{ .value = last, .cases = &.{ .{ .variable = none, .body = no_result }, .{ .variable = some, .body = completed } } } });
+        const selected = try b.term(.{ .match_sum = .{ .value = try b.reference(command), .cases = &.{ .{ .variable = argument, .body = try b.bind(branch_result, resumed, next) }, .{ .variable = finish, .body = stop } } } });
+        try b.define(loop, try b.bind(command, try b.term(.{ .perform = .{ .effect = effects[i], .payload = request } }), selected));
+        const reusable = try b.cloneResumption(owned, template);
+        const empty = try b.primitive(optional_result, .variant, &.{try b.constant(void, {})}, 0);
+        try b.define(function, try b.term(.{ .call = .{ .function = loop, .arguments = &.{ payload, reusable, empty } } }));
+    }
+    // Driver loops themselves can be retained by a later request. Include
+    // their actual variable types in generated contracts, using Horos's clone
+    // traits for multi-shot captures (never accepting an exclusive resource).
+    const generated_traits = try data.traits.derive(b.allocator(), b.schemas.items);
+    for (generated_schema_start..b.schemas.items.len) |schema_id| {
+        const shape = b.schemas.items[schema_id];
+        if (shape != .internal or shape.internal != .resumption) continue;
+        const reusable = shape.internal.resumption.use == .multi or b.effects.items[@intCast(shape.internal.resumption.effect)].control_use == .multi;
+        for (b.variables.items) |captured| {
+            if (!reusable or generated_traits.clone[@intCast(captured)]) try extendBound(&b, schema_id, captured);
+        }
+    }
+    const handler = try b.handler(.{ .mode = .deep, .input = result, .answer = result, .return_function = returns, .clauses = clauses, .effects = residual.items });
+    try b.define(root, try b.term(.{ .handle = .{ .handler = handler, .body = try b.lambda(body, body_schema) } }));
+    return .{ .module = b.module(root, original.failure), .ports = ports, .body = body, .controls = effects, .builder = b };
+}

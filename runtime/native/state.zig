@@ -38,7 +38,7 @@ pub fn visitReferencesAs(comptime T: type, comptime Ref: type, value: T, collect
 pub const Outcome = enum { progressed, yielded, requested, completed, failed, cancelled };
 pub const Schedule = enum { queued, active, parked };
 pub const Status = enum { queued, running, waiting_input, parked, cancelling, blocked, unknown, completed, failed, cancelled };
-pub const RecordKind = enum { occurrence, question, message, artifact, capture, attempt, origin, reconciliation };
+pub const RecordKind = enum { occurrence, question, message, artifact, capture, attempt, origin, reconciliation, workspace_program, workspace_work, workspace_value, workspace_view, workspace_port, workspace_port_reply, execution_route, workspace_wait, workspace_delegation };
 pub const Blocker = enum { missing_capability, denied, capacity, missing_artifact, incompatible_profile, unavailable_environment };
 
 /// Growing task metadata retains immutable object identities without a count quota.
@@ -87,7 +87,7 @@ pub const Task = struct {
     }
 };
 
-pub const Method = enum { submit, message, respond, cancel, @"resume", import_checkpoint, reconcile };
+pub const Method = enum { submit, message, respond, cancel, @"resume", import_checkpoint, reconcile, workspace };
 pub const Disposition = enum { accepted, queued, answer_acquired, cancellation_requested, resumed, imported, reconciled };
 pub const Receipt = struct {
     id: Digest,
@@ -100,6 +100,9 @@ pub const Receipt = struct {
     message: ?Digest = null,
     question: ?Digest = null,
     reconciliation: ?Digest = null,
+    workspace: ?Digest = null,
+    workspace_kind: ?@FieldType(contracts.workspace.Ref, "kind") = null,
+    workspace_observation: ?Reference = null,
 };
 
 pub const Question = struct {
@@ -192,6 +195,8 @@ pub const EventType = enum {
     cancelled,
     imported,
     reconciled,
+    workspace,
+    workspace_progress,
 };
 pub const Event = struct {
     task: TaskId,
@@ -212,6 +217,7 @@ pub const Artifact = struct {
 };
 
 pub const CaptureDisposition = enum { complete, definitely_not_sent, unknown };
+pub const AttemptOperation = enum { environment, workspace_build };
 pub const Attempt = struct {
     id: Digest,
     task: TaskId,
@@ -221,6 +227,7 @@ pub const Attempt = struct {
     capability: Name,
     inference: bool,
     prepared: ?Reference = null,
+    operation: AttemptOperation = .environment,
 };
 pub const Capture = struct {
     task: TaskId,
@@ -336,6 +343,34 @@ pub fn visitReconciliationHistory(a: std.mem.Allocator, store: anytype, current:
         try collector.typed(Reconciliation, ref, prior.value);
         try visitReconciliationHistory(a, store, prior.value, collector);
     }
+}
+
+/// An operation receipt retains the exact observation returned at admission,
+/// including historical work checkpoints superseded by later execution.
+pub fn visitWorkspaceReceipt(a: std.mem.Allocator, store: anytype, receipt: Receipt, collector: anytype) anyerror!void {
+    if (receipt.method != .workspace) {
+        if (receipt.workspace != null or receipt.workspace_kind != null or receipt.workspace_observation != null) return error.CorruptState;
+        return;
+    }
+    const id = receipt.workspace orelse return error.CorruptState;
+    const ref = receipt.workspace_observation orelse return error.CorruptState;
+    const kind = receipt.workspace_kind orelse return error.CorruptState;
+    const bytes = try store.object(a, ref, null);
+    defer a.free(bytes);
+    const w = @import("workspace_state.zig");
+    inline for (.{ .{ .program, w.ProgramArtifact }, .{ .work, w.Work }, .{ .value, w.ValueArtifact }, .{ .view, w.ViewArtifact } }) |entry| {
+        if (kind == entry[0]) {
+            const T = entry[1];
+            var decoded = try contracts.decodeOwned(T, a, bytes);
+            defer decoded.deinit();
+            if (T == w.Work) {
+                if (!std.meta.eql(decoded.value.id, id) or !std.meta.eql(decoded.value.task, receipt.task)) return error.CorruptState;
+            } else if (!std.meta.eql(ref.digest, id)) return error.CorruptState;
+            try collector.typed(T, ref, decoded.value);
+            return;
+        }
+    }
+    return error.CorruptState;
 }
 
 pub const Origin = struct {

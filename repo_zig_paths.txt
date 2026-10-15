@@ -8,9 +8,9 @@ examples/adaptive/report.zig
 examples/adaptive/tool_catalog.zig
 examples/adaptive/tool_resources.zig
 examples/adaptive/tool_types.zig
-examples/adaptive/tool_work.zig
 examples/adaptive/types.zig
 examples/adaptive/work.zig
+examples/adaptive/workspace.zig
 runtime/native/adaptive_context.zig
 runtime/native/adaptive_history.zig
 runtime/native/adaptive_responses.zig
@@ -20,6 +20,7 @@ runtime/native/configuration.zig
 runtime/native/demo.zig
 runtime/native/discovery.zig
 runtime/native/driver.zig
+runtime/native/dynamic_values.zig
 runtime/native/entry.zig
 runtime/native/hash.zig
 runtime/native/hash_abi.zig
@@ -30,6 +31,7 @@ runtime/native/inbox.zig
 runtime/native/json.zig
 runtime/native/namespace.zig
 runtime/native/occurrence.zig
+runtime/native/program_construction.zig
 runtime/native/protocol.zig
 runtime/native/registry.zig
 runtime/native/repository.zig
@@ -37,6 +39,8 @@ runtime/native/responses.zig
 runtime/native/retention.zig
 runtime/native/root.zig
 runtime/native/schemas.zig
+runtime/native/source_preflight.zig
+runtime/native/source_records.zig
 runtime/native/sqlite.zig
 runtime/native/state.zig
 runtime/native/store.zig
@@ -45,6 +49,11 @@ runtime/native/tool_construction.zig
 runtime/native/transport.zig
 runtime/native/values.zig
 runtime/native/worker.zig
+runtime/native/workspace_build.zig
+runtime/native/workspace_driver.zig
+runtime/native/workspace_instrument.zig
+runtime/native/workspace_projection.zig
+runtime/native/workspace_state.zig
 src/adaptive_controls.zig
 src/admission.zig
 src/approval.zig
@@ -81,6 +90,7 @@ src/text_inspection.zig
 src/tool_construction_contracts.zig
 src/tools.zig
 src/value_equality.zig
+src/workspace_contracts.zig
 test/authoring_tests.zig
 test/consumers/adaptive/build.zig
 test/protean/adaptive_controls.zig
@@ -120,6 +130,9 @@ test/protean/recursive_participant.zig
 test/protean/selection.zig
 test/protean/skill_unknown_field.zig
 test/protean/values.zig
+test/protean/workspace_programs.zig
+test/protean/workspace_semantics.zig
+test/protean/workspace_sources.zig
 tools/native/build_entry.zig
 tools/native/dependencies.zig
 tools/native/emit.zig

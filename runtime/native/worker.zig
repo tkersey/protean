@@ -73,6 +73,11 @@ pub const Worker = struct {
         const id = std.fmt.bytesToHex(self.work.task, .lower);
         const ctx: registry.Context = .{ .allocator = a, .io = self.io, .authority = &self.authority, .task_id = &id, .profile = self.work.profile, .environment = self.environment, .cancellation = &self.cancellation };
         try ctx.checkCancellation();
+        if (self.work.operation == .workspace_build) {
+            // Compilation has no external delivery. Cancellation is definitely
+            // not sent and never invents an uncertain environmental effect.
+            return .{ .acquired = try @import("workspace_build.zig").run(ctx, self.work.prepared orelse return error.InvalidPreparedRequest) };
+        }
         self.invoked = true;
         if (self.work.recovery) |item| {
             var saved = try @import("protean_contracts").decodeOwned(@import("state.zig").Reconciliation, a, item.body);

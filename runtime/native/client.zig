@@ -76,6 +76,7 @@ pub fn Client(comptime Types: type) type {
             try json.put(a, &result, "status", json.string(@tagName(try self.service.status(a, task))));
             try json.put(a, &result, "revision", try counter(a, task.revision));
             try json.put(a, &result, "result_available", .{ .bool = task.terminal() });
+            try json.put(a, &result, "associated_work_disposed", .{ .bool = try self.service.associatedWorkDisposed(a, id) });
             try json.put(a, &result, "earliest_available_seq", try counter(a, task.event_floor));
             try json.put(a, &result, "high_water_seq", try counter(a, task.event_high));
             try json.put(a, &result, "blocker", if (task.blocker) |blocker| json.string(@tagName(blocker)) else .null);

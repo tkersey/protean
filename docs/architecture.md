@@ -72,3 +72,46 @@ is a non-authoritative view. Missing input stays parked; cleanup can itself park
 Killing an execution worker produces no authoritative successor or cleanup proof.
 Content identity, conversation identity and delivery occurrence are distinct; whole
 snapshot copies can replay prior control and require environmental safeguards.
+
+## Adaptive computational workspace
+
+The adaptive application 5 controller chooses `program`, `work`, and `context`
+actions through the same captured offer/admission path as ordinary tools. It can
+finish without using them. A child's input type constrains a supplied answer;
+it does not constrain the next controller action. Neither status nor uncertainty
+automatically invokes a model or chooses an investigative method.
+
+`source_records.zig` reflects the linked Horos `source.Module` as versioned data.
+`source_preflight.zig` validates transport indices and structural dependencies
+before ordinary Horos checking/lowering. `program_construction.zig` rejects raw
+protected/external declarations and builds ordinary BPI3. Existing component
+recipes still use the frozen pure linker. `workspace_driver.zig` constructs
+ordinary source handlers and packages for exposed ports; typed futures remain
+inside the whole program state. Alternative ports use admitted multi-shot
+resumptions. Exposure metadata alone cannot manufacture a reusable capability.
+
+The existing Service schedules `(task, work?)` subjects through one queue and
+one occurrence engine. Root and child occurrences bind different subjects even
+when their request bytes match. Each child owns its exact program, typed input,
+Kosmos checkpoint, execution/control revisions, scheduling policy, and observed
+outcome. Immutable content identities do not confer task custody. No second
+evaluator or host-side program-control language interprets these records.
+
+Only the Service commits Programs, Work, ports, values, views, routes, and
+operation receipts. It freezes compiler inputs before dispatching the existing
+worker and publishes code only after capture and checked interpretation. The
+worker has no Store or Resident. Lost compiler work is definitely not sent;
+ambiguous environmental work remains unknown. Root completion parks unused
+automatic work, and pending cleanup or delivery remains discoverable.
+
+Explicit interpretation delegations create ordinary single-effect instrument
+programs bound to a real target port, profile/snapshot, input references, and
+current authority. The registry marks these handlers as workspace-only so root
+manifest completeness remains exact. A child model answer is typed evidence;
+it is not a replacement controller or a new grant. Pure programs invoke no model.
+
+Runtime-schema projection shares canonical scalar/value rules and Horos
+descriptors. Views retain source and hypothesis ancestry, coverage, and broader
+authorized access. Selecting a view creates a context epoch for future requests;
+policy, user messages, active skills, and current action availability survive.
+An in-flight request and historical evidence are immutable.

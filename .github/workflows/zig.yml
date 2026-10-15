@@ -145,12 +145,13 @@ jobs:
           "$output/protean" describe-build > "$output/protean.build.json"
           cp docs/native-single-binary.md "$output/RUNBOOK.md"
           cp examples/adaptive/README.md "$output/ADAPTIVE.md"
+          cp tools/native/install.mjs "$output/install.mjs"
           mkdir -p "$output/adaptive-example"
           cp examples/adaptive/adaptive.example.json "$output/adaptive-example/"
           cp -R examples/adaptive/skills "$output/adaptive-example/skills"
           cp -R "$RUNNER_TEMP/protean-qualification/protean/adaptive" "$output/adaptive-program"
           tar -czf "$RUNNER_TEMP/protean-$RUNNER_OS-$RUNNER_ARCH-$GITHUB_SHA.tar.gz" \
-            -C "$output" protean protean.build.json RUNBOOK.md ADAPTIVE.md adaptive-program adaptive-example
+            -C "$output" protean protean.build.json install.mjs RUNBOOK.md ADAPTIVE.md adaptive-program adaptive-example
       - name: Retain executed adaptive application
         if: matrix.lane == 'native'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

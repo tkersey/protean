@@ -27,14 +27,15 @@ pub const Occurrence = struct {
     request: Digest,
     state: State = .ready,
     request_object: @import("state.zig").Reference,
+    work: ?Digest = null,
 };
-pub const Binding = struct { id: Digest, task: TaskId, request: Digest };
+pub const Binding = struct { id: Digest, task: TaskId, work: ?Digest = null, request: Digest };
 
 fn equal(a: Digest, b: Digest) bool {
     return std.mem.eql(u8, &a, &b);
 }
 pub fn current(value: Occurrence, binding: Binding) Error!void {
-    if (!equal(value.id, binding.id) or !std.mem.eql(u8, &value.task, &binding.task) or !equal(value.request, binding.request)) return error.StaleOccurrence;
+    if (!equal(value.id, binding.id) or !std.mem.eql(u8, &value.task, &binding.task) or !equal(value.request, binding.request) or !std.meta.eql(value.work, binding.work)) return error.StaleOccurrence;
 }
 
 pub fn dispatch(value: Occurrence, binding: Binding, attempt: Digest, cancellation_pending: bool, cleanup: bool) Error!Occurrence {
@@ -238,4 +239,12 @@ test "recovery capture admission binds the original unknown attempt" {
     try std.testing.expectError(error.UnsettledOccurrence, consumed(recovered, binding, .cancel, true));
     try std.testing.expectError(error.UnsettledOccurrence, rearm(recovered, binding));
     try std.testing.expect((try acquired(recovered, binding, @splat(4), @splat(6))).state == .settled_reply);
+}
+
+test "root and child occurrence bindings cannot consume each other" {
+    const child: Occurrence = .{ .id = @splat(1), .task = @splat(2), .work = @splat(3), .request = @splat(4), .request_object = .{ .digest = @splat(5), .bytes = 0 } };
+    const root: Binding = .{ .id = child.id, .task = child.task, .request = child.request };
+    try std.testing.expectError(error.StaleOccurrence, dispatch(child, root, @splat(6), false, false));
+    const correct: Binding = .{ .id = child.id, .task = child.task, .work = child.work, .request = child.request };
+    _ = try dispatch(child, correct, @splat(6), false, false);
 }

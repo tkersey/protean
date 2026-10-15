@@ -6,7 +6,7 @@ const codecs = @import("model_codec.zig");
 const models = @import("model.zig");
 
 pub const semantic_identity = "agent.model.invoke.v11";
-pub const adaptive_context_semantic_identity = "agent.model.context.responses.adaptive.v6";
+pub const adaptive_context_semantic_identity = "agent.model.context.responses.adaptive.v7";
 pub const adaptive_policy_semantic_identity = "agent.model.policy.adaptive.v2";
 pub fn isModelIdentity(identity: []const u8) bool {
     // Reserve the model namespace against raw leaf-effect relabeling. Only v11
@@ -39,7 +39,7 @@ pub const AdaptiveInferenceProfile = struct {
     response_bytes: ?u32,
     timeout_ms: ?u32,
 };
-pub const EpochReason = enum { initial, model_change, effort_change, eviction };
+pub const EpochReason = enum { initial, model_change, effort_change, eviction, view_change };
 pub const SkillResidency = enum { resident, transient };
 pub const SkillMaterialization = struct {
     resource: ArtifactReference,
@@ -63,6 +63,10 @@ pub const AdaptiveContextReference = struct {
 };
 /// Large immutable history stays outside Kosmos values. Adapters validate each
 /// continuation against its original capture/resource closure before dispatch.
+/// A controller-selected view replaces preceding research exchanges. The
+/// reference is data, never object access authority; its actual material enters
+/// through the paired workspace result at selected_at.
+pub const ResearchSelection = struct { view: contracts.workspace.Ref, selected_at: u64 };
 pub const AdaptivePlan = struct {
     epoch: u64,
     reason: EpochReason,
@@ -71,6 +75,7 @@ pub const AdaptivePlan = struct {
     prior: ?AdaptiveContextReference,
     catalog: ArtifactReference,
     skills: contracts.Vector(SkillMaterialization, null),
+    research: ?ResearchSelection = null,
 };
 pub const AdaptiveUsage = struct {
     input_tokens: ?u64,
@@ -202,7 +207,7 @@ pub fn Profile(
         const Self = @This();
         pub const identity = semantic_identity;
         pub const adaptive_context_identity = adaptive_context_semantic_identity;
-        pub const adaptive_context_version: u8 = 6;
+        pub const adaptive_context_version: u8 = 7;
         pub const adaptive_policy_identity = adaptive_policy_semantic_identity;
         pub const AnswerType = Answer;
         pub const Interpretation = @import("model_interpretation.zig").Result(Answer);

@@ -531,6 +531,40 @@ pub fn Projection(comptime P: type) type {
             origins.* = kept_origins;
         }
 
+        /// Remove completed research exchanges as pairs. Current policy, all
+        /// user messages, skill bodies and declarations remain independently
+        /// owned. Opaque reasoning is invalid after its evidence prefix changes.
+        fn selectResearch(a: std.mem.Allocator, history: *json.Value, origins: *std.ArrayList(P.ContextOrigin), selected_at: u64) !void {
+            var calls: std.StringHashMap(bool) = .init(a);
+            defer calls.deinit();
+            var kept = list(a);
+            var kept_origins: std.ArrayList(P.ContextOrigin) = .empty;
+            for (history.array.items, origins.items) |value, origin| {
+                var item = value;
+                var retain = true;
+                if (kind(item, "function_call")) {
+                    retain = origin.watermark >= selected_at - 1;
+                    const id = try json.text(try field(item, "call_id"));
+                    if (calls.contains(id)) return error.CallPairMismatch;
+                    try calls.put(id, retain);
+                } else if (kind(item, "function_call_output")) {
+                    const pair = calls.fetchRemove(try json.text(try field(item, "call_id"))) orelse return error.CallPairMismatch;
+                    retain = pair.value;
+                } else if (kind(item, "reasoning")) {
+                    retain = false;
+                } else if (json.get(item, "role")) |role| {
+                    if (equal(try json.text(role), "assistant")) retain = origin.watermark >= selected_at - 1;
+                }
+                if (!retain) continue;
+                stripMarker(&item);
+                try kept.array.append(item);
+                try kept_origins.append(a, origin);
+            }
+            if (calls.count() != 0) return error.MissingCallResult;
+            history.* = kept;
+            origins.* = kept_origins;
+        }
+
         pub fn render(ctx: registry.ProjectionContext, request: P.AdaptiveRequest, frozen: P.AdaptivePolicy, selected: Admission.Selected, catalog: P.AdaptiveCatalog) !Rendered {
             const a = ctx.allocator;
             var history = list(a);
@@ -550,6 +584,13 @@ pub fn Projection(comptime P: type) type {
                 same_epoch = request.plan.epoch == old.plan.epoch;
                 same_profile = equal(&request.selection.profile_digest, &old.selection.profile_digest);
                 const removing = excluded(old, request);
+                const changed_view = !try encodedEqual(a, @TypeOf(request.plan.research), old.plan.research, request.plan.research);
+                if (changed_view) {
+                    const selection = request.plan.research orelse return error.InvalidContext;
+                    if (same_epoch or request.plan.reason != .view_change or selection.selected_at != request.plan.watermark or selection.selected_at == 0 or selection.view.kind != .view or selection.view.id.bytes.len != 64) return error.InvalidContext;
+                    var identity: [32]u8 = undefined;
+                    _ = std.fmt.hexToBytes(&identity, selection.view.id.bytes) catch return error.InvalidContext;
+                } else if (!same_epoch and request.plan.reason == .view_change) return error.InvalidContext;
                 if (same_epoch) {
                     if (removing or request.plan.eviction_generation != old.plan.eviction_generation or !same_profile or
                         request.invocation.parameters.reasoning.?.effort.? != old.top_effort or
@@ -566,12 +607,13 @@ pub fn Projection(comptime P: type) type {
                 try settle(a, &history, request, selected.profile.explicit_cache);
                 try fillOrigins(a, &origins, history.array.items.len, request.plan.watermark);
                 if (!same_epoch) {
+                    if (changed_view) try selectResearch(a, &history, &origins, request.plan.research.?.selected_at);
                     try revise(ctx, &history, &origins, old, request, catalog, selected.profile.explicit_cache);
                     new_start = 0;
                     while (new_start < origins.items.len and origins.items[new_start].watermark < request.plan.watermark) new_start += 1;
                 }
             } else {
-                if (request.plan.epoch != 0 or request.plan.watermark != 0 or request.plan.eviction_generation != 0 or request.plan.reason != .initial) return error.InvalidContext;
+                if (request.plan.epoch != 0 or request.plan.watermark != 0 or request.plan.eviction_generation != 0 or request.plan.reason != .initial or request.plan.research != null) return error.InvalidContext;
                 try settle(a, &history, request, selected.profile.explicit_cache);
                 try fillOrigins(a, &origins, history.array.items.len, request.plan.watermark);
             }

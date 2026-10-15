@@ -94,6 +94,17 @@ fn argument(comptime T: type, a: std.mem.Allocator, value: json.Value) ArgumentE
             inline for (info.field_names, info.field_types) |name, FieldType| @field(result, name) = try argument(FieldType, a, value.object.get(name) orelse return error.MissingField);
             break :blk result;
         },
+        .@"union" => |info| blk: {
+            if (value != .object) return error.WrongType;
+            for (value.object.keys()) |key| if (!equal(key, "tag") and !equal(key, "value")) return error.UnknownField;
+            const tag = value.object.get("tag") orelse return error.MissingField;
+            const payload = value.object.get("value") orelse return error.MissingField;
+            if (tag != .string) return error.WrongType;
+            inline for (info.field_names, info.field_types) |name, Child| {
+                if (equal(tag.string, name)) break :blk @unionInit(T, name, try argument(Child, a, payload));
+            }
+            return error.WrongType;
+        },
         else => @compileError("unsupported model argument"),
     };
 }

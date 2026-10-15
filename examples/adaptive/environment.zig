@@ -5,7 +5,7 @@ const t = @import("application_types");
 const contracts = @import("protean_contracts");
 const context = @import("context.zig");
 const work = @import("work.zig");
-const tool_work = @import("tool_work.zig");
+const workspace = @import("workspace.zig");
 const tool_resources = @import("tool_resources.zig");
 const Adapter = native.adaptive_responses.Adapter(t.P);
 const Admission = native.adaptive_responses.Admission(t.P);
@@ -18,8 +18,9 @@ pub const handlers = [_]native.Declaration{
     context.declaration(),
     work.declaration(),
     work.inspectionDeclaration(),
-    tool_work.declaration(true),
-    tool_work.declaration(false),
+    workspace.declaration(),
+    instrumentDeclaration(),
+    native.workspace_instrument.declaration(.snapshot),
     native.question(t.Question, t.Answer, .{ .identity = t.question_identity, .resource_role = "user", .answer_schema_id = t.answer_schema_id }, present),
     native.inbox.declaration(t.Message),
     providerDeclaration(),
@@ -40,7 +41,6 @@ fn bindings(ctx: native.Context, _: void) !t.Bindings {
         var value = native.json.object();
         try native.json.put(ctx.allocator, &value, "id", native.json.string(input.id.bytes));
         try native.json.put(ctx.allocator, &value, "description", native.json.string(input.description.bytes));
-        try native.json.put(ctx.allocator, &value, "input_ref", native.json.string(try tool_resources.referenceText(ctx.allocator, input.object)));
         try inputs.array.append(value);
     };
     return .{ .policy = frozen.profile_identity, .snapshot = frozen.snapshot.identity, .files = @intCast(frozen.snapshot.files().len), .excluded_entries = frozen.snapshot.decoded.value.excluded_entries, .profiles = .{ .items = choices }, .catalog = .{ .skills = .{ .items = catalog } }, .initial = frozen.initial, .instructions = try context.instructions(ctx.allocator, frozen.policy, frozen.catalog), .status = .{ .bytes = try std.fmt.allocPrint(ctx.allocator, "Initial profile: {s}; effort: {s}; control revision: 0. Snapshot: {d} files, {d} excluded entries. Authorized typed Table inputs: {s}", .{ frozen.initial.selection.profile_id.bytes, @tagName(frozen.initial.selection.effective_effort), frozen.snapshot.files().len, frozen.snapshot.decoded.value.excluded_entries, try native.json.canonical(ctx.allocator, inputs) }) } };
@@ -54,6 +54,18 @@ fn providerDeclaration() native.Declaration {
     var value = Adapter.declaration();
     value.capture.?.acquire = acquire;
     return value;
+}
+fn instrumentDeclaration() native.Declaration {
+    var value = native.workspace_instrument.declaration(.model);
+    value.capture.?.acquire = acquireInstrument;
+    return value;
+}
+fn acquireInstrument(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition {
+    const frozen = state(ctx) catch |err| return .{ .definitely_not_sent = err };
+    if (frozen.offline) return .{ .definitely_not_sent = error.OfflineInferenceUnavailable };
+    var provider = ctx;
+    provider.environment = @ptrCast(@constCast(&frozen.provider));
+    return native.workspace_instrument.acquire(provider, bytes);
 }
 fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition {
     const frozen = state(ctx) catch |err| return .{ .definitely_not_sent = err };
@@ -172,9 +184,9 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
             const components = try componentCatalog(a, assets);
             const body = try tool_resources.skillBody(a, components);
             try resources.append(a, body);
-            var tools = t.toolMask(.{"tool_build"});
-            tools[t.ordinal("tool_build")] = value.build;
-            try skills.append(a, .{ .id = .{ .bytes = "tool-construction" }, .version = .{ .bytes = "1" }, .description = .{ .bytes = "Construct reusable, effect-free computations over the frozen component catalog and authorized Table values." }, .instructions = work.reference(body), .tools = tools });
+            var tools = t.toolMask(.{"program"});
+            tools[t.ordinal("program")] = value.build;
+            try skills.append(a, .{ .id = .{ .bytes = "tool-construction" }, .version = .{ .bytes = "1" }, .description = .{ .bytes = "Construct general retained computations or reuse the frozen component catalog and authorized Table values." }, .instructions = work.reference(body), .tools = tools });
             try resources.append(a, components);
             const inputs = try a.alloc(t.ToolInputReference, value.inputs.items.len);
             for (value.inputs.items, inputs, 0..) |input, *out, i| {
@@ -194,11 +206,11 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
             items[1] = fixtureProfile("deep", "fixture-model-b");
             break :blk @as(@FieldType(t.P.AdaptivePolicy, "profiles"), .{ .items = items });
         };
-        var core = t.toolMask(.{ "list", "read", "ask", "report", "stop", "inference_set", "skill_set", "tool_run" });
+        const core = t.toolMask(.{ "list", "read", "ask", "report", "stop", "inference_set", "skill_set", "program", "work", "context" });
         var permitted: [t.P.declaration_count]bool = @splat(true);
-        core[t.ordinal("tool_run")] = if (tool_policy) |value| value.run else false;
-        permitted[t.ordinal("tool_build")] = if (tool_policy) |value| value.build else false;
-        permitted[t.ordinal("tool_run")] = core[t.ordinal("tool_run")];
+        permitted[t.ordinal("program")] = true;
+        permitted[t.ordinal("work")] = true;
+        permitted[t.ordinal("context")] = true;
         const policy: t.P.AdaptivePolicy = .{ .schema = .{ .bytes = t.P.adaptive_policy_identity }, .endpoint = if (config) |value| value.endpoint else .{ .bytes = "https://offline.invalid/v1/responses" }, .audience = if (config) |value| value.audience else .{ .bytes = "offline-fixture" }, .profiles = profiles, .catalog = work.reference(catalog), .core_tools = core, .permitted_tools = permitted };
         var root = native.json.object();
         try native.json.put(a, &root, "mode", native.json.string(mode));
@@ -246,11 +258,11 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
         for (catalog.value.skills.items) |skill| if (std.mem.eql(u8, skill.id.bytes, "tool-construction")) {
             if (found or !std.mem.eql(u8, skill.version.bytes, "1") or !std.mem.eql(u8, try resourceBytes(resources.items, skill.instructions), expected_body)) return error.InvalidSkill;
             var mask: [t.P.declaration_count]bool = @splat(false);
-            mask[t.ordinal("tool_build")] = value.build;
+            mask[t.ordinal("program")] = value.build;
             if (!std.meta.eql(mask, skill.tools)) return error.InvalidSkill;
             found = true;
         };
-        if (!found or policy.permitted_tools[t.ordinal("tool_build")] != value.build or policy.core_tools[t.ordinal("tool_build")] or policy.permitted_tools[t.ordinal("tool_run")] != value.run or policy.core_tools[t.ordinal("tool_run")] != value.run) return error.InvalidConfiguration;
+        if (!found or !policy.permitted_tools[t.ordinal("program")] or !policy.core_tools[t.ordinal("program")] or !policy.permitted_tools[t.ordinal("work")] or !policy.core_tools[t.ordinal("work")]) return error.InvalidConfiguration;
         for (value.inputs.items) |input| {
             var admitted = try contracts.decodeOwned(contracts.tool_construction.Input, a, try resourceBytes(resources.items, input.object));
             defer admitted.deinit();
@@ -258,7 +270,8 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
             var table = try contracts.decodeOwned(t.tool_types.Table, a, admitted.value.value.bytes);
             table.deinit();
         }
-    } else if (policy.permitted_tools[t.ordinal("tool_build")] or policy.permitted_tools[t.ordinal("tool_run")]) return error.InvalidConfiguration;
+    }
+    if (!policy.core_tools[t.ordinal("program")] or !policy.core_tools[t.ordinal("work")] or !policy.core_tools[t.ordinal("context")]) return error.InvalidConfiguration;
     const initial_id = try native.json.text(native.json.get(root, "initial_profile") orelse return error.InvalidConfiguration);
     const effort = std.meta.stringToEnum(@FieldType(t.model.AdaptiveSelection, "effective_effort"), try native.json.text(native.json.get(root, "initial_effort") orelse return error.InvalidConfiguration)) orelse return error.InvalidConfiguration;
     var selected: ?t.model.AdaptiveInferenceProfile = null;

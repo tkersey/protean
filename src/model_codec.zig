@@ -6,6 +6,7 @@ pub const json = contracts.json;
 
 pub const FieldKind = enum { text, signed_integer, unsigned_integer, boolean, enumeration };
 const StructuredKind = enum { text, signed_integer, unsigned_integer, boolean, enumeration, product, sequence };
+const SumKind = enum { text, signed_integer, unsigned_integer, boolean, enumeration, product, sequence, sum };
 fn vector(comptime T: type) bool {
     return contracts.native.wrapped(T) and T.protean_value_kind == .vector;
 }
@@ -14,6 +15,11 @@ fn structured(comptime T: type) bool {
 }
 fn nodeCount(comptime T: type) usize {
     if (vector(T)) return 1 + nodeCount(T.Child);
+    if (@typeInfo(T) == .@"union") {
+        var count: usize = 1;
+        for (@typeInfo(T).@"union".field_types) |Child| count += nodeCount(Child);
+        return count;
+    }
     if (structured(T)) {
         var count: usize = 1;
         for (@typeInfo(T).@"struct".field_types) |Child| count += nodeCount(Child);
@@ -27,11 +33,16 @@ const Maxima = struct {
     enums: usize = 0,
     nodes: usize = 0,
     nested: bool = false,
+    sums: bool = false,
     fn inspect(self: *Maxima, comptime name: []const u8, comptime T: type) void {
         self.names = @max(self.names, name.len);
         if (vector(T)) {
             self.nested = true;
             self.inspect("", T.Child);
+        } else if (@typeInfo(T) == .@"union") {
+            self.nested = true;
+            self.sums = true;
+            for (@typeInfo(T).@"union".field_names, @typeInfo(T).@"union".field_types) |field, Child| self.inspect(field, Child);
         } else if (structured(T)) {
             self.nested = true;
             for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field, Child| self.inspect(field, Child);
@@ -59,6 +70,10 @@ fn checkField(comptime name: []const u8, comptime T: type) void {
     if (vector(T)) return checkField(name, T.Child);
     switch (@typeInfo(T)) {
         .@"struct" => checkPayload(T),
+        .@"union" => |info| {
+            if (info.tag_type == null) @compileError("Protean model codec requires a tagged union: " ++ name);
+            for (info.field_names, info.field_types) |field, Child| checkField(field, Child);
+        },
         .bool => {},
         .int => |info| if (info.bits != 8 and info.bits != 16 and
             info.bits != 32 and info.bits != 64)
@@ -122,7 +137,7 @@ pub fn Profile(comptime Answer: type) type {
         pub const EnumTags = contracts.Vector(u32, maxima.enums);
         pub const Field = struct {
             name: FieldName,
-            kind: if (maxima.nested) StructuredKind else FieldKind,
+            kind: if (maxima.sums) SumKind else if (maxima.nested) StructuredKind else FieldKind,
             bit_width: u16,
             maximum_bytes: ?u64,
             enum_names: EnumNames,
@@ -159,6 +174,7 @@ pub fn Profile(comptime Answer: type) type {
                         .unsigned_integer,
                     .@"enum" => .enumeration,
                     .@"struct" => .product,
+                    .@"union" => .sum,
                     else => unreachable,
                 },
                 .bit_width = if (@typeInfo(T) == .int) @bitSizeOf(T) else 0,
@@ -169,10 +185,12 @@ pub fn Profile(comptime Answer: type) type {
         }
 
         fn appendNodes(comptime name: []const u8, comptime T: type, nodes: []Node, cursor: *usize) void {
-            nodes[cursor.*] = .{ .field = fieldValue(name, T), .children = if (vector(T)) 1 else if (structured(T)) @intCast(@typeInfo(T).@"struct".field_names.len) else 0, .maximum_items = if (vector(T)) T.max_length else null };
+            nodes[cursor.*] = .{ .field = fieldValue(name, T), .children = if (vector(T)) 1 else if (@typeInfo(T) == .@"union") @intCast(@typeInfo(T).@"union".field_names.len) else if (structured(T)) @intCast(@typeInfo(T).@"struct".field_names.len) else 0, .maximum_items = if (vector(T)) T.max_length else null };
             cursor.* += 1;
             if (vector(T)) {
                 appendNodes("", T.Child, nodes, cursor);
+            } else if (@typeInfo(T) == .@"union") {
+                for (@typeInfo(T).@"union".field_names, @typeInfo(T).@"union".field_types) |field, Child| appendNodes(field, Child, nodes, cursor);
             } else if (structured(T)) {
                 for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field, Child| appendNodes(field, Child, nodes, cursor);
             }

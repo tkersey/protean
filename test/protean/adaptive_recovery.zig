@@ -10,6 +10,31 @@ const environment = @import("adaptive_environment");
 const protocol = horos.data.invocation;
 const Ref = t.model.ArtifactReference;
 
+// Provider arguments use JSON integers; the client value codec deliberately
+// renders full-width integers as strings. Preserve that contract distinction.
+fn modelArguments(comptime T: type, a: std.mem.Allocator, value: T) !native.json.Value {
+    if (@typeInfo(T) == .int) return native.json.number(a, value);
+    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "protean_value_kind")) {
+        if (T.protean_value_kind == .vector) {
+            var array: native.json.Value = .{ .array = .init(a) };
+            for (value.items) |item| try array.array.append(try modelArguments(T.Child, a, item));
+            return array;
+        }
+        return native.values.toJson(T, a, value);
+    }
+    var result = try native.values.toJson(T, a, value);
+    switch (@typeInfo(T)) {
+        .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Child| {
+            try native.json.put(a, &result, name, try modelArguments(Child, a, @field(value, name)));
+        },
+        .@"union" => switch (value) {
+            inline else => |child| try native.json.put(a, &result, "value", try modelArguments(@TypeOf(child), a, child)),
+        },
+        else => {},
+    }
+    return result;
+}
+
 const Stage = struct { component: []const u8, operation: ?[]const u8 = null };
 fn constructionRecipe(a: std.mem.Allocator, stages: []const Stage) ![]u8 {
     const wire = protean.contracts.tool_construction;
@@ -68,11 +93,11 @@ test "compiled catalog composes coverage and orphan grouping and reuses exact BP
     } });
     var invocation = try t.P.templateValue(Model, .{ .items = &.{} }, .{ .minimum_calls = 1, .maximum_calls = 1, .parallel_calls = false });
     invocation.tools = t.P.allDeclarations();
-    const arguments = try std.json.Stringify.valueAlloc(a, .{ .proposal_json = swaps }, .{});
-    const response = try std.json.Stringify.valueAlloc(a, .{.{ .type = "function_call", .status = "completed", .call_id = "large-recipe", .name = "tool_build", .arguments = arguments }}, .{});
+    const arguments = try std.json.Stringify.valueAlloc(a, .{ .command = .{ .tag = "build", .value = .{ .source = .{ .tag = "json_text", .value = swaps }, .source_kind = "component_recipe", .exposures = .{} } } }, .{});
+    const response = try std.json.Stringify.valueAlloc(a, .{.{ .type = "function_call", .status = "completed", .call_id = "large-recipe", .name = "program", .arguments = arguments }}, .{});
     const parsed = try native.json.parse(a, response, .{ .bytes = response.len, .tokens = response.len });
     const normalized = try native.responses.OutputNormalizer(t.P).normalize(a, invocation, parsed.value);
-    try std.testing.expectEqualStrings(swaps, normalized.output.items.items[0].function_call.decoded_action.decoded.tool_build.proposal_json.bytes);
+    try std.testing.expectEqualStrings(swaps, normalized.output.items.items[0].function_call.decoded_action.decoded.program.command.build.source.json_text.bytes);
 
     // Persistence round-trip keeps the exact image, recipe and task binding.
     var recovered = try protean.contracts.decodeOwned(wire.Program, a, try protean.contracts.encodeOwned(wire.Program, a, product));
@@ -179,13 +204,90 @@ test "adaptive malformed capture remains private and portable without claiming s
     try adaptiveRecovery(false, .malformed);
 }
 
-test "adaptive generated tool construction rederives the exact capture through recovery admission" {
-    try adaptiveRecovery(false, .tool_build);
+test "adaptive workspace interrupted pure build restarts without ambiguous delivery" {
+    try workspaceRecovery(true, false);
 }
 
-test "adaptive generated tool execution rederives retained code and inputs through recovery admission" {
-    try adaptiveRecovery(false, .tool_run);
+test "adaptive workspace captured build imports and executes exact retained code and input" {
+    try workspaceRecovery(false, false);
 }
+
+test "adaptive workspace AUT-02 AUT-03 BUILD-01 controller abandons a binary framing and executes novel source twice" {
+    try workspaceRecovery(false, true);
+}
+
+const ReframeTrace = struct {
+    const wc = protean.contracts.workspace;
+    phase: usize = 0,
+    abandoned: wc.Expected = undefined,
+    program: wc.Ref = undefined,
+    schema: wc.Ref = undefined,
+    current: wc.Ref = undefined,
+    raw: wc.Ref = undefined,
+    first: wc.Ref = undefined,
+    done: bool = false,
+
+    fn build(a: std.mem.Allocator, comptime question: bool) !t.Action {
+        var builder = horos.source.Builder.init(a);
+        defer builder.deinit();
+        const sources = @import("workspace_sources.zig");
+        const module = if (question) try sources.binaryQuestion(&builder) else try sources.gcd(&builder);
+        const text = try native.source_records.encode(a, module);
+        return .{ .program = .{ .command = .{ .build = .{ .source = .{ .json_text = .{ .bytes = text } }, .source_kind = .source_records, .exposures = .{ .items = if (question) &.{.{ .effect = 0, .class = .input }} else &.{} } } } } };
+    }
+    fn start(self: ReframeTrace, text: []const u8) t.Action {
+        return .{ .work = .{ .command = .{ .start = .{ .program = self.program, .input = .{ .inline_json = .{ .schema = self.schema, .json_text = .{ .bytes = text } } }, .policy = .{ .stop = .next_exposed_event, .continuation = .owner_scheduled } } } } };
+    }
+    fn next(self: *ReframeTrace, a: std.mem.Allocator, observation: native.json.Value, request: t.P.AdaptiveRequest) !t.Action {
+        // These are actual request-time offers from the authored controller,
+        // including while its child is demanding a boolean.
+        inline for (.{ "list", "read", "ask", "stop", "inference_set", "skill_set", "program", "work", "context" }) |name|
+            try std.testing.expect(request.offered[t.ordinal(name)]);
+        const phase = self.phase;
+        self.phase += 1;
+        switch (phase) {
+            0 => return build(a, true),
+            1, 5 => {
+                self.program = try native.values.fromJson(wc.Ref, a, observation.object.get("program").?);
+                self.schema = try native.values.fromJson(wc.Ref, a, observation.object.get("input_schema").?);
+                return self.start(if (phase == 1) "{}" else "[\"48\",\"18\"]");
+            },
+            2 => {
+                try std.testing.expectEqualStrings("requested", observation.object.get("outcome").?.string);
+                try std.testing.expect(observation.object.get("port_accepts_command").?.bool);
+                self.abandoned = .{ .work = try native.values.fromJson(wc.Ref, a, observation.object.get("work").?), .execution_revision = try native.json.numberInteger(u64, try native.json.canonical(a, observation.object.get("execution_revision").?)), .control_revision = try native.json.numberInteger(u64, try native.json.canonical(a, observation.object.get("control_revision").?)) };
+                return .{ .context = .{ .command = .{ .materialize = .{ .input = .{ .snapshot = .{ .path = .{ .bytes = "input.zig" }, .offset = 0, .maximum = 4096 } }, .sources = .{ .items = &.{} } } } } };
+            },
+            3 => {
+                self.raw = try native.values.fromJson(wc.Ref, a, observation.object.get("value").?);
+                return .{ .work = .{ .command = .{ .park = self.abandoned } } };
+            },
+            4 => return build(a, false),
+            6, 7 => {
+                self.current = try native.values.fromJson(wc.Ref, a, observation.object.get("work").?);
+                if (!std.mem.eql(u8, observation.object.get("outcome").?.string, "completed")) {
+                    self.phase -= 1;
+                    return .{ .work = .{ .command = .{ .inspect = .{ .work = self.current } } } };
+                }
+                const result = observation.object.get("result_preview").?.object.get("text").?.string;
+                try std.testing.expectEqualStrings(if (phase == 6) "\"6\"" else "\"7\"", result);
+                const ref = try native.values.fromJson(wc.Ref, a, observation.object.get("result").?);
+                if (phase == 6) {
+                    self.first = ref;
+                    return self.start("[\"35\",\"14\"]");
+                }
+                const refs = try a.dupe(wc.Ref, &.{ self.first, ref });
+                return .{ .context = .{ .command = .{ .select = .{ .values = .{ .items = refs } } } } };
+            },
+            8 => return .{ .context = .{ .command = .{ .expand = .{ .reference = self.raw, .page = .{} } } } },
+            9 => {
+                self.done = true;
+                return .{ .stop = .{ .reason = .{ .bytes = "The binary framing was insufficient. Broader evidence and a new algorithm supplied the useful result; the old question remains unanswered." } } };
+            },
+            else => return error.UnexpectedInference,
+        }
+    }
+};
 
 fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.discovery.Assets, dir: std.Io.Dir, path: []const u8) !native.configuration.Admitted {
     const base = try environment.configure(a, io, .{ .offline = true }, null, assets);
@@ -224,8 +326,184 @@ fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.d
     }, null, assets);
 }
 
-fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { none, imported, snapshot, provider, malformed, tool_build, tool_run }) !void {
-    const generated = recovery_probe == .tool_build or recovery_probe == .tool_run;
+fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void {
+    const c = protean.contracts;
+    const wc = c.workspace;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const permanent = arena.allocator();
+    const image = @embedFile("adaptive_image");
+    const metadata = @embedFile("adaptive_application");
+    var admitted_image = try horos.data.program_image.Admitted.decode(a, image);
+    defer admitted_image.deinit();
+    const manifest = try @import("native_tasks.zig").ownerManifest(permanent, image, admitted_image.identity(), metadata);
+    const assets: native.discovery.Assets = .{ .image = image, .application = metadata, .manifest = manifest };
+    var declarations = environment.handlers;
+    for (&declarations) |*entry| if (entry.inference) {
+        entry.capture.?.acquire = struct {
+            fn forbidden(_: native.Context, _: []const u8) !native.registry.Acquisition {
+                return error.ProviderAcquisitionForbidden;
+            }
+        }.forbidden;
+    };
+    var handlers = try native.Registry.init(a, &declarations);
+    defer handlers.deinit();
+    var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "workspace-unit", .image_identity = admitted_image.identity() };
+    defer application.deinit();
+    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var buffer: [4096]u8 = undefined;
+    const directory = buffer[0..try temporary.dir.realPath(io, &buffer)];
+    const configured = try generatedToolConfiguration(permanent, io, assets, temporary.dir, directory);
+    var grants: [environment.handlers.len]native.registry.Grant = undefined;
+    const profile: native.tasks.Profile = .{ .id = configured.id, .runtime_identity = @splat(73), .bytes = configured.bytes, .environment = configured.environment, .resources = configured.resources, .authority = .{ .grants = &grants, .principal = "adaptive-unit", .tenant = "local", .inference = true } };
+    for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
+    var path = try std.fmt.allocPrint(permanent, "{s}/workspace", .{directory});
+    var namespace = try native.Namespace.open(a, io, path);
+    defer namespace.close() catch unreachable;
+    var service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
+    defer service.close(a) catch unreachable;
+    const task = (try service.submit(permanent, "workspace-recovery", .{ .task = .{ .bytes = if (reframing) "Investigate the measurements. You may abandon the initial binary classification and choose a useful numeric comparison after reading broader evidence." else "Build swap, retain and execute it on the authorized table." } })).receipt.task;
+    const recipe = try constructionRecipe(permanent, &.{.{ .component = "swap" }});
+    var stage: usize = 0;
+    var build_dispatches: usize = 0;
+    var compiled_image: ?[]const u8 = null;
+    var restarted = false;
+    var program: wc.Ref = undefined;
+    var input: wc.Ref = undefined;
+    var child: wc.Ref = undefined;
+    var inspected = false;
+    var trace: ReframeTrace = .{};
+    for (0..512) |_| {
+        var frame_arena = std.heap.ArenaAllocator.init(a);
+        defer frame_arena.deinit();
+        const frame = frame_arena.allocator();
+        var parent = try service.task(frame, task);
+        defer parent.deinit();
+        if (parent.value.terminal()) {
+            if (reframing) {
+                if (!trace.done) std.debug.print("reframing stopped phase={d} model_calls={d} outcome={s}\n", .{ trace.phase, stage, @tagName(parent.value.outcome_kind) });
+                try std.testing.expect(trace.done);
+                var id: [32]u8 = undefined;
+                _ = try std.fmt.hexToBytes(&id, trace.abandoned.work.id.bytes);
+                var abandoned = try service.workspaceWork(frame, task, id);
+                defer abandoned.deinit();
+                try std.testing.expectEqual(.requested, abandoned.value.outcome_kind);
+                try std.testing.expectEqual(.parked, abandoned.value.schedule);
+                try std.testing.expect(abandoned.value.current_port != null and abandoned.value.result == null);
+                try std.testing.expect(!try service.taskCleanupComplete(frame, parent.value));
+            } else try std.testing.expect(restarted and inspected);
+            try std.testing.expectEqual(@as(usize, if (interrupted or reframing) 2 else 1), build_dispatches);
+            try std.testing.expectEqual(stage, parent.value.inference_attempts);
+            return;
+        }
+        const step = try service.pump(frame);
+        if (step != .work) continue;
+        const work = step.work;
+        if (work.operation == .workspace_build) {
+            build_dispatches += 1;
+            if (!interrupted or restarted) {
+                const worker = try native.testing.Worker.init(a, io);
+                defer worker.deinit(a) catch unreachable;
+                try worker.start(work, profile.authority, null);
+                while (!worker.finished()) try io.sleep(.fromMilliseconds(1), .awake);
+                try worker.join();
+                defer worker.release() catch unreachable;
+                try std.testing.expect(worker.result.? == .acquired);
+                // The capture carries actual compiled bytes, not a model result.
+                const BuildOutput = struct {
+                    const Compiled = struct { image: c.Bytes(null), interface: c.tool_construction.Interface, ports: c.Vector(native.program_construction.PortInterface, null), compiler_nanoseconds: u64 };
+                    const Output = union(enum) { compiled: Compiled, rejected: struct { code: c.Utf8, phase: c.Utf8, function: ?u64, term: ?u64, value: ?u64, compiler_nanoseconds: u64 } };
+                };
+                var output = try c.decodeOwned(BuildOutput.Output, frame, worker.result.?.acquired);
+                defer output.deinit();
+                try std.testing.expect(output.value == .compiled);
+                compiled_image = try permanent.dupe(u8, output.value.compiled.image.bytes);
+                try service.completeWork(frame, work, worker.result.?);
+            } else try service.notSent(frame, work);
+            if (!reframing and !restarted) {
+                // Abandoning an in-flight pure compiler is known-not-sent;
+                // a durable compiler capture is imported without recompiling.
+                const archive_path = try std.fmt.allocPrint(frame, "{s}/captured.agnx", .{directory});
+                if (!interrupted) _ = try service.exportCheckpoint(frame, task, archive_path);
+                try service.close(frame);
+                try namespace.close();
+                if (!interrupted) path = try std.fmt.allocPrint(permanent, "{s}/imported", .{directory});
+                namespace = try native.Namespace.open(a, io, path);
+                service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
+                if (!interrupted) _ = try service.importCheckpoint(frame, "import-build", archive_path);
+                try std.testing.expectEqual(.idle, try service.pump(frame));
+                var recovered = try service.task(frame, task);
+                defer recovered.deinit();
+                try std.testing.expectEqual(@as(u64, 1), recovered.value.inference_attempts);
+                _ = try service.resumeTask(frame, "resume-build", task, recovered.value.revision);
+                restarted = true;
+            }
+            continue;
+        }
+        if (work.entry.declaration.inference) {
+            var prepared = try c.decodeOwned(t.P.AdaptivePrepared, frame, work.prepared.?);
+            defer prepared.deinit();
+            var observation: native.json.Value = .null;
+            if (stage > 0) {
+                try std.testing.expectEqual(1, prepared.value.request.results.items.len);
+                const prior = (try native.json.parse(permanent, prepared.value.request.results.items[0].output.bytes, .{})).value;
+                try std.testing.expect(!std.mem.eql(u8, "rejected", prior.object.get("disposition").?.string));
+                observation = prior.object.get("observation").?;
+            }
+            const action: t.Action = if (reframing) try trace.next(permanent, observation, prepared.value.request) else switch (stage) {
+                0 => .{ .program = .{ .command = .{ .build = .{ .source = .{ .json_text = .{ .bytes = recipe } }, .source_kind = .component_recipe, .exposures = .{ .items = &.{} } } } } },
+                1 => blk: {
+                    program = try native.values.fromJson(wc.Ref, permanent, observation.object.get("program").?);
+                    var id: [32]u8 = undefined;
+                    _ = try std.fmt.hexToBytes(&id, program.id.bytes);
+                    var stored = try service.workspaceProgram(frame, task, id);
+                    defer stored.deinit();
+                    try std.testing.expectEqualSlices(u8, compiled_image.?, try namespace.store.object(frame, stored.value.description.image, null));
+                    try std.testing.expectEqualStrings(recipe, try namespace.store.object(frame, stored.value.description.source, null));
+                    break :blk .{ .context = .{ .command = .{ .materialize = .{ .input = .{ .authorized_input = .{ .bytes = "retained-table" } }, .sources = .{ .items = &.{} } } } } };
+                },
+                2 => blk: {
+                    input = try native.values.fromJson(wc.Ref, permanent, observation.object.get("value").?);
+                    break :blk .{ .work = .{ .command = .{ .start = .{ .program = program, .input = .{ .reference = input }, .policy = .{ .stop = .terminal, .continuation = .owner_scheduled } } } } };
+                },
+                else => blk: {
+                    if (stage == 3) child = try native.values.fromJson(wc.Ref, permanent, observation.object.get("work").?);
+                    if (!std.mem.eql(u8, observation.object.get("outcome").?.string, "completed")) break :blk .{ .work = .{ .command = .{ .inspect = .{ .work = child } } } };
+                    const preview = observation.object.get("result_preview").?.object.get("text").?.string;
+                    const table = (try native.json.parse(frame, preview, .{})).value;
+                    try std.testing.expectEqualStrings("2", table.array.items[0].array.items[0].array.items[0].string);
+                    try std.testing.expectEqualStrings("1", table.array.items[1].array.items[0].array.items[0].string);
+                    inspected = true;
+                    break :blk .{ .stop = .{ .reason = .{ .bytes = "Retained program and inputs executed correctly after recovery." } } };
+                },
+            };
+            const encoded = try modelArguments(t.Action, frame, action);
+            const name = @tagName(action);
+            const arguments = try native.json.canonical(frame, encoded.object.get("value").?);
+            const response = try std.json.Stringify.valueAlloc(frame, .{ .status = "completed", .@"error" = @as(?u8, null), .output = .{.{ .type = "function_call", .status = "completed", .call_id = try std.fmt.allocPrint(frame, "workspace-{d}", .{stage}), .name = name, .arguments = arguments }} }, .{});
+            const raw = try c.encodeOwned(native.responses.Raw, frame, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = response } });
+            stage += 1;
+            try service.acquire(frame, work, raw);
+        } else {
+            var request = try protocol.decode(protocol.Request, frame, work.request);
+            defer request.deinit();
+            const ctx: native.Context = .{ .allocator = frame, .io = io, .authority = &profile.authority, .task_id = &std.fmt.bytesToHex(task, .lower), .profile = profile.bytes, .environment = profile.environment };
+            const reply = if (work.entry.declaration.capture) |adapter| blk: {
+                const acquired = try adapter.acquire(ctx, work.prepared.?);
+                try std.testing.expect(acquired == .captured);
+                break :blk acquired.captured;
+            } else try work.entry.declaration.invoke.?(ctx, request.value.binding.payload);
+            try service.acquire(frame, work, reply);
+        }
+    }
+    return error.WorkspaceRecoveryDidNotComplete;
+}
+
+fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { none, imported, snapshot, provider, malformed }) !void {
     var budget: kosmos.AllocationBudget = .{ .parent = std.testing.allocator, .limit = 64 * 1024 * 1024 };
     const a = budget.allocator();
     const io = std.testing.io;
@@ -241,21 +519,14 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
     var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "adaptive-unit", .image_identity = admitted_image.identity() };
     defer application.deinit();
     application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
-    var declarations = environment.handlers;
-    if (generated) for (&declarations) |*entry| {
-        if (entry.inference) entry.capture.?.acquire = struct {
-            fn forbidden(_: native.Context, _: []const u8) !native.registry.Acquisition {
-                return error.ProviderAcquisitionForbidden;
-            }
-        }.forbidden;
-    };
+    const declarations = environment.handlers;
     var handlers = try native.Registry.init(a, &declarations);
     defer handlers.deinit();
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var buffer: [4096]u8 = undefined;
     const length = try temporary.dir.realPath(io, &buffer);
-    const configured = if (generated) try generatedToolConfiguration(permanent, io, assets, temporary.dir, buffer[0..length]) else try environment.configure(permanent, io, .{ .offline = true, .scratch_allocator = a }, null, assets);
+    const configured = try environment.configure(permanent, io, .{ .offline = true, .scratch_allocator = a }, null, assets);
     var grants: [environment.handlers.len]native.registry.Grant = undefined;
     const profile: native.tasks.Profile = .{ .id = configured.id, .runtime_identity = @splat(73), .bytes = configured.bytes, .environment = configured.environment, .resources = configured.resources, .authority = .{ .grants = &grants, .principal = "adaptive-unit", .tenant = "local", .inference = true } };
     for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
@@ -274,7 +545,6 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
     _ = try service.message(permanent, "large-followup-one", task, .{ .message = .{ .bytes = &long_followup } });
     _ = try service.message(permanent, "large-followup-two", task, .{ .message = .{ .bytes = &long_followup } });
     var model_calls: usize = 0;
-    var tool_acquisitions: usize = 0;
     var last_model_capture: ?[32]u8 = null;
     var restarted = false;
     var witnessed = false;
@@ -373,34 +643,6 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                     try std.testing.expectEqual(@as(u64, 0), cache.misses);
                     try std.testing.expectEqual(@as(u64, 0), cache.ancestry_bytes);
                 }
-                if (generated and work.entry.declaration.inference) {
-                    var prepared = try protean.contracts.decodeOwned(t.P.AdaptivePrepared, frame, work.prepared.?);
-                    defer prepared.deinit();
-                    const name: []const u8 = switch (model_calls) {
-                        0 => "skill_set",
-                        1 => "tool_build",
-                        2 => "tool_run",
-                        else => return error.UnexpectedInference,
-                    };
-                    const arguments = switch (model_calls) {
-                        0 => "{\"operation\":\"load\",\"skill_id\":\"tool-construction\",\"version\":\"1\",\"residency\":\"resident\",\"expected_revision\":0,\"reason\":\"Recover admitted pure computations.\"}",
-                        1 => try std.json.Stringify.valueAlloc(frame, .{ .proposal_json = try constructionRecipe(frame, &.{.{ .component = "swap" }}) }, .{}),
-                        2 => blk_args: {
-                            const prior = prepared.value.request.results.items;
-                            try std.testing.expectEqual(1, prior.len);
-                            const built = (try native.json.parse(frame, prior[0].output.bytes, .{})).value;
-                            try std.testing.expectEqualStrings("structurally_admitted", built.object.get("disposition").?.string);
-                            const root = (try native.json.parse(frame, profile.bytes, .{})).value;
-                            const policy = try native.values.fromJson(t.ToolPolicy, frame, root.object.get("tool_construction").?);
-                            const input = policy.inputs.items[0].object;
-                            break :blk_args try std.json.Stringify.valueAlloc(frame, .{ .tool_ref = built.object.get("tool_ref").?.string, .input_ref = try std.fmt.allocPrint(frame, "{s}:{d}", .{ std.fmt.bytesToHex(input.digest, .lower), input.bytes }) }, .{});
-                        },
-                        else => unreachable,
-                    };
-                    const call = try std.fmt.allocPrint(frame, "generated-{d}", .{model_calls});
-                    const provider = try std.json.Stringify.valueAlloc(frame, .{ .status = "completed", .@"error" = @as(?u8, null), .output = .{.{ .type = "function_call", .status = "completed", .call_id = call, .name = name, .arguments = arguments }} }, .{});
-                    break :blk try protean.contracts.encodeOwned(native.responses.Raw, frame, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = provider } });
-                }
                 if (work.entry.declaration.inference and model_calls == 8) {
                     var prepared = try protean.contracts.decodeOwned(t.P.AdaptivePrepared, frame, work.prepared.?);
                     defer prepared.deinit();
@@ -450,7 +692,6 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                     const provider = try std.json.Stringify.valueAlloc(frame, .{ .id = call, .status = "completed", .@"error" = @as(?u8, null), .output = .{.{ .type = "function_call", .status = "completed", .call_id = call, .name = name, .arguments = arguments }} }, .{});
                     break :blk try protean.contracts.encodeOwned(native.responses.Raw, frame, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = provider } });
                 }
-                if (generated and (std.mem.eql(u8, work.entry.declaration.identity, t.tool_build_identity) or std.mem.eql(u8, work.entry.declaration.identity, t.tool_run_identity))) tool_acquisitions += 1;
                 const acquired = try adapter.acquire(context, work.prepared.?);
                 if (acquired != .captured) return error.UnexpectedAcquisitionFailure;
                 break :blk acquired.captured;
@@ -513,10 +754,7 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                 _ = try imported.exportCheckpoint(frame, task, second_archive);
                 return;
             }
-            if ((recovery_probe == .snapshot and work.entry.declaration.recovery != null) or (recovery_probe == .provider and inference) or
-                (recovery_probe == .tool_build and std.mem.eql(u8, work.entry.declaration.identity, t.tool_build_identity)) or
-                (recovery_probe == .tool_run and std.mem.eql(u8, work.entry.declaration.identity, t.tool_run_identity)))
-            {
+            if ((recovery_probe == .snapshot and work.entry.declaration.recovery != null) or (recovery_probe == .provider and inference)) {
                 const occurrence_id = work.occurrence;
                 const attempt_id = work.attempt;
                 try service.unknown(frame, work);
@@ -635,26 +873,6 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                         defer interpreted.deinit();
                         try std.testing.expect(interpreted.value.outcome == .reply_settled);
                         try std.testing.expect(interpreted.value.previous != null);
-                        if (generated) {
-                            const bound = try copy_namespace.store.object(frame, interpreted.value.outcome.reply_settled, null);
-                            var result = try protocol.decode(protocol.Result, frame, bound);
-                            defer result.deinit();
-                            var tool_reply = try protean.contracts.decodeOwned(t.ToolReply, frame, result.value.value);
-                            defer tool_reply.deinit();
-                            const artifact = try copy_namespace.store.object(frame, .{ .digest = tool_reply.value.artifact.digest, .bytes = tool_reply.value.artifact.bytes }, null);
-                            var tool_artifact = try protean.contracts.decodeOwned(t.ToolArtifact, frame, artifact);
-                            defer tool_artifact.deinit();
-                            if (recovery_probe == .tool_build) {
-                                try std.testing.expect(tool_artifact.value.outcome == .built and tool_reply.value.program != null);
-                            } else {
-                                try std.testing.expect(tool_artifact.value.outcome == .ran and tool_reply.value.evidence != null);
-                                var table = try protean.contracts.decodeOwned(t.tool_types.Table, frame, tool_artifact.value.outcome.ran.value.bytes);
-                                defer table.deinit();
-                                try std.testing.expectEqualDeep(&[_]t.tool_types.Row{auditRow(2, 20, 200, 2)}, table.value.rows.items);
-                                try std.testing.expectEqualDeep(&[_]t.tool_types.Row{auditRow(1, 10, 100, 1)}, table.value.relation.items);
-                            }
-                            try std.testing.expectEqual(@as(usize, if (recovery_probe == .tool_build) 1 else 2), tool_acquisitions);
-                        }
                     }
                 }
                 namespace = try native.Namespace.open(a, io, path);
