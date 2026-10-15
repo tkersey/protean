@@ -69,10 +69,16 @@ export function workspaceMetrics(archive, application) {
     count.calls++;
     if (!capture || capture[4].tag !== 1) { count.missing_usage++; continue; }
     const raw = decodeValue(captured, archive.object(capture[4].value));
-    const response = JSON.parse(Buffer.from(raw[3]).toString());
-    if (!response.usage) count.missing_usage++;
-    else { count.input_tokens += response.usage.input_tokens ?? 0; count.output_tokens += response.usage.output_tokens ?? 0; }
-    if (role === 'controller') for (const item of response.output ?? []) if (item.type === 'function_call') {
+    // Capture precedes response interpretation: HTTP errors and malformed
+    // provider output still incurred a call, but supply no usable usage.
+    let response;
+    try { response = JSON.parse(Buffer.from(raw[3]).toString()); } catch { response = null; }
+    const usage = response?.usage;
+    const known = value => Number.isSafeInteger(value) && value >= 0;
+    if (!known(usage?.input_tokens) || !known(usage?.output_tokens)) count.missing_usage++;
+    if (known(usage?.input_tokens)) count.input_tokens += usage.input_tokens;
+    if (known(usage?.output_tokens)) count.output_tokens += usage.output_tokens;
+    if (role === 'controller') for (const item of Array.isArray(response?.output) ? response.output : []) if (item?.type === 'function_call' && typeof item.name === 'string') {
       let argumentsValue; try { argumentsValue = JSON.parse(item.arguments); } catch { argumentsValue = null; }
       stats.actions.push({name: item.name, arguments: argumentsValue});
     }

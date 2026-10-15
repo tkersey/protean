@@ -51,6 +51,9 @@ allocator high-water mark. Retained namespace bytes include historical objects.
 Call totals include unknown delivery and exclude positively unsent attempts,
 including attempts superseded by an authorized rearm of the same occurrence.
 Prepared context bytes still include those attempts because preparation occurred.
+Malformed or non-JSON provider captures still count as calls with missing usage.
+Only nonnegative safe integer token fields contribute known usage; partial usage
+retains its known fields and also marks the call as having missing usage.
 
 Adjudicate `task_correctness`, `evidence_coverage`, `successful_reframing`,
 `unnecessary_construction`, and `branch_executions_not_used` against each frozen

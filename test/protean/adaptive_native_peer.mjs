@@ -741,6 +741,41 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
         assert(metrics.builds >= 1 && metrics.compiler_nanoseconds > 0 && metrics.native_publication_nanoseconds > 0);
         assert(metrics.checkpoint_publications >= 12 && metrics.current_checkpoint_bytes > 0);
         assert.equal(metrics.actions.filter(action => action.name === 'program' && action.arguments.command.tag === 'build').length, 4);
+        // CapturedResponse deliberately carries raw transport bytes. Exercise
+        // the evaluator over that domain with the archive's actual codecs.
+        const measuredBytes = await readFile(measured);
+        const application = JSON.parse(await readFile(applicationPath, 'utf8'));
+        for (const [body, input, output, missing, actions] of [
+          ['<html>502 Bad Gateway</html>', 0, 0, 1, 0],
+          ['', 0, 0, 1, 0], ['null', 0, 0, 1, 0], ['{}', 0, 0, 1, 0],
+          ['{"output":{}}', 0, 0, 1, 0], ['{"output":[null,1,{}]}', 0, 0, 1, 0],
+          ['{"usage":{}}', 0, 0, 1, 0],
+          ['{"usage":{"input_tokens":"7","output_tokens":-1}}', 0, 0, 1, 0],
+          ['{"usage":{"input_tokens":1e99,"output_tokens":null}}', 0, 0, 1, 0],
+          ['{"usage":{"input_tokens":7}}', 7, 0, 1, 0],
+          ['{"usage":{"input_tokens":0,"output_tokens":0}}', 0, 0, 0, 0],
+          [JSON.stringify({usage: {input_tokens: 3, output_tokens: 2}, output: [{type: 'function_call', name: 'report', arguments: '{"answer":42}'}]}), 3, 2, 0, 1],
+        ]) {
+          const archive = readArchive(measuredBytes);
+          const attemptRow = archive.manifest[6].find(([kind, , ref]) => kind === 5 && decodeValue(archive.schemas.get('attempt'), archive.object(ref))[5] === 'agent.model.invoke.v11');
+          const attempt = decodeValue(archive.schemas.get('attempt'), archive.object(attemptRow[2]));
+          const captureRow = archive.manifest[6].find(([kind, id]) => kind === 4 && Buffer.from(id).equals(Buffer.from(attempt[0])));
+          const capture = decodeValue(archive.schemas.get('capture'), archive.object(captureRow[2]));
+          const rawSchema = contract(application, 'CapturedResponse');
+          const raw = decodeValue(rawSchema, archive.object(capture[4].value));
+          raw[3] = Buffer.from(body);
+          const store = bytes => { const ref = reference(bytes); archive.objects.set(Buffer.from(ref[0]).toString('hex'), bytes); return ref; };
+          capture[4] = {tag: 1, value: store(Buffer.from(encodeValue(rawSchema, raw)))};
+          captureRow[2] = store(Buffer.from(encodeValue(archive.schemas.get('capture'), capture)));
+          archive.manifest[6] = archive.manifest[6].filter(row => row === attemptRow || row === captureRow || (row[0] === 0 && Buffer.from(row[1]).equals(Buffer.from(attempt[2]))));
+          const observed = workspaceMetrics(archive, application);
+          assert.equal(observed.controller.calls, 1, body);
+          assert.equal(observed.controller.input_tokens, input, body);
+          assert.equal(observed.controller.output_tokens, output, body);
+          assert.equal(observed.controller.missing_usage, missing, body);
+          assert.equal(observed.actions.length, actions, body);
+          if (actions) assert.deepEqual(observed.actions[0], {name: 'report', arguments: {answer: 42}});
+        }
       }
     }
     return {tool_construction: toolRuns};

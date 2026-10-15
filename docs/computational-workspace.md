@@ -58,6 +58,11 @@ the transaction commits. A failure while notifying a child after capture publica
 fences the owner; the durable capture remains available after reopening and cannot
 be dispatched again. Completed
 delegated answers remain eligible for delivery after explicit task resumption.
+Host shutdown preserves admitted child scheduling intent; reopening alone does
+not resume execution, and explicit controller parks remain parked. Task
+cancellation also reaches unfinished children after the root has completed,
+without replacing its saved result. A new cancellation request after reopening
+can continue already admitted cleanup.
 Cancellation may retain pending cleanup or unknown delivery. Neither is rendered
 as successful disposal. Independent work is interleaved; alternative tokens stay
 inside their work's checkpoint and do not imply parallel parent agents.

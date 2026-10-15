@@ -1058,11 +1058,21 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
         try writer.fixed(u64, @intCast(i));
     }
     try writer.natural(0);
-    const WaitScenario = enum { imported_message, owned_message, selected_event, resumed_child, reopened_control };
+    const WaitScenario = enum { imported_message, owned_message, selected_event, resumed_child, orderly_resumed_child, resumed_explicit_park, reopened_control };
     for (std.enums.values(WaitScenario), 0..) |scenario, index| {
         const interrupt = scenario == .imported_message or scenario == .owned_message;
         const prefix = try std.fmt.allocPrint(scratch, "wait-{d}", .{index});
         const parent = try service.submit(scratch, prefix, {});
+        var cleanup_id: ?[32]u8 = null;
+        if (scenario == .orderly_resumed_child) {
+            var disposal_builder = source.Builder.init(scratch);
+            defer disposal_builder.deinit();
+            const disposal_source = try native.source_records.encode(scratch, try @import("workspace_sources.zig").yieldingDisposal(&disposal_builder));
+            const disposal_program = try service.workspaceCommand(scratch, "late-cleanup-build", parent.receipt.task, .{ .program = .{ .build = .{ .source = .{ .json_text = .{ .bytes = disposal_source } }, .source_kind = .source_records, .exposures = .{ .items = &.{.{ .effect = 0, .class = .observation }} } } } });
+            var program_id: [32]u8 = undefined;
+            _ = try std.fmt.hexToBytes(&program_id, disposal_program.program.?.id.bytes);
+            cleanup_id = (try service.workspaceStart(scratch, "late-cleanup-start", parent.receipt.task, program_id, &.{}, .{})).receipt.workspace.?;
+        }
         var diagnostic: native.program_construction.Diagnostic = .{};
         const program = try service.workspaceBuild(scratch, try std.fmt.allocPrint(scratch, "{s}-build", .{prefix}), parent.receipt.task, document, &diagnostic);
         const started = try service.workspaceStart(scratch, try std.fmt.allocPrint(scratch, "{s}-start", .{prefix}), parent.receipt.task, program.receipt.workspace.?, input, .{});
@@ -1112,16 +1122,30 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
             _ = try service.workspaceControl(scratch, "reopen-and-advance", parent.receipt.task, initial.value.id, initial.value.execution_revision, initial.value.control_revision, .advance);
         } else {
             _ = try service.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "wait-progress-{d}", .{index}), parent.receipt.task, initial.value.id, initial.value.execution_revision, initial.value.control_revision, .{ .delegate = .{ .continuation = .owner_scheduled, .stop = .terminal } });
-            if (scenario == .resumed_child) {
+            if (scenario == .resumed_child or scenario == .orderly_resumed_child or scenario == .resumed_explicit_park) {
+                if (scenario == .resumed_explicit_park) {
+                    var delegated = try service.workspaceWork(scratch, parent.receipt.task, initial.value.id);
+                    defer delegated.deinit();
+                    _ = try service.workspaceControl(scratch, "explicit-park-before-close", parent.receipt.task, initial.value.id, delegated.value.execution_revision, delegated.value.control_revision, .park);
+                }
+                if (scenario != .resumed_child) try service.park(scratch);
                 try service.close(scratch);
                 service = try native.tasks.Service(WaitTypes).init(a, io, &namespace, assets, &application, handlers, profile);
                 try std.testing.expectEqual(.idle, std.meta.activeTag(try service.pump(scratch)));
                 var paused = try service.task(scratch, parent.receipt.task);
                 defer paused.deinit();
                 var guarded: AfterCommitAllocator = .{ .backing = scratch, .namespace = &namespace, .generation = namespace.store.head.generation };
-                _ = try service.resumeTask(guarded.allocator(), "restore-queued-child", parent.receipt.task, paused.value.revision);
+                const resume_id = try std.fmt.allocPrint(scratch, "restore-queued-child-{d}", .{index});
+                _ = try service.resumeTask(guarded.allocator(), resume_id, parent.receipt.task, paused.value.revision);
                 try std.testing.expectEqual(@as(usize, 0), guarded.rejected);
-                try std.testing.expect((try service.resumeTask(scratch, "restore-queued-child", parent.receipt.task, paused.value.revision)).replayed);
+                try std.testing.expect((try service.resumeTask(scratch, resume_id, parent.receipt.task, paused.value.revision)).replayed);
+                if (scenario == .resumed_explicit_park) {
+                    for (0..10) |_| _ = try service.pump(scratch);
+                    var parked = try service.workspaceWork(scratch, parent.receipt.task, initial.value.id);
+                    defer parked.deinit();
+                    try std.testing.expectEqual(.parked, parked.value.schedule);
+                    try std.testing.expectEqual(initial.value.execution_revision, parked.value.execution_revision);
+                }
             }
         }
         for (0..30) |_| {
@@ -1146,8 +1170,74 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
         var child = try service.workspaceWork(a, parent.receipt.task, initial.value.id);
         defer child.deinit();
         try std.testing.expect(!child.value.terminal());
-        if (interrupt) try std.testing.expectEqual(initial.value.execution_revision, child.value.execution_revision) else try std.testing.expect(child.value.execution_revision > initial.value.execution_revision);
+        if (interrupt or scenario == .resumed_explicit_park) try std.testing.expectEqual(initial.value.execution_revision, child.value.execution_revision) else try std.testing.expect(child.value.execution_revision > initial.value.execution_revision);
         try service.validateWorkspace(scratch, parent.receipt.task);
+        // Root completion retains unfinished children. The public task cancel
+        // path must dispose them without replacing the already published result.
+        if (scenario == .orderly_resumed_child) {
+            try service.park(scratch);
+            try service.close(scratch);
+            service = try native.tasks.Service(WaitTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+        }
+        const cancel_id = try std.fmt.allocPrint(scratch, "cancel-unjoined-{d}", .{index});
+        var cancel_guard: AfterCommitAllocator = .{ .backing = scratch, .namespace = &namespace, .generation = namespace.store.head.generation };
+        const cancelled = try service.requestCancel(cancel_guard.allocator(), cancel_id, parent.receipt.task, "dispose remaining work");
+        try std.testing.expectEqual(@as(usize, 0), cancel_guard.rejected);
+        const replayed = try service.requestCancel(scratch, cancel_id, parent.receipt.task, "dispose remaining work");
+        try std.testing.expect(replayed.replayed and std.meta.eql(cancelled.receipt.id, replayed.receipt.id));
+        if (cleanup_id) |pending_id| {
+            var started_cleanup = false;
+            for (0..30) |_| {
+                _ = try service.pump(scratch);
+                var pending = try service.workspaceWork(scratch, parent.receipt.task, pending_id);
+                defer pending.deinit();
+                if (pending.value.cancellation_applied) {
+                    try std.testing.expect(!pending.value.terminal());
+                    try std.testing.expectEqual(.queued, pending.value.schedule);
+                    started_cleanup = true;
+                    break;
+                }
+            }
+            try std.testing.expect(started_cleanup);
+            try service.park(scratch);
+            try service.close(scratch);
+            service = try native.tasks.Service(WaitTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+            try std.testing.expectEqual(.idle, std.meta.activeTag(try service.pump(scratch)));
+            _ = try service.requestCancel(scratch, "continue-admitted-cleanup", parent.receipt.task, "dispose remaining work");
+            var answered_cleanup = false;
+            for (0..30) |_| {
+                _ = try service.pump(scratch);
+                var pending = try service.workspaceWork(scratch, parent.receipt.task, pending_id);
+                defer pending.deinit();
+                if (pending.value.current_port) |ref| {
+                    try std.testing.expect(!try service.associatedWorkDisposed(scratch, parent.receipt.task));
+                    var port = try contracts.decodeOwned(native.workspace.Port, scratch, try namespace.store.object(scratch, ref, null));
+                    defer port.deinit();
+                    _ = try service.workspaceInteract(scratch, "answer-late-cleanup", parent.receipt.task, .{
+                        .expected = .{ .work = try workspaceRef(scratch, .work, pending_id), .execution_revision = pending.value.execution_revision, .control_revision = pending.value.control_revision },
+                        .port = try workspaceRef(scratch, .port, port.value.id),
+                        .generation = port.value.generation,
+                        .command = .{ .resume_value = .{ .inline_json = .{ .schema = try workspaceRef(scratch, .schema, port.value.interface.argument.digest), .json_text = .{ .bytes = "{}" } } } },
+                    });
+                    answered_cleanup = true;
+                    break;
+                }
+            }
+            try std.testing.expect(answered_cleanup);
+        }
+        for (0..30) |_| {
+            _ = try service.pump(scratch);
+            if (try service.associatedWorkDisposed(scratch, parent.receipt.task)) break;
+        }
+        try std.testing.expect(try service.associatedWorkDisposed(scratch, parent.receipt.task));
+        var retained_result = try service.task(scratch, parent.receipt.task);
+        defer retained_result.deinit();
+        try std.testing.expectEqual(.completed, retained_result.value.outcome_kind);
+        try std.testing.expectEqualDeep(finished.value.result, retained_result.value.result);
+        try std.testing.expectEqualDeep(finished.value.outcome, retained_result.value.outcome);
+        try std.testing.expect(!retained_result.value.cancellation_applied);
+        const cancelled_archive = try std.fmt.allocPrint(scratch, "{s}/cancelled-children-{d}.par", .{ path_buffer[0..length], index });
+        _ = try service.exportCheckpoint(scratch, parent.receipt.task, cancelled_archive);
     }
 }
 

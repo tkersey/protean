@@ -681,10 +681,26 @@ pub fn Service(comptime Types: type) type {
             defer decoded.deinit();
             var value = decoded.value;
             const previous = value.revision;
-            if (!value.terminal()) try self.ensureOwnershipCapacity(task_id);
-            try self.runnable.ensureUnusedCapacity(self.allocator, 1);
+            const needs_cancellation = !value.terminal() or !try self.associatedWorkDisposed(a, task_id);
+            var cleanup: std.ArrayList(workspace.Subject) = .empty;
+            defer cleanup.deinit(a);
+            if (needs_cancellation) {
+                try self.ensureOwnershipCapacity(task_id);
+                const children = try self.workspaceIds(a, task_id);
+                defer a.free(children);
+                for (children) |child_id| {
+                    var child = try self.retainedWorkspaceWork(a, task_id, child_id);
+                    defer child.deinit();
+                    // Reopening requires explicit ownership. A new cancel
+                    // can continue already admitted cleanup even when the root
+                    // has a result and ordinary task resume is unavailable.
+                    if (!child.value.terminal() and child.value.cancellation != null and child.value.schedule != .parked)
+                        try cleanup.append(a, .{ .task = task_id, .work = child_id });
+                }
+            }
+            try self.runnable.ensureUnusedCapacity(self.allocator, cleanup.items.len + 1);
             value.revision = try std.math.add(u64, previous, 1);
-            if (!value.terminal() and value.cancellation == null) value.cancellation = .{ .bytes = reason };
+            if (needs_cancellation and value.cancellation == null) value.cancellation = .{ .bytes = reason };
             try self.store().begin();
             defer self.store().rollback();
             try self.event(&value, .cancellation_requested, "{}");
@@ -693,6 +709,7 @@ pub fn Service(comptime Types: type) type {
             // The receipt now survives retries. If applying its cancellation
             // fails, only restart recovery may resume this owner's work.
             errdefer self.store().fence();
+            for (cleanup.items) |subject| self.subjectAddAssumeCapacity(subject);
             if (self.work) |*work| if (same(&work.task, &task_id)) {
                 work.cancel_requested = true;
             };
@@ -714,7 +731,7 @@ pub fn Service(comptime Types: type) type {
                     }
                 }
             }
-            if (!value.terminal()) {
+            if (needs_cancellation) {
                 if (self.work == null or self.work.?.subject_work != null or !same(&self.work.?.task, &task_id)) try self.runnableAdd(task_id);
                 self.claim(task_id);
             }
@@ -4552,10 +4569,10 @@ pub fn Service(comptime Types: type) type {
             if (self.work != null) return error.Busy;
             for (0..self.runnable.items.len) |offset| {
                 const id = self.runnable.items[(self.runnable_cursor + offset) % self.runnable.items.len];
-                if (id.work) |work_id| {
-                    try self.parkWorkspaceOnClose(a, id.task, work_id);
-                    continue;
-                }
+                // Host suspension drops volatile ownership, not the child's
+                // admitted scheduling intent. Explicit task resume restores
+                // eligible children; a controller work.park remains durable.
+                if (id.work != null) continue;
                 var decoded = try self.task(a, id.task);
                 defer decoded.deinit();
                 var value = decoded.value;
