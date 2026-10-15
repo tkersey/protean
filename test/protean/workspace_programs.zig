@@ -908,7 +908,7 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
         try writer.fixed(u64, @intCast(i));
     }
     try writer.natural(0);
-    const WaitScenario = enum { imported_message, owned_message, selected_event, resumed_child };
+    const WaitScenario = enum { imported_message, owned_message, selected_event, resumed_child, reopened_control };
     for (std.enums.values(WaitScenario), 0..) |scenario, index| {
         const interrupt = scenario == .imported_message or scenario == .owned_message;
         const prefix = try std.fmt.allocPrint(scratch, "wait-{d}", .{index});
@@ -955,6 +955,11 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
             _ = try service.message(guarded.allocator(), "owned-wait-amendment", parent.receipt.task, selection);
             try std.testing.expectEqual(@as(usize, 0), guarded.rejected);
             try std.testing.expect((try service.message(scratch, "owned-wait-amendment", parent.receipt.task, selection)).replayed);
+        } else if (scenario == .reopened_control) {
+            try service.close(scratch);
+            service = try native.tasks.Service(WaitTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+            try std.testing.expectEqual(.idle, std.meta.activeTag(try service.pump(scratch)));
+            _ = try service.workspaceControl(scratch, "reopen-and-advance", parent.receipt.task, initial.value.id, initial.value.execution_revision, initial.value.control_revision, .advance);
         } else {
             _ = try service.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "wait-progress-{d}", .{index}), parent.receipt.task, initial.value.id, initial.value.execution_revision, initial.value.control_revision, .{ .delegate = .{ .continuation = .owner_scheduled, .stop = .terminal } });
             if (scenario == .resumed_child) {

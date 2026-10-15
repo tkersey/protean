@@ -360,7 +360,7 @@ pub fn Service(comptime Types: type) type {
                     defer self.store().rollback();
                     try self.store().putRecord(occurrence.Occurrence, "occurrence", current, task_id, lost);
                     try self.effectSchedule(a, &value, pending.value, .parked, .unavailable_environment, false);
-                    try self.persist(a, value, parent.value.revision, "work.recover-unknown");
+                    try self.persist(a, value, parent.value.revision, "work.recover-unknown", .preserve);
                 }
             }
         }
@@ -406,7 +406,7 @@ pub fn Service(comptime Types: type) type {
                 defer self.store().rollback();
                 try self.store().putRecord(occurrence.Occurrence, "occurrence", current, id, lost);
                 try self.event(&value, if (compiling) .blocked else .delivery_unknown, "{}");
-                try self.persist(a, value, previous, "process.recover-dispatched");
+                try self.persist(a, value, previous, "process.recover-dispatched", .preserve);
             }
             for (ids) |id| {
                 var decoded = self.task(a, id) catch |err| switch (err) {
@@ -471,14 +471,18 @@ pub fn Service(comptime Types: type) type {
             defer a.free(bytes);
             try self.event(value, kind, bytes);
         }
-        fn persist(self: *Self, a: std.mem.Allocator, value: state.Task, previous: u64, transition: []const u8) !void {
+        const Ownership = enum { preserve, acquire };
+
+        fn persist(self: *Self, a: std.mem.Allocator, value: state.Task, previous: u64, transition: []const u8, ownership: Ownership) !void {
             try self.store().putTask(value, previous);
             // Eligibility is derived from the transaction's complete successor.
             // Reserve before commit: an acknowledged event cannot lose its
             // wake-up to allocation failure, or require each producer to notify.
-            const wake = try self.workspaceWaitWakeNeeded(a, value);
+            const wake = try self.workspaceWaitWakeNeeded(a, value, ownership);
+            if (ownership == .acquire) try self.ensureOwnershipCapacity(value.id);
             if (wake) try self.runnable.ensureUnusedCapacity(self.allocator, 1);
             try self.namespace.commit(transition);
+            if (ownership == .acquire) self.claim(value.id);
             if (wake) self.runnableAppendAssumeCapacity(value.id);
         }
         fn runnableAdd(self: *Self, id: state.TaskId) !void {
@@ -685,7 +689,7 @@ pub fn Service(comptime Types: type) type {
             defer self.store().rollback();
             try self.event(&value, .cancellation_requested, "{}");
             const admitted = try self.receipt(a, .cancel, id, request, value, .cancellation_requested, null, null);
-            try self.persist(a, value, previous, "task.cancel");
+            try self.persist(a, value, previous, "task.cancel", .preserve);
             // The receipt now survives retries. If applying its cancellation
             // fails, only restart recovery may resume this owner's work.
             errdefer self.store().fence();
@@ -753,7 +757,7 @@ pub fn Service(comptime Types: type) type {
             if (rearmed) |pending| try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, task_id, pending);
             try self.event(&value, .resumed, "{}");
             const admitted = try self.receipt(a, .@"resume", id, request, value, .resumed, null, null);
-            try self.persist(a, value, expected, "task.resume");
+            try self.persist(a, value, expected, "task.resume", .preserve);
             self.subjectAddAssumeCapacity(.{ .task = task_id });
             self.claim(task_id);
             for (eligible.items) |child| self.subjectAddAssumeCapacity(child);
@@ -878,7 +882,7 @@ pub fn Service(comptime Types: type) type {
             defer a.free(event_data);
             try self.event(&value, .reconciled, event_data);
             const admitted = try self.recoveryReceipt(a, .reconcile, id, request_digest, value, .reconciled, null, null, reconciliation_id);
-            try self.persist(a, value, expected, "task.reconcile");
+            try self.persist(a, value, expected, "task.reconcile", .preserve);
             if (asynchronous) {
                 try self.runnableAdd(task_id);
                 self.claim(task_id);
@@ -1026,7 +1030,7 @@ pub fn Service(comptime Types: type) type {
                 },
             };
             try self.store().putRecord(state.Reconciliation, "reconciliation", result.id, value.id, result);
-            try self.persist(a, value, initial.revision, "recovery.complete");
+            try self.persist(a, value, initial.revision, "recovery.complete", .preserve);
             if (value.schedule == .queued) try self.runnableAdd(value.id) else self.runnableRemove(value.id);
         }
 
@@ -1101,7 +1105,7 @@ pub fn Service(comptime Types: type) type {
             try self.messageEvent(a, &value, .message_queued, saved);
             const admitted = try self.receipt(a, .message, id, request, value, .queued, identity, null);
             try self.runnable.ensureUnusedCapacity(self.allocator, 1);
-            try self.persist(a, value, previous, "task.message");
+            try self.persist(a, value, previous, "task.message", .preserve);
             return admitted;
         }
 
@@ -1174,7 +1178,7 @@ pub fn Service(comptime Types: type) type {
             const admitted = try self.receipt(a, .respond, id, request, value, .answer_acquired, null, question_id);
             question.receipt = admitted.receipt;
             try self.store().putRecord(state.Question, "question", question_id, task_id, question);
-            try self.persist(a, value, previous, "task.respond");
+            try self.persist(a, value, previous, "task.respond", .preserve);
             try self.runnableAdd(task_id);
             self.claim(task_id);
             return admitted;
@@ -1188,7 +1192,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().begin();
             defer self.store().rollback();
             try self.event(&value, .blocked, "{}");
-            try self.persist(a, value, initial.revision, "task.blocked");
+            try self.persist(a, value, initial.revision, "task.blocked", .preserve);
             self.runnableRemove(value.id);
             try self.retire(a);
             return .waiting;
@@ -1367,7 +1371,7 @@ pub fn Service(comptime Types: type) type {
                 }
                 value.messages.items = &.{};
             }
-            try self.persist(a, value, initial.revision, "world.advance");
+            try self.persist(a, value, initial.revision, "world.advance", .preserve);
             self.active.?.execution_revision = value.execution_revision;
             if (value.terminal()) {
                 try driver.close();
@@ -1462,7 +1466,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().begin();
             defer self.store().rollback();
             try self.effectSchedule(a, &parent, pending, .parked, reason, false);
-            try self.persist(a, parent, initial.revision, "effect.blocked");
+            try self.persist(a, parent, initial.revision, "effect.blocked", .preserve);
             self.subjectRemove(.{ .task = parent.id, .work = pending.work });
             return .waiting;
         }
@@ -1504,7 +1508,7 @@ pub fn Service(comptime Types: type) type {
                     const event_bytes = try json.canonical(a, event_data);
                     defer a.free(event_bytes);
                     try self.event(&value, .input_required, event_bytes);
-                    try self.persist(a, value, initial.revision, "question.awaiting");
+                    try self.persist(a, value, initial.revision, "question.awaiting", .preserve);
                     self.runnableRemove(value.id);
                     try self.retire(a);
                     return .waiting;
@@ -1538,7 +1542,7 @@ pub fn Service(comptime Types: type) type {
                     _ = try self.store().putObject(bound);
                     if (message_decoded) |saved| try self.store().putRecord(state.Message, "message", saved.value.id, value.id, saved.value);
                     try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, value.id, acquired);
-                    try self.persist(a, value, initial.revision, "inbox.acquire");
+                    try self.persist(a, value, initial.revision, "inbox.acquire", .preserve);
                     return .progressed;
                 },
                 .leaf => {
@@ -1582,7 +1586,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().createRecord(state.Attempt, "attempt", attempt, value.id, .{ .id = attempt, .task = value.id, .occurrence = pending.id, .request = try self.store().putObject(request_bytes), .profile = value.profile, .capability = try name(entry.declaration.identity), .operation = operation_kind, .inference = entry.declaration.inference, .prepared = if (prepared) |body| try self.store().putObject(body) else null });
             try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, value.id, dispatched);
             try self.effectSchedule(a, &value, pending, .active, null, false);
-            try self.persist(a, value, initial.revision, "effect.dispatch");
+            try self.persist(a, value, initial.revision, "effect.dispatch", .preserve);
             self.work = work;
             self.subjectRemove(.{ .task = value.id, .work = pending.work });
             return .{ .work = work };
@@ -1641,7 +1645,7 @@ pub fn Service(comptime Types: type) type {
             });
             try self.store().putRecord(occurrence.Occurrence, "occurrence", work.occurrence, work.task, next);
             try self.effectSchedule(a, &value, saved.value, .queued, null, true);
-            try self.persist(a, value, previous, "effect.capture");
+            try self.persist(a, value, previous, "effect.capture", .preserve);
             try self.wakeOccurrence(a, value, saved.value);
         }
 
@@ -1704,7 +1708,7 @@ pub fn Service(comptime Types: type) type {
                 try self.store().putRecord(state.Reconciliation, "reconciliation", id, initial.id, recovery);
             }
             try self.effectSchedule(a, &value, pending, .queued, null, true);
-            try self.persist(a, value, initial.revision, "effect.interpret");
+            try self.persist(a, value, initial.revision, "effect.interpret", .preserve);
             try self.wakeOccurrence(a, value, pending);
             return .progressed;
         }
@@ -1789,7 +1793,7 @@ pub fn Service(comptime Types: type) type {
             _ = try self.store().putObject(bound);
             try self.store().putRecord(occurrence.Occurrence, "occurrence", work.occurrence, work.task, acquired);
             try self.effectSchedule(a, &value, saved.value, .queued, null, true);
-            try self.persist(a, value, previous, "effect.acquire");
+            try self.persist(a, value, previous, "effect.acquire", .preserve);
             try self.wakeOccurrence(a, value, saved.value);
         }
         pub fn unknown(self: *Self, a: std.mem.Allocator, work: Work) !void {
@@ -1815,7 +1819,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().putRecord(occurrence.Occurrence, "occurrence", work.occurrence, work.task, lost);
             if (work.subject_work == null) try self.event(&value, .delivery_unknown, "{}");
             try self.effectSchedule(a, &value, saved.value, .parked, .unavailable_environment, false);
-            try self.persist(a, value, previous, "effect.unknown");
+            try self.persist(a, value, previous, "effect.unknown", .preserve);
             self.subjectRemove(.{ .task = work.task, .work = work.subject_work });
             try self.retire(a);
         }
@@ -1845,7 +1849,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().putRecord(occurrence.Occurrence, "occurrence", work.occurrence, work.task, next);
             if (work.subject_work == null) try self.event(&value, .blocked, "{\"delivery\":\"definitely_not_sent\"}");
             try self.effectSchedule(a, &value, saved.value, if (cancelling) .queued else .parked, if (cancelling) null else .unavailable_environment, false);
-            try self.persist(a, value, previous, "effect.not-sent");
+            try self.persist(a, value, previous, "effect.not-sent", .preserve);
             if (cancelling) try self.wakeOccurrence(a, value, saved.value);
         }
 
@@ -2492,7 +2496,7 @@ pub fn Service(comptime Types: type) type {
             try json.put(a, &event_data, "archive_sha256", json.string(try a.dupe(u8, &std.fmt.bytesToHex(reader.identity, .lower))));
             try self.event(&value, .imported, try json.canonical(a, event_data));
             const admitted = try self.receipt(a, .import_checkpoint, id, request, value, .imported, null, null);
-            try self.persist(a, value, previous, "checkpoint.import");
+            try self.persist(a, value, previous, "checkpoint.import", .preserve);
             // Imported pending lookups have no live worker in this owner.
             // A crash before this ordinary transition is handled on reopen.
             try self.recover(a);
@@ -3481,7 +3485,7 @@ pub fn Service(comptime Types: type) type {
                         try self.store().begin();
                         defer self.store().rollback();
                         try self.store().createRecord(workspace.Wait, "workspace_wait", pending.id, initial.id, .{ .id = pending.id, .task = initial.id, .request = pending.request_object, .selection = selection });
-                        try self.persist(a, value, initial.revision, "workspace.wait");
+                        try self.persist(a, value, initial.revision, "workspace.wait", .preserve);
                     }
                     self.runnableRemove(initial.id);
                     try self.retire(a);
@@ -3557,7 +3561,7 @@ pub fn Service(comptime Types: type) type {
                 defer a.free(event_data);
                 try self.event(&parent, .workspace_progress, event_data);
             }
-            try self.persist(a, parent, initial.revision, "workspace.build");
+            try self.persist(a, parent, initial.revision, "workspace.build", .preserve);
             if (program) |saved| try self.checked_workspace_programs.put(self.allocator, saved.digest, self.store().integrity_epoch);
             return .progressed;
         }
@@ -3571,9 +3575,9 @@ pub fn Service(comptime Types: type) type {
             }
             return ready;
         }
-        fn workspaceWaitWakeNeeded(self: *Self, a: std.mem.Allocator, parent: state.Task) !bool {
+        fn workspaceWaitWakeNeeded(self: *Self, a: std.mem.Allocator, parent: state.Task, ownership: Ownership) !bool {
             if (parent.terminal()) return false;
-            var owned = false;
+            var owned = ownership == .acquire;
             for (self.owned.items) |id| owned = owned or std.meta.eql(id, parent.id);
             if (!owned) return false;
             for (self.runnable.items) |subject| if (subject.work == null and std.meta.eql(subject.task, parent.id)) return false;
@@ -3606,7 +3610,7 @@ pub fn Service(comptime Types: type) type {
             defer self.store().rollback();
             _ = try self.store().putObject(bound);
             try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, initial.id, acquired);
-            try self.persist(a, parent, fresh.value.revision, "workspace.reply");
+            try self.persist(a, parent, fresh.value.revision, "workspace.reply", .preserve);
             return .progressed;
         }
 
@@ -4012,10 +4016,8 @@ pub fn Service(comptime Types: type) type {
                 try self.store().putReceipt(&key, request, bytes);
             }
             try self.runnable.ensureUnusedCapacity(self.allocator, 2);
-            try self.ensureOwnershipCapacity(parent.id);
             const disposed = parent.terminal() and try self.taskCleanupComplete(a, parent);
-            try self.persist(a, parent, initial.revision, "workspace.publish");
-            self.claim(parent.id);
+            try self.persist(a, parent, initial.revision, "workspace.publish", .acquire);
             if (disposed) self.unclaim(parent.id);
             return .{ .receipt = saved, .replayed = false };
         }
@@ -4547,7 +4549,7 @@ pub fn Service(comptime Types: type) type {
                 try self.store().begin();
                 defer self.store().rollback();
                 try self.event(&value, .parked, "{}");
-                try self.persist(a, value, previous, "task.park");
+                try self.persist(a, value, previous, "task.park", .preserve);
             }
             self.runnable.clearRetainingCapacity();
             self.runnable_cursor = 0;
