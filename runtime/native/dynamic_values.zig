@@ -123,6 +123,165 @@ pub const Owned = struct {
     }
 };
 
+/// Page canonical JSON without expanding a zero-width collection into one
+/// allocation per logical element. The temporary tree stores concatenation and
+/// repetition; its lengths count JSON bytes, not canonical value bytes.
+pub fn page(a: std.mem.Allocator, schema: []const u8, bytes: []const u8, requested: contracts.workspace.Page) !json.Value {
+    if (requested.maximum == 0 or requested.maximum > 48 * 1024) return error.InvalidRange;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    var decoded = try data.schema.decode(scratch, schema);
+    defer decoded.deinit();
+    try data.schema.validateValue(scratch, decoded.descriptor, bytes);
+    var projection: Projection = .{ .allocator = scratch };
+    const root = try projection.build(decoded.descriptor, bytes);
+    const total = projection.nodes.items[root].length;
+    if (requested.offset > total) return error.InvalidRange;
+    const window = try scratch.alloc(u8, @intCast(@min(total - requested.offset, requested.maximum + 1)));
+    try projection.copy(root, requested.offset, window);
+    return @import("workspace_projection.zig").window(a, window, requested, total);
+}
+
+const Projection = struct {
+    const Node = struct {
+        length: u64,
+        content: union(enum) { text: []const u8, concat: struct { left: usize, right: usize }, repeat: usize },
+    };
+    allocator: std.mem.Allocator,
+    nodes: std.ArrayList(Node) = .empty,
+
+    fn add(self: *Projection, node: Node) !usize {
+        const id = self.nodes.items.len;
+        try self.nodes.append(self.allocator, node);
+        return id;
+    }
+    fn text(self: *Projection, bytes: []const u8) !usize {
+        return self.add(.{ .length = bytes.len, .content = .{ .text = bytes } });
+    }
+    fn concat(self: *Projection, left: usize, right: usize) !usize {
+        return self.add(.{ .length = try std.math.add(u64, self.nodes.items[left].length, self.nodes.items[right].length), .content = .{ .concat = .{ .left = left, .right = right } } });
+    }
+    fn repeat(self: *Projection, child: usize, count: u64) !usize {
+        return self.add(.{ .length = try std.math.mul(u64, self.nodes.items[child].length, count), .content = .{ .repeat = child } });
+    }
+    fn scalar(self: *Projection, value: json.Value) !usize {
+        return self.text(try json.canonical(self.allocator, value));
+    }
+
+    fn build(self: *Projection, descriptor: data.schema.Descriptor, bytes: []const u8) !usize {
+        const List = struct { schema: u64, index: u64 = 0, length: u64, accumulated: ?usize = null };
+        const Task = union(enum) {
+            value: u64,
+            cache: struct { schema: u64, start: usize },
+            sum: usize,
+            list: List,
+            next: struct { list: List, start: usize },
+        };
+        const a = self.allocator;
+        var pending: std.ArrayList(Task) = .empty;
+        var zero_width: std.AutoHashMap(u64, usize) = .init(a);
+        var reader: data.wire.Reader = .{ .input = bytes };
+        var result: usize = undefined;
+        const comma = try self.text(",");
+        const open = try self.text("[");
+        const close = try self.text("]");
+        try pending.append(a, .{ .value = descriptor.root });
+        while (pending.pop()) |task| switch (task) {
+            .cache => |entry| if (reader.position == entry.start) {
+                try zero_width.put(entry.schema, result);
+            },
+            .sum => |prefix| result = try self.concat(try self.concat(prefix, result), try self.text("}")),
+            .list => |list| {
+                if (list.index == list.length) {
+                    result = try self.concat(if (list.accumulated) |id| try self.concat(open, id) else open, close);
+                    continue;
+                }
+                const shape = descriptor.types[@intCast(list.schema)];
+                const child = switch (shape) {
+                    .product => |fields| fields[@intCast(list.index)],
+                    .seq => |element| element,
+                    .vector => |vector| vector.element,
+                    .array => |array| array.element,
+                    else => unreachable,
+                };
+                try pending.append(a, .{ .next = .{ .list = list, .start = reader.position } });
+                try pending.append(a, .{ .value = child });
+            },
+            .next => |next| {
+                var list = next.list;
+                const child = result;
+                list.accumulated = if (list.accumulated) |id| try self.concat(try self.concat(id, comma), child) else child;
+                list.index += 1;
+                // With no consumed bytes, this schema has exactly one external
+                // value. All remaining homogeneous elements have that value.
+                if (descriptor.types[@intCast(list.schema)] != .product and reader.position == next.start and list.index != list.length) {
+                    list.accumulated = try self.concat(list.accumulated.?, try self.repeat(try self.concat(comma, child), list.length - list.index));
+                    list.index = list.length;
+                }
+                try pending.append(a, .{ .list = list });
+            },
+            .value => |id| {
+                if (zero_width.get(id)) |cached| {
+                    result = cached;
+                    continue;
+                }
+                try pending.append(a, .{ .cache = .{ .schema = id, .start = reader.position } });
+                switch (descriptor.types[@intCast(id)]) {
+                    .unit => result = try self.text("{}"),
+                    .boolean => result = try self.text(if (try reader.byte() == 0) "false" else "true"),
+                    inline .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64 => |_, tag| result = try self.scalar(try values.toJson(integerType(tag), a, try reader.fixed(integerType(tag)))),
+                    .enumeration => result = try self.scalar(try values.toJson(u32, a, try reader.fixed(u32))),
+                    .bytes, .bounded_bytes => result = try self.scalar(try values.toJson(contracts.Bytes(null), a, .{ .bytes = try reader.bytes() })),
+                    .text, .bounded_text => result = try self.scalar(json.string(try reader.text())),
+                    .sum => |fields| {
+                        const tag = try reader.count();
+                        try pending.append(a, .{ .sum = try self.text(try std.fmt.allocPrint(a, "{{\"tag\":{d},\"value\":", .{tag})) });
+                        try pending.append(a, .{ .value = fields[tag] });
+                    },
+                    .product, .seq, .vector, .array => {
+                        const shape = descriptor.types[@intCast(id)];
+                        const length: u64 = switch (shape) {
+                            .product => |fields| fields.len,
+                            .array => |array| array.length,
+                            else => try reader.natural(),
+                        };
+                        try pending.append(a, .{ .list = .{ .schema = id, .length = length } });
+                    },
+                    .internal => return error.InvalidSchema,
+                }
+            },
+        };
+        try reader.finish();
+        return result;
+    }
+
+    fn copy(self: *Projection, root: usize, offset: u64, output: []u8) !void {
+        const Slice = struct { node: usize, offset: u64, output: []u8 };
+        var pending: std.ArrayList(Slice) = .empty;
+        try pending.append(self.allocator, .{ .node = root, .offset = offset, .output = output });
+        while (pending.pop()) |slice| {
+            if (slice.output.len == 0) continue;
+            switch (self.nodes.items[slice.node].content) {
+                .text => |bytes| @memcpy(slice.output, bytes[@intCast(slice.offset)..][0..slice.output.len]),
+                .concat => |pair| {
+                    const left = self.nodes.items[pair.left].length;
+                    const count: usize = if (slice.offset < left) @intCast(@min(left - slice.offset, slice.output.len)) else 0;
+                    if (count != slice.output.len) try pending.append(self.allocator, .{ .node = pair.right, .offset = if (slice.offset < left) 0 else slice.offset - left, .output = slice.output[count..] });
+                    if (count != 0) try pending.append(self.allocator, .{ .node = pair.left, .offset = slice.offset, .output = slice.output[0..count] });
+                },
+                .repeat => |child| {
+                    const length = self.nodes.items[child].length;
+                    const start = slice.offset % length;
+                    const count: usize = @intCast(@min(length - start, slice.output.len));
+                    if (count != slice.output.len) try pending.append(self.allocator, .{ .node = slice.node, .offset = slice.offset + count, .output = slice.output[count..] });
+                    try pending.append(self.allocator, .{ .node = child, .offset = start, .output = slice.output[0..count] });
+                },
+            }
+        }
+    }
+};
+
 /// All strings and children belong to the result, including text from input.
 /// Explicit work stacks handle recursive schemas without native recursion.
 pub fn decode(a: std.mem.Allocator, schema: []const u8, bytes: []const u8) Error!Owned {
@@ -221,6 +380,11 @@ test "runtime schema JSON agrees with independent native codecs and exact scalar
     const encoded_json = try json.canonical(a, projected.value);
     defer a.free(encoded_json);
     try std.testing.expectEqualStrings(document, encoded_json);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const projected_page = try page(arena.allocator(), schema, actual, .{});
+    try std.testing.expectEqualStrings(document, projected_page.object.get("text").?.string);
+    try std.testing.expect(projected_page.object.get("complete").?.bool);
 }
 
 test "runtime schema JSON rejects bounds, coercion, malformed variants and internal schemas" {
@@ -285,4 +449,64 @@ fn allocationProbe(a: std.mem.Allocator) !void {
 
 test "runtime schema projection releases partial owners on allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationProbe, .{});
+}
+
+test "runtime schema JSON pages zero-width collections within fixed memory" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // The old whole-value projection needs a billion JSON nodes for five input
+    // bytes. Paging the same value, including its far end, fits in 256 KiB.
+    const count = 1_000_000_000;
+    const schema = try data.schema.encodeOwned(a, &.{ .{ .seq = 1 }, .unit }, 0);
+    var encoded: [10]u8 = undefined;
+    var writer: data.wire.Writer = .{ .output = &encoded };
+    try writer.natural(count);
+    const bytes = encoded[0..writer.position];
+    var buffer: [256 * 1024]u8 = undefined;
+    var limited = std.heap.FixedBufferAllocator.init(&buffer);
+    try std.testing.expectError(error.OutOfMemory, decode(limited.allocator(), schema, bytes));
+    limited.reset();
+    const first = try page(limited.allocator(), schema, bytes, .{ .maximum = 10 });
+    try std.testing.expectEqualStrings("[{},{},{},", first.object.get("text").?.string);
+    try std.testing.expectEqual(@as(u64, 3 * count + 1), try json.numberInteger(u64, first.object.get("total_bytes").?.number_string));
+    try std.testing.expect(!first.object.get("complete").?.bool);
+    limited.reset();
+    const last = try page(limited.allocator(), schema, bytes, .{ .offset = 3 * count - 5, .maximum = 10 });
+    try std.testing.expectEqualStrings("{},{}]", last.object.get("text").?.string);
+    try std.testing.expect(last.object.get("eof").?.bool);
+    // Nested fixed arrays also have zero canonical width. Neither their schema
+    // DAG nor the repeated JSON must be expanded by logical cardinality.
+    const nested = try data.schema.encodeOwned(a, &.{ .{ .array = .{ .element = 1, .length = count } }, .{ .array = .{ .element = 2, .length = count } }, .{ .product = &.{ 3, 3 } }, .unit }, 0);
+    limited.reset();
+    const nested_first = try page(limited.allocator(), nested, "", .{ .maximum = 20 });
+    try std.testing.expectEqualStrings("[[[{},{}],[{},{}],[{}"[0..20], nested_first.object.get("text").?.string);
+}
+
+test "runtime schema pages agree with whole JSON at UTF-8 and recursive boundaries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const schema = try values.schemaBytes(contracts.Text(null), a);
+    const bytes = try contracts.encodeOwned(contracts.Text(null), a, .{ .bytes = "雪a\n雪" });
+    var decoded = try decode(a, schema, bytes);
+    defer decoded.deinit();
+    const expected = try json.canonical(a, decoded.value);
+    for (0..expected.len + 1) |offset| for (1..6) |maximum| {
+        const requested: contracts.workspace.Page = .{ .offset = offset, .maximum = @intCast(maximum) };
+        const ordinary = @import("workspace_projection.zig").page(a, expected, requested) catch |err| {
+            try std.testing.expectError(err, page(a, schema, bytes, requested));
+            continue;
+        };
+        try std.testing.expectEqualStrings(try json.canonical(a, ordinary), try json.canonical(a, try page(a, schema, bytes, requested)));
+    };
+    const recursive = try data.schema.encodeOwned(a, &.{ .{ .sum = &.{ 1, 0 } }, .unit }, 0);
+    const chain = try a.alloc(u8, 10_001);
+    @memset(chain, 1);
+    chain[chain.len - 1] = 0;
+    var full = try decode(a, recursive, chain);
+    defer full.deinit();
+    const full_text = try json.canonical(a, full.value);
+    const tail = try page(a, recursive, chain, .{ .offset = full_text.len - 40, .maximum = 40 });
+    try std.testing.expectEqualStrings(full_text[full_text.len - 40 ..], tail.object.get("text").?.string);
 }

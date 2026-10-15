@@ -1846,6 +1846,20 @@ test "deep recursive workspace values support input admission inspection expansi
     defer page.deinit();
     try std.testing.expect(!page.value.object.get("complete").?.bool);
     try std.testing.expectEqualStrings(text_value.items[0..16384], page.value.object.get("text").?.string);
+    const enormous = try b.schema(.{ .array = .{ .element = unit, .length = 1_000_000_000 } });
+    const enormous_entry = try b.declare(&.{enormous}, enormous, &.{}, &.{});
+    try b.define(enormous_entry, try b.pure(try b.reference(b.parameter(enormous_entry, 0))));
+    const enormous_program = try service.workspaceBuild(scratch, "enormous-build", parent.receipt.task, try native.source_records.encode(scratch, b.module(enormous_entry, unit)), &diagnostic);
+    const enormous_start = try service.workspaceStart(scratch, "enormous-start", parent.receipt.task, enormous_program.receipt.workspace.?, "", .{});
+    const enormous_inspect = try service.workspaceCommand(scratch, "enormous-inspect", parent.receipt.task, .{ .work = .{ .inspect = .{ .work = try workspaceRef(scratch, .work, enormous_start.receipt.workspace.?) } } });
+    const enormous_json = (try native.json.parse(scratch, enormous_inspect.observation_json.bytes, .{})).value;
+    try std.testing.expectEqualStrings("completed", enormous_json.object.get("outcome").?.string);
+    try std.testing.expect(!enormous_json.object.get("result_preview").?.object.get("complete").?.bool);
+    const enormous_ref = try native.values.fromJson(contracts.workspace.Ref, scratch, enormous_json.object.get("result").?);
+    const enormous_tail = try service.workspaceCommand(scratch, "enormous-tail", parent.receipt.task, .{ .context = .{ .expand = .{ .reference = enormous_ref, .page = .{ .offset = 2_999_999_995, .maximum = 10 } } } });
+    const enormous_tail_json = (try native.json.parse(scratch, enormous_tail.observation_json.bytes, .{})).value;
+    try std.testing.expectEqualStrings("{},{}]", enormous_tail_json.object.get("text").?.string);
+    try std.testing.expect(enormous_tail_json.object.get("eof").?.bool);
     const effect = try b.effect(.{ .identity = "example/deep-value", .payload = recursive, .result = recursive, .external = false });
     const port_entry = try b.declare(&.{recursive}, recursive, &.{effect}, &.{});
     try b.define(port_entry, try b.term(.{ .perform = .{ .effect = effect, .payload = try b.reference(b.parameter(port_entry, 0)) } }));
@@ -1974,6 +1988,12 @@ test "collected history rejects rehashed result substitution and false absence" 
     const original_reply = try contracts.decodeOwned(contracts.workspace.Reply, scratch, acquired.value.value);
     var manifest_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(manifest, &manifest_digest, .{});
+    {
+        var slow = try service.workspaceWork(scratch, parent.receipt.task, slow_start.receipt.workspace.?);
+        defer slow.deinit();
+        _ = try service.workspaceControl(scratch, "collect-slow-delegate", parent.receipt.task, slow.value.id, slow.value.execution_revision, slow.value.control_revision, .{ .delegate = .{ .stop = .terminal, .continuation = .owner_scheduled } });
+        for (0..4) |_| _ = try service.pump(scratch);
+    }
     for (0..1024) |step| {
         var slow = try service.workspaceWork(scratch, parent.receipt.task, slow_start.receipt.workspace.?);
         defer slow.deinit();
@@ -1986,6 +2006,26 @@ test "collected history rejects rehashed result substitution and false absence" 
     const future_reply = try service.workspaceCommand(scratch, "collect-future", parent.receipt.task, .{ .work = .{ .inspect = .{ .work = refs[2] } } });
     try service.validateWorkspace(scratch, parent.receipt.task);
     const index = try namespace.store.archiveIndex(scratch, original.task, .{ .digest = manifest_digest, .bytes = manifest.len });
+    // Display data and retained publication facts must name the same work.
+    // Rehashing a swapped/erased display ID cannot alter historical scope.
+    for ([_]native.testing.state.EventType{ .workspace, .workspace_progress }) |kind| {
+        try namespace.store.begin();
+        var event_query = try namespace.store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq", &.{.{ .blob = &original.task }});
+        var changed = false;
+        while (try event_query.step() == .row) {
+            var event_value = try contracts.decodeOwned(native.testing.state.Event, scratch, try event_query.bytes(0));
+            if (event_value.value.kind != kind or event_value.value.workspace_publications.items.len == 0) continue;
+            event_value.value.data.bytes = "{\"workspace_id\":\"0000000000000000000000000000000000000000000000000000000000000000\"}";
+            const rewritten = try namespace.store.putObject(try contracts.encodeOwned(native.testing.state.Event, scratch, event_value.value));
+            try namespace.store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &rewritten.digest }, .{ .blob = &original.task }, .{ .integer = @intCast(event_value.value.seq) } });
+            changed = true;
+            break;
+        }
+        event_query.deinit();
+        try std.testing.expect(changed);
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, original.task, index.records.items));
+        namespace.store.rollback();
+    }
     for (0..5) |variant| {
         try namespace.store.begin();
         var evidence = try contracts.decodeOwned(native.workspace.ReplyObservation, scratch, original_evidence);

@@ -13,7 +13,7 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const json = value => JSON.stringify(value, (_key, v) => typeof v === 'bigint' ? v.toString() : v, 2);
 const arms = {
   ordinary: 'Use ordinary source listing, reading, inspection and reporting. Do not construct programs or use program, work or context actions.',
-  pure: 'You may construct general pure programs and use their completed results as tools. Build with no exposed ports, start with terminal/owner_scheduled policy and wait for completion. Do not use work.interact or work.delegate, retained intermediate observations, or branching. Ordinary tools remain available.',
+  pure: 'You may construct general pure programs and use their completed results as tools. Build with no exposed ports, start with terminal/owner_scheduled policy, wait for completion and collect the results. Do not use work.inspect, work.park, work.cancel, work.advance, work.interact or work.delegate, retained intermediate observations, or branching. Ordinary tools remain available.',
   retained: 'You may use ordinary tools and the full computational workspace. Whether to construct, retain, expose ports, branch or delegate is your choice.',
 };
 const option = (args, name, fallback) => { const i = args.indexOf(name); return i < 0 ? fallback : args[i + 1]; };
@@ -23,6 +23,17 @@ if (import.meta.main && !['prepare', 'run'].includes(mode)) {
   process.exit(mode === '--help' || !mode ? 0 : 2);
 }
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+export function armViolations(arm, actions) {
+  return actions.filter(action => {
+    if (arm === 'ordinary') return ['program', 'work', 'context'].includes(action.name);
+    if (arm !== 'pure') return false;
+    const command = action.arguments?.command;
+    if (action.name === 'program') return command?.tag === 'build' && command.value.exposures?.length;
+    if (action.name !== 'work') return false;
+    return ['inspect', 'park', 'cancel', 'advance', 'interact', 'delegate'].includes(command?.tag) ||
+      (command?.tag === 'start' && (command.value.policy.stop !== 'terminal' || command.value.policy.continuation !== 'owner_scheduled'));
+  });
+}
 function command(binary, args) {
   const r = spawnSync(binary, args, {encoding: 'utf8', maxBuffer: 64 << 20});
   if (r.status !== 0) throw new Error(`native command ${args[0]} failed: ${r.stderr}`);
@@ -191,7 +202,7 @@ if (mode === 'prepare') {
     const elapsed_ms = performance.now()-started, retained_namespace_bytes = await bytesUnder(state), archivePath = join(output,'task.agnx');
     command(binary,['export-checkpoint','--state-dir',state,'--task-id',task.task_id,'--output',archivePath]);
     const archive = readArchive(await readFile(archivePath)), metrics = workspaceMetrics(archive,application);
-    const violations = metrics.actions.filter(action => subject.arm === 'ordinary' ? ['program','work','context'].includes(action.name) : subject.arm === 'pure' && ((action.name === 'work' && (['interact','delegate','advance'].includes(action.arguments?.command?.tag) || (action.arguments?.command?.tag === 'start' && (action.arguments.command.value.policy.stop !== 'terminal' || action.arguments.command.value.policy.continuation !== 'owner_scheduled')))) || (action.name === 'program' && action.arguments?.command?.tag === 'build' && action.arguments.command.value.exposures?.length)));
+    const violations = armViolations(subject.arm, metrics.actions);
     const report = {subject,build,elapsed_ms,peak_rss_sampled_bytes:peakRss,retained_namespace_bytes,status,result,metrics,arm_violations:violations,adjudication:{task_correctness:null,evidence_coverage:null,successful_reframing:null,unnecessary_construction:null,branch_executions_not_used:null,notes:'Review expected.json, result and actions. Do not count scripted conformance traces as model efficacy. Missing usage is unknown, not zero.'}};
     await writeFile(join(output,'report.json'),json(report)); reports.push(report);
     await writeFile(join(directory,'results.json'),json({format:plan.format,plan_sha256:hash(json(plan)),reports}));

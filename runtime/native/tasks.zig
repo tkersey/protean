@@ -2926,11 +2926,7 @@ pub fn Service(comptime Types: type) type {
                         defer a.free(schema);
                         const bytes = try self.store().object(a, value.value, null);
                         defer a.free(bytes);
-                        var decoded = try @import("dynamic_values.zig").decode(a, schema, bytes);
-                        defer decoded.deinit();
-                        const text = try json.canonical(a, decoded.value);
-                        defer a.free(text);
-                        return wp.page(a, text, request.page);
+                        return @import("dynamic_values.zig").page(a, schema, bytes, request.page);
                     },
                     .materialize, .select => return self.workspaceAdmissionObservation(a, task_id, try self.workspaceContextMutation(a, operation_id, task_id, context, authorized.snapshot, authorized.input)),
                 },
@@ -3057,11 +3053,7 @@ pub fn Service(comptime Types: type) type {
                 defer a.free(schema);
                 const bytes = try self.store().object(a, ref, null);
                 defer a.free(bytes);
-                var decoded = try @import("dynamic_values.zig").decode(a, schema, bytes);
-                defer decoded.deinit();
-                const text = try json.canonical(a, decoded.value);
-                defer a.free(text);
-                try json.put(a, &result, "result_preview", try wp.page(a, text, .{}));
+                try json.put(a, &result, "result_preview", try @import("dynamic_values.zig").page(a, schema, bytes, .{}));
             }
             return result;
         }
@@ -3092,11 +3084,7 @@ pub fn Service(comptime Types: type) type {
         fn workspacePayloadBytesPage(self: *Self, a: std.mem.Allocator, schema_ref: state.Reference, payload: []const u8, page: wc.Page) !json.Value {
             const schema = try self.store().object(a, schema_ref, null);
             defer a.free(schema);
-            var decoded = try @import("dynamic_values.zig").decode(a, schema, payload);
-            defer decoded.deinit();
-            const text = try json.canonical(a, decoded.value);
-            defer a.free(text);
-            return wp.page(a, text, page);
+            return @import("dynamic_values.zig").page(a, schema, payload, page);
         }
 
         pub fn workspaceInteract(self: *Self, allocator: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, interaction: @FieldType(wc.Work, "interact")) !Admission {
@@ -3310,15 +3298,11 @@ pub fn Service(comptime Types: type) type {
             defer a.free(schema);
             const bytes = try self.store().object(a, value.value, null);
             defer a.free(bytes);
-            var decoded = try @import("dynamic_values.zig").decode(a, schema, bytes);
-            defer decoded.deinit();
-            const text = try json.canonical(a, decoded.value);
-            defer a.free(text);
             var result = json.object();
             try json.put(a, &result, "value", try values.toJson(wc.Ref, a, ref));
             try json.put(a, &result, "schema", try values.toJson(wc.Ref, a, try wp.reference(a, .schema, value.schema.digest)));
             try json.put(a, &result, "provenance", try values.toJson(wc.Ref, a, try wp.reference(a, .provenance, value.provenance.digest)));
-            try json.put(a, &result, "preview", try wp.page(a, text, .{}));
+            try json.put(a, &result, "preview", try @import("dynamic_values.zig").page(a, schema, bytes, .{}));
             const provenance = try self.store().object(a, value.provenance, null);
             defer a.free(provenance);
             var derivation = try contracts.decodeOwned(workspace.Derivation, a, provenance);
@@ -3572,14 +3556,9 @@ pub fn Service(comptime Types: type) type {
             while (try query.step() == .row) {
                 var event_value = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
                 defer event_value.deinit();
-                if (event_value.value.kind != .workspace and event_value.value.kind != .workspace_progress) continue;
-                var parsed = try json.parseAsset(a, event_value.value.data.bytes, event_value.value.data.bytes.len);
-                defer parsed.deinit();
-                const text = try json.text(parsed.value.object.get("workspace_id") orelse return error.InvalidArchive);
-                const id = try wp.identity(.{ .kind = .work, .id = .{ .bytes = text } }, .work);
-                const work = (try self.store().recordBytes(a, "workspace_work", id, task_id)) orelse continue;
-                a.free(work);
-                try ids.put(id, {});
+                // Scope follows the same publication facts as historical work
+                // observations; display payloads cannot create or hide work.
+                for (event_value.value.workspace_publications.items) |item| try ids.put(item.work, {});
             }
             const result = try a.alloc(state.Digest, ids.count());
             var iterator = ids.keyIterator();
@@ -3673,6 +3652,13 @@ pub fn Service(comptime Types: type) type {
                 defer saved.deinit();
                 const event_value = saved.value;
                 if (event_value.workspace_publications.items.len != 0 and event_value.kind != .workspace and event_value.kind != .workspace_progress) return error.InvalidArchive;
+                if (event_value.workspace_publications.items.len != 0) {
+                    var parsed = try json.parseAsset(a, event_value.data.bytes, event_value.data.bytes.len);
+                    defer parsed.deinit();
+                    const text = try json.text(parsed.value.object.get("workspace_id") orelse return error.InvalidArchive);
+                    const id = try wp.identity(.{ .kind = .work, .id = .{ .bytes = text } }, .work);
+                    if (!std.meta.eql(id, event_value.workspace_publications.items[0].work)) return error.InvalidArchive;
+                }
                 for (event_value.workspace_publications.items) |item| {
                     try requireArchiveRecord(records, .workspace_work, item.work);
                     if (latest.get(item.work)) |prior| {

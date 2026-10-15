@@ -11,7 +11,17 @@ import {ProteanClient} from '../support/stdio-client.mts';
 import {certificates} from '../support/tls.mjs';
 import {readArchive, missingCaptures, tamperedAdaptiveControl, missingCheckpoint, changedProfile, extraPrivateArtifact, omittedAttempts, changedOperationKey, invalidEventData} from './native_archive.mjs';
 import {decodeValue, encodeValue} from '../support/values.mjs';
-import {workspaceMetrics} from '../../tools/evaluation/workspace.mjs';
+import {workspaceMetrics, armViolations} from '../../tools/evaluation/workspace.mjs';
+
+// Evaluation arms must reject retained-work control even without a live model.
+{
+  const work = tag => ({name: 'work', arguments: {command: {tag}}});
+  const retained = ['inspect', 'park', 'cancel', 'advance', 'interact', 'delegate'].map(work);
+  const completed = [work('wait'), work('collect'), {name: 'work', arguments: {command: {tag: 'start', value: {policy: {stop: 'terminal', continuation: 'owner_scheduled'}}}}}];
+  assert.deepEqual(armViolations('pure', [...retained, ...completed]), retained);
+  assert.deepEqual(armViolations('retained', retained), []);
+  assert.equal(armViolations('ordinary', [...retained, ...completed]).length, retained.length + completed.length);
+}
 import {contract, assertAdaptiveCaptures} from './adaptive_capture_checks.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');

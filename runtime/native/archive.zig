@@ -280,6 +280,7 @@ const AdmissionFact = struct {
     question: ?state.Digest,
     message: ?state.Digest,
     reconciliation: ?state.Digest,
+    workspace: ?state.Digest,
     event_seen: bool = false,
 };
 const AdmissionFacts = std.AutoHashMap(u64, AdmissionFact);
@@ -386,7 +387,13 @@ fn validateEventFacts(store: *storage.Store, archive: state.Archive, task: state
             if (origin.source_revision != event.revision - 1) return error.InvalidArchive;
             return null;
         },
-        .workspace, .workspace_progress, .workspace_read, .accepted, .cancellation_requested, .resumed => return null,
+        .workspace => {
+            var id: state.Digest = undefined;
+            _ = std.fmt.hexToBytes(&id, data.object.get("workspace_id").?.string) catch return error.InvalidArchive;
+            if (admission.?.workspace == null or !same(&id, &admission.?.workspace.?)) return error.InvalidArchive;
+            return null;
+        },
+        .workspace_progress, .workspace_read, .accepted, .cancellation_requested, .resumed => return null,
         // These may precede later progress and have no retained receipt or
         // immutable record of the historical schedule/blocker. Their shape and
         // journal range remain checked; current state cannot refute old state.
@@ -506,7 +513,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
             .submit, .respond, .message, .@"resume", .reconcile => last_nonterminal_revision = @max(last_nonterminal_revision, decoded.value.revision),
             .cancel, .import_checkpoint, .workspace => {},
         }
-        const fact: AdmissionFact = .{ .method = decoded.value.method, .receipt = row.body.digest, .question = decoded.value.question, .message = decoded.value.message, .reconciliation = decoded.value.reconciliation };
+        const fact: AdmissionFact = .{ .method = decoded.value.method, .receipt = row.body.digest, .question = decoded.value.question, .message = decoded.value.message, .reconciliation = decoded.value.reconciliation, .workspace = decoded.value.workspace };
         const entry = try admissions.getOrPut(decoded.value.revision);
         if (entry.found_existing and !std.meta.eql(entry.value_ptr.*, fact)) return error.InvalidArchive;
         entry.value_ptr.* = fact;
