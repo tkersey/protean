@@ -25,7 +25,6 @@ jobs:
           sh tools/check_zig_paths.sh
   qualify:
     name: Qualification / ${{ matrix.lane }} / linux-x86_64
-    needs: source
     strategy:
       fail-fast: false
       matrix:
