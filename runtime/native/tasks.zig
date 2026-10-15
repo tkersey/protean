@@ -2848,23 +2848,24 @@ pub fn Service(comptime Types: type) type {
                 },
                 .context => |context| switch (context) {
                     .inspect => |request| {
-                        var output: json.Value = .{ .array = .init(a) };
+                        var output = try wp.Range.init(a, request.page);
+                        defer output.deinit(a);
+                        try output.append("[");
                         if (basis) |frozen| {
-                            for (try self.workspaceScopeAt(a, task_id, frozen.scope)) |id| try output.array.append(try values.toJson(wc.Ref, a, try wp.reference(a, .work, id)));
-                            const text = try json.canonical(a, output);
-                            defer a.free(text);
-                            return wp.page(a, text, request.page);
+                            const ids = try self.workspaceScopeAt(a, task_id, frozen.scope);
+                            defer a.free(ids);
+                            for (ids) |id| try appendWorkspaceReference(&output, id);
+                        } else {
+                            var query = try self.store().database.prepare("SELECT id FROM records WHERE task=? AND kind='workspace_work' ORDER BY id", &.{.{ .blob = &task_id }});
+                            defer query.deinit();
+                            while (try query.step() == .row) {
+                                const id = try query.bytes(0);
+                                if (id.len != 32) return error.CorruptState;
+                                try appendWorkspaceReference(&output, id[0..32].*);
+                            }
                         }
-                        var query = try self.store().database.prepare("SELECT id FROM records WHERE task=? AND kind='workspace_work' ORDER BY id", &.{.{ .blob = &task_id }});
-                        defer query.deinit();
-                        while (try query.step() == .row) {
-                            const id = try query.bytes(0);
-                            if (id.len != 32) return error.CorruptState;
-                            try output.array.append(try values.toJson(wc.Ref, a, try wp.reference(a, .work, id[0..32].*)));
-                        }
-                        const text = try json.canonical(a, output);
-                        defer a.free(text);
-                        return wp.page(a, text, request.page);
+                        try output.append("]");
+                        return output.finish(a);
                     },
                     .expand => |request| {
                         if (request.reference.kind == .port) {
@@ -3543,13 +3544,24 @@ pub fn Service(comptime Types: type) type {
             };
         }
 
+        fn appendWorkspaceReference(output: *wp.Range, id: state.Digest) !void {
+            if (output.total > 1) try output.append(",");
+            // Ref's canonical JSON has only a fixed tag and hexadecimal ID.
+            try output.append("{\"id\":\"");
+            try output.append(&std.fmt.bytesToHex(id, .lower));
+            try output.append("\",\"kind\":\"work\"}");
+        }
+
         fn workspaceScopeAt(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, watermark: u64) ![]state.Digest {
             var ids: std.AutoHashMap(state.Digest, void) = .init(a);
             defer ids.deinit();
+            var event_arena = std.heap.ArenaAllocator.init(a);
+            defer event_arena.deinit();
             var query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq<=? ORDER BY e.seq", &.{ .{ .blob = &task_id }, .{ .integer = std.math.cast(i64, watermark) orelse return error.InvalidArchive } });
             defer query.deinit();
             while (try query.step() == .row) {
-                var event_value = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+                _ = event_arena.reset(.retain_capacity);
+                var event_value = try contracts.decodeOwned(state.Event, event_arena.allocator(), try query.bytes(0));
                 defer event_value.deinit();
                 // Scope follows the same publication facts as historical work
                 // observations; display payloads cannot create or hide work.
@@ -3646,6 +3658,23 @@ pub fn Service(comptime Types: type) type {
                 var saved = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
                 defer saved.deinit();
                 const event_value = saved.value;
+                if (event_value.kind == .workspace_read) {
+                    var parsed = try json.parseAsset(a, event_value.data.bytes, event_value.data.bytes.len);
+                    defer parsed.deinit();
+                    const text = try json.text(parsed.value.object.get("occurrence_id") orelse return error.InvalidArchive);
+                    const id = try wp.identity(.{ .kind = .work, .id = .{ .bytes = text } }, .work);
+                    try requireArchiveRecord(records, .workspace_reply, id);
+                    var evidence = try self.record(workspace.ReplyObservation, a, "workspace_reply", id, parent.id);
+                    defer evidence.deinit();
+                    if (evidence.value.evidence != .read) return error.InvalidArchive;
+                    const at = switch (evidence.value.evidence.read) {
+                        .immutable => return error.InvalidArchive,
+                        .scope => |value| value,
+                        .works => |value| value.event_watermark,
+                        .wait => |value| value.event_watermark,
+                    };
+                    if (event_value.seq == 0 or at != event_value.seq - 1) return error.InvalidArchive;
+                }
                 if (event_value.workspace_publications.items.len != 0 and event_value.kind != .workspace and event_value.kind != .workspace_progress) return error.InvalidArchive;
                 if (event_value.workspace_publications.items.len != 0) {
                     var parsed = try json.parseAsset(a, event_value.data.bytes, event_value.data.bytes.len);
@@ -3882,6 +3911,11 @@ pub fn Service(comptime Types: type) type {
                             if (!same(failure.code.bytes, @errorName(err))) return error.InvalidArchive;
                             break :blk try workspaceRejection(a, err);
                         };
+                        return error.InvalidArchive;
+                    }
+                    const key = try self.operationKey(a, &operation_id);
+                    if (try self.store().savedReceipt(a, &key)) |committed| {
+                        a.free(committed);
                         return error.InvalidArchive;
                     }
                     // A captured operation failure is a diagnostic event. It

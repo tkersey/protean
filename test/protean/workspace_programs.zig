@@ -520,10 +520,37 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
         try std.testing.expectEqualStrings(ref.id.bytes, item.object.get("work").?.object.get("id").?.string);
         try std.testing.expectEqualStrings(expected, item.object.get("outcome").?.string);
     }
+    // A controller can choose a collected value as report evidence without
+    // inspecting retained work or creating a new judgment/provenance identity.
+    const collected_value = try native.values.fromJson(contracts.workspace.Ref, scratch, collection_json.value.array.items[0].object.get("result").?);
+    const cited = try service.workspaceCommand(scratch, "cite-collected-result", parent.receipt.task, .{ .context = .{ .materialize = .{ .input = .{ .value = .{ .reference = collected_value } }, .sources = .{ .items = &.{} } } } });
+    try std.testing.expectEqualDeep(collected_value, cited.evidence.?);
+    const cited_json = (try native.json.parse(scratch, cited.observation_json.bytes, .{})).value;
+    try std.testing.expectEqualStrings("computation", cited_json.object.get("derivation").?.object.get("kind").?.string);
     var collection_parent = try service.task(a, parent.receipt.task);
     defer collection_parent.deinit();
     try std.testing.expectEqualDeep(initial.value.checkpoint, collection_parent.value.checkpoint);
     try std.testing.expectEqual(initial.value.execution_revision, collection_parent.value.execution_revision);
+    // Context inspection serializes a page, not a JSON tree for all work.
+    for (0..256) |i| _ = try service.workspaceStart(scratch, try std.fmt.allocPrint(scratch, "scope-work-{d}", .{i}), parent.receipt.task, program.receipt.workspace.?, &.{0}, .{});
+    var expected_scope: native.json.Value = .{ .array = .init(scratch) };
+    var scope_query = try namespace.store.database.prepare("SELECT id FROM records WHERE task=? AND kind='workspace_work' ORDER BY id", &.{.{ .blob = &parent.receipt.task }});
+    while (try scope_query.step() == .row) {
+        const scope_id = try scope_query.bytes(0);
+        try expected_scope.array.append(try native.values.toJson(contracts.workspace.Ref, scratch, try workspaceRef(scratch, .work, scope_id[0..32].*)));
+    }
+    scope_query.deinit();
+    const scope_text = try native.json.canonical(scratch, expected_scope);
+    const scope_budget_bytes = try a.alloc(u8, 32 * 1024);
+    defer a.free(scope_budget_bytes);
+    for ([_]u64{ 0, 63, scope_text.len - 7, scope_text.len }) |offset| {
+        var scope_budget = std.heap.FixedBufferAllocator.init(scope_budget_bytes);
+        const page = try service.workspaceCommand(scope_budget.allocator(), "scope-page", parent.receipt.task, .{ .context = .{ .inspect = .{ .page = .{ .offset = offset, .maximum = 64 } } } });
+        try std.testing.expectEqual(.observed, page.disposition);
+        const rendered = (try native.json.parse(scratch, page.observation_json.bytes, .{})).value;
+        try std.testing.expectEqualStrings(scope_text[@intCast(offset)..][0..@min(64, scope_text.len - offset)], rendered.object.get("text").?.string);
+        try std.testing.expectEqual(scope_text.len, try native.json.numberInteger(usize, rendered.object.get("total_bytes").?.number_string));
+    }
     // AUT-08: no authored yields or ports are needed for whole-work controls.
     var noncooperative_builder = source.Builder.init(a);
     defer noncooperative_builder.deinit();
@@ -977,6 +1004,50 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
     // Mutation replies re-project the original operation receipt, including
     // acquisition provenance, even after the controller has completed.
     try service.validateWorkspace(scratch, parent.receipt.task);
+
+    // A settled mutation cannot be rewritten into a rejection while its
+    // committed receipt survives. A genuine rejection has no such receipt.
+    for ([_]bool{ false, true }) |reject| {
+        var mutation = command;
+        if (reject) mutation.context.materialize.input.snapshot.path.bytes = "missing.txt";
+        const mutation_parent = try service.submit(scratch, if (reject) "rejected-mutation" else "accepted-mutation", mutation);
+        var observed: ?native.testing.occurrence.Occurrence = null;
+        var evidence: native.workspace.ReplyObservation = undefined;
+        for (0..32) |_| {
+            _ = try service.pump(scratch);
+            var query = try namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='workspace_reply'", &.{.{ .blob = &mutation_parent.receipt.task }});
+            defer query.deinit();
+            if (try query.step() != .row) continue;
+            evidence = (try contracts.decodeOwned(native.workspace.ReplyObservation, scratch, try query.bytes(0))).value;
+            const pending_bytes = (try namespace.store.recordBytes(scratch, "occurrence", evidence.id, evidence.task)).?;
+            observed = (try contracts.decodeOwned(native.testing.occurrence.Occurrence, scratch, pending_bytes)).value;
+            break;
+        }
+        const settled = observed orelse return error.MissingMutationObservation;
+        try std.testing.expect(settled.state == .settled_reply);
+        try service.validateWorkspace(scratch, mutation_parent.receipt.task);
+        if (reject) {
+            try std.testing.expect(evidence.evidence == .rejected);
+            continue;
+        }
+        try std.testing.expect(evidence.evidence == .admitted);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(assets.manifest, &digest, .{});
+        const mutation_index = try namespace.store.archiveIndex(scratch, mutation_parent.receipt.task, .{ .digest = digest, .bytes = assets.manifest.len });
+        try namespace.store.begin();
+        evidence.evidence = .{ .rejected = .{ .stage = .operation, .code = .{ .bytes = "Denied" } } };
+        const forged = try namespace.store.putObject(try contracts.encodeOwned(native.workspace.ReplyObservation, scratch, evidence));
+        try namespace.store.database.run("UPDATE records SET body=? WHERE kind='workspace_reply' AND id=?", &.{ .{ .blob = &forged.digest }, .{ .blob = &settled.id } });
+        const failed_reply: contracts.workspace.Reply = .{ .disposition = .rejected, .observation_json = .{ .bytes = "{\"error\":\"Denied\"}" } };
+        const payload = try contracts.encodeOwned(contracts.workspace.Reply, scratch, failed_reply);
+        const bound = try data.invocation.encodeOwned(data.invocation.Result, scratch, .{ .request_identity = settled.request, .value = payload });
+        var forged_occurrence = settled;
+        forged_occurrence.state.settled_reply.reply = (try namespace.store.putObject(bound)).digest;
+        try namespace.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", settled.id, settled.task, forged_occurrence);
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, settled.task, mutation_index.records.items));
+        namespace.store.rollback();
+        try service.validateWorkspace(scratch, settled.task);
+    }
 
     const read_parent = try service.submit(scratch, "read-observation", .{ .program = .{ .describe = .{ .section = .source_records, .page = .{} } } });
     var read_occurrence: ?native.testing.occurrence.Occurrence = null;
@@ -2101,6 +2172,25 @@ test "collected history rejects rehashed result substitution and false absence" 
     var manifest_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(manifest, &manifest_digest, .{});
     {
+        // Before root consumption, preserve the successful read journal entry
+        // while coherently rewriting both retained evidence and acquired reply.
+        const read_index = try namespace.store.archiveIndex(scratch, original.task, .{ .digest = manifest_digest, .bytes = manifest.len });
+        try namespace.store.begin();
+        var evidence = try contracts.decodeOwned(native.workspace.ReplyObservation, scratch, original_evidence);
+        evidence.value.evidence = .{ .rejected = .{ .stage = .operation, .code = .{ .bytes = "Denied" } } };
+        const forged = try namespace.store.putObject(try contracts.encodeOwned(native.workspace.ReplyObservation, scratch, evidence.value));
+        try namespace.store.database.run("UPDATE records SET body=? WHERE kind='workspace_reply' AND id=?", &.{ .{ .blob = &forged.digest }, .{ .blob = &original.id } });
+        const failed_reply: contracts.workspace.Reply = .{ .disposition = .rejected, .observation_json = .{ .bytes = "{\"error\":\"Denied\"}" } };
+        const payload = try contracts.encodeOwned(contracts.workspace.Reply, scratch, failed_reply);
+        const bound = try data.invocation.encodeOwned(data.invocation.Result, scratch, .{ .request_identity = original.request, .value = payload });
+        var forged_occurrence = original;
+        forged_occurrence.state.settled_reply.reply = (try namespace.store.putObject(bound)).digest;
+        try namespace.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", original.id, original.task, forged_occurrence);
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, original.task, read_index.records.items));
+        namespace.store.rollback();
+        try service.validateWorkspace(scratch, original.task);
+    }
+    {
         var slow = try service.workspaceWork(scratch, parent.receipt.task, slow_start.receipt.workspace.?);
         defer slow.deinit();
         _ = try service.workspaceControl(scratch, "collect-slow-delegate", parent.receipt.task, slow.value.id, slow.value.execution_revision, slow.value.control_revision, .{ .delegate = .{ .stop = .terminal, .continuation = .owner_scheduled } });
@@ -2190,8 +2280,14 @@ test "collected history rejects rehashed result substitution and false absence" 
         forged_reply.observation_json.bytes = try native.json.canonical(scratch, reply_json.value);
         const payload = try contracts.encodeOwned(contracts.workspace.Reply, scratch, forged_reply);
         const bound = try data.invocation.encodeOwned(data.invocation.Result, scratch, .{ .request_identity = original.request, .value = payload });
-        var forged_occurrence = original;
-        forged_occurrence.state.settled_reply.reply = (try namespace.store.putObject(bound)).digest;
+        const current_occurrence = (try namespace.store.recordBytes(scratch, "occurrence", original.id, original.task)).?;
+        var forged_occurrence = (try contracts.decodeOwned(native.testing.occurrence.Occurrence, scratch, current_occurrence)).value;
+        const forged_digest = (try namespace.store.putObject(bound)).digest;
+        switch (forged_occurrence.state) {
+            .settled_reply => |*reply| reply.reply = forged_digest,
+            .admitted => |*reply| reply.reply.reply = forged_digest,
+            else => return error.UnexpectedReadState,
+        }
         try namespace.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", original.id, original.task, forged_occurrence);
         try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, original.task, index.records.items));
         namespace.store.rollback();

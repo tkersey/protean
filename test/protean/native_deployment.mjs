@@ -40,7 +40,9 @@ export function deployment(source, name) {
     assert.match(format, /ELF 64-bit.*x86-64/);
     const linkage = execFileSync('readelf', ['-lWd', executable], {encoding: 'utf8'});
     assert(!/INTERP|\(NEEDED\)|\(RPATH\)|\(RUNPATH\)/.test(linkage), 'Linux product must have no dynamic loader or shared-library dependency');
-    const args = ['/usr/bin/strace', '-f', '-qq', '-xx', '-s', '4096', '-e', 'trace=process', '-o'];
+    // Filter in the kernel so unrelated file/SQLite calls do not incur ptrace
+    // stops. Every process event and descendant remains traced and checked.
+    const args = ['/usr/bin/strace', '--seccomp-bpf', '-f', '-qq', '-xx', '-s', '4096', '-e', 'trace=process', '-o'];
     const isolate = ['/usr/bin/bwrap', '--unshare-user', '--die-with-parent', '--unshare-pid', '--new-session', '--uid', '0', '--gid', '0',
       '--proc', '/proc', '--dev', '/dev', '--ro-bind', executable, executable, '--bind', data, data, '--chdir'];
     // The controller owns tracing and namespace setup. Neither tool is mounted
