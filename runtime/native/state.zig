@@ -217,6 +217,8 @@ pub const WorkPublication = struct {
     execution_revision: u64,
     control_revision: u64,
     observation: Digest,
+    control: @import("workspace_state.zig").ControlObservation,
+    command: ?Reference = null,
 };
 
 pub const Artifact = struct {

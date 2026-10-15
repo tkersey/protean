@@ -147,6 +147,39 @@ pub const WorkObservation = struct {
     occurrence: ?@import("occurrence.zig").Occurrence,
 };
 
+/// Native control facts are checked independently of the execution checkpoint.
+/// Keep only the facts needed to validate adjacent journal publications.
+pub const ControlObservation = struct {
+    policy: RunPolicy,
+    schedule: state.Schedule,
+    blocker: ?state.Blocker,
+    cancellation: ?state.Reason,
+    cancellation_applied: bool,
+    outcome: state.Outcome,
+    instrument: bool,
+    port: bool,
+    delivery: ?std.meta.Tag(@import("occurrence.zig").State),
+
+    pub fn from(observed: WorkObservation) ControlObservation {
+        const work = observed.work;
+        return .{ .policy = work.policy, .schedule = work.schedule, .blocker = work.blocker, .cancellation = work.cancellation, .cancellation_applied = work.cancellation_applied, .outcome = work.outcome_kind, .instrument = work.delegation != null, .port = work.current_port != null, .delivery = if (observed.occurrence) |pending| std.meta.activeTag(pending.state) else null };
+    }
+};
+
+pub const StartRequest = struct { method: state.Method = .workspace, kind: Operation = .start, task: state.TaskId, program: state.Digest, input: contracts.Bytes(null), policy: RunPolicy, origin: ?state.Reference };
+pub const ControlRequest = struct { method: state.Method = .workspace, kind: Operation = .control, task: state.TaskId, work: state.Digest, execution: u64, control: u64, command: Command };
+pub const InteractionRequest = struct { kind: Operation = .interact, task: state.TaskId, interaction: @FieldType(contracts.workspace.Work, "interact") };
+pub const DelegationRequest = struct { task: state.TaskId, command: @FieldType(contracts.workspace.Work, "delegate") };
+
+/// The existing receipt binds these inputs by request digest. Start input bytes
+/// and identity already have immutable work custody, so do not copy them here.
+pub const PublicationCommand = union(enum) {
+    start: struct { policy: RunPolicy, origin: bool },
+    control: struct { execution: u64, control: u64, command: Command },
+    interact: @FieldType(contracts.workspace.Work, "interact"),
+    delegate: @FieldType(contracts.workspace.Work, "delegate"),
+};
+
 /// Inputs to a read projection, captured before later work can replace them.
 /// Executable claims in each work are checked against its retained checkpoint.
 pub const ReadObservation = union(enum) {

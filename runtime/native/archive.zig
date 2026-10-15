@@ -551,6 +551,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         defer store.allocator.free(bytes);
         var decoded = try contracts.decodeOwned(state.Event, store.allocator, bytes);
         defer decoded.deinit();
+        try collector.visit(state.Event, decoded.value);
         if (!same(&decoded.value.task, &value.id) or decoded.value.seq != row.seq or decoded.value.revision != row.revision) return error.CorruptState;
         try @import("schemas.zig").validateEventData(store.allocator, decoded.value.kind, decoded.value.data.bytes);
         const identity = try validateEventFacts(store, archive, value, &admissions, decoded.value);

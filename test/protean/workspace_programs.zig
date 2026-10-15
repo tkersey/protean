@@ -1346,7 +1346,7 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
         try writer.fixed(u64, @intCast(i));
     }
     try writer.natural(0);
-    const WaitScenario = enum { imported_message, owned_message, selected_event, resumed_child, orderly_resumed_child, resumed_explicit_park, reopened_control };
+    const WaitScenario = enum { imported_message, owned_message, selected_event, resumed_child, orderly_resumed_child, resumed_explicit_park, reopened_control, incompatible_wait };
     for (std.enums.values(WaitScenario), 0..) |scenario, index| {
         const interrupt = scenario == .imported_message or scenario == .owned_message;
         const prefix = try std.fmt.allocPrint(scratch, "wait-{d}", .{index});
@@ -1401,6 +1401,36 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
         }
         try std.testing.expect(waited);
         try std.testing.expectEqual(.idle, std.meta.activeTag(try service.pump(scratch)));
+        if (scenario == .incompatible_wait) {
+            try service.close(scratch);
+            var foreign_profile = profile;
+            foreign_profile.bytes = "different-wait-launch";
+            service = try native.tasks.Service(WaitTypes).init(a, io, &namespace, assets, &application, handlers, foreign_profile);
+            const first_cancel = try service.requestCancel(scratch, "foreign-wait-cancel", parent.receipt.task, "cancel retained wait");
+            const replay = try service.requestCancel(scratch, "foreign-wait-cancel", parent.receipt.task, "cancel retained wait");
+            try std.testing.expect(replay.replayed and std.meta.eql(first_cancel.receipt.id, replay.receipt.id));
+            _ = try service.requestCancel(scratch, "foreign-wait-cancel-again", parent.receipt.task, "retain original cancellation");
+            try std.testing.expectEqual(.idle, try service.pump(scratch));
+            var blocked = try service.task(scratch, parent.receipt.task);
+            defer blocked.deinit();
+            try std.testing.expectEqual(.incompatible_profile, blocked.value.blocker.?);
+            try std.testing.expectEqualStrings("cancel retained wait", blocked.value.cancellation.?.bytes);
+            try std.testing.expect(!try service.associatedWorkDisposed(scratch, parent.receipt.task));
+            try service.close(scratch);
+            service = try native.tasks.Service(WaitTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+            _ = try service.requestCancel(scratch, "compatible-wait-cancel", parent.receipt.task, "cancel retained wait");
+            for (0..64) |_| {
+                _ = try service.pump(scratch);
+                var current = try service.task(scratch, parent.receipt.task);
+                defer current.deinit();
+                if (try service.taskCleanupComplete(scratch, current.value)) break;
+            }
+            var disposed = try service.task(scratch, parent.receipt.task);
+            defer disposed.deinit();
+            try std.testing.expect(try service.taskCleanupComplete(scratch, disposed.value));
+            try std.testing.expectEqual(.cancelled, disposed.value.outcome_kind);
+            continue;
+        }
         if (scenario == .imported_message) {
             const archive_path = try std.fmt.allocPrint(scratch, "{s}/waiting.par", .{path_buffer[0..length]});
             _ = try service.exportCheckpoint(scratch, parent.receipt.task, archive_path);
@@ -2348,13 +2378,42 @@ test "collected history rejects rehashed result substitution and false absence" 
         try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, original.task, index.records.items));
         namespace.store.rollback();
     }
-    for (0..5) |variant| {
+    for (0..9) |variant| {
         try namespace.store.begin();
         var evidence = try contracts.decodeOwned(native.workspace.ReplyObservation, scratch, original_evidence);
         const snapshots = try scratch.dupe(?native.workspace.WorkObservation, evidence.value.evidence.read.works.works.items);
         evidence.value.evidence.read.works.works.items = snapshots;
         var reply_json = try native.json.parse(scratch, original_reply.value.observation_json.bytes, .{});
-        if (variant >= 3) {
+        if (variant >= 5) {
+            const historical = &snapshots[2].?.work;
+            switch (variant) {
+                5, 8 => historical.policy = .{ .stop = .terminal, .continuation = .owner_scheduled },
+                6 => historical.schedule = .queued,
+                7 => historical.blocker = .incompatible_profile,
+                else => unreachable,
+            }
+            if (variant == 6) try native.json.put(scratch, &reply_json.value.array.items[2], "schedule", native.json.string("queued"));
+            if (variant == 7) try native.json.put(scratch, &reply_json.value.array.items[2], "blocker", native.json.string("incompatible_profile"));
+            var event_query = try namespace.store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq=?", &.{ .{ .blob = &original.task }, .{ .integer = @intCast(historical.event_watermark) } });
+            defer event_query.deinit();
+            try std.testing.expect(try event_query.step() == .row);
+            var event_value = try contracts.decodeOwned(native.testing.state.Event, scratch, try event_query.bytes(0));
+            const publications = try scratch.dupe(native.testing.state.WorkPublication, event_value.value.workspace_publications.items);
+            event_value.value.workspace_publications.items = publications;
+            for (publications) |*item| {
+                if (std.meta.eql(item.work, historical.id)) {
+                    item.control = native.workspace.ControlObservation.from(snapshots[2].?);
+                    if (variant == 8) {
+                        var declared = try contracts.decodeOwned(native.workspace.PublicationCommand, scratch, try namespace.store.object(scratch, item.command.?, null));
+                        declared.value.start.policy = historical.policy;
+                        item.command = try namespace.store.putObject(try contracts.encodeOwned(native.workspace.PublicationCommand, scratch, declared.value));
+                    }
+                    std.crypto.hash.sha2.Sha256.hash(try contracts.encodeOwned(native.workspace.WorkObservation, scratch, snapshots[2].?), &item.observation, .{});
+                }
+            }
+            const rewritten = try namespace.store.putObject(try contracts.encodeOwned(native.testing.state.Event, scratch, event_value.value));
+            try namespace.store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &rewritten.digest }, .{ .blob = &original.task }, .{ .integer = @intCast(historical.event_watermark) } });
+        } else if (variant >= 3) {
             const original_watermark = snapshots[2].?.work.event_watermark;
             try std.testing.expect(snapshots[2].?.work.outcome_kind == .yielded);
             snapshots[2].?.work = future.value;
@@ -2409,6 +2468,33 @@ test "collected history rejects rehashed result substitution and false absence" 
             else => return error.UnexpectedReadState,
         }
         try namespace.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", original.id, original.task, forged_occurrence);
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, original.task, index.records.items));
+        namespace.store.rollback();
+    }
+    // A direct native operation receipt is replayable even without a root
+    // workspace_reply record; its historical snapshot needs the same checks.
+    for (0..3) |variant| {
+        try namespace.store.begin();
+        var receipt_query = try namespace.store.database.prepare("SELECT p.id,o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?", &.{.{ .blob = &parent.receipt.task }});
+        var changed = false;
+        while (try receipt_query.step() == .row) {
+            var saved = try contracts.decodeOwned(native.testing.state.Receipt, scratch, try receipt_query.bytes(1));
+            if (!std.meta.eql(saved.value.id, slow_start.receipt.id)) continue;
+            var historical = try contracts.decodeOwned(native.workspace.WorkObservation, scratch, try namespace.store.object(scratch, saved.value.workspace_observation.?, null));
+            switch (variant) {
+                0 => historical.value.work.schedule = .queued,
+                1 => historical.value = (try contracts.decodeOwned(native.workspace.WorkObservation, scratch, try namespace.store.object(scratch, started.receipt.workspace_observation.?, null))).value,
+                2 => historical.value = .{ .work = future.value, .occurrence = null },
+                else => unreachable,
+            }
+            saved.value.workspace_observation = try namespace.store.putObject(try contracts.encodeOwned(native.workspace.WorkObservation, scratch, historical.value));
+            const rewritten = try namespace.store.putObject(try contracts.encodeOwned(native.testing.state.Receipt, scratch, saved.value));
+            try namespace.store.database.run("UPDATE operations SET receipt=? WHERE id=?", &.{ .{ .blob = &rewritten.digest }, .{ .text = try receipt_query.bytes(0) } });
+            changed = true;
+            break;
+        }
+        receipt_query.deinit();
+        try std.testing.expect(changed);
         try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, original.task, index.records.items));
         namespace.store.rollback();
     }
