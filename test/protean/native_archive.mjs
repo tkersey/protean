@@ -43,7 +43,7 @@ export function readArchive(bytes) {
     return bytes;
   };
   const schemas = new Map(definitions.map(([name, reference]) => [name, decodeSchema(object(reference))]));
-  assert.deepEqual([...schemas.keys()], ['task', 'event', 'receipt', 'occurrence', 'question', 'message', 'artifact', 'capture', 'attempt', 'origin', 'reconciliation', 'workspace_program', 'workspace_work', 'workspace_value', 'workspace_view', 'workspace_port', 'workspace_port_reply', 'execution_route', 'workspace_wait', 'workspace_delegation']);
+  assert.deepEqual([...schemas.keys()], ['task', 'event', 'receipt', 'occurrence', 'question', 'message', 'artifact', 'capture', 'attempt', 'origin', 'reconciliation', 'workspace_program', 'workspace_work', 'workspace_value', 'workspace_view', 'workspace_port', 'workspace_port_reply', 'execution_route', 'workspace_wait', 'workspace_delegation', 'workspace_reply']);
   const taskValue = decodeValue(schemas.get('task'), object(taskReference));
   assert.equal(taskValue.length, taskFields.length);
   const task = Object.fromEntries(taskFields.map((name, index) => [name, taskValue[index]]));
@@ -139,7 +139,7 @@ function pruneObjects(archive) {
   };
   visit(archive.manifest.slice(3, 10));
   visit(archive.taskValue);
-  const kinds = ['occurrence', 'question', 'message', 'artifact', 'capture', 'attempt', 'origin', 'reconciliation', 'workspace_program', 'workspace_work', 'workspace_value', 'workspace_view', 'workspace_port', 'workspace_port_reply', 'execution_route', 'workspace_wait', 'workspace_delegation'];
+  const kinds = ['occurrence', 'question', 'message', 'artifact', 'capture', 'attempt', 'origin', 'reconciliation', 'workspace_program', 'workspace_work', 'workspace_value', 'workspace_view', 'workspace_port', 'workspace_port_reply', 'execution_route', 'workspace_wait', 'workspace_delegation', 'workspace_reply'];
   for (const [kind,, reference] of archive.manifest[6]) {
     const value = decodeValue(archive.schemas.get(kinds[kind]), archive.object(reference));
     visit(value);

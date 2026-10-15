@@ -53,7 +53,15 @@ All authoritative workspace mutations commit through `workspaceCommit` or the
 existing occurrence transaction. Kernel publication happens before durable
 receipt transfer; failure after publication fences the owner. Receipt replay
 returns the original immutable work and occurrence observation even if either
-has since advanced. Parent-wait eligibility and queue capacity are prepared before
+has since advanced. Ordinary workspace replies retain the inputs to their
+projection: immutable content, historical work/checkpoint observations, or the
+matching operation receipt. Import re-renders these replies and checks work
+claims against Kosmos; a changed reply and recomputed digest are insufficient.
+Scope and wait observations also use the retained event prefix. Captured native
+rejections carry diagnostics only, with no result or authority references.
+Applied-cancellation markers on both root and child checkpoints must agree with
+the kernel's terminal reason or unchanged zero-quantum cancellation result.
+Parent-wait eligibility and queue capacity are prepared before
 the transaction commits. A failure while notifying a child after capture publication
 fences the owner; the durable capture remains available after reopening and cannot
 be dispatched again. Completed

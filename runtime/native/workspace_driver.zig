@@ -25,12 +25,17 @@ pub const Generated = struct {
     }
 };
 
-fn extendBound(b: *source.Builder, schema: Id, capability: Id) !void {
-    const bound = switch (b.schemas.items[@intCast(schema)].internal) {
+fn captureBound(b: *source.Builder, schema: Id) !*[]const Id {
+    if (schema >= b.schemas.items.len or b.schemas.items[@intCast(schema)] != .internal) return error.InvalidOwnership;
+    return switch (b.schemas.items[@intCast(schema)].internal) {
         .computation => |*value| &value.capture_bound,
         .resumption => |*value| &value.capture_bound,
-        else => unreachable,
+        else => error.InvalidOwnership,
     };
+}
+
+fn extendBound(b: *source.Builder, schema: Id, capability: Id) !void {
+    const bound = try captureBound(b, schema);
     if (std.mem.indexOfScalar(Id, bound.*, capability) != null) return;
     const extended = try b.allocator().alloc(Id, bound.*.len + 1);
     @memcpy(extended[0..bound.*.len], bound.*);
@@ -226,9 +231,6 @@ pub fn generate(a: std.mem.Allocator, original: source.Module, requested: []cons
         for (original.values) |value| if (value.expression == .lambda and needed.functions[@intCast(value.expression.lambda)]) {
             try extendBound(&b, value.schema, capability);
         };
-        for (original.terms) |term| if (term == .handle and needed.values[@intCast(term.handle.body)]) {
-            for (original.handlers[@intCast(term.handle.handler)].clauses) |clause| try extendBound(&b, clause.resumption, capability);
-        };
         // Handler functions are closed. Carry the induced lexical capability
         // through ordinary handler state, binding the same variable at each
         // closed entry. Copy those entries so direct callers and lambdas keep
@@ -257,6 +259,33 @@ pub fn generate(a: std.mem.Allocator, original: source.Module, requested: []cons
                 else => {},
             };
         };
+        // Captures belong to the computation/token type, including values
+        // reached through bindings, parameters and projections. Propagate only
+        // this fresh capability; original declared bounds remain unchanged.
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (original.terms) |term| {
+                const carried = switch (term) {
+                    .handle => |h| .{ h.handler, original.values[@intCast(h.body)].schema },
+                    .resume_with => |r| .{ r.handler, original.values[@intCast(r.resumption)].schema },
+                    else => continue,
+                };
+                const schema = b.schemas.items[@intCast(carried[1])];
+                if (schema != .internal) continue;
+                const bound = switch (schema.internal) {
+                    .computation => |c| c.capture_bound,
+                    .resumption => |r| r.capture_bound,
+                    else => continue,
+                };
+                if (std.mem.indexOfScalar(Id, bound, capability) == null) continue;
+                for (b.handlers.items[@intCast(carried[0])].clauses) |clause| {
+                    const prior = (try captureBound(&b, clause.resumption)).*.len;
+                    try extendBound(&b, clause.resumption, capability);
+                    changed = changed or prior != (try captureBound(&b, clause.resumption)).*.len;
+                }
+            }
+        }
     }
     const body_schema = try b.schema(.{ .internal = .{ .computation = .{ .parameters = capabilities, .result = result, .effects = entry.effects, .capture_bound = &.{input}, .regions = entry.regions } } });
     try b.define(body, try b.term(.{ .call = .{ .function = original.entry, .arguments = &.{try b.reference(b.parameter(root, 0))} } }));

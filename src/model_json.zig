@@ -398,6 +398,14 @@ fn maximumValueBytes(comptime T: type) ?usize {
             }
             break :blk maximum;
         },
+        .@"union" => |info| blk: {
+            var maximum: usize = 0;
+            inline for (info.field_names, info.field_types) |field_name, FieldType| {
+                const child = maximumValueBytes(FieldType) orelse return null;
+                maximum = @max(maximum, 19 + 6 * field_name.len + child);
+            }
+            break :blk maximum;
+        },
         else => @compileError(
             "protean JSON value bound does not support " ++ @typeName(T),
         ),

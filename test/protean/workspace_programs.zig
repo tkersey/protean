@@ -54,6 +54,28 @@ const AfterCommitAllocator = struct {
     }
 };
 
+/// Keep allocations in an outer arena, but destroy freed contents so an arena
+/// cannot accidentally hide a projection borrowing a decoded record's storage.
+const PoisonFreedAllocator = struct {
+    backing: std.mem.Allocator,
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.backing.rawAlloc(len, alignment, ra);
+    }
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+    fn free(_: *anyopaque, bytes: []u8, _: std.mem.Alignment, _: usize) void {
+        @memset(bytes, 'X');
+    }
+};
+
 test "BUILD-07 source build allocation fault sweep releases partial owners and cancellation admits nothing" {
     const a = std.testing.allocator;
     var builder = source.Builder.init(a);
@@ -175,7 +197,7 @@ test "WORK-08 an exclusive resource cannot be captured by a generated alternativ
 
 test "exposure carries capabilities through closed handler returns clauses and shallow successors" {
     const a = std.testing.allocator;
-    for (0..3) |variant| {
+    for (0..5) |variant| {
         var b = source.Builder.init(a);
         defer b.deinit();
         const unit = try b.scalar(void);
@@ -198,12 +220,17 @@ test "exposure carries capabilities through closed handler returns clauses and s
             try b.term(.{ .resume_with = .{ .resumption = try b.reference(b.parameter(clause, 2)), .argument = try b.constant(void, {}), .handler = handler, .state = &.{try b.reference(answer)} } })
         else
             try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(clause, 2)), .argument = try b.constant(void, {}) } });
-        try b.define(clause, if (variant == 0) resumed else try b.bind(answer, try b.term(.{ .call = .{ .function = helper, .arguments = &.{try b.reference(b.parameter(clause, 0))} } }), resumed));
-        const body = try b.declare(&.{cap}, unit, &.{local}, &.{});
-        try b.define(body, try b.term(.{ .perform = .{ .effect = local, .capability = try b.reference(b.parameter(body, 0)), .payload = try b.constant(void, {}) } }));
-        const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{cap}, .result = unit, .effects = &.{local} } } });
+        try b.define(clause, if (variant == 0 or variant >= 3) resumed else try b.bind(answer, try b.term(.{ .call = .{ .function = helper, .arguments = &.{try b.reference(b.parameter(clause, 0))} } }), resumed));
+        const body_effects: []const source.Id = if (variant >= 3) &.{ ask, local } else &.{local};
+        const body = try b.declare(&.{cap}, unit, body_effects, &.{});
+        const local_call = try b.term(.{ .perform = .{ .effect = local, .capability = try b.reference(b.parameter(body, 0)), .payload = try b.constant(void, {}) } });
+        try b.define(body, if (variant >= 3) try b.bind(try b.variable(unit), local_call, try b.bind(try b.variable(u), try b.term(.{ .call = .{ .function = helper, .arguments = &.{try b.constant(u64, 17)} } }), try b.pure(try b.constant(void, {})))) else local_call);
+        const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{cap}, .result = unit, .effects = body_effects } } });
         const entry = try b.declare(&.{unit}, u, &.{ ask, local }, &.{});
-        try b.define(entry, try b.term(.{ .handle = .{ .handler = handler, .body = try b.lambda(body, body_type), .state = &.{try b.constant(u64, 17)} } }));
+        const body_value = try b.lambda(body, body_type);
+        const stored_body = try b.variable(body_type);
+        const handled = try b.term(.{ .handle = .{ .handler = handler, .body = if (variant == 4) try b.reference(stored_body) else body_value, .state = &.{try b.constant(u64, 17)} } });
+        try b.define(entry, if (variant == 4) try b.bind(stored_body, try b.pure(body_value), handled) else handled);
         b.effects.items[@intCast(ask)].external = true;
         var baseline = try source.lower(a, b.module(entry, unit));
         baseline.deinit();
@@ -231,7 +258,7 @@ test "exposure carries capabilities through closed handler returns clauses and s
         var completed = try kosmos.invocation.invoke(a, .{ .image = built.image, .instance = .{ .state = suspended.record.requested.state.? }, .control = .{ .reply = reply } });
         defer completed.deinit();
         try std.testing.expectEqual(.completed, std.meta.activeTag(completed.record));
-        try std.testing.expectEqualSlices(u8, if (variant == 1) expected else value, completed.record.completed);
+        try std.testing.expectEqualSlices(u8, if (variant == 1 or variant >= 3) expected else value, completed.record.completed);
     }
 }
 
@@ -655,6 +682,13 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     try namespace.store.putRecord(native.workspace.Work, "workspace_work", forged.id, forged.task, forged);
     try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, parent.receipt.task, archive_index.records.items));
     namespace.store.rollback();
+    try namespace.store.begin();
+    forged = interactive_completed.value;
+    forged.cancellation = .{ .bytes = "forged applied cancellation" };
+    forged.cancellation_applied = true;
+    try namespace.store.putRecord(native.workspace.Work, "workspace_work", forged.id, forged.task, forged);
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, parent.receipt.task, archive_index.records.items));
+    namespace.store.rollback();
 
     const cancel_started = try service.workspaceStart(scratch, "cancel-after-answer-start", parent.receipt.task, program_id, interactive_input, .{});
     var cancel_work = try service.workspaceWork(a, parent.receipt.task, cancel_started.receipt.workspace.?);
@@ -892,6 +926,54 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
     var expanded = try native.json.parse(a, expansion.observation_json.bytes, .{});
     defer expanded.deinit();
     try std.testing.expectEqualStrings(text, expanded.value.object.get("text").?.string);
+    const provenance_ref = try native.values.fromJson(contracts.workspace.Ref, scratch, observation.value.object.get("provenance").?);
+    var poisoned: PoisonFreedAllocator = .{ .backing = scratch };
+    const provenance_reply = try service.workspaceCommand(poisoned.allocator(), "expand-provenance", parent.receipt.task, .{ .context = .{ .expand = .{ .reference = provenance_ref, .page = .{} } } });
+    var provenance_page = try native.json.parse(a, provenance_reply.observation_json.bytes, .{});
+    defer provenance_page.deinit();
+    var provenance = try native.json.parse(a, provenance_page.value.object.get("text").?.string, .{});
+    defer provenance.deinit();
+    try std.testing.expectEqualStrings("evidence.txt", provenance.value.object.get("acquisition").?.object.get("path").?.string);
+    // Mutation replies re-project the original operation receipt, including
+    // acquisition provenance, even after the controller has completed.
+    try service.validateWorkspace(scratch, parent.receipt.task);
+
+    const read_parent = try service.submit(scratch, "read-observation", .{ .program = .{ .describe = .{ .section = .source_records, .page = .{} } } });
+    var read_occurrence: ?native.testing.occurrence.Occurrence = null;
+    for (0..32) |_| {
+        _ = try service.pump(scratch);
+        var query = try namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='occurrence'", &.{.{ .blob = &read_parent.receipt.task }});
+        defer query.deinit();
+        if (try query.step() != .row) continue;
+        var pending = try contracts.decodeOwned(native.testing.occurrence.Occurrence, a, try query.bytes(0));
+        defer pending.deinit();
+        if (pending.value.state == .settled_reply) {
+            read_occurrence = pending.value;
+            break;
+        }
+    }
+    const original = read_occurrence orelse return error.MissingReadObservation;
+    try service.validateWorkspace(scratch, read_parent.receipt.task);
+    var manifest_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(assets.manifest, &manifest_digest, .{});
+    const index = try namespace.store.archiveIndex(scratch, read_parent.receipt.task, .{ .digest = manifest_digest, .bytes = assets.manifest.len });
+    // Rehashing an independently changed acquired reply must not turn it into
+    // the result of the retained read. Test before the root consumes the reply.
+    for (0..2) |variant| {
+        try namespace.store.begin();
+        const fake: contracts.workspace.Reply = .{
+            .disposition = .observed,
+            .observation_json = .{ .bytes = if (variant == 0) "{\"text\":\"fabricated schema\"}" else "{}" },
+            .selected_view = if (variant == 1) .{ .kind = .view, .id = .{ .bytes = &(@as([64]u8, @splat('0'))) } } else null,
+        };
+        const payload = try contracts.encodeOwned(contracts.workspace.Reply, scratch, fake);
+        const bound = try data.invocation.encodeOwned(data.invocation.Result, scratch, .{ .request_identity = original.request, .value = payload });
+        var forged_reply = original;
+        forged_reply.state.settled_reply.reply = (try namespace.store.putObject(bound)).digest;
+        try namespace.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", original.id, original.task, forged_reply);
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, original.task, index.records.items));
+        namespace.store.rollback();
+    }
     const other = try service.submit(scratch, "other-task", command);
     const forbidden = try service.workspaceCommand(scratch, "cross-task-source", other.receipt.task, .{ .context = .{ .expand = .{ .reference = source_ref, .page = .{} } } });
     try std.testing.expectEqual(.rejected, forbidden.disposition);

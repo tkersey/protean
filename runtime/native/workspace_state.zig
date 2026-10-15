@@ -147,6 +147,38 @@ pub const WorkObservation = struct {
     occurrence: ?@import("occurrence.zig").Occurrence,
 };
 
+/// Inputs to a read projection, captured before later work can replace them.
+/// Executable claims in each work are checked against its retained checkpoint.
+pub const ReadObservation = union(enum) {
+    immutable,
+    works: contracts.Vector(?WorkObservation, null),
+    /// The retained event prefix determines which work had been published.
+    scope: u64,
+    wait: struct {
+        works: contracts.Vector(?WorkObservation, null),
+        interrupted: bool,
+        event_watermark: u64,
+    },
+};
+
+/// The local operation owns these inputs; reply JSON is always a projection.
+/// Rejections retain a native diagnostic event, never a result or authority.
+pub const ReplyEvidence = union(enum) {
+    read: ReadObservation,
+    admitted: struct { replayed: bool },
+    rejected: struct {
+        stage: enum { authorization, preparation, operation },
+        code: state.Name,
+    },
+};
+pub const ReplyObservation = struct {
+    id: state.Digest,
+    task: state.TaskId,
+    attempt: state.Digest,
+    request: state.Reference,
+    evidence: ReplyEvidence,
+};
+
 /// Epistemic origin is retained alongside canonical values. Equal payloads do
 /// not erase independent origins or convert a hypothesis into an acquisition.
 pub const Derivation = struct {

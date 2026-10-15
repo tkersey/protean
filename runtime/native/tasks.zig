@@ -162,6 +162,9 @@ pub fn Service(comptime Types: type) type {
         owner_epoch: state.Digest = undefined,
         work: ?Work = null,
         checked_workspace_programs: std.AutoHashMapUnmanaged(state.Digest, u64) = .empty,
+        // Import may use ordinary mutation projections only through an existing
+        // matching receipt. Missing receipts must never execute a new mutation.
+        workspace_replay: ?struct { replayed: bool, records: []const state.ArchiveRecord } = null,
 
         pub fn init(a: std.mem.Allocator, io: std.Io, namespace: *Namespace, assets: discovery.Assets, application: *const discovery.Application, handlers: registry.Registry, profile: Profile) !Self {
             try profile.validate();
@@ -434,7 +437,10 @@ pub fn Service(comptime Types: type) type {
             try self.allowed();
             _ = try name(id);
             const key = try self.operationKey(a, id);
-            const bytes = (try self.store().receipt(a, &key, request)) orelse return null;
+            const bytes = (try self.store().receipt(a, &key, request)) orelse {
+                if (self.workspace_replay != null) return error.InvalidArchive;
+                return null;
+            };
             defer a.free(bytes);
             var decoded = try contracts.decodeOwned(state.Receipt, a, bytes);
             defer decoded.deinit();
@@ -442,7 +448,8 @@ pub fn Service(comptime Types: type) type {
             defer bound_task.deinit();
             var saved = decoded.value;
             saved.client_operation_id = .{ .bytes = try a.dupe(u8, saved.client_operation_id.bytes) };
-            return .{ .receipt = saved, .replayed = true };
+            if (self.workspace_replay != null and saved.method != .workspace) return error.InvalidArchive;
+            return .{ .receipt = saved, .replayed = if (self.workspace_replay) |replay_only| replay_only.replayed else true };
         }
         fn operationKey(self: *Self, a: std.mem.Allocator, id: []const u8) ![64]u8 {
             const Key = struct { principal: state.Name, tenant: state.Name, operation_id: state.Name };
@@ -2207,8 +2214,18 @@ pub fn Service(comptime Types: type) type {
                         }
                         const reply = acquired.?;
                         if (reply.answer != null) return error.InvalidArchive;
-                        var observation = try contracts.decodeOwned(wc.Reply, temporary, reply_value.?);
-                        defer observation.deinit();
+                        if (try self.store().recordBytes(temporary, "workspace_reply", saved.id, value.id)) |bytes| {
+                            try requireArchiveRecord(records, .workspace_reply, saved.id);
+                            var evidence = try contracts.decodeOwned(workspace.ReplyObservation, temporary, bytes);
+                            defer evidence.deinit();
+                            try self.validateWorkspaceReply(temporary, value, saved, entry, request.value, evidence.value, reply_value.?, records);
+                        } else {
+                            try requireArchiveRecord(records, .attempt, reply.attempt);
+                            try requireArchiveRecord(records, .capture, reply.attempt);
+                            var attempt = try self.record(state.Attempt, temporary, "attempt", reply.attempt, value.id);
+                            defer attempt.deinit();
+                            if (attempt.value.operation != .workspace_build or !std.meta.eql(attempt.value.occurrence, saved.id)) return error.InvalidArchive;
+                        }
                     },
                     .inbox => {
                         const reply = acquired orelse return error.InvalidArchive;
@@ -2536,6 +2553,38 @@ pub fn Service(comptime Types: type) type {
             }
         }
 
+        /// The applied marker is a claim about Kosmos state, for roots and
+        /// child work alike. A zero-quantum repeat must preserve that state.
+        fn validateCancellation(a: std.mem.Allocator, driver: *evaluator.Driver, value: anytype, outcome: data.invocation.Outcome, observed: []const u8) !void {
+            if (value.cancellation_applied and value.cancellation == null) return error.InvalidArchive;
+            const terminal_cancellation: ?data.invocation.Reason = switch (outcome) {
+                .cancelled => |cancelled| cancelled.reason,
+                .failed => |failure| failure.cancellation,
+                else => null,
+            };
+            if (terminal_cancellation) |reason| {
+                const intent = value.cancellation orelse return error.InvalidArchive;
+                if (!value.cancellation_applied or reason != .text or !same(reason.text, intent.bytes)) return error.InvalidArchive;
+            }
+            if (value.cancellation_applied) switch (outcome) {
+                .cancelled => {},
+                .failed => |failure| if (failure.cancellation == null) return error.InvalidArchive,
+                .completed => return error.InvalidArchive,
+                else => {
+                    // The imported marker claims Kosmos already received this
+                    // control. Let Kosmos establish that it is a no-op without
+                    // executing authored steps or dispatching any native work.
+                    // The next publication replaces the borrowed checkpoint.
+                    // Its exact persisted digest/length remain our comparison.
+                    const next = try driver.drive(a, .{ .cancel = .{ .text = value.cancellation.?.bytes } }, 0);
+                    const repeated = next.outcome;
+                    defer a.free(repeated);
+                    if (!same(repeated, observed) or next.checkpoint.len != value.checkpoint.bytes or
+                        !same(&storage.digest(next.checkpoint), &value.checkpoint.digest)) return error.InvalidArchive;
+                },
+            };
+        }
+
         fn validateImportedState(self: *Self, a: std.mem.Allocator, value: state.Task, pending: ?occurrence.Occurrence) !void {
             if (value.cancellation_applied and value.cancellation == null) return error.InvalidArchive;
             try self.validatePendingMessages(a, value);
@@ -2554,32 +2603,7 @@ pub fn Service(comptime Types: type) type {
             var decoded = try data.invocation.decode(data.invocation.Outcome, a, observed);
             defer decoded.deinit();
             if (!same(@tagName(decoded.value), @tagName(value.outcome_kind))) return error.InvalidArchive;
-            const terminal_cancellation: ?data.invocation.Reason = switch (decoded.value) {
-                .cancelled => |cancelled| cancelled.reason,
-                .failed => |failure| failure.cancellation,
-                else => null,
-            };
-            if (terminal_cancellation) |reason| {
-                const intent = value.cancellation orelse return error.InvalidArchive;
-                if (!value.cancellation_applied or reason != .text or !same(reason.text, intent.bytes)) return error.InvalidArchive;
-            }
-            if (value.cancellation_applied) switch (decoded.value) {
-                .cancelled => {},
-                .failed => |failure| if (failure.cancellation == null) return error.InvalidArchive,
-                .completed => return error.InvalidArchive,
-                else => {
-                    // The imported marker claims Kosmos already received this
-                    // control. Let Kosmos establish that it is a no-op without
-                    // executing authored steps or dispatching any native work.
-                    // The next publication replaces the borrowed checkpoint.
-                    // Its exact persisted digest/length remain our comparison.
-                    const next = try driver.drive(a, .{ .cancel = .{ .text = value.cancellation.?.bytes } }, 0);
-                    const repeated = next.outcome;
-                    defer a.free(repeated);
-                    if (!same(repeated, observed) or next.checkpoint.len != value.checkpoint.bytes or
-                        !same(&storage.digest(next.checkpoint), &value.checkpoint.digest)) return error.InvalidArchive;
-                },
-            };
+            try validateCancellation(a, driver, value, decoded.value, observed);
             switch (decoded.value) {
                 .requested => |requested| {
                     const current = pending orelse return error.InvalidArchive;
@@ -2630,12 +2654,15 @@ pub fn Service(comptime Types: type) type {
             return self.workspaceCommandAuthorized(a, operation_id, task_id, .{ .command = command });
         }
         fn workspaceCommandAuthorized(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, admitted: workspace.Authorized) !wc.Reply {
+            return self.workspaceCommandFrom(a, operation_id, task_id, admitted, null);
+        }
+        fn workspaceCommandFrom(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, admitted: workspace.Authorized, basis: ?workspace.ReadObservation) !wc.Reply {
             try self.allowed();
             const command = admitted.command;
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatible(parent.value);
-            const observation = self.workspaceExecute(a, operation_id, task_id, admitted) catch |err| {
+            const observation = self.workspaceExecute(a, operation_id, task_id, admitted, basis) catch |err| {
                 if (self.store().fenced or err == error.OutOfMemory or err == error.StorageUnavailable) return err;
                 return workspaceRejection(a, err);
             };
@@ -2660,7 +2687,7 @@ pub fn Service(comptime Types: type) type {
             return .{ .disposition = .rejected, .observation_json = .{ .bytes = try json.canonical(a, failure) } };
         }
 
-        fn workspaceExecute(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, authorized: workspace.Authorized) !json.Value {
+        fn workspaceExecute(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, authorized: workspace.Authorized, basis: ?workspace.ReadObservation) !json.Value {
             const command = authorized.command;
             switch (command) {
                 .program => |program| switch (program) {
@@ -2740,13 +2767,26 @@ pub fn Service(comptime Types: type) type {
                         return self.workspaceAdmissionObservation(a, task_id, try self.workspaceStartValue(a, operation_id, task_id, program_id, input, request.policy, origin));
                     },
                     .inspect => |request| {
+                        if (basis) |frozen| return self.renderWorkspaceWorkObservation(a, frozen.works.items[0].?.work, frozen.works.items[0].?.occurrence);
                         var value = try self.workspaceWork(a, task_id, try wp.identity(request.work, .work));
                         defer value.deinit();
                         return self.workspaceWorkObservation(a, value.value);
                     },
                     .collect => |request| {
                         var result: json.Value = .{ .array = .init(a) };
-                        for (request.works.items) |ref| {
+                        for (request.works.items, 0..) |ref, i| {
+                            if (basis) |frozen| {
+                                const item = frozen.works.items[i];
+                                if (item) |observed| {
+                                    try result.array.append(try self.renderWorkspaceWorkObservation(a, observed.work, observed.occurrence));
+                                } else {
+                                    var missing = json.object();
+                                    try json.put(a, &missing, "work", try values.toJson(wc.Ref, a, ref));
+                                    try json.put(a, &missing, "outcome", json.string("unavailable"));
+                                    try result.array.append(missing);
+                                }
+                                continue;
+                            }
                             var value = self.workspaceWork(a, task_id, try wp.identity(ref, .work)) catch |err| {
                                 if (err != error.ArtifactUnavailable) return err;
                                 var missing = json.object();
@@ -2782,16 +2822,24 @@ pub fn Service(comptime Types: type) type {
                         var parent = try self.task(a, task_id);
                         defer parent.deinit();
                         var result = json.object();
-                        const ready = try self.workspaceWaitReady(a, parent.value, request);
-                        try json.put(a, &result, "ready", .{ .bool = ready });
-                        try json.put(a, &result, "interrupted", .{ .bool = parent.value.messages.items.len != 0 or parent.value.cancellation != null });
-                        try json.put(a, &result, "event_watermark", try json.number(a, parent.value.event_high));
+                        const interrupted = if (basis) |frozen| frozen.wait.interrupted else parent.value.messages.items.len != 0 or parent.value.cancellation != null;
+                        var ready = interrupted;
                         var selected: json.Value = .{ .array = .init(a) };
-                        for (request.works.items) |ref| {
-                            var work = try self.workspaceWork(a, task_id, try wp.identity(ref, .work));
-                            defer work.deinit();
-                            try selected.array.append(try self.workspaceWorkObservation(a, work.value));
+                        for (request.works.items, 0..) |ref, i| {
+                            if (basis) |frozen| {
+                                const observed = frozen.wait.works.items[i].?;
+                                ready = ready or observed.work.event_watermark > request.after or observed.work.terminal();
+                                try selected.array.append(try self.renderWorkspaceWorkObservation(a, observed.work, observed.occurrence));
+                            } else {
+                                var work = try self.workspaceWork(a, task_id, try wp.identity(ref, .work));
+                                defer work.deinit();
+                                ready = ready or work.value.event_watermark > request.after or work.value.terminal();
+                                try selected.array.append(try self.workspaceWorkObservation(a, work.value));
+                            }
                         }
+                        try json.put(a, &result, "ready", .{ .bool = ready });
+                        try json.put(a, &result, "interrupted", .{ .bool = interrupted });
+                        try json.put(a, &result, "event_watermark", try json.number(a, if (basis) |frozen| frozen.wait.event_watermark else parent.value.event_high));
                         try json.put(a, &result, "works", selected);
                         return result;
                     },
@@ -2800,6 +2848,12 @@ pub fn Service(comptime Types: type) type {
                 .context => |context| switch (context) {
                     .inspect => |request| {
                         var output: json.Value = .{ .array = .init(a) };
+                        if (basis) |frozen| {
+                            for (try self.workspaceScopeAt(a, task_id, frozen.scope)) |id| try output.array.append(try values.toJson(wc.Ref, a, try wp.reference(a, .work, id)));
+                            const text = try json.canonical(a, output);
+                            defer a.free(text);
+                            return wp.page(a, text, request.page);
+                        }
                         var query = try self.store().database.prepare("SELECT id FROM records WHERE task=? AND kind='workspace_work' ORDER BY id", &.{.{ .blob = &task_id }});
                         defer query.deinit();
                         while (try query.step() == .row) {
@@ -2820,6 +2874,17 @@ pub fn Service(comptime Types: type) type {
                             return self.workspacePayloadPage(a, port.value.interface.payload, port.value.payload, request.page);
                         }
                         if (request.reference.kind == .work) {
+                            if (basis) |frozen| {
+                                const work = frozen.works.items[0].?.work;
+                                const bytes = try self.store().object(a, work.outcome, null);
+                                defer a.free(bytes);
+                                var outcome = try data.invocation.decode(data.invocation.Outcome, a, bytes);
+                                defer outcome.deinit();
+                                if (outcome.value != .failed) return error.InvalidState;
+                                var program = try self.workspaceProgram(a, task_id, work.program);
+                                defer program.deinit();
+                                return self.workspacePayloadBytesPage(a, program.value.description.failure_schema, outcome.value.failed.value, request.page);
+                            }
                             var work = try self.retainedWorkspaceWork(a, task_id, try wp.identity(request.reference, .work));
                             defer work.deinit();
                             const bytes = try self.store().object(a, work.value.outcome, null);
@@ -2883,6 +2948,12 @@ pub fn Service(comptime Types: type) type {
                     var value = try contracts.decodeOwned(workspace.WorkObservation, a, bytes);
                     defer value.deinit();
                     if (!std.meta.eql(value.value.work.task, task_id)) return error.Denied;
+                    if (self.workspace_replay) |replay_only| {
+                        var parent = try self.task(a, task_id);
+                        defer parent.deinit();
+                        try self.validateWorkspaceWorkSnapshot(a, parent.value, value.value.work, replay_only.records);
+                        try self.validateHistoricalOccurrence(a, value.value);
+                    }
                     break :blk try self.renderWorkspaceWorkObservation(a, value.value.work, value.value.occurrence);
                 },
                 .value => try self.workspaceValueObservation(a, task_id, receipt_value.workspace.?),
@@ -3218,7 +3289,9 @@ pub fn Service(comptime Types: type) type {
             if (derivation.program) |ref| try json.put(a, &result, "program", try values.toJson(wc.Ref, a, try wp.reference(a, .program, ref.digest)));
             if (derivation.work) |id| try json.put(a, &result, "work", try values.toJson(wc.Ref, a, try wp.reference(a, .work, id)));
             if (derivation.acquisition) |origin| {
-                try json.put(a, &result, "acquisition", try values.toJson(workspace.SnapshotRange, a, origin));
+                var projected = origin;
+                projected.path.bytes = try a.dupe(u8, origin.path.bytes);
+                try json.put(a, &result, "acquisition", try values.toJson(workspace.SnapshotRange, a, projected));
                 try json.put(a, &result, "complete_file", .{ .bool = origin.start == 0 and origin.end == origin.file_bytes });
             }
             if (derivation.frozen_input) |ref| try json.put(a, &result, "frozen_input", try values.toJson(state.Reference, a, ref));
@@ -3478,10 +3551,277 @@ pub fn Service(comptime Types: type) type {
             }{ .authorize = entry.declaration.workspace.?, .payload = payload });
         }
 
+        fn workspaceIsRead(command: wc.Command) bool {
+            return switch (command) {
+                .program => |p| p != .build,
+                .work => |w| w == .inspect or w == .collect or w == .wait,
+                .context => |c| c == .inspect or c == .expand,
+            };
+        }
+
+        fn workspaceScopeAt(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, watermark: u64) ![]state.Digest {
+            var ids: std.AutoHashMap(state.Digest, void) = .init(a);
+            defer ids.deinit();
+            var query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq<=? ORDER BY e.seq", &.{ .{ .blob = &task_id }, .{ .integer = std.math.cast(i64, watermark) orelse return error.InvalidArchive } });
+            defer query.deinit();
+            while (try query.step() == .row) {
+                var event_value = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+                defer event_value.deinit();
+                if (event_value.value.kind != .workspace and event_value.value.kind != .workspace_progress) continue;
+                var parsed = try json.parseAsset(a, event_value.value.data.bytes, event_value.value.data.bytes.len);
+                defer parsed.deinit();
+                const text = try json.text(parsed.value.object.get("workspace_id") orelse return error.InvalidArchive);
+                const id = try wp.identity(.{ .kind = .work, .id = .{ .bytes = text } }, .work);
+                const work = (try self.store().recordBytes(a, "workspace_work", id, task_id)) orelse continue;
+                a.free(work);
+                try ids.put(id, {});
+            }
+            const result = try a.alloc(state.Digest, ids.count());
+            var iterator = ids.keyIterator();
+            var i: usize = 0;
+            while (iterator.next()) |id| : (i += 1) result[i] = id.*;
+            std.mem.sort(state.Digest, result, {}, struct {
+                fn less(_: void, left: state.Digest, right: state.Digest) bool {
+                    return std.mem.order(u8, &left, &right) == .lt;
+                }
+            }.less);
+            return result;
+        }
+
+        fn workspaceInterruptedAt(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, watermark: u64) !bool {
+            var messages: u64 = 0;
+            var cancelled = false;
+            var query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq<=? ORDER BY e.seq", &.{ .{ .blob = &task_id }, .{ .integer = std.math.cast(i64, watermark) orelse return error.InvalidArchive } });
+            defer query.deinit();
+            while (try query.step() == .row) {
+                var saved = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+                defer saved.deinit();
+                switch (saved.value.kind) {
+                    .message_queued => messages = try std.math.add(u64, messages, 1),
+                    .message_consumed, .message_not_consumed => messages = std.math.sub(u64, messages, 1) catch return error.InvalidArchive,
+                    .cancellation_requested => cancelled = true,
+                    else => {},
+                }
+            }
+            return messages != 0 or cancelled;
+        }
+
+        fn freezeWorkspaceWork(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, ref: wc.Ref, retained: bool) !workspace.WorkObservation {
+            var saved = if (retained) try self.retainedWorkspaceWork(a, task_id, try wp.identity(ref, .work)) else try self.workspaceWork(a, task_id, try wp.identity(ref, .work));
+            defer saved.deinit();
+            var work = saved.value;
+            work.inputs.items = try a.dupe(state.Reference, work.inputs.items);
+            if (work.cancellation) |reason| work.cancellation = .{ .bytes = try a.dupe(u8, reason.bytes) };
+            var pending: ?occurrence.Occurrence = null;
+            if (work.current_occurrence) |id| {
+                var decoded = try self.record(occurrence.Occurrence, a, "occurrence", id, task_id);
+                defer decoded.deinit();
+                pending = decoded.value;
+            }
+            return .{ .work = work, .occurrence = pending };
+        }
+
+        fn workspaceReadBasis(self: *Self, allocator: std.mem.Allocator, parent: state.Task, command: wc.Command) ![]u8 {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var basis: workspace.ReadObservation = .immutable;
+            var refs: []const wc.Ref = &.{};
+            var one: [1]wc.Ref = undefined;
+            var retained = false;
+            var collect = false;
+            switch (command) {
+                .work => |w| switch (w) {
+                    .inspect => |r| {
+                        one[0] = r.work;
+                        refs = &one;
+                    },
+                    .collect => |r| {
+                        refs = r.works.items;
+                        collect = true;
+                    },
+                    .wait => |r| refs = r.works.items,
+                    else => return error.InvalidState,
+                },
+                .context => |c| switch (c) {
+                    .inspect => basis = .{ .scope = parent.event_high },
+                    .expand => |r| if (r.reference.kind == .work) {
+                        one[0] = r.reference;
+                        refs = &one;
+                        retained = true;
+                    },
+                    else => return error.InvalidState,
+                },
+                .program => |p| if (p == .build) return error.InvalidState,
+            }
+            if (command == .work or refs.len != 0) {
+                const observations = try a.alloc(?workspace.WorkObservation, refs.len);
+                for (refs, observations) |ref, *out| out.* = self.freezeWorkspaceWork(a, parent.id, ref, retained) catch |err| blk: {
+                    if (!collect or err != error.ArtifactUnavailable) return err;
+                    break :blk null;
+                };
+                basis = if (command == .work and command.work == .wait) .{ .wait = .{
+                    .works = .{ .items = observations },
+                    .interrupted = parent.messages.items.len != 0 or parent.cancellation != null,
+                    .event_watermark = parent.event_high,
+                } } else .{ .works = .{ .items = observations } };
+            }
+            return contracts.encodeOwned(workspace.ReadObservation, allocator, basis);
+        }
+
+        fn rejectWorkspace(self: *Self, a: std.mem.Allocator, parent: state.Task, pending: occurrence.Occurrence, stage: @FieldType(@FieldType(workspace.ReplyEvidence, "rejected"), "stage"), err: anyerror) !Step {
+            if (self.store().fenced or err == error.OutOfMemory or err == error.StorageUnavailable) return err;
+            return self.settleWorkspaceReply(a, parent, pending, try workspaceRejection(a, err), .{ .rejected = .{ .stage = stage, .code = try name(@errorName(err)) } });
+        }
+
+        fn validateHistoricalOccurrence(self: *Self, a: std.mem.Allocator, observed: workspace.WorkObservation) !void {
+            const work = observed.work;
+            if (observed.occurrence) |pending| {
+                if (!std.meta.eql(work.current_occurrence, pending.id) or !std.meta.eql(pending.task, work.task) or !std.meta.eql(pending.work, work.id)) return error.InvalidArchive;
+                var current = try self.record(occurrence.Occurrence, a, "occurrence", pending.id, work.task);
+                defer current.deinit();
+                if (!std.meta.eql(current.value.request, pending.request) or !std.meta.eql(current.value.request_object, pending.request_object)) return error.InvalidArchive;
+                // A settled observation must name the same acquired evidence;
+                // later admission may change only its enclosing state tag.
+                const acquired: ?occurrence.Acquired = switch (pending.state) {
+                    .settled_reply => |r| r,
+                    .admitted => |v| if (v == .reply) v.reply else null,
+                    else => null,
+                };
+                if (acquired) |expected| {
+                    const actual = switch (current.value.state) {
+                        .settled_reply => |r| r,
+                        .admitted => |v| if (v == .reply) v.reply else return error.InvalidArchive,
+                        else => return error.InvalidArchive,
+                    };
+                    if (!std.meta.eql(expected, actual)) return error.InvalidArchive;
+                }
+            } else if (work.current_occurrence != null) return error.InvalidArchive;
+        }
+
+        fn validateWorkspaceRead(self: *Self, a: std.mem.Allocator, parent: state.Task, command: wc.Command, basis: workspace.ReadObservation, records: []const state.ArchiveRecord) !void {
+            if (!workspaceIsRead(command)) return error.InvalidArchive;
+            var refs: []const wc.Ref = &.{};
+            var one: [1]wc.Ref = undefined;
+            var optional = false;
+            var expected: std.meta.Tag(workspace.ReadObservation) = .immutable;
+            switch (command) {
+                .work => |w| switch (w) {
+                    .inspect => |r| {
+                        one[0] = r.work;
+                        refs = &one;
+                        expected = .works;
+                    },
+                    .collect => |r| {
+                        refs = r.works.items;
+                        expected = .works;
+                        optional = true;
+                    },
+                    .wait => |r| {
+                        refs = r.works.items;
+                        expected = .wait;
+                    },
+                    else => return error.InvalidArchive,
+                },
+                .context => |c| switch (c) {
+                    .inspect => expected = .scope,
+                    .expand => |r| if (r.reference.kind == .work) {
+                        one[0] = r.reference;
+                        refs = &one;
+                        expected = .works;
+                    },
+                    else => return error.InvalidArchive,
+                },
+                .program => {},
+            }
+            if (std.meta.activeTag(basis) != expected) return error.InvalidArchive;
+            switch (basis) {
+                .immutable => {},
+                .scope => |watermark| {
+                    if (watermark > parent.event_high) return error.InvalidArchive;
+                    for (try self.workspaceScopeAt(a, parent.id, watermark)) |id| try requireArchiveRecord(records, .workspace_work, id);
+                },
+                .works, .wait => {
+                    const observed = if (basis == .works) basis.works.items else basis.wait.works.items;
+                    if (observed.len != refs.len) return error.InvalidArchive;
+                    if (basis == .wait) {
+                        if (basis.wait.event_watermark > parent.event_high or basis.wait.interrupted != try self.workspaceInterruptedAt(a, parent.id, basis.wait.event_watermark)) return error.InvalidArchive;
+                    }
+                    for (observed, refs) |item, ref| {
+                        const id = try wp.identity(ref, .work);
+                        const snapshot = item orelse {
+                            if (!optional) return error.InvalidArchive;
+                            continue;
+                        };
+                        if (!std.meta.eql(snapshot.work.id, id) or (basis == .wait and snapshot.work.event_watermark > basis.wait.event_watermark)) return error.InvalidArchive;
+                        try requireArchiveRecord(records, .workspace_work, id);
+                        var current = try self.workspaceWork(a, parent.id, id);
+                        defer current.deinit();
+                        if (!std.meta.eql(current.value.program, snapshot.work.program) or !std.meta.eql(current.value.input, snapshot.work.input) or
+                            snapshot.work.execution_revision > current.value.execution_revision or snapshot.work.control_revision > current.value.control_revision or
+                            snapshot.work.port_generation > current.value.port_generation) return error.InvalidArchive;
+                        try self.validateWorkspaceWorkSnapshot(a, parent, snapshot.work, records);
+                        try self.validateHistoricalOccurrence(a, snapshot);
+                    }
+                },
+            }
+        }
+
+        fn validateWorkspaceReply(self: *Self, a: std.mem.Allocator, parent: state.Task, pending: occurrence.Occurrence, entry: registry.Entry, request: data.invocation.Request, saved: workspace.ReplyObservation, reply: []const u8, records: []const state.ArchiveRecord) anyerror!void {
+            if (pending.work != null or !std.meta.eql(saved.id, pending.id) or !std.meta.eql(saved.task, parent.id) or !std.meta.eql(saved.request, pending.request_object)) return error.InvalidArchive;
+            const acquired = switch (pending.state) {
+                .settled_reply => |r| r,
+                .admitted => |v| if (v == .reply) v.reply else return error.InvalidArchive,
+                else => return error.InvalidArchive,
+            };
+            if (!std.meta.eql(acquired.attempt, saved.attempt)) return error.InvalidArchive;
+            const authorized_bytes = self.authorizeWorkspace(a, parent, entry, request.binding.payload) catch |err| {
+                if (saved.evidence != .rejected or saved.evidence.rejected.stage != .authorization or !same(saved.evidence.rejected.code.bytes, @errorName(err))) return error.InvalidArchive;
+                const expected = try contracts.encodeOwned(wc.Reply, a, try workspaceRejection(a, err));
+                if (!same(reply, expected)) return error.InvalidArchive;
+                return;
+            };
+            var authorized = try contracts.decodeOwned(workspace.Authorized, a, authorized_bytes);
+            defer authorized.deinit();
+            const command = authorized.value.command;
+            const operation_id = std.fmt.bytesToHex(pending.id, .lower);
+            const expected: wc.Reply = switch (saved.evidence) {
+                .read => |basis| blk: {
+                    try self.validateWorkspaceRead(a, parent, command, basis, records);
+                    break :blk try self.workspaceCommandFrom(a, &operation_id, parent.id, authorized.value, basis);
+                },
+                .admitted => |admitted| blk: {
+                    if (workspaceIsRead(command) or (command == .program and command.program == .build)) return error.InvalidArchive;
+                    if (self.workspace_replay != null) return error.InvalidArchive;
+                    self.workspace_replay = .{ .replayed = admitted.replayed, .records = records };
+                    defer self.workspace_replay = null;
+                    const result = try self.workspaceCommandAuthorized(a, &operation_id, parent.id, authorized.value);
+                    if (result.disposition == .rejected) return error.InvalidArchive;
+                    break :blk result;
+                },
+                .rejected => |failure| blk: {
+                    if (failure.stage == .authorization or failure.code.bytes.len == 0) return error.InvalidArchive;
+                    if (failure.stage == .preparation) {
+                        if (command != .program or command.program != .build) return error.InvalidArchive;
+                        _ = self.workspacePrepareBuild(a, parent, authorized.value) catch |err| {
+                            if (!same(failure.code.bytes, @errorName(err))) return error.InvalidArchive;
+                            break :blk try workspaceRejection(a, err);
+                        };
+                        return error.InvalidArchive;
+                    }
+                    // A captured operation failure is a diagnostic event. It
+                    // can carry no result, selected view, program or evidence.
+                    var observation = json.object();
+                    try json.put(a, &observation, "error", json.string(failure.code.bytes));
+                    break :blk .{ .disposition = .rejected, .observation_json = .{ .bytes = try json.canonical(a, observation) } };
+                },
+            };
+            if (!same(reply, try contracts.encodeOwned(wc.Reply, a, expected))) return error.InvalidArchive;
+        }
+
         fn dispatchWorkspace(self: *Self, a: std.mem.Allocator, initial: state.Task, pending: occurrence.Occurrence, entry: registry.Entry, payload: []const u8) !Step {
             const authorized = self.authorizeWorkspace(a, initial, entry, payload) catch |err| {
-                if (self.store().fenced or err == error.OutOfMemory) return err;
-                return self.settleWorkspaceReply(a, initial, pending, try workspaceRejection(a, err));
+                return self.rejectWorkspace(a, initial, pending, .authorization, err);
             };
             defer a.free(authorized);
             var command = try contracts.decodeOwned(workspace.Authorized, a, authorized);
@@ -3490,8 +3830,7 @@ pub fn Service(comptime Types: type) type {
             if (command.value.command == .program and command.value.command.program == .build) {
                 if (self.work != null) return .idle;
                 const prepared = self.workspacePrepareBuild(a, initial, command.value) catch |err| {
-                    if (self.store().fenced or err == error.OutOfMemory) return err;
-                    return self.settleWorkspaceReply(a, initial, pending, try workspaceRejection(a, err));
+                    return self.rejectWorkspace(a, initial, pending, .preparation, err);
                 };
                 defer a.free(prepared);
                 const request_bytes = try self.store().object(a, pending.request_object, null);
@@ -3500,7 +3839,7 @@ pub fn Service(comptime Types: type) type {
             }
             if (command.value.command == .work and command.value.command.work == .wait) {
                 const selection = command.value.command.work.wait;
-                const ready = self.workspaceWaitReady(a, initial, selection) catch |err| return self.settleWorkspaceReply(a, initial, pending, try workspaceRejection(a, err));
+                const ready = self.workspaceWaitReady(a, initial, selection) catch |err| return self.rejectWorkspace(a, initial, pending, .operation, err);
                 if (!ready) {
                     if (try self.store().recordBytes(a, "workspace_wait", pending.id, initial.id)) |bytes| {
                         defer a.free(bytes);
@@ -3521,8 +3860,20 @@ pub fn Service(comptime Types: type) type {
                     return .waiting;
                 }
             }
-            const observation = try self.workspaceCommandAuthorized(a, &operation_id, initial.id, command.value);
-            return self.settleWorkspaceReply(a, initial, pending, observation);
+            var basis: ?contracts.Decoded(workspace.ReadObservation) = null;
+            defer if (basis) |*frozen| frozen.deinit();
+            if (workspaceIsRead(command.value.command)) {
+                const bytes = self.workspaceReadBasis(a, initial, command.value.command) catch |err| return self.rejectWorkspace(a, initial, pending, .operation, err);
+                defer a.free(bytes);
+                basis = try contracts.decodeOwned(workspace.ReadObservation, a, bytes);
+            }
+            const observation = try self.workspaceCommandFrom(a, &operation_id, initial.id, command.value, if (basis) |frozen| frozen.value else null);
+            var parsed = try json.parseAsset(a, observation.observation_json.bytes, observation.observation_json.bytes.len);
+            defer parsed.deinit();
+            const evidence: workspace.ReplyEvidence = if (observation.disposition == .rejected)
+                .{ .rejected = .{ .stage = .operation, .code = try name(try json.text(parsed.value.object.get("error") orelse return error.CorruptState)) } }
+            else if (basis) |frozen| .{ .read = frozen.value } else .{ .admitted = .{ .replayed = (parsed.value.object.get("replayed") orelse return error.CorruptState).bool } };
+            return self.settleWorkspaceReply(a, initial, pending, observation, evidence);
         }
         fn workspacePrepareBuild(self: *Self, a: std.mem.Allocator, parent: state.Task, authorized: workspace.Authorized) ![]u8 {
             const build = authorized.command.program.build;
@@ -3618,7 +3969,7 @@ pub fn Service(comptime Types: type) type {
             return self.workspaceWaitReady(a, parent, waiting.value.selection);
         }
 
-        fn settleWorkspaceReply(self: *Self, a: std.mem.Allocator, initial: state.Task, pending: occurrence.Occurrence, observation: wc.Reply) !Step {
+        fn settleWorkspaceReply(self: *Self, a: std.mem.Allocator, initial: state.Task, pending: occurrence.Occurrence, observation: wc.Reply, evidence: workspace.ReplyEvidence) !Step {
             const reply = try contracts.encodeOwned(wc.Reply, a, observation);
             defer a.free(reply);
             const bound = try data.invocation.encodeOwned(data.invocation.Result, a, .{ .request_identity = pending.request, .value = reply });
@@ -3638,6 +3989,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().begin();
             defer self.store().rollback();
             _ = try self.store().putObject(bound);
+            try self.store().createRecord(workspace.ReplyObservation, "workspace_reply", pending.id, initial.id, .{ .id = pending.id, .task = initial.id, .attempt = attempt, .request = pending.request_object, .evidence = evidence });
             try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, initial.id, acquired);
             try self.persist(a, parent, fresh.value.revision, "workspace.reply", .preserve);
             return .progressed;
@@ -3865,6 +4217,12 @@ pub fn Service(comptime Types: type) type {
                 .execution_route => {
                     try requireArchiveRecord(records, .occurrence, row.id);
                 },
+                .workspace_reply => {
+                    try requireArchiveRecord(records, .occurrence, row.id);
+                    var pending = try self.record(occurrence.Occurrence, a, "occurrence", row.id, task_id);
+                    defer pending.deinit();
+                    if (pending.value.work != null or !(pending.value.state == .settled_reply or (pending.value.state == .admitted and pending.value.state.admitted == .reply))) return error.InvalidArchive;
+                },
                 .workspace_delegation => try self.validateDelegation(a, parent.value, row, records),
                 .workspace_wait => {
                     var wait = try self.record(workspace.Wait, a, "workspace_wait", row.id, task_id);
@@ -3895,48 +4253,54 @@ pub fn Service(comptime Types: type) type {
                 var saved = try self.workspaceWork(a, task_id, row.id);
                 defer saved.deinit();
                 const value = saved.value;
-                if (value.execution_revision == 0 or value.control_revision == 0 or value.event_watermark > parent.value.event_high or
-                    (value.cancellation_applied and value.cancellation == null)) return error.InvalidArchive;
-                var program = try self.workspaceProgram(a, task_id, value.program);
-                defer program.deinit();
-                const native_program = program.value.description.source_kind == .instrument_model or program.value.description.source_kind == .instrument_snapshot;
-                if (native_program != (value.delegation != null) or (value.delegation == null and (value.answer_value != null or value.instrument_occurrence != null))) return error.InvalidArchive;
-                if (value.delegation) |ref| {
-                    var delegation = try contracts.decodeOwned(workspace.Delegation, a, try self.store().object(a, ref, null));
-                    defer delegation.deinit();
-                    try requireArchiveRecord(records, .workspace_delegation, delegation.value.id);
-                    if (!std.meta.eql(delegation.value.instrument, value.id)) return error.InvalidArchive;
-                    if (value.instrument_occurrence) |id| try requireArchiveRecord(records, .occurrence, id);
-                }
-                const input = try self.workspaceValueReference(a, task_id, try wp.reference(a, .value, (value.input_value orelse return error.InvalidArchive).digest));
-                if (!std.meta.eql(input.value, value.input) or !std.meta.eql(input.schema, program.value.description.input_schema)) return error.InvalidArchive;
-                for (value.inputs.items) |ref| _ = try self.workspaceValueReference(a, task_id, try wp.reference(a, .value, ref.digest));
                 for (0..std.math.cast(usize, value.port_generation) orelse return error.InvalidArchive) |i| if (!generations.contains(.{ .work = value.id, .generation = i + 1 })) return error.InvalidArchive;
-                const driver = try self.workspaceResident(a, value);
-                defer self.retire(a) catch self.store().fence();
-                const publication = try driver.drive(a, .none, 0);
-                if (!std.meta.eql(storage.digest(publication.outcome), value.outcome.digest) or publication.outcome.len != value.outcome.bytes or
-                    !std.meta.eql(storage.digest(publication.checkpoint), value.checkpoint.digest) or publication.checkpoint.len != value.checkpoint.bytes) return error.InvalidArchive;
-                var observed = try data.invocation.decode(data.invocation.Outcome, a, publication.outcome);
-                defer observed.deinit();
-                if (!same(@tagName(observed.value), @tagName(value.outcome_kind))) return error.InvalidArchive;
-                switch (observed.value) {
-                    .requested => |pending| {
-                        const id = value.current_occurrence orelse return error.InvalidArchive;
-                        var occurrence_value = try self.record(occurrence.Occurrence, a, "occurrence", id, task_id);
-                        defer occurrence_value.deinit();
-                        if (!std.meta.eql(occurrence_value.value.request_object, state.Reference{ .digest = storage.digest(pending.request), .bytes = pending.request.len })) return error.InvalidArchive;
-                        var route = try self.record(workspace.ExecutionRoute, a, "execution_route", id, task_id);
-                        defer route.deinit();
-                        if (!std.meta.eql(value.current_port, route.value.port)) return error.InvalidArchive;
-                    },
-                    .completed => |bytes| {
-                        if (value.result == null or value.result_value == null or !std.meta.eql(value.result.?, state.Reference{ .digest = storage.digest(bytes), .bytes = bytes.len })) return error.InvalidArchive;
-                    },
-                    else => if (value.result != null or value.result_value != null) return error.InvalidArchive,
-                }
-                if (observed.value != .requested and (value.current_occurrence != null or value.current_port != null)) return error.InvalidArchive;
+                try self.validateWorkspaceWorkSnapshot(a, parent.value, value, records);
             }
+        }
+
+        fn validateWorkspaceWorkSnapshot(self: *Self, a: std.mem.Allocator, parent: state.Task, value: workspace.Work, records: []const state.ArchiveRecord) !void {
+            if (!std.meta.eql(value.task, parent.id)) return error.InvalidArchive;
+            if (value.execution_revision == 0 or value.control_revision == 0 or value.event_watermark > parent.event_high or
+                (value.cancellation_applied and value.cancellation == null)) return error.InvalidArchive;
+            var program = try self.workspaceProgram(a, parent.id, value.program);
+            defer program.deinit();
+            const native_program = program.value.description.source_kind == .instrument_model or program.value.description.source_kind == .instrument_snapshot;
+            if (native_program != (value.delegation != null) or (value.delegation == null and (value.answer_value != null or value.instrument_occurrence != null))) return error.InvalidArchive;
+            if (value.delegation) |ref| {
+                var delegation = try contracts.decodeOwned(workspace.Delegation, a, try self.store().object(a, ref, null));
+                defer delegation.deinit();
+                try requireArchiveRecord(records, .workspace_delegation, delegation.value.id);
+                if (!std.meta.eql(delegation.value.instrument, value.id)) return error.InvalidArchive;
+                if (value.instrument_occurrence) |id| try requireArchiveRecord(records, .occurrence, id);
+            }
+            const input = try self.workspaceValueReference(a, parent.id, try wp.reference(a, .value, (value.input_value orelse return error.InvalidArchive).digest));
+            if (!std.meta.eql(input.value, value.input) or !std.meta.eql(input.schema, program.value.description.input_schema)) return error.InvalidArchive;
+            for (value.inputs.items) |ref| _ = try self.workspaceValueReference(a, parent.id, try wp.reference(a, .value, ref.digest));
+            const driver = try self.workspaceResident(a, value);
+            defer self.retire(a) catch self.store().fence();
+            const publication = try driver.drive(a, .none, 0);
+            if (!std.meta.eql(storage.digest(publication.outcome), value.outcome.digest) or publication.outcome.len != value.outcome.bytes or
+                !std.meta.eql(storage.digest(publication.checkpoint), value.checkpoint.digest) or publication.checkpoint.len != value.checkpoint.bytes) return error.InvalidArchive;
+            var observed = try data.invocation.decode(data.invocation.Outcome, a, publication.outcome);
+            defer observed.deinit();
+            if (!same(@tagName(observed.value), @tagName(value.outcome_kind))) return error.InvalidArchive;
+            try validateCancellation(a, driver, value, observed.value, publication.outcome);
+            switch (observed.value) {
+                .requested => |pending| {
+                    const id = value.current_occurrence orelse return error.InvalidArchive;
+                    var occurrence_value = try self.record(occurrence.Occurrence, a, "occurrence", id, parent.id);
+                    defer occurrence_value.deinit();
+                    if (!std.meta.eql(occurrence_value.value.request_object, state.Reference{ .digest = storage.digest(pending.request), .bytes = pending.request.len })) return error.InvalidArchive;
+                    var route = try self.record(workspace.ExecutionRoute, a, "execution_route", id, parent.id);
+                    defer route.deinit();
+                    if (!std.meta.eql(value.current_port, route.value.port)) return error.InvalidArchive;
+                },
+                .completed => |bytes| {
+                    if (value.result == null or value.result_value == null or !std.meta.eql(value.result.?, state.Reference{ .digest = storage.digest(bytes), .bytes = bytes.len })) return error.InvalidArchive;
+                },
+                else => if (value.result != null or value.result_value != null) return error.InvalidArchive,
+            }
+            if (observed.value != .requested and (value.current_occurrence != null or value.current_port != null)) return error.InvalidArchive;
         }
 
         /// The compilation result stays local until the same transaction admits

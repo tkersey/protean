@@ -53,6 +53,7 @@ pub fn Record(comptime kind: []const u8) type {
         .execution_route => @import("workspace_state.zig").ExecutionRoute,
         .workspace_wait => @import("workspace_state.zig").Wait,
         .workspace_delegation => @import("workspace_state.zig").Delegation,
+        .workspace_reply => @import("workspace_state.zig").ReplyObservation,
     };
 }
 pub const Store = struct {
@@ -605,7 +606,7 @@ pub const Store = struct {
     }
     pub fn putRecord(self: *Store, comptime T: type, comptime kind: []const u8, id: Digest, task: state.TaskId, value: T) !void {
         if (T != Record(kind)) @compileError("native record type/kind mismatch");
-        if (comptime std.mem.eql(u8, kind, "artifact") or std.mem.eql(u8, kind, "attempt") or std.mem.eql(u8, kind, "origin") or std.mem.eql(u8, kind, "workspace_program") or std.mem.eql(u8, kind, "workspace_value") or std.mem.eql(u8, kind, "workspace_view") or std.mem.eql(u8, kind, "workspace_port") or std.mem.eql(u8, kind, "workspace_port_reply") or std.mem.eql(u8, kind, "execution_route") or std.mem.eql(u8, kind, "workspace_wait") or std.mem.eql(u8, kind, "workspace_delegation")) @compileError("immutable native records are created once");
+        if (comptime std.mem.eql(u8, kind, "artifact") or std.mem.eql(u8, kind, "attempt") or std.mem.eql(u8, kind, "origin") or std.mem.eql(u8, kind, "workspace_program") or std.mem.eql(u8, kind, "workspace_value") or std.mem.eql(u8, kind, "workspace_view") or std.mem.eql(u8, kind, "workspace_port") or std.mem.eql(u8, kind, "workspace_port_reply") or std.mem.eql(u8, kind, "execution_route") or std.mem.eql(u8, kind, "workspace_wait") or std.mem.eql(u8, kind, "workspace_delegation") or std.mem.eql(u8, kind, "workspace_reply")) @compileError("immutable native records are created once");
         try self.writing();
         errdefer self.rollback();
         const body = try contracts.encodeOwned(T, self.allocator, value);
