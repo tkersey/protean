@@ -363,9 +363,9 @@ peers. The peers run copied binaries under OS execution/file boundaries, using
 controlled provider replies, real transport, kills/restarts, cancellation, tool
 construction/reuse, and independently altered archives. No paid model calls run.
 The complete aggregate remains `check-native`. CI distributes its existing checks
-across the same three runners: authoring also runs `check-native-owner` and the
-workspace program/semantics checks; native runs `check-native-packaged`; downstream
-keeps its independent build. Source accounting starts independently; the terminal
+across four runners: authoring also runs `check-native-owner` and `check-native-https`;
+workspace runs the program/semantics checks; native runs `check-native-executable`;
+downstream keeps its independent build. Source accounting starts independently; the terminal
 gate requires it and all qualification lanes and retains the 360-second maximum.
 The packaged adaptive peer runs its independent controller/recovery and workspace
 groups concurrently, with separate state, snapshot, and HTTPS fixtures. Both
