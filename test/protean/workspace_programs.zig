@@ -470,6 +470,57 @@ fn expectWorkInputHistoryBound(service: anytype, a: std.mem.Allocator, task: nat
     try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(a, task, index.records.items));
 }
 
+fn expectWorkCancellationReasonBound(service: anytype, a: std.mem.Allocator, child: native.workspace.Work) !void {
+    try std.testing.expect(child.cancellation_applied and !child.terminal() and child.current_occurrence == null);
+    const store = &service.namespace.store;
+    var manifest_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
+    const index = try store.archiveIndex(a, child.task, .{ .digest = manifest_digest, .bytes = service.assets.manifest.len });
+    var graph = try data.state_image.decodeGraph(a, try store.object(a, child.checkpoint, null));
+    defer graph.deinit();
+    const nodes = try a.dupe(data.process_state.Node, graph.state.nodes);
+    defer a.free(nodes);
+    graph.state.nodes = nodes;
+    var cursor = graph.state.roots.exit orelse return error.MissingCancellation;
+    while (nodes[@intCast(cursor.id)].record.exit.outer) |outer| cursor = outer;
+    nodes[@intCast(cursor.id)].record.exit.cancellation = .{ .text = "different kernel reason" };
+    try store.begin();
+    defer store.rollback();
+    var forged = child;
+    forged.checkpoint = try store.putObject(try data.state_image.emit(a, graph.state));
+    try store.putRecord(native.workspace.Work, "workspace_work", child.id, child.task, forged);
+    var operations = try store.database.prepare("SELECT p.id,o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?", &.{.{ .blob = &child.task }});
+    defer operations.deinit();
+    var changed: usize = 0;
+    while (try operations.step() == .row) {
+        var receipt = (try contracts.decodeOwned(native.testing.state.Receipt, a, try operations.bytes(1))).value;
+        if (receipt.workspace_kind != .work or !std.meta.eql(receipt.workspace, child.id)) continue;
+        var observation = (try contracts.decodeOwned(native.workspace.WorkObservation, a, try store.object(a, receipt.workspace_observation.?, null))).value;
+        if (observation.work.execution_revision != child.execution_revision) continue;
+        observation.work.checkpoint = forged.checkpoint;
+        const snapshot = try store.putObject(try contracts.encodeOwned(native.workspace.WorkObservation, a, observation));
+        receipt.workspace_observation = snapshot;
+        const rewritten = try store.putObject(try contracts.encodeOwned(native.testing.state.Receipt, a, receipt));
+        try store.database.run("UPDATE operations SET receipt=? WHERE id=?", &.{ .{ .blob = &rewritten.digest }, .{ .text = try operations.bytes(0) } });
+        var events = try store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq=?", &.{ .{ .blob = &child.task }, .{ .integer = @intCast(observation.work.event_watermark) } });
+        defer events.deinit();
+        try std.testing.expect(try events.step() == .row);
+        var event_value = (try contracts.decodeOwned(native.testing.state.Event, a, try events.bytes(0))).value;
+        const publications = try a.dupe(native.testing.state.WorkPublication, event_value.workspace_publications.items);
+        for (publications) |*item| if (std.meta.eql(item.work, child.id)) {
+            item.observation = snapshot.digest;
+        };
+        event_value.workspace_publications.items = publications;
+        const event_ref = try store.putObject(try contracts.encodeOwned(native.testing.state.Event, a, event_value));
+        try store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &event_ref.digest }, .{ .blob = &child.task }, .{ .integer = @intCast(event_value.seq) } });
+        changed += 1;
+    }
+    try std.testing.expect(changed != 0);
+    // Native reason, command, event control facts and operation identity stay
+    // unchanged; only the kernel checkpoint and its content references differ.
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(a, child.task, index.records.items));
+}
+
 fn expectInteractionReplyBound(service: anytype, a: std.mem.Allocator, task: native.testing.state.TaskId, operation_id: []const u8) !void {
     const store = &service.namespace.store;
     var manifest_digest: [32]u8 = undefined;
@@ -1055,6 +1106,7 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     var cancelling = try service.workspaceWork(scratch, parent.receipt.task, disposal_id);
     defer cancelling.deinit();
     try std.testing.expect(cancelling.value.cancellation_applied and !cancelling.value.terminal());
+    try expectWorkCancellationReasonBound(&service, scratch, cancelling.value);
     _ = try service.workspaceControl(scratch, "disposal-cancel-again", parent.receipt.task, disposal_id, cancelling.value.execution_revision, cancelling.value.control_revision, .{ .cancel = .{ .bytes = "different reason" } });
     var saw_cleanup_port = false;
     var disposal_complete = false;
@@ -1161,7 +1213,7 @@ const ContextApplication = struct {
         defer command.deinit();
         // This fixture's compiled application accepts the command as its root
         // input. The production adapter authenticates a captured model action.
-        return contracts.encodeOwned(native.workspace.Authorized, ctx.allocator, .{ .command = command.value, .snapshot = ctx.resources[0], .catalog = if (ctx.resources.len > 1) ctx.resources[1] else null });
+        return contracts.encodeOwned(native.workspace.Authorized, ctx.allocator, .{ .command = command.value, .snapshot = ctx.resources[0], .catalog = if (ctx.resources.len > 1) ctx.resources[1] else null, .input = if (ctx.resources.len > 2) ctx.resources[2] else null });
     }
     fn payloadSchema(a: std.mem.Allocator) ![]u8 {
         return native.values.schemaBytes(ContextTypes.Input, a);
@@ -1202,8 +1254,12 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
     _ = try data.component.encode(a, component, component_bytes);
     const catalog = try contracts.encodeOwned(contracts.tool_construction.Catalog, a, .{ .items = &.{.{ .id = .{ .bytes = "gcd" }, .object = .{ .bytes = component_bytes } }} });
     defer a.free(catalog);
+    const compact_schema = try data.schema.encodeOwned(a, &.{ .{ .array = .{ .element = 1, .length = 1_000_000_000 } }, .unit }, 0);
+    defer a.free(compact_schema);
+    const frozen_input = try contracts.encodeOwned(contracts.tool_construction.Input, a, .{ .schema = .{ .bytes = compact_schema }, .value = .{ .bytes = "" } });
+    defer a.free(frozen_input);
     var grants = [_]native.registry.Grant{.{ .identity = "workspace-context", .resource_role = "workspace", .resource_identity = undefined }};
-    const profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "context-test", .resources = &.{ snapshot, catalog }, .authority = .{ .grants = &grants, .principal = "test", .tenant = "test" } };
+    const profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "context-test", .resources = &.{ snapshot, catalog, frozen_input }, .authority = .{ .grants = &grants, .principal = "test", .tenant = "test" } };
     grants[0].resource_identity = try profile.resourceIdentity(a, application.image_identity);
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
@@ -1255,6 +1311,36 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
     // Mutation replies re-project the original operation receipt, including
     // acquisition provenance, even after the controller has completed.
     try service.validateWorkspace(scratch, parent.receipt.task);
+
+    // The source and value routes expose the same compact frozen input. A
+    // tiny source window must not allocate its billion logical JSON nodes.
+    const frozen_parent = try service.submit(scratch, "frozen-input-parent", .{ .context = .{ .materialize = .{ .input = .{ .authorized_input = .{ .bytes = "compact" } }, .sources = .{ .items = &.{} } } } });
+    for (0..32) |_| {
+        const step = try service.pump(scratch);
+        try std.testing.expect(step != .work);
+        if (step == .idle or step == .waiting) break;
+    }
+    var frozen_finished = try service.task(scratch, frozen_parent.receipt.task);
+    defer frozen_finished.deinit();
+    try std.testing.expectEqual(.completed, frozen_finished.value.outcome_kind);
+    var frozen_reply = try contracts.decodeOwned(ContextTypes.Output, scratch, try namespace.store.object(scratch, frozen_finished.value.result.?, null));
+    defer frozen_reply.deinit();
+    try std.testing.expectEqual(.observed, frozen_reply.value.disposition);
+    var frozen_observation = try native.json.parse(scratch, frozen_reply.value.observation_json.bytes, .{});
+    defer frozen_observation.deinit();
+    const frozen_source = try native.values.fromJson(contracts.workspace.Ref, scratch, frozen_observation.value.object.get("source").?);
+    const page_buffer = try a.alloc(u8, 16 * 1024 * 1024);
+    defer a.free(page_buffer);
+    for ([_]u64{ 0, 2_999_999_998 }, [_][]const u8{ "[", "{}]" }) |offset, expected| {
+        var bounded = std.heap.FixedBufferAllocator.init(page_buffer);
+        const paged = try service.workspaceCommand(bounded.allocator(), "frozen-source-page", frozen_parent.receipt.task, .{ .context = .{ .expand = .{ .reference = frozen_source, .page = .{ .offset = offset, .maximum = @intCast(expected.len) } } } });
+        try std.testing.expectEqual(.observed, paged.disposition);
+        var parsed = try native.json.parse(scratch, paged.observation_json.bytes, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings(expected, parsed.value.object.get("text").?.string);
+        try std.testing.expectEqual(@as(u64, 3_000_000_001), try native.json.numberInteger(u64, parsed.value.object.get("total_bytes").?.number_string));
+    }
+    try service.validateWorkspace(scratch, frozen_parent.receipt.task);
 
     // A settled mutation cannot be rewritten into a rejection while its
     // committed receipt survives. A genuine rejection has no such receipt.

@@ -63,7 +63,8 @@ claims against Kosmos; a changed reply and recomputed digest are insufficient.
 Scope and wait observations also use the retained event prefix. Captured native
 rejections carry diagnostics only, with no result or authority references.
 Applied-cancellation markers on both root and child checkpoints must agree with
-the kernel's terminal reason or unchanged zero-quantum cancellation result.
+the kernel's actual reason, including the outermost exit of unfinished cleanup.
+Admission reads the public checkpoint graph without advancing cleanup.
 Parent-wait eligibility and queue capacity are prepared before
 the transaction commits. A failure while notifying a child after capture publication
 fences the owner; the durable capture remains available after reopening and cannot
@@ -124,11 +125,11 @@ is distinguished from concrete execution where it supplies the argument.
 | WORK-09, WORK-10 | Independent source/native/WASM fixtures preserve distinct attachments, shallow behavior and explicit successor-state capabilities. |
 | WORK-11 | Ordered collection includes repeated, completed, cancelled, pending and missing identities without cloning the parent. |
 | WORK-12, WORK-13 | No image-replacement operation exists; records bind exact admitted program/checkpoint. Ordinary quantum control is separate from generation-bound port commands; stale/no-port controls reject. |
-| WORK-14 | Real cancellation cleanup yields, exposes a request, yields again and completes; inspection reports pending cleanup until terminal disposal. Explicit parking survives older cancellation; fresh parent cancellation resumes it after reopening with a compatible profile. |
+| WORK-14 | Real cancellation cleanup yields, exposes a request, yields again and completes; inspection reports pending cleanup until terminal disposal. Rehashed checkpoints with a different cancellation reason reject for roots and children. Explicit parking survives older cancellation; fresh parent cancellation resumes it after reopening with a compatible profile. |
 | CTX-01, CTX-02, CTX-08 | Partial snapshot omits a rare exception; full source expansion reveals it; a different task cannot expand the same digest. |
 | CTX-03, CTX-04 | Equal payloads from different work retain distinct derivations; inline inputs and subsequent computation retain hypothesis ancestry. |
-| CTX-05–07 | Adaptive context fixtures exercise view epochs, pair preservation, policy/user messages, skill unloading, model change and retained opaque-content rules; preparation uses immutable captures. |
-| CTX-09 | Existing long catalogs/input/resources and large prompt/result tests retained; workspace source/value/view pages report completeness and coverage. |
+| CTX-05–07 | Adaptive context fixtures exercise view epochs, pair preservation, rejected undeclared calls, policy/user messages, skill unloading, model change and retained opaque-content rules; preparation uses immutable captures. |
+| CTX-09 | Existing long catalogs/input/resources and large prompt/result tests retained; workspace source/value/view pages report completeness and coverage. First and final source pages of a billion-unit frozen input fit a 16 MiB allocator. |
 | CTX-10 | Exact snapshot/resource and ancestry checks in `workspaceValueReference`, `workspaceSnapshotAccess`, archive admission and the existing profile binding; no cross-universe value cache. |
 | OWN-02–07, OWN-10, OWN-14 | Delegation fixture uses the same typed input directly, from pure computation and from explicit inference; distinct occurrences, wrong callback rejection, parent amendment, pre-dispatch revocation, malformed capture and cancellation/unknown cases. Rehashed answer provenance, omitted answers and an alternative same-program checkpoint are rejected; valid unavailable answers and model/snapshot handoffs survive recovery. |
 | OWN-08 | Actual SQLite write denial after kernel publication fences the owner and prevents subsequent dispatch. |

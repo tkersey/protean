@@ -436,8 +436,12 @@ pub fn Projection(comptime P: type) type {
         }
 
         fn ordinal(name: []const u8) !usize {
+            return declarationOrdinal(name) orelse error.InvalidContext;
+        }
+
+        fn declarationOrdinal(name: []const u8) ?usize {
             for (P.allDeclarations().items, 0..) |declaration, index| if (equal(name, declaration.name.bytes)) return index;
-            return error.InvalidContext;
+            return null;
         }
 
         fn fillOrigins(a: std.mem.Allocator, origins: *std.ArrayList(P.ContextOrigin), count: usize, watermark: u64) !void {
@@ -543,7 +547,10 @@ pub fn Projection(comptime P: type) type {
                 var item = value;
                 var retain = true;
                 if (kind(item, "function_call")) {
-                    retain = P.retained_control_calls[try ordinal(try json.text(try field(item, "name")))] or origin.watermark >= selected_at - 1;
+                    // Rejected undeclared calls remain valid replay history.
+                    // Only authored declarations can grant control retention.
+                    const control = if (declarationOrdinal(try json.text(try field(item, "name")))) |index| P.retained_control_calls[index] else false;
+                    retain = control or origin.watermark >= selected_at - 1;
                     const id = try json.text(try field(item, "call_id"));
                     if (calls.contains(id)) return error.CallPairMismatch;
                     try calls.put(id, retain);

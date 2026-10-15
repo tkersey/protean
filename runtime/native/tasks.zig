@@ -2605,36 +2605,39 @@ pub fn Service(comptime Types: type) type {
             }
         }
 
-        /// The applied marker is a claim about Kosmos state, for roots and
-        /// child work alike. A zero-quantum repeat must preserve that state.
-        fn validateCancellation(a: std.mem.Allocator, driver: *evaluator.Driver, value: anytype, outcome: data.invocation.Outcome, observed: []const u8) !void {
+        /// Bind native intent to the actual kernel cancellation, for roots and
+        /// children alike. A repeated cancel preserves any existing reason and
+        /// therefore cannot establish this agreement.
+        fn validateCancellation(a: std.mem.Allocator, value: anytype, outcome: data.invocation.Outcome, checkpoint: []const u8) !void {
             if (value.cancellation_applied and value.cancellation == null) return error.InvalidArchive;
-            const terminal_cancellation: ?data.invocation.Reason = switch (outcome) {
+            var graph: ?data.state_image.Owned = null;
+            defer if (graph) |*decoded| decoded.deinit();
+            const actual: ?data.invocation.Reason = switch (outcome) {
                 .cancelled => |cancelled| cancelled.reason,
                 .failed => |failure| failure.cancellation,
-                else => null,
-            };
-            if (terminal_cancellation) |reason| {
-                const intent = value.cancellation orelse return error.InvalidArchive;
-                if (!value.cancellation_applied or reason != .text or !same(reason.text, intent.bytes)) return error.InvalidArchive;
-            }
-            if (value.cancellation_applied) switch (outcome) {
-                .cancelled => {},
-                .failed => |failure| if (failure.cancellation == null) return error.InvalidArchive,
-                .completed => return error.InvalidArchive,
-                else => {
-                    // The imported marker claims Kosmos already received this
-                    // control. Let Kosmos establish that it is a no-op without
-                    // executing authored steps or dispatching any native work.
-                    // The next publication replaces the borrowed checkpoint.
-                    // Its exact persisted digest/length remain our comparison.
-                    const next = try driver.drive(a, .{ .cancel = .{ .text = value.cancellation.?.bytes } }, 0);
-                    const repeated = next.outcome;
-                    defer a.free(repeated);
-                    if (!same(repeated, observed) or next.checkpoint.len != value.checkpoint.bytes or
-                        !same(&storage.digest(next.checkpoint), &value.checkpoint.digest)) return error.InvalidArchive;
+                .completed => null,
+                else => blk: {
+                    // The matching program has already admitted this checkpoint.
+                    // Read its public graph without advancing authored cleanup.
+                    graph = try data.state_image.decodeGraph(a, checkpoint);
+                    var cursor = graph.?.state.roots.exit orelse break :blk null;
+                    const nodes = graph.?.state.nodes;
+                    for (0..nodes.len) |_| {
+                        if (cursor.id >= nodes.len) return error.InvalidArchive;
+                        const node = nodes[@intCast(cursor.id)].record;
+                        if (node != .exit) return error.InvalidArchive;
+                        if (node.exit.outer) |outer| {
+                            cursor = outer;
+                        } else break :blk node.exit.cancellation;
+                    }
+                    return error.InvalidArchive;
                 },
             };
+            if (value.cancellation_applied != (actual != null)) return error.InvalidArchive;
+            if (actual) |reason| {
+                const intent = value.cancellation orelse return error.InvalidArchive;
+                if (reason != .text or !same(reason.text, intent.bytes)) return error.InvalidArchive;
+            }
         }
 
         fn validateImportedState(self: *Self, a: std.mem.Allocator, value: state.Task, pending: ?occurrence.Occurrence) !void {
@@ -2655,7 +2658,7 @@ pub fn Service(comptime Types: type) type {
             var decoded = try data.invocation.decode(data.invocation.Outcome, a, observed);
             defer decoded.deinit();
             if (!same(@tagName(decoded.value), @tagName(value.outcome_kind))) return error.InvalidArchive;
-            try validateCancellation(a, driver, value, decoded.value, observed);
+            try validateCancellation(a, value, decoded.value, checkpoint);
             switch (decoded.value) {
                 .requested => |requested| {
                     const current = pending orelse return error.InvalidArchive;
@@ -2974,9 +2977,7 @@ pub fn Service(comptime Types: type) type {
                             return .{ .observation = try wp.page(a, text, request.page) };
                         }
                         if (request.reference.kind == .source) {
-                            const text = try self.workspaceSource(a, task_id, request.reference);
-                            defer a.free(text);
-                            return .{ .observation = try wp.page(a, text, request.page) };
+                            return .{ .observation = try self.workspaceSourcePage(a, task_id, request.reference, request.page) };
                         }
                         const value = try self.workspaceValueReference(a, task_id, request.reference);
                         const schema = try self.store().object(a, value.schema, null);
@@ -3247,7 +3248,36 @@ pub fn Service(comptime Types: type) type {
             return admitted;
         }
 
+        const WorkspaceSource = union(enum) { text: []u8, value: WorkspaceValueReference };
+
         fn workspaceSource(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, ref: wc.Ref) ![]u8 {
+            return switch (try self.resolveWorkspaceSource(a, task_id, ref)) {
+                .text => |text| text,
+                .value => |checked| blk: {
+                    const schema = try self.store().object(a, checked.schema, null);
+                    defer a.free(schema);
+                    const value = try self.store().object(a, checked.value, null);
+                    defer a.free(value);
+                    var decoded = try @import("dynamic_values.zig").decode(a, schema, value);
+                    defer decoded.deinit();
+                    break :blk try json.canonical(a, decoded.value);
+                },
+            };
+        }
+
+        fn workspaceSourcePage(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, ref: wc.Ref, requested: wc.Page) !json.Value {
+            return switch (try self.resolveWorkspaceSource(a, task_id, ref)) {
+                .text => |text| blk: {
+                    defer a.free(text);
+                    break :blk try wp.page(a, text, requested);
+                },
+                .value => |value| try self.workspacePayloadPage(a, value.schema, value.value, requested),
+            };
+        }
+
+        /// Resolve and authorize before choosing complete text or a bounded
+        /// projection. Frozen typed inputs keep their compact representation.
+        fn resolveWorkspaceSource(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, ref: wc.Ref) !WorkspaceSource {
             const id = try wp.identity(ref, .source);
             var acquired = try self.store().database.prepare("SELECT id FROM records WHERE task=? AND kind='workspace_value' ORDER BY id", &.{.{ .blob = &task_id }});
             defer acquired.deinit();
@@ -3257,16 +3287,9 @@ pub fn Service(comptime Types: type) type {
                 var record_value = try self.record(workspace.Value, a, "workspace_value", key[0..32].*, task_id);
                 defer record_value.deinit();
                 if (!std.meta.eql(record_value.value.description.provenance.digest, id)) continue;
-                _ = try self.workspaceValueReference(a, task_id, try wp.reference(a, .value, record_value.value.artifact.digest));
+                const checked = try self.workspaceValueReference(a, task_id, try wp.reference(a, .value, record_value.value.artifact.digest));
                 if (record_value.value.derivation.frozen_input != null) {
-                    const checked = try self.workspaceValueReference(a, task_id, try wp.reference(a, .value, record_value.value.artifact.digest));
-                    const schema = try self.store().object(a, checked.schema, null);
-                    defer a.free(schema);
-                    const value = try self.store().object(a, checked.value, null);
-                    defer a.free(value);
-                    var decoded = try @import("dynamic_values.zig").decode(a, schema, value);
-                    defer decoded.deinit();
-                    return json.canonical(a, decoded.value);
+                    return .{ .value = checked };
                 }
                 const origin = record_value.value.derivation.acquisition orelse continue;
                 const bytes = try self.store().object(a, origin.snapshot, null);
@@ -3274,8 +3297,8 @@ pub fn Service(comptime Types: type) type {
                 var source = try @import("repository.zig").Snapshot.openBorrowed(a, bytes);
                 defer source.deinit();
                 const file = source.get(origin.path.bytes) orelse return error.CorruptState;
-                if (!std.unicode.utf8ValidateSlice(file.contents.bytes)) return json.canonical(a, try values.toJson(contracts.Bytes(null), a, file.contents));
-                return a.dupe(u8, file.contents.bytes);
+                if (!std.unicode.utf8ValidateSlice(file.contents.bytes)) return .{ .text = try json.canonical(a, try values.toJson(contracts.Bytes(null), a, file.contents)) };
+                return .{ .text = try a.dupe(u8, file.contents.bytes) };
             }
             var query = try self.store().database.prepare("SELECT id FROM records WHERE task=? AND kind='workspace_program' ORDER BY id", &.{.{ .blob = &task_id }});
             defer query.deinit();
@@ -3284,7 +3307,7 @@ pub fn Service(comptime Types: type) type {
                 if (key.len != 32) return error.CorruptState;
                 var program = try self.record(workspace.Program, a, "workspace_program", key[0..32].*, task_id);
                 defer program.deinit();
-                if (std.meta.eql(program.value.description.source.digest, id)) return self.store().object(a, program.value.description.source, null);
+                if (std.meta.eql(program.value.description.source.digest, id)) return .{ .text = try self.store().object(a, program.value.description.source, null) };
             }
             return error.ArtifactUnavailable;
         }
@@ -4904,7 +4927,7 @@ pub fn Service(comptime Types: type) type {
             var observed = try data.invocation.decode(data.invocation.Outcome, a, publication.outcome);
             defer observed.deinit();
             if (!same(@tagName(observed.value), @tagName(value.outcome_kind))) return error.InvalidArchive;
-            try validateCancellation(a, driver, value, observed.value, publication.outcome);
+            try validateCancellation(a, value, observed.value, publication.checkpoint);
             switch (observed.value) {
                 .requested => |pending| {
                     const id = value.current_occurrence orelse return error.InvalidArchive;

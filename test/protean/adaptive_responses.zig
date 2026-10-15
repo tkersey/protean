@@ -114,6 +114,35 @@ fn Fixture(comptime P: type) type {
             request.results.items = settled;
         }
 
+        fn rejectedHistory(ctx: native.registry.ProjectionContext, objects: *Objects, original: P.AdaptiveRequest) !void {
+            const a = ctx.allocator;
+            var request = original;
+            for ([_][]const u8{ "old-rejected", "recent-rejected" }, 0..) |id, index| {
+                if (index != 0) try advance(ctx, objects, &request, "between-rejections", "OLD-REASONING");
+                const body = try std.fmt.allocPrint(a, "{{\"status\":\"completed\",\"error\":null,\"output\":[{{\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"{s}\",\"name\":\"bogus\",\"arguments\":\"{{}}\"}}]}}", .{id});
+                const result = try capture(ctx, objects, request, body);
+                try std.testing.expectEqual(.complete, result.replay_status);
+                try std.testing.expectEqual(.invalid, std.meta.activeTag(result.result.output.items.items[0].function_call.decoded_action));
+                request.plan.prior = result.replay;
+                request.plan.watermark = result.replay.?.watermark;
+                const settled = try a.alloc(P.ToolResult, 1);
+                settled[0] = .{ .call_id = .{ .bytes = id }, .output = .{ .bytes = "Rejected undeclared action." } };
+                request.results.items = settled;
+            }
+            request.plan.epoch += 1;
+            request.plan.reason = .view_change;
+            request.plan.research = .{ .view = .{ .kind = .view, .id = .{ .bytes = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef" } }, .selected_at = request.plan.watermark };
+            const selected = try native.json.canonical(a, try http(a, try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, request))));
+            try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, selected, "old-rejected"));
+            try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, selected, "recent-rejected"));
+            try std.testing.expect(std.mem.indexOf(u8, selected, "Rejected undeclared action.") != null);
+            var unpaired = request;
+            unpaired.results.items = &.{};
+            try std.testing.expectError(error.MissingCallResult, Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, unpaired)));
+            try advance(ctx, objects, &request, "after-rejected-view", "CURRENT-REASONING");
+            _ = try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, request));
+        }
+
         pub fn preservation(comptime clarification_only: bool) !void {
             var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
             defer arena.deinit();
@@ -272,6 +301,7 @@ fn Fixture(comptime P: type) type {
             request.plan.prior = second.replay;
             request.plan.watermark = second.replay.?.watermark;
             request.results.items = &.{.{ .call_id = .{ .bytes = "call-2" }, .output = .{ .bytes = "Observed invariant retained." } }};
+            if (!clarification_only) try rejectedHistory(ctx, &objects, request);
             if (clarification_only) {
                 // Retention follows the authored role, independently of the
                 // provider function's spelling. The application marks ask this way.
