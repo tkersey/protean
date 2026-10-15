@@ -122,18 +122,35 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8, limits: Limits) Er
         else => error.InvalidJson,
     };
     errdefer parsed.deinit();
-    try memberBounds(parsed.value, limits.members);
+    try memberBounds(allocator, parsed.value, limits.members);
     return parsed;
 }
 
-fn memberBounds(value: Value, maximum: usize) Error!void {
-    switch (value) {
-        .object => |map| {
-            if (map.count() > maximum) return error.Capacity;
-            for (map.values()) |child| try memberBounds(child, maximum);
-        },
-        .array => |array| for (array.items) |child| try memberBounds(child, maximum),
-        else => {},
+fn memberBounds(allocator: std.mem.Allocator, value: Value, maximum: usize) Error!void {
+    const Frame = struct { items: []const Value, index: usize = 0 };
+    var stack: std.ArrayList(Frame) = .empty;
+    defer stack.deinit(allocator);
+    const root = [_]Value{value};
+    var cursor: Frame = .{ .items = &root };
+    while (true) {
+        if (cursor.index == cursor.items.len) {
+            cursor = stack.pop() orelse return;
+            continue;
+        }
+        const child = cursor.items[cursor.index];
+        cursor.index += 1;
+        const children: []const Value = switch (child) {
+            .object => |map| blk: {
+                if (map.count() > maximum) return error.Capacity;
+                break :blk map.values();
+            },
+            .array => |array| array.items,
+            else => continue,
+        };
+        if (children.len != 0) {
+            try stack.append(allocator, cursor);
+            cursor = .{ .items = children };
+        }
     }
 }
 
@@ -291,34 +308,90 @@ pub fn canonicalBounded(allocator: std.mem.Allocator, value: Value, maximum: usi
     return bytes;
 }
 fn writeCanonical(allocator: std.mem.Allocator, value: Value, writer: *std.Io.Writer) !void {
-    switch (value) {
-        .object => |map| {
-            const keys = try allocator.dupe([]const u8, map.keys());
-            defer allocator.free(keys);
-            std.mem.sort([]const u8, keys, {}, struct {
-                fn less(_: void, a: []const u8, b: []const u8) bool {
-                    return std.mem.lessThan(u8, a, b);
-                }
-            }.less);
-            try writer.writeByte('{');
-            for (keys, 0..) |key, i| {
-                if (i != 0) try writer.writeByte(',');
-                try std.json.Stringify.value(key, .{}, writer);
-                try writer.writeByte(':');
-                try writeCanonical(allocator, map.get(key).?, writer);
-            }
-            try writer.writeByte('}');
-        },
-        .array => |array| {
-            try writer.writeByte('[');
-            for (array.items, 0..) |child, i| {
-                if (i != 0) try writer.writeByte(',');
-                try writeCanonical(allocator, child, writer);
-            }
-            try writer.writeByte(']');
-        },
-        else => try std.json.Stringify.value(value, .{}, writer),
+    const Frame = struct { value: Value, index: usize = 0, keys: ?[][]const u8 = null };
+    var stack: std.ArrayList(Frame) = .empty;
+    defer {
+        for (stack.items) |cursor| if (cursor.keys) |keys| allocator.free(keys);
+        stack.deinit(allocator);
     }
+    var next: ?Value = value;
+    while (next != null or stack.items.len != 0) {
+        if (next) |item| {
+            next = null;
+            switch (item) {
+                .object => |map| {
+                    const keys = try allocator.dupe([]const u8, map.keys());
+                    errdefer allocator.free(keys);
+                    std.mem.sort([]const u8, keys, {}, struct {
+                        fn less(_: void, a: []const u8, b: []const u8) bool {
+                            return std.mem.lessThan(u8, a, b);
+                        }
+                    }.less);
+                    try writer.writeByte('{');
+                    try stack.append(allocator, .{ .value = item, .keys = keys });
+                },
+                .array => {
+                    try writer.writeByte('[');
+                    try stack.append(allocator, .{ .value = item });
+                },
+                else => try std.json.Stringify.value(item, .{}, writer),
+            }
+            continue;
+        }
+        const cursor = &stack.items[stack.items.len - 1];
+        const length = if (cursor.keys) |keys| keys.len else cursor.value.array.items.len;
+        if (cursor.index == length) {
+            try writer.writeByte(if (cursor.keys != null) '}' else ']');
+            if (stack.pop().?.keys) |keys| allocator.free(keys);
+            continue;
+        }
+        if (cursor.index != 0) try writer.writeByte(',');
+        if (cursor.keys) |keys| {
+            const key = keys[cursor.index];
+            try std.json.Stringify.value(key, .{}, writer);
+            try writer.writeByte(':');
+            next = cursor.value.object.get(key).?;
+        } else next = cursor.value.array.items[cursor.index];
+        cursor.index += 1;
+    }
+}
+
+test "recursive JSON stays stack safe through parsing and canonical serialization" {
+    const a = std.testing.allocator;
+    const depth = 50_000;
+    const Form = struct { prefix: []const u8, suffix: []const u8, canonical_prefix: []const u8, canonical_suffix: []const u8 };
+    for ([_]Form{
+        .{ .prefix = "[", .suffix = "]", .canonical_prefix = "[", .canonical_suffix = "]" },
+        .{ .prefix = "{\"value\":", .suffix = ",\"tag\":1}", .canonical_prefix = "{\"tag\":1,\"value\":", .canonical_suffix = "}" },
+    }) |form| {
+        const document = try a.alloc(u8, depth * (form.prefix.len + form.suffix.len) + 1);
+        defer a.free(document);
+        for (0..depth) |i| @memcpy(document[i * form.prefix.len ..][0..form.prefix.len], form.prefix);
+        const middle = depth * form.prefix.len;
+        document[middle] = '0';
+        for (0..depth) |i| @memcpy(document[middle + 1 + i * form.suffix.len ..][0..form.suffix.len], form.suffix);
+        var parsed = try parse(a, document, .{ .bytes = document.len, .depth = depth, .tokens = document.len, .members = document.len });
+        defer parsed.deinit();
+        const encoded = try canonicalBounded(a, parsed.value, document.len);
+        defer a.free(encoded);
+        try std.testing.expectEqual(document.len, encoded.len);
+        for (0..depth) |i| try std.testing.expectEqualStrings(form.canonical_prefix, encoded[i * form.canonical_prefix.len ..][0..form.canonical_prefix.len]);
+        const canonical_middle = depth * form.canonical_prefix.len;
+        try std.testing.expectEqual(@as(u8, '0'), encoded[canonical_middle]);
+        for (0..depth) |i| try std.testing.expectEqualStrings(form.canonical_suffix, encoded[canonical_middle + 1 + i * form.canonical_suffix.len ..][0..form.canonical_suffix.len]);
+    }
+}
+
+fn canonicalAllocationProbe(a: std.mem.Allocator) !void {
+    var parsed = try parse(a, "{\"z\":[{\"b\":2,\"a\":1}],\"a\":{\"q\":null}}", .{});
+    defer parsed.deinit();
+    const encoded = try canonicalBounded(a, parsed.value, 128);
+    defer a.free(encoded);
+    try std.testing.expectEqualStrings("{\"a\":{\"q\":null},\"z\":[{\"a\":1,\"b\":2}]}", encoded);
+}
+
+test "canonical traversal releases every owned key list on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, canonicalAllocationProbe, .{});
 }
 
 test "strict JSON preserves integers and rejects duplicate keys unicode and resource excess" {

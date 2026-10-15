@@ -88,11 +88,30 @@ test "BUILD-07 source build allocation fault sweep releases partial owners and c
 
 test "WORK-06 WORK-07 generated driver reuses a template with isolated mutable aliases after one prefix" {
     const a = std.testing.allocator;
-    for (0..3) |variant| {
+    for (0..5) |variant| {
         const multi = variant != 0;
         var builder = source.Builder.init(a);
         defer builder.deinit();
-        const module = if (variant == 2) try @import("workspace_sources.zig").mutableAlternatives(&builder) else try alternatives(&builder, multi);
+        var module = if (variant == 2 or variant == 3) try @import("workspace_sources.zig").mutableAlternatives(&builder) else try alternatives(&builder, multi);
+        if (variant >= 3) {
+            const sparse = try builder.allocator().dupe(Id, &.{std.math.maxInt(Id) - 1});
+            for (builder.schemas.items) |*schema| if (schema.* == .internal) switch (schema.internal) {
+                .region => |*id| id.* = sparse[0],
+                .cell => |*cell| cell.region = sparse[0],
+                .computation => |*computation| if (computation.regions.len != 0) {
+                    computation.regions = sparse;
+                },
+                else => {},
+            };
+            for (builder.functions.items) |*function| if (function.regions.len != 0) {
+                function.regions = sparse;
+            };
+            for (builder.terms.items) |*term| if (term.* == .with_region) {
+                term.with_region.region = sparse[0];
+            };
+            builder.region_count = std.math.maxInt(Id);
+            module = builder.module(module.entry, module.failure);
+        }
         const text = try native.source_records.encode(a, module);
         defer a.free(text);
         var diagnostic: native.program_construction.Diagnostic = .{};
@@ -152,6 +171,68 @@ test "WORK-08 an exclusive resource cannot be captured by a generated alternativ
     defer a.free(text);
     var diagnostic: native.program_construction.Diagnostic = .{};
     try std.testing.expectError(error.InvalidOwnership, native.program_construction.buildExposed(a, text, &.{.{ .effect = 0, .class = .alternative }}, null, &diagnostic));
+}
+
+test "exposure carries capabilities through closed handler returns clauses and shallow successors" {
+    const a = std.testing.allocator;
+    for (0..3) |variant| {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const unit = try b.scalar(void);
+        const u = try b.scalar(u64);
+        const ask = try b.effect(.{ .identity = "example/handler-query", .payload = u, .result = u, .external = false });
+        const local = try b.effect(.{ .identity = "example/local", .payload = unit, .result = unit, .external = false });
+        const cap = try b.schema(.{ .internal = .{ .capability = local } });
+        const mode: data.program.Mode = if (variant == 2) .shallow else .deep;
+        const token = try b.schema(.{ .internal = .{ .resumption = .{ .effect = local, .input = unit, .answer = if (mode == .deep) u else unit, .effects = &.{ ask, local }, .capture_bound = &.{ unit, u, cap }, .handled = &.{local}, .escaping = if (mode == .shallow) &.{ask} else &.{}, .mode = mode, .use = .linear } } });
+        const helper = try b.declare(&.{u}, u, &.{ask}, &.{});
+        try b.define(helper, try b.term(.{ .perform = .{ .effect = ask, .payload = try b.reference(b.parameter(helper, 0)) } }));
+        const helper_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{u}, .result = u, .effects = &.{ask} } } });
+        const returns = try b.declare(&.{ u, unit }, u, &.{ask}, &.{});
+        const returned = try b.reference(b.parameter(returns, 0));
+        try b.define(returns, if (variant == 0) try b.term(.{ .apply = .{ .computation = try b.lambda(helper, helper_type), .arguments = &.{returned} } }) else try b.pure(returned));
+        const clause = try b.declare(&.{ u, unit, token }, u, &.{ ask, local }, &.{});
+        const handler = try b.handler(.{ .mode = mode, .input = unit, .answer = u, .return_function = returns, .clauses = &.{.{ .effect = local, .function = clause, .resumption = token }}, .state = &.{u}, .effects = &.{ ask, local } });
+        const answer = try b.variable(u);
+        const resumed = if (mode == .shallow)
+            try b.term(.{ .resume_with = .{ .resumption = try b.reference(b.parameter(clause, 2)), .argument = try b.constant(void, {}), .handler = handler, .state = &.{try b.reference(answer)} } })
+        else
+            try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(clause, 2)), .argument = try b.constant(void, {}) } });
+        try b.define(clause, if (variant == 0) resumed else try b.bind(answer, try b.term(.{ .call = .{ .function = helper, .arguments = &.{try b.reference(b.parameter(clause, 0))} } }), resumed));
+        const body = try b.declare(&.{cap}, unit, &.{local}, &.{});
+        try b.define(body, try b.term(.{ .perform = .{ .effect = local, .capability = try b.reference(b.parameter(body, 0)), .payload = try b.constant(void, {}) } }));
+        const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{cap}, .result = unit, .effects = &.{local} } } });
+        const entry = try b.declare(&.{unit}, u, &.{ ask, local }, &.{});
+        try b.define(entry, try b.term(.{ .handle = .{ .handler = handler, .body = try b.lambda(body, body_type), .state = &.{try b.constant(u64, 17)} } }));
+        b.effects.items[@intCast(ask)].external = true;
+        var baseline = try source.lower(a, b.module(entry, unit));
+        baseline.deinit();
+        b.effects.items[@intCast(ask)].external = false;
+        const text = try native.source_records.encode(a, b.module(entry, unit));
+        defer a.free(text);
+        var diagnostic: native.program_construction.Diagnostic = .{};
+        var built = native.program_construction.buildExposed(a, text, &.{.{ .effect = ask, .class = .input }}, null, &diagnostic) catch |err| {
+            std.debug.print("handler variant {d}: {s} {any}\n", .{ variant, @errorName(err), diagnostic });
+            return err;
+        };
+        defer built.deinit();
+        var suspended = try kosmos.invocation.invoke(a, .{ .image = built.image, .instance = .{ .initial_args = &.{} } });
+        defer suspended.deinit();
+        try std.testing.expectEqual(.requested, std.meta.activeTag(suspended.record));
+        var request = try data.invocation.decode(data.invocation.Request, a, suspended.record.requested.request);
+        defer request.deinit();
+        const expected = try contracts.encodeOwned(u64, a, 17);
+        defer a.free(expected);
+        try std.testing.expectEqualSlices(u8, expected, request.value.binding.payload);
+        const value = try contracts.encodeOwned(u64, a, 42);
+        defer a.free(value);
+        const reply = try data.invocation.encodeOwned(data.invocation.Result, a, .{ .request_identity = request.value.request_identity, .value = value });
+        defer a.free(reply);
+        var completed = try kosmos.invocation.invoke(a, .{ .image = built.image, .instance = .{ .state = suspended.record.requested.state.? }, .control = .{ .reply = reply } });
+        defer completed.deinit();
+        try std.testing.expectEqual(.completed, std.meta.activeTag(completed.record));
+        try std.testing.expectEqualSlices(u8, if (variant == 1) expected else value, completed.record.completed);
+    }
 }
 
 fn compile(a: std.mem.Allocator, b: *source.Builder, module: source.Module) !native.program_construction.Built {
@@ -314,6 +395,17 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     try std.testing.expect(cancelled.value.result == null);
     try service.park(scratch);
     try service.close(scratch);
+    var observation_profile = profile;
+    observation_profile.bytes = "different-launch-configuration";
+    service = try native.tasks.Service(OwnerTypes).init(a, io, &namespace, assets, &application, handlers, observation_profile);
+    var reader: native.client.Client(OwnerTypes) = .{ .service = &service };
+    var status_params = native.json.object();
+    try native.json.put(scratch, &status_params, "task_id", native.json.string(try std.fmt.allocPrint(scratch, "{s}", .{std.fmt.bytesToHex(parent.receipt.task, .lower)})));
+    const reopened_status = try reader.call(scratch, .@"task.status", status_params);
+    try std.testing.expect(!reopened_status.object.get("associated_work_disposed").?.bool);
+    _ = try reader.call(scratch, .@"task.result", status_params);
+    try std.testing.expectError(error.IncompatibleProfile, service.workspaceWork(scratch, parent.receipt.task, id));
+    try service.close(scratch);
     service = try native.tasks.Service(OwnerTypes).init(a, io, &namespace, assets, &application, handlers, profile);
     const recovered = try service.workspaceControl(scratch, "advance", parent.receipt.task, id, work.value.execution_revision, work.value.control_revision, .advance);
     try std.testing.expect(recovered.replayed);
@@ -453,6 +545,56 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
         .policy = .{},
     } } };
     const original_observation = try service.workspaceCommand(scratch, "interactive-start", parent.receipt.task, start_command);
+    // Paging reaches complete payloads, including retained failures, rather
+    // than paging an observation that has already truncated its preview.
+    var payload_builder = source.Builder.init(a);
+    defer payload_builder.deinit();
+    const payload_type = try payload_builder.schema(.text);
+    const payload_effect = try payload_builder.effect(.{ .identity = "example/large-payload", .payload = payload_type, .result = payload_type, .external = false });
+    const payload_entry = try payload_builder.declare(&.{payload_type}, payload_type, &.{payload_effect}, &.{});
+    const payload_result = try payload_builder.variable(payload_type);
+    try payload_builder.define(payload_entry, try payload_builder.bind(payload_result, try payload_builder.term(.{ .perform = .{ .effect = payload_effect, .payload = try payload_builder.reference(payload_builder.parameter(payload_entry, 0)) } }), try payload_builder.term(.{ .fail = try payload_builder.reference(payload_result) })));
+    const payload_source = try native.source_records.encode(scratch, payload_builder.module(payload_entry, payload_type));
+    const payload_program = try service.workspaceCommand(scratch, "payload-build", parent.receipt.task, .{ .program = .{ .build = .{ .source = .{ .json_text = .{ .bytes = payload_source } }, .source_kind = .source_records, .exposures = .{ .items = &.{.{ .effect = payload_effect, .class = .input }} } } } });
+    try std.testing.expect(payload_program.program != null);
+    const complete_payload = try scratch.alloc(u8, 20000);
+    @memset(complete_payload, 'x');
+    @memcpy(complete_payload[19996..], "TAIL");
+    const payload_wire = try contracts.encodeOwned(contracts.Utf8, scratch, .{ .bytes = complete_payload });
+    const payload_start = try service.workspaceStart(scratch, "payload-start", parent.receipt.task, try nativeIdentity(payload_program.program.?), payload_wire, .{});
+    var payload_work = try service.workspaceWork(scratch, parent.receipt.task, payload_start.receipt.workspace.?);
+    defer payload_work.deinit();
+    var payload_port = try contracts.decodeOwned(native.workspace.Port, scratch, try namespace.store.object(scratch, payload_work.value.current_port.?, null));
+    defer payload_port.deinit();
+    const payload_port_ref = try workspaceRef(scratch, .port, payload_port.value.id);
+    const payload_work_ref = try workspaceRef(scratch, .work, payload_work.value.id);
+    const payload_json = try native.json.canonical(scratch, native.json.string(complete_payload));
+    const full_port = try service.workspaceCommand(scratch, "payload-expand", parent.receipt.task, .{ .context = .{ .expand = .{ .reference = payload_port_ref, .page = .{ .maximum = 48 * 1024 } } } });
+    var full_port_json = try native.json.parse(scratch, full_port.observation_json.bytes, .{ .bytes = 64 * 1024 });
+    defer full_port_json.deinit();
+    try std.testing.expectEqualStrings(payload_json, full_port_json.value.object.get("text").?.string);
+    try std.testing.expect(full_port_json.value.object.get("complete").?.bool);
+    _ = try service.workspaceInteract(scratch, "payload-answer", parent.receipt.task, .{ .expected = .{ .work = payload_work_ref, .execution_revision = payload_work.value.execution_revision, .control_revision = payload_work.value.control_revision }, .port = payload_port_ref, .generation = payload_port.value.generation, .command = .{ .resume_value = .{ .inline_json = .{ .schema = try workspaceRef(scratch, .schema, payload_port.value.interface.argument.digest), .json_text = .{ .bytes = payload_json } } } } });
+    for (0..16) |_| {
+        _ = try service.pump(scratch);
+        var current = try service.workspaceWork(scratch, parent.receipt.task, payload_work.value.id);
+        defer current.deinit();
+        if (current.value.terminal()) break;
+    }
+    var payload_failed = try service.workspaceWork(scratch, parent.receipt.task, payload_work.value.id);
+    defer payload_failed.deinit();
+    try std.testing.expectEqual(.failed, payload_failed.value.outcome_kind);
+    var reconstructed: std.ArrayList(u8) = .empty;
+    var payload_offset: u64 = 0;
+    while (true) {
+        const part = try service.workspaceCommand(scratch, "failure-expand", parent.receipt.task, .{ .context = .{ .expand = .{ .reference = payload_work_ref, .page = .{ .offset = payload_offset, .maximum = 4096 } } } });
+        var parsed_part = try native.json.parse(scratch, part.observation_json.bytes, .{});
+        defer parsed_part.deinit();
+        try reconstructed.appendSlice(scratch, parsed_part.value.object.get("text").?.string);
+        if (parsed_part.value.object.get("eof").?.bool) break;
+        payload_offset = try native.json.numberInteger(u64, parsed_part.value.object.get("next_offset").?.number_string);
+    }
+    try std.testing.expectEqualStrings(payload_json, reconstructed.items);
     for (0..4) |i| {
         var current = try service.workspaceWork(a, parent.receipt.task, interactive_id);
         defer current.deinit();
@@ -530,6 +672,14 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     var answered_work = try service.workspaceWork(a, parent.receipt.task, cancel_work.value.id);
     defer answered_work.deinit();
     _ = try service.workspaceControl(scratch, "cancel-after-answer", parent.receipt.task, cancel_work.value.id, answered_work.value.execution_revision, answered_work.value.control_revision, .{ .cancel = .{ .bytes = "stop exploring" } });
+    // Explicit advance and the scheduled pump must apply the same pending
+    // cancellation after consuming an already settled reply.
+    for (0..2) |step| {
+        var pending_cancel = try service.workspaceWork(scratch, parent.receipt.task, cancel_work.value.id);
+        defer pending_cancel.deinit();
+        if (pending_cancel.value.terminal()) break;
+        _ = try service.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "cancel-explicit-advance-{d}", .{step}), parent.receipt.task, cancel_work.value.id, pending_cancel.value.execution_revision, pending_cancel.value.control_revision, .advance);
+    }
     for (0..20) |_| {
         _ = try service.pump(scratch);
         var observed = try service.workspaceWork(a, parent.receipt.task, cancel_work.value.id);
@@ -1101,7 +1251,7 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const Scenario = enum { model, snapshot, snapshot_empty, revoked, unknown, unknown_wait, not_sent_wait, cancel_capture, invalid_capture };
+    const Scenario = enum { model, snapshot, snapshot_empty, revoked, unknown, unknown_wait, not_sent_wait, cancel_capture, invalid_capture, response_failed, response_incomplete, response_error };
     for (std.enums.values(Scenario)) |scenario| {
         const snapshot_mode = scenario == .snapshot or scenario == .snapshot_empty;
         const successful = scenario == .model or snapshot_mode;
@@ -1204,7 +1354,16 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                     try worker.release();
                 } else {
                     const raw = try contracts.encodeOwned(native.responses.Raw, scratch, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = "{\"output\":[{\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"typed-answer\",\"name\":\"answer\",\"arguments\":\"{\\\"json_value\\\":\\\"\\\\\\\"42\\\\\\\"\\\"}\"}],\"usage\":{\"output_tokens\":7}}" } });
-                    try service.acquire(scratch, step.work, if (scenario == .invalid_capture) "malformed controlled capture" else raw);
+                    var response = try contracts.decodeOwned(native.responses.Raw, scratch, raw);
+                    defer response.deinit();
+                    const envelope = try std.fmt.allocPrint(scratch, "{{\"status\":\"{s}\",\"error\":{s},{s}", .{
+                        if (scenario == .response_failed) "failed" else if (scenario == .response_incomplete) "incomplete" else "completed",
+                        if (scenario == .response_error) "{}" else "null",
+                        response.value.body.bytes[1..],
+                    });
+                    response.value.body.bytes = envelope;
+                    const captured = try contracts.encodeOwned(native.responses.Raw, scratch, response.value);
+                    try service.acquire(scratch, step.work, if (scenario == .invalid_capture) "malformed controlled capture" else captured);
                 }
             }
             var result = try service.workspaceWork(scratch, parent.receipt.task, target_id);
@@ -1269,7 +1428,7 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                     },
                     .unknown_wait => try std.testing.expect(pending.value.state == .unknown),
                     .not_sent_wait => try std.testing.expect(pending.value.state == .not_sent),
-                    .invalid_capture => try std.testing.expect(pending.value.state == .captured),
+                    .invalid_capture, .response_failed, .response_incomplete, .response_error => try std.testing.expect(pending.value.state == .captured),
                     else => unreachable,
                 }
             }
@@ -1402,4 +1561,101 @@ fn fixtureManifest(a: std.mem.Allocator, image: []const u8, identity: [32]u8, ap
         .dependencies = .{ .world = "unit-kosmos", .boundary = "unit-horos" },
         .compiler = .{ .version = "0.17.0" },
     }, .{});
+}
+
+test "deep recursive workspace values support input admission inspection expansion and port replies" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var root_builder = source.Builder.init(a);
+    defer root_builder.deinit();
+    var root = try compile(a, &root_builder, try gcd(&root_builder));
+    defer root.deinit();
+    const admitted = try data.program_image.Admitted.decode(a, root.image);
+    defer admitted.deinit();
+    var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "workspace-unit", .image_identity = admitted.identity() };
+    defer application.deinit();
+    const assets: native.discovery.Assets = .{ .image = root.image, .application = "workspace-unit", .manifest = "{}" };
+    var handlers = try native.Registry.init(a, &.{});
+    defer handlers.deinit();
+    const profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "workspace-test", .authority = .{ .grants = &.{}, .principal = "test", .tenant = "test" } };
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var path_buffer: [4096]u8 = undefined;
+    const length = try temp.dir.realPath(io, &path_buffer);
+    const path = try std.fmt.allocPrint(a, "{s}/state", .{path_buffer[0..length]});
+    defer a.free(path);
+    var namespace = try native.Namespace.open(a, io, path);
+    defer namespace.close() catch unreachable;
+    var service = try native.tasks.Service(OwnerTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    defer service.close(a) catch unreachable;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const parent = try service.submit(scratch, "parent", .{ 25, 5 });
+
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const recursive = try b.reserveSchema();
+    const unit = try b.scalar(void);
+    try b.defineSchema(recursive, .{ .sum = &.{ unit, recursive } });
+    const entry = try b.declare(&.{recursive}, recursive, &.{}, &.{});
+    try b.define(entry, try b.pure(try b.reference(b.parameter(entry, 0))));
+    const text = try native.source_records.encode(scratch, b.module(entry, unit));
+    var diagnostic: native.program_construction.Diagnostic = .{};
+    const built = try service.workspaceBuild(scratch, "deep-build", parent.receipt.task, text, &diagnostic);
+    var artifact = try service.workspaceProgram(scratch, parent.receipt.task, built.receipt.workspace.?);
+    defer artifact.deinit();
+    const schema_ref = try workspaceRef(scratch, .schema, artifact.value.description.input_schema.digest);
+    var text_value: std.ArrayList(u8) = .empty;
+    for (0..50000) |_| try text_value.appendSlice(scratch, "{\"tag\":1,\"value\":");
+    try text_value.appendSlice(scratch, "{\"tag\":0,\"value\":{}}");
+    try text_value.appendNTimes(scratch, '}', 50000);
+    const started = try service.workspaceCommand(scratch, "deep-start", parent.receipt.task, .{ .work = .{ .start = .{
+        .program = try workspaceRef(scratch, .program, built.receipt.workspace.?),
+        .input = .{ .inline_json = .{ .schema = schema_ref, .json_text = .{ .bytes = text_value.items } } },
+        .policy = .{},
+    } } });
+    try std.testing.expectEqual(.observed, started.disposition);
+    var observation = try native.json.parse(scratch, started.observation_json.bytes, .{});
+    defer observation.deinit();
+    try std.testing.expectEqualStrings("completed", observation.value.object.get("outcome").?.string);
+    const result_ref: contracts.workspace.Ref = .{ .kind = .value, .id = .{ .bytes = observation.value.object.get("result").?.object.get("id").?.string } };
+    const expanded = try service.workspaceCommand(scratch, "deep-expand", parent.receipt.task, .{ .context = .{ .expand = .{ .reference = result_ref, .page = .{} } } });
+    var page = try native.json.parse(scratch, expanded.observation_json.bytes, .{});
+    defer page.deinit();
+    try std.testing.expect(!page.value.object.get("complete").?.bool);
+    try std.testing.expectEqualStrings(text_value.items[0..16384], page.value.object.get("text").?.string);
+    const effect = try b.effect(.{ .identity = "example/deep-value", .payload = recursive, .result = recursive, .external = false });
+    const port_entry = try b.declare(&.{recursive}, recursive, &.{effect}, &.{});
+    try b.define(port_entry, try b.term(.{ .perform = .{ .effect = effect, .payload = try b.reference(b.parameter(port_entry, 0)) } }));
+    const port_program = try service.workspaceCommand(scratch, "deep-port-build", parent.receipt.task, .{ .program = .{ .build = .{
+        .source = .{ .json_text = .{ .bytes = try native.source_records.encode(scratch, b.module(port_entry, unit)) } },
+        .source_kind = .source_records,
+        .exposures = .{ .items = &.{.{ .effect = effect, .class = .input }} },
+    } } });
+    try std.testing.expect(port_program.program != null);
+    const wire = try scratch.alloc(u8, 50001);
+    @memset(wire, 1);
+    wire[50000] = 0;
+    const suspended = try service.workspaceStart(scratch, "deep-port-start", parent.receipt.task, try nativeIdentity(port_program.program.?), wire, .{});
+    var work = try service.workspaceWork(scratch, parent.receipt.task, suspended.receipt.workspace.?);
+    defer work.deinit();
+    var port = try contracts.decodeOwned(native.workspace.Port, scratch, try namespace.store.object(scratch, work.value.current_port.?, null));
+    defer port.deinit();
+    _ = try service.workspaceInteract(scratch, "deep-port-reply", parent.receipt.task, .{
+        .expected = .{ .work = try workspaceRef(scratch, .work, work.value.id), .execution_revision = work.value.execution_revision, .control_revision = work.value.control_revision },
+        .port = try workspaceRef(scratch, .port, port.value.id),
+        .generation = port.value.generation,
+        .command = .{ .resume_value = .{ .inline_json = .{ .schema = try workspaceRef(scratch, .schema, port.value.interface.argument.digest), .json_text = .{ .bytes = text_value.items } } } },
+    });
+    for (0..8) |_| {
+        var current = try service.workspaceWork(scratch, parent.receipt.task, work.value.id);
+        defer current.deinit();
+        if (current.value.terminal()) {
+            try std.testing.expectEqualSlices(u8, wire, try namespace.store.object(scratch, current.value.result.?, null));
+            return;
+        }
+        _ = try service.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "deep-advance-{d}", .{current.value.execution_revision}), parent.receipt.task, current.value.id, current.value.execution_revision, current.value.control_revision, .advance);
+    }
+    return error.DidNotComplete;
 }

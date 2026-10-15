@@ -42,15 +42,31 @@ export function workspaceMetrics(archive, application) {
   const replySchema = contract(application, 'WorkspaceReply');
   const attempts = new Map(archive.manifest[6].filter(([kind]) => kind === 5).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('attempt'), archive.object(ref))]));
   const captures = new Map(archive.manifest[6].filter(([kind]) => kind === 4).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('capture'), archive.object(ref))]));
+  const occurrences = new Map(archive.manifest[6].filter(([kind]) => kind === 0).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('occurrence'), archive.object(ref))]));
   const stats = {controller: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, delegated: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, builds: 0, rejected_builds: 0, compiler_nanoseconds: 0, native_publication_nanoseconds: 0, checkpoint_publications: 0, current_checkpoint_bytes: 0, work_items: 0, result_bytes: 0, actions: []};
-  // Attempts are the denominator. Unknown delivery may have consumed provider
-  // resources even when no response capture exists.
+  // Count possible provider delivery, including unknown delivery, but exclude
+  // positive non-invocation evidence. Rearming an occurrence is only permitted
+  // from not_sent, so older uncaptured attempts are also known not to have run.
   for (const [id, attempt] of attempts) {
     const role = attempt[5] === 'agent.model.invoke.v11' ? 'controller' : attempt[5] === 'protean.workspace.inference/1' ? 'delegated' : null;
     if (!role) continue;
-    const count = stats[role]; count.calls++;
-    if (attempt[7].tag === 1) count.prepared_bytes += Number(attempt[7].value[1]);
     const capture = captures.get(id);
+    const occurrence = occurrences.get(Buffer.from(attempt[2]).toString('hex'));
+    const state = occurrence?.[3];
+    let notSent = capture?.[5] === 1;
+    if (!capture && state) {
+      if (state.tag === 0 || state.tag === 6) notSent = true; // ready after rearm, or not_sent
+      else if ([1, 2, 3, 4, 7].includes(state.tag)) {
+        notSent = Buffer.from(state.value[0]).toString('hex') !== id;
+      } else if (state.tag === 5) {
+        // Cancellation cannot consume unknown/dispatching/captured inference.
+        notSent = state.value.tag === 1 || Buffer.from(state.value.value[0]).toString('hex') !== id;
+      }
+    }
+    const count = stats[role];
+    if (attempt[7].tag === 1) count.prepared_bytes += Number(attempt[7].value[1]);
+    if (notSent) continue;
+    count.calls++;
     if (!capture || capture[4].tag !== 1) { count.missing_usage++; continue; }
     const raw = decodeValue(captured, archive.object(capture[4].value));
     const response = JSON.parse(Buffer.from(raw[3]).toString());

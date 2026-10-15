@@ -44,12 +44,19 @@ An optional driver port exposes a typed command, not a raw stack or settlement
 capability. Ordinary Horos BPI3 admission and program-relative PST3 restoration
 remain separate checks.
 
+`context.expand` on a port pages its full payload. A failed work observation
+includes a `failure` reference; expanding it pages the full failure value.
+Inspection previews remain bounded, and every page reports its byte range and
+whether it reaches the end. These reads use the existing task-owned records.
+
 All authoritative workspace mutations commit through `workspaceCommit` or the
 existing occurrence transaction. Kernel publication happens before durable
 receipt transfer; failure after publication fences the owner. Receipt replay
 returns the original immutable work and occurrence observation even if either
-has since advanced. Wait eligibility and queue capacity are prepared before the
-transaction commits; notification cannot fail after durable acceptance. Completed
+has since advanced. Parent-wait eligibility and queue capacity are prepared before
+the transaction commits. A failure while notifying a child after capture publication
+fences the owner; the durable capture remains available after reopening and cannot
+be dispatched again. Completed
 delegated answers remain eligible for delivery after explicit task resumption.
 Cancellation may retain pending cleanup or unknown delivery. Neither is rendered
 as successful disposal. Independent work is interleaved; alternative tokens stay
@@ -80,7 +87,7 @@ is distinguished from concrete execution where it supplies the argument.
 | AUT-01, AUT-02, AUT-03, AUT-09 | Existing ordinary offline demo and `adaptive_recovery.zig` reframing trace through actual prepared model offers; report/stop parks unfinished work. |
 | AUT-04, AUT-06, AUT-08 | `workspace_programs.zig` delegates a 300-element recursive computation; a variant with no yields or ports is parked/cancelled at native quantum boundaries. |
 | AUT-05, AUT-10, OWN-01 | Pure and port execution use an empty environmental registry; source/native traces finish or wait without model dispatch or mandatory alternatives. |
-| AUT-07, OWN-11 | Authored waits wake for messages, selected progress, unknown delivery and definitely-not-sent results while the worker is occupied. Allocation rejection after commit cannot lose wake-up, cancellation or resumed child eligibility. |
+| AUT-07, OWN-11 | Authored waits wake for messages, selected progress, unknown delivery and definitely-not-sent results while the worker is occupied. Allocation rejection after commit cannot lose prepared parent-wait wake-up, cancellation or resumed child eligibility. |
 | BUILD-01, BUILD-02 | Novel GCD on two inputs; recursive schema/list traversal across more than 300 boundaries, plus independent source/native execution. |
 | BUILD-03, BUILD-04, BUILD-05 | Source transport, unused malformed declaration, index/order, protected identity and nested action rejection fixtures. |
 | BUILD-06, BUILD-08 | Existing component recipes use the shared worker/owner; actual controller traces revise rejected construction without losing ordinary offers. |

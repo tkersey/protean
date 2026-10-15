@@ -281,7 +281,7 @@ pub fn Service(comptime Types: type) type {
             const ids = try self.workspaceIds(a, task_id);
             defer a.free(ids);
             for (ids) |id| {
-                var child = try self.workspaceWork(a, task_id, id);
+                var child = try self.retainedWorkspaceWork(a, task_id, id);
                 defer child.deinit();
                 if (child.value.terminal()) {
                     const bytes = try self.store().object(a, child.value.outcome, null);
@@ -2800,10 +2800,19 @@ pub fn Service(comptime Types: type) type {
                             var port = try self.record(workspace.Port, a, "workspace_port", id, task_id);
                             defer port.deinit();
                             if (!std.meta.eql(port.value.id, id) or !std.meta.eql(port.value.task, task_id)) return error.CorruptState;
-                            const observed = try self.workspacePortObservation(a, port.value);
-                            const text = try json.canonical(a, observed);
-                            defer a.free(text);
-                            return wp.page(a, text, request.page);
+                            return self.workspacePayloadPage(a, port.value.interface.payload, port.value.payload, request.page);
+                        }
+                        if (request.reference.kind == .work) {
+                            var work = try self.retainedWorkspaceWork(a, task_id, try wp.identity(request.reference, .work));
+                            defer work.deinit();
+                            const bytes = try self.store().object(a, work.value.outcome, null);
+                            defer a.free(bytes);
+                            var outcome = try data.invocation.decode(data.invocation.Outcome, a, bytes);
+                            defer outcome.deinit();
+                            if (outcome.value != .failed) return error.InvalidState;
+                            var program = try self.workspaceProgram(a, task_id, work.value.program);
+                            defer program.deinit();
+                            return self.workspacePayloadBytesPage(a, program.value.description.failure_schema, outcome.value.failed.value, request.page);
                         }
                         if (request.reference.kind == .view) {
                             return self.workspaceViewObservation(a, task_id, try wp.identity(request.reference, .view), request.page);
@@ -2933,13 +2942,8 @@ pub fn Service(comptime Types: type) type {
             if (outcome.value == .failed) {
                 var program = try self.workspaceProgram(a, value.task, value.program);
                 defer program.deinit();
-                const schema = try self.store().object(a, program.value.description.failure_schema, null);
-                defer a.free(schema);
-                var failure = try @import("dynamic_values.zig").decode(a, schema, outcome.value.failed.value);
-                defer failure.deinit();
-                const text = try json.canonical(a, failure.value);
-                defer a.free(text);
-                try json.put(a, &result, "failure_preview", try wp.page(a, text, .{}));
+                try json.put(a, &result, "failure_preview", try self.workspacePayloadBytesPage(a, program.value.description.failure_schema, outcome.value.failed.value, .{}));
+                try json.put(a, &result, "failure", try values.toJson(wc.Ref, a, try wp.reference(a, .work, value.id)));
             }
             try json.put(a, &result, "input", try values.toJson(wc.Ref, a, try wp.reference(a, .value, (value.input_value orelse return error.CorruptState).digest)));
             if (value.current_occurrence) |id| {
@@ -2981,16 +2985,24 @@ pub fn Service(comptime Types: type) type {
                 try json.put(a, &result, field ++ "_schema", try values.toJson(wc.Ref, a, try wp.reference(a, .schema, ref.digest)));
                 try json.put(a, &result, field ++ "_descriptor", try wp.schema(a, bytes));
             }
-            const schema = try self.store().object(a, port.interface.payload, null);
-            defer a.free(schema);
-            const payload = try self.store().object(a, port.payload, null);
+            try json.put(a, &result, "preview", try self.workspacePayloadPage(a, port.interface.payload, port.payload, .{}));
+            return result;
+        }
+
+        fn workspacePayloadPage(self: *Self, a: std.mem.Allocator, schema_ref: state.Reference, payload_ref: state.Reference, page: wc.Page) !json.Value {
+            const payload = try self.store().object(a, payload_ref, null);
             defer a.free(payload);
+            return self.workspacePayloadBytesPage(a, schema_ref, payload, page);
+        }
+
+        fn workspacePayloadBytesPage(self: *Self, a: std.mem.Allocator, schema_ref: state.Reference, payload: []const u8, page: wc.Page) !json.Value {
+            const schema = try self.store().object(a, schema_ref, null);
+            defer a.free(schema);
             var decoded = try @import("dynamic_values.zig").decode(a, schema, payload);
             defer decoded.deinit();
             const text = try json.canonical(a, decoded.value);
             defer a.free(text);
-            try json.put(a, &result, "preview", try wp.page(a, text, .{}));
-            return result;
+            return wp.page(a, text, page);
         }
 
         pub fn workspaceInteract(self: *Self, allocator: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, interaction: @FieldType(wc.Work, "interact")) !Admission {
@@ -3711,7 +3723,8 @@ pub fn Service(comptime Types: type) type {
             if (authorized.value.command != .work or authorized.value.command.work != .delegate) return error.InvalidArchive;
             const selection = authorized.value.command.work.delegate;
             if (selection.interpretation == .none or !same(try contracts.encodeOwned(wc.Interpretation, a, selection.interpretation), try contracts.encodeOwned(wc.Interpretation, a, value.selection)) or
-                !std.meta.eql(try wp.identity(selection.expected.work, .work), value.work) or selection.expected.control_revision + 1 != value.control_revision) return error.InvalidArchive;
+                !std.meta.eql(try wp.identity(selection.expected.work, .work), value.work) or
+                (std.math.add(u64, selection.expected.control_revision, 1) catch return error.InvalidArchive) != value.control_revision) return error.InvalidArchive;
             if (!same(try contracts.encodeOwned(?workspace.ModelBinding, a, authorized.value.model), try contracts.encodeOwned(?workspace.ModelBinding, a, value.model))) return error.InvalidArchive;
             if (!std.meta.eql(if (value.selection == .snapshot) authorized.value.snapshot else null, value.snapshot)) return error.InvalidArchive;
             var port = try contracts.decodeOwned(workspace.Port, a, try self.store().object(a, value.port, null));
@@ -4360,9 +4373,13 @@ pub fn Service(comptime Types: type) type {
                 _ = try self.workspaceAdvance(a, parent.value, saved.value, .{ .reply = reply }, null, @splat(0));
                 return .progressed;
             }
-            const control: data.invocation.Control = if (saved.value.cancellation != null and !saved.value.cancellation_applied) .{ .cancel = .{ .text = saved.value.cancellation.?.bytes } } else if (saved.value.outcome_kind == .yielded) .resume_yield else .none;
-            _ = try self.workspaceAdvance(a, parent.value, saved.value, control, null, @splat(0));
+            _ = try self.workspaceAdvance(a, parent.value, saved.value, workspaceContinuation(saved.value), null, @splat(0));
             return .progressed;
+        }
+
+        fn workspaceContinuation(value: workspace.Work) data.invocation.Control {
+            if (value.cancellation != null and !value.cancellation_applied) return .{ .cancel = .{ .text = value.cancellation.?.bytes } };
+            return if (value.outcome_kind == .yielded) .resume_yield else .none;
         }
 
         fn workspaceRunnable(self: *Self, a: std.mem.Allocator, parent: state.Task, child: workspace.Work) !bool {
@@ -4472,7 +4489,7 @@ pub fn Service(comptime Types: type) type {
                     defer a.free(reply);
                     return self.workspaceAdvance(a, parent.value, value, .{ .reply = reply }, operation_id, request);
                 }
-                return self.workspaceAdvance(a, parent.value, value, if (value.outcome_kind == .yielded) .resume_yield else .none, operation_id, request);
+                return self.workspaceAdvance(a, parent.value, value, workspaceContinuation(value), operation_id, request);
             }
             try self.runnable.ensureUnusedCapacity(self.allocator, 1);
             value.control_revision = try std.math.add(u64, value.control_revision, 1);

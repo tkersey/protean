@@ -48,6 +48,9 @@ nanoseconds, checkpoint counts/current bytes, result bytes and prepared context
 bytes. Native publication time includes execution and canonical checkpoint
 projection; it excludes worker I/O and model latency. RSS is sampled, not an
 allocator high-water mark. Retained namespace bytes include historical objects.
+Call totals include unknown delivery and exclude positively unsent attempts,
+including attempts superseded by an authorized rearm of the same occurrence.
+Prepared context bytes still include those attempts because preparation occurred.
 
 Adjudicate `task_correctness`, `evidence_coverage`, `successful_reframing`,
 `unnecessary_construction`, and `branch_executions_not_used` against each frozen

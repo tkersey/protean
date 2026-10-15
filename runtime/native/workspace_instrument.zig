@@ -208,6 +208,9 @@ fn interpret(ctx: registry.ProjectionContext, _: []const u8, rendered: []const u
     if (raw.value.status < 200 or raw.value.status >= 300 or !raw.value.identity_encoding) return error.InvalidCapture;
     var parsed = try json.parse(a, raw.value.body.bytes, .{ .bytes = raw.value.body.bytes.len, .tokens = raw.value.body.bytes.len, .members = raw.value.body.bytes.len });
     defer parsed.deinit();
+    const status = json.get(parsed.value, "status") orelse return error.InvalidCapture;
+    if (status != .string or !std.mem.eql(u8, status.string, "completed") or
+        (json.get(parsed.value, "error") orelse return error.InvalidCapture) != .null) return error.InvalidCapture;
     const output = json.get(parsed.value, "output") orelse return error.InvalidCapture;
     if (output != .array) return error.InvalidCapture;
     var invocation = try P.templateValue(Model, .{ .items = &.{} }, .{ .minimum_calls = 1, .maximum_calls = 1, .parallel_calls = false });

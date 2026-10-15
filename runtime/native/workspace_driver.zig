@@ -49,7 +49,12 @@ const Induced = struct {
     fn optional(flags: []const bool, id: ?Id) bool {
         return if (id) |value| flags[@intCast(value)] else false;
     }
-    fn term(self: Induced, value: source.ast.Term, effect: Id) bool {
+    fn handler(self: Induced, value: data.program.Handler) bool {
+        if (self.functions[@intCast(value.return_function)]) return true;
+        for (value.clauses) |clause| if (self.functions[@intCast(clause.function)]) return true;
+        return false;
+    }
+    fn term(self: Induced, module: source.Module, value: source.ast.Term, effect: Id) bool {
         const v = self.values;
         const t = self.terms;
         return switch (value) {
@@ -60,9 +65,9 @@ const Induced = struct {
             .call => |x| self.functions[@intCast(x.function)] or any(v, x.arguments),
             .apply => |x| v[@intCast(x.computation)] or any(v, x.arguments),
             .perform => |x| (x.effect == effect and x.capability == null) or optional(v, x.capability) or v[@intCast(x.payload)] or any(v, x.bodies) or any(v, x.use_site_capabilities),
-            .handle => |x| v[@intCast(x.body)] or any(v, x.arguments) or any(v, x.state),
+            .handle => |x| self.handler(module.handlers[@intCast(x.handler)]) or v[@intCast(x.body)] or any(v, x.arguments) or any(v, x.state),
             .resume_value => |x| v[@intCast(x.resumption)] or v[@intCast(x.argument)],
-            .resume_with => |x| v[@intCast(x.resumption)] or v[@intCast(x.argument)] or any(v, x.state),
+            .resume_with => |x| self.handler(module.handlers[@intCast(x.handler)]) or v[@intCast(x.resumption)] or v[@intCast(x.argument)] or any(v, x.state),
             .resume_computation => |x| v[@intCast(x.resumption)] or v[@intCast(x.computation)],
             .protect => |x| v[@intCast(x.body)] or v[@intCast(x.cleanup)] or any(v, x.arguments) or optional(v, x.resource),
             .with_region => |x| v[@intCast(x.body)] or any(v, x.arguments),
@@ -94,7 +99,7 @@ fn inducedCaptures(a: std.mem.Allocator, module: source.Module, effect: Id) !Ind
             needed.* = now;
         }
         for (module.terms, result.terms) |term, *needed| {
-            const now = result.term(term, effect);
+            const now = result.term(module, term, effect);
             changed = (now and !needed.*) or changed;
             needed.* = now;
         }
@@ -105,6 +110,50 @@ fn inducedCaptures(a: std.mem.Allocator, module: source.Module, effect: Id) !Ind
         }
     }
     return result;
+}
+
+fn prepend(a: std.mem.Allocator, id: Id, ids: []const Id) ![]const Id {
+    const result = try a.alloc(Id, ids.len + 1);
+    result[0] = id;
+    @memcpy(result[1..], ids);
+    return result;
+}
+
+fn bindHandlerFunction(b: *source.Builder, function: Id, variable: Id) !Id {
+    var copied = b.functions.items[@intCast(function)];
+    copied.parameters = try prepend(b.allocator(), variable, copied.parameters);
+    const id: Id = @intCast(b.functions.items.len);
+    try b.functions.append(b.allocator(), copied);
+    return id;
+}
+
+// Region IDs are names in a sparse namespace, not a dense allocation size.
+fn usedRegions(a: std.mem.Allocator, module: source.Module) ![]const Id {
+    var ids: std.ArrayList(Id) = .empty;
+    for (module.functions) |function| try ids.appendSlice(a, function.regions);
+    for (module.schemas) |schema| if (schema == .internal) switch (schema.internal) {
+        .computation => |value| try ids.appendSlice(a, value.regions),
+        .resumption => |value| try ids.appendSlice(a, value.owned_regions),
+        .region => |id| try ids.append(a, id),
+        .cell => |value| try ids.append(a, value.region),
+        .borrowed => |value| try ids.append(a, value.region),
+        else => {},
+    };
+    for (module.terms) |term| switch (term) {
+        .with_region => |value| try ids.append(a, value.region),
+        .protect => |value| if (value.loan_region) |id| {
+            try ids.append(a, id);
+        },
+        else => {},
+    };
+    std.mem.sort(Id, ids.items, {}, std.sort.asc(Id));
+    var count: usize = 0;
+    for (ids.items) |id| {
+        if (count != 0 and ids.items[count - 1] == id) continue;
+        ids.items[count] = id;
+        count += 1;
+    }
+    return ids.items[0..count];
 }
 
 pub fn generate(a: std.mem.Allocator, original: source.Module, requested: []const contracts.workspace.Exposure) !Generated {
@@ -172,13 +221,41 @@ pub fn generate(a: std.mem.Allocator, original: source.Module, requested: []cons
     // Compute only the new lexical dependencies. Existing capture contracts
     // remain intact; unrelated closures must not acquire a capability bound
     // that changes handler relevance merely because a port was requested.
-    for (exposed, capabilities) |effect, capability| {
+    for (exposed, capabilities, 0..) |effect, capability, i| {
         const needed = try inducedCaptures(b.allocator(), original, effect);
         for (original.values) |value| if (value.expression == .lambda and needed.functions[@intCast(value.expression.lambda)]) {
             try extendBound(&b, value.schema, capability);
         };
         for (original.terms) |term| if (term == .handle and needed.values[@intCast(term.handle.body)]) {
             for (original.handlers[@intCast(term.handle.handler)].clauses) |clause| try extendBound(&b, clause.resumption, capability);
+        };
+        // Handler functions are closed. Carry the induced lexical capability
+        // through ordinary handler state, binding the same variable at each
+        // closed entry. Copy those entries so direct callers and lambdas keep
+        // their original signatures. Deep resume retains this state; shallow
+        // resumeWith supplies it explicitly at its successor installation.
+        const variable = b.parameter(body, i);
+        const reference = try b.reference(variable);
+        for (original.handlers, 0..) |handler, index| if (needed.handler(handler)) {
+            var replacement = b.handlers.items[index];
+            replacement.state = try prepend(b.allocator(), capability, replacement.state);
+            replacement.return_function = try bindHandlerFunction(&b, replacement.return_function, variable);
+            const copied = try b.allocator().dupe(data.program.Clause, replacement.clauses);
+            for (copied) |*clause| {
+                clause.function = try bindHandlerFunction(&b, clause.function, variable);
+                try extendBound(&b, clause.resumption, capability);
+            }
+            replacement.clauses = copied;
+            b.handlers.items[index] = replacement;
+            for (b.terms.items[0..original.terms.len]) |*term| switch (term.*) {
+                .handle => |*handle| if (handle.handler == index) {
+                    handle.state = try prepend(b.allocator(), reference, handle.state);
+                },
+                .resume_with => |*resume_with| if (resume_with.handler == index) {
+                    resume_with.state = try prepend(b.allocator(), reference, resume_with.state);
+                },
+                else => {},
+            };
         };
     }
     const body_schema = try b.schema(.{ .internal = .{ .computation = .{ .parameters = capabilities, .result = result, .effects = entry.effects, .capture_bound = &.{input}, .regions = entry.regions } } });
@@ -193,8 +270,7 @@ pub fn generate(a: std.mem.Allocator, original: source.Module, requested: []cons
     const traits = try data.traits.derive(b.allocator(), b.schemas.items);
     var cloneable: std.ArrayList(Id) = .empty;
     for (capture_bound.items) |schema| if (traits.clone[@intCast(schema)]) try cloneable.append(b.allocator(), schema);
-    const regions = try b.allocator().alloc(Id, @intCast(original.region_count));
-    for (regions, 0..) |*region, i| region.* = i;
+    const regions = try usedRegions(b.allocator(), original);
     var obligations = false;
     for (original.terms) |term| if (term == .protect) {
         obligations = true;

@@ -594,6 +594,34 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
           assert.equal(metrics.controller.calls, alternateIndex, 'dispatched attempts remain counted without captured responses');
           assert.equal(metrics.controller.missing_usage, 1, 'unknown delivery is unknown cost, not zero calls');
           assert(metrics.controller.prepared_bytes > 0);
+          // Exercise the evaluator's other legal occurrence observations using
+          // the real archive schemas and prepared inference from this run.
+          const archiveBytes = await readFile(uncertainArchive);
+          const application = JSON.parse(await readFile(applicationPath, 'utf8'));
+          for (const disposition of ['not_sent', 'rearmed', 'cancelled', 'successor']) {
+            const archive = readArchive(archiveBytes);
+            const attemptRow = archive.manifest[6].find(([kind, , ref]) => kind === 5 && decodeValue(archive.schemas.get('attempt'), archive.object(ref))[5] === 'agent.model.invoke.v11');
+            const attempt = decodeValue(archive.schemas.get('attempt'), archive.object(attemptRow[2]));
+            const occurrenceRow = archive.manifest[6].find(([kind, id]) => kind === 0 && Buffer.from(id).equals(Buffer.from(attempt[2])));
+            const occurrence = decodeValue(archive.schemas.get('occurrence'), archive.object(occurrenceRow[2]));
+            const store = (schema, value) => {
+              const bytes = Buffer.from(encodeValue(archive.schemas.get(schema), value));
+              const ref = reference(bytes); archive.objects.set(Buffer.from(ref[0]).toString('hex'), bytes); return ref;
+            };
+            occurrence[3] = disposition === 'not_sent' ? {tag: 6, value: [attempt[0]]}
+              : disposition === 'rearmed' ? {tag: 0, value: null}
+              : disposition === 'cancelled' ? {tag: 5, value: {tag: 1, value: {tag: 0, value: null}}}
+              : {tag: 3, value: [[...Buffer.alloc(32, 137)]]};
+            if (disposition === 'successor') {
+              const successor = [...attempt]; successor[0] = occurrence[3].value[0];
+              archive.manifest[6].push([5, successor[0], store('attempt', successor)]);
+            }
+            occurrenceRow[2] = store('occurrence', occurrence);
+            const measured = workspaceMetrics(archive, application);
+            assert.equal(measured.controller.calls, disposition === 'successor' ? 1 : 0, disposition);
+            assert.equal(measured.controller.missing_usage, disposition === 'successor' ? 1 : 0, disposition);
+            assert.equal(measured.controller.prepared_bytes, metrics.controller.prepared_bytes * (disposition === 'successor' ? 2 : 1), 'preparation is still measured for unsent attempts');
+          }
         }
         cancellations.push({method, milliseconds, provider_requests: alternateIndex, recovered_status: unknown.status});
       }
