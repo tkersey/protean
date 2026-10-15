@@ -1,4 +1,4 @@
-// Opt-in model-use evaluation. Never imported by the product or ordinary CI.
+// Live model-use evaluation is opt-in; native fixtures reuse the offline helpers.
 import assert from 'node:assert/strict';
 import {mkdir, readFile, writeFile, readdir, stat} from 'node:fs/promises';
 import {resolve, join, dirname} from 'node:path';
