@@ -1733,6 +1733,14 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
                 }
             }
             try std.testing.expect(started_cleanup);
+            var cleanup = try service.workspaceWork(scratch, parent.receipt.task, pending_id);
+            defer cleanup.deinit();
+            _ = try service.workspaceControl(scratch, "park-admitted-cleanup", parent.receipt.task, pending_id, cleanup.value.execution_revision, cleanup.value.control_revision, .park);
+            for (0..30) |_| _ = try service.pump(scratch);
+            var still_parked = try service.workspaceWork(scratch, parent.receipt.task, pending_id);
+            defer still_parked.deinit();
+            try std.testing.expectEqual(.parked, still_parked.value.schedule);
+            try std.testing.expectEqual(cleanup.value.execution_revision, still_parked.value.execution_revision);
             try service.park(scratch);
             try service.close(scratch);
             var incompatible = profile;
@@ -1789,6 +1797,135 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
         try std.testing.expect(!retained_result.value.cancellation_applied);
         const cancelled_archive = try std.fmt.allocPrint(scratch, "{s}/cancelled-children-{d}.par", .{ path_buffer[0..length], index });
         _ = try service.exportCheckpoint(scratch, parent.receipt.task, cancelled_archive);
+    }
+}
+
+fn expectModelRequestBudget(service: anytype, a: std.mem.Allocator, child: native.workspace.Work) !void {
+    const store = &service.namespace.store;
+    const Reader = struct {
+        fn read(pointer: *anyopaque, allocator: std.mem.Allocator, ref: native.testing.state.Reference, limit: usize) ![]u8 {
+            const source_store: *@TypeOf(service.namespace.store) = @ptrCast(@alignCast(pointer));
+            return source_store.object(allocator, ref, limit);
+        }
+    };
+    var delegation = (try contracts.decodeOwned(native.workspace.Delegation, a, try store.object(a, child.delegation.?, null))).value;
+    const original_port = (try contracts.decodeOwned(native.workspace.Port, a, try store.object(a, delegation.port, null))).value;
+    try store.begin();
+    defer store.rollback();
+    const huge_schema = try store.putObject(try data.schema.encodeOwned(a, &.{ .{ .array = .{ .element = 1, .length = 1_000_000_000 } }, .unit }, 0));
+    const empty = try store.putObject("");
+    const artifact = try store.putObject(try contracts.encodeOwned(native.workspace.ValueArtifact, a, .{ .schema = huge_schema, .value = empty, .provenance = empty }));
+    const prepare = native.workspace_instrument.declaration(.model).capture.?.prepare;
+    var context: native.registry.ProjectionContext = .{ .allocator = a, .task = child.task, .tenant = "test", .profile = "test", .objects = native.registry.ReadView.validating(store, Reader.read) };
+    const unlimited = (try contracts.decodeOwned(native.workspace_instrument.Prepared, a, try prepare(context, try contracts.encodeOwned(native.workspace_instrument.Input, a, .{ .delegation = child.delegation.? })))).value;
+    delegation.model.?.settings.request_bytes = 8 * 1024;
+    const bounded_ref = try store.putObject(try contracts.encodeOwned(native.workspace.Delegation, a, delegation));
+    const bounded = (try contracts.decodeOwned(native.workspace_instrument.Prepared, a, try prepare(context, try contracts.encodeOwned(native.workspace_instrument.Input, a, .{ .delegation = bounded_ref })))).value;
+    try std.testing.expectEqualStrings(unlimited.body.bytes, bounded.body.bytes);
+    for (0..2) |variant| {
+        var port = original_port;
+        if (variant == 0) {
+            delegation.inputs.items = &.{artifact};
+        } else {
+            delegation.inputs.items = &.{};
+            port.interface.payload = huge_schema;
+            port.payload = empty;
+        }
+        delegation.port = try store.putObject(try contracts.encodeOwned(native.workspace.Port, a, port));
+        const ref = try store.putObject(try contracts.encodeOwned(native.workspace.Delegation, a, delegation));
+        const input = try contracts.encodeOwned(native.workspace_instrument.Input, a, .{ .delegation = ref });
+        var buffer: [256 * 1024]u8 = undefined;
+        var allocator = std.heap.FixedBufferAllocator.init(&buffer);
+        context.allocator = allocator.allocator();
+        try std.testing.expectError(error.Capacity, prepare(context, input));
+    }
+}
+
+fn expectInstrumentAnswerBound(service: anytype, a: std.mem.Allocator, child: native.workspace.Work) !void {
+    const store = &service.namespace.store;
+    try service.validateWorkspace(a, child.task);
+    var manifest_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
+    const index = try store.archiveIndex(a, child.task, .{ .digest = manifest_digest, .bytes = service.assets.manifest.len });
+    const old_result_id = try native.workspace.custodyId(a, child.task, child.result_value.?.digest);
+    const old_answer_id = try native.workspace.custodyId(a, child.task, child.answer_value.?.digest);
+    var original_result = try contracts.decodeOwned(native.workspace.Value, a, (try store.recordBytes(a, "workspace_value", old_result_id, child.task)).?);
+    defer original_result.deinit();
+    var original_answer = try contracts.decodeOwned(native.workspace.ValueArtifact, a, try store.object(a, child.answer_value.?, null));
+    defer original_answer.deinit();
+    for (0..3) |variant| {
+        try store.begin();
+        defer store.rollback();
+        var forged = child;
+        var records: std.ArrayList(native.testing.state.ArchiveRecord) = .empty;
+        for (index.records.items) |row| if (!std.meta.eql(row.id, old_result_id) and !std.meta.eql(row.id, old_answer_id)) try records.append(a, row);
+        try store.database.run("DELETE FROM records WHERE task=? AND kind='workspace_value' AND id=?", &.{ .{ .blob = &child.task }, .{ .blob = &old_answer_id } });
+        if (variant == 0) {
+            // Same typed bytes, but an unrelated hypothesis is not the answer's
+            // selected acquisition or captured model judgment.
+            var answer: native.workspace.Value = .{ .id = undefined, .task = child.task, .artifact = undefined, .description = original_answer.value, .derivation = .{ .kind = .hypothesis, .sources = .{ .items = &.{} } } };
+            answer.description.provenance = try store.putObject(try contracts.encodeOwned(native.workspace.Derivation, a, answer.derivation));
+            answer.artifact = try store.putObject(try contracts.encodeOwned(native.workspace.ValueArtifact, a, answer.description));
+            answer.id = try native.workspace.custodyId(a, child.task, answer.artifact.digest);
+            try store.createRecord(native.workspace.Value, "workspace_value", answer.id, child.task, answer);
+            try records.append(a, .{ .kind = .workspace_value, .id = answer.id, .body = try store.putObject(try contracts.encodeOwned(native.workspace.Value, a, answer)) });
+            forged.answer_value = answer.artifact;
+        } else forged.answer_value = null;
+        forged.inputs.items = if (forged.answer_value) |ref| try a.dupe(native.testing.state.Reference, &.{ref}) else &.{};
+        if (variant == 2) {
+            // A real checkpoint of the SAME native program can return another
+            // reply. It must not substitute for the actual captured reply.
+            var program = try contracts.decodeOwned(native.workspace.ProgramArtifact, a, try store.object(a, try store.objectReference(child.program, null), null));
+            defer program.deinit();
+            var prepared = try kosmos.Prepared.init(a, try store.object(a, program.value.image, null));
+            defer prepared.deinit();
+            var resident = try kosmos.Resident.start(a, &prepared, try store.object(a, child.input, null));
+            defer resident.close() catch unreachable;
+            var requested = try resident.publish(.{ .encoded = a }, .none, .{ .quantum = 256, .checkpoint = .receipt });
+            defer requested.takeCheckpoint().?.deinit();
+            var initial = try data.invocation.decode(data.invocation.Outcome, a, requested.outcome.encoded);
+            defer initial.deinit();
+            var request = try data.invocation.decode(data.invocation.Request, a, initial.value.requested.request);
+            defer request.deinit();
+            const output = try contracts.encodeOwned(native.workspace_instrument.Output, a, .{ .unavailable = .{ .bytes = "invented alternative reply" } });
+            const reply = try data.invocation.encodeOwned(data.invocation.Result, a, .{ .request_identity = request.value.request_identity, .value = output });
+            var published = try resident.publish(.{ .encoded = a }, .{ .reply = reply }, .{ .quantum = 256, .checkpoint = .receipt });
+            const checkpoint = published.takeCheckpoint().?;
+            defer checkpoint.deinit();
+            var completed = try data.invocation.decode(data.invocation.Outcome, a, published.outcome.encoded);
+            defer completed.deinit();
+            try std.testing.expectEqual(.completed, std.meta.activeTag(completed.value));
+            forged.checkpoint = try store.putObject(checkpoint.bytes());
+            forged.outcome = try store.putObject(published.outcome.encoded);
+            forged.result = try store.putObject(completed.value.completed);
+        }
+        var result = original_result.value;
+        result.description.value = forged.result.?;
+        const sources = try a.alloc(native.testing.state.Reference, 1 + forged.inputs.items.len);
+        sources[0] = forged.input_value.?;
+        @memcpy(sources[1..], forged.inputs.items);
+        result.derivation.sources.items = sources;
+        result.description.provenance = try store.putObject(try contracts.encodeOwned(native.workspace.Derivation, a, result.derivation));
+        result.artifact = try store.putObject(try contracts.encodeOwned(native.workspace.ValueArtifact, a, result.description));
+        result.id = try native.workspace.custodyId(a, child.task, result.artifact.digest);
+        try store.database.run("DELETE FROM records WHERE task=? AND kind='workspace_value' AND id=?", &.{ .{ .blob = &child.task }, .{ .blob = &old_result_id } });
+        try store.createRecord(native.workspace.Value, "workspace_value", result.id, child.task, result);
+        try records.append(a, .{ .kind = .workspace_value, .id = result.id, .body = try store.putObject(try contracts.encodeOwned(native.workspace.Value, a, result)) });
+        forged.result_value = result.artifact;
+        try store.putRecord(native.workspace.Work, "workspace_work", child.id, child.task, forged);
+        var events = try store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq=?", &.{ .{ .blob = &child.task }, .{ .integer = @intCast(child.event_watermark) } });
+        defer events.deinit();
+        try std.testing.expect(try events.step() == .row);
+        var event_value = (try contracts.decodeOwned(native.testing.state.Event, a, try events.bytes(0))).value;
+        const publications = try a.dupe(native.testing.state.WorkPublication, event_value.workspace_publications.items);
+        const observation = try contracts.encodeOwned(native.workspace.WorkObservation, a, .{ .work = forged, .occurrence = null });
+        for (publications) |*item| if (std.meta.eql(item.work, child.id)) {
+            std.crypto.hash.sha2.Sha256.hash(observation, &item.observation, .{});
+        };
+        event_value.workspace_publications.items = publications;
+        const event_ref = try store.putObject(try contracts.encodeOwned(native.testing.state.Event, a, event_value));
+        try store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &event_ref.digest }, .{ .blob = &child.task }, .{ .integer = @intCast(child.event_watermark) } });
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(a, child.task, records.items));
     }
 }
 
@@ -1892,7 +2029,7 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const Scenario = enum { model, snapshot, snapshot_empty, revoked, unknown, unknown_wait, not_sent_wait, cancel_capture, invalid_capture, response_failed, response_incomplete, response_error };
+    const Scenario = enum { model, snapshot, snapshot_empty, model_unavailable, revoked, unknown, unknown_wait, not_sent_wait, cancel_capture, invalid_capture, response_failed, response_incomplete, response_error };
     for (std.enums.values(Scenario)) |scenario| {
         const snapshot_mode = scenario == .snapshot or scenario == .snapshot_empty;
         const successful = scenario == .model or snapshot_mode;
@@ -2029,18 +2166,21 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                         response.value.body.bytes[1..],
                     });
                     response.value.body.bytes = envelope;
+                    if (scenario == .model_unavailable) response.value.body.bytes = "{\"status\":\"completed\",\"error\":null,\"output\":[],\"usage\":{\"output_tokens\":0}}";
                     const captured = try contracts.encodeOwned(native.responses.Raw, scratch, response.value);
                     try service.acquire(scratch, step.work, if (scenario == .invalid_capture) "malformed controlled capture" else captured);
                 }
             }
             var result = try service.workspaceWork(scratch, parent.receipt.task, target_id);
             defer result.deinit();
-            if (scenario == .model and !resumed_handoff and instrument_id != null) {
+            if (successful and !resumed_handoff and instrument_id != null) {
                 var completed = try service.workspaceWork(scratch, parent.receipt.task, instrument_id.?);
                 defer completed.deinit();
                 if (completed.value.answer_value != null) {
                     try std.testing.expectEqual(.completed, completed.value.outcome_kind);
                     try std.testing.expectEqual(.requested, result.value.outcome_kind);
+                    if (scenario == .model) try expectModelRequestBudget(&service, scratch, completed.value);
+                    try expectInstrumentAnswerBound(&service, scratch, completed.value);
                     try service.close(scratch);
                     service_open = false;
                     try namespace.close();
@@ -2052,7 +2192,7 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                     try std.testing.expectEqual(.idle, try service.pump(scratch));
                     var paused = try service.task(scratch, parent.receipt.task);
                     defer paused.deinit();
-                    _ = try service.resumeTask(scratch, "resume-completed-answer", parent.receipt.task, paused.value.revision);
+                    _ = try service.resumeTask(scratch, try std.fmt.allocPrint(scratch, "resume-completed-answer-{s}", .{suffix}), parent.receipt.task, paused.value.revision);
                     resumed_handoff = true;
                 }
             }
@@ -2080,6 +2220,9 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
             if (scenario == .cancel_capture) {
                 try std.testing.expectEqual(.cancelled, child.value.outcome_kind);
                 try std.testing.expect(child.value.cancellation_applied);
+            } else if (scenario == .model_unavailable) {
+                try std.testing.expectEqual(.completed, child.value.outcome_kind);
+                try std.testing.expect(child.value.current_occurrence == null);
             } else {
                 const bytes = (try namespace.store.recordBytes(scratch, "occurrence", child.value.current_occurrence.?, parent.receipt.task)).?;
                 var pending = try contracts.decodeOwned(native.testing.occurrence.Occurrence, scratch, bytes);

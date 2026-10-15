@@ -71,6 +71,8 @@ not resume execution, and explicit controller parks remain parked. Task
 cancellation also reaches unfinished children after the root has completed,
 without replacing its saved result. A new cancellation request after reopening
 can continue already admitted cleanup.
+A fresh parent cancellation also resumes cleanup explicitly parked before that
+request; a later child park remains respected until another cancellation.
 Cancellation may retain pending cleanup or unknown delivery. Neither is rendered
 as successful disposal. Independent work is interleaved; alternative tokens stay
 inside their work's checkpoint and do not imply parallel parent agents.
@@ -80,6 +82,13 @@ an explicit authorized snapshot/model delegation. Revocation is checked before
 dispatch. A pending input alone creates no acquisition. Direct answers are
 hypotheses, pure results have computation ancestry, authenticated source slices
 have acquisition ancestry, and delegated model answers are judgments.
+Import binds each completed instrument's result and answer provenance to its
+actual admitted reply, including unavailable answers. A valid checkpoint alone
+cannot substitute a different instrument reply.
+When a model request has a byte limit, compact JSON measurement rejects oversized
+selected values and port observations before their logical elements are allocated.
+The final request still checks envelopes and escaping against the same limit;
+this is not a general memory ceiling.
 
 Values, sources and views have task custody as well as content identity.
 Acquisition records bind the exact frozen source universe and slice; computations
@@ -112,13 +121,13 @@ is distinguished from concrete execution where it supplies the argument.
 | WORK-09, WORK-10 | Independent source/native/WASM fixtures preserve distinct attachments, shallow behavior and explicit successor-state capabilities. |
 | WORK-11 | Ordered collection includes repeated, completed, cancelled, pending and missing identities without cloning the parent. |
 | WORK-12, WORK-13 | No image-replacement operation exists; records bind exact admitted program/checkpoint. Ordinary quantum control is separate from generation-bound port commands; stale/no-port controls reject. |
-| WORK-14 | Real cancellation cleanup yields, exposes a request, yields again and completes; inspection reports pending cleanup until terminal disposal. |
+| WORK-14 | Real cancellation cleanup yields, exposes a request, yields again and completes; inspection reports pending cleanup until terminal disposal. Explicit parking survives older cancellation; fresh parent cancellation resumes it after reopening with a compatible profile. |
 | CTX-01, CTX-02, CTX-08 | Partial snapshot omits a rare exception; full source expansion reveals it; a different task cannot expand the same digest. |
 | CTX-03, CTX-04 | Equal payloads from different work retain distinct derivations; inline inputs and subsequent computation retain hypothesis ancestry. |
 | CTX-05–07 | Adaptive context fixtures exercise view epochs, pair preservation, policy/user messages, skill unloading, model change and retained opaque-content rules; preparation uses immutable captures. |
 | CTX-09 | Existing long catalogs/input/resources and large prompt/result tests retained; workspace source/value/view pages report completeness and coverage. |
 | CTX-10 | Exact snapshot/resource and ancestry checks in `workspaceValueReference`, `workspaceSnapshotAccess`, archive admission and the existing profile binding; no cross-universe value cache. |
-| OWN-02–07, OWN-10, OWN-14 | Delegation fixture uses the same typed input directly, from pure computation and from explicit inference; distinct occurrences, wrong callback rejection, parent amendment, pre-dispatch revocation, malformed capture and cancellation/unknown cases. |
+| OWN-02–07, OWN-10, OWN-14 | Delegation fixture uses the same typed input directly, from pure computation and from explicit inference; distinct occurrences, wrong callback rejection, parent amendment, pre-dispatch revocation, malformed capture and cancellation/unknown cases. Rehashed answer provenance, omitted answers and an alternative same-program checkpoint are rejected; valid unavailable answers and model/snapshot handoffs survive recovery. |
 | OWN-08 | Actual SQLite write denial after kernel publication fences the owner and prevents subsequent dispatch. |
 | OWN-09, OWN-12 | Frozen receipt replay after work/occurrence advancement and owner replacement, completed-answer handoff after namespace reopen, interrupted/captured build recovery, independent archive mutation, exact child/result restoration and private capture checks. Existing process-kill recovery matrix remains enabled. |
 | OWN-13 | Prior application parked at a question, temporary installation retains its exact binary, and the old task completes through that retained runtime. |

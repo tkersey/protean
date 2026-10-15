@@ -143,6 +143,29 @@ pub fn page(a: std.mem.Allocator, schema: []const u8, bytes: []const u8, request
     return @import("workspace_projection.zig").window(a, window, requested, total);
 }
 
+/// A request's selected values share a JSON-byte budget. Measure compact
+/// repetition before allocating a JSON node for each logical element. The
+/// caller still checks the final request, including envelopes and escaping.
+pub fn decodeWithin(a: std.mem.Allocator, schema: []const u8, bytes: []const u8, remaining: *?u64) !Owned {
+    if (remaining.*) |maximum| {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        var decoded = try data.schema.decode(scratch, schema);
+        defer decoded.deinit();
+        try data.schema.validateValue(scratch, decoded.descriptor, bytes);
+        var projection: Projection = .{ .allocator = scratch };
+        const root = projection.build(decoded.descriptor, bytes) catch |err| switch (err) {
+            error.Overflow => return error.Capacity,
+            else => return err,
+        };
+        const length = projection.nodes.items[root].length;
+        if (length > maximum) return error.Capacity;
+        remaining.* = maximum - length;
+    }
+    return decode(a, schema, bytes);
+}
+
 const Projection = struct {
     const Node = struct {
         length: u64,
@@ -467,6 +490,10 @@ test "runtime schema JSON pages zero-width collections within fixed memory" {
     var limited = std.heap.FixedBufferAllocator.init(&buffer);
     try std.testing.expectError(error.OutOfMemory, decode(limited.allocator(), schema, bytes));
     limited.reset();
+    var request_budget: ?u64 = 8 * 1024;
+    try std.testing.expectError(error.Capacity, decodeWithin(limited.allocator(), schema, bytes, &request_budget));
+    try std.testing.expectEqual(@as(?u64, 8 * 1024), request_budget);
+    limited.reset();
     const first = try page(limited.allocator(), schema, bytes, .{ .maximum = 10 });
     try std.testing.expectEqualStrings("[{},{},{},", first.object.get("text").?.string);
     try std.testing.expectEqual(@as(u64, 3 * count + 1), try json.numberInteger(u64, first.object.get("total_bytes").?.number_string));
@@ -481,6 +508,25 @@ test "runtime schema JSON pages zero-width collections within fixed memory" {
     limited.reset();
     const nested_first = try page(limited.allocator(), nested, "", .{ .maximum = 20 });
     try std.testing.expectEqualStrings("[[[{},{}],[{},{}],[{}"[0..20], nested_first.object.get("text").?.string);
+}
+
+test "runtime schema request budget counts aggregate JSON bytes and preserves valid values" {
+    const a = std.testing.allocator;
+    const schema = try values.schemaBytes(bool, a);
+    defer a.free(schema);
+    var remaining: ?u64 = 9;
+    var first = try decodeWithin(a, schema, &.{1}, &remaining);
+    defer first.deinit();
+    try std.testing.expect(first.value.bool);
+    var second = try decodeWithin(a, schema, &.{0}, &remaining);
+    defer second.deinit();
+    try std.testing.expect(!second.value.bool);
+    try std.testing.expectEqual(@as(?u64, 0), remaining);
+    try std.testing.expectError(error.Capacity, decodeWithin(a, schema, &.{1}, &remaining));
+    remaining = null;
+    var unlimited = try decodeWithin(a, schema, &.{1}, &remaining);
+    defer unlimited.deinit();
+    try std.testing.expectEqualDeep(first.value, unlimited.value);
 }
 
 test "runtime schema pages agree with whole JSON at UTF-8 and recursive boundaries" {

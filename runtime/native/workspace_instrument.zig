@@ -99,6 +99,7 @@ fn prepareModel(ctx: registry.ProjectionContext, payload: []const u8) ![]u8 {
     const delegation = admitted.value;
     if (delegation.selection != .model or delegation.model == null or delegation.snapshot != null) return error.InvalidDelegation;
     const binding = delegation.model.?;
+    var remaining: ?u64 = if (binding.settings.request_bytes) |maximum| maximum else null;
     const schema = try portSchema(ctx, delegation);
     var content = json.object();
     try json.put(a, &content, "subproblem", json.string(delegation.selection.model.subproblem.bytes));
@@ -109,7 +110,7 @@ fn prepareModel(ctx: registry.ProjectionContext, payload: []const u8) ![]u8 {
         defer artifact.deinit();
         const descriptor = try ctx.object(artifact.value.schema, std.math.cast(usize, artifact.value.schema.bytes) orelse return error.Capacity);
         const bytes = try ctx.object(artifact.value.value, std.math.cast(usize, artifact.value.value.bytes) orelse return error.Capacity);
-        var value = try dynamic.decode(a, descriptor, bytes);
+        var value = try dynamic.decodeWithin(a, descriptor, bytes, &remaining);
         defer value.deinit();
         var item = json.object();
         try json.put(a, &item, "reference", try values.toJson(state.Reference, a, ref));
@@ -123,7 +124,7 @@ fn prepareModel(ctx: registry.ProjectionContext, payload: []const u8) ![]u8 {
     try json.put(a, &content, "inputs", inputs);
     var port = try c.decodeOwned(workspace.Port, a, try ctx.object(delegation.port, std.math.cast(usize, delegation.port.bytes) orelse return error.Capacity));
     defer port.deinit();
-    var observed = try dynamic.decode(a, try ctx.object(port.value.interface.payload, std.math.cast(usize, port.value.interface.payload.bytes) orelse return error.Capacity), try ctx.object(port.value.payload, std.math.cast(usize, port.value.payload.bytes) orelse return error.Capacity));
+    var observed = try dynamic.decodeWithin(a, try ctx.object(port.value.interface.payload, std.math.cast(usize, port.value.interface.payload.bytes) orelse return error.Capacity), try ctx.object(port.value.payload, std.math.cast(usize, port.value.payload.bytes) orelse return error.Capacity), &remaining);
     defer observed.deinit();
     try json.put(a, &content, "port_observation", observed.value);
     var body = json.object();

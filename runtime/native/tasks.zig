@@ -380,11 +380,37 @@ pub fn Service(comptime Types: type) type {
             for (ids) |id| {
                 var child = try self.workspaceWork(a, parent.id, id);
                 defer child.deinit();
-                if (child.value.terminal() or child.value.cancellation != null) continue;
-                const operation_id = try std.fmt.allocPrint(a, "task-cancel-{s}", .{std.fmt.bytesToHex(id, .lower)});
+                if (child.value.terminal()) continue;
+                if (child.value.cancellation != null and
+                    (child.value.schedule != .parked or !try self.workspaceCancellationPending(a, parent.id, id))) continue;
+                const operation_id = try std.fmt.allocPrint(a, "task-cancel-{s}-{d}", .{ std.fmt.bytesToHex(id, .lower), child.value.control_revision });
                 defer a.free(operation_id);
                 _ = try self.workspaceControl(a, operation_id, parent.id, id, child.value.execution_revision, child.value.control_revision, .{ .cancel = parent.cancellation.? });
                 return true;
+            }
+            return false;
+        }
+
+        // Only a newer parent cancellation overrides an explicit child park.
+        // Capture and execution publications do not acknowledge that intent.
+        fn workspaceCancellationPending(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: state.Digest) !bool {
+            var query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq DESC", &.{.{ .blob = &task_id }});
+            defer query.deinit();
+            while (try query.step() == .row) {
+                var saved = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+                defer saved.deinit();
+                if (saved.value.kind == .cancellation_requested) return true;
+                const concerns_child = for (saved.value.workspace_publications.items) |item| {
+                    if (std.meta.eql(item.work, work_id)) break true;
+                } else false;
+                if (!concerns_child) continue;
+                const ref = saved.value.workspace_command orelse continue;
+                const bytes = try self.store().object(a, ref, null);
+                defer a.free(bytes);
+                var command = try contracts.decodeOwned(workspace.PublicationCommand, a, bytes);
+                defer command.deinit();
+                if (command.value != .control or (command.value.control.command != .park and command.value.control.command != .cancel)) continue;
+                return false;
             }
             return false;
         }
@@ -4885,6 +4911,48 @@ pub fn Service(comptime Types: type) type {
                 else => if (value.result != null or value.result_value != null) return error.InvalidArchive,
             }
             if (observed.value != .requested and (value.current_occurrence != null or value.current_port != null)) return error.InvalidArchive;
+            if (native_program) try self.validateWorkspaceInstrumentAnswer(a, parent, value);
+        }
+
+        fn validateWorkspaceInstrumentAnswer(self: *Self, a: std.mem.Allocator, parent: state.Task, child: workspace.Work) !void {
+            if (child.outcome_kind != .completed) {
+                if (child.answer_value != null) return error.InvalidArchive;
+                return;
+            }
+            var pending = try self.record(occurrence.Occurrence, a, "occurrence", child.instrument_occurrence orelse return error.InvalidArchive, parent.id);
+            defer pending.deinit();
+            if (!std.meta.eql(pending.value.work, child.id) or pending.value.state != .admitted or pending.value.state.admitted != .reply) return error.InvalidArchive;
+            const admitted = pending.value.state.admitted.reply;
+            var reply = try data.invocation.decode(data.invocation.Result, a, try self.store().acquiredObject(a, admitted.reply, null));
+            defer reply.deinit();
+            if (!std.meta.eql(reply.value.request_identity, pending.value.request) or
+                !std.meta.eql(child.result, @as(?state.Reference, .{ .digest = storage.digest(reply.value.value), .bytes = reply.value.value.len }))) return error.InvalidArchive;
+            var output = try contracts.decodeOwned(instrument.Output, a, reply.value.value);
+            defer output.deinit();
+            if (output.value == .unavailable) {
+                if (child.answer_value != null) return error.InvalidArchive;
+                return;
+            }
+            const answer_ref = child.answer_value orelse return error.InvalidArchive;
+            const answer = try self.workspaceValueReference(a, parent.id, try wp.reference(a, .value, answer_ref.digest));
+            const delegation_ref = child.delegation orelse return error.InvalidArchive;
+            var delegation = try contracts.decodeOwned(workspace.Delegation, a, try self.store().object(a, delegation_ref, null));
+            defer delegation.deinit();
+            var port = try contracts.decodeOwned(workspace.Port, a, try self.store().object(a, delegation.value.port, null));
+            defer port.deinit();
+            if (!std.meta.eql(answer.artifact, answer_ref) or !std.meta.eql(answer.schema, port.value.interface.argument) or
+                !std.meta.eql(answer.value, state.Reference{ .digest = storage.digest(output.value.answer.bytes), .bytes = output.value.answer.bytes.len })) return error.InvalidArchive;
+            const expected: workspace.Derivation = switch (delegation.value.selection) {
+                .snapshot => |selected| .{ .kind = .acquisition, .sources = .{ .items = &.{} }, .acquisition = try self.workspaceSnapshotRange(a, parent, delegation.value.snapshot orelse return error.InvalidArchive, selected) },
+                .model => blk: {
+                    var capture_value = try self.record(state.Capture, a, "capture", admitted.attempt, parent.id);
+                    defer capture_value.deinit();
+                    break :blk .{ .kind = .judgment, .sources = delegation.value.inputs, .work = child.id, .delegation = delegation_ref, .capture = capture_value.value.response orelse return error.InvalidArchive };
+                },
+                else => return error.InvalidArchive,
+            };
+            const provenance = try contracts.encodeOwned(workspace.Derivation, a, expected);
+            if (!std.meta.eql(answer.provenance, state.Reference{ .digest = storage.digest(provenance), .bytes = provenance.len })) return error.InvalidArchive;
         }
 
         /// The compilation result stays local until the same transaction admits
