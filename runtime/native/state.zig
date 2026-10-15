@@ -197,6 +197,7 @@ pub const EventType = enum {
     reconciled,
     workspace,
     workspace_progress,
+    workspace_read,
 };
 pub const Event = struct {
     task: TaskId,

@@ -58,7 +58,7 @@ pub const Action = union(enum) {
 pub const P = model.Profile(Action, .{
     .{ .name = "list", .description = "List a page of the admitted immutable snapshot; next is the following page's after." },
     .{ .name = "read", .description = "Read at most 4096 UTF-8 bytes. Successful reads append zero-indexed evidence." },
-    .{ .name = "ask", .description = "Ask for clarification needed for the current task." },
+    .{ .name = "ask", .description = "Ask for clarification needed for the current task.", .context_retention = .control },
     .{ .name = "report", .description = "Finish with claims citing acquired evidence_indices, reasoning, and limitations. Observations and inferences require citations; inferences and hypotheses require reasoning." },
     .{ .name = "stop", .description = "Stop honestly if the task cannot be supported by the admitted evidence." },
     .{ .name = "inference_set", .description = "Select an approved profile and effort for the next inference, using the current control revision." },

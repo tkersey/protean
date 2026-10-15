@@ -67,6 +67,9 @@ pub const AdaptiveContextReference = struct {
 /// reference is data, never object access authority; its actual material enters
 /// through the paired workspace result at selected_at.
 pub const ResearchSelection = struct { view: contracts.workspace.Ref, selected_at: u64 };
+/// Authored classification of paired call/results during research replacement.
+/// Human input and other operative controls must survive a selected data view.
+pub const ContextRetention = enum { research, control };
 pub const AdaptivePlan = struct {
     epoch: u64,
     reason: EpochReason,
@@ -152,8 +155,13 @@ fn checkDeclarations(comptime Answer: type, comptime declarations: anytype) void
     inline for (declarations, 0..) |declaration, index| {
         inline for (@typeInfo(@TypeOf(declaration)).@"struct".field_names) |field_name| {
             if (!std.mem.eql(u8, field_name, "name") and
-                !std.mem.eql(u8, field_name, "description"))
+                !std.mem.eql(u8, field_name, "description") and
+                !std.mem.eql(u8, field_name, "context_retention"))
                 @compileError("Protean model declaration has unknown field '" ++ field_name ++ "'");
+        }
+        if (@hasField(@TypeOf(declaration), "context_retention")) {
+            const retention: ContextRetention = declaration.context_retention;
+            _ = retention;
         }
         const name: []const u8 = declaration.name;
         if (name.len == 0 or name.len > 64)
@@ -215,6 +223,15 @@ pub fn Profile(
         pub const InterpretationFailure = @import("model_interpretation.zig").Failure;
         pub const representation = limits;
         pub const declaration_count = declarations.len;
+        /// Compile-time application semantics, never provider-supplied metadata.
+        pub const retained_control_calls: [declarations.len]bool = blk: {
+            var result: [declarations.len]bool = @splat(false);
+            for (declarations, 0..) |declaration, i| {
+                if (@hasField(@TypeOf(declaration), "context_retention"))
+                    result[i] = @as(ContextRetention, declaration.context_retention) == .control;
+            }
+            break :blk result;
+        };
         pub const ArgumentCodec = CodecProfile.Codec;
         pub const DecodedAnswer = CodecProfile.Decoded;
         pub const ModelId = contracts.Text(schemaBound(limits.model_id_bytes));

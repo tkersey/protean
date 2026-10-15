@@ -543,7 +543,7 @@ pub fn Projection(comptime P: type) type {
                 var item = value;
                 var retain = true;
                 if (kind(item, "function_call")) {
-                    retain = origin.watermark >= selected_at - 1;
+                    retain = P.retained_control_calls[try ordinal(try json.text(try field(item, "name")))] or origin.watermark >= selected_at - 1;
                     const id = try json.text(try field(item, "call_id"));
                     if (calls.contains(id)) return error.CallPairMismatch;
                     try calls.put(id, retain);

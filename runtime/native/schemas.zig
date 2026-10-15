@@ -177,6 +177,7 @@ fn eventFields(kind: state.EventType) []const EventField {
         .blocked => &.{.{ .name = "delivery", .kind = .delivery, .optional = true }},
         .imported => &.{.{ .name = "archive_sha256", .kind = .digest }},
         .reconciled => &.{.{ .name = "reconciliation_id", .kind = .digest }},
+        .workspace_read => &.{.{ .name = "occurrence_id", .kind = .digest }},
         .workspace, .workspace_progress => &.{.{ .name = "workspace_id", .kind = .digest }},
         .accepted, .input_accepted, .cancellation_requested, .parked, .resumed, .delivery_unknown, .completed, .failed, .cancelled => &.{},
     };

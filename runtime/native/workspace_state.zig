@@ -151,7 +151,10 @@ pub const WorkObservation = struct {
 /// Executable claims in each work are checked against its retained checkpoint.
 pub const ReadObservation = union(enum) {
     immutable,
-    works: contracts.Vector(?WorkObservation, null),
+    works: struct {
+        works: contracts.Vector(?WorkObservation, null),
+        event_watermark: u64,
+    },
     /// The retained event prefix determines which work had been published.
     scope: u64,
     wait: struct {

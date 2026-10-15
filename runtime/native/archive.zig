@@ -297,6 +297,7 @@ fn admissionMethod(kind: state.EventType) ?state.Method {
         .reconciled => .reconcile,
         .workspace => .workspace,
         .workspace_progress,
+        .workspace_read,
         .input_required,
         .message_consumed,
         .message_not_consumed,
@@ -385,7 +386,7 @@ fn validateEventFacts(store: *storage.Store, archive: state.Archive, task: state
             if (origin.source_revision != event.revision - 1) return error.InvalidArchive;
             return null;
         },
-        .workspace, .workspace_progress, .accepted, .cancellation_requested, .resumed => return null,
+        .workspace, .workspace_progress, .workspace_read, .accepted, .cancellation_requested, .resumed => return null,
         // These may precede later progress and have no retained receipt or
         // immutable record of the historical schedule/blocker. Their shape and
         // journal range remain checked; current state cannot refute old state.

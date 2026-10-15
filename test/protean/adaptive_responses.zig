@@ -3,10 +3,13 @@ const protean = @import("protean");
 const native = @import("protean_native");
 const contracts = protean.contracts;
 const model = protean.model_invocation;
-const CurrentProfile = model.Profile(union(enum) { finish: struct { value: u64 }, inspect: struct { value: u64 } }, .{
-    .{ .name = "finish", .description = "Finish with evidence." },
-    .{ .name = "inspect", .description = "Inspect an invariant." },
-}, .{ .model_id_bytes = 128, .temperature_bytes = 32, .maximum_messages = 4, .message_bytes = 1024, .maximum_output_items = 8, .call_id_bytes = 64, .arguments_json_bytes = 256, .result_text_bytes = 1024, .provider_response_bytes = 4096, .maximum_adaptive_reply_bytes = 1024 });
+const CurrentProfile = TestProfile(false);
+fn TestProfile(comptime control_answer: bool) type {
+    return model.Profile(union(enum) { finish: struct { value: u64 }, inspect: struct { value: u64 } }, .{
+        .{ .name = "finish", .description = "Finish with evidence." },
+        .{ .name = "inspect", .description = "Inspect an invariant.", .context_retention = if (control_answer) .control else .research },
+    }, .{ .model_id_bytes = 128, .temperature_bytes = 32, .maximum_messages = 4, .message_bytes = 1024, .maximum_output_items = 8, .call_id_bytes = 64, .arguments_json_bytes = 256, .result_text_bytes = 1024, .provider_response_bytes = 4096, .maximum_adaptive_reply_bytes = 1024 });
+}
 const Ref = model.ArtifactReference;
 const Objects = struct {
     items: std.ArrayList([]const u8) = .empty,
@@ -34,8 +37,11 @@ fn digest(bytes: []const u8) [32]u8 {
     return out;
 }
 test "chunked adaptive projection preserves history and appends without prefixes" {
-    try Fixture(CurrentProfile).preservation();
+    try Fixture(CurrentProfile).preservation(false);
     try Fixture(CurrentProfile).scaling(false);
+}
+test "research replacement preserves authored human-answer call pairs" {
+    try Fixture(TestProfile(true)).preservation(true);
 }
 test "owned adaptive projection reuses checked ancestry in one integrity epoch" {
     try Fixture(CurrentProfile).scaling(true);
@@ -108,7 +114,7 @@ fn Fixture(comptime P: type) type {
             request.results.items = settled;
         }
 
-        pub fn preservation() !void {
+        pub fn preservation(comptime clarification_only: bool) !void {
             var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
             defer arena.deinit();
             const a = arena.allocator();
@@ -266,6 +272,23 @@ fn Fixture(comptime P: type) type {
             request.plan.prior = second.replay;
             request.plan.watermark = second.replay.?.watermark;
             request.results.items = &.{.{ .call_id = .{ .bytes = "call-2" }, .output = .{ .bytes = "Observed invariant retained." } }};
+            if (clarification_only) {
+                // Retention follows the authored role, independently of the
+                // provider function's spelling. The application marks ask this way.
+                request.results.items = &.{.{ .call_id = .{ .bytes = "call-2" }, .output = .{ .bytes = "HUMAN-CLARIFICATION: include archived evidence." } }};
+                try advance(ctx, &objects, &request, "later-research", "OLD-REASONING");
+                try advance(ctx, &objects, &request, "select-view", "NEW-REASONING");
+                request.plan.epoch += 1;
+                request.plan.reason = .view_change;
+                request.plan.research = .{ .view = .{ .kind = .view, .id = .{ .bytes = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef" } }, .selected_at = request.plan.watermark };
+                const selected = try native.json.canonical(a, try http(a, try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, request))));
+                try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, selected, "call-2"));
+                try std.testing.expect(std.mem.indexOf(u8, selected, "HUMAN-CLARIFICATION") != null);
+                try std.testing.expect(std.mem.indexOf(u8, selected, "later-research") == null);
+                try std.testing.expect(std.mem.indexOf(u8, selected, "select-view") != null);
+                try std.testing.expect(std.mem.indexOf(u8, selected, "OLD-REASONING") == null);
+                return;
+            }
             try skillOriginRejections(ctx, &objects, request);
             // CTX-05/06/07: an explicit view replaces research exchanges while
             // preserving policy, user amendments, current tools, and skills.
