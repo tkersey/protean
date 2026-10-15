@@ -178,8 +178,14 @@ fn omitArchiveFact(a: std.mem.Allocator, io: std.Io, shape: anytype, task: anyty
             task: [16]u8,
             seq: u64,
             revision: u64,
-            kind: enum { accepted, input_required, input_accepted, message_queued, message_consumed, message_not_consumed, cancellation_requested, parked, resumed, blocked, delivery_unknown, completed, failed, cancelled, imported },
+            kind: enum { accepted, input_required, input_accepted, message_queued, message_consumed, message_not_consumed, cancellation_requested, parked, resumed, blocked, delivery_unknown, completed, failed, cancelled, imported, reconciled, workspace, workspace_progress, workspace_read },
             data: protean.contracts.Bytes(48 * 1024),
+            workspace_publications: protean.contracts.Vector(struct {
+                work: [32]u8,
+                execution_revision: u64,
+                control_revision: u64,
+                observation: [32]u8,
+            }, null),
         };
         var found = false;
         const events = try a.dupe(@TypeOf(archive.events.items[0]), archive.events.items);

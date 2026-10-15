@@ -469,8 +469,11 @@ pub fn Service(comptime Types: type) type {
             return .{ .receipt = saved, .replayed = false };
         }
         fn event(self: *Self, value: *state.Task, kind: state.EventType, bytes: []const u8) !void {
+            return self.publicationEvent(value, kind, bytes, &.{});
+        }
+        fn publicationEvent(self: *Self, value: *state.Task, kind: state.EventType, bytes: []const u8, publications: []const state.WorkPublication) !void {
             value.event_high = try std.math.add(u64, value.event_high, 1);
-            try self.store().putEvent(.{ .task = value.id, .seq = value.event_high, .revision = value.revision, .kind = kind, .data = .{ .bytes = bytes } });
+            try self.store().putEvent(.{ .task = value.id, .seq = value.event_high, .revision = value.revision, .kind = kind, .data = .{ .bytes = bytes }, .workspace_publications = .{ .items = publications } });
         }
         fn messageEvent(self: *Self, a: std.mem.Allocator, value: *state.Task, kind: state.EventType, item: state.Message) !void {
             const body = try state.messageData(a, item, item.disposition);
@@ -1474,7 +1477,8 @@ pub fn Service(comptime Types: type) type {
             try self.store().putRecord(workspace.Work, "workspace_work", id, parent.id, work.value);
             const event_data = try std.fmt.allocPrint(a, "{{\"workspace_id\":\"{s}\"}}", .{std.fmt.bytesToHex(id, .lower)});
             defer a.free(event_data);
-            try self.event(parent, .workspace_progress, event_data);
+            const observed = try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, id), true);
+            try self.publicationEvent(parent, .workspace_progress, event_data, &.{try workPublication(a, observed)});
         }
         fn wakeOccurrence(self: *Self, a: std.mem.Allocator, parent: state.Task, pending: occurrence.Occurrence) !void {
             if (pending.work) |id| {
@@ -2951,7 +2955,7 @@ pub fn Service(comptime Types: type) type {
                     if (self.workspace_replay) |replay_only| {
                         var parent = try self.task(a, task_id);
                         defer parent.deinit();
-                        try self.validateWorkspaceWorkSnapshot(a, parent.value, value.value.work, replay_only.records);
+                        try self.validateWorkspaceWorkSnapshot(a, parent.value, value.value, replay_only.records);
                         try self.validateHistoricalOccurrence(a, value.value);
                     }
                     break :blk try self.renderWorkspaceWorkObservation(a, value.value.work, value.value.occurrence, value.value.work.event_watermark);
@@ -3641,6 +3645,55 @@ pub fn Service(comptime Types: type) type {
             return .{ .work = work, .occurrence = pending };
         }
 
+        fn workPublication(a: std.mem.Allocator, observed: workspace.WorkObservation) !state.WorkPublication {
+            const bytes = try contracts.encodeOwned(workspace.WorkObservation, a, observed);
+            defer a.free(bytes);
+            return .{ .work = observed.work.id, .execution_revision = observed.work.execution_revision, .control_revision = observed.work.control_revision, .observation = storage.digest(bytes) };
+        }
+
+        fn workspacePublicationAt(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, id: state.Digest, watermark: u64) !u64 {
+            var query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq<=? ORDER BY e.seq DESC", &.{ .{ .blob = &task_id }, .{ .integer = std.math.cast(i64, watermark) orelse return error.InvalidArchive } });
+            defer query.deinit();
+            while (try query.step() == .row) {
+                var saved = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+                defer saved.deinit();
+                for (saved.value.workspace_publications.items) |item| if (std.meta.eql(item.work, id)) return saved.value.seq;
+            }
+            return error.InvalidArchive;
+        }
+
+        fn validateWorkspacePublications(self: *Self, a: std.mem.Allocator, parent: state.Task, records: []const state.ArchiveRecord) !void {
+            const Position = struct { publication: state.WorkPublication, seq: u64 };
+            var latest: std.AutoHashMap(state.Digest, Position) = .init(a);
+            defer latest.deinit();
+            var query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq", &.{.{ .blob = &parent.id }});
+            defer query.deinit();
+            while (try query.step() == .row) {
+                var saved = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+                defer saved.deinit();
+                const event_value = saved.value;
+                if (event_value.workspace_publications.items.len != 0 and event_value.kind != .workspace and event_value.kind != .workspace_progress) return error.InvalidArchive;
+                for (event_value.workspace_publications.items) |item| {
+                    try requireArchiveRecord(records, .workspace_work, item.work);
+                    if (latest.get(item.work)) |prior| {
+                        if (prior.seq >= event_value.seq) return error.InvalidArchive;
+                        inline for (.{ "execution_revision", "control_revision" }) |field| {
+                            const before = @field(prior.publication, field);
+                            const after = @field(item, field);
+                            if (after < before or after - before > 1) return error.InvalidArchive;
+                        }
+                    } else if (item.execution_revision != 1 or item.control_revision != 1) return error.InvalidArchive;
+                    try latest.put(item.work, .{ .publication = item, .seq = event_value.seq });
+                }
+            }
+            for (records) |row| {
+                if (row.kind != .workspace_work) continue;
+                const current = try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, row.id), true);
+                const last = latest.get(row.id) orelse return error.InvalidArchive;
+                if (last.seq != current.work.event_watermark or !std.meta.eql(last.publication, try workPublication(a, current))) return error.InvalidArchive;
+            }
+        }
+
         fn workspaceReadBasis(self: *Self, allocator: std.mem.Allocator, parent: state.Task, command: wc.Command) ![]u8 {
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
@@ -3779,7 +3832,8 @@ pub fn Service(comptime Types: type) type {
                         };
                         if (!std.meta.eql(snapshot.work.id, id) or snapshot.work.event_watermark > watermark) return error.InvalidArchive;
                         try requireArchiveRecord(records, .workspace_work, id);
-                        try self.validateWorkspaceWorkSnapshot(a, parent, snapshot.work, records);
+                        try self.validateWorkspaceWorkSnapshot(a, parent, snapshot, records);
+                        if (snapshot.work.event_watermark != try self.workspacePublicationAt(a, parent.id, id, watermark)) return error.InvalidArchive;
                         try self.validateHistoricalOccurrence(a, snapshot);
                     }
                 },
@@ -4192,6 +4246,7 @@ pub fn Service(comptime Types: type) type {
             const a = arena.allocator();
             var parent = try self.task(a, task_id);
             defer parent.deinit();
+            try self.validateWorkspacePublications(a, parent.value, records);
             const Generation = struct { work: state.Digest, generation: u64 };
             var generations: std.AutoHashMap(Generation, void) = .init(a);
             for (records) |row| switch (row.kind) {
@@ -4299,12 +4354,24 @@ pub fn Service(comptime Types: type) type {
                 defer saved.deinit();
                 const value = saved.value;
                 for (0..std.math.cast(usize, value.port_generation) orelse return error.InvalidArchive) |i| if (!generations.contains(.{ .work = value.id, .generation = i + 1 })) return error.InvalidArchive;
-                try self.validateWorkspaceWorkSnapshot(a, parent.value, value, records);
+                try self.validateWorkspaceWorkSnapshot(a, parent.value, try self.freezeWorkspaceWork(a, task_id, try wp.reference(a, .work, value.id), true), records);
             }
         }
 
-        fn validateWorkspaceWorkSnapshot(self: *Self, a: std.mem.Allocator, parent: state.Task, value: workspace.Work, records: []const state.ArchiveRecord) !void {
+        fn validateWorkspaceWorkSnapshot(self: *Self, a: std.mem.Allocator, parent: state.Task, snapshot: workspace.WorkObservation, records: []const state.ArchiveRecord) !void {
+            const value = snapshot.work;
             if (!std.meta.eql(value.task, parent.id)) return error.InvalidArchive;
+            const publication_binding = try workPublication(a, snapshot);
+            var event_query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq=?", &.{ .{ .blob = &parent.id }, .{ .integer = std.math.cast(i64, value.event_watermark) orelse return error.InvalidArchive } });
+            defer event_query.deinit();
+            if (try event_query.step() != .row) return error.InvalidArchive;
+            var published = try contracts.decodeOwned(state.Event, a, try event_query.bytes(0));
+            defer published.deinit();
+            var matches: usize = 0;
+            for (published.value.workspace_publications.items) |item| if (std.meta.eql(item, publication_binding)) {
+                matches += 1;
+            };
+            if (matches != 1) return error.InvalidArchive;
             // A checkpoint certifies execution, not native custody facts. Those
             // facts either remain immutable or grow monotonically in the owner.
             var current = try self.workspaceWork(a, parent.id, value.id);
@@ -4457,11 +4524,16 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn workspaceCommit(self: *Self, a: std.mem.Allocator, initial: state.Task, operation_id: ?[]const u8, request: state.Digest, identity: state.Digest, kind: @FieldType(contracts.workspace.Ref, "kind"), observation: state.Reference) !Admission {
+            return self.workspaceCommitRelated(a, initial, operation_id, request, identity, kind, observation, null);
+        }
+
+        fn workspaceCommitRelated(self: *Self, a: std.mem.Allocator, initial: state.Task, operation_id: ?[]const u8, request: state.Digest, identity: state.Digest, kind: @FieldType(contracts.workspace.Ref, "kind"), observation: state.Reference, related: ?state.Digest) !Admission {
             var parent = initial;
             parent.revision = try std.math.add(u64, parent.revision, 1);
             const event_data = try std.fmt.allocPrint(a, "{{\"workspace_id\":\"{s}\"}}", .{std.fmt.bytesToHex(identity, .lower)});
             defer a.free(event_data);
-            try self.event(&parent, if (operation_id != null) .workspace else .workspace_progress, event_data);
+            var publications: [2]state.WorkPublication = undefined;
+            var publication_count: usize = 0;
             var receipt_id: state.Digest = undefined;
             try self.io.randomSecure(&receipt_id);
             var frozen = observation;
@@ -4473,10 +4545,18 @@ pub fn Service(comptime Types: type) type {
                 var pending: ?contracts.Decoded(occurrence.Occurrence) = null;
                 defer if (pending) |*value| value.deinit();
                 if (work.value.current_occurrence) |id| pending = try self.record(occurrence.Occurrence, a, "occurrence", id, parent.id);
-                const snapshot = try contracts.encodeOwned(workspace.WorkObservation, a, .{ .work = work.value, .occurrence = if (pending) |value| value.value else null });
+                const observed: workspace.WorkObservation = .{ .work = work.value, .occurrence = if (pending) |value| value.value else null };
+                publications[publication_count] = try workPublication(a, observed);
+                publication_count += 1;
+                const snapshot = try contracts.encodeOwned(workspace.WorkObservation, a, observed);
                 defer a.free(snapshot);
                 frozen = try self.store().putObject(snapshot);
             }
+            if (related) |id| {
+                publications[publication_count] = try workPublication(a, try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, id), true));
+                publication_count += 1;
+            }
+            try self.publicationEvent(&parent, if (operation_id != null) .workspace else .workspace_progress, event_data, publications[0..publication_count]);
             const saved: state.Receipt = .{ .id = receipt_id, .client_operation_id = try name(operation_id orelse "workspace.progress"), .method = .workspace, .request_digest = request, .task = parent.id, .revision = parent.revision, .disposition = .accepted, .workspace = identity, .workspace_kind = kind, .workspace_observation = frozen };
             if (operation_id) |op| {
                 const bytes = try contracts.encodeOwned(state.Receipt, a, saved);
@@ -4630,7 +4710,7 @@ pub fn Service(comptime Types: type) type {
             saved.input_value = origin orelse try self.workspacePublishValue(a, task_id, artifact.value.description.input_schema, saved.input, .{ .kind = .hypothesis, .sources = .{ .items = &.{} } });
             try self.workspacePublication(a, &saved, publication);
             try self.store().createRecord(workspace.Work, "workspace_work", id, task_id, saved);
-            const admitted = try self.workspaceCommit(a, parent.value, operation_id, request, id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", id, task_id));
+            const admitted = try self.workspaceCommitRelated(a, parent.value, operation_id, request, id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", id, task_id), if (delegated) |bound| bound.record.work else null);
             self.active.?.execution_revision = saved.execution_revision;
             if (saved.schedule == .queued) self.subjectAppendAssumeCapacity(.{ .task = task_id, .work = id });
             return admitted;

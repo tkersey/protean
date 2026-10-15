@@ -224,12 +224,14 @@ pub fn build(b: *std.Build) void {
     const native_product = b.step("check-native-product", "Qualify the native adaptive application on the selected supported platform");
     const native_owner = b.step("check-native-owner", "Qualify native owner, context, and recovery contracts");
     const native_packaged = b.step("check-native-packaged", "Qualify the packaged adaptive executable and HTTPS isolation");
+    const native_executable = b.step("check-native-executable", "Qualify the packaged adaptive executable and process isolation");
     const native_consumer = b.step("check-native-https", "Check native HTTPS against an independent endpoint");
     const scheduler_benchmark = b.step("bench-native-scheduler", "Measure idle Service scans with a held worker");
     native_checks.dependOn(native_product);
     native_product.dependOn(native_owner);
     native_product.dependOn(native_packaged);
     native_packaged.dependOn(native_consumer);
+    native_packaged.dependOn(native_executable);
     if (native_enabled) {
         const kosmos = b.createModule(.{
             .root_source_file = kosmos_source.path(b, "src/root.zig"),
@@ -360,13 +362,13 @@ pub fn build(b: *std.Build) void {
             const adaptive_reference = b.step("protean", "Build the native Kosmos reference host for the adaptive program");
             adaptive_reference.dependOn(&adaptive_product.install.step);
             adaptive_reference.dependOn(adaptive_image_step);
-            native_packaged.dependOn(adaptive_reference);
+            native_executable.dependOn(adaptive_reference);
             const adaptive_peer = nativeCheckCommand(b);
             adaptive_peer.addArgs(&.{ "node", "test/protean/native_adaptive.mjs" });
             adaptive_peer.addFileArg2(adaptive_product.executable.getEmittedBin(), .{ .make_absolute = true });
             adaptive_peer.addFileArg2(adaptive_application, .{ .make_absolute = true });
             adaptive_peer.addFileArg2(adaptive_image, .{ .make_absolute = true });
-            native_packaged.dependOn(&adaptive_peer.step);
+            native_executable.dependOn(&adaptive_peer.step);
             const retention_check = b.step("check-workspace-runtime-retention", "Resume an old task with its retained original executable after installing the new product");
             if (b.option(std.Build.LazyPath, "previous-runtime", "Retained previous Protean executable for namespace compatibility qualification")) |previous| {
                 const retention_run = b.addSystemCommand(&.{ "node", "test/protean/workspace_runtime_retention.mjs" });
@@ -396,6 +398,7 @@ pub fn build(b: *std.Build) void {
 
             native_consumer.dependOn(&unsupported.step);
             native_packaged.dependOn(&unsupported.step);
+            native_executable.dependOn(&unsupported.step);
         }
         // These roots share exact module identities; compile their retained
         // tests together instead of rebuilding the same compiler eleven times.
@@ -481,6 +484,7 @@ pub fn build(b: *std.Build) void {
         native_checks.dependOn(&missing.step);
         native_owner.dependOn(&missing.step);
         native_packaged.dependOn(&missing.step);
+        native_executable.dependOn(&missing.step);
         native_consumer.dependOn(&missing.step);
         scheduler_benchmark.dependOn(&missing.step);
     }

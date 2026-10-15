@@ -207,6 +207,16 @@ pub const Event = struct {
     /// An admitted public projection. Raw provider captures and checkpoints do
     /// not enter this field or acquire artifact-read permission by their digest.
     data: contracts.Bytes(48 * 1024),
+    /// Native publication bindings, separate from the public event projection.
+    /// Snapshots still require checkpoint, occurrence, and provenance validation.
+    workspace_publications: contracts.Vector(WorkPublication, null) = .{ .items = &.{} },
+};
+
+pub const WorkPublication = struct {
+    work: Digest,
+    execution_revision: u64,
+    control_revision: u64,
+    observation: Digest,
 };
 
 pub const Artifact = struct {

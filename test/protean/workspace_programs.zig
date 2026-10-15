@@ -1941,7 +1941,18 @@ test "collected history rejects rehashed result substitution and false absence" 
         const candidate = try contracts.decodeOwned(native.workspace.Value, scratch, try query.bytes(0));
         if (std.mem.eql(u8, &candidate.value.artifact.digest, &(try nativeIdentity(hypothesis_ref)))) hypothesis_record = candidate.value;
     }
-    const refs = [_]contracts.workspace.Ref{ try workspaceRef(scratch, .work, work.value.id), try workspaceRef(scratch, .work, @splat(0)) };
+    var slow_builder = source.Builder.init(scratch);
+    defer slow_builder.deinit();
+    const slow_program = try service.workspaceBuild(scratch, "collect-slow-build", parent.receipt.task, try native.source_records.encode(scratch, try listLength(&slow_builder)), &diagnostic);
+    const slow_input = try scratch.alloc(u8, 300 * 9 + 1);
+    var writer: data.wire.Writer = .{ .output = slow_input };
+    for (0..300) |i| {
+        try writer.natural(1);
+        try writer.fixed(u64, @intCast(i));
+    }
+    try writer.natural(0);
+    const slow_start = try service.workspaceStart(scratch, "collect-slow-start", parent.receipt.task, slow_program.receipt.workspace.?, slow_input, .{});
+    const refs = [_]contracts.workspace.Ref{ try workspaceRef(scratch, .work, work.value.id), try workspaceRef(scratch, .work, @splat(0)), try workspaceRef(scratch, .work, slow_start.receipt.workspace.?) };
     _ = try service.message(scratch, "collect-message", parent.receipt.task, .{ .work = .{ .collect = .{ .works = .{ .items = &refs } } } });
     var observed: ?native.testing.occurrence.Occurrence = null;
     for (0..64) |_| {
@@ -1963,14 +1974,52 @@ test "collected history rejects rehashed result substitution and false absence" 
     const original_reply = try contracts.decodeOwned(contracts.workspace.Reply, scratch, acquired.value.value);
     var manifest_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(manifest, &manifest_digest, .{});
+    for (0..1024) |step| {
+        var slow = try service.workspaceWork(scratch, parent.receipt.task, slow_start.receipt.workspace.?);
+        defer slow.deinit();
+        if (slow.value.terminal()) break;
+        _ = try service.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "collect-slow-{d}", .{step}), parent.receipt.task, slow.value.id, slow.value.execution_revision, slow.value.control_revision, .advance);
+    }
+    var future = try service.workspaceWork(scratch, parent.receipt.task, slow_start.receipt.workspace.?);
+    defer future.deinit();
+    try std.testing.expectEqual(.completed, future.value.outcome_kind);
+    const future_reply = try service.workspaceCommand(scratch, "collect-future", parent.receipt.task, .{ .work = .{ .inspect = .{ .work = refs[2] } } });
+    try service.validateWorkspace(scratch, parent.receipt.task);
     const index = try namespace.store.archiveIndex(scratch, original.task, .{ .digest = manifest_digest, .bytes = manifest.len });
-    for (0..3) |variant| {
+    for (0..5) |variant| {
         try namespace.store.begin();
         var evidence = try contracts.decodeOwned(native.workspace.ReplyObservation, scratch, original_evidence);
         const snapshots = try scratch.dupe(?native.workspace.WorkObservation, evidence.value.evidence.read.works.works.items);
         evidence.value.evidence.read.works.works.items = snapshots;
         var reply_json = try native.json.parse(scratch, original_reply.value.observation_json.bytes, .{});
-        if (variant == 0) {
+        if (variant >= 3) {
+            const original_watermark = snapshots[2].?.work.event_watermark;
+            try std.testing.expect(snapshots[2].?.work.outcome_kind == .yielded);
+            snapshots[2].?.work = future.value;
+            snapshots[2].?.work.event_watermark = original_watermark;
+            snapshots[2].?.occurrence = null;
+            var future_json = try native.json.parse(scratch, future_reply.observation_json.bytes, .{});
+            try native.json.put(scratch, &future_json.value, "event_watermark", try native.json.number(scratch, evidence.value.evidence.read.works.event_watermark));
+            reply_json.value.array.items[2] = future_json.value;
+            if (variant == 4) {
+                // Updating the event digest too must not hide a future revision
+                // before its actual publication sequence.
+                var event_query = try namespace.store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq=?", &.{ .{ .blob = &original.task }, .{ .integer = @intCast(original_watermark) } });
+                defer event_query.deinit();
+                try std.testing.expect(try event_query.step() == .row);
+                var event_value = try contracts.decodeOwned(native.testing.state.Event, scratch, try event_query.bytes(0));
+                const publications = try scratch.dupe(native.testing.state.WorkPublication, event_value.value.workspace_publications.items);
+                event_value.value.workspace_publications.items = publications;
+                for (publications) |*item| {
+                    if (!std.meta.eql(item.work, future.value.id)) continue;
+                    item.execution_revision = future.value.execution_revision;
+                    item.control_revision = future.value.control_revision;
+                    std.crypto.hash.sha2.Sha256.hash(try contracts.encodeOwned(native.workspace.WorkObservation, scratch, snapshots[2].?), &item.observation, .{});
+                }
+                const rewritten = try namespace.store.putObject(try contracts.encodeOwned(native.testing.state.Event, scratch, event_value.value));
+                try namespace.store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &rewritten.digest }, .{ .blob = &original.task }, .{ .integer = @intCast(original_watermark) } });
+            }
+        } else if (variant == 0) {
             snapshots[0].?.work.result_value = hypothesis_record.?.artifact;
             try native.json.put(scratch, &reply_json.value.array.items[0], "result", try native.values.toJson(contracts.workspace.Ref, scratch, hypothesis_ref));
         } else {

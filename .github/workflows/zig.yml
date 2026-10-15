@@ -97,9 +97,9 @@ jobs:
       - name: Run retained qualification
         run: |
           if [ "${{ matrix.lane }}" = authoring ]; then
-            # Keep owner tests on the otherwise short authoring runner. The
-            # native runner qualifies the exact executable and its isolation.
-            zig build check-protean check-native-owner check-workspace-programs check-workspace-semantics \
+            # Keep the independent HTTPS probe with owner tests so its compiler
+            # does not compete with the packaged executable on the native lane.
+            zig build check-protean check-native-owner check-native-https check-workspace-programs check-workspace-semantics \
               -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = downstream ]; then
             # The downstream witness authenticates its own inputs and builds
@@ -109,7 +109,7 @@ jobs:
             cat "$RUNNER_TEMP/downstream-identity.json"
           else
             result=0
-            zig build check-native-packaged -Doptimize=safe --summary all \
+            zig build check-native-executable -Doptimize=safe --summary all \
               --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
               > "$RUNNER_TEMP/native-check.log" 2>&1 || result=$?
             cat "$RUNNER_TEMP/native-check.log"
