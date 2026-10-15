@@ -3448,6 +3448,11 @@ pub fn Service(comptime Types: type) type {
                 try data.schema.validateValue(a, descriptor.descriptor, input_value.value.value.bytes);
             } else if (saved.value.derivation.kind == .acquisition) return error.CorruptState;
             if (saved.value.derivation.delegation != null or saved.value.derivation.capture != null) try self.validateDelegatedValue(a, task_id, saved.value);
+            const origin = saved.value.derivation;
+            if (origin.program == null and origin.work == null and origin.acquisition == null and origin.frozen_input == null and origin.delegation == null and origin.capture == null) {
+                const expected: @TypeOf(origin.kind) = if (origin.sources.items.len == 0) .hypothesis else .judgment;
+                if (origin.kind != expected) return error.InvalidArchive;
+            }
             return .{ .artifact = saved.value.artifact, .schema = saved.value.description.schema, .value = saved.value.description.value, .provenance = saved.value.description.provenance };
         }
 

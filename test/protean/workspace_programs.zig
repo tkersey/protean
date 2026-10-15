@@ -2089,4 +2089,32 @@ test "collected history rejects rehashed result substitution and false absence" 
     _ = try service.workspaceStart(scratch, "collect-later-start", parent.receipt.task, program.receipt.workspace.?, input, .{});
     try service.validateWorkspace(scratch, parent.receipt.task);
     try std.testing.expectEqualStrings(original_evidence, (try namespace.store.recordBytes(scratch, "workspace_reply", original.id, original.task)).?);
+    const judgment = try service.workspaceCommand(scratch, "sourced-judgment", parent.receipt.task, .{ .context = .{ .materialize = .{
+        .input = .{ .value = .{ .reference = hypothesis_ref } },
+        .sources = .{ .items = &.{hypothesis_ref} },
+    } } });
+    const judgment_json = (try native.json.parse(scratch, judgment.observation_json.bytes, .{})).value;
+    try std.testing.expectEqualStrings("judgment", judgment_json.object.get("derivation").?.object.get("kind").?.string);
+    try service.validateWorkspace(scratch, parent.receipt.task);
+    const before_forgery = try namespace.store.archiveIndex(scratch, original.task, .{ .digest = manifest_digest, .bytes = manifest.len });
+    for (0..2) |variant| {
+        try namespace.store.begin();
+        var forged = hypothesis_record.?;
+        if (variant == 0) {
+            forged.derivation.kind = .judgment;
+        } else {
+            forged.derivation.sources.items = &.{hypothesis_record.?.artifact};
+        }
+        forged.description.provenance = try namespace.store.putObject(try contracts.encodeOwned(native.workspace.Derivation, scratch, forged.derivation));
+        forged.artifact = try namespace.store.putObject(try contracts.encodeOwned(native.workspace.ValueArtifact, scratch, forged.description));
+        forged.id = try native.workspace.custodyId(scratch, forged.task, forged.artifact.digest);
+        try namespace.store.createRecord(native.workspace.Value, "workspace_value", forged.id, forged.task, forged);
+        const records = try scratch.alloc(native.testing.state.ArchiveRecord, before_forgery.records.items.len + 1);
+        @memcpy(records[0..before_forgery.records.items.len], before_forgery.records.items);
+        records[records.len - 1] = .{ .kind = .workspace_value, .id = forged.id, .body = try namespace.store.putObject(try contracts.encodeOwned(native.workspace.Value, scratch, forged)) };
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, original.task, records));
+        const inspected = try service.workspaceCommand(scratch, "forged-derivation", original.task, .{ .context = .{ .expand = .{ .reference = try workspaceRef(scratch, .value, forged.artifact.digest), .page = .{} } } });
+        try std.testing.expectEqual(.rejected, inspected.disposition);
+        namespace.store.rollback();
+    }
 }
