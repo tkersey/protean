@@ -2068,6 +2068,11 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn validateOccurrenceProvenance(self: *Self, a: std.mem.Allocator, value: state.Task, records: []const state.ArchiveRecord) !void {
+            // A history can contain many occurrences of the same immutable
+            // image. Decode each distinct content reference once in this read
+            // pass; every occurrence still checks its own request and route.
+            var images: std.AutoHashMap(state.Reference, state.Digest) = .init(a);
+            defer images.deinit();
             for (records) |row| {
                 if (row.kind != .occurrence) continue;
                 var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -2097,9 +2102,13 @@ pub fn Service(comptime Types: type) type {
                 const encoded = try self.store().object(temporary, saved.request_object, null);
                 var request = try data.invocation.decode(data.invocation.Request, temporary, encoded);
                 defer request.deinit();
-                var image = try data.program_image.decode(temporary, try self.store().object(temporary, expected_image, null));
-                defer image.deinit();
-                if (!same(&request.value.request_identity, &saved.request) or !same(&request.value.binding.program_identity, &image.identity) or !same(&route.value.program_identity, &image.identity)) return error.InvalidArchive;
+                const identity = images.get(expected_image) orelse identity: {
+                    var image = try data.program_image.decode(temporary, try self.store().object(temporary, expected_image, null));
+                    defer image.deinit();
+                    try images.put(expected_image, image.identity);
+                    break :identity image.identity;
+                };
+                if (!same(&request.value.request_identity, &saved.request) or !same(&request.value.binding.program_identity, &identity) or !same(&route.value.program_identity, &identity)) return error.InvalidArchive;
                 if (route.value.port) |port| {
                     if (saved.work == null or route.value.delegation != null) return error.InvalidArchive;
                     try self.validateWorkspacePortOccurrence(temporary, value.id, saved, port, request.value, records);

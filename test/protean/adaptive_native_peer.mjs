@@ -663,7 +663,9 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
       assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
       if (name === 'tools-reuse') {
         const measured = join(app.data, 'workspace-accounting.bundle');
+        const exportStarted = performance.now();
         invoke('export-checkpoint', '--state-dir', selectedState, '--task-id', task.task_id, '--output', measured);
+        toolRuns.at(-1).archive_export_ms = performance.now() - exportStarted;
         const metrics = workspaceMetrics(readArchive(await readFile(measured)), JSON.parse(await readFile(applicationPath, 'utf8')));
         assert.equal(metrics.controller.calls, alternateIndex);
         assert.equal(metrics.delegated.calls, 0);
