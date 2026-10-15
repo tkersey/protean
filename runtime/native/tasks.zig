@@ -2419,7 +2419,7 @@ pub fn Service(comptime Types: type) type {
                 try self.validateArchiveAdmissions(arena.allocator(), value.value, index);
                 try self.validateOccurrenceProvenance(arena.allocator(), value.value, index.records.items);
                 try self.validateCapturedProjections(value.value, index.records.items, .inspect);
-                try self.validateWorkspaceRecords(arena.allocator(), task_id, index.records.items);
+                try self.validateWorkspaceRecordBodies(arena.allocator(), task_id, index.records.items);
             }
             return archive_api.write(self.allocator, self.io, self.store(), task_id, self.assets.manifest, path, self.namespace.directory);
         }
@@ -2467,7 +2467,7 @@ pub fn Service(comptime Types: type) type {
             try self.validateArchiveAdmissions(a, value, reader.manifest.value);
             try self.validateOccurrenceProvenance(a, value, reader.manifest.value.records.items);
             try self.validateCapturedProjections(value, reader.manifest.value.records.items, .retain);
-            try self.validateWorkspaceRecords(a, value.id, reader.manifest.value.records.items);
+            try self.validateWorkspaceRecordBodies(a, value.id, reader.manifest.value.records.items);
             // This transaction contains untrusted, unpublished archive data.
             // Reuse the closure validator without treating semantic rejection
             // as corruption of the committed namespace. Store integrity and
@@ -3731,6 +3731,18 @@ pub fn Service(comptime Types: type) type {
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.validateOccurrenceProvenance(a, parent.value, records);
+            try self.validateWorkspaceRecordBodies(a, task_id, records);
+        }
+
+        // Archive admission has already checked occurrence provenance before
+        // replaying captured projections. Keep that ordering without checking
+        // the complete occurrence history a second time here.
+        fn validateWorkspaceRecordBodies(self: *Self, allocator: std.mem.Allocator, task_id: state.TaskId, records: []const state.ArchiveRecord) !void {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
             const Generation = struct { work: state.Digest, generation: u64 };
             var generations: std.AutoHashMap(Generation, void) = .init(a);
             for (records) |row| switch (row.kind) {
