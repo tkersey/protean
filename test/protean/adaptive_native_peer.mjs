@@ -248,6 +248,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
         const next = subject.trace.next(previous);
         assert(!next.done, 'the recorded scenario must finish through a real controller action');
         const call = next.value;
+        (subject.actions ??= []).push(JSON.parse(JSON.stringify({name: call[0], arguments: call[1]})));
         response.writeHead(200, {'content-type': 'application/json'});
         response.end(JSON.stringify({id: `tools-response-${index}`, status: 'completed', error: null, output: [{type: 'function_call', status: 'completed', call_id: `tools-${index}`, name: call[0], arguments: JSON.stringify(call[1])}]}));
         return;
@@ -757,6 +758,8 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
         toolRuns.at(-1).archive_export_ms = performance.now() - exportStarted;
         const metrics = workspaceMetrics(readArchive(await readFile(measured)), JSON.parse(await readFile(applicationPath, 'utf8')));
         assert.equal(metrics.controller.calls, alternateIndex);
+        assert.deepEqual(metrics.actions, toolSubject.actions, 'archived actions preserve actual provider execution order across restart');
+        assert.equal(metrics.actions.at(-1).name, 'report');
         assert.equal(metrics.delegated.calls, 0);
         assert.equal(metrics.work_items, 12);
         assert(metrics.builds >= 1 && metrics.compiler_nanoseconds > 0 && metrics.native_publication_nanoseconds > 0);
@@ -783,14 +786,14 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
           const attempt = decodeValue(archive.schemas.get('attempt'), archive.object(attemptRow[2]));
           const captureRow = archive.manifest[6].find(([kind, id]) => kind === 4 && Buffer.from(id).equals(Buffer.from(attempt[0])));
           const capture = decodeValue(archive.schemas.get('capture'), archive.object(captureRow[2]));
-          const expectedActions = workspaceMetrics(archive, application).actions.slice(0, 1);
+          archive.manifest[6] = archive.manifest[6].filter(row => row === attemptRow || row === captureRow || (row[0] === 0 && Buffer.from(row[1]).equals(Buffer.from(attempt[2]))));
+          const expectedActions = workspaceMetrics(archive, application).actions;
           const rawSchema = contract(application, 'CapturedResponse');
           const raw = decodeValue(rawSchema, archive.object(capture[4].value));
           raw[3] = Buffer.from(body);
           const store = bytes => { const ref = reference(bytes); archive.objects.set(Buffer.from(ref[0]).toString('hex'), bytes); return ref; };
           capture[4] = {tag: 1, value: store(Buffer.from(encodeValue(rawSchema, raw)))};
           captureRow[2] = store(Buffer.from(encodeValue(archive.schemas.get('capture'), capture)));
-          archive.manifest[6] = archive.manifest[6].filter(row => row === attemptRow || row === captureRow || (row[0] === 0 && Buffer.from(row[1]).equals(Buffer.from(attempt[2]))));
           const observed = workspaceMetrics(archive, application);
           assert.equal(observed.controller.calls, 1, body);
           assert.equal(observed.controller.input_tokens, input, body);
@@ -815,7 +818,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
             assert.deepEqual(rejected.controller, observed.controller, 'rejected output retains its actual cost observations');
           }
         }
-        for (const failure of ['task.submit', 'task.status', 'task.result', 'artifact.read', 'close', 'export']) {
+        for (const failure of ['task.submit', 'task.status', 'task.result', 'artifact.read', 'close', 'close-code', 'close-signal', 'export']) {
           const output = join(app.data, 'evaluation-failure-' + failure); await mkdir(output);
           let closed = false;
           class FailingClient {
@@ -826,11 +829,15 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
               if (method === 'describe') return {profile: {id: 'fixture'}};
               if (method === 'task.submit') return {task_id: task.task_id};
               if (method === 'task.status') return {status: 'completed'};
-              if (method === 'task.result' && ['close', 'export'].includes(failure)) return {ready: true, outcome: {value: {fixture: true}}};
+              if (method === 'task.result' && ['close', 'close-code', 'close-signal', 'export'].includes(failure)) return {ready: true, outcome: {value: {fixture: true}}};
               if (method === 'task.result') return {ready: true, outcome: {value_ref: {artifact_id: 'fixture', sha256: 'fixture', bytes: '1'}}};
               throw new Error('unexpected ' + method);
             }
-            async close() { closed = true; if (failure === 'close') throw new Error('injected close'); }
+            async close() {
+              closed = true;
+              if (failure === 'close') throw new Error('injected close');
+              return {code: failure === 'close-code' ? 2 : failure === 'close-signal' ? null : 0, signal: failure === 'close-signal' ? 'SIGKILL' : null};
+            }
           }
           const report = await evaluateCase({subject: {id: failure, arm: 'pure', config: 'fixture', prompt: 'fixture'}, build: {fixture: true}, output, binary: 'fixture', credential: 'unused', application, seconds: 1}, {
             Client: FailingClient,
@@ -840,7 +847,9 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
             },
           });
           assert(closed);
-          assert(report.errors.some(error => error.message === 'injected ' + failure));
+          if (failure === 'close-code' || failure === 'close-signal') {
+            assert(report.errors.some(error => error.stage === 'close' && error.message === (failure === 'close-code' ? 'Native process exited with code 2, signal null' : 'Native process exited with code null, signal SIGKILL')));
+          } else assert(report.errors.some(error => error.message === 'injected ' + failure));
           assert.equal(report.task?.task_id ?? null, failure === 'task.submit' ? null : task.task_id);
           assert(report.elapsed_ms >= 0);
           if (failure === 'task.submit' || failure === 'export') {

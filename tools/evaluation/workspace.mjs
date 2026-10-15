@@ -57,6 +57,7 @@ export function workspaceMetrics(archive, application) {
   const captures = new Map(archive.manifest[6].filter(([kind]) => kind === 4).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('capture'), archive.object(ref))]));
   const occurrences = new Map(archive.manifest[6].filter(([kind]) => kind === 0).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('occurrence'), archive.object(ref))]));
   const stats = {controller: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, delegated: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, builds: 0, rejected_builds: 0, compiler_nanoseconds: 0, native_publication_nanoseconds: 0, checkpoint_publications: 0, current_checkpoint_bytes: 0, work_items: 0, result_bytes: 0, actions: []};
+  const actions = [];
   // Count possible provider delivery, including unknown delivery, but exclude
   // positive non-invocation evidence. Rearming an occurrence is only permitted
   // from not_sent, so older uncaptured attempts are also known not to have run.
@@ -105,11 +106,14 @@ export function workspaceMetrics(archive, application) {
         const request = decodeValue(adaptivePrepared, archive.object(attempt[7].value))[1];
         if (call[4].tag === 0 && call[4].value.tag === ordinal && request[5][ordinal] &&
             request[0][4].some(tool => tool[0] === ordinal && tool[2] === call[1])) {
-          stats.actions.push({name: call[1], arguments: JSON.parse(Buffer.from(call[2]).toString())});
+          actions.push({watermark: BigInt(request[3][2]), action: {name: call[1], arguments: JSON.parse(Buffer.from(call[2]).toString())}});
         }
       }
     }
   }
+  // Archive records are ordered by kind and random identity. The retained
+  // controller request carries the causal model-call watermark across restart.
+  stats.actions = actions.sort((a, b) => a.watermark < b.watermark ? -1 : a.watermark > b.watermark ? 1 : 0).map(item => item.action);
   for (const [kind, id, reference] of archive.manifest[6]) {
     if (kind === 9) {
       const work = decodeValue(archive.schemas.get('workspace_work'), archive.object(reference));
@@ -176,7 +180,12 @@ export async function evaluateCase({subject, build, output, binary, credential, 
       result.outcome.value = JSON.parse(bytes.toString());
     }
   } catch (error) { record('execution', error); }
-  finally { if (client) try { await client.close(); } catch (error) { record('close', error); } }
+  finally {
+    if (client) try {
+      const exit = await client.close();
+      if (exit.code !== 0 || exit.signal !== null) throw new Error(`Native process exited with code ${exit.code}, signal ${exit.signal}`);
+    } catch (error) { record('close', error); }
+  }
   const elapsed_ms = performance.now() - started;
   let retained_namespace_bytes = null, metrics = null, archive = null;
   try { retained_namespace_bytes = await bytesUnder(state); } catch (error) { record('namespace', error); }

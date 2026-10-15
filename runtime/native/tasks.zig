@@ -3510,7 +3510,7 @@ pub fn Service(comptime Types: type) type {
             if (std.unicode.utf8ValidateSlice(part)) return .{ .schema = try values.schemaBytes(contracts.Utf8, a), .value = try contracts.encodeOwned(contracts.Utf8, a, .{ .bytes = part }) };
             return .{ .schema = try values.schemaBytes(contracts.Bytes(null), a), .value = try contracts.encodeOwned(contracts.Bytes(null), a, .{ .bytes = part }) };
         }
-        fn workspaceMaterializeSnapshot(self: *Self, a: std.mem.Allocator, parent: state.Task, snapshot: state.Reference, selection: anytype) !state.Reference {
+        fn workspaceSnapshotRange(self: *Self, a: std.mem.Allocator, parent: state.Task, snapshot: state.Reference, selection: anytype) !workspace.SnapshotRange {
             try workspaceSnapshotAccess(parent, snapshot);
             const bytes = try self.store().object(a, snapshot, null);
             defer a.free(bytes);
@@ -3518,7 +3518,7 @@ pub fn Service(comptime Types: type) type {
             defer source.deinit();
             const file = source.get(selection.path.bytes) orelse return error.SourceMissing;
             if (selection.offset > file.contents.bytes.len) return error.InvalidRange;
-            const origin: workspace.SnapshotRange = .{
+            return .{
                 .snapshot = snapshot,
                 .path = selection.path,
                 .file_digest = file.sha256,
@@ -3527,6 +3527,9 @@ pub fn Service(comptime Types: type) type {
                 .file_bytes = file.contents.bytes.len,
                 .excluded_entries = source.decoded.value.excluded_entries,
             };
+        }
+        fn workspaceMaterializeSnapshot(self: *Self, a: std.mem.Allocator, parent: state.Task, snapshot: state.Reference, selection: anytype) !state.Reference {
+            const origin = try self.workspaceSnapshotRange(a, parent, snapshot, selection);
             const derived = try self.workspaceSnapshotBytes(a, origin);
             defer a.free(derived.schema);
             defer a.free(derived.value);
@@ -3678,6 +3681,127 @@ pub fn Service(comptime Types: type) type {
 
         const WorkspaceAdmission = struct { request: state.Digest, work: state.Digest, kind: @FieldType(wc.Ref, "kind") };
 
+        fn workspaceInteractionReply(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, interaction: @FieldType(wc.Work, "interact")) !workspace.PortReply {
+            var port = try self.record(workspace.Port, a, "workspace_port", try wp.identity(interaction.port, .port), task_id);
+            defer port.deinit();
+            if (!std.meta.eql(port.value.task, task_id) or !std.meta.eql(port.value.work, try wp.identity(interaction.expected.work, .work)) or
+                port.value.generation != interaction.generation) return error.InvalidArchive;
+            var pending = try self.record(occurrence.Occurrence, a, "occurrence", port.value.occurrence, task_id);
+            defer pending.deinit();
+            const acquired = switch (pending.value.state) {
+                .settled_reply => |reply| reply,
+                .admitted => |admitted| if (admitted == .reply) admitted.reply else return error.InvalidArchive,
+                else => return error.InvalidArchive,
+            };
+            var saved = try self.record(workspace.PortReply, a, "workspace_port_reply", acquired.attempt, task_id);
+            defer saved.deinit();
+            const reply = saved.value;
+            const port_bytes = try contracts.encodeOwned(workspace.Port, a, port.value);
+            defer a.free(port_bytes);
+            if (!std.meta.eql(reply.task, task_id) or !std.meta.eql(reply.id, acquired.attempt) or
+                !std.meta.eql(reply.reply.digest, acquired.reply) or
+                !std.meta.eql(reply.port, state.Reference{ .digest = storage.digest(port_bytes), .bytes = port_bytes.len })) return error.InvalidArchive;
+            switch (interaction.command) {
+                .finish => if (reply.command != .finish or reply.input != null) return error.InvalidArchive,
+                .resume_value => |supplied| {
+                    if (reply.command != .resume_value) return error.InvalidArchive;
+                    const input = reply.input orelse return error.InvalidArchive;
+                    const actual = try self.workspaceValueReference(a, task_id, try wp.reference(a, .value, input.digest));
+                    if (!std.meta.eql(actual.artifact, input) or !std.meta.eql(actual.schema, port.value.interface.argument)) return error.InvalidArchive;
+                    switch (supplied) {
+                        .reference => |ref| {
+                            const expected = try self.workspaceValueReference(a, task_id, ref);
+                            if (!std.meta.eql(expected.artifact, input)) return error.InvalidArchive;
+                        },
+                        .inline_json => |inline_value| {
+                            if (!std.meta.eql(try wp.identity(inline_value.schema, .schema), port.value.interface.argument.digest)) return error.InvalidArchive;
+                            const descriptor = try self.store().object(a, port.value.interface.argument, null);
+                            defer a.free(descriptor);
+                            const text = inline_value.json_text.bytes;
+                            var parsed = try json.parse(a, text, .{ .bytes = text.len, .depth = text.len, .tokens = text.len, .members = text.len });
+                            defer parsed.deinit();
+                            const bytes = try @import("dynamic_values.zig").encode(a, descriptor, parsed.value);
+                            defer a.free(bytes);
+                            const provenance = try contracts.encodeOwned(workspace.Derivation, a, .{ .kind = .hypothesis, .sources = .{ .items = &.{} } });
+                            defer a.free(provenance);
+                            if (!std.meta.eql(actual.value, state.Reference{ .digest = storage.digest(bytes), .bytes = bytes.len }) or
+                                !std.meta.eql(actual.provenance, state.Reference{ .digest = storage.digest(provenance), .bytes = provenance.len })) return error.InvalidArchive;
+                        },
+                    }
+                },
+            }
+            return reply;
+        }
+
+        // Replay proves receipt stability only after admission. At the archive
+        // boundary, derive the content relationship from the retained command.
+        fn validateWorkspaceContextOutput(self: *Self, a: std.mem.Allocator, parent: state.Task, context: @FieldType(workspace.PublicationCommand, "context"), identity: state.Digest) !void {
+            switch (context.command) {
+                .select => |selection| {
+                    const refs = try a.alloc(state.Reference, selection.values.items.len);
+                    defer a.free(refs);
+                    for (selection.values.items, refs) |ref, *out| out.* = (try self.workspaceValueReference(a, parent.id, ref)).artifact;
+                    const bytes = try contracts.encodeOwned(workspace.ViewArtifact, a, .{ .values = .{ .items = refs } });
+                    defer a.free(bytes);
+                    if (!std.meta.eql(storage.digest(bytes), identity)) return error.InvalidArchive;
+                },
+                .materialize => |materialize| {
+                    const actual = try self.workspaceValueReference(a, parent.id, try wp.reference(a, .value, identity));
+                    var schema = actual.schema;
+                    var payload = actual.value;
+                    var derivation: workspace.Derivation = .{ .kind = .hypothesis, .sources = .{ .items = &.{} } };
+                    var sources: std.ArrayList(state.Reference) = .empty;
+                    defer sources.deinit(a);
+                    switch (materialize.input) {
+                        .authorized_input => {
+                            if (materialize.sources.items.len != 0) return error.InvalidArchive;
+                            const ref = context.input orelse return error.InvalidArchive;
+                            try workspaceSnapshotAccess(parent, ref);
+                            derivation = .{ .kind = .acquisition, .sources = .{ .items = &.{} }, .frozen_input = ref };
+                            // workspaceValueReference checks the actual schema
+                            // and payload against this exact frozen input.
+                        },
+                        .snapshot => |selection| {
+                            if (materialize.sources.items.len != 0) return error.InvalidArchive;
+                            derivation = .{ .kind = .acquisition, .sources = .{ .items = &.{} }, .acquisition = try self.workspaceSnapshotRange(a, parent, context.snapshot orelse return error.InvalidArchive, selection) };
+                        },
+                        .value => |input| {
+                            for (materialize.sources.items) |ref| try sources.append(a, (try self.workspaceValueReference(a, parent.id, ref)).artifact);
+                            switch (input) {
+                                .reference => |ref| {
+                                    const origin = try self.workspaceValueReference(a, parent.id, ref);
+                                    if (sources.items.len == 0) {
+                                        if (!std.meta.eql(origin.artifact, actual.artifact)) return error.InvalidArchive;
+                                        return;
+                                    }
+                                    try sources.append(a, origin.artifact);
+                                    schema = origin.schema;
+                                    payload = origin.value;
+                                },
+                                .inline_json => |inline_value| {
+                                    schema = try self.workspaceOwnedDescriptor(a, parent.id, inline_value.schema);
+                                    const descriptor = try self.store().object(a, schema, null);
+                                    defer a.free(descriptor);
+                                    const text = inline_value.json_text.bytes;
+                                    var parsed = try json.parse(a, text, .{ .bytes = text.len, .depth = text.len, .tokens = text.len, .members = text.len });
+                                    defer parsed.deinit();
+                                    const bytes = try @import("dynamic_values.zig").encode(a, descriptor, parsed.value);
+                                    defer a.free(bytes);
+                                    payload = .{ .digest = storage.digest(bytes), .bytes = bytes.len };
+                                },
+                            }
+                            derivation = .{ .kind = if (sources.items.len == 0) .hypothesis else .judgment, .sources = .{ .items = sources.items } };
+                        },
+                    }
+                    const provenance = try contracts.encodeOwned(workspace.Derivation, a, derivation);
+                    defer a.free(provenance);
+                    if (!std.meta.eql(actual.schema, schema) or !std.meta.eql(actual.value, payload) or
+                        !std.meta.eql(actual.provenance, state.Reference{ .digest = storage.digest(provenance), .bytes = provenance.len })) return error.InvalidArchive;
+                },
+                else => return error.InvalidArchive,
+            }
+        }
+
         // Validate the receipt's operation before interpreting any declared
         // publication. Neither the receipt kind nor an empty list can bypass it.
         fn validateWorkspaceAdmission(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, command: workspace.PublicationCommand, admission: WorkspaceAdmission) !void {
@@ -3707,7 +3831,10 @@ pub fn Service(comptime Types: type) type {
                     if (artifact.source_kind != .source_records and artifact.source_kind != .component_recipe) return error.InvalidArchive;
                     break :blk try operation(workspace.BuildRequest, a, .{ .task = parent.id, .source = .{ .bytes = try self.store().object(a, artifact.source, null) }, .source_kind = @fromBackingInt(@intCast(@backingInt(artifact.source_kind))), .catalog = artifact.catalog, .exposures = artifact.exposures });
                 },
-                .context => |context| try operation(workspace.ContextRequest, a, .{ .task = parent.id, .command = context.command, .snapshot = context.snapshot, .input = context.input }),
+                .context => |context| blk: {
+                    try self.validateWorkspaceContextOutput(a, parent, context, admission.work);
+                    break :blk try operation(workspace.ContextRequest, a, .{ .task = parent.id, .command = context.command, .snapshot = context.snapshot, .input = context.input });
+                },
                 .start => |start| blk: {
                     var work = try self.retainedWorkspaceWork(a, parent.id, admission.work);
                     defer work.deinit();
@@ -3876,6 +4003,8 @@ pub fn Service(comptime Types: type) type {
             defer latest.deinit();
             var admissions: std.AutoHashMap(u64, WorkspaceAdmission) = .init(a);
             defer admissions.deinit();
+            var replies: std.AutoHashMap(state.Digest, void) = .init(a);
+            defer replies.deinit();
             var operations = try self.store().database.prepare("SELECT o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?", &.{.{ .blob = &parent.id }});
             defer operations.deinit();
             while (try operations.step() == .row) {
@@ -3900,6 +4029,11 @@ pub fn Service(comptime Types: type) type {
                     const ref = event_value.workspace_command orelse return error.InvalidArchive;
                     command = try contracts.decodeOwned(workspace.PublicationCommand, a, try self.store().object(a, ref, null));
                     try self.validateWorkspaceAdmission(a, parent, event_value, command.?.value, (admission orelse return error.InvalidArchive).value);
+                    if (command.?.value == .interact) {
+                        const reply = try self.workspaceInteractionReply(a, parent.id, command.?.value.interact);
+                        try requireArchiveRecord(records, .workspace_port_reply, reply.id);
+                        if ((try replies.getOrPut(reply.id)).found_existing) return error.InvalidArchive;
+                    }
                 } else if (event_value.workspace_command != null) return error.InvalidArchive;
 
                 if (event_value.kind == .workspace_progress and event_value.workspace_publications.items.len == 0) return error.InvalidArchive;
@@ -3946,6 +4080,7 @@ pub fn Service(comptime Types: type) type {
             }
             if (admissions.count() != 0) return error.InvalidArchive;
             for (records) |row| {
+                if (row.kind == .workspace_port_reply and !replies.contains(row.id)) return error.InvalidArchive;
                 if (row.kind != .workspace_work) continue;
                 const current = try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, row.id), true);
                 const last = latest.get(row.id) orelse return error.InvalidArchive;
@@ -4640,6 +4775,33 @@ pub fn Service(comptime Types: type) type {
             }
         }
 
+        // Inputs are the ordered interaction history at this publication, plus
+        // the instrument's answer when completed. A mutable list cannot certify
+        // its own ancestry, even when every supplied reference is valid.
+        fn validateWorkspaceInputs(self: *Self, a: std.mem.Allocator, value: workspace.Work) !void {
+            var count: usize = 0;
+            var query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq<=? ORDER BY e.seq", &.{ .{ .blob = &value.task }, .{ .integer = std.math.cast(i64, value.event_watermark) orelse return error.InvalidArchive } });
+            defer query.deinit();
+            while (try query.step() == .row) {
+                var event_value = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+                defer event_value.deinit();
+                const ref = event_value.value.workspace_command orelse continue;
+                var command = try contracts.decodeOwned(workspace.PublicationCommand, a, try self.store().object(a, ref, null));
+                defer command.deinit();
+                if (command.value != .interact or !std.meta.eql(try wp.identity(command.value.interact.expected.work, .work), value.id)) continue;
+                const reply = try self.workspaceInteractionReply(a, value.task, command.value.interact);
+                if (reply.input) |input| {
+                    if (count >= value.inputs.items.len or !std.meta.eql(value.inputs.items[count], input)) return error.InvalidArchive;
+                    count += 1;
+                }
+            }
+            if (value.answer_value) |answer| {
+                if (count >= value.inputs.items.len or !std.meta.eql(value.inputs.items[count], answer)) return error.InvalidArchive;
+                count += 1;
+            }
+            if (count != value.inputs.items.len) return error.InvalidArchive;
+        }
+
         fn validateWorkspaceWorkSnapshot(self: *Self, a: std.mem.Allocator, parent: state.Task, snapshot: workspace.WorkObservation, records: []const state.ArchiveRecord) !void {
             const value = snapshot.work;
             if (!std.meta.eql(value.task, parent.id)) return error.InvalidArchive;
@@ -4662,9 +4824,7 @@ pub fn Service(comptime Types: type) type {
                 if (!std.meta.eql(@field(value, field), @field(current.value, field))) return error.InvalidArchive;
             inline for (.{ "execution_revision", "control_revision", "port_generation", "event_watermark" }) |field|
                 if (@field(value, field) > @field(current.value, field)) return error.InvalidArchive;
-            if (value.inputs.items.len > current.value.inputs.items.len) return error.InvalidArchive;
-            for (value.inputs.items, current.value.inputs.items[0..value.inputs.items.len]) |before, after|
-                if (!std.meta.eql(before, after)) return error.InvalidArchive;
+            try self.validateWorkspaceInputs(a, value);
             inline for (.{ "result", "result_value", "answer_value", "instrument_occurrence" }) |field| {
                 if (@field(value, field) != null and !std.meta.eql(@field(value, field), @field(current.value, field))) return error.InvalidArchive;
             }
