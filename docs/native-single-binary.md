@@ -362,6 +362,11 @@ wire fixtures. `check-native` checks native owners plus the adaptive and HTTPS
 peers. The peers run copied binaries under OS execution/file boundaries, using
 controlled provider replies, real transport, kills/restarts, cancellation, tool
 construction/reuse, and independently altered archives. No paid model calls run.
+The complete aggregate remains `check-native`. CI distributes its existing checks
+across the same three runners: authoring also runs `check-native-owner` and the
+workspace program/semantics checks; native runs `check-native-packaged`; downstream
+keeps its independent build. The terminal gate requires all lanes and retains the
+360-second maximum.
 
 `check-native-recovery-crash`, included in `check-native`, kills the owner process
 at 16 original-acquisition and receipt-lookup boundaries. Two fresh processes

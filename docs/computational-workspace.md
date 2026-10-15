@@ -47,7 +47,10 @@ remain separate checks.
 All authoritative workspace mutations commit through `workspaceCommit` or the
 existing occurrence transaction. Kernel publication happens before durable
 receipt transfer; failure after publication fences the owner. Receipt replay
-returns the original immutable observation even if work has since advanced.
+returns the original immutable work and occurrence observation even if either
+has since advanced. Wait eligibility and queue capacity are prepared before the
+transaction commits; notification cannot fail after durable acceptance. Completed
+delegated answers remain eligible for delivery after explicit task resumption.
 Cancellation may retain pending cleanup or unknown delivery. Neither is rendered
 as successful disposal. Independent work is interleaved; alternative tokens stay
 inside their work's checkpoint and do not imply parallel parent agents.
@@ -77,7 +80,7 @@ is distinguished from concrete execution where it supplies the argument.
 | AUT-01, AUT-02, AUT-03, AUT-09 | Existing ordinary offline demo and `adaptive_recovery.zig` reframing trace through actual prepared model offers; report/stop parks unfinished work. |
 | AUT-04, AUT-06, AUT-08 | `workspace_programs.zig` delegates a 300-element recursive computation; a variant with no yields or ports is parked/cancelled at native quantum boundaries. |
 | AUT-05, AUT-10, OWN-01 | Pure and port execution use an empty environmental registry; source/native traces finish or wait without model dispatch or mandatory alternatives. |
-| AUT-07, OWN-11 | Authored wait fixture wakes through the inbox/control path while worker capacity is occupied; pure work remains eligible. |
+| AUT-07, OWN-11 | Authored waits wake for messages, selected progress, unknown delivery and definitely-not-sent results while the worker is occupied. Allocation rejection after commit cannot lose wake-up, cancellation or resumed child eligibility. |
 | BUILD-01, BUILD-02 | Novel GCD on two inputs; recursive schema/list traversal across more than 300 boundaries, plus independent source/native execution. |
 | BUILD-03, BUILD-04, BUILD-05 | Source transport, unused malformed declaration, index/order, protected identity and nested action rejection fixtures. |
 | BUILD-06, BUILD-08 | Existing component recipes use the shared worker/owner; actual controller traces revise rejected construction without losing ordinary offers. |
@@ -97,7 +100,7 @@ is distinguished from concrete execution where it supplies the argument.
 | CTX-10 | Exact snapshot/resource and ancestry checks in `workspaceValueReference`, `workspaceSnapshotAccess`, archive admission and the existing profile binding; no cross-universe value cache. |
 | OWN-02–07, OWN-10, OWN-14 | Delegation fixture uses the same typed input directly, from pure computation and from explicit inference; distinct occurrences, wrong callback rejection, parent amendment, pre-dispatch revocation, malformed capture and cancellation/unknown cases. |
 | OWN-08 | Actual SQLite write denial after kernel publication fences the owner and prevents subsequent dispatch. |
-| OWN-09, OWN-12 | Receipt replay after replacement, interrupted/captured build recovery, independent archive mutation, exact child/result restoration and private capture checks. Existing process-kill recovery matrix remains enabled. |
+| OWN-09, OWN-12 | Frozen receipt replay after work/occurrence advancement and owner replacement, completed-answer handoff after namespace reopen, interrupted/captured build recovery, independent archive mutation, exact child/result restoration and private capture checks. Existing process-kill recovery matrix remains enabled. |
 | OWN-13 | Prior application parked at a question, temporary installation retains its exact binary, and the old task completes through that retained runtime. |
 
 Historical independent byte fixtures are retained. Replaced old tool-action tests

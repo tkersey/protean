@@ -30,7 +30,7 @@ jobs:
       fail-fast: false
       matrix:
         lane: [authoring, native, downstream]
-    runs-on: ${{ matrix.lane != 'authoring' && 'ubuntu-22.04' || 'ubuntu-24.04' }}
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
       ZIG_DEBUG_CMD: '1'
@@ -91,16 +91,17 @@ jobs:
       - name: Authenticate and provision selected native inputs
         if: matrix.lane != 'downstream'
         run: |
-          options=()
-          if [ "${{ matrix.lane }}" = authoring ]; then options+=(--authoring-only); fi
           zig run tools/native/dependencies.zig -- setup \
             conformance/protean/dependencies.lock.json \
             conformance/protean/native-dependencies.lock.json \
-            .protean-native/inputs "$(command -v zig)" "${options[@]}"
+            .protean-native/inputs "$(command -v zig)"
       - name: Run retained qualification
         run: |
           if [ "${{ matrix.lane }}" = authoring ]; then
-            zig build check-protean -Dnative=false -Doptimize=safe --summary all
+            # Keep owner tests on the otherwise short authoring runner. The
+            # native runner qualifies the exact executable and its isolation.
+            zig build check-protean check-native-owner check-workspace-programs check-workspace-semantics \
+              -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = downstream ]; then
             # The downstream witness authenticates its own inputs and builds
             # independently, without competing with native tests on one runner.
@@ -109,7 +110,7 @@ jobs:
             cat "$RUNNER_TEMP/downstream-identity.json"
           else
             result=0
-            zig build check-native -Doptimize=safe --summary all \
+            zig build check-native-packaged -Doptimize=safe --summary all \
               --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
               > "$RUNNER_TEMP/native-check.log" 2>&1 || result=$?
             cat "$RUNNER_TEMP/native-check.log"

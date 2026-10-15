@@ -41,7 +41,26 @@ export function workspaceMetrics(archive, application) {
   const captured = contract(application, 'CapturedResponse');
   const replySchema = contract(application, 'WorkspaceReply');
   const attempts = new Map(archive.manifest[6].filter(([kind]) => kind === 5).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('attempt'), archive.object(ref))]));
+  const captures = new Map(archive.manifest[6].filter(([kind]) => kind === 4).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('capture'), archive.object(ref))]));
   const stats = {controller: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, delegated: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, builds: 0, rejected_builds: 0, compiler_nanoseconds: 0, native_publication_nanoseconds: 0, checkpoint_publications: 0, current_checkpoint_bytes: 0, work_items: 0, result_bytes: 0, actions: []};
+  // Attempts are the denominator. Unknown delivery may have consumed provider
+  // resources even when no response capture exists.
+  for (const [id, attempt] of attempts) {
+    const role = attempt[5] === 'agent.model.invoke.v11' ? 'controller' : attempt[5] === 'protean.workspace.inference/1' ? 'delegated' : null;
+    if (!role) continue;
+    const count = stats[role]; count.calls++;
+    if (attempt[7].tag === 1) count.prepared_bytes += Number(attempt[7].value[1]);
+    const capture = captures.get(id);
+    if (!capture || capture[4].tag !== 1) { count.missing_usage++; continue; }
+    const raw = decodeValue(captured, archive.object(capture[4].value));
+    const response = JSON.parse(Buffer.from(raw[3]).toString());
+    if (!response.usage) count.missing_usage++;
+    else { count.input_tokens += response.usage.input_tokens ?? 0; count.output_tokens += response.usage.output_tokens ?? 0; }
+    if (role === 'controller') for (const item of response.output ?? []) if (item.type === 'function_call') {
+      let argumentsValue; try { argumentsValue = JSON.parse(item.arguments); } catch { argumentsValue = null; }
+      stats.actions.push({name: item.name, arguments: argumentsValue});
+    }
+  }
   for (const [kind, id, reference] of archive.manifest[6]) {
     if (kind === 9) {
       const work = decodeValue(archive.schemas.get('workspace_work'), archive.object(reference));
@@ -70,19 +89,6 @@ export function workspaceMetrics(archive, application) {
       stats.compiler_nanoseconds += Number(observation.compiler_nanoseconds ?? 0);
       if (observation.error) stats.rejected_builds++;
       continue;
-    }
-    const role = attempt[5] === 'agent.model.invoke.v11' ? 'controller' : attempt[5] === 'protean.workspace.inference/1' ? 'delegated' : null;
-    if (!role) continue;
-    const count = stats[role]; count.calls++;
-    if (attempt[7].tag === 1) count.prepared_bytes += Number(attempt[7].value[1]);
-    if (capture[4].tag !== 1) { count.missing_usage++; continue; }
-    const raw = decodeValue(captured, archive.object(capture[4].value));
-    const response = JSON.parse(Buffer.from(raw[3]).toString());
-    if (!response.usage) count.missing_usage++;
-    else { count.input_tokens += response.usage.input_tokens ?? 0; count.output_tokens += response.usage.output_tokens ?? 0; }
-    if (role === 'controller') for (const item of response.output ?? []) if (item.type === 'function_call') {
-      let argumentsValue; try { argumentsValue = JSON.parse(item.arguments); } catch { argumentsValue = null; }
-      stats.actions.push({name: item.name, arguments: argumentsValue});
     }
   }
   return stats;

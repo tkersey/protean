@@ -140,6 +140,13 @@ pub const Work = struct {
     }
 };
 
+/// A receipt observes one committed instant. The live occurrence can later
+/// change without changing this work revision or its replayed observation.
+pub const WorkObservation = struct {
+    work: Work,
+    occurrence: ?@import("occurrence.zig").Occurrence,
+};
+
 /// Epistemic origin is retained alongside canonical values. Equal payloads do
 /// not erase independent origins or convert a hypothesis into an acquisition.
 pub const Derivation = struct {

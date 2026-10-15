@@ -17,6 +17,43 @@ const gcd = @import("workspace_sources.zig").gcd;
 const listLength = @import("workspace_sources.zig").listLength;
 const alternatives = @import("workspace_sources.zig").alternatives;
 
+/// Reject allocation after an actual store commit, without depending on an
+/// allocation ordinal or adding a fault hook to the production owner.
+const AfterCommitAllocator = struct {
+    backing: std.mem.Allocator,
+    namespace: *native.Namespace,
+    generation: u64,
+    rejected: usize = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn blocked(self: *@This()) bool {
+        if (self.namespace.store.head.generation == self.generation) return false;
+        self.rejected += 1;
+        return true;
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.blocked()) return null;
+        return self.backing.rawAlloc(len, alignment, ra);
+    }
+    fn resize(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (len > bytes.len and self.blocked()) return false;
+        return self.backing.rawResize(bytes, alignment, len, ra);
+    }
+    fn remap(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (len > bytes.len and self.blocked()) return null;
+        return self.backing.rawRemap(bytes, alignment, len, ra);
+    }
+    fn free(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(bytes, alignment, ra);
+    }
+};
+
 test "BUILD-07 source build allocation fault sweep releases partial owners and cancellation admits nothing" {
     const a = std.testing.allocator;
     var builder = source.Builder.init(a);
@@ -408,6 +445,14 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     defer a.free(interactive_input);
     const interactive_started = try service.workspaceStart(scratch, "interactive-start", parent.receipt.task, program_id, interactive_input, .{});
     const interactive_id = interactive_started.receipt.workspace.?;
+    var interactive_artifact = try service.workspaceProgram(scratch, parent.receipt.task, program_id);
+    defer interactive_artifact.deinit();
+    const start_command: contracts.workspace.Command = .{ .work = .{ .start = .{
+        .program = interactive_program.program.?,
+        .input = .{ .inline_json = .{ .schema = try workspaceRef(scratch, .schema, interactive_artifact.value.description.input_schema.digest), .json_text = .{ .bytes = "\"100\"" } } },
+        .policy = .{},
+    } } };
+    const original_observation = try service.workspaceCommand(scratch, "interactive-start", parent.receipt.task, start_command);
     for (0..4) |i| {
         var current = try service.workspaceWork(a, parent.receipt.task, interactive_id);
         defer current.deinit();
@@ -424,12 +469,21 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
         };
         const operation_id = try std.fmt.allocPrint(scratch, "interact-{d}", .{i});
         const accepted = try service.workspaceInteract(scratch, operation_id, parent.receipt.task, interaction);
-        const replay = try service.workspaceInteract(scratch, operation_id, parent.receipt.task, interaction);
+        const replay = try service.workspaceInteract(a, operation_id, parent.receipt.task, interaction);
+        defer a.free(replay.receipt.client_operation_id.bytes);
         try std.testing.expect(replay.replayed);
         try std.testing.expectEqualDeep(accepted.receipt, replay.receipt);
+        const historical = try service.workspaceCommand(scratch, "interactive-start", parent.receipt.task, start_command);
+        try std.testing.expectEqualStrings(original_observation.observation_json.bytes, historical.observation_json.bytes);
+        const live = try service.workspaceCommand(scratch, "inspect-answered", parent.receipt.task, .{ .work = .{ .inspect = .{ .work = interaction.expected.work } } });
+        var live_json = try native.json.parse(a, live.observation_json.bytes, .{});
+        defer live_json.deinit();
+        try std.testing.expect(!live_json.value.object.get("port_accepts_command").?.bool);
         try std.testing.expectError(error.StaleRevision, service.workspaceInteract(scratch, "new-conflicting-answer", parent.receipt.task, interaction));
         try service.close(scratch);
         service = try native.tasks.Service(OwnerTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+        const restored_observation = try service.workspaceCommand(scratch, "interactive-start", parent.receipt.task, start_command);
+        try std.testing.expectEqualStrings(original_observation.observation_json.bytes, restored_observation.observation_json.bytes);
         var recovered_work = try service.workspaceWork(a, parent.receipt.task, interactive_id);
         defer recovered_work.deinit();
         _ = try service.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "interactive-resume-{d}", .{i}), parent.receipt.task, interactive_id, recovered_work.value.execution_revision, recovered_work.value.control_revision, .{ .delegate = .{ .continuation = .owner_scheduled, .stop = .next_exposed_event } });
@@ -854,8 +908,10 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
         try writer.fixed(u64, @intCast(i));
     }
     try writer.natural(0);
-    for ([_]bool{ true, false }, 0..) |interrupt, scenario| {
-        const prefix = try std.fmt.allocPrint(scratch, "wait-{d}", .{scenario});
+    const WaitScenario = enum { imported_message, owned_message, selected_event, resumed_child };
+    for (std.enums.values(WaitScenario), 0..) |scenario, index| {
+        const interrupt = scenario == .imported_message or scenario == .owned_message;
+        const prefix = try std.fmt.allocPrint(scratch, "wait-{d}", .{index});
         const parent = try service.submit(scratch, prefix, {});
         var diagnostic: native.program_construction.Diagnostic = .{};
         const program = try service.workspaceBuild(scratch, try std.fmt.allocPrint(scratch, "{s}-build", .{prefix}), parent.receipt.task, document, &diagnostic);
@@ -875,7 +931,7 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
         }
         try std.testing.expect(waited);
         try std.testing.expectEqual(.idle, std.meta.activeTag(try service.pump(scratch)));
-        if (interrupt) {
+        if (scenario == .imported_message) {
             const archive_path = try std.fmt.allocPrint(scratch, "{s}/waiting.par", .{path_buffer[0..length]});
             _ = try service.exportCheckpoint(scratch, parent.receipt.task, archive_path);
             try service.close(scratch);
@@ -894,8 +950,24 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
             var paused = try service.task(a, parent.receipt.task);
             defer paused.deinit();
             _ = try service.resumeTask(scratch, "wait-resume", parent.receipt.task, paused.value.revision);
+        } else if (scenario == .owned_message) {
+            var guarded: AfterCommitAllocator = .{ .backing = scratch, .namespace = &namespace, .generation = namespace.store.head.generation };
+            _ = try service.message(guarded.allocator(), "owned-wait-amendment", parent.receipt.task, selection);
+            try std.testing.expectEqual(@as(usize, 0), guarded.rejected);
+            try std.testing.expect((try service.message(scratch, "owned-wait-amendment", parent.receipt.task, selection)).replayed);
         } else {
-            _ = try service.workspaceControl(scratch, "wait-progress", parent.receipt.task, initial.value.id, initial.value.execution_revision, initial.value.control_revision, .{ .delegate = .{ .continuation = .owner_scheduled, .stop = .terminal } });
+            _ = try service.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "wait-progress-{d}", .{index}), parent.receipt.task, initial.value.id, initial.value.execution_revision, initial.value.control_revision, .{ .delegate = .{ .continuation = .owner_scheduled, .stop = .terminal } });
+            if (scenario == .resumed_child) {
+                try service.close(scratch);
+                service = try native.tasks.Service(WaitTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+                try std.testing.expectEqual(.idle, std.meta.activeTag(try service.pump(scratch)));
+                var paused = try service.task(scratch, parent.receipt.task);
+                defer paused.deinit();
+                var guarded: AfterCommitAllocator = .{ .backing = scratch, .namespace = &namespace, .generation = namespace.store.head.generation };
+                _ = try service.resumeTask(guarded.allocator(), "restore-queued-child", parent.receipt.task, paused.value.revision);
+                try std.testing.expectEqual(@as(usize, 0), guarded.rejected);
+                try std.testing.expect((try service.resumeTask(scratch, "restore-queued-child", parent.receipt.task, paused.value.revision)).replayed);
+            }
         }
         for (0..30) |_| {
             const step = try service.pump(scratch);
@@ -1024,9 +1096,9 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const Scenario = enum { model, snapshot, revoked, unknown, cancel_capture, invalid_capture };
+    const Scenario = enum { model, snapshot, snapshot_empty, revoked, unknown, unknown_wait, not_sent_wait, cancel_capture, invalid_capture };
     for (std.enums.values(Scenario)) |scenario| {
-        const snapshot_mode = scenario == .snapshot;
+        const snapshot_mode = scenario == .snapshot or scenario == .snapshot_empty;
         const successful = scenario == .model or snapshot_mode;
         const suffix = @tagName(scenario);
         const parent = try service.submit(scratch, try std.fmt.allocPrint(scratch, "parent-{s}", .{suffix}), {});
@@ -1042,10 +1114,11 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
         var port = try contracts.decodeOwned(native.workspace.Port, scratch, try namespace.store.object(scratch, target.value.current_port.?, null));
         defer port.deinit();
         const port_ref = try workspaceRef(scratch, .port, port.value.id);
-        const interpretation: contracts.workspace.Interpretation = if (snapshot_mode) .{ .snapshot = .{ .port = port_ref, .generation = port.value.generation, .path = .{ .bytes = "source.txt" }, .offset = 0, .maximum = text.len } } else .{ .model = .{ .port = port_ref, .generation = port.value.generation, .profile_id = .{ .bytes = "fixture" }, .effort = .{ .bytes = "medium" }, .subproblem = .{ .bytes = "Return forty-two as the selected hypothetical value." }, .inputs = .{ .items = &.{} } } };
+        const interpretation: contracts.workspace.Interpretation = if (snapshot_mode) .{ .snapshot = .{ .port = port_ref, .generation = port.value.generation, .path = .{ .bytes = "source.txt" }, .offset = 0, .maximum = if (scenario == .snapshot_empty) 0 else text.len } } else .{ .model = .{ .port = port_ref, .generation = port.value.generation, .profile_id = .{ .bytes = "fixture" }, .effort = .{ .bytes = "medium" }, .subproblem = .{ .bytes = "Return forty-two as the selected hypothetical value." }, .inputs = .{ .items = &.{} } } };
         _ = try service.message(scratch, try std.fmt.allocPrint(scratch, "delegate-{s}", .{suffix}), parent.receipt.task, .{ .work = .{ .delegate = .{ .expected = .{ .work = try workspaceRef(scratch, .work, target_id), .execution_revision = target.value.execution_revision, .control_revision = target.value.control_revision }, .policy = .{ .stop = .terminal, .continuation = .owner_scheduled }, .interpretation = interpretation } } });
         var dispatches: usize = 0;
         var instrument_id: ?[32]u8 = null;
+        var resumed_handoff = false;
         for (0..256) |_| {
             if (instrument_id == null) {
                 var rows = try namespace.store.database.prepare("SELECT body FROM records WHERE task=? AND kind='workspace_work'", &.{.{ .blob = &parent.receipt.task }});
@@ -1073,19 +1146,49 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                 var root = try service.task(scratch, parent.receipt.task);
                 defer root.deinit();
                 try std.testing.expect(!std.meta.eql(root.value.current_occurrence, step.work.occurrence));
-                _ = try service.message(scratch, try std.fmt.allocPrint(scratch, "amend-{s}", .{suffix}), parent.receipt.task, .{ .context = .{ .inspect = .{ .page = .{} } } });
+                const wait_for_failure = scenario == .unknown_wait or scenario == .not_sent_wait or scenario == .cancel_capture;
+                var waiting_revision: u64 = 0;
+                if (wait_for_failure) {
+                    var active_child = try service.workspaceWork(scratch, parent.receipt.task, instrument_id.?);
+                    defer active_child.deinit();
+                    _ = try service.message(scratch, try std.fmt.allocPrint(scratch, "wait-{s}", .{suffix}), parent.receipt.task, .{ .work = .{ .wait = .{
+                        .works = .{ .items = &.{try workspaceRef(scratch, .work, instrument_id.?)} },
+                        .after = active_child.value.event_watermark,
+                    } } });
+                    for (0..32) |_| {
+                        const root_step = try service.pump(scratch);
+                        try std.testing.expect(root_step != .work);
+                        if (root_step == .idle) break;
+                    }
+                    var waiting_root = try service.task(scratch, parent.receipt.task);
+                    defer waiting_root.deinit();
+                    try std.testing.expectEqual(.parked, waiting_root.value.schedule);
+                    waiting_revision = waiting_root.value.execution_revision;
+                } else _ = try service.message(scratch, try std.fmt.allocPrint(scratch, "amend-{s}", .{suffix}), parent.receipt.task, .{ .context = .{ .inspect = .{ .page = .{} } } });
                 var wrong = step.work;
                 wrong.subject_work = @splat(99);
                 try std.testing.expectError(error.StaleOccurrence, service.acquire(scratch, wrong, ""));
                 if (scenario == .unknown or scenario == .cancel_capture) {
                     var pending_child = try service.workspaceWork(scratch, parent.receipt.task, instrument_id.?);
                     defer pending_child.deinit();
-                    _ = try service.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "cancel-{s}", .{suffix}), parent.receipt.task, instrument_id.?, pending_child.value.execution_revision, pending_child.value.control_revision, .{ .cancel = .{ .bytes = "cancel explicitly delegated judgment" } });
+                    var guarded: AfterCommitAllocator = .{ .backing = scratch, .namespace = &namespace, .generation = namespace.store.head.generation };
+                    _ = try service.workspaceControl(guarded.allocator(), try std.fmt.allocPrint(scratch, "cancel-{s}", .{suffix}), parent.receipt.task, instrument_id.?, pending_child.value.execution_revision, pending_child.value.control_revision, .{ .cancel = .{ .bytes = if (scenario == .unknown) "" else "cancel explicitly delegated judgment" } });
+                    try std.testing.expectEqual(@as(usize, 0), guarded.rejected);
                     try std.testing.expect(try service.shouldCancelWork(step.work));
                 }
                 if (scenario == .unknown) {
                     try service.unknown(scratch, step.work);
-                    _ = try service.requestCancel(scratch, "cancel-parent-with-unknown-child", parent.receipt.task, "cancel the investigation");
+                    _ = try service.requestCancel(scratch, "cancel-parent-with-unknown-child", parent.receipt.task, "");
+                } else if (scenario == .unknown_wait or scenario == .not_sent_wait) {
+                    if (scenario == .unknown_wait) try service.unknown(scratch, step.work) else try service.notSent(scratch, step.work);
+                    for (0..32) |_| {
+                        const root_step = try service.pump(scratch);
+                        try std.testing.expect(root_step != .work);
+                        if (root_step == .idle) break;
+                    }
+                    var awakened = try service.task(scratch, parent.receipt.task);
+                    defer awakened.deinit();
+                    try std.testing.expect(awakened.value.execution_revision > waiting_revision);
                 } else if (snapshot_mode) {
                     const worker = try native.testing.Worker.init(a, io);
                     defer worker.deinit(a) catch unreachable;
@@ -1101,9 +1204,31 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
             }
             var result = try service.workspaceWork(scratch, parent.receipt.task, target_id);
             defer result.deinit();
+            if (scenario == .model and !resumed_handoff and instrument_id != null) {
+                var completed = try service.workspaceWork(scratch, parent.receipt.task, instrument_id.?);
+                defer completed.deinit();
+                if (completed.value.answer_value != null) {
+                    try std.testing.expectEqual(.completed, completed.value.outcome_kind);
+                    try std.testing.expectEqual(.requested, result.value.outcome_kind);
+                    try service.close(scratch);
+                    service_open = false;
+                    try namespace.close();
+                    namespace_open = false;
+                    namespace = try native.Namespace.open(a, io, path);
+                    namespace_open = true;
+                    service = try native.tasks.Service(DelegateTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+                    service_open = true;
+                    try std.testing.expectEqual(.idle, try service.pump(scratch));
+                    var paused = try service.task(scratch, parent.receipt.task);
+                    defer paused.deinit();
+                    _ = try service.resumeTask(scratch, "resume-completed-answer", parent.receipt.task, paused.value.revision);
+                    resumed_handoff = true;
+                }
+            }
             if (result.value.outcome_kind == .completed or (instrument_id != null and step == .idle)) break;
         }
         try std.testing.expectEqual(@as(usize, if (scenario == .revoked) 0 else 1), dispatches);
+        if (scenario == .model) try std.testing.expect(resumed_handoff);
         var result = try service.workspaceWork(scratch, parent.receipt.task, target_id);
         defer result.deinit();
         var child = try service.workspaceWork(scratch, parent.receipt.task, instrument_id.?);
@@ -1137,6 +1262,8 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                         try std.testing.expect(pending.value.state == .unknown);
                         try std.testing.expect(try service.shutdownIncomplete(scratch));
                     },
+                    .unknown_wait => try std.testing.expect(pending.value.state == .unknown),
+                    .not_sent_wait => try std.testing.expect(pending.value.state == .not_sent),
                     .invalid_capture => try std.testing.expect(pending.value.state == .captured),
                     else => unreachable,
                 }
@@ -1153,7 +1280,7 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
             if (snapshot_mode) {
                 var actual = try contracts.decodeOwned(contracts.Utf8, scratch, result_bytes);
                 defer actual.deinit();
-                try std.testing.expectEqualStrings(text, actual.value.bytes);
+                try std.testing.expectEqualStrings(if (scenario == .snapshot_empty) "" else text, actual.value.bytes);
             } else {
                 var actual = try contracts.decodeOwned(u64, scratch, result_bytes);
                 defer actual.deinit();

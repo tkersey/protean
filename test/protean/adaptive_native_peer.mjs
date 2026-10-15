@@ -564,6 +564,14 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
 
       assert.equal(alternateIndex, 1, 'unknown adaptive delivery cannot be retried');
       assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
+      if (method === 'protocol') {
+        const uncertainArchive = join(app.data, 'unknown-provider.bundle');
+        invoke('export-checkpoint', '--state-dir', selectedState, '--task-id', task.task_id, '--output', uncertainArchive);
+        const metrics = workspaceMetrics(readArchive(await readFile(uncertainArchive)), JSON.parse(await readFile(applicationPath, 'utf8')));
+        assert.equal(metrics.controller.calls, alternateIndex, 'dispatched attempts remain counted without captured responses');
+        assert.equal(metrics.controller.missing_usage, 1, 'unknown delivery is unknown cost, not zero calls');
+        assert(metrics.controller.prepared_bytes > 0);
+      }
       cancellations.push({method, milliseconds, provider_requests: alternateIndex, recovered_status: unknown.status});
     }
     const row = (id, key, value, group) => Object.fromEntries(Object.entries({id, key, value, group}).map(([name, value]) => [name, String(value)]));

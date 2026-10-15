@@ -358,13 +358,17 @@ pub fn visitWorkspaceReceipt(a: std.mem.Allocator, store: anytype, receipt: Rece
     const bytes = try store.object(a, ref, null);
     defer a.free(bytes);
     const w = @import("workspace_state.zig");
-    inline for (.{ .{ .program, w.ProgramArtifact }, .{ .work, w.Work }, .{ .value, w.ValueArtifact }, .{ .view, w.ViewArtifact } }) |entry| {
+    inline for (.{ .{ .program, w.ProgramArtifact }, .{ .work, w.WorkObservation }, .{ .value, w.ValueArtifact }, .{ .view, w.ViewArtifact } }) |entry| {
         if (kind == entry[0]) {
             const T = entry[1];
             var decoded = try contracts.decodeOwned(T, a, bytes);
             defer decoded.deinit();
-            if (T == w.Work) {
-                if (!std.meta.eql(decoded.value.id, id) or !std.meta.eql(decoded.value.task, receipt.task)) return error.CorruptState;
+            if (T == w.WorkObservation) {
+                const work = decoded.value.work;
+                if (!std.meta.eql(work.id, id) or !std.meta.eql(work.task, receipt.task)) return error.CorruptState;
+                if (decoded.value.occurrence) |pending| {
+                    if (!std.meta.eql(work.current_occurrence, pending.id) or !std.meta.eql(pending.task, work.task) or !std.meta.eql(pending.work, work.id)) return error.CorruptState;
+                } else if (work.current_occurrence != null) return error.CorruptState;
             } else if (!std.meta.eql(ref.digest, id)) return error.CorruptState;
             try collector.typed(T, ref, decoded.value);
             return;
