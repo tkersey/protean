@@ -476,11 +476,11 @@ pub fn Service(comptime Types: type) type {
             return .{ .receipt = saved, .replayed = false };
         }
         fn event(self: *Self, value: *state.Task, kind: state.EventType, bytes: []const u8) !void {
-            return self.publicationEvent(value, kind, bytes, &.{});
+            return self.publicationEvent(value, kind, bytes, &.{}, null);
         }
-        fn publicationEvent(self: *Self, value: *state.Task, kind: state.EventType, bytes: []const u8, publications: []const state.WorkPublication) !void {
+        fn publicationEvent(self: *Self, value: *state.Task, kind: state.EventType, bytes: []const u8, publications: []const state.WorkPublication, command: ?state.Reference) !void {
             value.event_high = try std.math.add(u64, value.event_high, 1);
-            try self.store().putEvent(.{ .task = value.id, .seq = value.event_high, .revision = value.revision, .kind = kind, .data = .{ .bytes = bytes }, .workspace_publications = .{ .items = publications } });
+            try self.store().putEvent(.{ .task = value.id, .seq = value.event_high, .revision = value.revision, .kind = kind, .data = .{ .bytes = bytes }, .workspace_publications = .{ .items = publications }, .workspace_command = command });
         }
         fn messageEvent(self: *Self, a: std.mem.Allocator, value: *state.Task, kind: state.EventType, item: state.Message) !void {
             const body = try state.messageData(a, item, item.disposition);
@@ -1503,7 +1503,7 @@ pub fn Service(comptime Types: type) type {
             const event_data = try std.fmt.allocPrint(a, "{{\"workspace_id\":\"{s}\"}}", .{std.fmt.bytesToHex(id, .lower)});
             defer a.free(event_data);
             const observed = try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, id), true);
-            try self.publicationEvent(parent, .workspace_progress, event_data, &.{try workPublication(a, observed)});
+            try self.publicationEvent(parent, .workspace_progress, event_data, &.{try workPublication(a, observed)}, null);
         }
         fn wakeOccurrence(self: *Self, a: std.mem.Allocator, parent: state.Task, pending: occurrence.Occurrence) !void {
             if (pending.work) |id| {
@@ -3354,7 +3354,7 @@ pub fn Service(comptime Types: type) type {
         fn workspaceContextMutation(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, command: wc.Context, snapshot: ?state.Reference, input: ?state.Reference) !Admission {
             var parent = try self.task(a, task_id);
             defer parent.deinit();
-            const Request = struct { task: state.TaskId, command: wc.Context, snapshot: ?state.Reference, input: ?state.Reference };
+            const Request = workspace.ContextRequest;
             const request = try operation(Request, a, .{ .task = task_id, .command = command, .snapshot = snapshot, .input = input });
             if (try self.replay(a, operation_id, request)) |prior| return prior;
             if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
@@ -3426,7 +3426,7 @@ pub fn Service(comptime Types: type) type {
                 },
                 else => return error.InvalidState,
             };
-            return self.workspaceCommit(a, parent.value, operation_id, request, artifact.digest, kind, artifact, null);
+            return self.workspaceCommit(a, parent.value, operation_id, request, artifact.digest, kind, artifact, .{ .context = .{ .command = command, .snapshot = snapshot, .input = input } });
         }
 
         fn workspaceValueReference(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, ref: wc.Ref) !WorkspaceValueReference {
@@ -3663,13 +3663,9 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn samePublication(a: std.mem.Allocator, declared: state.WorkPublication, observed: state.WorkPublication) !bool {
-            var expected = observed;
-            // The command belongs to the publication transition, not the work
-            // snapshot. Its receipt binding is checked by the journal fold.
-            expected.command = declared.command;
             const left = try contracts.encodeOwned(state.WorkPublication, a, declared);
             defer a.free(left);
-            const right = try contracts.encodeOwned(state.WorkPublication, a, expected);
+            const right = try contracts.encodeOwned(state.WorkPublication, a, observed);
             defer a.free(right);
             return same(left, right);
         }
@@ -3680,29 +3676,55 @@ pub fn Service(comptime Types: type) type {
             return if (value.cancellation != null or (value.policy.continuation == .owner_scheduled and value.policy.stop != .next_slice and (value.outcome != .yielded or value.policy.stop == .terminal))) .queued else .parked;
         }
 
-        const WorkspaceAdmission = struct { request: state.Digest, work: state.Digest };
+        const WorkspaceAdmission = struct { request: state.Digest, work: state.Digest, kind: @FieldType(wc.Ref, "kind") };
 
-        fn validateWorkspaceControl(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, item: state.WorkPublication, prior: ?state.WorkPublication, admission: ?WorkspaceAdmission) !void {
-            var command: ?contracts.Decoded(workspace.PublicationCommand) = null;
-            defer if (command) |*decoded| decoded.deinit();
-            if (item.command) |ref| {
-                if (event_value.kind != .workspace) return error.InvalidArchive;
-                command = try contracts.decodeOwned(workspace.PublicationCommand, a, try self.store().object(a, ref, null));
-                const receipt_value = admission orelse return error.InvalidArchive;
-                const request = switch (command.?.value) {
-                    .start => |start| blk: {
-                        var work = try self.retainedWorkspaceWork(a, parent.id, item.work);
-                        defer work.deinit();
-                        break :blk try operation(workspace.StartRequest, a, .{ .task = parent.id, .program = work.value.program, .input = .{ .bytes = try self.store().object(a, work.value.input, null) }, .policy = start.policy, .origin = if (start.origin) work.value.input_value else null });
-                    },
-                    .control => |control| try operation(workspace.ControlRequest, a, .{ .task = parent.id, .work = item.work, .execution = control.execution, .control = control.control, .command = control.command }),
-                    .interact => |interaction| try operation(workspace.InteractionRequest, a, .{ .task = parent.id, .interaction = interaction }),
-                    .delegate => |selection| try operation(workspace.DelegationRequest, a, .{ .task = parent.id, .command = selection }),
-                };
-                if (!std.meta.eql(request, receipt_value.request)) return error.InvalidArchive;
-                if (command.?.value != .delegate and !std.meta.eql(receipt_value.work, item.work)) return error.InvalidArchive;
-            } else if (event_value.kind == .workspace) return error.InvalidArchive;
+        // Validate the receipt's operation before interpreting any declared
+        // publication. Neither the receipt kind nor an empty list can bypass it.
+        fn validateWorkspaceAdmission(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, command: workspace.PublicationCommand, admission: WorkspaceAdmission) !void {
+            const items = event_value.workspace_publications.items;
+            const kind: @FieldType(wc.Ref, "kind") = switch (command) {
+                .build => .program,
+                .context => |context| switch (context.command) {
+                    .materialize => .value,
+                    .select => .view,
+                    else => return error.InvalidArchive,
+                },
+                else => .work,
+            };
+            if (admission.kind != kind) return error.InvalidArchive;
+            const count: usize = switch (command) {
+                .build, .context => 0,
+                .delegate => 2,
+                else => 1,
+            };
+            if (items.len != count) return error.InvalidArchive;
+            if (count != 0 and !std.meta.eql(items[0].work, admission.work)) return error.InvalidArchive;
+            const request = switch (command) {
+                .build => blk: {
+                    var program = try self.workspaceProgram(a, parent.id, admission.work);
+                    defer program.deinit();
+                    const artifact = program.value.description;
+                    if (artifact.source_kind != .source_records and artifact.source_kind != .component_recipe) return error.InvalidArchive;
+                    break :blk try operation(workspace.BuildRequest, a, .{ .task = parent.id, .source = .{ .bytes = try self.store().object(a, artifact.source, null) }, .source_kind = @fromBackingInt(@intCast(@backingInt(artifact.source_kind))), .catalog = artifact.catalog, .exposures = artifact.exposures });
+                },
+                .context => |context| try operation(workspace.ContextRequest, a, .{ .task = parent.id, .command = context.command, .snapshot = context.snapshot, .input = context.input }),
+                .start => |start| blk: {
+                    var work = try self.retainedWorkspaceWork(a, parent.id, admission.work);
+                    defer work.deinit();
+                    break :blk try operation(workspace.StartRequest, a, .{ .task = parent.id, .program = work.value.program, .input = .{ .bytes = try self.store().object(a, work.value.input, null) }, .policy = start.policy, .origin = if (start.origin) work.value.input_value else null });
+                },
+                .control => |control| try operation(workspace.ControlRequest, a, .{ .task = parent.id, .work = admission.work, .execution = control.execution, .control = control.control, .command = control.command }),
+                .interact => |interaction| try operation(workspace.InteractionRequest, a, .{ .task = parent.id, .interaction = interaction }),
+                .delegate => |selection| blk: {
+                    const target = try wp.identity(selection.expected.work, .work);
+                    if (!std.meta.eql(items[1].work, target) or std.meta.eql(items[0].work, target)) return error.InvalidArchive;
+                    break :blk try operation(workspace.DelegationRequest, a, .{ .task = parent.id, .command = selection });
+                },
+            };
+            if (!std.meta.eql(request, admission.request)) return error.InvalidArchive;
+        }
 
+        fn validateWorkspaceControl(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, item: state.WorkPublication, prior: ?state.WorkPublication, command: ?workspace.PublicationCommand, admission: ?WorkspaceAdmission) !void {
             const actual = item.control;
             if ((actual.outcome == .requested) != (actual.delivery != null) or (actual.port and actual.delivery == null)) return error.InvalidArchive;
             var expected = actual;
@@ -3720,7 +3742,8 @@ pub fn Service(comptime Types: type) type {
                 if (actual.cancellation_applied) return error.InvalidArchive;
             }
 
-            if (command) |decoded| switch (decoded.value) {
+            if (command) |decoded| switch (decoded) {
+                .build, .context => return error.InvalidArchive,
                 .start => |start| {
                     if (prior != null or actual.instrument) return error.InvalidArchive;
                     expected.policy = start.policy;
@@ -3859,10 +3882,10 @@ pub fn Service(comptime Types: type) type {
                 var receipt_value = try contracts.decodeOwned(state.Receipt, a, try operations.bytes(0));
                 defer receipt_value.deinit();
                 const value = receipt_value.value;
-                if (value.method != .workspace or value.workspace_kind != .work) continue;
+                if (value.method != .workspace) continue;
                 const entry = try admissions.getOrPut(value.revision);
                 if (entry.found_existing) return error.InvalidArchive;
-                entry.value_ptr.* = .{ .request = value.request_digest, .work = value.workspace orelse return error.InvalidArchive };
+                entry.value_ptr.* = .{ .request = value.request_digest, .work = value.workspace orelse return error.InvalidArchive, .kind = value.workspace_kind orelse return error.InvalidArchive };
             }
             var query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq", &.{.{ .blob = &parent.id }});
             defer query.deinit();
@@ -3870,6 +3893,15 @@ pub fn Service(comptime Types: type) type {
                 var saved = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
                 defer saved.deinit();
                 const event_value = saved.value;
+                var command: ?contracts.Decoded(workspace.PublicationCommand) = null;
+                defer if (command) |*decoded| decoded.deinit();
+                const admission = if (event_value.kind == .workspace) admissions.fetchRemove(event_value.revision) else null;
+                if (event_value.kind == .workspace) {
+                    const ref = event_value.workspace_command orelse return error.InvalidArchive;
+                    command = try contracts.decodeOwned(workspace.PublicationCommand, a, try self.store().object(a, ref, null));
+                    try self.validateWorkspaceAdmission(a, parent, event_value, command.?.value, (admission orelse return error.InvalidArchive).value);
+                } else if (event_value.workspace_command != null) return error.InvalidArchive;
+
                 if (event_value.kind == .workspace_progress and event_value.workspace_publications.items.len == 0) return error.InvalidArchive;
                 if (event_value.kind == .workspace_read) {
                     var parsed = try json.parseAsset(a, event_value.data.bytes, event_value.data.bytes.len);
@@ -3906,12 +3938,13 @@ pub fn Service(comptime Types: type) type {
                             if (after < before or after - before > 1) return error.InvalidArchive;
                         }
                     } else if (item.execution_revision != 1 or item.control_revision != 1) return error.InvalidArchive;
-                    try self.validateWorkspaceControl(a, parent, event_value, item, if (latest.get(item.work)) |prior| prior.publication else null, admissions.get(event_value.revision));
+                    try self.validateWorkspaceControl(a, parent, event_value, item, if (latest.get(item.work)) |prior| prior.publication else null, if (command) |decoded| decoded.value else null, if (admission) |entry| entry.value else null);
                     var retained = item;
                     if (item.control.cancellation) |reason| retained.control.cancellation = .{ .bytes = try a.dupe(u8, reason.bytes) };
                     try latest.put(item.work, .{ .publication = retained, .seq = event_value.seq });
                 }
             }
+            if (admissions.count() != 0) return error.InvalidArchive;
             for (records) |row| {
                 if (row.kind != .workspace_work) continue;
                 const current = try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, row.id), true);
@@ -4722,7 +4755,7 @@ pub fn Service(comptime Types: type) type {
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatible(parent.value);
-            const Request = struct { method: state.Method = .workspace, kind: workspace.Operation = .build, task: state.TaskId, source: contracts.Bytes(null), source_kind: wc.SourceKind, catalog: ?state.Reference, exposures: contracts.Vector(wc.Exposure, null) };
+            const Request = workspace.BuildRequest;
             const request = try operation(Request, a, .{ .task = task_id, .source = .{ .bytes = source }, .source_kind = source_kind, .catalog = catalog, .exposures = .{ .items = exposures } });
             if (try self.replay(a, operation_id, request)) |prior| return prior;
             if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
@@ -4732,7 +4765,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().begin();
             defer self.store().rollback();
             const saved = try self.workspaceStoreProgram(a, task_id, source, @fromBackingInt(@intCast(@backingInt(source_kind))), catalog, exposures, .{ .image = .{ .bytes = built.image }, .interface = built.interface, .ports = .{ .items = built.ports } });
-            const admitted = try self.workspaceCommit(a, parent.value, operation_id, request, saved.digest, .program, saved, null);
+            const admitted = try self.workspaceCommit(a, parent.value, operation_id, request, saved.digest, .program, saved, .build);
             try self.checked_workspace_programs.put(self.allocator, saved.digest, self.store().integrity_epoch);
             return admitted;
         }
@@ -4812,12 +4845,11 @@ pub fn Service(comptime Types: type) type {
                 defer a.free(bytes);
                 break :blk try self.store().putObject(bytes);
             } else null;
-            for (publications[0..publication_count]) |*item| item.command = command_ref;
             // Internal program publication is observed through the subsequent
             // work/delegation or captured build reply. Only work progress has
             // the retained publication facts needed for a journal projection.
             if (operation_id != null or publication_count != 0)
-                try self.publicationEvent(&parent, if (operation_id != null) .workspace else .workspace_progress, event_data, publications[0..publication_count]);
+                try self.publicationEvent(&parent, if (operation_id != null) .workspace else .workspace_progress, event_data, publications[0..publication_count], command_ref);
             const saved: state.Receipt = .{ .id = receipt_id, .client_operation_id = try name(operation_id orelse "workspace.progress"), .method = .workspace, .request_digest = request, .task = parent.id, .revision = parent.revision, .disposition = .accepted, .workspace = identity, .workspace_kind = kind, .workspace_observation = frozen };
             if (operation_id) |op| {
                 const bytes = try contracts.encodeOwned(state.Receipt, a, saved);

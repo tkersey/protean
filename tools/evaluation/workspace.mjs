@@ -28,10 +28,10 @@ export function armViolations(arm, actions) {
     if (arm === 'ordinary') return ['program', 'work', 'context'].includes(action.name);
     if (arm !== 'pure') return false;
     const command = action.arguments?.command;
-    if (action.name === 'program') return command?.tag === 'build' && command.value.exposures?.length;
+    if (action.name === 'program') return command?.tag === 'build' && command.value?.exposures?.length;
     if (action.name !== 'work') return false;
     return ['inspect', 'park', 'cancel', 'advance', 'interact', 'delegate'].includes(command?.tag) ||
-      (command?.tag === 'start' && (command.value.policy.stop !== 'terminal' || command.value.policy.continuation !== 'owner_scheduled'));
+      (command?.tag === 'start' && (command.value?.policy?.stop !== 'terminal' || command.value?.policy?.continuation !== 'owner_scheduled'));
   });
 }
 function command(binary, args) {
@@ -51,6 +51,8 @@ async function bytesUnder(path) {
 export function workspaceMetrics(archive, application) {
   const captured = contract(application, 'CapturedResponse');
   const replySchema = contract(application, 'WorkspaceReply');
+  const adaptiveResult = contract(application, 'AdaptiveResult');
+  const adaptivePrepared = contract(application, 'AdaptivePrepared');
   const attempts = new Map(archive.manifest[6].filter(([kind]) => kind === 5).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('attempt'), archive.object(ref))]));
   const captures = new Map(archive.manifest[6].filter(([kind]) => kind === 4).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('capture'), archive.object(ref))]));
   const occurrences = new Map(archive.manifest[6].filter(([kind]) => kind === 0).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('occurrence'), archive.object(ref))]));
@@ -89,9 +91,23 @@ export function workspaceMetrics(archive, application) {
     if (!known(usage?.input_tokens) || !known(usage?.output_tokens)) count.missing_usage++;
     if (known(usage?.input_tokens)) count.input_tokens += usage.input_tokens;
     if (known(usage?.output_tokens)) count.output_tokens += usage.output_tokens;
-    if (role === 'controller') for (const item of Array.isArray(response?.output) ? response.output : []) if (item?.type === 'function_call' && typeof item.name === 'string') {
-      let argumentsValue; try { argumentsValue = JSON.parse(item.arguments); } catch { argumentsValue = null; }
-      stats.actions.push({name: item.name, arguments: argumentsValue});
+    // Costs come from raw captures; actions come only from the native
+    // normalized result that the controller actually received.
+    if (role === 'controller' && capture[6].tag === 1) {
+      const normalized = decodeValue(adaptiveResult, resultValue(archive.object(capture[6].value[0])));
+      const result = normalized[0];
+      const calls = result.tag === 0 ? result.value[0].filter(item => item.tag === 0) : [];
+      // This application's authored single-action admission also requires a
+      // decoded, offered declaration and complete replay. Rejected proposals
+      // are not actions, even inside a successfully normalized response.
+      if (normalized[1].tag === 1 && normalized[2] === 0 && calls.length === 1) {
+        const call = calls[0].value, ordinal = call[3];
+        const request = decodeValue(adaptivePrepared, archive.object(attempt[7].value))[1];
+        if (call[4].tag === 0 && call[4].value.tag === ordinal && request[5][ordinal] &&
+            request[0][4].some(tool => tool[0] === ordinal && tool[2] === call[1])) {
+          stats.actions.push({name: call[1], arguments: JSON.parse(Buffer.from(call[2]).toString())});
+        }
+      }
     }
   }
   for (const [kind, id, reference] of archive.manifest[6]) {
@@ -112,12 +128,7 @@ export function workspaceMetrics(archive, application) {
     if (attempt[8] === 1) {
       stats.builds++;
       if (capture[6].tag !== 1) continue;
-      const bound = archive.object(capture[6].value[0]);
-      assert.equal(bound.subarray(0, 8).toString(), 'ABL_ERS3');
-      const payload = bound.subarray(20 + 32); // Result: request digest then byte sequence.
-      let n = 0, shift = 0, length = 0;
-      do { const b = payload[n++]; length += (b & 127) * 2 ** shift; shift += 7; if (!(b & 128)) break; } while (n < 10);
-      const reply = decodeValue(replySchema, payload.subarray(n, n + length));
+      const reply = decodeValue(replySchema, resultValue(archive.object(capture[6].value[0])));
       const observation = JSON.parse(Buffer.from(reply[1]).toString());
       stats.compiler_nanoseconds += Number(observation.compiler_nanoseconds ?? 0);
       if (observation.error) stats.rejected_builds++;
@@ -125,6 +136,64 @@ export function workspaceMetrics(archive, application) {
     }
   }
   return stats;
+}
+
+const resultSchema = {root: 0, types: [{product: [1, 3]}, {array: {element: 2, length: 32}}, 'u8', 'bytes']};
+function resultValue(bytes) {
+  assert.equal(bytes.subarray(0, 8).toString(), 'ABL_ERS3');
+  assert.equal(bytes.readBigUInt64LE(12), BigInt(bytes.length - 20));
+  return Buffer.from(decodeValue(resultSchema, bytes.subarray(20))[1]);
+}
+
+// Return an observation even when the runner fails after a potentially paid
+// dispatch. The caller persists it before stopping; it never retries inference.
+export async function evaluateCase({subject, build, output, binary, credential, application, seconds}, {Client = ProteanClient, runCommand = command} = {}) {
+  const state = join(output, 'state');
+  let client, result = null, status = null, task = null, peakRss = 0;
+  const errors = [], record = (stage, error) => errors.push({stage, name: error.name, message: error.message});
+  const started = performance.now();
+  try {
+    client = new Client(binary, ['--config', subject.config, '--authorize-inference', '--credential-file', resolve(credential), '--state-dir', state]);
+    await client.initialize(); const description = await client.call('describe');
+    task = await client.call('task.submit', {client_operation_id: subject.id, application_id: 'adaptive-agent', profile_id: description.profile.id, input: {schema_id: 'adaptive-agent.input.v2', value: {task: subject.prompt}}});
+    for (;;) {
+      status = await client.call('task.status', {task_id: task.task_id});
+      const ps = spawnSync('ps', ['-o', 'rss=', '-p', String(client.child.pid)], {encoding: 'utf8'});
+      if (ps.status === 0) peakRss = Math.max(peakRss, Number(ps.stdout.trim()) * 1024);
+      if (['completed', 'failed', 'cancelled', 'unknown', 'blocked'].includes(status.status) || status.question || performance.now() - started >= seconds * 1000) break;
+      await pause(100);
+    }
+    if (!['completed', 'failed', 'cancelled', 'unknown', 'blocked'].includes(status.status)) await client.call('task.cancel', {client_operation_id: subject.id + '-end', task_id: task.task_id, reason: 'Evaluation boundary: preserve unanswered state and stop further work.'});
+    result = await client.call('task.result', {task_id: task.task_id});
+    if (result.outcome?.value_ref) {
+      const ref = result.outcome.value_ref, chunks = []; let offset = '0';
+      for (;;) {
+        const chunk = await client.call('artifact.read', {task_id: task.task_id, artifact_id: ref.artifact_id, offset, length: '32768'});
+        assert.equal(chunk.sha256, ref.sha256); chunks.push(Buffer.from(chunk.data, 'base64url')); offset = chunk.next_offset;
+        if (chunk.eof) break;
+      }
+      const bytes = Buffer.concat(chunks); assert.equal(hash(bytes), ref.sha256); assert.equal(BigInt(bytes.length), BigInt(ref.bytes));
+      result.outcome.value = JSON.parse(bytes.toString());
+    }
+  } catch (error) { record('execution', error); }
+  finally { if (client) try { await client.close(); } catch (error) { record('close', error); } }
+  const elapsed_ms = performance.now() - started;
+  let retained_namespace_bytes = null, metrics = null, archive = null;
+  try { retained_namespace_bytes = await bytesUnder(state); } catch (error) { record('namespace', error); }
+  if (task) {
+    const archivePath = join(output, 'task.agnx');
+    try {
+      await runCommand(binary, ['export-checkpoint', '--state-dir', state, '--task-id', task.task_id, '--output', archivePath]);
+      archive = archivePath;
+      metrics = workspaceMetrics(readArchive(await readFile(archivePath)), application);
+    } catch (error) { record('measurements', error); }
+  }
+  const report = {subject, build, task, elapsed_ms, peak_rss_sampled_bytes: peakRss, retained_namespace_bytes, status, result, archive, metrics,
+    arm_violations: metrics ? armViolations(subject.arm, metrics.actions) : null, errors,
+    adjudication: {task_correctness: null, evidence_coverage: null, successful_reframing: null, unnecessary_construction: null, branch_executions_not_used: null,
+      notes: 'Review expected.json, result and actions. Do not count scripted conformance traces as model efficacy. Missing usage or metrics is unknown, not zero.'}};
+  await writeFile(join(output, 'report.json'), json(report));
+  return report;
 }
 
 if (import.meta.main) {
@@ -174,38 +243,10 @@ if (mode === 'prepare') {
     assert.deepEqual((await readdir(subject.snapshot)).sort(),subject.evidence.map(item => item.path).sort(), 'Evidence universe changed.');
     for (const item of subject.evidence) assert.equal(hash(await readFile(join(subject.snapshot,item.path))),item.sha256,'Frozen evidence changed.');
     const output = join(directory,subject.id); await mkdir(output); // Refuse to overwrite an earlier paid attempt.
-    const state = join(output,'state'); let client, result, status, task, peakRss = 0;
-    const started = performance.now();
-    try {
-      client = new ProteanClient(binary,['--config',subject.config,'--authorize-inference','--credential-file',resolve(credential),'--state-dir',state]);
-      await client.initialize(); const description = await client.call('describe');
-      task = await client.call('task.submit',{client_operation_id:subject.id,application_id:'adaptive-agent',profile_id:description.profile.id,input:{schema_id:'adaptive-agent.input.v2',value:{task:subject.prompt}}});
-      for (;;) {
-        status = await client.call('task.status',{task_id:task.task_id});
-        const ps = spawnSync('ps',['-o','rss=','-p',String(client.child.pid)],{encoding:'utf8'}); if (ps.status === 0) peakRss = Math.max(peakRss, Number(ps.stdout.trim()) * 1024);
-        if (['completed','failed','cancelled','unknown','blocked'].includes(status.status) || status.question || performance.now()-started >= plan.seconds_per_case*1000) break;
-        await pause(100);
-      }
-      if (!['completed','failed','cancelled','unknown','blocked'].includes(status.status)) await client.call('task.cancel',{client_operation_id:`${subject.id}-end`,task_id:task.task_id,reason:'Evaluation boundary: preserve unanswered state and stop further work.'});
-      result = await client.call('task.result',{task_id:task.task_id});
-      if (result.outcome?.value_ref) {
-        const ref = result.outcome.value_ref, chunks = []; let offset = '0';
-        for (;;) {
-          const chunk = await client.call('artifact.read',{task_id:task.task_id,artifact_id:ref.artifact_id,offset,length:'32768'});
-          assert.equal(chunk.sha256,ref.sha256); chunks.push(Buffer.from(chunk.data,'base64url')); offset = chunk.next_offset;
-          if (chunk.eof) break;
-        }
-        const bytes = Buffer.concat(chunks); assert.equal(hash(bytes),ref.sha256); assert.equal(BigInt(bytes.length),BigInt(ref.bytes));
-        result.outcome.value = JSON.parse(bytes.toString());
-      }
-    } finally { if (client) await client.close(); }
-    const elapsed_ms = performance.now()-started, retained_namespace_bytes = await bytesUnder(state), archivePath = join(output,'task.agnx');
-    command(binary,['export-checkpoint','--state-dir',state,'--task-id',task.task_id,'--output',archivePath]);
-    const archive = readArchive(await readFile(archivePath)), metrics = workspaceMetrics(archive,application);
-    const violations = armViolations(subject.arm, metrics.actions);
-    const report = {subject,build,elapsed_ms,peak_rss_sampled_bytes:peakRss,retained_namespace_bytes,status,result,metrics,arm_violations:violations,adjudication:{task_correctness:null,evidence_coverage:null,successful_reframing:null,unnecessary_construction:null,branch_executions_not_used:null,notes:'Review expected.json, result and actions. Do not count scripted conformance traces as model efficacy. Missing usage is unknown, not zero.'}};
-    await writeFile(join(output,'report.json'),json(report)); reports.push(report);
+    const report = await evaluateCase({subject, build, output, binary, credential, application, seconds: plan.seconds_per_case});
+    reports.push(report);
     await writeFile(join(directory,'results.json'),json({format:plan.format,plan_sha256:hash(json(plan)),reports}));
+    if (report.errors.length) throw new Error('Evaluation attempt failed; observations retained in ' + join(output, 'report.json'));
   }
   console.log(json({results:join(directory,'results.json'),runs:reports.length,efficacy:'requires recorded adjudication'}));
 }

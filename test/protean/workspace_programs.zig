@@ -1761,6 +1761,32 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                     defer candidate.deinit();
                     if (candidate.value.delegation != null) instrument_id = candidate.value.id;
                 }
+                if (scenario == .model and instrument_id != null) {
+                    // Keep the admitted instrument but omit the other half of
+                    // the same delegation, restoring its prior valid target.
+                    var manifest_digest: [32]u8 = undefined;
+                    std.crypto.hash.sha2.Sha256.hash(manifest, &manifest_digest, .{});
+                    const archive_index = try namespace.store.archiveIndex(scratch, parent.receipt.task, .{ .digest = manifest_digest, .bytes = manifest.len });
+                    try namespace.store.begin();
+                    defer namespace.store.rollback();
+                    var events = try namespace.store.database.prepare("SELECT seq,o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY seq DESC", &.{.{ .blob = &parent.receipt.task }});
+                    defer events.deinit();
+                    var changed = false;
+                    while (try events.step() == .row) {
+                        var event_value = try contracts.decodeOwned(native.testing.state.Event, scratch, try events.bytes(1));
+                        const publications = event_value.value.workspace_publications.items;
+                        if (publications.len != 2 or !std.meta.eql(publications[0].work, instrument_id.?)) continue;
+                        try std.testing.expectEqualDeep(target_id, publications[1].work);
+                        event_value.value.workspace_publications.items = publications[0..1];
+                        const rewritten = try namespace.store.putObject(try contracts.encodeOwned(native.testing.state.Event, scratch, event_value.value));
+                        try namespace.store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &rewritten.digest }, .{ .blob = &parent.receipt.task }, .{ .integer = try events.integer(0) } });
+                        changed = true;
+                        break;
+                    }
+                    try std.testing.expect(changed);
+                    try namespace.store.putRecord(native.workspace.Work, "workspace_work", target_id, parent.receipt.task, target.value);
+                    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, parent.receipt.task, archive_index.records.items));
+                }
                 if (scenario == .revoked and instrument_id != null) {
                     var current = try service.workspaceWork(scratch, parent.receipt.task, target_id);
                     defer current.deinit();
@@ -2343,6 +2369,33 @@ test "collected history rejects rehashed result substitution and false absence" 
     {
         var slow = try service.workspaceWork(scratch, parent.receipt.task, slow_start.receipt.workspace.?);
         defer slow.deinit();
+        const parked = try service.workspaceControl(scratch, "collect-kind-park", parent.receipt.task, slow.value.id, slow.value.execution_revision, slow.value.control_revision, .park);
+        {
+            // The response kind cannot opt an admitted work command out of its
+            // proof by presenting a genuine program artifact instead.
+            const archive_index = try namespace.store.archiveIndex(scratch, parent.receipt.task, .{ .digest = manifest_digest, .bytes = manifest.len });
+            try namespace.store.begin();
+            defer namespace.store.rollback();
+            var changed_receipt = parked.receipt;
+            changed_receipt.workspace_kind = .program;
+            changed_receipt.workspace = program.receipt.workspace;
+            changed_receipt.workspace_observation = program.receipt.workspace_observation;
+            const prior_receipt_ref = try namespace.store.putObject(try contracts.encodeOwned(native.testing.state.Receipt, scratch, parked.receipt));
+            const receipt_ref = try namespace.store.putObject(try contracts.encodeOwned(native.testing.state.Receipt, scratch, changed_receipt));
+            try namespace.store.database.run("UPDATE operations SET receipt=? WHERE receipt=?", &.{ .{ .blob = &receipt_ref.digest }, .{ .blob = &prior_receipt_ref.digest } });
+            var event_query = try namespace.store.database.prepare("SELECT seq,o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.revision=?", &.{ .{ .blob = &parent.receipt.task }, .{ .integer = @intCast(parked.receipt.revision) } });
+            defer event_query.deinit();
+            try std.testing.expect(try event_query.step() == .row);
+            var event_value = try contracts.decodeOwned(native.testing.state.Event, scratch, try event_query.bytes(1));
+            event_value.value.workspace_publications.items = &.{};
+            event_value.value.data = .{ .bytes = try std.fmt.allocPrint(scratch, "{{\"workspace_id\":\"{s}\"}}", .{std.fmt.bytesToHex(program.receipt.workspace.?, .lower)}) };
+            const event_ref = try namespace.store.putObject(try contracts.encodeOwned(native.testing.state.Event, scratch, event_value.value));
+            try namespace.store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &event_ref.digest }, .{ .blob = &parent.receipt.task }, .{ .integer = try event_query.integer(0) } });
+            try namespace.store.putRecord(native.workspace.Work, "workspace_work", slow.value.id, parent.receipt.task, slow.value);
+            try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, parent.receipt.task, archive_index.records.items));
+        }
+        slow.deinit();
+        slow = try service.workspaceWork(scratch, parent.receipt.task, slow_start.receipt.workspace.?);
         _ = try service.workspaceControl(scratch, "collect-slow-delegate", parent.receipt.task, slow.value.id, slow.value.execution_revision, slow.value.control_revision, .{ .delegate = .{ .stop = .terminal, .continuation = .owner_scheduled } });
         for (0..4) |_| _ = try service.pump(scratch);
     }
@@ -2404,9 +2457,9 @@ test "collected history rejects rehashed result substitution and false absence" 
                 if (std.meta.eql(item.work, historical.id)) {
                     item.control = native.workspace.ControlObservation.from(snapshots[2].?);
                     if (variant == 8) {
-                        var declared = try contracts.decodeOwned(native.workspace.PublicationCommand, scratch, try namespace.store.object(scratch, item.command.?, null));
+                        var declared = try contracts.decodeOwned(native.workspace.PublicationCommand, scratch, try namespace.store.object(scratch, event_value.value.workspace_command.?, null));
                         declared.value.start.policy = historical.policy;
-                        item.command = try namespace.store.putObject(try contracts.encodeOwned(native.workspace.PublicationCommand, scratch, declared.value));
+                        event_value.value.workspace_command = try namespace.store.putObject(try contracts.encodeOwned(native.workspace.PublicationCommand, scratch, declared.value));
                     }
                     std.crypto.hash.sha2.Sha256.hash(try contracts.encodeOwned(native.workspace.WorkObservation, scratch, snapshots[2].?), &item.observation, .{});
                 }

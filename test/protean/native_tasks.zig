@@ -185,7 +185,19 @@ fn omitArchiveFact(a: std.mem.Allocator, io: std.Io, shape: anytype, task: anyty
                 execution_revision: u64,
                 control_revision: u64,
                 observation: [32]u8,
+                control: struct {
+                    policy: struct { stop: enum { next_slice, next_exposed_event, terminal }, continuation: enum { explicit_only, owner_scheduled } },
+                    schedule: enum { queued, active, parked },
+                    blocker: ?enum { missing_capability, denied, capacity, missing_artifact, incompatible_profile, unavailable_environment },
+                    cancellation: ?protean.contracts.Text(256),
+                    cancellation_applied: bool,
+                    outcome: enum { progressed, yielded, requested, completed, failed, cancelled },
+                    instrument: bool,
+                    port: bool,
+                    delivery: ?enum { ready, dispatching, awaiting, unknown, settled_reply, admitted, not_sent, captured },
+                },
             }, null),
+            workspace_command: ?Reference,
         };
         var found = false;
         const events = try a.dupe(@TypeOf(archive.events.items[0]), archive.events.items);

@@ -41,6 +41,10 @@ further work without inventing an answer. Each attempt retains its result,
 archive, exact executable manifest, elapsed time, sampled peak RSS, namespace
 bytes and metrics derived from actual occurrence/capture/work records. Private
 captures remain private artifacts; do not publish the evaluation directory.
+If an RPC, result read, process shutdown, or export fails, the runner saves the
+attempt's identity, error, elapsed time and available observations before stopping.
+Unavailable metrics and arm compliance remain null; reruns never overwrite or
+automatically retry the attempt.
 
 The report separates controller/delegated calls and tokens (missing usage stays
 unknown), build/rejection counts, compiler nanoseconds, native publication
@@ -54,6 +58,9 @@ Prepared context bytes still include those attempts because preparation occurred
 Malformed or non-JSON provider captures still count as calls with missing usage.
 Only nonnegative safe integer token fields contribute known usage; partial usage
 retains its known fields and also marks the call as having missing usage.
+Action traces use the native normalized controller result. Raw function calls in
+failed or rejected provider responses contribute no actions or arm violations;
+their provider calls and available usage still contribute costs.
 
 Adjudicate `task_correctness`, `evidence_coverage`, `successful_reframing`,
 `unnecessary_construction`, and `branch_executions_not_used` against each frozen

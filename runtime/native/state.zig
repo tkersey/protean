@@ -210,6 +210,7 @@ pub const Event = struct {
     /// Native publication bindings, separate from the public event projection.
     /// Snapshots still require checkpoint, occurrence, and provenance validation.
     workspace_publications: contracts.Vector(WorkPublication, null) = .{ .items = &.{} },
+    workspace_command: ?Reference = null,
 };
 
 pub const WorkPublication = struct {
@@ -218,7 +219,6 @@ pub const WorkPublication = struct {
     control_revision: u64,
     observation: Digest,
     control: @import("workspace_state.zig").ControlObservation,
-    command: ?Reference = null,
 };
 
 pub const Artifact = struct {

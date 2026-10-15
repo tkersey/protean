@@ -170,10 +170,14 @@ pub const StartRequest = struct { method: state.Method = .workspace, kind: Opera
 pub const ControlRequest = struct { method: state.Method = .workspace, kind: Operation = .control, task: state.TaskId, work: state.Digest, execution: u64, control: u64, command: Command };
 pub const InteractionRequest = struct { kind: Operation = .interact, task: state.TaskId, interaction: @FieldType(contracts.workspace.Work, "interact") };
 pub const DelegationRequest = struct { task: state.TaskId, command: @FieldType(contracts.workspace.Work, "delegate") };
+pub const BuildRequest = struct { method: state.Method = .workspace, kind: Operation = .build, task: state.TaskId, source: contracts.Bytes(null), source_kind: contracts.workspace.SourceKind, catalog: ?state.Reference, exposures: contracts.Vector(contracts.workspace.Exposure, null) };
+pub const ContextRequest = struct { task: state.TaskId, command: contracts.workspace.Context, snapshot: ?state.Reference, input: ?state.Reference };
 
 /// The existing receipt binds these inputs by request digest. Start input bytes
 /// and identity already have immutable work custody, so do not copy them here.
 pub const PublicationCommand = union(enum) {
+    build,
+    context: struct { command: contracts.workspace.Context, snapshot: ?state.Reference, input: ?state.Reference },
     start: struct { policy: RunPolicy, origin: bool },
     control: struct { execution: u64, control: u64, command: Command },
     interact: @FieldType(contracts.workspace.Work, "interact"),

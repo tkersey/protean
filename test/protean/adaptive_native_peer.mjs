@@ -11,7 +11,7 @@ import {ProteanClient} from '../support/stdio-client.mts';
 import {certificates} from '../support/tls.mjs';
 import {readArchive, missingCaptures, tamperedAdaptiveControl, missingCheckpoint, changedProfile, extraPrivateArtifact, omittedAttempts, changedOperationKey, invalidEventData} from './native_archive.mjs';
 import {decodeValue, encodeValue} from '../support/values.mjs';
-import {workspaceMetrics, armViolations} from '../../tools/evaluation/workspace.mjs';
+import {workspaceMetrics, armViolations, evaluateCase} from '../../tools/evaluation/workspace.mjs';
 
 // Evaluation arms must reject retained-work control even without a live model.
 {
@@ -152,19 +152,30 @@ function* workspaceTrace(subject, scenario) {
   assert.match(inappropriate, /source-file evidence/);
   const inspected = yield ['inspect', {evidence_index: subject.sourceIndex}];
   assert.match(inspected, new RegExp(`Observed 0 lines.*evidence ${subject.sourceIndex}`));
-  yield skill('unload', 2, 'invariant-review');
+  yield ['inference_set', {profile_id: 'analysis', effort: 'high', expected_revision: 2, reason: 'Retain operative control state across research replacement.'}];
+  yield workspaceCall('context', 'inspect', {page: {offset: 0, maximum: 4096}});
+  yield workspaceCall('context', 'select', {values: [subject.results[0]]});
+  const retainedCalls = subject.body.input.filter(item => item.type === 'function_call');
+  for (const [name, revision] of [['skill_set', 2], ['inference_set', 3]]) {
+    const call = retainedCalls.findLast(item => item.name === name);
+    assert(call, name + ' survives selecting a view after intervening research');
+    const output = subject.body.input.find(item => item.type === 'function_call_output' && item.call_id === call.call_id);
+    assert(output, name + ' retains its paired receipt');
+    assert(strings(output).some(text => text.includes('"next_revision":' + revision)), name + ' retains the operative revision');
+  }
+  yield skill('unload', 3, 'invariant-review');
   subject.heldIndex = subject.calls + 1;
   yield ['ask', {question: 'The first audit and source inspection are acquired. Continue on the second input?'}];
   assert(subject.offered.has('program'), 'construction remains available after restart');
-  yield skill('deactivate', 3);
-  yield skill('unload', 4);
+  yield skill('deactivate', 4);
+  yield skill('unload', 5);
   assert(subject.offered.has('work') && subject.offered.has('program'));
   assert(strings(subject.body.input).some(text => text.includes('Retained workspace program references') && text.includes(subject.program.id)));
   const secondInput = yield* materialize(subject.inputs[1].id);
   for (let n = 0; n < 11; n++) yield* run(n % 2 ? firstInput : secondInput, n % 2 ? [['1','1'],['2','2'],['3','3'],['4','4']] : [['80','1']]);
   for (let n = 0; n < 12; n++) {
     assert(subject.offered.has('skill_set'), 'control revisions remain available beyond sixteen');
-    yield skill(n % 2 ? 'unload' : 'load', 5 + n, 'repository-orientation');
+    yield skill(n % 2 ? 'unload' : 'load', 6 + n, 'repository-orientation');
   }
   yield ['report', {summary: 'The same admitted program continued auditing both inputs after restart.', claims: [
     {kind: 'observation', statement: 'The source range and second computed audit are acquired.', reasoning: '', evidence_indices: [subject.sourceIndex, subject.resultIndices.at(-1)]},
@@ -734,7 +745,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
         assert.equal(result.outcome.value.evidence.length, 15, 'twelve results, two inputs, and the source remain retained');
         assert.deepEqual(result.outcome.value.result.value.claims[0].evidence_indices, [String(toolSubject.sourceIndex), String(toolSubject.resultIndices.at(-1))]);
         assert.equal(result.outcome.value.evidence[toolSubject.sourceIndex].tag, 'source');
-        assert.equal(result.outcome.value.control.selection.control_revision, '17');
+        assert.equal(result.outcome.value.control.selection.control_revision, '18');
         assert.equal(result.outcome.value.control.skills.length, 0);
       }
       toolRuns.push({scenario: name, provider_calls: alternateIndex, disposition: result.outcome.value.result.tag});
@@ -750,12 +761,13 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
         assert.equal(metrics.work_items, 12);
         assert(metrics.builds >= 1 && metrics.compiler_nanoseconds > 0 && metrics.native_publication_nanoseconds > 0);
         assert(metrics.checkpoint_publications >= 12 && metrics.current_checkpoint_bytes > 0);
+        assert(armViolations('pure', metrics.actions).some(action => action.name === 'work' && action.arguments.command.tag === 'inspect'), 'accepted normalized inspection remains an arm violation');
         assert.equal(metrics.actions.filter(action => action.name === 'program' && action.arguments.command.tag === 'build').length, 4);
         // CapturedResponse deliberately carries raw transport bytes. Exercise
         // the evaluator over that domain with the archive's actual codecs.
         const measuredBytes = await readFile(measured);
         const application = JSON.parse(await readFile(applicationPath, 'utf8'));
-        for (const [body, input, output, missing, actions] of [
+        for (const [body, input, output, missing] of [
           ['<html>502 Bad Gateway</html>', 0, 0, 1, 0],
           ['', 0, 0, 1, 0], ['null', 0, 0, 1, 0], ['{}', 0, 0, 1, 0],
           ['{"output":{}}', 0, 0, 1, 0], ['{"output":[null,1,{}]}', 0, 0, 1, 0],
@@ -771,6 +783,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
           const attempt = decodeValue(archive.schemas.get('attempt'), archive.object(attemptRow[2]));
           const captureRow = archive.manifest[6].find(([kind, id]) => kind === 4 && Buffer.from(id).equals(Buffer.from(attempt[0])));
           const capture = decodeValue(archive.schemas.get('capture'), archive.object(captureRow[2]));
+          const expectedActions = workspaceMetrics(archive, application).actions.slice(0, 1);
           const rawSchema = contract(application, 'CapturedResponse');
           const raw = decodeValue(rawSchema, archive.object(capture[4].value));
           raw[3] = Buffer.from(body);
@@ -783,8 +796,57 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
           assert.equal(observed.controller.input_tokens, input, body);
           assert.equal(observed.controller.output_tokens, output, body);
           assert.equal(observed.controller.missing_usage, missing, body);
-          assert.equal(observed.actions.length, actions, body);
-          if (actions) assert.deepEqual(observed.actions[0], {name: 'report', arguments: {answer: 42}});
+          assert.deepEqual(observed.actions, expectedActions, 'raw transport changes cannot invent or erase normalized actions');
+          const resultSchema = contract(application, 'AdaptiveResult');
+          const projected = decodeValue(resultSchema, resultValue(archive.object(capture[6].value[0])));
+          for (const result of [{tag: 3, value: [1, 200]}, {tag: 3, value: [2, 200]}, {tag: 4, value: 0}]) {
+            projected[0] = result;
+            const boundSchema = {root: 0, types: [{product: [1, 3]}, {array: {element: 2, length: 32}}, 'u8', 'bytes']};
+            const bound = decodeValue(boundSchema, archive.object(capture[6].value[0]).subarray(20));
+            bound[1] = encodeValue(resultSchema, projected);
+            const payload = Buffer.from(encodeValue(boundSchema, bound));
+            const header = Buffer.from(archive.object(capture[6].value[0]).subarray(0, 20));
+            header.writeBigUInt64LE(BigInt(payload.length), 12);
+            capture[6].value[0] = store(Buffer.concat([header, payload]));
+            captureRow[2] = store(Buffer.from(encodeValue(archive.schemas.get('capture'), capture)));
+            const rejected = workspaceMetrics(archive, application);
+            assert.deepEqual(rejected.actions, []);
+            assert.deepEqual(armViolations('pure', rejected.actions), []);
+            assert.deepEqual(rejected.controller, observed.controller, 'rejected output retains its actual cost observations');
+          }
+        }
+        for (const failure of ['task.submit', 'task.status', 'task.result', 'artifact.read', 'close', 'export']) {
+          const output = join(app.data, 'evaluation-failure-' + failure); await mkdir(output);
+          let closed = false;
+          class FailingClient {
+            child = {pid: process.pid};
+            async initialize() { await mkdir(join(output, 'state')); }
+            async call(method) {
+              if (method === failure) throw new Error('injected ' + failure);
+              if (method === 'describe') return {profile: {id: 'fixture'}};
+              if (method === 'task.submit') return {task_id: task.task_id};
+              if (method === 'task.status') return {status: 'completed'};
+              if (method === 'task.result' && ['close', 'export'].includes(failure)) return {ready: true, outcome: {value: {fixture: true}}};
+              if (method === 'task.result') return {ready: true, outcome: {value_ref: {artifact_id: 'fixture', sha256: 'fixture', bytes: '1'}}};
+              throw new Error('unexpected ' + method);
+            }
+            async close() { closed = true; if (failure === 'close') throw new Error('injected close'); }
+          }
+          const report = await evaluateCase({subject: {id: failure, arm: 'pure', config: 'fixture', prompt: 'fixture'}, build: {fixture: true}, output, binary: 'fixture', credential: 'unused', application, seconds: 1}, {
+            Client: FailingClient,
+            runCommand: async (_binary, args) => {
+              if (failure === 'export') throw new Error('injected export');
+              await writeFile(args.at(-1), measuredBytes);
+            },
+          });
+          assert(closed);
+          assert(report.errors.some(error => error.message === 'injected ' + failure));
+          assert.equal(report.task?.task_id ?? null, failure === 'task.submit' ? null : task.task_id);
+          assert(report.elapsed_ms >= 0);
+          if (failure === 'task.submit' || failure === 'export') {
+            assert.equal(report.metrics, null); assert.equal(report.arm_violations, null);
+          } else assert.equal(report.metrics.controller.calls, metrics.controller.calls);
+          assert.deepEqual(JSON.parse(await readFile(join(output, 'report.json'), 'utf8')), report);
         }
       }
     }
