@@ -101,6 +101,10 @@ equal result payload. A new source universe cannot silently reuse an old absence
 claim as evidence about that universe. `context.select` changes the next context
 epoch; prepared requests remain frozen. It cannot remove policy, user messages,
 active skills or action availability. Omitted evidence remains expandable.
+Provenance expansion folds source references into the requested byte range,
+preserving their order and multiplicity without retaining the full expanded JSON.
+It still loads and validates the stored provenance metadata; paging is not a
+constant-memory guarantee for all retained state.
 
 ## Acceptance witnesses
 

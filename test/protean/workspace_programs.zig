@@ -773,6 +773,12 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     try std.testing.expectEqualDeep(collected_value, cited.evidence.?);
     const cited_json = (try native.json.parse(scratch, cited.observation_json.bytes, .{})).value;
     try std.testing.expectEqualStrings("computation", cited_json.object.get("derivation").?.object.get("kind").?.string);
+    const cited_provenance = try native.values.fromJson(contracts.workspace.Ref, scratch, cited_json.object.get("provenance").?);
+    const cited_expansion = try service.workspaceCommand(scratch, "expand-computation-provenance", parent.receipt.task, .{ .context = .{ .expand = .{ .reference = cited_provenance, .page = .{} } } });
+    try std.testing.expectEqual(.observed, cited_expansion.disposition);
+    const cited_page = (try native.json.parse(scratch, cited_expansion.observation_json.bytes, .{})).value;
+    try std.testing.expectEqualStrings(try native.json.canonical(scratch, cited_json.object.get("derivation").?), cited_page.object.get("text").?.string);
+    try std.testing.expect(cited_page.object.get("complete").?.bool);
     var collection_parent = try service.task(a, parent.receipt.task);
     defer collection_parent.deinit();
     try std.testing.expectEqualDeep(initial.value.checkpoint, collection_parent.value.checkpoint);
@@ -862,6 +868,36 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     const judgment_ref = try native.values.fromJson(contracts.workspace.Ref, scratch, judgment_json.value.object.get("value").?);
     try std.testing.expectEqualStrings("judgment", judgment_json.value.object.get("derivation").?.object.get("kind").?.string);
     try std.testing.expectEqual(@as(usize, 1), judgment_json.value.object.get("derivation").?.object.get("sources").?.array.items.len);
+    // A small provenance page must not retain the expanded JSON for every
+    // antecedent. Preserve duplicates and order, using the complete ordinary
+    // observation as an independent byte oracle for the paged projection.
+    const provenance_memory = try a.alloc(u8, 8 * 1024 * 1024);
+    defer a.free(provenance_memory);
+    for ([_]usize{ 1, 8192 }) |count| {
+        const antecedents = try scratch.alloc(contracts.workspace.Ref, count);
+        for (antecedents, 0..) |*ref, i| ref.* = if (i % 3 == 1) judgment_ref else value_ref;
+        var many_sources = materialize;
+        many_sources.context.materialize.sources.items = antecedents;
+        const derived = try service.workspaceCommand(scratch, try std.fmt.allocPrint(scratch, "provenance-sources-{d}", .{count}), parent.receipt.task, many_sources);
+        if (derived.disposition != .observed) std.debug.print("provenance materialize {d}: {s}\n", .{ count, derived.observation_json.bytes });
+        try std.testing.expectEqual(.observed, derived.disposition);
+        const complete = (try native.json.parseAsset(scratch, derived.observation_json.bytes, derived.observation_json.bytes.len)).value;
+        const provenance_ref = try native.values.fromJson(contracts.workspace.Ref, scratch, complete.object.get("provenance").?);
+        const expected = try native.json.canonical(scratch, complete.object.get("derivation").?);
+        for ([_]u64{ 0, expected.len / 2, expected.len - 7, expected.len }) |offset| {
+            var budget = std.heap.FixedBufferAllocator.init(provenance_memory);
+            const maximum: u32 = if (offset == 0) 1 else 31;
+            const page = try service.workspaceCommand(budget.allocator(), "provenance-page", parent.receipt.task, .{ .context = .{ .expand = .{ .reference = provenance_ref, .page = .{ .offset = offset, .maximum = maximum } } } });
+            if (page.disposition != .observed) std.debug.print("provenance page {d}/{d}: {s}\n", .{ count, offset, page.observation_json.bytes });
+            try std.testing.expectEqual(.observed, page.disposition);
+            const observed = (try native.json.parse(scratch, page.observation_json.bytes, .{})).value;
+            const end = @min(expected.len, offset + maximum);
+            try std.testing.expectEqualStrings(expected[@intCast(offset)..@intCast(end)], observed.object.get("text").?.string);
+            try std.testing.expectEqual(expected.len, try native.json.numberInteger(usize, observed.object.get("total_bytes").?.number_string));
+            try std.testing.expectEqual(end, try native.json.numberInteger(u64, observed.object.get("next_offset").?.number_string));
+            try std.testing.expectEqual(end == expected.len, observed.object.get("eof").?.bool);
+        }
+    }
     const selection: contracts.workspace.Command = .{ .context = .{ .select = .{ .values = .{ .items = &.{ judgment_ref, value_ref } } } } };
     const selected = try service.workspaceCommand(scratch, "context-select", parent.receipt.task, selection);
     try std.testing.expectEqual(.observed, selected.disposition);

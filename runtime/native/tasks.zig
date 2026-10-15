@@ -2967,12 +2967,12 @@ pub fn Service(comptime Types: type) type {
                             const reference = try self.workspaceOwnedDescriptor(a, task_id, request.reference);
                             const bytes = try self.store().object(a, reference, null);
                             defer a.free(bytes);
-                            const projected = if (request.reference.kind == .schema) try wp.schema(a, bytes) else blk: {
+                            if (request.reference.kind == .provenance) {
                                 var derivation = try contracts.decodeOwned(workspace.Derivation, a, bytes);
                                 defer derivation.deinit();
-                                break :blk try self.workspaceDerivationObservation(a, derivation.value);
-                            };
-                            const text = try json.canonical(a, projected);
+                                return .{ .observation = try self.workspaceDerivationPage(a, derivation.value, request.page) };
+                            }
+                            const text = try json.canonical(a, try wp.schema(a, bytes));
                             defer a.free(text);
                             return .{ .observation = try wp.page(a, text, request.page) };
                         }
@@ -3362,6 +3362,45 @@ pub fn Service(comptime Types: type) type {
             }
             if (derivation.frozen_input) |ref| try json.put(a, &result, "frozen_input", try values.toJson(state.Reference, a, ref));
             return result;
+        }
+
+        fn workspaceDerivationPage(self: *Self, a: std.mem.Allocator, derivation: workspace.Derivation, page: wc.Page) !json.Value {
+            // Reuse the ordinary projection's fields, but fold its growing
+            // source vector directly into the requested canonical byte range.
+            var metadata = derivation;
+            metadata.sources.items = &.{};
+            const fields = try self.workspaceDerivationObservation(a, metadata);
+            const keys = try a.dupe([]const u8, fields.object.keys());
+            defer a.free(keys);
+            std.mem.sort([]const u8, keys, {}, struct {
+                fn less(_: void, left: []const u8, right: []const u8) bool {
+                    return std.mem.lessThan(u8, left, right);
+                }
+            }.less);
+            var output = try wp.Range.init(a, page);
+            defer output.deinit(a);
+            var element = std.heap.ArenaAllocator.init(a);
+            defer element.deinit();
+            try output.append("{");
+            for (keys, 0..) |key, index| {
+                if (index != 0) try output.append(",");
+                try output.append(try json.canonical(a, json.string(key)));
+                try output.append(":");
+                if (!same(key, "sources")) {
+                    try output.append(try json.canonical(a, fields.object.get(key).?));
+                    continue;
+                }
+                try output.append("[");
+                for (derivation.sources.items, 0..) |ref, i| {
+                    _ = element.reset(.retain_capacity);
+                    const scratch = element.allocator();
+                    if (i != 0) try output.append(",");
+                    try output.append(try json.canonical(scratch, try values.toJson(wc.Ref, scratch, try wp.reference(scratch, .value, ref.digest))));
+                }
+                try output.append("]");
+            }
+            try output.append("}");
+            return output.finish(a);
         }
 
         fn workspaceValueObservation(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, id: state.Digest) !json.Value {
