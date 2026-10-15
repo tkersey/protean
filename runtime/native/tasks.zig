@@ -281,21 +281,28 @@ pub fn Service(comptime Types: type) type {
             return self.workspaceSettled(a, task_id, true);
         }
         fn workspaceSettled(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, require_disposal: bool) !bool {
-            const ids = try self.workspaceIds(a, task_id);
-            defer a.free(ids);
-            for (ids) |id| {
-                var child = try self.retainedWorkspaceWork(a, task_id, id);
+            var query = try self.store().database.prepare("SELECT id FROM records WHERE task=? AND kind='workspace_work' ORDER BY id", &.{.{ .blob = &task_id }});
+            defer query.deinit();
+            var arena = std.heap.ArenaAllocator.init(a);
+            defer arena.deinit();
+            while (try query.step() == .row) {
+                const bytes = try query.bytes(0);
+                if (bytes.len != 32) return error.CorruptState;
+                const id = bytes[0..32].*;
+                _ = arena.reset(.retain_capacity);
+                const temporary = arena.allocator();
+                var child = try self.retainedWorkspaceWork(temporary, task_id, id);
                 defer child.deinit();
                 if (child.value.terminal()) {
-                    const bytes = try self.store().object(a, child.value.outcome, null);
-                    defer a.free(bytes);
-                    var outcome = try data.invocation.decode(data.invocation.Outcome, a, bytes);
+                    const outcome_bytes = try self.store().object(temporary, child.value.outcome, null);
+                    defer temporary.free(outcome_bytes);
+                    var outcome = try data.invocation.decode(data.invocation.Outcome, temporary, outcome_bytes);
                     defer outcome.deinit();
                     if (!cleanupComplete(outcome.value)) return false;
                 } else {
                     if (require_disposal or child.value.cancellation != null) return false;
                     if (child.value.current_occurrence) |current| {
-                        var pending = try self.record(occurrence.Occurrence, a, "occurrence", current, task_id);
+                        var pending = try self.record(occurrence.Occurrence, temporary, "occurrence", current, task_id);
                         defer pending.deinit();
                         switch (pending.value.state) {
                             .dispatching, .unknown, .captured, .settled_reply => return false,
@@ -692,10 +699,18 @@ pub fn Service(comptime Types: type) type {
             var value = decoded.value;
             const previous = value.revision;
             const needs_cancellation = !value.terminal() or !try self.associatedWorkDisposed(a, task_id);
+            const executable = compatible: {
+                self.compatible(value) catch |err| switch (err) {
+                    error.IncompatibleProfile => break :compatible false,
+                };
+                break :compatible true;
+            };
             var cleanup: std.ArrayList(workspace.Subject) = .empty;
             defer cleanup.deinit(a);
             if (needs_cancellation) {
                 try self.ensureOwnershipCapacity(task_id);
+            }
+            if (needs_cancellation and executable) {
                 const children = try self.workspaceIds(a, task_id);
                 defer a.free(children);
                 for (children) |child_id| {
@@ -711,6 +726,10 @@ pub fn Service(comptime Types: type) type {
             try self.runnable.ensureUnusedCapacity(self.allocator, cleanup.items.len + 1);
             value.revision = try std.math.add(u64, previous, 1);
             if (needs_cancellation and value.cancellation == null) value.cancellation = .{ .bytes = reason };
+            if (needs_cancellation and !executable) {
+                value.blocker = .incompatible_profile;
+                value.schedule = .parked;
+            } else if (executable and value.blocker == .incompatible_profile) value.blocker = null;
             try self.store().begin();
             defer self.store().rollback();
             try self.event(&value, .cancellation_requested, "{}");
@@ -719,6 +738,12 @@ pub fn Service(comptime Types: type) type {
             // The receipt now survives retries. If applying its cancellation
             // fails, only restart recovery may resume this owner's work.
             errdefer self.store().fence();
+            // Cancellation intent survives a different launch configuration,
+            // but it grants no authority to run the root or retained cleanup.
+            if (needs_cancellation and !executable) {
+                self.claim(task_id);
+                return admitted;
+            }
             for (cleanup.items) |subject| self.subjectAddAssumeCapacity(subject);
             if (self.work) |*work| if (same(&work.task, &task_id)) {
                 work.cancel_requested = true;
@@ -3658,6 +3683,7 @@ pub fn Service(comptime Types: type) type {
                 var saved = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
                 defer saved.deinit();
                 const event_value = saved.value;
+                if (event_value.kind == .workspace_progress and event_value.workspace_publications.items.len == 0) return error.InvalidArchive;
                 if (event_value.kind == .workspace_read) {
                     var parsed = try json.parseAsset(a, event_value.data.bytes, event_value.data.bytes.len);
                     defer parsed.deinit();
@@ -4045,11 +4071,8 @@ pub fn Service(comptime Types: type) type {
             projected.projection = .{ .reply = try self.store().putObject(bound), .objects = .{ .items = &.{} }, .output_tokens = null };
             try self.store().putRecord(state.Capture, "capture", attempt.id, initial.id, projected);
             try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, initial.id, next);
-            if (program) |saved| {
-                const event_data = try std.fmt.allocPrint(a, "{{\"workspace_id\":\"{s}\"}}", .{std.fmt.bytesToHex(saved.digest, .lower)});
-                defer a.free(event_data);
-                try self.event(&parent, .workspace_progress, event_data);
-            }
+            // The retained capture/reply owns the program observation. A
+            // second journal projection has no independent publication fact.
             try self.persist(a, parent, initial.revision, "workspace.build", .preserve);
             if (program) |saved| try self.checked_workspace_programs.put(self.allocator, saved.digest, self.store().integrity_epoch);
             return .progressed;
@@ -4572,7 +4595,11 @@ pub fn Service(comptime Types: type) type {
                 publications[publication_count] = try workPublication(a, try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, id), true));
                 publication_count += 1;
             }
-            try self.publicationEvent(&parent, if (operation_id != null) .workspace else .workspace_progress, event_data, publications[0..publication_count]);
+            // Internal program publication is observed through the subsequent
+            // work/delegation or captured build reply. Only work progress has
+            // the retained publication facts needed for a journal projection.
+            if (operation_id != null or publication_count != 0)
+                try self.publicationEvent(&parent, if (operation_id != null) .workspace else .workspace_progress, event_data, publications[0..publication_count]);
             const saved: state.Receipt = .{ .id = receipt_id, .client_operation_id = try name(operation_id orelse "workspace.progress"), .method = .workspace, .request_digest = request, .task = parent.id, .revision = parent.revision, .disposition = .accepted, .workspace = identity, .workspace_kind = kind, .workspace_observation = frozen };
             if (operation_id) |op| {
                 const bytes = try contracts.encodeOwned(state.Receipt, a, saved);

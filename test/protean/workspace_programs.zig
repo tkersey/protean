@@ -379,6 +379,37 @@ const OwnerTypes = struct {
     pub const Message = void;
 };
 
+fn expectProgramProgressIsDerived(service: anytype, a: std.mem.Allocator, task_id: native.testing.state.TaskId) !void {
+    const store = &service.namespace.store;
+    var query = try store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq", &.{.{ .blob = &task_id }});
+    defer query.deinit();
+    var first: ?contracts.Decoded(native.testing.state.Event) = null;
+    defer if (first) |*event_value| event_value.deinit();
+    var bare_progress = false;
+    while (try query.step() == .row) {
+        var event_value = try contracts.decodeOwned(native.testing.state.Event, a, try query.bytes(0));
+        defer event_value.deinit();
+        if (first == null) first = try contracts.decodeOwned(native.testing.state.Event, a, try query.bytes(0));
+        if (event_value.value.kind == .workspace_progress and event_value.value.workspace_publications.items.len == 0) bare_progress = true;
+    }
+    var manifest_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
+    const index = try store.archiveIndex(a, task_id, .{ .digest = manifest_digest, .bytes = service.assets.manifest.len });
+    try service.validateWorkspaceRecords(a, task_id, index.records.items);
+    // Neither successful compilation nor delegation authorizes an independent
+    // program claim in the journal, even when its object digest is recomputed.
+    try store.begin();
+    defer store.rollback();
+    var forged = first.?.value;
+    forged.kind = .workspace_progress;
+    forged.workspace_publications = .{ .items = &.{} };
+    forged.data.bytes = "{\"workspace_id\":\"0000000000000000000000000000000000000000000000000000000000000000\"}";
+    const reference = try store.putObject(try contracts.encodeOwned(native.testing.state.Event, a, forged));
+    try store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &reference.digest }, .{ .blob = &task_id }, .{ .integer = @intCast(forged.seq) } });
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(a, task_id, index.records.items));
+    try std.testing.expect(!bare_progress);
+}
+
 test "WORK-01 retained work keeps controller state distinct and replays exact admissions" {
     const a = std.testing.allocator;
     const io = std.testing.io;
@@ -455,6 +486,9 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     try std.testing.expectEqual(.cancelled, cancelled.value.outcome_kind);
     try std.testing.expect(cancelled.value.cancellation_applied);
     try std.testing.expect(cancelled.value.result == null);
+    const foreign_cancel = try service.submit(scratch, "foreign-cancel-parent", .{ 25, 5 });
+    const foreign_program = try service.workspaceBuild(scratch, "foreign-cancel-build", foreign_cancel.receipt.task, document, &diagnostic);
+    const foreign_child = try service.workspaceStart(scratch, "foreign-cancel-child", foreign_cancel.receipt.task, foreign_program.receipt.workspace.?, input, .{});
     try service.park(scratch);
     try service.close(scratch);
     var observation_profile = profile;
@@ -467,8 +501,39 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     try std.testing.expect(!reopened_status.object.get("associated_work_disposed").?.bool);
     _ = try reader.call(scratch, .@"task.result", status_params);
     try std.testing.expectError(error.IncompatibleProfile, service.workspaceWork(scratch, parent.receipt.task, id));
+    _ = try service.requestCancel(scratch, "foreign-cancel", foreign_cancel.receipt.task, "retain intent without execution authority");
+    try std.testing.expectEqual(.idle, try service.pump(scratch));
+    var blocked_cancel = try service.task(scratch, foreign_cancel.receipt.task);
+    defer blocked_cancel.deinit();
+    try std.testing.expectEqual(.blocked, try service.status(scratch, blocked_cancel.value));
+    try std.testing.expectEqual(.incompatible_profile, blocked_cancel.value.blocker.?);
+    try std.testing.expect(!try service.associatedWorkDisposed(scratch, foreign_cancel.receipt.task));
+    const independent = try service.submit(scratch, "compatible-independent", .{ 25, 5 });
+    for (0..32) |_| {
+        _ = try service.pump(scratch);
+        var independent_state = try service.task(scratch, independent.receipt.task);
+        defer independent_state.deinit();
+        if (independent_state.value.terminal()) break;
+    }
+    var independent_result = try service.task(scratch, independent.receipt.task);
+    defer independent_result.deinit();
+    try std.testing.expectEqual(.completed, independent_result.value.outcome_kind);
     try service.close(scratch);
     service = try native.tasks.Service(OwnerTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    _ = try service.requestCancel(scratch, "compatible-cancel", foreign_cancel.receipt.task, "retain intent without execution authority");
+    for (0..32) |_| {
+        _ = try service.pump(scratch);
+        var current_cancel = try service.task(scratch, foreign_cancel.receipt.task);
+        defer current_cancel.deinit();
+        if (try service.taskCleanupComplete(scratch, current_cancel.value)) break;
+    }
+    var disposed_cancel = try service.task(scratch, foreign_cancel.receipt.task);
+    defer disposed_cancel.deinit();
+    try std.testing.expect(try service.taskCleanupComplete(scratch, disposed_cancel.value));
+    try std.testing.expect(disposed_cancel.value.blocker == null);
+    var disposed_child = try service.workspaceWork(scratch, foreign_cancel.receipt.task, foreign_child.receipt.workspace.?);
+    defer disposed_child.deinit();
+    try std.testing.expectEqual(.cancelled, disposed_child.value.outcome_kind);
     const recovered = try service.workspaceControl(scratch, "advance", parent.receipt.task, id, work.value.execution_revision, work.value.control_revision, .advance);
     try std.testing.expect(recovered.replayed);
     var retained = try service.workspaceWork(a, parent.receipt.task, id);
@@ -551,6 +616,35 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
         try std.testing.expectEqualStrings(scope_text[@intCast(offset)..][0..@min(64, scope_text.len - offset)], rendered.object.get("text").?.string);
         try std.testing.expectEqual(scope_text.len, try native.json.numberInteger(usize, rendered.object.get("total_bytes").?.number_string));
     }
+    // A scalar disposal observation need not retain all historical work while
+    // scanning it. Exercise the actual client frame allocator at several sizes.
+    const status_parent = try service.submit(scratch, "status-history-parent", .{ 25, 5 });
+    const status_program = try service.workspaceBuild(scratch, "status-history-build", status_parent.receipt.task, document, &diagnostic);
+    var history_params = native.json.object();
+    try native.json.put(scratch, &history_params, "task_id", native.json.string(try std.fmt.allocPrint(scratch, "{s}", .{std.fmt.bytesToHex(status_parent.receipt.task, .lower)})));
+    const status_memory = try a.alloc(u8, 64 * 1024);
+    defer a.free(status_memory);
+    var status_scratch_max: usize = 0;
+    for (0..1024) |i| {
+        _ = try service.workspaceStart(scratch, try std.fmt.allocPrint(scratch, "status-history-{d}", .{i}), status_parent.receipt.task, status_program.receipt.workspace.?, &.{0}, .{});
+        if (i != 0 and i != 31 and i != 255 and i != 1023) continue;
+        var status_budget = std.heap.FixedBufferAllocator.init(status_memory);
+        var frame = std.heap.ArenaAllocator.init(status_budget.allocator());
+        defer frame.deinit();
+        var measured = std.testing.FailingAllocator.init(a, .{});
+        const observed = observe: {
+            const original_allocator = service.allocator;
+            defer service.allocator = original_allocator;
+            service.allocator = measured.allocator();
+            break :observe try reader.call(frame.allocator(), .@"task.status", history_params);
+        };
+        try std.testing.expect(observed.object.get("associated_work_disposed").?.bool);
+        try std.testing.expectEqual(measured.allocated_bytes, measured.freed_bytes);
+        status_scratch_max = @max(status_scratch_max, measured.allocated_bytes);
+        if (measured.allocated_bytes > 64 * 1024)
+            std.debug.print("disposal status: {d} completed works, {d} scratch allocated bytes\n", .{ i + 1, measured.allocated_bytes });
+    }
+    try std.testing.expect(status_scratch_max <= 64 * 1024);
     // AUT-08: no authored yields or ports are needed for whole-work controls.
     var noncooperative_builder = source.Builder.init(a);
     defer noncooperative_builder.deinit();
@@ -1132,6 +1226,7 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
     }
     try std.testing.expect(compilation_seen);
     try std.testing.expect(built_id != null);
+    try expectProgramProgressIsDerived(&service, scratch, build_parent.receipt.task);
     const input = try contracts.encodeOwned(struct { u64, u64 }, a, .{ 1071, 462 });
     defer a.free(input);
     const started = try service.workspaceStart(scratch, "component-start", build_parent.receipt.task, built_id.?, input, .{});
@@ -1410,6 +1505,17 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
         if (scenario == .orderly_resumed_child) {
             try service.park(scratch);
             try service.close(scratch);
+            var incompatible = profile;
+            incompatible.bytes = "different-cleanup-launch";
+            service = try native.tasks.Service(WaitTypes).init(a, io, &namespace, assets, &application, handlers, incompatible);
+            _ = try service.requestCancel(scratch, "incompatible-completed-root-cancel", parent.receipt.task, "dispose remaining work");
+            try std.testing.expectEqual(.idle, try service.pump(scratch));
+            var blocked = try service.task(scratch, parent.receipt.task);
+            defer blocked.deinit();
+            try std.testing.expectEqual(.completed, blocked.value.outcome_kind);
+            try std.testing.expectEqual(.incompatible_profile, blocked.value.blocker.?);
+            try std.testing.expect(!try service.associatedWorkDisposed(scratch, parent.receipt.task));
+            try service.close(scratch);
             service = try native.tasks.Service(WaitTypes).init(a, io, &namespace, assets, &application, handlers, profile);
         }
         const cancel_id = try std.fmt.allocPrint(scratch, "cancel-unjoined-{d}", .{index});
@@ -1434,9 +1540,22 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
             try std.testing.expect(started_cleanup);
             try service.park(scratch);
             try service.close(scratch);
+            var incompatible = profile;
+            incompatible.bytes = "different-resumed-cleanup-launch";
+            service = try native.tasks.Service(WaitTypes).init(a, io, &namespace, assets, &application, handlers, incompatible);
+            _ = try service.requestCancel(scratch, "incompatible-queued-cleanup-cancel", parent.receipt.task, "dispose remaining work");
+            try std.testing.expectEqual(.idle, try service.pump(scratch));
+            var blocked = try service.task(scratch, parent.receipt.task);
+            defer blocked.deinit();
+            try std.testing.expectEqual(.incompatible_profile, blocked.value.blocker.?);
+            try std.testing.expect(!try service.associatedWorkDisposed(scratch, parent.receipt.task));
+            try service.close(scratch);
             service = try native.tasks.Service(WaitTypes).init(a, io, &namespace, assets, &application, handlers, profile);
             try std.testing.expectEqual(.idle, std.meta.activeTag(try service.pump(scratch)));
             _ = try service.requestCancel(scratch, "continue-admitted-cleanup", parent.receipt.task, "dispose remaining work");
+            var unblocked = try service.task(scratch, parent.receipt.task);
+            defer unblocked.deinit();
+            try std.testing.expect(unblocked.value.blocker == null);
             var answered_cleanup = false;
             for (0..30) |_| {
                 _ = try service.pump(scratch);
@@ -1830,6 +1949,7 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
             defer root.deinit();
             try std.testing.expectEqual(@as(u64, 1), root.value.inference_attempts);
         }
+        if (scenario == .model) try expectProgramProgressIsDerived(&service, scratch, parent.receipt.task);
         const archive_path = try std.fmt.allocPrint(scratch, "{s}/{s}.par", .{ path_buffer[0..length], suffix });
         _ = try service.exportCheckpoint(scratch, parent.receipt.task, archive_path);
         const import_path = try std.fmt.allocPrint(scratch, "{s}/import-{s}", .{ path_buffer[0..length], suffix });
