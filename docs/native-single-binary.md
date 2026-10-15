@@ -367,6 +367,9 @@ across the same three runners: authoring also runs `check-native-owner` and the
 workspace program/semantics checks; native runs `check-native-packaged`; downstream
 keeps its independent build. Source accounting starts independently; the terminal
 gate requires it and all qualification lanes and retains the 360-second maximum.
+The packaged adaptive peer runs its independent controller/recovery and workspace
+groups concurrently, with separate state, snapshot, and HTTPS fixtures. Both
+groups must finish, and their original assertions and command deadlines remain.
 
 `check-native-recovery-crash`, included in `check-native`, kills the owner process
 at 16 original-acquisition and receipt-lookup boundaries. Two fresh processes
