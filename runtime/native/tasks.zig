@@ -1520,7 +1520,7 @@ pub fn Service(comptime Types: type) type {
             const task_name = std.fmt.bytesToHex(value.id, .lower);
             const ctx: registry.Context = .{ .allocator = a, .io = self.io, .authority = &self.profile.authority, .task_id = &task_name, .profile = self.profile.bytes, .environment = self.profile.environment };
             switch (entry.declaration.kind) {
-                .workspace => return self.dispatchWorkspace(a, initial, pending, entry, request.value.binding.payload),
+                .workspace => return self.dispatchWorkspace(a, initial, dispatched, entry, request.value.binding.payload),
                 .question => {
                     const prompt = try json.canonical(a, try entry.declaration.present.?(ctx, request.value.binding.payload));
                     defer a.free(prompt);
@@ -1582,7 +1582,7 @@ pub fn Service(comptime Types: type) type {
                             error.MissingArtifact, error.CorruptObject => .missing_artifact,
                             else => .incompatible_profile,
                         }) else null;
-                    return self.dispatchAcquisition(a, initial, pending, entry, request_bytes, prepared, .environment);
+                    return self.dispatchAcquisition(a, initial, dispatched, entry, request_bytes, prepared, .environment);
                 },
             }
         }
@@ -1590,10 +1590,12 @@ pub fn Service(comptime Types: type) type {
         fn dispatchAcquisition(self: *Self, a: std.mem.Allocator, initial: state.Task, pending: occurrence.Occurrence, entry: registry.Entry, request_bytes: []const u8, prepared: ?[]const u8, operation_kind: state.AttemptOperation) !Step {
             if (self.work != null) return .idle;
             const subject = try self.occurrenceSubject(a, initial, pending);
-            var attempt: state.Digest = undefined;
-            try self.io.randomSecure(&attempt);
-            const binding: occurrence.Binding = .{ .id = pending.id, .task = pending.task, .work = pending.work, .request = pending.request };
-            const dispatched = try occurrence.dispatch(pending, binding, attempt, subject.cancelling, subject.cleanup);
+            // Consume the already-authorized transition. Preparation and
+            // settlement cannot reconstruct a different cancellation policy.
+            const attempt = switch (pending.state) {
+                .dispatching => |dispatching| dispatching.id,
+                else => return error.UnsettledOccurrence,
+            };
             var value = initial;
             value.revision = try std.math.add(u64, value.revision, 1);
             if (pending.work == null) value.schedule = .active;
@@ -1612,7 +1614,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().begin();
             defer self.store().rollback();
             try self.store().createRecord(state.Attempt, "attempt", attempt, value.id, .{ .id = attempt, .task = value.id, .occurrence = pending.id, .request = try self.store().putObject(request_bytes), .profile = value.profile, .capability = try name(entry.declaration.identity), .operation = operation_kind, .inference = entry.declaration.inference, .prepared = if (prepared) |body| try self.store().putObject(body) else null });
-            try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, value.id, dispatched);
+            try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, value.id, pending);
             try self.effectSchedule(a, &value, pending, .active, null, false);
             try self.persist(a, value, initial.revision, "effect.dispatch", .preserve);
             self.work = work;
@@ -2081,26 +2083,21 @@ pub fn Service(comptime Types: type) type {
                 var result = try data.invocation.decode(data.invocation.Result, a, try self.store().object(a, answer.value.reply, null));
                 defer result.deinit();
                 if (!std.meta.eql(result.value.request_identity, pending.request)) return error.InvalidArchive;
-                var result_schema = try data.schema.decode(a, request.binding.resume_schema);
-                defer result_schema.deinit();
-                try data.schema.validateValue(a, result_schema.descriptor, result.value.value);
-                var command = try @import("dynamic_values.zig").decode(a, request.binding.resume_schema, result.value.value);
-                defer command.deinit();
+                const protocol: @import("workspace_driver.zig").Protocol = .{
+                    .class = port.interface.class,
+                    .command_schema = request.binding.resume_schema,
+                    .payload_schema = request.binding.payload_schema,
+                    .payload = request.binding.payload,
+                };
+                const command = try protocol.decode(a, result.value.value);
                 if (answer.value.command == .finish) {
-                    if (port.interface.class != .alternative or answer.value.input != null or try values.fromJson(u32, a, command.value.object.get("tag").?) != 1) return error.InvalidArchive;
-                    var observation = try @import("dynamic_values.zig").decode(a, request.binding.payload_schema, request.binding.payload);
-                    defer observation.deinit();
-                    if (try values.fromJson(u32, a, observation.value.array.items[1].object.get("tag").?) != 1) return error.InvalidArchive;
+                    if (command != .finish or answer.value.input != null) return error.InvalidArchive;
                 } else {
+                    if (command != .resume_value) return error.InvalidArchive;
                     const input = answer.value.input orelse return error.InvalidArchive;
                     const origin = try self.workspaceValueReference(a, task_id, try wp.reference(a, .value, input.digest));
                     if (!std.meta.eql(origin.artifact, input) or !std.meta.eql(origin.schema, port.interface.argument)) return error.InvalidArchive;
-                    const expected = if (port.interface.class == .alternative) blk: {
-                        if (try values.fromJson(u32, a, command.value.object.get("tag").?) != 0) return error.InvalidArchive;
-                        break :blk command.value.object.get("value").?;
-                    } else command.value;
-                    const schema = try self.store().object(a, port.interface.argument, null);
-                    const input_bytes = try @import("dynamic_values.zig").encode(a, schema, expected);
+                    const input_bytes = command.resume_value;
                     if (!std.meta.eql(origin.value, state.Reference{ .digest = storage.digest(input_bytes), .bytes = input_bytes.len })) return error.InvalidArchive;
                     var found = false;
                     for (work.value.inputs.items) |source| found = found or std.meta.eql(source, input);
@@ -3120,23 +3117,21 @@ pub fn Service(comptime Types: type) type {
             var input: ?[]u8 = null;
             defer if (input) |bytes| a.free(bytes);
             var origin: ?state.Reference = null;
-            var command_json: json.Value = .null;
-            switch (interaction.command) {
-                .finish => {
-                    if (port.value.interface.class != .alternative) return error.InvalidPortCommand;
-                    const payload_schema = try self.store().object(a, port.value.interface.payload, null);
-                    defer a.free(payload_schema);
-                    const payload = try self.store().object(a, port.value.payload, null);
-                    defer a.free(payload);
-                    var observed = try @import("dynamic_values.zig").decode(a, payload_schema, payload);
-                    defer observed.deinit();
-                    const last = observed.value.array.items[1];
-                    if (try values.fromJson(u32, a, last.object.get("tag").?) != 1) return error.NoBranchResult;
-                    command_json = json.object();
-                    try json.put(a, &command_json, "tag", try json.number(a, 1));
-                    try json.put(a, &command_json, "value", json.object());
-                },
-                .resume_value => |supplied| {
+            const command_schema = try self.store().object(a, port.value.interface.command, null);
+            defer a.free(command_schema);
+            const payload_schema = if (interaction.command == .finish) try self.store().object(a, port.value.interface.payload, null) else &.{};
+            defer a.free(payload_schema);
+            const payload = if (interaction.command == .finish) try self.store().object(a, port.value.payload, null) else &.{};
+            defer a.free(payload);
+            const protocol: @import("workspace_driver.zig").Protocol = .{
+                .class = port.value.interface.class,
+                .command_schema = command_schema,
+                .payload_schema = payload_schema,
+                .payload = payload,
+            };
+            const command: @import("workspace_driver.zig").Command = switch (interaction.command) {
+                .finish => .finish,
+                .resume_value => |supplied| supplied_value: {
                     input = switch (supplied) {
                         .inline_json => |inline_value| blk: {
                             if (!std.meta.eql(try wp.identity(inline_value.schema, .schema), port.value.interface.argument.digest)) return error.SchemaMismatch;
@@ -3152,23 +3147,10 @@ pub fn Service(comptime Types: type) type {
                             break :blk try self.store().object(a, selected.value, null);
                         },
                     };
-                    var decoded = try @import("dynamic_values.zig").decode(a, argument_schema, input.?);
-                    defer decoded.deinit();
-                    // Own the JSON independently of the dynamic decoder arena.
-                    const text = try json.canonical(a, decoded.value);
-                    defer a.free(text);
-                    const parsed = try json.parse(a, text, .{ .bytes = text.len, .depth = text.len, .tokens = text.len, .members = text.len });
-                    command_json = parsed.value;
-                    if (port.value.interface.class == .alternative) {
-                        command_json = json.object();
-                        try json.put(a, &command_json, "tag", try json.number(a, 0));
-                        try json.put(a, &command_json, "value", parsed.value);
-                    }
+                    break :supplied_value .{ .resume_value = input.? };
                 },
-            }
-            const command_schema = try self.store().object(a, port.value.interface.command, null);
-            defer a.free(command_schema);
-            const command_bytes = try @import("dynamic_values.zig").encode(a, command_schema, command_json);
+            };
+            const command_bytes = try protocol.encode(a, command);
             defer a.free(command_bytes);
             const bound = try data.invocation.encodeOwned(data.invocation.Result, a, .{ .request_identity = pending.value.request, .value = command_bytes });
             defer a.free(bound);
@@ -3322,15 +3304,23 @@ pub fn Service(comptime Types: type) type {
             var result = json.object();
             try json.put(a, &result, "view", try values.toJson(wc.Ref, a, try wp.reference(a, .view, id)));
             try json.put(a, &result, "coverage", json.string("selected_values_only"));
-            var selected: json.Value = .{ .array = .init(a) };
-            for (saved.value.description.values.items) |ref| {
-                const value = try self.workspaceValueReference(a, task_id, try wp.reference(a, .value, ref.digest));
+            var selection = try wp.Range.init(a, page);
+            defer selection.deinit(a);
+            try selection.append("[");
+            var element = std.heap.ArenaAllocator.init(a);
+            defer element.deinit();
+            for (saved.value.description.values.items, 0..) |ref, i| {
+                // Each element is independently projected and released. A
+                // bounded page never retains N complete value previews.
+                _ = element.reset(.retain_capacity);
+                const scratch = element.allocator();
+                const value = try self.workspaceValueReference(scratch, task_id, try wp.reference(scratch, .value, ref.digest));
                 if (!std.meta.eql(value.artifact, ref)) return error.CorruptState;
-                try selected.array.append(try self.workspaceValueObservation(a, task_id, ref.digest));
+                if (i != 0) try selection.append(",");
+                try selection.append(try json.canonical(scratch, try self.workspaceValueObservation(scratch, task_id, ref.digest)));
             }
-            const text = try json.canonical(a, selected);
-            defer a.free(text);
-            try json.put(a, &result, "selection", try wp.page(a, text, page));
+            try selection.append("]");
+            try json.put(a, &result, "selection", try selection.finish(a));
             try json.put(a, &result, "value_count", try json.number(a, saved.value.description.values.items.len));
             return result;
         }
@@ -4065,11 +4055,12 @@ pub fn Service(comptime Types: type) type {
             defer fresh.deinit();
             var parent = fresh.value;
             if (!std.meta.eql(parent.current_occurrence, initial.current_occurrence)) return error.StaleOccurrence;
-            var attempt: state.Digest = undefined;
-            try self.io.randomSecure(&attempt);
+            const attempt = switch (pending.state) {
+                .dispatching => |dispatching| dispatching.id,
+                else => return error.UnsettledOccurrence,
+            };
             const binding: occurrence.Binding = .{ .id = pending.id, .task = initial.id, .request = pending.request };
-            const dispatched = try occurrence.dispatch(pending, binding, attempt, parent.cancellation != null, false);
-            const acquired = try occurrence.acquired(dispatched, binding, attempt, storage.digest(bound));
+            const acquired = try occurrence.acquired(pending, binding, attempt, storage.digest(bound));
             parent.revision = try std.math.add(u64, parent.revision, 1);
             try self.store().begin();
             defer self.store().rollback();

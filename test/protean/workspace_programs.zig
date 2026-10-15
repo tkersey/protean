@@ -197,48 +197,64 @@ test "WORK-08 an exclusive resource cannot be captured by a generated alternativ
 
 test "exposure carries capabilities through closed handler returns clauses and shallow successors" {
     const a = std.testing.allocator;
-    for (0..5) |variant| {
+    for (0..6) |variant| {
+        const path_variant = if (variant == 5) 0 else variant;
         var b = source.Builder.init(a);
         defer b.deinit();
         const unit = try b.scalar(void);
         const u = try b.scalar(u64);
         const ask = try b.effect(.{ .identity = "example/handler-query", .payload = u, .result = u, .external = false });
+        const second = if (variant == 5) try b.effect(.{ .identity = "example/second-query", .payload = u, .result = u, .external = false }) else ask;
+        const asks: []const Id = if (variant == 5) &.{ ask, second } else &.{ask};
         const local = try b.effect(.{ .identity = "example/local", .payload = unit, .result = unit, .external = false });
         const cap = try b.schema(.{ .internal = .{ .capability = local } });
-        const mode: data.program.Mode = if (variant == 2) .shallow else .deep;
-        const token = try b.schema(.{ .internal = .{ .resumption = .{ .effect = local, .input = unit, .answer = if (mode == .deep) u else unit, .effects = &.{ ask, local }, .capture_bound = &.{ unit, u, cap }, .handled = &.{local}, .escaping = if (mode == .shallow) &.{ask} else &.{}, .mode = mode, .use = .linear } } });
-        const helper = try b.declare(&.{u}, u, &.{ask}, &.{});
+        const mode: data.program.Mode = if (path_variant == 2) .shallow else .deep;
+        const token = try b.schema(.{ .internal = .{ .resumption = .{ .effect = local, .input = unit, .answer = if (mode == .deep) u else unit, .effects = if (variant == 5) &.{ ask, second, local } else &.{ ask, local }, .capture_bound = &.{ unit, u, cap }, .handled = &.{local}, .escaping = if (mode == .shallow) asks else &.{}, .mode = mode, .use = .linear } } });
+        const helper = try b.declare(&.{u}, u, asks, &.{});
         try b.define(helper, try b.term(.{ .perform = .{ .effect = ask, .payload = try b.reference(b.parameter(helper, 0)) } }));
-        const helper_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{u}, .result = u, .effects = &.{ask} } } });
-        const returns = try b.declare(&.{ u, unit }, u, &.{ask}, &.{});
+        if (variant == 5) {
+            const response = try b.variable(u);
+            b.functions.items[@intCast(helper)].body = try b.bind(response, b.functions.items[@intCast(helper)].body.?, try b.term(.{ .perform = .{ .effect = second, .payload = try b.reference(response) } }));
+        }
+        const helper_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{u}, .result = u, .effects = asks } } });
+        const returns = try b.declare(&.{ u, unit }, u, asks, &.{});
         const returned = try b.reference(b.parameter(returns, 0));
-        try b.define(returns, if (variant == 0) try b.term(.{ .apply = .{ .computation = try b.lambda(helper, helper_type), .arguments = &.{returned} } }) else try b.pure(returned));
-        const clause = try b.declare(&.{ u, unit, token }, u, &.{ ask, local }, &.{});
-        const handler = try b.handler(.{ .mode = mode, .input = unit, .answer = u, .return_function = returns, .clauses = &.{.{ .effect = local, .function = clause, .resumption = token }}, .state = &.{u}, .effects = &.{ ask, local } });
+        try b.define(returns, if (path_variant == 0) try b.term(.{ .apply = .{ .computation = try b.lambda(helper, helper_type), .arguments = &.{returned} } }) else try b.pure(returned));
+        const clause = try b.declare(&.{ u, unit, token }, u, if (variant == 5) &.{ ask, second, local } else &.{ ask, local }, &.{});
+        const handler = try b.handler(.{ .mode = mode, .input = unit, .answer = u, .return_function = returns, .clauses = &.{.{ .effect = local, .function = clause, .resumption = token }}, .state = &.{u}, .effects = if (variant == 5) &.{ ask, second, local } else &.{ ask, local } });
         const answer = try b.variable(u);
         const resumed = if (mode == .shallow)
             try b.term(.{ .resume_with = .{ .resumption = try b.reference(b.parameter(clause, 2)), .argument = try b.constant(void, {}), .handler = handler, .state = &.{try b.reference(answer)} } })
         else
             try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(clause, 2)), .argument = try b.constant(void, {}) } });
-        try b.define(clause, if (variant == 0 or variant >= 3) resumed else try b.bind(answer, try b.term(.{ .call = .{ .function = helper, .arguments = &.{try b.reference(b.parameter(clause, 0))} } }), resumed));
-        const body_effects: []const source.Id = if (variant >= 3) &.{ ask, local } else &.{local};
+        try b.define(clause, if (path_variant == 0 or path_variant >= 3) resumed else try b.bind(answer, try b.term(.{ .call = .{ .function = helper, .arguments = &.{try b.reference(b.parameter(clause, 0))} } }), resumed));
+        const resource = try b.resource(u);
+        try b.resourceAuthority(resource, &.{ returns, clause }, &.{ returns, clause });
+        for ([_]Id{ returns, clause }) |function| {
+            const response = try b.variable(u);
+            const owned = try b.variable(resource);
+            b.functions.items[@intCast(function)].body = try b.bind(response, b.functions.items[@intCast(function)].body.?, try b.bind(owned, try b.pure(try b.primitive(resource, .resource_pack, &.{try b.reference(response)}, 0)), try b.pure(try b.primitive(u, .resource_unpack, &.{try b.reference(owned)}, 0))));
+        }
+        const body_effects: []const source.Id = if (path_variant >= 3) if (variant == 5) &.{ ask, second, local } else &.{ ask, local } else &.{local};
         const body = try b.declare(&.{cap}, unit, body_effects, &.{});
         const local_call = try b.term(.{ .perform = .{ .effect = local, .capability = try b.reference(b.parameter(body, 0)), .payload = try b.constant(void, {}) } });
-        try b.define(body, if (variant >= 3) try b.bind(try b.variable(unit), local_call, try b.bind(try b.variable(u), try b.term(.{ .call = .{ .function = helper, .arguments = &.{try b.constant(u64, 17)} } }), try b.pure(try b.constant(void, {})))) else local_call);
+        try b.define(body, if (path_variant >= 3) try b.bind(try b.variable(unit), local_call, try b.bind(try b.variable(u), try b.term(.{ .call = .{ .function = helper, .arguments = &.{try b.constant(u64, 17)} } }), try b.pure(try b.constant(void, {})))) else local_call);
         const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{cap}, .result = unit, .effects = body_effects } } });
-        const entry = try b.declare(&.{unit}, u, &.{ ask, local }, &.{});
+        const entry = try b.declare(&.{unit}, u, if (variant == 5) &.{ ask, second, local } else &.{ ask, local }, &.{});
         const body_value = try b.lambda(body, body_type);
         const stored_body = try b.variable(body_type);
-        const handled = try b.term(.{ .handle = .{ .handler = handler, .body = if (variant == 4) try b.reference(stored_body) else body_value, .state = &.{try b.constant(u64, 17)} } });
-        try b.define(entry, if (variant == 4) try b.bind(stored_body, try b.pure(body_value), handled) else handled);
+        const handled = try b.term(.{ .handle = .{ .handler = handler, .body = if (path_variant == 4) try b.reference(stored_body) else body_value, .state = &.{try b.constant(u64, 17)} } });
+        try b.define(entry, if (path_variant == 4) try b.bind(stored_body, try b.pure(body_value), handled) else handled);
         b.effects.items[@intCast(ask)].external = true;
+        b.effects.items[@intCast(second)].external = true;
         var baseline = try source.lower(a, b.module(entry, unit));
         baseline.deinit();
         b.effects.items[@intCast(ask)].external = false;
+        b.effects.items[@intCast(second)].external = false;
         const text = try native.source_records.encode(a, b.module(entry, unit));
         defer a.free(text);
         var diagnostic: native.program_construction.Diagnostic = .{};
-        var built = native.program_construction.buildExposed(a, text, &.{.{ .effect = ask, .class = .input }}, null, &diagnostic) catch |err| {
+        var built = native.program_construction.buildExposed(a, text, if (variant == 5) &.{ .{ .effect = ask, .class = .input }, .{ .effect = second, .class = .input } } else &.{.{ .effect = ask, .class = .input }}, null, &diagnostic) catch |err| {
             std.debug.print("handler variant {d}: {s} {any}\n", .{ variant, @errorName(err), diagnostic });
             return err;
         };
@@ -257,8 +273,27 @@ test "exposure carries capabilities through closed handler returns clauses and s
         defer a.free(reply);
         var completed = try kosmos.invocation.invoke(a, .{ .image = built.image, .instance = .{ .state = suspended.record.requested.state.? }, .control = .{ .reply = reply } });
         defer completed.deinit();
+        if (variant == 5) {
+            try std.testing.expectEqual(.requested, std.meta.activeTag(completed.record));
+            var next_request = try data.invocation.decode(data.invocation.Request, a, completed.record.requested.request);
+            defer next_request.deinit();
+            try std.testing.expectEqualSlices(u8, value, next_request.value.binding.payload);
+            const next_reply = try data.invocation.encodeOwned(data.invocation.Result, a, .{ .request_identity = next_request.value.request_identity, .value = value });
+            defer a.free(next_reply);
+            const next = try kosmos.invocation.invoke(a, .{ .image = built.image, .instance = .{ .state = completed.record.requested.state.? }, .control = .{ .reply = next_reply } });
+            completed.deinit();
+            completed = next;
+        }
         try std.testing.expectEqual(.completed, std.meta.activeTag(completed.record));
-        try std.testing.expectEqualSlices(u8, if (variant == 1 or variant >= 3) expected else value, completed.record.completed);
+        try std.testing.expectEqualSlices(u8, if (path_variant == 1 or path_variant >= 3) expected else value, completed.record.completed);
+        // Transporting authority must never invent authority for an invalid
+        // original body, even when all its callers are generated handlers.
+        const resource_id = b.schemas.items[@intCast(resource)].internal.abstract_resource;
+        b.resources.items[@intCast(resource_id)].introducers = &.{};
+        b.resources.items[@intCast(resource_id)].eliminators = &.{};
+        const unauthorized = try native.source_records.encode(a, b.module(entry, unit));
+        defer a.free(unauthorized);
+        try std.testing.expectError(error.InvalidOwnership, native.program_construction.buildExposed(a, unauthorized, if (variant == 5) &.{ .{ .effect = ask, .class = .input }, .{ .effect = second, .class = .input } } else &.{.{ .effect = ask, .class = .input }}, null, &diagnostic));
     }
 }
 
@@ -1860,6 +1895,83 @@ test "deep recursive workspace values support input admission inspection expansi
     const enormous_tail_json = (try native.json.parse(scratch, enormous_tail.observation_json.bytes, .{})).value;
     try std.testing.expectEqualStrings("{},{}]", enormous_tail_json.object.get("text").?.string);
     try std.testing.expect(enormous_tail_json.object.get("eof").?.bool);
+    // The same compact value must remain compact across input commands,
+    // alternative commands, finish inspection, and retained archive checks.
+    const memory = try a.alloc(u8, 16 * 1024 * 1024);
+    defer a.free(memory);
+    for ([_]@FieldType(contracts.workspace.Exposure, "class"){ .input, .alternative }) |class| {
+        var cb = source.Builder.init(a);
+        defer cb.deinit();
+        const compact_unit = try cb.scalar(void);
+        const compact_array = try cb.schema(.{ .array = .{ .element = compact_unit, .length = 1_000_000_000 } });
+        const operation_name = @tagName(class);
+        const compact_effect = try cb.effect(.{ .identity = operation_name, .payload = compact_unit, .result = compact_array, .external = false, .control_use = .multi });
+        const compact_entry = try cb.declare(&.{compact_unit}, compact_array, &.{compact_effect}, &.{});
+        try cb.define(compact_entry, try cb.term(.{ .perform = .{ .effect = compact_effect, .payload = try cb.constant(void, {}) } }));
+        const compact_program = try service.workspaceCommand(scratch, try std.fmt.allocPrint(scratch, "compact-build-{s}", .{operation_name}), parent.receipt.task, .{ .program = .{ .build = .{
+            .source = .{ .json_text = .{ .bytes = try native.source_records.encode(scratch, cb.module(compact_entry, compact_unit)) } },
+            .source_kind = .source_records,
+            .exposures = .{ .items = &.{.{ .effect = compact_effect, .class = class }} },
+        } } });
+        if (compact_program.program == null) std.debug.print("compact {s}: {s}\n", .{ operation_name, compact_program.observation_json.bytes });
+        try std.testing.expect(compact_program.program != null);
+        const compact_start = try service.workspaceStart(scratch, try std.fmt.allocPrint(scratch, "compact-start-{s}", .{operation_name}), parent.receipt.task, try nativeIdentity(compact_program.program.?), "", .{});
+        for (0..if (class == .alternative) @as(usize, 2) else 1) |turn| {
+            var current = try service.workspaceWork(scratch, parent.receipt.task, compact_start.receipt.workspace.?);
+            defer current.deinit();
+            var exposed = try contracts.decodeOwned(native.workspace.Port, scratch, try namespace.store.object(scratch, current.value.current_port.?, null));
+            defer exposed.deinit();
+            var budget = std.heap.FixedBufferAllocator.init(memory);
+            if (turn == 0) {
+                try std.testing.expectError(if (class == .alternative) error.NoBranchResult else error.InvalidPortCommand, service.workspaceInteract(budget.allocator(), try std.fmt.allocPrint(scratch, "premature-finish-{s}", .{operation_name}), parent.receipt.task, .{
+                    .expected = .{ .work = try workspaceRef(scratch, .work, current.value.id), .execution_revision = current.value.execution_revision, .control_revision = current.value.control_revision },
+                    .port = try workspaceRef(scratch, .port, exposed.value.id),
+                    .generation = exposed.value.generation,
+                    .command = .{ .finish = .{} },
+                }));
+                budget.reset();
+            }
+            _ = try service.workspaceInteract(budget.allocator(), try std.fmt.allocPrint(scratch, "compact-reply-{s}-{d}", .{ operation_name, turn }), parent.receipt.task, .{
+                .expected = .{ .work = try workspaceRef(scratch, .work, current.value.id), .execution_revision = current.value.execution_revision, .control_revision = current.value.control_revision },
+                .port = try workspaceRef(scratch, .port, exposed.value.id),
+                .generation = exposed.value.generation,
+                .command = if (turn == 0) .{ .resume_value = .{ .reference = enormous_ref } } else .{ .finish = .{} },
+            });
+            for (0..8) |_| {
+                var next = try service.workspaceWork(scratch, parent.receipt.task, current.value.id);
+                defer next.deinit();
+                if (next.value.terminal() or (next.value.current_port != null and !std.meta.eql(next.value.current_port, current.value.current_port))) break;
+                _ = try service.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "compact-advance-{s}-{d}", .{ operation_name, next.value.execution_revision }), parent.receipt.task, next.value.id, next.value.execution_revision, next.value.control_revision, .advance);
+            }
+        }
+        var completed = try service.workspaceWork(scratch, parent.receipt.task, compact_start.receipt.workspace.?);
+        defer completed.deinit();
+        try std.testing.expectEqual(.completed, completed.value.outcome_kind);
+        try std.testing.expectEqualSlices(u8, "", try namespace.store.object(scratch, completed.value.result.?, null));
+    }
+    var manifest_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(assets.manifest, &manifest_digest, .{});
+    const index = try namespace.store.archiveIndex(scratch, parent.receipt.task, .{ .digest = manifest_digest, .bytes = assets.manifest.len });
+    try service.validateWorkspaceRecords(scratch, parent.receipt.task, index.records.items);
+
+    // Repeated selected values preserve their exact order and multiplicity,
+    // while the page uses less memory than the full 32 MiB preview array.
+    const selected_refs = try scratch.alloc(contracts.workspace.Ref, 2048);
+    @memset(selected_refs, enormous_ref);
+    var selection_budget = std.heap.FixedBufferAllocator.init(memory);
+    const selected_view = try service.workspaceCommand(selection_budget.allocator(), "compact-view", parent.receipt.task, .{ .context = .{ .select = .{ .values = .{ .items = selected_refs } } } });
+    if (selected_view.disposition != .observed) std.debug.print("compact view: {s}\n", .{selected_view.observation_json.bytes});
+    try std.testing.expectEqual(.observed, selected_view.disposition);
+    const view_ref = try workspaceRef(scratch, .view, try nativeIdentity(selected_view.selected_view.?));
+    const selected_json = (try native.json.parse(scratch, selected_view.observation_json.bytes, .{})).value;
+    try std.testing.expectEqualStrings("2048", selected_json.object.get("value_count").?.number_string);
+    const selected_page = selected_json.object.get("selection").?;
+    const selected_total = try native.json.numberInteger(u64, selected_page.object.get("total_bytes").?.number_string);
+    try std.testing.expect(selected_total > 32 * 1024 * 1024);
+    selection_budget.reset();
+    const selected_tail = try service.workspaceCommand(selection_budget.allocator(), "compact-view-tail", parent.receipt.task, .{ .context = .{ .expand = .{ .reference = view_ref, .page = .{ .offset = selected_total - 1, .maximum = 10 } } } });
+    const selected_tail_json = (try native.json.parse(scratch, selected_tail.observation_json.bytes, .{})).value;
+    try std.testing.expectEqualStrings("]", selected_tail_json.object.get("selection").?.object.get("text").?.string);
     const effect = try b.effect(.{ .identity = "example/deep-value", .payload = recursive, .result = recursive, .external = false });
     const port_entry = try b.declare(&.{recursive}, recursive, &.{effect}, &.{});
     try b.define(port_entry, try b.term(.{ .perform = .{ .effect = effect, .payload = try b.reference(b.parameter(port_entry, 0)) } }));
@@ -2117,4 +2229,85 @@ test "collected history rejects rehashed result substitution and false absence" 
         try std.testing.expectEqual(.rejected, inspected.disposition);
         namespace.store.rollback();
     }
+}
+
+const WorkspaceCleanupApplication = struct {
+    pub fn emit(c: @import("protean").Context) !source.Module {
+        const author = horos.authoring.interop;
+        const input = try author.schemaId(c.author, try c.schema(ContextTypes.Input));
+        const output = try author.schemaId(c.author, try c.schema(ContextTypes.Output));
+        const effect = try author.operationId(c.author, try c.external("workspace-context", try c.schema(ContextTypes.Input), try c.schema(ContextTypes.Output), .read));
+        const b = c.builder;
+        const unit = try b.scalar(void);
+        const info = try horos.library.cleanup.exitInfo(b, unit);
+        const body = try b.declare(&.{}, output, &.{}, &.{});
+        try b.define(body, try b.term(.{ .yield_then = try b.pure(try b.literal(.{ .schema = output, .bytes = try contracts.encodeOwned(ContextTypes.Output, b.allocator(), .{ .disposition = .observed, .observation_json = .{ .bytes = "{}" } }) })) }));
+        const cleanup = try b.declare(&.{info}, unit, &.{effect}, &.{});
+        const request = try b.term(.{ .perform = .{ .effect = effect, .payload = try b.literal(.{ .schema = input, .bytes = try contracts.encodeOwned(ContextTypes.Input, b.allocator(), .{ .program = .{ .describe = .{ .section = .values, .page = .{} } } }) }) } });
+        try b.define(cleanup, try b.bind(try b.variable(output), request, try b.pure(try b.constant(void, {}))));
+        const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{}, .result = output } } });
+        const cleanup_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{info}, .result = unit, .effects = &.{effect} } } });
+        const entry = try b.declare(&.{input}, output, &.{effect}, &.{});
+        try b.define(entry, try b.term(.{ .protect = .{ .body = try b.lambda(body, body_type), .cleanup = try b.lambda(cleanup, cleanup_type) } }));
+        return b.module(entry, unit);
+    }
+};
+
+test "WORK-14 workspace reads settle inside root cancellation cleanup" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const protean = @import("protean");
+    var compiled = try protean.compile(a, protean.system(.{ .InitialArgs = ContextTypes.Input, .Result = ContextTypes.Output, .Failure = void, .application = WorkspaceCleanupApplication }));
+    defer compiled.deinit();
+    const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    defer a.free(image);
+    _ = try compiled.encode(a, image);
+    const admitted = try data.program_image.Admitted.decode(a, image);
+    defer admitted.deinit();
+    var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "context-unit", .image_identity = admitted.identity() };
+    defer application.deinit();
+    const assets: native.discovery.Assets = .{ .image = image, .application = "context-unit", .manifest = "{}" };
+    var handlers = try native.Registry.init(a, &.{.{ .identity = "workspace-context", .resource_role = "workspace", .kind = .workspace, .workspace = ContextApplication.authorize, .payload_schema = ContextApplication.payloadSchema, .resume_schema = ContextApplication.resultSchema }});
+    defer handlers.deinit();
+    const text = "ordinary rows agree\nrare exception: missing invoice\n";
+    var file_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(text, &file_digest, .{});
+    const snapshot = try contracts.encodeOwned(contracts.RepositorySnapshot, a, .{ .version = 2, .excluded_entries = 3, .files = .{ .items = &.{.{ .path = .{ .bytes = "evidence.txt" }, .sha256 = file_digest, .contents = .{ .bytes = text } }} } });
+    defer a.free(snapshot);
+    var algorithm = source.Builder.init(a);
+    defer algorithm.deinit();
+    var gcd_program = try horos.source.lower(a, try @import("workspace_sources.zig").gcd(&algorithm));
+    defer gcd_program.deinit();
+    const component: data.component.Object = .{ .program = gcd_program.program, .exports = &.{.{ .name = "apply", .reference = .{ .kind = .function, .id = gcd_program.program.roots.entry } }}, .borrows = &.{.{ .function = gcd_program.program.roots.entry }} };
+    const component_bytes = try a.alloc(u8, try data.component.encodedLength(component));
+    defer a.free(component_bytes);
+    _ = try data.component.encode(a, component, component_bytes);
+    const catalog = try contracts.encodeOwned(contracts.tool_construction.Catalog, a, .{ .items = &.{.{ .id = .{ .bytes = "gcd" }, .object = .{ .bytes = component_bytes } }} });
+    defer a.free(catalog);
+    var grants = [_]native.registry.Grant{.{ .identity = "workspace-context", .resource_role = "workspace", .resource_identity = undefined }};
+    const profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "context-test", .resources = &.{ snapshot, catalog }, .authority = .{ .grants = &grants, .principal = "test", .tenant = "test" } };
+    grants[0].resource_identity = try profile.resourceIdentity(a, application.image_identity);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var path_buffer: [4096]u8 = undefined;
+    const length = try temp.dir.realPath(io, &path_buffer);
+    const path = try std.fmt.allocPrint(a, "{s}/state", .{path_buffer[0..length]});
+    defer a.free(path);
+    var namespace = try native.Namespace.open(a, io, path);
+    defer namespace.close() catch unreachable;
+    var service = try native.tasks.Service(ContextTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    defer service.close(a) catch unreachable;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const parent = try service.submit(scratch, "parent", .{ .program = .{ .describe = .{ .section = .values, .page = .{} } } });
+    _ = try service.pump(scratch);
+    var paused = try service.task(scratch, parent.receipt.task);
+    defer paused.deinit();
+    try std.testing.expectEqual(.yielded, paused.value.outcome_kind);
+    _ = try service.requestCancel(scratch, "cancel", parent.receipt.task, "cancel body");
+    for (0..8) |_| _ = try service.pump(scratch);
+    var done = try service.task(scratch, parent.receipt.task);
+    defer done.deinit();
+    try std.testing.expectEqual(.cancelled, done.value.outcome_kind);
 }

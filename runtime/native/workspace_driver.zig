@@ -7,6 +7,65 @@ const contracts = @import("protean_contracts");
 const source = horos.source;
 const Id = source.Id;
 pub const prefix = "protean.workspace.control/1/";
+/// The driver's command algebra transports canonical values unchanged.
+/// JSON is a presentation/input syntax, never an intermediate wire value.
+pub const Command = union(enum) { resume_value: []const u8, finish };
+pub const Protocol = struct {
+    class: @FieldType(contracts.workspace.Exposure, "class"),
+    command_schema: []const u8,
+    payload_schema: []const u8,
+    payload: []const u8,
+
+    pub fn encode(self: Protocol, a: std.mem.Allocator, command: Command) ![]u8 {
+        const bytes = switch (command) {
+            .resume_value => |input| if (self.class == .alternative) try std.mem.concat(a, u8, &.{ &.{0}, input }) else try a.dupe(u8, input),
+            .finish => if (self.class == .alternative) try a.dupe(u8, &.{1}) else return error.InvalidPortCommand,
+        };
+        errdefer a.free(bytes);
+        _ = try self.decode(a, bytes);
+        return bytes;
+    }
+
+    /// Returned input borrows `bytes`. Validation and interpretation share the
+    /// protocol for both live admission and retained-reply verification.
+    pub fn decode(self: Protocol, a: std.mem.Allocator, bytes: []const u8) !Command {
+        var schema = try data.schema.decode(a, self.command_schema);
+        defer schema.deinit();
+        try data.schema.validateValue(a, schema.descriptor, bytes);
+        if (self.class != .alternative) return .{ .resume_value = bytes };
+        var reader: data.wire.Reader = .{ .input = bytes };
+        return switch (try reader.natural()) {
+            0 => .{ .resume_value = bytes[reader.position..] },
+            1 => blk: {
+                try reader.finish();
+                if (!try self.hasResult(a)) return error.NoBranchResult;
+                break :blk .finish;
+            },
+            else => error.InvalidPortCommand,
+        };
+    }
+
+    fn hasResult(self: Protocol, a: std.mem.Allocator) !bool {
+        var schema = try data.schema.decode(a, self.payload_schema);
+        defer schema.deinit();
+        const descriptor = schema.descriptor;
+        const root = descriptor.types[@intCast(descriptor.root)];
+        if (root != .product or root.product.len != 2) return error.InvalidPortCommand;
+        const optional = descriptor.types[@intCast(root.product[1])];
+        if (optional != .sum or optional.sum.len != 2 or descriptor.types[@intCast(optional.sum[0])] != .unit) return error.InvalidPortCommand;
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const facts = try data.admission.schemas(scratch, descriptor.types);
+        var reader: data.wire.Reader = .{ .input = self.payload };
+        _ = try data.admission.readValue(scratch, descriptor.types, facts, root.product[0], &reader);
+        const tag = try reader.natural();
+        if (tag > 1) return error.InvalidPortCommand;
+        _ = try data.admission.readValue(scratch, descriptor.types, facts, optional.sum[@intCast(tag)], &reader);
+        try reader.finish();
+        return tag == 1;
+    }
+};
 pub const Port = struct {
     identity: []const u8,
     class: @FieldType(contracts.workspace.Exposure, "class"),
@@ -129,6 +188,18 @@ fn bindHandlerFunction(b: *source.Builder, function: Id, variable: Id) !Id {
     copied.parameters = try prepend(b.allocator(), variable, copied.parameters);
     const id: Id = @intCast(b.functions.items.len);
     try b.functions.append(b.allocator(), copied);
+    // A bound entry is the same source function under an added lexical
+    // parameter. Transport its authority with its body, including copy chains.
+    for (b.resources.items) |*resource| {
+        inline for (.{ "introducers", "eliminators" }) |field| {
+            const owners = &@field(resource, field);
+            if (std.mem.indexOfScalar(Id, owners.*, function) != null) {
+                // Function identities are appended, so preserve the existing
+                // canonical order without repairing invalid source authority.
+                owners.* = try std.mem.concat(b.allocator(), Id, &.{ owners.*, &.{id} });
+            }
+        }
+    }
     return id;
 }
 
