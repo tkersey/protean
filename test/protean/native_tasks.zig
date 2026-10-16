@@ -1219,6 +1219,7 @@ fn largeResultWitness(comptime Types: type) !void {
     // Authoring/image bytes above model build-time work and embedded read-only
     // assets. All runtime owners below share the real 64MiB allocation budget.
     var budget: kosmos.AllocationBudget = .{ .parent = harness, .limit = 64 * 1024 * 1024 };
+    errdefer std.debug.print("large-result memory: live={d} peak={d} required={d} limit={d}\n", .{ budget.live, budget.peak, budget.required, budget.limit });
     const a = budget.allocator();
     // SQLite is charged by Namespace.open. Reserve only the absent process
     // worker and input framer, then actually admit the large resource set.

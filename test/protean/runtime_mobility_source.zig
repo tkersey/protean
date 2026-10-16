@@ -92,10 +92,17 @@ pub fn build(b: *source.Builder) !source.Module {
     const choice = try b.variable(command);
     const selected = try b.variable(u);
     const result = try b.variable(u);
-    const branches = try b.term(.{ .match_sum = .{ .value = try b.reference(choice), .cases = &.{
-        .{ .variable = selected, .body = try b.bind(result, try b.term(.{ .resume_value = .{ .resumption = try ref(b, choose, 0), .argument = try b.reference(selected) } }), try call(b, choose, &.{ try ref(b, choose, 0), try b.reference(result) })) },
-        .{ .variable = try b.variable(unit), .body = try b.pure(try ref(b, choose, 1)) },
-    } } });
+    const branches = try b.term(.{
+        .match_sum = .{
+            .value = try b.reference(choice),
+            .cases = &.{
+                // A public guest yield precedes instantiation. The fixture can then
+                // bound base work and observe a real partially constructed clone.
+                .{ .variable = selected, .body = try b.term(.{ .yield_then = try b.bind(result, try b.term(.{ .resume_value = .{ .resumption = try ref(b, choose, 0), .argument = try b.reference(selected) } }), try call(b, choose, &.{ try ref(b, choose, 0), try b.reference(result) })) }) },
+                .{ .variable = try b.variable(unit), .body = try b.pure(try ref(b, choose, 1)) },
+            },
+        },
+    });
     try b.define(choose, try b.bind(choice, try b.term(.{ .perform = .{ .effect = select, .payload = try ref(b, choose, 1) } }), branches));
     const clause = try b.declare(&.{ unit, token }, u, &.{select}, &.{});
     try b.define(clause, try call(b, choose, &.{ try ref(b, clause, 1), zero }));

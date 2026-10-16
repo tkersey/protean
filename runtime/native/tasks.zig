@@ -817,7 +817,7 @@ pub fn Service(comptime Types: type) type {
             for (pending.dependencies.items, record_value.dependencies) |ref, expected| if (!std.meta.eql(ref.digest, expected.digest) or ref.bytes != expected.bytes) return error.InvalidArchive;
             const image = try self.store().object(a, value.image, null);
             defer a.free(image);
-            var prepared = try kosmos.Prepared.init(a, image);
+            var prepared = try self.program.prepare(a, image);
             defer prepared.deinit();
             if (!std.meta.eql(record_value.artifact.digest, prepared.runtime.identity) or record_value.artifact.bytes != prepared.runtime.core.?.encoded_length) return error.InvalidArchive;
             const code = try self.store().object(a, .{ .digest = record_value.artifact.digest, .bytes = record_value.artifact.bytes }, null);
@@ -893,7 +893,9 @@ pub fn Service(comptime Types: type) type {
                     }
                 };
                 var owner: Owner = .{ .task = value, .reference = operation_value.capsule };
-                break :restored try evaluator.Driver.openCapsule(self.allocator, self.assets.image, null, bytes, .{ .context = &owner, .claim = Owner.claim });
+                var runtime = try self.program.retainRuntime();
+                defer runtime.deinit();
+                break :restored try evaluator.Driver.openCapsule(self.allocator, self.assets.image, &runtime, bytes, .{ .context = &owner, .claim = Owner.claim });
             } else restored: {
                 const checkpoint = try self.store().object(a, value.checkpoint, null);
                 defer a.free(checkpoint);
@@ -1714,6 +1716,16 @@ pub fn Service(comptime Types: type) type {
             defer self.store().rollback();
             value.checkpoint = try self.store().putObject(checkpoint);
             value.outcome = try self.store().putObject(encoded);
+            // Terminal state has no remaining guest cleanup. Its checkpoint
+            // and outcome are now owned by the transaction, so release the
+            // physical evaluator before materializing potentially much larger
+            // client JSON. Failure below still fences the uncommitted owner;
+            // restart uses the prior durable cut and acquired reply.
+            if (outcome.value == .completed or outcome.value == .failed or outcome.value == .cancelled) {
+                try driver.close();
+                try driver.destroy();
+                self.active = null;
+            }
             if (consumed) |prior| {
                 try self.store().putRecord(occurrence.Occurrence, "occurrence", prior.id, value.id, prior);
                 const question_id: ?state.Digest = switch (prior.state.admitted) {
@@ -1788,12 +1800,11 @@ pub fn Service(comptime Types: type) type {
             }
             try self.putRootOperation(a, .{ .id = rootIdentity(value.id), .task = value.id, .execution_revision = value.execution_revision, .pending = null });
             try self.persist(a, value, initial.revision, "world.advance", .preserve);
-            self.active.?.outer_operation = null;
-            self.active.?.execution_revision = value.execution_revision;
+            if (self.active) |*active| {
+                active.outer_operation = null;
+                active.execution_revision = value.execution_revision;
+            }
             if (value.terminal()) {
-                try driver.close();
-                try driver.destroy();
-                self.active = null;
                 self.runnableRemove(value.id);
                 const children = try self.workspaceIds(a, value.id);
                 defer a.free(children);
@@ -3911,13 +3922,18 @@ pub fn Service(comptime Types: type) type {
             var saved_operation = try self.rootOperation(a, value);
             defer if (saved_operation) |*saved| saved.deinit();
             if (saved_operation) |saved| try self.validateRootOperation(a, value, saved.value);
-            const guest_checkpoint = try self.store().object(a, value.checkpoint, null);
-            defer a.free(guest_checkpoint);
-            const driver = try evaluator.Driver.start(self.allocator, self.program, .{ .state = guest_checkpoint });
-            defer {
+            const driver = restored: {
+                // Restore owns its admitted input. Release the serialized copy
+                // before reconstruction, even when the caller uses an arena.
+                const guest_checkpoint = try self.store().object(self.allocator, value.checkpoint, null);
+                defer self.allocator.free(guest_checkpoint);
+                break :restored try evaluator.Driver.start(self.allocator, self.program, .{ .state = guest_checkpoint });
+            };
+            var driver_live = true;
+            defer if (driver_live) {
                 driver.retire() catch self.store().fence();
                 driver.destroy() catch self.store().fence();
-            }
+            };
             const publication = try driver.drive(a, .none, 0);
             const observed = publication.outcome;
             defer a.free(observed);
@@ -3930,6 +3946,11 @@ pub fn Service(comptime Types: type) type {
             defer decoded.deinit();
             if (!same(@tagName(decoded.value), @tagName(value.outcome_kind))) return error.InvalidArchive;
             try validateCancellation(a, value, decoded.value, checkpoint);
+            // All guest/cut checks are complete. Result mapping consumes the
+            // separately owned outcome, so it need not overlap the evaluator.
+            try driver.retire();
+            try driver.destroy();
+            driver_live = false;
             switch (decoded.value) {
                 .requested => |requested| {
                     const current = pending orelse return error.InvalidArchive;
@@ -4929,7 +4950,7 @@ pub fn Service(comptime Types: type) type {
                 defer selected.deinit();
                 return kosmos.Prepared.initWithRuntime(a, image, &selected.admitted);
             }
-            return kosmos.Prepared.init(a, image);
+            return self.program.prepare(a, image);
         }
 
         fn workspaceInspectionBytes(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, origin: workspace.Inspection) !struct { schema: []u8, value: []u8 } {
@@ -6328,7 +6349,7 @@ pub fn Service(comptime Types: type) type {
             defer program.deinit();
             const image = try self.store().object(a, program.value.description.image, null);
             defer a.free(image);
-            var generic: ?kosmos.Prepared = if (selected == null) try kosmos.Prepared.init(self.allocator, image) else null;
+            var generic: ?kosmos.Prepared = if (selected == null) try self.program.prepare(self.allocator, image) else null;
             defer if (generic) |*item| item.deinit();
             const target_artifact = if (selected) |*item| &item.admitted else &generic.?.runtime;
             const driver = try self.workspaceResident(a, work.value);
@@ -6422,7 +6443,7 @@ pub fn Service(comptime Types: type) type {
                 if (!std.meta.eql(owned.record.value.artifact, expected)) return error.InvalidArchive;
                 break :chosen try owned.admitted.clone();
             } else chosen: {
-                var packaged = try kosmos.Prepared.init(a, image);
+                var packaged = try self.program.prepare(a, image);
                 defer packaged.deinit();
                 if (!std.meta.eql(runtime_ref.digest, packaged.runtime.identity) or runtime_ref.bytes != packaged.runtime.core.?.encoded_length) return error.InvalidArchive;
                 break :chosen try packaged.runtime.clone();
@@ -7254,7 +7275,9 @@ pub fn Service(comptime Types: type) type {
             var selected: ?SelectedRuntime = if (runtime) |ref| try self.workspaceRuntime(a, task_id, ref.digest, program_id) else null;
             defer if (selected) |*value| value.deinit();
             if (selected) |value| if (!std.meta.eql(runtime.?, value.record.value.artifact)) return error.InvalidRuntime;
-            const driver = try evaluator.Driver.openSelected(self.allocator, image, .{ .initial_args = input }, if (selected) |*value| &value.admitted else null);
+            var packaged = try self.program.retainRuntime();
+            defer packaged.deinit();
+            const driver = try evaluator.Driver.openSelected(self.allocator, image, .{ .initial_args = input }, if (selected) |*value| &value.admitted else &packaged);
             self.active = .{ .task = task_id, .work = id, .execution_revision = 0, .driver = driver };
             errdefer if (!self.store().fenced) self.retire(a) catch self.store().fence();
             const native_started = std.Io.Clock.awake.now(self.io);
@@ -7398,6 +7421,8 @@ pub fn Service(comptime Types: type) type {
             var selected: ?SelectedRuntime = if (value.runtime) |ref| try self.workspaceRuntime(a, value.task, ref.digest, value.program) else null;
             defer if (selected) |*item| item.deinit();
             if (selected) |item| if (!std.meta.eql(value.runtime.?, item.record.value.artifact)) return error.InvalidRuntime;
+            var packaged = try self.program.retainRuntime();
+            defer packaged.deinit();
             const driver = if (value.outer_operation) |pending| restored: {
                 try self.validatePublishedCapsuleTrace(a, value, pending.capsule, value.runtime, null, pending);
                 const bytes = try self.store().object(a, pending.capsule, null);
@@ -7414,8 +7439,8 @@ pub fn Service(comptime Types: type) type {
                 // The task's immutable publication and current exclusive native
                 // namespace ownership authorize this one resident installation.
                 var owner: Owner = .{ .work = value, .reference = pending.capsule };
-                break :restored try evaluator.Driver.openCapsule(self.allocator, image, if (selected) |*item| &item.admitted else null, bytes, .{ .context = &owner, .claim = Owner.claim });
-            } else try evaluator.Driver.openSelected(self.allocator, image, .{ .state = checkpoint }, if (selected) |*item| &item.admitted else null);
+                break :restored try evaluator.Driver.openCapsule(self.allocator, image, if (selected) |*item| &item.admitted else &packaged, bytes, .{ .context = &owner, .claim = Owner.claim });
+            } else try evaluator.Driver.openSelected(self.allocator, image, .{ .state = checkpoint }, if (selected) |*item| &item.admitted else &packaged);
             self.active = .{ .task = value.task, .work = value.id, .execution_revision = value.execution_revision, .realization_revision = value.realization_revision, .outer_operation = if (value.outer_operation) |pending| pending.capsule else null, .driver = driver };
             return driver;
         }

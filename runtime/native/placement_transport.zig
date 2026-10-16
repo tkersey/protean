@@ -27,7 +27,7 @@ pub const Connection = struct {
         const channel = peer.channel orelse return error.UnsupportedCapability;
         if (channel.argv.len == 0 or channel.timeout_ms == 0) return error.InvalidConfiguration;
         var child = try std.process.spawn(io, .{ .argv = channel.argv, .stdin = .pipe, .stdout = .pipe, .stderr = .inherit });
-        errdefer child.kill(io);
+        errdefer _ = stopChild(&child, io);
         const frame = try a.alloc(u8, (protocol.Limits{}).frame_bytes);
         errdefer a.free(frame);
         for ([_]c_int{ child.stdin.?.handle, child.stdout.?.handle }) |fd| {
@@ -55,7 +55,7 @@ pub const Connection = struct {
     pub fn deinit(self: *Connection) void {
         // Transport closure is never a custody decision. The peer's native
         // seal owns recovery if the process stops after committing a reply.
-        self.child.kill(self.io);
+        _ = stopChild(&self.child, self.io);
         self.allocator.free(self.frame);
     }
 
@@ -171,3 +171,48 @@ pub const Connection = struct {
         return decision;
     }
 };
+
+fn stopChild(child: *std.process.Child, io: std.Io) ?std.process.Child.Term {
+    const pid = child.id orelse return null;
+    // Child.kill sends SIGTERM, which the native host interprets as semantic
+    // cancellation. Closing a transport grants no such control. Kill only the
+    // still-owned process, then reap it before releasing its handles.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    _ = c.kill(pid, c.SIGKILL);
+    return child.wait(io) catch null;
+}
+
+test "peer transport close is physical termination rather than semantic cancellation" {
+    const Handler = struct {
+        fn cancel(_: c_int) callconv(.c) void {
+            c._exit(42);
+        }
+    };
+    var ready: [2]c_int = undefined;
+    try std.testing.expectEqual(0, c.pipe(&ready));
+    defer _ = c.close(ready[0]);
+    var writer_open = true;
+    defer if (writer_open) {
+        _ = c.close(ready[1]);
+    };
+    const pid = c.fork();
+    try std.testing.expect(pid >= 0);
+    if (pid == 0) {
+        if (c.protean_native_signals_begin(Handler.cancel) != 0) c._exit(2);
+        if (c.write(ready[1], "x", 1) != 1) c._exit(3);
+        while (true) _ = c.pause();
+    }
+    _ = c.close(ready[1]);
+    writer_open = false;
+    var child: std.process.Child = .{ .id = pid, .thread_handle = {}, .stdin = null, .stdout = null, .stderr = null, .request_resource_usage_statistics = false };
+    defer _ = stopChild(&child, std.testing.io);
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(1, c.read(ready[0], &byte, 1));
+    // Exercise the production stop path. SIGTERM would exit 42 through the
+    // installed handler; SIGKILL cannot invoke it.
+    const termination = stopChild(&child, std.testing.io) orelse return error.MissingTermination;
+    try std.testing.expect(termination == .signal);
+    try std.testing.expectEqual(std.posix.SIG.KILL, termination.signal);
+    try std.testing.expect(child.id == null);
+}

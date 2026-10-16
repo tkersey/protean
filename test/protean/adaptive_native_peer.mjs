@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {createServer} from 'node:https';
 import {X509Certificate, createHash} from 'node:crypto';
 import {once} from 'node:events';
+import {DatabaseSync} from 'node:sqlite';
 import {mkdir, writeFile, readFile, unlink} from 'node:fs/promises';
 import {execFile} from 'node:child_process';
 import {join} from 'node:path';
@@ -22,6 +23,11 @@ import {workspaceMetrics, armViolations, evaluateCase} from '../../tools/evaluat
   assert.deepEqual(armViolations('pure', [...retained, ...completed]), retained);
   assert.deepEqual(armViolations('retained', retained), []);
   assert.equal(armViolations('ordinary', [...retained, ...completed]).length, retained.length + completed.length);
+  const runtime = [{name: 'program', arguments: {command: {tag: 'specialize'}}}, work('realize'),
+    {name: 'work', arguments: {command: {tag: 'start', value: {runtime: {tag: 'selected'}}}}},
+    {name: 'context', arguments: {command: {tag: 'materialize', value: {input: {tag: 'guest_view'}}}}}];
+  assert.deepEqual(armViolations('generic', [...runtime, ...completed]), runtime);
+  assert.deepEqual(armViolations('runtime', runtime), []);
 }
 import {contract, assertAdaptiveCaptures} from './adaptive_capture_checks.mjs';
 import {runtimeTrace} from './runtime_trace.mjs';
@@ -68,7 +74,10 @@ function strings(value) {
   return [];
 }
 
-const workspaceCall = (family, tag, value) => [family, {command: {tag, value}}];
+const workspaceCall = (family, tag, value) => {
+  if (family === 'work' && tag === 'start') value = {...value, runtime: {tag: 'packaged', value: {}}};
+  return [family, {command: {tag, value}}];
+};
 function* workspaceTrace(subject, scenario) {
   const skill = (operation, revision, skill_id = 'tool-construction') => ['skill_set', {operation, skill_id, version: '1', residency: operation === 'load' ? 'resident' : 'unchanged', expected_revision: revision, reason: 'Exercise retained computation and independent execution authority.'}];
   const build = recipe => workspaceCall('program', 'build', {source: {tag: 'json_text', value: JSON.stringify(recipe)}, source_kind: 'component_recipe', exposures: []});
@@ -199,8 +208,27 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
   console.log(JSON.stringify({...results[0].value, ...results[1].value}));
 }
 
-export async function verifyAdaptiveRuntime({app, applicationPath, scenarios}) {
-  return verifyAdaptiveNativeSuite({app, applicationPath, suite: 'runtime', runtimeScenarios: scenarios});
+export async function verifyAdaptiveRuntime({app, applicationPath, scenarios, sourcePeer}) {
+  if (scenarios) return verifyAdaptiveNativeSuite({app, applicationPath, suite: 'runtime', runtimeScenarios: scenarios, sourcePeer});
+  // Each group owns its provider, task namespaces, placement peers and signing
+  // fixtures. Bound concurrency at two; the large runtime constructors should
+  // not all compete for the same runner's memory. Await both cleanup paths.
+  const groups = [
+    ['tools-runtime-mobility'],
+    ['tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe', 'tools-runtime-placement'],
+  ];
+  const results = await Promise.allSettled(groups.map(async (runtimeScenarios, index) => {
+    const data = join(app.data, `runtime-${index}`), controller = join(app.controller, `runtime-${index}`);
+    await Promise.all([mkdir(data), mkdir(controller)]);
+    const started = performance.now();
+    const result = await verifyAdaptiveNativeSuite({app: {...app, data, controller}, applicationPath,
+      suite: 'runtime', runtimeScenarios, sourcePeer});
+    return {...result, elapsed_ms: performance.now() - started};
+  }));
+  const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
+  if (failures.length) throw new AggregateError(failures, 'native runtime qualification failed');
+  return {tool_construction: results.flatMap(result => result.value.tool_construction),
+    groups: results.map((result, index) => ({scenarios: groups[index], elapsed_ms: result.value.elapsed_ms}))};
 }
 
 // Keep native command timeouts and exit-status assertions without blocking the
@@ -233,9 +261,23 @@ export async function verifyEvaluationPreparation({configPath, directory}) {
   await validatePreparedCase(subject);
   const unbound = {...subject}; delete unbound.expected_sha256;
   await assert.rejects(validatePreparedCase(unbound), /Expected answers changed/);
+  const runtimeDirectory = join(directory, 'runtime-suite');
+  const runtimePrepared = await execute(process.execPath, [script, 'prepare', '--suite', 'runtime', '--config', configPath, '--out', runtimeDirectory], {encoding: 'utf8'});
+  assert.equal(runtimePrepared.status, 0, runtimePrepared.stderr);
+  assert.equal(JSON.parse(runtimePrepared.stdout).live_calls, 0);
+  const runtimePlan = JSON.parse(await readFile(join(runtimeDirectory, 'plan.json'), 'utf8'));
+  assert.equal(runtimePlan.suite, 'runtime');
+  assert.equal(runtimePlan.cases.length, 9);
+  assert.deepEqual([...new Set(runtimePlan.cases.map(item => item.arm))], ['ordinary', 'generic', 'runtime']);
+  for (const item of runtimePlan.cases) await validatePreparedCase(item);
+  const repeated = runtimePlan.cases.filter(item => item.family === 'repetitive');
+  assert.equal(new Set(repeated.map(item => item.evidence_sha256)).size, 1);
+  const repeatedConfig = JSON.parse(await readFile(repeated[0].config, 'utf8'));
+  assert.equal(repeatedConfig.tools.inputs.length, 8);
+  assert.equal(new Set(repeatedConfig.tools.inputs.map(item => JSON.stringify(item.rows))).size, 8);
 }
 
-async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeScenarios}) {
+async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeScenarios, sourcePeer}) {
   const assetBytes = await readFile(applicationPath), asset = JSON.parse(assetBytes);
   const fixture = JSON.parse(Buffer.from(asset.resources.find(row => row.id === 'adaptive-agent.offline-responses').base64url, 'base64url'));
   const root = join(app.data, 'controlled snapshot'), state = join(app.data, 'controlled state'), configPath = join(app.data, 'adaptive.json');
@@ -282,10 +324,32 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
           const text = typeof result.output === 'string' ? result.output : result.output[0].text;
           try { previous = JSON.parse(text); } catch { previous = text; }
         }
+        if (subject.findClone && previous?.observation?.outer_operation) {
+          const capsule = previous.observation.outer_operation;
+          const database = new DatabaseSync(join(subject.state, 'state.sqlite'), {readOnly: true});
+          const runtimePath = join(app.controller, 'phase-runtime.bin'), capsulePath = join(app.controller, 'phase-capsule.bin');
+          try {
+            const object = digest => {
+              const bytes = database.prepare('SELECT body FROM objects WHERE digest=?').get(Buffer.from(digest)).body;
+              assert.equal(hash(bytes), Buffer.from(digest).toString('hex'));
+              return bytes;
+            };
+            await writeFile(runtimePath, object(Buffer.from(subject.runtime.id, 'hex')));
+            await writeFile(capsulePath, object(capsule.digest));
+          } finally { database.close(); }
+          const phase = await execute(sourcePeer, ['capsule-phase', runtimePath, capsulePath], {encoding: 'utf8', maxBuffer: 1 << 20});
+          assert.equal(phase.status, 0, phase.stderr);
+          subject.clonePhase = JSON.parse(phase.stdout);
+        }
         const next = subject.trace.next(previous);
         assert(!next.done, 'the recorded scenario must finish through a real controller action');
         const call = next.value;
         if (suite === 'runtime') console.error(JSON.stringify({runtime_fixture: scenario, model_call: index, action: call[0], command: call[1]?.command?.tag ?? null}));
+        // The destination validates transferred code in another process. Give
+        // it wall time between status observations instead of exhausting a
+        // model-call count while admission is still running.
+        if (suite === 'runtime' && call[0] === 'placement' && call[1]?.command?.tag === 'inspect')
+          await new Promise(resolve => setTimeout(resolve, 100));
         (subject.actions ??= []).push(JSON.parse(JSON.stringify({name: call[0], arguments: call[1]})));
         response.writeHead(200, {'content-type': 'application/json'});
         response.end(JSON.stringify({id: `tools-response-${index}`, status: 'completed', error: null, output: [{type: 'function_call', status: 'completed', call_id: `tools-${index}`, name: call[0], arguments: JSON.stringify(call[1])}]}));
@@ -340,6 +404,10 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
   let client;
   const launch = async (extra, selectedState = state, versions = ['agent-host/2.1']) => {
     client = new ProteanClient(app.command, ['--state-dir', selectedState, '--authorize-inference', '--test-provider', '--trust-root', trust, ...placementArgs, ...extra], {cwd: app.data, env: {PATH: '/nonexistent'}});
+    if (suite === 'runtime') {
+      client.child.stderr.on('data', bytes => process.stderr.write(bytes));
+      client.closed.then(exit => console.error(JSON.stringify({runtime_fixture: scenario, process_exit: exit})));
+    }
     const initialized = await client.initialize(versions);
     assert.equal(initialized.server_info.version, '6.0.0');
     assert.equal(initialized.protocol_version, 'agent-host/2.1');
@@ -404,7 +472,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
       }
       assert.equal(requests.length, 1); assert(!requests[0].bytes.includes('FOLLOWUP-A'));
       releaseHeld();
-      const waiting = await until(() => client.call('task.status', {task_id: accepted.task_id}), value => value.question != null);
+      const waiting = await until(() => client.call('task.status', {task_id: accepted.task_id}), value => value.question != null, 4000);
       if (providerFailure) throw providerFailure;
       assert.equal(requests.length, 13); assert(requests[1].bytes.includes('FOLLOWUP-A'));
       assert(requests[7].bytes.includes('OPAQUE-SKILL-CONTEXT-6'));
@@ -705,18 +773,25 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
     const reverseRecipe = linkRecipe([['filter', 'selected'], ['swap'], ['map', 'join'], ['filter', 'orphan'], ['group']]);
     let retainedProgram, retainedState;
     const toolRuns = [];
-    const scenarios = suite === 'runtime' ? (runtimeScenarios ?? ['tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe', 'tools-runtime-placement']) : ['tools-reuse', 'tools-reverse', 'tools-disabled', 'tools-foreign'];
+    const scenarios = suite === 'runtime' ? (runtimeScenarios ?? ['tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe', 'tools-runtime-placement', 'tools-runtime-mobility']) : ['tools-reuse', 'tools-reverse', 'tools-disabled', 'tools-foreign'];
     for (const name of scenarios) {
       if (suite === 'runtime') console.error(JSON.stringify({runtime_fixture: name, stage: 'launch'}));
       scenario = name; alternateIndex = 0;
       toolSubject = {recipe: name === 'tools-reverse' ? reverseRecipe : coverageRecipe, foreign: retainedProgram};
+      if (name === 'tools-runtime-mobility') {
+        assert(sourcePeer, 'the mobility scenario requires its Horos source emitter');
+        const emitted = await execute(sourcePeer, ['mobility'], {encoding: 'utf8', maxBuffer: 16 << 20});
+        assert.equal(emitted.status, 0, emitted.stderr);
+        toolSubject.mobility = JSON.parse(emitted.stdout);
+      }
       let selectedState = name === 'tools-foreign' ? retainedState : join(app.data, name);
+      toolSubject.state = selectedState;
       const selectedConfig = join(app.data, `${name}.json`);
       const selectedInputs = name === 'tools-runtime-placement' ? [
         {...inputs[0], rows: Array.from({length: 16}, (_, i) => row(2000 + i, 10, 100, 1))}, inputs[1],
       ] : inputs;
       await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: name === 'tools-reuse' ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, inputs: selectedInputs}}));
-      const placement = name === 'tools-runtime-placement' ? await runtimePlacementFixture(app, selectedConfig, trust, selectedState) : null;
+      const placement = ['tools-runtime-placement', 'tools-runtime-mobility'].includes(name) ? await runtimePlacementFixture(app, selectedConfig, trust, selectedState) : null;
       if (placement) placementArgs[1] = placement.source.config;
       await launch(['--config', selectedConfig], selectedState);
       const description = await client.call('describe');
@@ -745,7 +820,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
         assert.equal(exported.object(savedProgram[3][5]).subarray(0, 8).toString(), 'ABL_BPI3');
 
         const attempts = exported.manifest[6].filter(([kind]) => kind === 5).map(([, , ref]) => decodeValue(exported.schemas.get('attempt'), exported.object(ref))[5]);
-        assert.equal(attempts.filter(identity => identity === 'agent.adaptive.workspace.v1').length, 4);
+        assert.equal(attempts.filter(identity => identity === 'agent.adaptive.workspace.v2').length, 4);
         assert.equal(attempts.filter(identity => identity === 'agent.adaptive.snapshot.guards.v2').length, 1, 'generated-evidence rejection never dispatches source inspection');
         let privateChecks = 0;
         for (const [kind, id, ref] of exported.manifest[6]) {
@@ -772,6 +847,11 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
           const custody = await placementRequest(client, 'status', subject);
           if (custody?.phase === 'away') {
             assert.deepEqual(custody.owner, placement.successor.identity.site);
+            toolSubject.transferArchive = {
+              path: join(placement.source.spool, `outgoing-${Buffer.from(custody.intent.transfer).toString('hex')}.par`),
+              sha256: Buffer.from(custody.offer.value.archive_digest).toString('hex'),
+              bytes: Number(custody.offer.value.archive_bytes),
+            };
             await assert.rejects(client.call('task.resume', {client_operation_id: 'stale-controller-resume', task_id: task.task_id, expected_revision: custody.intent.cut.control}), error => error.data?.kind === 'StateConflict');
             assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
             selectedState = placement.successor.state;
@@ -785,8 +865,10 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
             await client.call('task.resume', {client_operation_id: 'resume-moved-controller', task_id: task.task_id, expected_revision: cut.control});
           }
         }
-        return client.call('task.result', {task_id: task.task_id});
-      }, value => value.ready, 2000);
+        // Placement executes on the owner thread and already has a 120-second
+        // transport allowance. A concurrent status read waits behind that move.
+        return client.call('task.result', {task_id: task.task_id}, placement ? 120_000 : 30_000);
+      }, value => value.ready, suite === 'runtime' ? 20_000 : 2000);
       if (providerFailure) throw providerFailure;
       if (result.outcome.value_ref) {
         assert.equal(result.outcome.value_ref.schema_id, 'adaptive-agent.output.v5');
@@ -814,6 +896,11 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
           assert.equal(toolSubject.results.length, 1);
           assert.equal(hash(await readFile(app.executable)), placement.binary);
         }
+        if (name === 'tools-runtime-mobility') {
+          assert(toolSubject.outer && toolSubject.controllerMoved && toolSubject.cleanupComplete);
+          assert.deepEqual(toolSubject.branchValues, ['366', '376']);
+          assert.equal(hash(await readFile(app.executable)), placement.binary);
+        }
         if (name === 'tools-runtime-reframe') {
           assert(toolSubject.view);
           assert.deepEqual(toolSubject.actions.slice(-2).map(action => action.name), ['read', 'stop']);
@@ -836,7 +923,39 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
       toolRuns.push({scenario: name, provider_calls: alternateIndex, disposition: result.outcome.value.result.tag});
       assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
       if (name.startsWith('tools-runtime-')) {
-        await invoke('export-checkpoint', '--state-dir', selectedState, '--task-id', task.task_id, '--output', join(app.data, `${name}.bundle`));
+        // Movement already produced and admitted an exact archive containing
+        // every runtime construction/switch in these traces. Account that real
+        // transfer cut without performing another full export for measurement.
+        // Terminal cleanup remains checked above through the successor owner.
+        let archiveBytes;
+        if (placement) {
+          const transfer = toolSubject.transferArchive;
+          assert(transfer);
+          archiveBytes = await readFile(transfer.path);
+          assert.equal(hash(archiveBytes), transfer.sha256);
+          assert.equal(archiveBytes.length, transfer.bytes);
+        } else {
+          const bundle = join(app.data, `${name}.bundle`);
+          await invoke('export-checkpoint', '--state-dir', selectedState, '--task-id', task.task_id, '--output', bundle);
+          archiveBytes = await readFile(bundle);
+        }
+        const metrics = workspaceMetrics(readArchive(archiveBytes), JSON.parse(await readFile(applicationPath, 'utf8')));
+        assert.equal(metrics.runtime_specializations_requested, toolSubject.actions.filter(action => action.name === 'program' && action.arguments.command.tag === 'specialize').length);
+        assert.equal(metrics.runtime_switches_requested, toolSubject.actions.filter(action => action.name === 'work' && action.arguments.command.tag === 'realize').length);
+        assert.equal(metrics.runtime_specialization_nanoseconds, null);
+        assert.equal(metrics.runtime_validation_nanoseconds, null);
+        if (metrics.runtime_specializations_requested > 0) {
+          assert(metrics.admitted_runtimes > 0);
+          assert(metrics.distinct_runtime_artifact_bytes > 0);
+        }
+        toolRuns.at(-1).runtime_accounting = {
+          stage: placement ? 'controller-transfer' : 'terminal',
+          admitted_runtimes: metrics.admitted_runtimes,
+          artifact_bytes: metrics.distinct_runtime_artifact_bytes,
+          current_capsule_bytes: metrics.distinct_current_runtime_capsule_bytes,
+          specializations: metrics.runtime_specializations_requested,
+          switches: metrics.runtime_switches_requested,
+        };
       }
       if (name === 'tools-reuse') {
         const measured = join(app.data, 'workspace-accounting.bundle');

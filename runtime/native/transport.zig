@@ -224,3 +224,52 @@ test "outstanding request identity normalizes integer spellings without conflati
     try std.testing.expect(!Id.equal(first, try Id.from(json.string("1"))));
     try std.testing.expect(Id.equal(.null, .null));
 }
+
+test "write opportunity after owner work distinguishes queued output from a stalled reader" {
+    const saved = c.dup(1);
+    try std.testing.expect(saved >= 0);
+    defer _ = c.close(saved);
+    defer _ = c.dup2(saved, 1);
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(0, c.pipe(&fds));
+    defer _ = c.close(fds[0]);
+    defer _ = c.close(fds[1]);
+    try std.testing.expectEqual(1, c.dup2(fds[1], 1));
+    var transport = try Transport.init(std.testing.allocator, std.testing.io, .{});
+    defer transport.deinit();
+
+    try transport.enqueue("ok", &.{}, false);
+    transport.output_progress = transport.now() - transport.limits.output_stall_ms - 1;
+    try transport.flush(true);
+    try transport.deadlines();
+    try std.testing.expectEqual(0, transport.count);
+    var received: [3]u8 = undefined;
+    try std.testing.expectEqual(3, c.read(fds[0], &received, received.len));
+    try std.testing.expectEqualStrings("ok\n", &received);
+
+    const fill: [4096]u8 = @splat(0);
+    while (true) {
+        const written = c.write(1, &fill, fill.len);
+        if (written < 0) {
+            if (std.c.errno(written) == .INTR) continue;
+            try std.testing.expectEqual(std.c.E.AGAIN, std.c.errno(written));
+            break;
+        }
+        try std.testing.expect(written > 0);
+    }
+    // A failed PIPE_BUF-sized write may leave room for a smaller frame.
+    while (true) {
+        const written = c.write(1, &fill, 1);
+        if (written < 0) {
+            if (std.c.errno(written) == .INTR) continue;
+            try std.testing.expectEqual(std.c.E.AGAIN, std.c.errno(written));
+            break;
+        }
+        try std.testing.expectEqual(1, written);
+    }
+    try transport.enqueue("blocked", &.{}, false);
+    transport.output_progress = transport.now() - transport.limits.output_stall_ms - 1;
+    try transport.flush(true);
+    try std.testing.expectEqual(1, transport.count);
+    try std.testing.expectError(error.OutputStall, transport.deadlines());
+}

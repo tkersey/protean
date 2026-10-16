@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [authoring, workspace, native, downstream]
+        lane: [authoring, workspace, native, runtime, downstream]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -64,7 +64,7 @@ jobs:
           mkdir -p .zig-cache/tmp
           packages=()
           command -v rg >/dev/null || packages+=(ripgrep)
-          if [ "${{ matrix.lane }}" = native ] || [ "${{ matrix.lane }}" = downstream ]; then
+          if [ "${{ matrix.lane }}" = native ] || [ "${{ matrix.lane }}" = runtime ] || [ "${{ matrix.lane }}" = downstream ]; then
             test -x /usr/bin/bwrap || packages+=(bubblewrap)
             test -x /usr/bin/strace || packages+=(strace)
           fi
@@ -77,7 +77,7 @@ jobs:
               sudo apt-get install --yes --no-install-recommends "${packages[@]}"
             fi
           fi
-          if [ "${{ matrix.lane }}" = native ] || [ "${{ matrix.lane }}" = downstream ]; then
+          if [ "${{ matrix.lane }}" = native ] || [ "${{ matrix.lane }}" = runtime ] || [ "${{ matrix.lane }}" = downstream ]; then
             /usr/bin/bwrap --unshare-user --ro-bind / / /usr/bin/true
           fi
       - name: Restore locked native transport bytes
@@ -113,30 +113,48 @@ jobs:
               > "$RUNNER_TEMP/downstream-identity.json"
             cat "$RUNNER_TEMP/downstream-identity.json"
           else
+            lane="${{ matrix.lane }}"
             result=0
-            zig build check-native-executable -Doptimize=safe --summary all \
-              --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
-              > "$RUNNER_TEMP/native-check.log" 2>&1 || result=$?
-            cat "$RUNNER_TEMP/native-check.log"
+            if [ "$lane" = native ]; then
+              # This target retains both the adaptive CLI and process-placement
+              # fixtures. The independent runtime lane runs the third fixture.
+              zig build protean check-native-placement -Doptimize=safe --summary all \
+                --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
+                > "$RUNNER_TEMP/$lane-check.log" 2>&1 || result=$?
+            else
+              zig build protean build-workspace-peer -Doptimize=safe --summary all \
+                --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
+                > "$RUNNER_TEMP/$lane-check.log" 2>&1 || result=$?
+              if [ "$result" -eq 0 ]; then
+                node test/protean/native_runtime.mjs \
+                  "$RUNNER_TEMP/protean-qualification/executables/protean" \
+                  "$RUNNER_TEMP/protean-qualification/protean/adaptive/application.json" '' \
+                  "$RUNNER_TEMP/protean-qualification/verification/workspace-semantics" \
+                  >> "$RUNNER_TEMP/$lane-check.log" 2>&1 || result=$?
+              fi
+            fi
+            cat "$RUNNER_TEMP/$lane-check.log"
             test "$result" -eq 0
-            node --input-type=module - "$RUNNER_TEMP/protean-qualification/executables/protean" "$RUNNER_TEMP/native-check.log" "$RUNNER_TEMP/native-identity.json" <<'JS'
+            node --input-type=module - "$RUNNER_TEMP/protean-qualification/executables/protean" "$RUNNER_TEMP/$lane-check.log" "$RUNNER_TEMP/$lane-identity.json" "$lane" <<'JS'
           import assert from 'node:assert/strict';
           import {execFileSync} from 'node:child_process';
           import {createHash} from 'node:crypto';
           import {readFileSync, writeFileSync} from 'node:fs';
-          const [binary, nativeLog, output] = process.argv.slice(2);
+          const [binary, nativeLog, output, lane] = process.argv.slice(2);
           const manifest = JSON.parse(execFileSync(binary, ['describe-build'], {encoding: 'utf8'}));
           const executions = readFileSync(nativeLog, 'utf8').split('\n').filter(line => line.startsWith('{"native_deployment":')).map(line => JSON.parse(line));
-          assert.equal(executions.length, 1);
-          assert.equal(executions[0].passed, true);
-          assert.equal(executions[0].sha256, manifest.artifact_sha256);
+          assert.equal(executions.length, lane === 'native' ? 2 : 1, 'every selected deployment qualified');
+          for (const execution of executions) {
+            assert.equal(execution.passed, true);
+            assert.equal(execution.sha256, manifest.artifact_sha256);
+          }
           assert.equal(createHash('sha256').update(readFileSync(binary)).digest('hex'), manifest.artifact_sha256);
           const identity = Object.fromEntries(['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target'].map(key => [key, manifest[key]]));
-          writeFileSync(output, JSON.stringify({identity}));
+          writeFileSync(output, JSON.stringify({identity, artifact_sha256: manifest.artifact_sha256}));
           JS
           fi
       - name: Retain independently qualified build identity
-        if: matrix.lane == 'native' || matrix.lane == 'downstream'
+        if: matrix.lane == 'native' || matrix.lane == 'runtime' || matrix.lane == 'downstream'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           path: ${{ runner.temp }}/${{ matrix.lane }}-identity.json
@@ -198,7 +216,7 @@ jobs:
         if: needs.source.result == 'success' && needs.qualify.result == 'success'
         with:
           node-version: '26.9.0'
-      - name: Require complete qualification within the existing workflow budget
+      - name: Require complete qualification within ten minutes
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -222,16 +240,19 @@ jobs:
             assert.equal(artifact.expired, false);
             const bytes = api(`actions/artifacts/${artifact.id}/zip`);
             assert.equal(`sha256:${createHash('sha256').update(bytes).digest('hex')}`, artifact.digest);
-            return JSON.parse(bytes).identity;
+            return JSON.parse(bytes);
           };
-          const native = load('native'), downstream = load('downstream');
+          const native = load('native'), runtime = load('runtime'), downstream = load('downstream');
           for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target']) {
-            assert.notEqual(native[key], undefined, key);
-            assert.deepEqual(downstream[key], native[key], key);
+            assert.notEqual(native.identity[key], undefined, key);
+            assert.deepEqual(downstream.identity[key], native.identity[key], key);
+            assert.deepEqual(runtime.identity[key], native.identity[key], key);
           }
-          console.log('Independent native and downstream build identities agree.');
+          assert.notEqual(native.artifact_sha256, undefined);
+          assert.equal(runtime.artifact_sha256, native.artifact_sha256, 'runtime scenarios executed the packaged native binary');
+          console.log('Independent native, runtime and downstream build identities agree.');
           JS
           started="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq .run_started_at)"
           elapsed=$(( $(date +%s) - $(date -d "$started" +%s) ))
-          echo "Complete workflow before terminal gate: ${elapsed}s (target 300s, maximum 360s)" | tee -a "$GITHUB_STEP_SUMMARY"
-          test "$elapsed" -le 360
+          echo "Complete workflow before terminal gate: ${elapsed}s (maximum 600s)" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$elapsed" -le 600

@@ -29,7 +29,7 @@ const Graph = struct {
     fn testModule(g: Graph, step: *std.Build.Step, module_value: *std.Build.Module) void {
         const tests = g.b.addTest(.{
             .root_module = module_value,
-            .use_llvm = if (g.b.graph.host.result.os.tag == .linux and g.b.graph.host.result.cpu.arch == .x86_64) false else null,
+            .use_llvm = if (g.b.graph.host.result.os.tag == .linux and g.b.graph.host.result.cpu.arch == .x86_64) g.optimize != .debug else null,
         });
         tests.step.dependOn(g.gate);
         step.dependOn(&g.b.addRunArtifact(tests).step);
@@ -38,7 +38,7 @@ const Graph = struct {
         const executable = g.b.addExecutable(.{
             .name = name,
             .root_module = module_value,
-            .use_llvm = if (g.b.graph.host.result.os.tag == .linux and g.b.graph.host.result.cpu.arch == .x86_64) false else null,
+            .use_llvm = if (g.b.graph.host.result.os.tag == .linux and g.b.graph.host.result.cpu.arch == .x86_64) g.optimize != .debug else null,
         });
         executable.step.dependOn(g.gate);
         return executable;
@@ -327,10 +327,8 @@ pub fn build(b: *std.Build) void {
         const checked_kosmos = if (native_on_host) native_kosmos else kosmos;
         const checked_environment = if (native_on_host) public_environment else host_environment;
         const workspace_programs = native_graph.module("test/protean/workspace_programs.zig");
-        // Match the retained native suite: compile test orchestration in debug
-        // while imported product modules retain the requested optimization.
-        // Zig 0.17's safe optimizer crashes on this large orchestration root.
-        workspace_programs.optimize = .debug;
+        // Execute generated programs in the requested optimization mode.
+        // These roots instantiate the evaluator as well as test orchestration.
         workspace_programs.strip = optimize != .debug;
         workspace_programs.addImport("kosmos", checked_kosmos);
         workspace_programs.addImport("protean_native", checked_environment);
@@ -338,11 +336,12 @@ pub fn build(b: *std.Build) void {
         native_graph.testModule(workspace_checks, workspace_programs);
         native_checks.dependOn(workspace_checks);
         const workspace_semantics_module = native_graph.module("test/protean/workspace_semantics.zig");
-        workspace_semantics_module.optimize = .debug;
         workspace_semantics_module.strip = optimize != .debug;
         workspace_semantics_module.addImport("kosmos", checked_kosmos);
         workspace_semantics_module.addImport("protean_native", checked_environment);
         const workspace_peer = native_graph.emitter("workspace-semantics", workspace_semantics_module);
+        b.step("build-workspace-peer", "Build the verification-only source and capsule byte peer")
+            .dependOn(&b.addInstallArtifact(workspace_peer, .{ .dest_dir = .{ .override = .{ .custom = "verification" } } }).step);
         const workspace_semantics_run = b.addSystemCommand(&.{"node"});
         workspace_semantics_run.addFileArg2(b.path("test/protean/workspace_semantics.mjs"), .{});
         workspace_semantics_run.addArtifactArg(workspace_peer);
@@ -394,12 +393,18 @@ pub fn build(b: *std.Build) void {
             const placement_peer = nativeCheckCommand(b);
             placement_peer.addArgs(&.{ "node", "test/protean/native_placement.mjs" });
             placement_peer.addFileArg2(adaptive_product.executable.getEmittedBin(), .{ .make_absolute = true });
+            // The adaptive CLI has a wall-time contract. Do not run other
+            // CPU-heavy deployment fixtures against that same measurement.
+            placement_peer.step.dependOn(&adaptive_peer.step);
             b.step("check-native-placement", "Qualify authenticated placement between native processes").dependOn(&placement_peer.step);
             native_executable.dependOn(&placement_peer.step);
             const runtime_peer = nativeCheckCommand(b);
             runtime_peer.addArgs(&.{ "node", "test/protean/native_runtime.mjs" });
             runtime_peer.addFileArg2(adaptive_product.executable.getEmittedBin(), .{ .make_absolute = true });
             runtime_peer.addFileArg2(adaptive_application, .{ .make_absolute = true });
+            runtime_peer.addArg("");
+            runtime_peer.addArtifactArg(workspace_peer);
+            runtime_peer.step.dependOn(&placement_peer.step);
             b.step("check-native-runtime", "Qualify scripted optional runtime choices through native inference and workspace boundaries").dependOn(&runtime_peer.step);
             native_executable.dependOn(&runtime_peer.step);
             const retention_check = b.step("check-workspace-runtime-retention", "Resume an old task with its retained original executable after installing the new product");
@@ -436,8 +441,8 @@ pub fn build(b: *std.Build) void {
         // These roots share exact module identities; compile their retained
         // tests together instead of rebuilding the same compiler eleven times.
         const native_suite = native_graph.module("test/protean/native_tests.zig");
-        // Keep the general suite on the fast compilation path.
-        native_suite.optimize = .debug;
+        // Generic owner/evaluator instantiations inherit the root's mode.
+        // Keep execution representative of the requested product build.
         native_suite.strip = optimize != .debug;
         native_suite.addImport("kosmos", checked_kosmos);
         native_suite.addImport("protean_native", checked_environment);
@@ -454,12 +459,16 @@ pub fn build(b: *std.Build) void {
         native_suite.addAnonymousImport("adaptive_application", .{ .root_source_file = adaptive_application });
         native_suite.addImport("native_asset_writer", native_graph.module("tools/native/emit.zig"));
         native_graph.testModule(native_owner, native_suite);
-        const workspace_recovery_tests = b.addTest(.{ .root_module = native_suite, .filters = &.{"adaptive workspace"} });
+        const workspace_recovery_tests = b.addTest(.{
+            .root_module = native_suite,
+            .filters = &.{"adaptive workspace"},
+            .use_llvm = if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) optimize != .debug else null,
+        });
         workspace_recovery_tests.step.dependOn(native_graph.gate);
         const workspace_recovery_run = b.addRunArtifact(workspace_recovery_tests);
         b.step("check-workspace-recovery", "Qualify workspace construction recovery through the adaptive controller").dependOn(&workspace_recovery_run.step);
         // Reuse the fixture's complete import graph; keep the measured root in
-        // the requested optimization mode rather than the general suite's Debug.
+        // the requested optimization mode.
         const scheduler_module = b.allocator.create(std.Build.Module) catch @panic("out of memory");
         scheduler_module.init(b, .{ .existing = native_suite });
         scheduler_module.root_source_file = b.path("test/protean/native_scheduler_benchmark.zig");
@@ -490,10 +499,9 @@ pub fn build(b: *std.Build) void {
         // independently exercises its public task owner with authored programs.
         const native_unit_tests = b.allocator.create(std.Build.Module) catch @panic("out of memory");
         native_unit_tests.init(b, .{ .existing = checked_environment });
-        native_unit_tests.optimize = .debug;
+        native_unit_tests.optimize = optimize;
         native_graph.testModule(native_owner, native_unit_tests);
         const crash_module = native_graph.module("test/protean/native_recovery_crash.zig");
-        crash_module.optimize = .debug;
         crash_module.strip = optimize != .debug;
         crash_module.addImport("kosmos", checked_kosmos);
         crash_module.addImport("protean_native", checked_environment);
@@ -503,7 +511,7 @@ pub fn build(b: *std.Build) void {
             .name = "protean-recovery-crash",
             .root_module = crash_module,
             .filters = &.{"process-crash-controller-only"},
-            .use_llvm = if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) false else null,
+            .use_llvm = if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) optimize != .debug else null,
         });
         crash_probe.step.dependOn(&native_guard.step);
         const crash_check = nodeCommand(b);

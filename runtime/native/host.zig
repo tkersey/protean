@@ -834,7 +834,16 @@ fn serve(comptime Types: type, io: std.Io, a: std.mem.Allocator, connection: *Co
             connection.shutdown = .cancel;
         }
         if (signals > 1) std.process.exit(2);
+        // Owner work can take longer than the output stall interval. Give the
+        // nonblocking writer an opportunity before classifying elapsed time as
+        // backpressure. A blocked writer makes no progress and still expires.
+        if (writable) transport.flush(if (connection.client) |client| !client.service.profile.authority.revoked and client.service.profile.authority.disclosure else true) catch {
+            writable = false;
+            code = 74;
+            if (shutdown_at == null) shutdown_at = time;
+        };
         transport.deadlines() catch |err| {
+            _ = reportFailure(err);
             if (shutdown_at == null) shutdown_at = time;
             if (err == error.FrameTimeout) {
                 if (code != 64 and writable and transport.canAdmit()) try transport.enqueue(try json.frame(frame, try protocol.failure(frame, .null, .InvalidRequest, "reconnect")), &.{}, false);
@@ -844,11 +853,6 @@ fn serve(comptime Types: type, io: std.Io, a: std.mem.Allocator, connection: *Co
                 // A stalled output channel is an I/O failure even with no task.
                 code = 74;
             }
-        };
-        if (writable) transport.flush(if (connection.client) |client| !client.service.profile.authority.revoked and client.service.profile.authority.disclosure else true) catch {
-            writable = false;
-            code = 74;
-            if (shutdown_at == null) shutdown_at = time;
         };
         // During explicit shutdown, bounded reads remain available while work
         // drains. Once parked, only queued output drains. Fatal framing and EOF
@@ -931,6 +935,7 @@ fn serve(comptime Types: type, io: std.Io, a: std.mem.Allocator, connection: *Co
             if (!parked and (shutdown_at == null or (mode == .cancel and code == 0))) {
                 const step = service.pump(frame) catch |err| blk: {
                     if (shutdown_at == null) shutdown_at = time;
+                    _ = reportFailure(err);
                     code = if (err == error.Denied) 2 else 74;
                     break :blk tasks.Step.idle;
                 };

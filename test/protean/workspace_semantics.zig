@@ -22,6 +22,111 @@ pub fn main(init: std.process.Init) !void {
         var input = std.Io.File.stdin().reader(init.io, &input_buffer);
         const bytes = try input.interface.allocRemaining(a, .unlimited);
         try output.interface.writeAll(try kosmos.invocation.invokeBytes(a, bytes));
+    } else if (std.mem.eql(u8, mode, "capsule-export")) {
+        // A synthetic, authority-free fixture for comparing exact outer bytes
+        // across native platforms. Bilateral custody is qualified separately
+        // by native_runtime.mjs against the actual process transport.
+        var builder = horos.source.Builder.init(a);
+        defer builder.deinit();
+        var compiled = try horos.source.lower(a, try horos.source.examples.cloned(&builder));
+        defer compiled.deinit();
+        const image = try a.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
+        _ = try compiled.encode(a, image);
+        var prepared = try kosmos.Prepared.init(a, image);
+        defer prepared.deinit();
+        var original = try kosmos.Session.start(a, &prepared, &.{});
+        defer original.deinit();
+        var found = false;
+        for (0..400) |_| {
+            try original.driver.submit(.{ .advance = .{ .control = if (original.driver.last_cut.?.status == .yielded) .resume_yield else .none, .quantum = 1 } });
+            while (true) {
+                var step = try original.driver.pump(16);
+                if (step == .event) {
+                    step.event.deinit();
+                    break;
+                }
+                if (step != .suspended) return error.InvalidPhase;
+                const current = original.driver.outer.roots.current orelse continue;
+                const frame = try original.driver.outer.frames.get(current.id);
+                if (frame.position == 0) continue;
+                for (prepared.runtime.content.value.recovery.anchors) |anchor| {
+                    if (anchor.role == .clone_rebase and anchor.function == frame.function) found = true;
+                }
+                if (found) break;
+            }
+            if (found) break;
+            if (original.driver.last_cut.?.status == .completed) return error.MissingClonePhase;
+        }
+        if (!found) return error.MissingClonePhase;
+        if (original.driver.checkpoint(a)) |_| return error.FalseGuestCut else |err| {
+            if (err != error.GuestCutUnavailable) return err;
+        }
+        const capsule = try kosmos.RuntimeCapsule.publish(a, &original.driver, .outer_execution, .{ .execution = @splat(31), .custody = @splat(32), .publication = null });
+        const packet: CapsulePacket = .{ .image = image, .runtime = try prepared.runtime.encode(a), .capsule = capsule, .outer = try original.driver.outer.checkpoint(a) };
+        try output.interface.writeAll(try std.json.Stringify.valueAlloc(a, packet, .{ .emit_strings_as_arrays = true }));
+    } else if (std.mem.eql(u8, mode, "capsule-import")) {
+        var input_buffer: [4096]u8 = undefined;
+        var input = std.Io.File.stdin().reader(init.io, &input_buffer);
+        const bytes = try input.interface.allocRemaining(a, .unlimited);
+        const packet = (try std.json.parseFromSlice(CapsulePacket, a, bytes, .{})).value;
+        var selected = try kosmos.RuntimeArtifact.init(a, packet.runtime, kosmos.RuntimeCapsule.reference(packet.runtime).digest);
+        defer selected.deinit();
+        try kosmos.RuntimeCompiler.validate(a, &selected);
+        var prepared = try kosmos.Prepared.initWithRuntime(a, packet.image, &selected);
+        defer prepared.deinit();
+        var custody: CapsuleCustody = .{ .expected = kosmos.RuntimeCapsule.reference(packet.capsule) };
+        var restored = try kosmos.RuntimeCapsule.restore(a, &prepared.guest, &selected, packet.capsule, custody.verifier());
+        defer restored.deinit();
+        if (!std.mem.eql(u8, packet.outer, try restored.outer.checkpoint(a))) return error.ChangedOuterState;
+        if (kosmos.RuntimeCapsule.restore(a, &prepared.guest, &selected, packet.capsule, custody.verifier())) |value| {
+            var unexpected = value;
+            unexpected.deinit();
+            return error.ReusedCustody;
+        } else |err| if (err != error.UnauthorizedCapsule) return err;
+        var completed = try restored.pump(null);
+        defer if (completed == .event) completed.event.deinit();
+        if (completed != .event or completed.event.value != .cut) return error.InvalidPhase;
+        try output.interface.writeAll(try restored.checkpoint(a));
+    } else if (std.mem.eql(u8, mode, "capsule-phase")) {
+        // Fixture-only observation of immutable, already published objects.
+        // No restore verifier or execution authority is supplied here.
+        const runtime_path = args.next() orelse return error.MissingRuntime;
+        const capsule_path = args.next() orelse return error.MissingCapsule;
+        const runtime_bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, runtime_path, a, .unlimited);
+        const capsule_bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, capsule_path, a, .unlimited);
+        var selected = try kosmos.RuntimeArtifact.init(a, runtime_bytes, kosmos.RuntimeCapsule.reference(runtime_bytes).digest);
+        defer selected.deinit();
+        var envelope = try kosmos.RuntimeCapsule.read(a, capsule_bytes);
+        defer envelope.deinit();
+        if (envelope.value.record.kind != .outer_execution or envelope.value.record.operation == null or
+            !std.meta.eql(envelope.value.record.artifact, kosmos.RuntimeCapsule.reference(runtime_bytes))) return error.InvalidPhase;
+        var state = try horos.data.state_image.decodeGraph(a, envelope.value.checkpoint);
+        defer state.deinit();
+        try horos.data.state_admission.validateAdmitted(a, selected.program, state.state);
+        var clone_frames: usize = 0;
+        var clone_bindings: usize = 0;
+        var active_clone_frames: usize = 0;
+        for (state.state.nodes) |node| {
+            const block = switch (node.record) {
+                .control => |control| control.block,
+                .continuation => |continuation| continuation.source_block,
+                else => continue,
+            };
+            const function = selected.program.program().blocks[@intCast(block)].function;
+            for (selected.content.value.recovery.anchors) |anchor| {
+                if ((anchor.role != .clone_rebase and anchor.role != .clone_context) or anchor.function != function) continue;
+                active_clone_frames += 1;
+                const frame = node.activation orelse return error.MissingActivation;
+                // Lowering can retire entry parameters after their last use.
+                // The live continuation locals carry the updated cursor/map.
+                // Require execution beyond entry and actual retained locals;
+                // a matching declaration alone is not a mid-operation witness.
+                if (frame.position == 0 or frame.bindings.len == 0) continue;
+                clone_frames += 1;
+                clone_bindings += frame.bindings.len;
+            }
+        }
+        try output.interface.print("{{\"clone_frames\":{d},\"clone_bindings\":{d},\"active_clone_frames\":{d},\"outer_revision\":\"{d}\"}}", .{ clone_frames, clone_bindings, active_clone_frames, envelope.value.record.outer_revision });
     } else {
         var builder = horos.source.Builder.init(a);
         defer builder.deinit();
@@ -90,6 +195,23 @@ pub fn main(init: std.process.Init) !void {
     }
     try output.interface.flush();
 }
+
+const CapsulePacket = struct { image: []const u8, runtime: []const u8, capsule: []const u8, outer: []const u8 };
+const CapsuleCustody = struct {
+    expected: kosmos.RuntimeCapsule.Reference,
+    consumed: bool = false,
+    fn claim(context: *anyopaque, actual: kosmos.RuntimeCapsule.Reference, record: kosmos.RuntimeCapsule.Record, target: kosmos.RuntimeCapsule.Reference) !void {
+        const self: *CapsuleCustody = @ptrCast(@alignCast(context));
+        if (self.consumed or !std.meta.eql(self.expected, actual) or
+            !std.meta.eql(record.provenance.execution, @as([32]u8, @splat(31))) or
+            !std.meta.eql(record.provenance.custody, @as([32]u8, @splat(32))) or
+            !std.meta.eql(record.artifact, target)) return error.UnauthorizedCapsule;
+        self.consumed = true;
+    }
+    fn verifier(self: *CapsuleCustody) kosmos.RuntimeCapsule.Verifier {
+        return .{ .context = self, .claim = claim };
+    }
+};
 
 fn example(a: std.mem.Allocator, input: []const u8, replies: []const []const u8, expected: []const u8) !native.json.Value {
     var value = native.json.object();

@@ -2,7 +2,7 @@
 // This helper prepares peers; the prescribed model trace selects the moves.
 import assert from 'node:assert/strict';
 import {createHash, createPrivateKey, createPublicKey} from 'node:crypto';
-import {mkdir, readFile, writeFile} from 'node:fs/promises';
+import {mkdir, mkdtemp, readFile, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {ProteanClient} from '../support/stdio-client.mts';
 
@@ -11,13 +11,14 @@ export const placementRequest = (client, tag, value) => client.call('placement',
 
 export async function runtimePlacementFixture(app, configuration, trust, sourceState) {
   const binary = createHash('sha256').update(await readFile(app.executable)).digest('hex');
+  const directory = await mkdtemp(join(app.data, 'runtime-placement-'));
   const sites = [];
   for (const [index, name] of ['controller', 'executor', 'successor'].entries()) {
     const seed = Buffer.alloc(32, 51 + index);
     const privateKey = createPrivateKey({key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), seed]), format: 'der', type: 'pkcs8'});
-    const key = join(app.data, name + '-runtime.key'), config = join(app.data, name + '-runtime-placement.json');
-    const spool = join(app.data, name + '-runtime-spool');
-    const state = index === 0 ? sourceState : join(app.data, name + '-runtime-state');
+    const key = join(directory, name + '-runtime.key'), config = join(directory, name + '-runtime-placement.json');
+    const spool = join(directory, name + '-runtime-spool');
+    const state = index === 0 ? sourceState : join(directory, name + '-runtime-state');
     await mkdir(spool, {mode: 0o700});
     await writeFile(key, seed.toString('hex'), {mode: 0o600});
     await writeFile(config, JSON.stringify({signing_key_file: key, transport_directory: spool, peers: []}), {mode: 0o600});
@@ -26,7 +27,7 @@ export async function runtimePlacementFixture(app, configuration, trust, sourceS
   const flags = site => ['--state-dir', site.state, '--placement-config', site.config, '--config', configuration, '--authorize-inference', '--test-provider', '--trust-root', trust];
   // Compatibility names the semantic service, independently of the profile's
   // resources. Obtain it from the actual binary without any model request.
-  const probe = new ProteanClient(app.command, ['--offline', '--state-dir', join(app.data, 'runtime-placement-probe'), '--placement-config', sites[0].config], {cwd: app.data, env: {PATH: '/nonexistent'}});
+  const probe = new ProteanClient(app.command, ['--offline', '--state-dir', join(directory, 'probe'), '--placement-config', sites[0].config], {cwd: app.data, env: {PATH: '/nonexistent'}});
   let compatibility;
   try {
     await probe.initialize();

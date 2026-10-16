@@ -44,6 +44,15 @@ pub const Program = opaque {
         owner.prepared.deinit();
         owner.parent.destroy(owner);
     }
+    /// Independent guest admission under this owner's already admitted runtime.
+    /// The returned preparation holds its own strong lease; no guest state or
+    /// environmental authority is shared.
+    pub fn prepare(self: *Program, a: std.mem.Allocator, image: []const u8) !kosmos.Prepared {
+        return kosmos.Prepared.initWithRuntime(a, image, &self.storage().prepared.runtime);
+    }
+    pub fn retainRuntime(self: *Program) !kosmos.RuntimeArtifact {
+        return self.storage().prepared.runtime.clone();
+    }
 };
 
 pub const Driver = opaque {

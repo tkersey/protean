@@ -387,6 +387,14 @@ source through Horos's independent source oracle and native Kosmos. Passing
 `-Dworkspace-wasm=/absolute/path/to/kosmos-kernel.wasm` additionally compares exact
 native/WASM outcomes and alternates checkpoint producers. The oracle and embedding
 are the authenticated dependency implementations, not production dependencies.
+The same check exports a synthetic capsule during an actual clone operation,
+restores its exact outer state, and rejects a second custody claim. For native
+platform comparison, build `build-workspace-peer -Doptimize=safe` on each host.
+`zig-out/verification/workspace-semantics capsule-export` emits a qualification
+packet; `capsule-import` reads that packet on stdin and emits the next canonical
+guest checkpoint. Compare both directions byte for byte. This fixture has no
+environmental authority; `check-native-runtime` separately exercises real signed
+custody transfer, controller succession and cleanup between native processes.
 Use `check-workspace-runtime-retention -Dprevious-runtime=/absolute/path/to/protean`
 to exercise an actual prior executable through a temporary installation.
 
