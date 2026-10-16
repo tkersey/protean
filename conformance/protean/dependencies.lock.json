@@ -13,11 +13,11 @@
     },
     "archive": {
       "url": "https://github.com/tkersey/horos/archive/fdbaa96872b669a0a1d78f9402ed87518611a1fc.tar.gz",
-      "sha256": "0ca6a35ba20407a8f371e1ed94c5b675790f7b98cfeb65f3665183311f2c3663",
-      "bytes": 1616708,
-      "origin": "Development local Git archive; remote transport qualification pending before delivery."
+      "sha256": "9947326afdfca44b858c46270d8b6c946e980d5d7cd4af0f252c75b2f915a951",
+      "bytes": 1642127,
+      "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
-    "authentication": "Complete source inventory from the exact local Git commit; remote publication and transport qualification pending.",
+    "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree.",
     "package": {
       "zigHash": "horos-6.0.0-flclaFRsQACQc-EXxHETgolgtIFvzrUM6Nqf5DvA-zt5",
       "defaultProfile": "zig-managed",
@@ -97,21 +97,21 @@
   },
   "world": {
     "repository": "tkersey/kosmos",
-    "commit": "4e86cacc3688359d8347ad1dfc89a99c9e996c96",
-    "gitTree": "a99b579bf1ebb5e8ad295de0369b8800a4c32d21",
+    "commit": "c49fb80af74273cc784f1304e60739fae3027a85",
+    "gitTree": "d46214fb5e03cc13de83b96c44c5d6711e25067c",
     "version": "9.0.0",
     "source": {
-      "inventorySha256": "2f33b25b04e6e07cae1bcdc7a298dc5d26a9908ebb338ace35c1fd09883d8c4e",
-      "entries": 201,
-      "bytes": 2396970
+      "inventorySha256": "f9f3d6cbbbf1a5d5888b2f0251d957de0a6705a41bfc77def8007e8fe00e70a4",
+      "entries": 203,
+      "bytes": 2435532
     },
     "archive": {
-      "url": "https://github.com/tkersey/kosmos/archive/4e86cacc3688359d8347ad1dfc89a99c9e996c96.tar.gz",
-      "sha256": "067a00a73644edcf36344a4fff8fecaced37b32fd922e4d70d7d511228a2e3b3",
-      "bytes": 500761,
-      "origin": "Development local Git archive; remote transport qualification pending before delivery."
+      "url": "https://github.com/tkersey/kosmos/archive/c49fb80af74273cc784f1304e60739fae3027a85.tar.gz",
+      "sha256": "64a7ab8289836c4be55d169519a652866eeafc92514673fa98192a8584e3742e",
+      "bytes": 514041,
+      "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
-    "authentication": "Complete source inventory from the exact local Git commit; remote publication and transport qualification pending."
+    "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree."
   },
   "toolchain": {
     "zig": {
@@ -122,25 +122,18 @@
     "architecture": "arm64"
   },
   "publicationObservation": {
-    "compatiblePublishedReleaseObserved": true,
-    "releases": [
-      {
-        "repository": "tkersey/horos",
-        "tag": "v5.0.0",
-        "commit": "931b960723fb8a2b6808d0c53e2e18efe8394c92"
-      },
-      {
-        "repository": "tkersey/kosmos",
-        "tag": "v8.0.0",
-        "commit": "f38b077f78e39267c05207393d4043b053187e81"
-      }
+    "compatiblePublishedReleaseObserved": false,
+    "releases": [],
+    "pullRequests": [
+      "https://github.com/tkersey/horos/pull/174",
+      "https://github.com/tkersey/kosmos/pull/71"
     ]
   },
   "limitations": [
-    "Development Horos 6.0.0 and Kosmos 9.0.0 exact local source snapshots; remote archive transport qualification is pending.",
+    "Development Horos 6.0.0 and Kosmos 9.0.0 commits published in draft PRs; complete remote archive transport and source identities authenticated. These are not released versions.",
     "Controlled-provider qualification does not establish live-provider availability or model quality; existing saved tasks retain their original executable and image bindings."
   ],
   "notes": [
-    "Development exact local source tuple for executable semantics. Remote archive transport must be refreshed and qualified before delivery."
+    "Exact published development source tuple for executable semantics. Final platform, performance and review qualification remains open."
   ]
 }
