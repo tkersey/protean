@@ -3254,15 +3254,12 @@ pub fn Service(comptime Types: type) type {
         fn workspaceSource(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, ref: wc.Ref) ![]u8 {
             return switch (try self.resolveWorkspaceSource(a, task_id, ref)) {
                 .text => |text| text,
-                .value => |checked| blk: {
-                    const schema = try self.store().object(a, checked.schema, null);
-                    defer a.free(schema);
-                    const value = try self.store().object(a, checked.value, null);
-                    defer a.free(value);
-                    var decoded = try @import("dynamic_values.zig").decode(a, schema, value);
-                    defer decoded.deinit();
-                    break :blk try json.canonical(a, decoded.value);
-                },
+                // Runtime value JSON has no named-record objects: its only
+                // objects are unit {} and sums {tag,value}. Neither is a
+                // source Document {version,module} or a Recipe
+                // {instances,bindings,entry}. Do not expand incompatible data
+                // on the owner before handing construction to the worker.
+                .value => error.InvalidParams,
             };
         }
 

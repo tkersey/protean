@@ -11,6 +11,9 @@ The canonical model interface is `program`, `work`, and `context` in
 are in [the application guide](../examples/adaptive/README.md#construct-and-retain-computations).
 The previous `tool_build`/`tool_run` action route is retired in this image.
 Component recipes remain an input to the shared program build owner.
+Build references identify stored construction documents. Frozen runtime data
+remains expandable for inspection, but its JSON representation is not a source
+record document or component recipe and is rejected before build expansion.
 
 ## Construction and authority
 

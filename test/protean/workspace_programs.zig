@@ -697,6 +697,15 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     const repeated = try service.workspaceBuild(scratch, "build", parent.receipt.task, document, &diagnostic);
     try std.testing.expect(repeated.replayed);
     try std.testing.expectEqualDeep(program.receipt.workspace, repeated.receipt.workspace);
+    var source_program = try service.workspaceProgram(scratch, parent.receipt.task, program.receipt.workspace.?);
+    defer source_program.deinit();
+    const rebuilt_source = try service.workspaceCommand(scratch, "build-source-reference", parent.receipt.task, .{ .program = .{ .build = .{
+        .source = .{ .reference = try workspaceRef(scratch, .source, source_program.value.description.source.digest) },
+        .source_kind = .source_records,
+        .exposures = .{ .items = &.{} },
+    } } });
+    try std.testing.expectEqual(.observed, rebuilt_source.disposition);
+    try std.testing.expectEqualDeep(program.receipt.workspace.?, try nativeIdentity(rebuilt_source.program.?));
     const input = try a.alloc(u8, 300 * 9 + 1);
     defer a.free(input);
     var writer: data.wire.Writer = .{ .output = input };
@@ -1442,6 +1451,26 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
         defer parsed.deinit();
         try std.testing.expectEqualStrings(expected, parsed.value.object.get("text").?.string);
         try std.testing.expectEqual(@as(u64, 3_000_000_001), try native.json.numberInteger(u64, parsed.value.object.get("total_bytes").?.number_string));
+    }
+    try service.validateWorkspace(scratch, frozen_parent.receipt.task);
+
+    // Runtime value JSON is not either construction-document grammar. Reject
+    // the compact value before expanding its billion logical elements, while
+    // retaining its independently tested source-page inspection above.
+    for ([_]contracts.workspace.SourceKind{ .source_records, .component_recipe }) |kind| {
+        var bounded = std.heap.FixedBufferAllocator.init(page_buffer);
+        const rejected = service.workspaceCommand(bounded.allocator(), "reject-typed-source", frozen_parent.receipt.task, .{ .program = .{ .build = .{
+            .source = .{ .reference = frozen_source },
+            .source_kind = kind,
+            .exposures = .{ .items = &.{} },
+        } } }) catch |err| {
+            std.debug.print("typed source {s}: {s}\n", .{ @tagName(kind), @errorName(err) });
+            return err;
+        };
+        try std.testing.expectEqual(.rejected, rejected.disposition);
+        try std.testing.expect(rejected.program == null);
+        const failure = (try native.json.parse(scratch, rejected.observation_json.bytes, .{})).value;
+        try std.testing.expectEqualStrings("InvalidParams", failure.object.get("error").?.string);
     }
     try service.validateWorkspace(scratch, frozen_parent.receipt.task);
 
