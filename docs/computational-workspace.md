@@ -60,6 +60,9 @@ has since advanced. Ordinary workspace replies retain the inputs to their
 projection: immutable content, historical work/checkpoint observations, or the
 matching operation receipt. Import re-renders these replies and checks work
 claims against Kosmos; a changed reply and recomputed digest are insufficient.
+Initial inputs retain either the explicitly selected value's ancestry or the
+constructor's empty-source hypothesis. Equal payloads cannot substitute a
+different derivation across the current record and its publication history.
 Scope and wait observations also use the retained event prefix. Captured native
 rejections carry diagnostics only, with no result or authority references.
 Applied-cancellation markers on both root and child checkpoints must agree with
@@ -129,9 +132,9 @@ is distinguished from concrete execution where it supplies the argument.
 | WORK-09, WORK-10 | Independent source/native/WASM fixtures preserve distinct attachments, shallow behavior and explicit successor-state capabilities. |
 | WORK-11 | Ordered collection includes repeated, completed, cancelled, pending and missing identities without cloning the parent. |
 | WORK-12, WORK-13 | No image-replacement operation exists; records bind exact admitted program/checkpoint. Ordinary quantum control is separate from generation-bound port commands; stale/no-port controls reject. |
-| WORK-14 | Real cancellation cleanup yields, exposes a request, yields again and completes; inspection reports pending cleanup until terminal disposal. Rehashed checkpoints with a different cancellation reason reject for roots and children. Explicit parking survives older cancellation; fresh parent cancellation resumes it after reopening with a compatible profile. |
+| WORK-14 | Real cancellation cleanup yields, exposes a request, yields again and completes; inspection reports pending cleanup until terminal disposal. Rehashed checkpoints with a different cancellation reason reject for roots and children. Explicit parking survives older cancellation, including a later definitely-not-sent worker completion; fresh cancellation resumes cleanup. |
 | CTX-01, CTX-02, CTX-08 | Partial snapshot omits a rare exception; full source expansion reveals it; a different task cannot expand the same digest. |
-| CTX-03, CTX-04 | Equal payloads from different work retain distinct derivations; inline inputs and subsequent computation retain hypothesis ancestry. |
+| CTX-03, CTX-04 | Equal payloads from different work retain distinct derivations; inline inputs and subsequent computation retain hypothesis ancestry. Coherently substituting a judgment for an inline input across all publications rejects; explicitly starting from that judgment remains valid. |
 | CTX-05–07 | Adaptive context fixtures exercise view epochs, pair preservation, rejected undeclared calls, policy/user messages, skill unloading, model change and retained opaque-content rules; preparation uses immutable captures. |
 | CTX-09 | Existing long catalogs/input/resources and large prompt/result tests retained; workspace source/value/view pages report completeness and coverage. First and final source pages of a billion-unit frozen input fit a 16 MiB allocator. |
 | CTX-10 | Exact snapshot/resource and ancestry checks in `workspaceValueReference`, `workspaceSnapshotAccess`, archive admission and the existing profile binding; no cross-universe value cache. |

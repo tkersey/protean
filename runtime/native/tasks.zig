@@ -369,7 +369,7 @@ pub fn Service(comptime Types: type) type {
                     try self.store().begin();
                     defer self.store().rollback();
                     try self.store().putRecord(occurrence.Occurrence, "occurrence", current, task_id, lost);
-                    try self.effectSchedule(a, &value, pending.value, .parked, .unavailable_environment, false);
+                    try self.effectSchedule(a, &value, pending.value, .parked, .unavailable_environment);
                     try self.persist(a, value, parent.value.revision, "work.recover-unknown", .preserve);
                 }
             }
@@ -1517,12 +1517,13 @@ pub fn Service(comptime Types: type) type {
 
         /// Inside the same transaction as its occurrence. Child accounting is
         /// visible in the task journal without changing the root continuation.
-        fn effectSchedule(self: *Self, a: std.mem.Allocator, parent: *state.Task, pending: occurrence.Occurrence, schedule: state.Schedule, blocker: ?state.Blocker, preserve_park: bool) !void {
+        fn effectSchedule(self: *Self, a: std.mem.Allocator, parent: *state.Task, pending: occurrence.Occurrence, schedule: state.Schedule, blocker: ?state.Blocker) !void {
             const id = pending.work orelse return;
             var work = try self.retainedWorkspaceWork(a, parent.id, id);
             defer work.deinit();
             if (!std.meta.eql(work.value.current_occurrence, pending.id)) return error.StaleOccurrence;
-            if (!preserve_park or work.value.schedule != .parked) work.value.schedule = schedule;
+            // Completion makes work eligible; it does not revoke a later park.
+            if (schedule != .queued or work.value.schedule != .parked) work.value.schedule = schedule;
             work.value.blocker = blocker;
             work.value.event_watermark = try std.math.add(u64, parent.event_high, 1);
             try self.store().putRecord(workspace.Work, "workspace_work", id, parent.id, work.value);
@@ -1544,7 +1545,7 @@ pub fn Service(comptime Types: type) type {
             parent.revision = try std.math.add(u64, parent.revision, 1);
             try self.store().begin();
             defer self.store().rollback();
-            try self.effectSchedule(a, &parent, pending, .parked, reason, false);
+            try self.effectSchedule(a, &parent, pending, .parked, reason);
             try self.persist(a, parent, initial.revision, "effect.blocked", .preserve);
             self.subjectRemove(.{ .task = parent.id, .work = pending.work });
             return .waiting;
@@ -1666,7 +1667,7 @@ pub fn Service(comptime Types: type) type {
             defer self.store().rollback();
             try self.store().createRecord(state.Attempt, "attempt", attempt, value.id, .{ .id = attempt, .task = value.id, .occurrence = pending.id, .request = try self.store().putObject(request_bytes), .profile = value.profile, .capability = try name(entry.declaration.identity), .operation = operation_kind, .inference = entry.declaration.inference, .prepared = if (prepared) |body| try self.store().putObject(body) else null });
             try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, value.id, pending);
-            try self.effectSchedule(a, &value, pending, .active, null, false);
+            try self.effectSchedule(a, &value, pending, .active, null);
             try self.persist(a, value, initial.revision, "effect.dispatch", .preserve);
             self.work = work;
             self.subjectRemove(.{ .task = value.id, .work = pending.work });
@@ -1725,7 +1726,7 @@ pub fn Service(comptime Types: type) type {
                 .disposition = .complete,
             });
             try self.store().putRecord(occurrence.Occurrence, "occurrence", work.occurrence, work.task, next);
-            try self.effectSchedule(a, &value, saved.value, .queued, null, true);
+            try self.effectSchedule(a, &value, saved.value, .queued, null);
             try self.persist(a, value, previous, "effect.capture", .preserve);
             try self.wakeOccurrence(a, value, saved.value);
         }
@@ -1788,7 +1789,7 @@ pub fn Service(comptime Types: type) type {
                 recovery.outcome = .{ .reply_settled = reply };
                 try self.store().putRecord(state.Reconciliation, "reconciliation", id, initial.id, recovery);
             }
-            try self.effectSchedule(a, &value, pending, .queued, null, true);
+            try self.effectSchedule(a, &value, pending, .queued, null);
             try self.persist(a, value, initial.revision, "effect.interpret", .preserve);
             try self.wakeOccurrence(a, value, pending);
             return .progressed;
@@ -1873,7 +1874,7 @@ pub fn Service(comptime Types: type) type {
             defer self.store().rollback();
             _ = try self.store().putObject(bound);
             try self.store().putRecord(occurrence.Occurrence, "occurrence", work.occurrence, work.task, acquired);
-            try self.effectSchedule(a, &value, saved.value, .queued, null, true);
+            try self.effectSchedule(a, &value, saved.value, .queued, null);
             try self.persist(a, value, previous, "effect.acquire", .preserve);
             try self.wakeOccurrence(a, value, saved.value);
         }
@@ -1899,7 +1900,7 @@ pub fn Service(comptime Types: type) type {
             defer self.store().rollback();
             try self.store().putRecord(occurrence.Occurrence, "occurrence", work.occurrence, work.task, lost);
             if (work.subject_work == null) try self.event(&value, .delivery_unknown, "{}");
-            try self.effectSchedule(a, &value, saved.value, .parked, .unavailable_environment, false);
+            try self.effectSchedule(a, &value, saved.value, .parked, .unavailable_environment);
             try self.persist(a, value, previous, "effect.unknown", .preserve);
             self.subjectRemove(.{ .task = work.task, .work = work.subject_work });
             try self.retire(a);
@@ -1929,7 +1930,7 @@ pub fn Service(comptime Types: type) type {
             defer self.store().rollback();
             try self.store().putRecord(occurrence.Occurrence, "occurrence", work.occurrence, work.task, next);
             if (work.subject_work == null) try self.event(&value, .blocked, "{\"delivery\":\"definitely_not_sent\"}");
-            try self.effectSchedule(a, &value, saved.value, if (cancelling) .queued else .parked, if (cancelling) null else .unavailable_environment, false);
+            try self.effectSchedule(a, &value, saved.value, if (cancelling) .queued else .parked, if (cancelling) null else .unavailable_environment);
             try self.persist(a, value, previous, "effect.not-sent", .preserve);
             if (cancelling) try self.wakeOccurrence(a, value, saved.value);
         }
@@ -3942,6 +3943,7 @@ pub fn Service(comptime Types: type) type {
                 .start => |start| blk: {
                     var work = try self.retainedWorkspaceWork(a, parent.id, admission.work);
                     defer work.deinit();
+                    if (!start.origin) try self.validateWorkspaceInitialInput(a, work.value);
                     break :blk try operation(workspace.StartRequest, a, .{ .task = parent.id, .program = work.value.program, .input = .{ .bytes = try self.store().object(a, work.value.input, null) }, .policy = start.policy, .origin = if (start.origin) work.value.input_value else null });
                 },
                 .control => |control| try operation(workspace.ControlRequest, a, .{ .task = parent.id, .work = admission.work, .execution = control.execution, .control = control.control, .command = control.command }),
@@ -3949,10 +3951,23 @@ pub fn Service(comptime Types: type) type {
                 .delegate => |selection| blk: {
                     const target = try wp.identity(selection.expected.work, .work);
                     if (!std.meta.eql(items[1].work, target) or std.meta.eql(items[0].work, target)) return error.InvalidArchive;
+                    var child = try self.retainedWorkspaceWork(a, parent.id, admission.work);
+                    defer child.deinit();
+                    try self.validateWorkspaceInitialInput(a, child.value);
                     break :blk try operation(workspace.DelegationRequest, a, .{ .task = parent.id, .command = selection });
                 },
             };
             if (!std.meta.eql(request, admission.request)) return error.InvalidArchive;
+        }
+
+        /// An originless admission derives this identity from the constructor;
+        /// equal schema/payload bytes do not authorize different ancestry.
+        fn validateWorkspaceInitialInput(self: *Self, a: std.mem.Allocator, work: workspace.Work) !void {
+            const ref = work.input_value orelse return error.InvalidArchive;
+            const input = try self.workspaceValueReference(a, work.task, try wp.reference(a, .value, ref.digest));
+            const provenance = try contracts.encodeOwned(workspace.Derivation, a, .{ .kind = .hypothesis, .sources = .{ .items = &.{} } });
+            defer a.free(provenance);
+            if (!std.meta.eql(input.provenance, state.Reference{ .digest = storage.digest(provenance), .bytes = provenance.len })) return error.InvalidArchive;
         }
 
         fn validateWorkspaceControl(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, item: state.WorkPublication, prior: ?state.WorkPublication, command: ?workspace.PublicationCommand, admission: ?WorkspaceAdmission) !void {
@@ -4076,7 +4091,7 @@ pub fn Service(comptime Types: type) type {
                         },
                         .not_sent => {
                             const cancelling = actual.cancellation != null and !actual.cancellation_applied;
-                            expected.schedule = if (cancelling) .queued else .parked;
+                            expected.schedule = if (cancelling and before.control.schedule != .parked) .queued else .parked;
                             expected.blocker = if (cancelling) null else .unavailable_environment;
                         },
                         else => return error.InvalidArchive,
