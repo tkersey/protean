@@ -27,7 +27,7 @@ source archive, a Zig package and a final executable have distinct identities.
 | Compiler policy | `kosmos.source-lower/1` |
 | Authored semantic source | `aa7a3b20f6dc0dd6d34efab9254109aeab4811249e83339984d373f0c0063571` |
 | Generic artifact SHA-256 | `e58be22ba27ad3586b906a4b73d0647fc5fafcb37c2fc859af3ebd327d389a48` (1,186,158 bytes) |
-| macOS executable SHA-256 | `1c70e7324258dd603c811780dd9c064f05301de1cceb309db0932f0657eddcd7` (11,295,928 bytes) |
+| macOS executable SHA-256 | `55e50e94bfca56773ad39dbb6f728a4cdada75d7ec7f899bb9b777524c76aa79` (11,295,928 bytes; final deployment qualification pending) |
 | WASM kernel SHA-256 | `f7d9ae50e4313fb7cd45f91aac6613315f8b45f8f0f5b849131d7f465b4afda4` |
 
 These are built artifacts, not published release assets. The native manifest
@@ -71,6 +71,12 @@ forged source/evidence or inventories, stale/missing recovery bindings, corrupte
 clone mappings/cursors/work lists, overlapping scalar maps and forged table sizes
 or order. Rehashing a mutant does not grant approval.
 
+A controlled source mutation changes guest add to xor before lowering and
+specialization. Both generic and regenerated specialized execution produce the
+new result on three dynamic inputs, with the guest image unchanged and a new
+specialization key. Extending the actual Horos opcode enum in an isolated source
+copy also causes the base profile's exhaustive switch to fail compilation.
+
 A bounded base pump can suspend inside clone or cleanup. That suspension is not
 a guest result. An outer capsule retains the exact evaluator checkpoint, command,
 input, realization and revisions; a guest-cut capsule carries canonical guest
@@ -84,6 +90,10 @@ durable cut; they do not invent a guest exception. Terminal drivers release thei
 private evaluator before large result publication and import validation retires
 its temporary evaluator before typed JSON validation. The existing 64 MiB owner
 budget and large-result reservations remain enforced.
+
+Specialization and independent validation allocate temporary proof arenas from
+the service allocator. Their cleanup releases completed compiler phases even
+when the caller uses a response arena whose individual frees are no-ops.
 
 The native loop flushes writable output before testing output-stall deadlines.
 Stopping a placement transport uses physical termination and reaping; it does not
@@ -116,12 +126,14 @@ cleanup. Local capsule-verifier tests alone do not establish these host laws.
 | Evidence | Result and scope |
 | --- | --- |
 | Native semantic/storage suites | Kosmos safe `check-native`: 293/293 tests on the optimized sources. |
-| Artifact, recovery and specialization suites | Kosmos safe `check-semantic-driver check-semantic-specialization`: 95/95 tests. |
+| Artifact, recovery and specialization suites | Kosmos safe `check-semantic-driver check-semantic-specialization`: 95/95 tests before the new source-mutation witness; the expanded specialization suite passes 47/47 tests. |
 | Workspace comparison | Nine generated cases, 328 boundaries: independent Horos source oracle, native/WASM byte equality and alternating checkpoint producers. Exact outer restore and duplicate-custody rejection also passed. |
 | Old tasks | The public Protean 5.0.0 macOS executable continued its old task after the new product was selected, preserving the original question and separate namespaces. Baseline executable SHA-256: `53471a265a095481ab9eaccf3cfc685cfa85ed243a6104db1d0e2ac166a4f935`. |
 | Native owner and workspace aggregate | 172/172 tests, 29/29 build steps; 352.87 seconds including compilation on macOS. |
-| Native executable | Pending final optimized run. Prior complete scenarios are development evidence only. |
-| Linux, independent package and optional browser qualification | Pending final integrated candidate results. |
+| Compiler scratch lifetime | Protean safe workspace suite: all 17 tests pass after releasing compiler/validator scratch between phases; maximum resident set decreased from 8.57 GB to 3.14 GB on local runs. The new 1 MiB request-budget witness is pending. |
+| Native executable | All three deployment fixtures and five runtime scenarios passed on the preceding `1c70e732` product in 544.32 seconds with two isolated runtime groups. Qualification of the compiler-scratch successor above is pending. |
+| Linux Kosmos and optional boundaries | [Run 38978873767](https://github.com/tkersey/kosmos/actions/runs/38978873767) passed on the exact runtime input `bd35d9c`: native owners, independent source package, source oracle, JS and browser checks. Subsequent Kosmos edits add only documentation and the source-mutation test. |
+| Protean authoring and independent package | macOS authoring/HTTPS checks passed 52/52 build steps. Independent source-package installation passed in 305.38 seconds before the compiler-scratch change. Current Linux integration remains pending. |
 | Serial reviews | Pending. |
 
 WASM common-domain tests explicitly provide sufficient working memory for the
@@ -142,6 +154,14 @@ On the current local sample, generic long-cleanup execution/projection improved
 from 606.166/529.813 ms to 207.957/113.325 ms. Frozen workspace binaries retained all
 17 tests and reduced total test execution from 433.119 to 221.426 seconds. These
 measurements exclude compilation and do not certify the ten-minute CI ceiling.
+
+Protean CI retains a ten-minute per-job and whole-workflow ceiling. Independent
+authoring, owner, workspace, correspondence and deployment work runs in separate
+lanes. The downstream script shares a nine-minute deadline across its subprocesses,
+allowing up to eight minutes for cold compilation. The full portable offline demo
+has a sixty-second subprocess allowance; short CLI commands retain thirty seconds.
+These scheduling bounds retain every semantic assertion and still require a
+passing current Linux run.
 
 The scalar chain measured 19.346 ms generic and 18.757 ms specialized execution.
 Including measured start cost leaves about 0.093 ms saved per new session;

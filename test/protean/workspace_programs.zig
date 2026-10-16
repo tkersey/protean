@@ -3471,7 +3471,12 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     defer a.free(document);
     var diagnostic: native.program_construction.Diagnostic = .{};
     const program = try service.workspaceBuild(scratch, "build", parent.receipt.task, document, &diagnostic);
-    const specialized = try service.workspaceSpecializeWithHooks(scratch, "specialize", parent.receipt.task, program.receipt.workspace.?, .{ .control = true, .storage = true });
+    // The request retains its receipt, not the compiler's completed proof
+    // arenas. The service allocator still checks every temporary allocation.
+    const specialization_request_memory = try a.alloc(u8, 1024 * 1024);
+    defer a.free(specialization_request_memory);
+    var specialization_request = std.heap.FixedBufferAllocator.init(specialization_request_memory);
+    const specialized = try service.workspaceSpecializeWithHooks(specialization_request.allocator(), "specialize", parent.receipt.task, program.receipt.workspace.?, .{ .control = true, .storage = true });
     const duplicate = try service.workspaceSpecializeWithHooks(scratch, "specialize", parent.receipt.task, program.receipt.workspace.?, .{ .control = true, .storage = true });
     try std.testing.expect(duplicate.replayed);
     try std.testing.expectEqualDeep(specialized.receipt.workspace, duplicate.receipt.workspace);

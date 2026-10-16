@@ -12,6 +12,9 @@ if (process.argv.length === 3 && process.argv[2] === '--help') { console.log(usa
 if (process.argv.length > 4 || process.argv.slice(2).some(arg => arg.startsWith('-'))) throw new Error(usage);
 
 const root = resolve(import.meta.dirname, '../..');
+// Reserve the final minute of the CI job for identity publication and cleanup.
+// Every subprocess shares this deadline, including cold independent compilation.
+const deadline = performance.now() + 540_000;
 const zig = realpathSync(process.env.PROTEAN_ZIG_EXE ?? execFileSync('which', ['zig'], {encoding: 'utf8'}).trim());
 const description = execFileSync(zig, ['env'], {encoding: 'utf8'});
 const library = realpathSync(JSON.parse(description.match(/^\s*\.lib_dir = (".*"),$/m)?.[1] ?? 'null'));
@@ -43,6 +46,8 @@ if (process.platform === 'darwin') {
 } else throw new Error('unsupported downstream qualification platform');
 
 function run(executable, args, cwd = scratch, {failure = false, diagnostic, timeout = 300000} = {}) {
+  timeout = Math.min(timeout, Math.floor(deadline - performance.now()));
+  assert(timeout > 0, 'independent installation exceeded its nine-minute budget');
   const command = [...prefix, ...(process.platform === 'linux' ? ['--chdir', cwd] : []), executable, ...args];
   const result = spawnSync(command[0], command.slice(1), {cwd, env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout});
   assert.equal(result.error, undefined, result.error?.message);
@@ -93,7 +98,7 @@ try {
   writeFileSync(join(consumer, 'build.zig.zon'), zon);
   const prefixDir = join(scratch, 'installed');
   const buildArgs = ['build', '-Doptimize=safe', `-Dkosmos-source=${join(inputs, 'kosmos')}`, `-Dsqlite-source=${join(inputs, 'sqlite')}`, '--prefix', prefixDir, '--prefix-exe-dir', 'executables', '--summary', 'all'];
-  run(zig, buildArgs, consumer);
+  run(zig, buildArgs, consumer, {timeout: 480_000});
   // The actual exported module graph must stop on either a changed package or
   // a changed native source override, before compiling/claiming new assets.
   for (const path of [join(consumer, 'zig-pkg', lock.boundary.package.zigHash, 'src/root.zig'), join(inputs, 'kosmos/src/root.zig')]) {

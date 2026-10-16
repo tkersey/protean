@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [authoring, workspace, native, runtime, downstream]
+        lane: [authoring, owners, workspace, correspondence, native, runtime, downstream]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -96,16 +96,18 @@ jobs:
             .protean-native/inputs "$(command -v zig)"
       - name: Run retained qualification
         run: |
+          set -o pipefail
           if [ "${{ matrix.lane }}" = authoring ]; then
-            # Keep the independent HTTPS probe with owner tests so its compiler
-            # does not compete with the packaged executable on the native lane.
-            zig build check-protean check-native-owner check-native-https \
+            zig build check-protean check-native-https \
               -Doptimize=safe --summary all
+          elif [ "${{ matrix.lane }}" = owners ]; then
+            # Owner/recovery fixtures retain checking allocators and all fault
+            # sweeps without competing with the independent authoring compilers.
+            zig build check-native-owner -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = workspace ]; then
-            # These independent owner fixtures have no shared runtime state
-            # with the authoring lane and retain their complete assertions.
-            zig build check-workspace-programs check-workspace-semantics \
-              -Doptimize=safe --summary all
+            zig build check-workspace-programs -Doptimize=safe --summary all
+          elif [ "${{ matrix.lane }}" = correspondence ]; then
+            zig build check-workspace-semantics -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = downstream ]; then
             # The downstream witness authenticates its own inputs and builds
             # independently, without competing with native tests on one runner.
@@ -120,20 +122,19 @@ jobs:
               # fixtures. The independent runtime lane runs the third fixture.
               zig build protean check-native-placement -Doptimize=safe --summary all \
                 --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
-                > "$RUNNER_TEMP/$lane-check.log" 2>&1 || result=$?
+                2>&1 | tee "$RUNNER_TEMP/$lane-check.log" || result=$?
             else
               zig build protean build-workspace-peer -Doptimize=safe --summary all \
                 --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
-                > "$RUNNER_TEMP/$lane-check.log" 2>&1 || result=$?
+                2>&1 | tee "$RUNNER_TEMP/$lane-check.log" || result=$?
               if [ "$result" -eq 0 ]; then
                 node test/protean/native_runtime.mjs \
                   "$RUNNER_TEMP/protean-qualification/executables/protean" \
                   "$RUNNER_TEMP/protean-qualification/protean/adaptive/application.json" '' \
                   "$RUNNER_TEMP/protean-qualification/verification/workspace-semantics" \
-                  >> "$RUNNER_TEMP/$lane-check.log" 2>&1 || result=$?
+                  2>&1 | tee -a "$RUNNER_TEMP/$lane-check.log" || result=$?
               fi
             fi
-            cat "$RUNNER_TEMP/$lane-check.log"
             test "$result" -eq 0
             node --input-type=module - "$RUNNER_TEMP/protean-qualification/executables/protean" "$RUNNER_TEMP/$lane-check.log" "$RUNNER_TEMP/$lane-identity.json" "$lane" <<'JS'
           import assert from 'node:assert/strict';

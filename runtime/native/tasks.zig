@@ -6219,7 +6219,9 @@ pub fn Service(comptime Types: type) type {
             const bound = admitted.content.value.guest orelse return error.InvalidRuntime;
             if (!std.mem.eql(u8, &bound, &guest.identity()) or !same(admitted.content.value.manifest.compiler.horos_package, @import("native_options").horos_identity)) return error.InvalidRuntime;
             if (self.checked_workspace_runtimes.get(digest) != self.store().integrity_epoch) {
-                try kosmos.RuntimeCompiler.validate(a, &admitted);
+                // Validation owns and releases its large temporary arenas.
+                // A caller's response arena may intentionally ignore free.
+                try kosmos.RuntimeCompiler.validate(self.allocator, &admitted);
                 try self.checked_workspace_runtimes.put(self.allocator, digest, self.store().integrity_epoch);
             }
             const retained = try admitted.clone();
@@ -6265,11 +6267,14 @@ pub fn Service(comptime Types: type) type {
             defer a.free(image);
             const guest = try data.program_image.Admitted.decode(a, image);
             defer guest.deinit();
-            const bytes = try kosmos.RuntimeCompiler.compile(a, .{ .guest = guest, .horos_package = @import("native_options").horos_identity, .hooks = .{ .control = hooks.control, .storage = hooks.storage } });
-            defer a.free(bytes);
-            var admitted = try kosmos.RuntimeArtifact.init(a, bytes, storage.digest(bytes));
+            // Compiler and proof scratch ends before the next phase. Keeping it
+            // in the caller's response arena retains completed work, including
+            // independently decoded proofs, until that entire request ends.
+            const bytes = try kosmos.RuntimeCompiler.compile(self.allocator, .{ .guest = guest, .horos_package = @import("native_options").horos_identity, .hooks = .{ .control = hooks.control, .storage = hooks.storage } });
+            defer self.allocator.free(bytes);
+            var admitted = try kosmos.RuntimeArtifact.init(self.allocator, bytes, storage.digest(bytes));
             defer admitted.deinit();
-            try kosmos.RuntimeCompiler.validate(a, &admitted);
+            try kosmos.RuntimeCompiler.validate(self.allocator, &admitted);
             try self.store().begin();
             defer self.store().rollback();
             const artifact = try self.store().putObject(bytes);
