@@ -11,7 +11,7 @@ const {Kernel, encodeInput, decodeRequest, encodeResult, decodeOutcome} = await 
 const kernel = wasmPath ? new Uint8Array(await readFile(wasmPath)) : null;
 const wasm = kernel ? await Kernel.create({bytes: kernel, expectedSha256: createHash('sha256').update(kernel).digest('hex')}) : null;
 const reports = [];
-for (const name of ['gcd', 'recursive', 'alternatives', 'mutable-alternatives', 'shallow', 'successor', 'attachments']) {
+for (const name of ['gcd', 'recursive', 'alternatives', 'mutable-alternatives', 'shallow', 'successor', 'attachments', 'mobility']) {
   const emitted = spawnSync(peer, [name], {maxBuffer: 16 << 20, encoding: 'utf8'});
   assert.equal(emitted.status, 0, emitted.stderr);
   const fixture = JSON.parse(emitted.stdout), image = Buffer.from(fixture.image, 'base64url');

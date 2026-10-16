@@ -83,11 +83,12 @@ fn Connection(comptime Types: type) type {
                 try json.put(a, &capabilities, "message_input", .{ .bool = messages });
                 try json.put(a, &capabilities, "task_execution", .{ .bool = self.client != null });
                 try json.put(a, &capabilities, "task_reconciliation", .{ .bool = self.client != null });
+                try json.put(a, &capabilities, "placement", .{ .bool = if (self.client) |client| client.service.profile.placement != null else false });
                 try json.put(a, &result, "capabilities", capabilities);
                 return protocol.response(a, request.id, result);
             }
             if (!self.initialized) return protocol.failure(a, request.id, .ProtocolState, "correct_request");
-            if (self.shutdown != null and (request.method == .@"task.submit" or request.method == .@"task.message" or request.method == .@"task.resume" or request.method == .@"task.respond" or request.method == .@"task.reconcile"))
+            if (self.shutdown != null and (request.method == .@"task.submit" or request.method == .@"task.message" or request.method == .@"task.resume" or request.method == .@"task.respond" or request.method == .@"task.reconcile" or request.method == .placement))
                 return protocol.failure(a, request.id, .StateConflict, failureRecovery(.StateConflict));
             switch (request.method) {
                 .shutdown => {
@@ -172,6 +173,8 @@ fn failureKind(err: anyerror) protocol.Kind {
     return switch (err) {
         error.Denied, error.UnknownTask, error.NotFound => .NotFound,
         error.OperationConflict => .OperationConflict,
+        error.CustodyNotLocal, error.CustodyNotRemote, error.StaleCustody, error.StaleController, error.UnsettledRemoteControl => .StateConflict,
+        error.DisclosureDenied, error.KeyOwnerMismatch, error.SignatureVerificationFailed => .Denied,
         error.StaleInteraction, error.QuestionMismatch, error.StaleOccurrence => .StaleInteraction,
         error.AnswerConflict => .AnswerConflict,
         error.CursorExpired => .CursorExpired,
@@ -191,6 +194,7 @@ pub fn run(comptime Types: type, comptime Environment: type, init: std.process.I
     const command = args.next() orelse "--help";
     if (std.mem.eql(u8, command, "--help")) {
         if (args.next() != null) return 64;
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Optional native placement: --placement-config FILE supplies a private signing-key file, pinned peers, disclosure policies and operator-selected transport commands. A model can select only configured peer names. Copying an archive grants no placement custody.\n\n");
         if (comptime @hasDecl(Environment, "configure")) {
             try std.Io.File.stdout().writeStreamingAll(init.io, "Configured application commands:\nvalidate --config FILE\nrun --config FILE --task TEXT --state-dir PATH --authorize-inference --credential-file FILE\nserve --transport stdio --config FILE --state-dir PATH [--authorize-inference --credential-file FILE]\nresume --state-dir PATH [--task-id ID] [--config FILE] [--authorize-inference --credential-file FILE]\nUse --profile-task ID with serve to restore that task's frozen profile and snapshot.\nAn explicit --trust-root DER_FILE selects a TLS trust root. Credentials are never discovered.\n--test-provider selects loopback HTTPS with a built-in non-secret token; it requires --trust-root and rejects --credential-file.\nStatus/result read saved task data without loading execution configuration.\nOffline mode uses embedded deterministic fixtures and requires --offline.\n\n");
         }
@@ -227,6 +231,7 @@ pub fn run(comptime Types: type, comptime Environment: type, init: std.process.I
     var state_path: ?[]const u8 = null;
     var config_path: ?[]const u8 = null;
     var credential_path: ?[]const u8 = null;
+    var placement_path: ?[]const u8 = null;
     var trust_root_path: ?[]const u8 = null;
     var profile_task: ?[]const u8 = null;
     var task_text: ?[]const u8 = null;
@@ -242,6 +247,8 @@ pub fn run(comptime Types: type, comptime Environment: type, init: std.process.I
             config_path = args.next() orelse return 64;
         } else if (std.mem.eql(u8, arg, "--credential-file") and credential_path == null) {
             credential_path = args.next() orelse return 64;
+        } else if (std.mem.eql(u8, arg, "--placement-config") and placement_path == null) {
+            placement_path = args.next() orelse return 64;
         } else if (std.mem.eql(u8, arg, "--trust-root") and trust_root_path == null) {
             trust_root_path = args.next() orelse return 64;
         } else if (std.mem.eql(u8, arg, "--profile-task") and serving and profile_task == null) {
@@ -347,6 +354,11 @@ pub fn run(comptime Types: type, comptime Environment: type, init: std.process.I
     // Task admission checks the same digest derived from its durable references.
     const resource_identity = try profile.resourceIdentity(a, application.image_identity);
     for (grants) |*grant| grant.resource_identity = resource_identity;
+    if (placement_path) |path| {
+        if (service == null) return 64;
+        profile.placement = try @import("placement_configuration.zig").load(profile_allocator, init.io, path);
+        service.?.profile.placement = profile.placement;
+    }
     if (task_text) |text| {
         if (comptime @hasDecl(Environment, "taskInput")) {
             const input = Environment.taskInput(profile_allocator, text) catch return 64;

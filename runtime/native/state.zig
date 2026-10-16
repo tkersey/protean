@@ -38,8 +38,23 @@ pub fn visitReferencesAs(comptime T: type, comptime Ref: type, value: T, collect
 pub const Outcome = enum { progressed, yielded, requested, completed, failed, cancelled };
 pub const Schedule = enum { queued, active, parked };
 pub const Status = enum { queued, running, waiting_input, parked, cancelling, blocked, unknown, completed, failed, cancelled };
-pub const RecordKind = enum { occurrence, question, message, artifact, capture, attempt, origin, reconciliation, workspace_program, workspace_work, workspace_value, workspace_view, workspace_port, workspace_port_reply, execution_route, workspace_wait, workspace_delegation, workspace_reply };
+pub const RecordKind = enum { occurrence, question, message, artifact, capture, attempt, origin, reconciliation, workspace_program, workspace_work, workspace_value, workspace_view, workspace_port, workspace_port_reply, execution_route, workspace_wait, workspace_delegation, workspace_reply, workspace_runtime, placement_custody, placement_control, placement_action, placement_move, placement_succession, root_operation };
 pub const Blocker = enum { missing_capability, denied, capacity, missing_artifact, incompatible_profile, unavailable_environment };
+
+/// Physical controller progress is independent of the last published guest cut.
+/// This row is replaced on suspension and cleared atomically with the next cut.
+pub const OuterOperation = struct {
+    capsule: Reference,
+    dependencies: contracts.Vector(Reference, null),
+    control: Reference,
+    guest_quantum: u64,
+};
+pub const RootOperation = struct {
+    id: Digest,
+    task: TaskId,
+    execution_revision: u64,
+    pending: ?OuterOperation,
+};
 
 /// Growing task metadata retains immutable object identities without a count quota.
 pub const Task = struct {
@@ -217,6 +232,12 @@ pub const WorkPublication = struct {
     work: Digest,
     execution_revision: u64,
     control_revision: u64,
+    runtime: ?Reference = null,
+    realization_revision: u64 = 0,
+    runtime_capsule: ?Reference = null,
+    runtime_trace: bool = false,
+    outer_operation: ?Reference = null,
+    checkpoint: ?Reference = null,
     observation: Digest,
     control: @import("workspace_state.zig").ControlObservation,
 };
@@ -371,7 +392,7 @@ pub fn visitWorkspaceReceipt(a: std.mem.Allocator, store: anytype, receipt: Rece
     const bytes = try store.object(a, ref, null);
     defer a.free(bytes);
     const w = @import("workspace_state.zig");
-    inline for (.{ .{ .program, w.ProgramArtifact }, .{ .work, w.WorkObservation }, .{ .value, w.ValueArtifact }, .{ .view, w.ViewArtifact } }) |entry| {
+    inline for (.{ .{ .program, w.ProgramArtifact }, .{ .work, w.WorkObservation }, .{ .value, w.ValueArtifact }, .{ .view, w.ViewArtifact }, .{ .runtime, w.Runtime } }) |entry| {
         if (kind == entry[0]) {
             const T = entry[1];
             var decoded = try contracts.decodeOwned(T, a, bytes);
@@ -382,12 +403,24 @@ pub fn visitWorkspaceReceipt(a: std.mem.Allocator, store: anytype, receipt: Rece
                 if (decoded.value.occurrence) |pending| {
                     if (!std.meta.eql(work.current_occurrence, pending.id) or !std.meta.eql(pending.task, work.task) or !std.meta.eql(pending.work, work.id)) return error.CorruptState;
                 } else if (work.current_occurrence != null) return error.CorruptState;
+            } else if (T == w.Runtime) {
+                if (!std.meta.eql(decoded.value.artifact.digest, id) or !std.meta.eql(decoded.value.task, receipt.task)) return error.CorruptState;
             } else if (!std.meta.eql(ref.digest, id)) return error.CorruptState;
             try collector.typed(T, ref, decoded.value);
             return;
         }
     }
     return error.CorruptState;
+}
+
+pub fn visitWorkspaceCommand(a: std.mem.Allocator, store: anytype, event: Event, collector: anytype) anyerror!void {
+    const ref = event.workspace_command orelse return;
+    const bytes = try store.object(a, ref, null);
+    defer a.free(bytes);
+    const T = @import("workspace_state.zig").PublicationCommand;
+    var decoded = try contracts.decodeOwned(T, a, bytes);
+    defer decoded.deinit();
+    try collector.typed(T, ref, decoded.value);
 }
 
 pub const Origin = struct {

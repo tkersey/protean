@@ -37,7 +37,7 @@ pub const Wait = struct {
     selection: @FieldType(contracts.workspace.Work, "wait"),
 };
 
-pub const Operation = enum { build, start, control, interact };
+pub const Operation = enum { build, start, control, interact, specialize, realize, request_cut, pump };
 pub const Command = union(enum) { advance, park, delegate: RunPolicy, cancel: state.Reason };
 
 pub const RunPolicy = contracts.workspace.Policy;
@@ -99,8 +99,26 @@ pub const Program = struct {
     description: ProgramArtifact,
 };
 
+/// Approved by this host's exact source/translation checker, scoped to the
+/// existing task and guest program. Content possession alone is insufficient.
+pub const Runtime = struct {
+    id: state.Digest,
+    task: state.TaskId,
+    program: state.Digest,
+    artifact: state.Reference,
+};
+
+/// One source-derived cut observation and the exact machine that produced it.
+pub const RuntimeTrace = struct {
+    output: @import("kosmos").RuntimeInstrumentation.Output,
+    capsule: state.Reference,
+    dependencies: contracts.Vector(state.Reference, null),
+};
+
+pub const OuterOperation = state.OuterOperation;
+
 pub const Work = struct {
-    version: u32 = 1,
+    version: u32 = 2,
     id: state.Digest,
     task: state.TaskId,
     origin_work: ?state.Digest = null,
@@ -108,6 +126,13 @@ pub const Work = struct {
     answer_value: ?state.Reference = null,
     instrument_occurrence: ?state.Digest = null,
     program: state.Digest,
+    runtime: ?state.Reference = null,
+    realization_revision: u64 = 0,
+    /// Read-only published capsule; execution still belongs to the work owner.
+    runtime_capsule: ?state.Reference = null,
+    runtime_trace: ?RuntimeTrace = null,
+    outer_operation: ?OuterOperation = null,
+    runtime_dependencies: contracts.Vector(state.Reference, null) = .{ .items = &.{} },
     input: state.Reference,
     input_value: ?state.Reference = null,
     checkpoint: state.Reference,
@@ -166,7 +191,11 @@ pub const ControlObservation = struct {
     }
 };
 
-pub const StartRequest = struct { method: state.Method = .workspace, kind: Operation = .start, task: state.TaskId, program: state.Digest, input: contracts.Bytes(null), policy: RunPolicy, origin: ?state.Reference };
+pub const StartRequest = struct { method: state.Method = .workspace, kind: Operation = .start, task: state.TaskId, program: state.Digest, input: contracts.Bytes(null), policy: RunPolicy, origin: ?state.Reference, runtime: ?state.Reference = null };
+pub const SpecializeRequest = struct { method: state.Method = .workspace, kind: Operation = .specialize, task: state.TaskId, program: state.Digest, hooks: contracts.workspace.RuntimeHooks = .{} };
+pub const RealizeRequest = struct { method: state.Method = .workspace, kind: Operation = .realize, task: state.TaskId, work: state.Digest, execution: u64, control: u64, realization: u64, runtime: ?state.Reference };
+pub const CutRequest = struct { method: state.Method = .workspace, kind: Operation = .request_cut, task: state.TaskId, command: @FieldType(contracts.workspace.Work, "request_cut") };
+pub const PumpRequest = struct { method: state.Method = .workspace, kind: Operation = .pump, task: state.TaskId, command: @FieldType(contracts.workspace.Work, "pump") };
 pub const ControlRequest = struct { method: state.Method = .workspace, kind: Operation = .control, task: state.TaskId, work: state.Digest, execution: u64, control: u64, command: Command };
 pub const InteractionRequest = struct { kind: Operation = .interact, task: state.TaskId, interaction: @FieldType(contracts.workspace.Work, "interact") };
 pub const DelegationRequest = struct { task: state.TaskId, command: @FieldType(contracts.workspace.Work, "delegate") };
@@ -177,8 +206,12 @@ pub const ContextRequest = struct { task: state.TaskId, command: contracts.works
 /// and identity already have immutable work custody, so do not copy them here.
 pub const PublicationCommand = union(enum) {
     build,
+    specialize: struct { program: state.Digest, hooks: contracts.workspace.RuntimeHooks = .{} },
+    realize: struct { execution: u64, control: u64, realization: u64, runtime: ?state.Reference, source: state.Reference, target: state.Reference, dependencies: contracts.Vector(state.Reference, null) },
+    request_cut: @FieldType(contracts.workspace.Work, "request_cut"),
+    pump: @FieldType(contracts.workspace.Work, "pump"),
     context: struct { command: contracts.workspace.Context, snapshot: ?state.Reference, input: ?state.Reference },
-    start: struct { policy: RunPolicy, origin: bool },
+    start: struct { policy: RunPolicy, origin: bool, runtime: ?state.Reference = null },
     control: struct { execution: u64, control: u64, command: Command },
     interact: @FieldType(contracts.workspace.Work, "interact"),
     delegate: @FieldType(contracts.workspace.Work, "delegate"),
@@ -206,6 +239,7 @@ pub const ReadObservation = union(enum) {
 pub const ReplyEvidence = union(enum) {
     read: ReadObservation,
     admitted: struct { replayed: bool },
+    placement: state.Reference,
     rejected: struct {
         stage: enum { authorization, preparation, operation },
         code: state.Name,
@@ -222,7 +256,7 @@ pub const ReplyObservation = struct {
 /// Epistemic origin is retained alongside canonical values. Equal payloads do
 /// not erase independent origins or convert a hypothesis into an acquisition.
 pub const Derivation = struct {
-    kind: enum { hypothesis, computation, acquisition, judgment },
+    kind: enum { hypothesis, computation, acquisition, judgment, inspection },
     sources: contracts.Vector(state.Reference, null),
     program: ?state.Reference = null,
     work: ?state.Digest = null,
@@ -230,6 +264,15 @@ pub const Derivation = struct {
     frozen_input: ?state.Reference = null,
     delegation: ?state.Reference = null,
     capture: ?state.Reference = null,
+    inspection: ?Inspection = null,
+};
+
+/// Ordinary immutable evidence. Nominal references in the retained snapshot
+/// keep its checkpoint and runtime dependencies inside archive closure.
+pub const Inspection = struct {
+    observation: WorkObservation,
+    nodes: contracts.workspace.NodeScope,
+    runtime_code: state.Reference,
 };
 
 pub const ModelBinding = struct {

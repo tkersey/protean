@@ -358,6 +358,7 @@ pub fn Client(comptime Types: type) type {
 
         fn dispatch(self: *Self, a: std.mem.Allocator, method: protocol.Method, params: json.Value) !json.Value {
             switch (method) {
+                .placement => return self.service.placementRequest(a, try values.fromJson(@import("placement.zig").Request, a, try field(params, "request"))),
                 .@"task.submit" => {
                     if (!std.mem.eql(u8, try json.text(try field(params, "application_id")), Types.application_id) or !std.mem.eql(u8, try json.text(try field(params, "profile_id")), self.service.profile.id)) return error.NotFound;
                     return self.admission(a, try self.service.submit(a, try operationId(params), try typed(Types.Input, a, try field(params, "input"), Types.input_schema_id)));

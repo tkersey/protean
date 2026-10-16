@@ -24,6 +24,8 @@ pub const configuration = @import("configuration.zig");
 pub const workspace = @import("workspace_state.zig");
 pub const workspace_instrument = @import("workspace_instrument.zig");
 pub const tasks = @import("tasks.zig");
+pub const placement = @import("placement.zig");
+pub const placement_configuration = @import("placement_configuration.zig");
 pub const client = @import("client.zig");
 pub const Namespace = @import("namespace.zig").Namespace;
 
@@ -37,6 +39,9 @@ test {
     _ = registry;
     _ = client;
     _ = discovery;
+    _ = placement;
+    _ = placement_configuration;
+    _ = @import("placement_stage.zig");
     _ = @import("occurrence.zig");
     _ = @import("store.zig");
     _ = @import("namespace.zig");

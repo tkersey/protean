@@ -31,10 +31,11 @@ pub fn main(init: std.process.Init) !void {
         const mutable = std.mem.eql(u8, mode, "mutable-alternatives");
         const alternative = mutable or std.mem.eql(u8, mode, "alternatives");
         const recursive = std.mem.eql(u8, mode, "recursive");
-        if (!attachments and !shallow and !successor and !alternative and !recursive and !std.mem.eql(u8, mode, "gcd")) return error.InvalidMode;
-        const module = if (attachments) try sources.distinctAttachments(&builder) else if (shallow or successor) try sources.retainedHandlers(&builder, shallow) else if (mutable) try sources.mutableAlternatives(&builder) else if (alternative) try sources.alternatives(&builder, true) else if (recursive) try sources.listLength(&builder) else try sources.gcd(&builder);
+        const mobility = std.mem.eql(u8, mode, "mobility");
+        if (!mobility and !attachments and !shallow and !successor and !alternative and !recursive and !std.mem.eql(u8, mode, "gcd")) return error.InvalidMode;
+        const module = if (mobility) try @import("runtime_mobility_source.zig").build(&builder) else if (attachments) try sources.distinctAttachments(&builder) else if (shallow or successor) try sources.retainedHandlers(&builder, shallow) else if (mutable) try sources.mutableAlternatives(&builder) else if (alternative) try sources.alternatives(&builder, true) else if (recursive) try sources.listLength(&builder) else try sources.gcd(&builder);
         const transport = try native.source_records.encode(a, module);
-        const exposures: []const c.workspace.Exposure = if (attachments or shallow or successor) &.{.{ .effect = 0, .class = .input }} else if (alternative) &.{ .{ .effect = 0, .class = .observation }, .{ .effect = 1, .class = .alternative } } else &.{};
+        const exposures: []const c.workspace.Exposure = if (mobility) &.{ .{ .effect = 0, .class = .observation }, .{ .effect = 1, .class = .input }, .{ .effect = 2, .class = .observation } } else if (attachments or shallow or successor) &.{.{ .effect = 0, .class = .input }} else if (alternative) &.{ .{ .effect = 0, .class = .observation }, .{ .effect = 1, .class = .alternative } } else &.{};
         var diagnostic: native.program_construction.Diagnostic = .{};
         const started = std.Io.Clock.awake.now(init.io);
         var built = native.program_construction.buildExposed(a, transport, exposures, null, &diagnostic) catch |err| {
@@ -54,13 +55,19 @@ pub fn main(init: std.process.Init) !void {
         _ = try compiled.encode(a, image);
         if (!std.mem.eql(u8, built.image, image)) return error.SourceImageMismatch;
         var document = native.json.object();
+        try native.json.put(a, &document, "transport", native.json.string(transport));
         const raw_source = try std.json.Stringify.valueAlloc(a, interpreted, .{ .emit_strings_as_arrays = true });
         try native.json.put(a, &document, "source", (try native.json.parse(a, raw_source, .{ .bytes = raw_source.len, .tokens = raw_source.len, .members = raw_source.len })).value);
         try native.json.put(a, &document, "image", try native.values.toJson(c.Bytes(null), a, .{ .bytes = image }));
         try native.json.put(a, &document, "compile_ns", try native.json.number(a, compile_ns));
         try native.json.put(a, &document, "compiler_arena_bytes", try native.json.number(a, arena.queryCapacity()));
         var cases: native.json.Value = .{ .array = .init(a) };
-        if (attachments) {
+        if (mobility) {
+            const Command = union(enum) { instantiate: u64, finish: void };
+            try cases.array.append(try example(a, try c.encodeOwned(struct { u64, u64 }, a, .{ 32, 100 }), &.{
+                try c.encodeOwned(void, a, {}), try c.encodeOwned(Command, a, .{ .instantiate = 10 }), try c.encodeOwned(Command, a, .{ .instantiate = 20 }), try c.encodeOwned(Command, a, .{ .finish = {} }), try c.encodeOwned(void, a, {}),
+            }, try c.encodeOwned(u64, a, 184)));
+        } else if (attachments) {
             try cases.array.append(try example(a, &.{}, &.{}, try c.encodeOwned(u64, a, 42)));
         } else if (shallow or successor) {
             const expected = if (shallow) try c.encodeOwned([8]u64, a, .{ 99, 99, 99, 99, 42, 42, 42, 42 }) else try c.encodeOwned([2]u64, a, .{ 42, 37 });

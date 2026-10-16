@@ -117,14 +117,14 @@ export function workspaceMetrics(archive, application) {
   for (const [kind, id, reference] of archive.manifest[6]) {
     if (kind === 9) {
       const work = decodeValue(archive.schemas.get('workspace_work'), archive.object(reference));
-      // Version 1 Work: the schema is carried in the archive; positions are this
+      // Version 2 Work: the schema is carried in the archive; positions are this
       // evaluator's explicit versioned interpretation, not imported authority.
-      assert.equal(work[0], 1);
-      assert.equal(work.length, 28);
-      stats.work_items++; stats.native_publication_nanoseconds += Number(work[27]);
-      stats.checkpoint_publications += Number(work[13]);
-      stats.current_checkpoint_bytes += Number(work[10][1]);
-      if (work[21].tag === 1) stats.result_bytes += Number(work[21].value[1]);
+      assert.equal(work[0], 2);
+      assert.equal(work.length, 34);
+      stats.work_items++; stats.native_publication_nanoseconds += Number(work[33]);
+      stats.checkpoint_publications += Number(work[19]);
+      stats.current_checkpoint_bytes += Number(work[16][1]);
+      if (work[27].tag === 1) stats.result_bytes += Number(work[27].value[1]);
     }
     if (kind !== 4) continue;
     const attempt = attempts.get(Buffer.from(id).toString('hex'));

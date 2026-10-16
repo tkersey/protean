@@ -451,6 +451,53 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
                 } else if (!same(&item.task, &value.id)) return error.CorruptState;
                 try collector.visit(T, item);
                 if (T == state.Reconciliation) try state.visitReconciliationHistory(a, store, item, &collector);
+                if (comptime same(kind, "placement_action")) {
+                    const p = @import("placement.zig");
+                    try p.verify(p.Action, a, item.action, item.action.value.owner);
+                    if (!std.meta.eql(item.id, item.action.value.id) or !std.meta.eql(item.task, item.action.value.task) or
+                        !std.meta.eql(item.id, p.operationId(item.action.value.owner, item.task, item.action.value.operation.bytes, .action))) return error.InvalidArchive;
+                }
+                if (comptime same(kind, "placement_control")) {
+                    const p = @import("placement.zig");
+                    try p.verify(p.Control, a, item.control, item.control.value.controller);
+                    if (!std.meta.eql(item.id, p.controlId(item.control.value)) or !std.meta.eql(item.task, item.control.value.subject.task)) return error.InvalidArchive;
+                    if (item.report) |report| {
+                        try p.verify(p.Report, a, report, item.control.value.executor);
+                        if (!std.meta.eql(report.value.control, try p.digest(p.Control, a, item.control.value)) or report.value.custody_epoch != item.control.value.custody_epoch) return error.InvalidArchive;
+                    }
+                }
+                if (comptime same(kind, "placement_move")) {
+                    const p = @import("placement.zig");
+                    const action_bytes = try store.object(a, item.action, null);
+                    defer a.free(action_bytes);
+                    var action = try contracts.decodeOwned(p.ActionRecord, a, action_bytes);
+                    defer action.deinit();
+                    try p.verify(p.Action, a, action.value.action, item.owner);
+                    if (action.value.action.value.request != .move or !std.meta.eql(item.task, action.value.task) or
+                        !std.meta.eql(item.id, p.operationId(item.owner, item.task, item.request.operation.bytes, .move))) return error.InvalidArchive;
+                    if (!std.meta.eql(item.subject.task, item.task)) return error.InvalidArchive;
+                    switch (item.request.subject) {
+                        .controller => if (item.subject.work != null) return error.InvalidArchive,
+                        .work => |ref| {
+                            if (ref.kind != .work or ref.id.bytes.len != 64 or item.subject.work == null) return error.InvalidArchive;
+                            var expected_work: state.Digest = undefined;
+                            _ = std.fmt.hexToBytes(&expected_work, ref.id.bytes) catch return error.InvalidArchive;
+                            if (!std.meta.eql(expected_work, item.subject.work.?)) return error.InvalidArchive;
+                        },
+                    }
+                    const wanted = try contracts.encodeOwned(@TypeOf(item.request), a, action.value.action.value.request.move);
+                    defer a.free(wanted);
+                    const actual = try contracts.encodeOwned(@TypeOf(item.request), a, item.request);
+                    defer a.free(actual);
+                    if (!same(wanted, actual)) return error.InvalidArchive;
+                }
+                if (comptime same(kind, "placement_succession")) {
+                    const p = @import("placement.zig");
+                    try p.verify(p.Offer, a, item.offer, item.offer.value.intent.source);
+                    try p.matchDecision(a, item.offer.value, item.decision);
+                    if (item.decision.value.verdict != .accepted or !std.meta.eql(item.id, item.decision.value.transfer) or
+                        !std.meta.eql(item.task, item.offer.value.intent.subject.task)) return error.InvalidArchive;
+                }
                 if (comptime same(kind, "occurrence")) {
                     switch (item.state) {
                         .dispatching => return error.UnsettledOccurrence,
@@ -552,6 +599,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         var decoded = try contracts.decodeOwned(state.Event, store.allocator, bytes);
         defer decoded.deinit();
         try collector.visit(state.Event, decoded.value);
+        try state.visitWorkspaceCommand(a, store, decoded.value, &collector);
         if (!same(&decoded.value.task, &value.id) or decoded.value.seq != row.seq or decoded.value.revision != row.revision) return error.CorruptState;
         try @import("schemas.zig").validateEventData(store.allocator, decoded.value.kind, decoded.value.data.bytes);
         const identity = try validateEventFacts(store, archive, value, &admissions, decoded.value);
@@ -648,6 +696,31 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         for (objects, archive.objects.items) |actual, declared| if (actual.bytes != declared.bytes or !same(&actual.digest, &declared.digest)) return error.InvalidArchive;
     }
     return .{ .task = task, .objects = objects, .current = current };
+}
+
+/// Current retained data for disclosure of a control message or observation.
+/// Unlike a movable execution archive, this may include an active occurrence:
+/// examining its bytes cannot activate it at another owner.
+pub fn disclosureClosure(a: std.mem.Allocator, store: *storage.Store, task: state.TaskId) ![]state.Reference {
+    try store.checkIntegrity();
+    var query = try store.database.prepare(
+        \\WITH RECURSIVE roots(digest) AS (
+        \\ SELECT body FROM tasks WHERE id=? UNION SELECT body FROM records WHERE task=?
+        \\ UNION SELECT body FROM events WHERE task=? UNION SELECT receipt FROM operations WHERE task=?
+        \\), reachable(digest) AS (
+        \\ SELECT digest FROM roots UNION SELECT d.child FROM dependencies d JOIN reachable r ON d.parent=r.digest
+        \\) SELECT o.digest,length(o.body) FROM objects o JOIN reachable r ON o.digest=r.digest ORDER BY o.digest
+    , &.{ .{ .blob = &task }, .{ .blob = &task }, .{ .blob = &task }, .{ .blob = &task } });
+    defer query.deinit();
+    var result: std.ArrayList(state.Reference) = .empty;
+    errdefer result.deinit(a);
+    while (try query.step() == .row) {
+        const id = try query.bytes(0);
+        const length = try query.integer(1);
+        if (id.len != 32 or length < 0) return error.CorruptState;
+        try result.append(a, .{ .digest = id[0..32].*, .bytes = @intCast(length) });
+    }
+    return result.toOwnedSlice(a);
 }
 
 pub fn write(a: std.mem.Allocator, io: std.Io, store: *storage.Store, task: state.TaskId, build: []const u8, path: []const u8, state_directory: c_int) !Exported {

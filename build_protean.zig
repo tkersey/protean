@@ -248,6 +248,24 @@ pub fn build(b: *std.Build) void {
         native_guard.has_side_effects = true;
         native_guard.expectExitCode(0);
         native_guard.step.dependOn(&source_guard.step);
+        // Compile the authenticated portable evaluator during the build. The
+        // deployed execution path only admits and runs these ordinary bytes.
+        const runtime_options = b.addOptions();
+        runtime_options.addOption([]const u8, "horos_package", @import("build.zig.zon").dependencies.horos.hash);
+        const runtime_emitter = b.addExecutable(.{ .name = "protean-runtime-artifact", .root_module = b.createModule(.{
+            .root_source_file = kosmos_source.path(b, "src/semantic_artifact.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "horos_data", .module = data }, .{ .name = "horos", .module = horos } },
+        }) });
+        runtime_emitter.root_module.addOptions("artifact_options", runtime_options);
+        runtime_emitter.step.dependOn(&native_guard.step);
+        const emit_runtime = b.addRunArtifact(runtime_emitter);
+        const runtime_files = b.addWriteFiles();
+        _ = runtime_files.addCopyFile(emit_runtime.captureStdOut(.{}), "semantic-core.kar");
+        const runtime_source = runtime_files.add("runtime.zig", "pub const bytes = @embedFile(\"semantic-core.kar\");\n");
+        kosmos.addImport("horos", horos);
+        kosmos.addImport("packaged_runtime", b.createModule(.{ .root_source_file = runtime_source, .target = b.graph.host, .optimize = optimize }));
         var native_graph = g;
         native_graph.gate = &native_guard.step;
         const native_admission_files = b.addWriteFiles();
@@ -290,6 +308,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{.{ .name = "horos_data", .module = native_data }},
         });
+        if (native_kosmos != kosmos) {
+            native_kosmos.addImport("horos", native_horos);
+            native_kosmos.addImport("packaged_runtime", b.createModule(.{ .root_source_file = runtime_source, .target = native_target, .optimize = optimize }));
+        }
         const public_environment = if (!default_musl and target.query.isNative()) host_environment else nativeEnvironment(b, native_target, optimize, native_kosmos, native_data, native_contracts, native_horos, native_protean, native_admission, sqlite_source, &native_guard.step);
         // Executed native checks use the delivered ABI when it runs on this
         // host. This also shares its C library instead of compiling a GNU-only
@@ -369,6 +391,17 @@ pub fn build(b: *std.Build) void {
             adaptive_peer.addFileArg2(adaptive_application, .{ .make_absolute = true });
             adaptive_peer.addFileArg2(adaptive_image, .{ .make_absolute = true });
             native_executable.dependOn(&adaptive_peer.step);
+            const placement_peer = nativeCheckCommand(b);
+            placement_peer.addArgs(&.{ "node", "test/protean/native_placement.mjs" });
+            placement_peer.addFileArg2(adaptive_product.executable.getEmittedBin(), .{ .make_absolute = true });
+            b.step("check-native-placement", "Qualify authenticated placement between native processes").dependOn(&placement_peer.step);
+            native_executable.dependOn(&placement_peer.step);
+            const runtime_peer = nativeCheckCommand(b);
+            runtime_peer.addArgs(&.{ "node", "test/protean/native_runtime.mjs" });
+            runtime_peer.addFileArg2(adaptive_product.executable.getEmittedBin(), .{ .make_absolute = true });
+            runtime_peer.addFileArg2(adaptive_application, .{ .make_absolute = true });
+            b.step("check-native-runtime", "Qualify scripted optional runtime choices through native inference and workspace boundaries").dependOn(&runtime_peer.step);
+            native_executable.dependOn(&runtime_peer.step);
             const retention_check = b.step("check-workspace-runtime-retention", "Resume an old task with its retained original executable after installing the new product");
             if (b.option(std.Build.LazyPath, "previous-runtime", "Retained previous Protean executable for namespace compatibility qualification")) |previous| {
                 const retention_run = b.addSystemCommand(&.{ "node", "test/protean/workspace_runtime_retention.mjs" });

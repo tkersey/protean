@@ -6,7 +6,7 @@ pub const tool_types = @import("tool_types.zig");
 pub const controls = protean.adaptive_controls;
 pub const model = protean.model_invocation;
 pub const application_id = "adaptive-agent";
-pub const application_version = "5.0.0";
+pub const application_version = "6.0.0";
 pub const input_schema_id = "adaptive-agent.input.v2";
 pub const output_schema_id = "adaptive-agent.output.v5";
 pub const failure_schema_id = "adaptive-agent.failure.v1";
@@ -16,7 +16,7 @@ pub const bindings_identity = "agent.adaptive.bindings.v2";
 pub const prepare_identity = "agent.adaptive.context.prepare.v2";
 pub const work_identity = "agent.adaptive.snapshot.work.v2";
 pub const inspect_identity = "agent.adaptive.snapshot.guards.v2";
-pub const workspace_identity = "agent.adaptive.workspace.v1";
+pub const workspace_identity = "agent.adaptive.workspace.v2";
 pub const question_identity = "agent.adaptive.question.v2";
 pub const Path = contracts.Utf8;
 pub const Summary = contracts.Utf8;
@@ -54,6 +54,7 @@ pub const Action = union(enum) {
     program: struct { command: contracts.workspace.Program },
     work: struct { command: contracts.workspace.Work },
     context: struct { command: contracts.workspace.Context },
+    placement: struct { command: contracts.workspace.Placement },
 };
 pub const P = model.Profile(Action, .{
     .{ .name = "list", .description = "List a page of the admitted immutable snapshot; next is the following page's after." },
@@ -64,9 +65,10 @@ pub const P = model.Profile(Action, .{
     .{ .name = "inference_set", .description = "Select an approved profile and effort for the next inference, using the current control revision.", .context_retention = .control },
     .{ .name = "skill_set", .description = "Load, deactivate or physically unload a pinned approved skill. Use an exact version and current control revision.", .context_retention = .control },
     .{ .name = "inspect", .description = "Locate guard-like lines in source-file evidence by its global evidence_index. Generated results are not source files. Requires an active invariant-review skill; it is not a correctness proof." },
-    .{ .name = "program", .description = "Describe the existing Horos source-record contract, construct a general program, or inspect its real interface. Construction never runs the algorithm or invokes another model." },
-    .{ .name = "work", .description = "Start, inspect, advance, delegate, wait for, interact with, collect, park, or cancel retained computation. A pending child input never restricts your next action." },
-    .{ .name = "context", .description = "Inspect and materialize authorized evidence, choose a view for future inference, or expand an omitted source range. Views preserve sources and coverage." },
+    .{ .name = "program", .description = "Describe the Horos source-record contract, construct or inspect a program, or specialize its runtime with optional control/storage observations. Description sections include runtimes and executable retention, trace-divergence and hypothetical-reply examples. Construction never runs the guest algorithm or invokes another model." },
+    .{ .name = "work", .description = "Start, inspect, advance, pump, delegate, wait for, interact with, collect, park, or cancel retained computation. Choose a runtime at start or switch realizations at an exact guest cut; request_cut retains progress inside an interpreter operation. A pending child input never restricts your next action." },
+    .{ .name = "context", .description = "Inspect and materialize authorized evidence, including a revision-bound guest state view; choose a view for future inference or expand an omitted source range. Views preserve sources and coverage and do not advance the inspected work." },
+    .{ .name = "placement", .description = "Inspect operator-admitted sites, assess or move a controller or work, and route commands or result pages to remote work. Retry or withdraw a transfer by operation name. A published transfer remains frozen until its peer signs acceptance or refusal. Movement and peer communication remain optional." },
 }, .{});
 pub fn ordinal(comptime name: []const u8) usize {
     return @backingInt(@field(std.meta.Tag(Action), name));

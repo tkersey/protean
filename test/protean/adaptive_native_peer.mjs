@@ -24,6 +24,8 @@ import {workspaceMetrics, armViolations, evaluateCase} from '../../tools/evaluat
   assert.equal(armViolations('ordinary', [...retained, ...completed]).length, retained.length + completed.length);
 }
 import {contract, assertAdaptiveCaptures} from './adaptive_capture_checks.mjs';
+import {runtimeTrace} from './runtime_trace.mjs';
+import {runtimePlacementFixture, placementRequest} from './runtime_placement_fixture.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const reference = bytes => [[...createHash('sha256').update(bytes).digest()], BigInt(bytes.length)];
@@ -197,6 +199,10 @@ export async function verifyAdaptiveNative({app, applicationPath}) {
   console.log(JSON.stringify({...results[0].value, ...results[1].value}));
 }
 
+export async function verifyAdaptiveRuntime({app, applicationPath, scenarios}) {
+  return verifyAdaptiveNativeSuite({app, applicationPath, suite: 'runtime', runtimeScenarios: scenarios});
+}
+
 // Keep native command timeouts and exit-status assertions without blocking the
 // other fixture's HTTPS server while an archive command is running.
 const execute = (command, args, options) => new Promise(resolve => {
@@ -229,10 +235,17 @@ export async function verifyEvaluationPreparation({configPath, directory}) {
   await assert.rejects(validatePreparedCase(unbound), /Expected answers changed/);
 }
 
-async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
+async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeScenarios}) {
   const assetBytes = await readFile(applicationPath), asset = JSON.parse(assetBytes);
   const fixture = JSON.parse(Buffer.from(asset.resources.find(row => row.id === 'adaptive-agent.offline-responses').base64url, 'base64url'));
   const root = join(app.data, 'controlled snapshot'), state = join(app.data, 'controlled state'), configPath = join(app.data, 'adaptive.json');
+  const placementArgs = [];
+  if (suite === 'runtime') {
+    const key = join(app.data, 'fixture-placement.key'), placement = join(app.data, 'fixture-placement.json');
+    await writeFile(key, '2a'.repeat(32), {mode: 0o600});
+    await writeFile(placement, JSON.stringify({signing_key_file: key, peers: []}), {mode: 0o600});
+    placementArgs.push('--placement-config', placement);
+  }
   await mkdir(join(root, 'src'), {recursive: true});
   const source = 'pub fn main() void {\n    // The offline fixture has no external effects.\n}\n';
   await writeFile(join(root, 'src/main.zig'), suite === 'workspace' ? 'changed after admission\n' : source);
@@ -262,7 +275,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
           const marker = 'Authorized typed Table inputs: ', text = strings(body.input).find(text => text.includes(marker));
           assert(text); subject.inputs = JSON.parse(text.slice(text.indexOf(marker) + marker.length));
           assert.equal(subject.inputs.length, 2);
-          subject.trace = workspaceTrace(subject, scenario);
+          subject.trace = scenario.startsWith('tools-runtime-') ? runtimeTrace(subject, scenario) : workspaceTrace(subject, scenario);
         } else {
           const result = body.input.find(item => item.type === 'function_call_output' && item.call_id === `tools-${index - 1}`);
           assert(result, `missing paired output ${index - 1}`);
@@ -272,6 +285,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
         const next = subject.trace.next(previous);
         assert(!next.done, 'the recorded scenario must finish through a real controller action');
         const call = next.value;
+        if (suite === 'runtime') console.error(JSON.stringify({runtime_fixture: scenario, model_call: index, action: call[0], command: call[1]?.command?.tag ?? null}));
         (subject.actions ??= []).push(JSON.parse(JSON.stringify({name: call[0], arguments: call[1]})));
         response.writeHead(200, {'content-type': 'application/json'});
         response.end(JSON.stringify({id: `tools-response-${index}`, status: 'completed', error: null, output: [{type: 'function_call', status: 'completed', call_id: `tools-${index}`, name: call[0], arguments: JSON.stringify(call[1])}]}));
@@ -295,7 +309,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
       assert.equal(body.model, index >= 6 && index <= 8 ? 'fixture-model-b' : 'fixture-model-a');
       assert.equal(body.reasoning.effort, index >= 5 && index <= 8 ? 'high' : 'medium');
       assert.deepEqual(body.reasoning, {mode: 'standard', context: 'auto', effort: body.reasoning.effort});
-      assert.equal(body.tools.length, 10); assert(!body.tools.some(tool => tool.name === 'inspect'));
+      assert.equal(body.tools.length, 11); assert(body.tools.some(tool => tool.name === 'placement')); assert(!body.tools.some(tool => tool.name === 'inspect'));
       for (const key of ['store', 'stream', 'background', 'parallel_tool_calls']) assert.equal(body[key], false);
       assert.equal(body.truncation, 'disabled'); assert(!Object.hasOwn(body, 'previous_response_id') && !Object.hasOwn(body, 'conversation'));
       assert.equal(body.tool_choice.tools.some(tool => tool.name === 'inspect'), index >= 3 && index <= 6);
@@ -320,14 +334,14 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
   const configuration = adaptive => ({schema: 'adaptive-agent.configuration.v3', adaptive, tools: null});
   await writeFile(configPath, JSON.stringify(configuration(config)));
   const invoke = async (...args) => {
-    const result = await execute(app.command, [...args, '--test-provider', '--trust-root', trust], {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024});
+    const result = await execute(app.command, [...args, '--test-provider', '--trust-root', trust, ...placementArgs], {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024});
     assert.equal(result.status, 0, result.error ?? `${result.stderr}\n${result.stdout}`); return JSON.parse(result.stdout);
   };
   let client;
   const launch = async (extra, selectedState = state, versions = ['agent-host/2.1']) => {
-    client = new ProteanClient(app.command, ['--state-dir', selectedState, '--authorize-inference', '--test-provider', '--trust-root', trust, ...extra], {cwd: app.data, env: {PATH: '/nonexistent'}});
+    client = new ProteanClient(app.command, ['--state-dir', selectedState, '--authorize-inference', '--test-provider', '--trust-root', trust, ...placementArgs, ...extra], {cwd: app.data, env: {PATH: '/nonexistent'}});
     const initialized = await client.initialize(versions);
-    assert.equal(initialized.server_info.version, '5.0.0');
+    assert.equal(initialized.server_info.version, '6.0.0');
     assert.equal(initialized.protocol_version, 'agent-host/2.1');
     assert.equal(Object.hasOwn(initialized.capabilities, 'task_reconciliation'), true);
     return client;
@@ -691,16 +705,24 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
     const reverseRecipe = linkRecipe([['filter', 'selected'], ['swap'], ['map', 'join'], ['filter', 'orphan'], ['group']]);
     let retainedProgram, retainedState;
     const toolRuns = [];
-    for (const name of ['tools-reuse', 'tools-reverse', 'tools-disabled', 'tools-foreign']) {
+    const scenarios = suite === 'runtime' ? (runtimeScenarios ?? ['tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe', 'tools-runtime-placement']) : ['tools-reuse', 'tools-reverse', 'tools-disabled', 'tools-foreign'];
+    for (const name of scenarios) {
+      if (suite === 'runtime') console.error(JSON.stringify({runtime_fixture: name, stage: 'launch'}));
       scenario = name; alternateIndex = 0;
       toolSubject = {recipe: name === 'tools-reverse' ? reverseRecipe : coverageRecipe, foreign: retainedProgram};
       let selectedState = name === 'tools-foreign' ? retainedState : join(app.data, name);
       const selectedConfig = join(app.data, `${name}.json`);
-      await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: name === 'tools-reuse' ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, inputs}}));
+      const selectedInputs = name === 'tools-runtime-placement' ? [
+        {...inputs[0], rows: Array.from({length: 16}, (_, i) => row(2000 + i, 10, 100, 1))}, inputs[1],
+      ] : inputs;
+      await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: name === 'tools-reuse' ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, inputs: selectedInputs}}));
+      const placement = name === 'tools-runtime-placement' ? await runtimePlacementFixture(app, selectedConfig, trust, selectedState) : null;
+      if (placement) placementArgs[1] = placement.source.config;
       await launch(['--config', selectedConfig], selectedState);
       const description = await client.call('describe');
       const task = await client.call('task.submit', {client_operation_id: name, application_id: 'adaptive-agent', profile_id: description.profile.id,
         input: {schema_id: 'adaptive-agent.input.v2', value: {task: name === 'tools-reverse' ? 'Group source records unsupported by the selected lock scope.' : 'Audit selected lock records against source records, retaining all classifications and reuse the tool on the second input.'}}});
+      if (suite === 'runtime') console.error(JSON.stringify({runtime_fixture: name, stage: 'submitted'}));
       if (name === 'tools-reuse') {
         const waiting = await until(async () => {
           const value = await client.call('task.status', {task_id: task.task_id});
@@ -744,7 +766,27 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
           question_revision: waiting.question.question_revision, request_digest: waiting.question.request_digest,
           answer: {schema_id: waiting.question.answer_schema_id, value: {message: 'Continue on the second admitted input with the same generated program.'}}});
       }
-      const result = await until(() => client.call('task.result', {task_id: task.task_id}), value => value.ready, 2000);
+      const result = await until(async () => {
+        if (placement && toolSubject.controllerMove && !toolSubject.controllerMoved) {
+          const subject = {task: [...Buffer.from(task.task_id, 'hex')], work: null};
+          const custody = await placementRequest(client, 'status', subject);
+          if (custody?.phase === 'away') {
+            assert.deepEqual(custody.owner, placement.successor.identity.site);
+            await assert.rejects(client.call('task.resume', {client_operation_id: 'stale-controller-resume', task_id: task.task_id, expected_revision: custody.intent.cut.control}), error => error.data?.kind === 'StateConflict');
+            assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
+            selectedState = placement.successor.state;
+            placementArgs[1] = placement.successor.config;
+            await launch(['--config', selectedConfig], selectedState);
+            const accepted = await placementRequest(client, 'status', subject);
+            assert.equal(accepted.phase, 'local');
+            assert.equal(accepted.epoch, '1');
+            const cut = await placementRequest(client, 'cut', subject);
+            toolSubject.controllerMoved = true;
+            await client.call('task.resume', {client_operation_id: 'resume-moved-controller', task_id: task.task_id, expected_revision: cut.control});
+          }
+        }
+        return client.call('task.result', {task_id: task.task_id});
+      }, value => value.ready, 2000);
       if (providerFailure) throw providerFailure;
       if (result.outcome.value_ref) {
         assert.equal(result.outcome.value_ref.schema_id, 'adaptive-agent.output.v5');
@@ -758,6 +800,23 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
         for (const [n, index] of toolSubject.resultIndices.entries()) {
           assert.equal(result.outcome.value.evidence[index].tag, 'workspace');
           assert.deepEqual(result.outcome.value.evidence[index].value, toolSubject.results[n]);
+        }
+      } else if (name.startsWith('tools-runtime-')) {
+        assert.equal(result.outcome.value.result.tag, 'no_result');
+        assert.equal(result.outcome.value.programs.length, name === 'tools-runtime-ordinary' ? 0 : 1);
+        if (name === 'tools-runtime-ordinary') assert(!toolSubject.actions.some(action => ['program', 'work', 'context', 'placement'].includes(action.name)));
+        if (name === 'tools-runtime-specialized') {
+          assert.equal(toolSubject.results.length, 3);
+          assert.equal(toolSubject.actions.filter(action => action.name === 'program' && action.arguments.command.tag === 'specialize').length, 1);
+        }
+        if (name === 'tools-runtime-placement') {
+          assert(toolSubject.outer && toolSubject.controllerMoved);
+          assert.equal(toolSubject.results.length, 1);
+          assert.equal(hash(await readFile(app.executable)), placement.binary);
+        }
+        if (name === 'tools-runtime-reframe') {
+          assert(toolSubject.view);
+          assert.deepEqual(toolSubject.actions.slice(-2).map(action => action.name), ['read', 'stop']);
         }
       } else {
         assert.equal(result.outcome.value.result.tag, 'no_result');
@@ -776,6 +835,9 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
       }
       toolRuns.push({scenario: name, provider_calls: alternateIndex, disposition: result.outcome.value.result.tag});
       assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
+      if (name.startsWith('tools-runtime-')) {
+        await invoke('export-checkpoint', '--state-dir', selectedState, '--task-id', task.task_id, '--output', join(app.data, `${name}.bundle`));
+      }
       if (name === 'tools-reuse') {
         const measured = join(app.data, 'workspace-accounting.bundle');
         const exportStarted = performance.now();

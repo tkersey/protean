@@ -133,6 +133,7 @@ pub const Method = enum {
     @"artifact.read",
     shutdown,
     @"task.reconcile",
+    placement,
 };
 
 pub const Fields = struct { required: []const []const u8, optional: []const []const u8 = &.{} };
@@ -141,6 +142,7 @@ pub fn fields(method: Method) Fields {
         .initialize => .{ .required = &.{"protocol_versions"}, .optional = &.{"client_info"} },
         .describe => .{ .required = &.{}, .optional = &.{ "application_id", "cursor", "limit" } },
         .ping => .{ .required = &.{} },
+        .placement => .{ .required = &.{"request"} },
         .@"task.submit" => .{ .required = &.{ "client_operation_id", "application_id", "profile_id", "input" } },
         .@"task.message" => .{ .required = &.{ "client_operation_id", "task_id", "message" } },
         .@"task.respond" => .{ .required = &.{ "client_operation_id", "task_id", "question_id", "question_revision", "request_digest", "answer" } },
