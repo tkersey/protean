@@ -3,10 +3,13 @@ const protean = @import("protean");
 const native = @import("protean_native");
 const contracts = protean.contracts;
 const model = protean.model_invocation;
-const CurrentProfile = model.Profile(union(enum) { finish: struct { value: u64 }, inspect: struct { value: u64 } }, .{
-    .{ .name = "finish", .description = "Finish with evidence." },
-    .{ .name = "inspect", .description = "Inspect an invariant." },
-}, .{ .model_id_bytes = 128, .temperature_bytes = 32, .maximum_messages = 4, .message_bytes = 1024, .maximum_output_items = 8, .call_id_bytes = 64, .arguments_json_bytes = 256, .result_text_bytes = 1024, .provider_response_bytes = 4096, .maximum_adaptive_reply_bytes = 1024 });
+const CurrentProfile = TestProfile(false);
+fn TestProfile(comptime control_answer: bool) type {
+    return model.Profile(union(enum) { finish: struct { value: u64 }, inspect: struct { value: u64 } }, .{
+        .{ .name = "finish", .description = "Finish with evidence." },
+        .{ .name = "inspect", .description = "Inspect an invariant.", .context_retention = if (control_answer) .control else .research },
+    }, .{ .model_id_bytes = 128, .temperature_bytes = 32, .maximum_messages = 4, .message_bytes = 1024, .maximum_output_items = 8, .call_id_bytes = 64, .arguments_json_bytes = 256, .result_text_bytes = 1024, .provider_response_bytes = 4096, .maximum_adaptive_reply_bytes = 1024 });
+}
 const Ref = model.ArtifactReference;
 const Objects = struct {
     items: std.ArrayList([]const u8) = .empty,
@@ -34,8 +37,11 @@ fn digest(bytes: []const u8) [32]u8 {
     return out;
 }
 test "chunked adaptive projection preserves history and appends without prefixes" {
-    try Fixture(CurrentProfile).preservation();
+    try Fixture(CurrentProfile).preservation(false);
     try Fixture(CurrentProfile).scaling(false);
+}
+test "research replacement preserves authored human-answer call pairs" {
+    try Fixture(TestProfile(true)).preservation(true);
 }
 test "owned adaptive projection reuses checked ancestry in one integrity epoch" {
     try Fixture(CurrentProfile).scaling(true);
@@ -108,7 +114,36 @@ fn Fixture(comptime P: type) type {
             request.results.items = settled;
         }
 
-        pub fn preservation() !void {
+        fn rejectedHistory(ctx: native.registry.ProjectionContext, objects: *Objects, original: P.AdaptiveRequest) !void {
+            const a = ctx.allocator;
+            var request = original;
+            for ([_][]const u8{ "old-rejected", "recent-rejected" }, 0..) |id, index| {
+                if (index != 0) try advance(ctx, objects, &request, "between-rejections", "OLD-REASONING");
+                const body = try std.fmt.allocPrint(a, "{{\"status\":\"completed\",\"error\":null,\"output\":[{{\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"{s}\",\"name\":\"bogus\",\"arguments\":\"{{}}\"}}]}}", .{id});
+                const result = try capture(ctx, objects, request, body);
+                try std.testing.expectEqual(.complete, result.replay_status);
+                try std.testing.expectEqual(.invalid, std.meta.activeTag(result.result.output.items.items[0].function_call.decoded_action));
+                request.plan.prior = result.replay;
+                request.plan.watermark = result.replay.?.watermark;
+                const settled = try a.alloc(P.ToolResult, 1);
+                settled[0] = .{ .call_id = .{ .bytes = id }, .output = .{ .bytes = "Rejected undeclared action." } };
+                request.results.items = settled;
+            }
+            request.plan.epoch += 1;
+            request.plan.reason = .view_change;
+            request.plan.research = .{ .view = .{ .kind = .view, .id = .{ .bytes = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef" } }, .selected_at = request.plan.watermark };
+            const selected = try native.json.canonical(a, try http(a, try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, request))));
+            try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, selected, "old-rejected"));
+            try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, selected, "recent-rejected"));
+            try std.testing.expect(std.mem.indexOf(u8, selected, "Rejected undeclared action.") != null);
+            var unpaired = request;
+            unpaired.results.items = &.{};
+            try std.testing.expectError(error.MissingCallResult, Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, unpaired)));
+            try advance(ctx, objects, &request, "after-rejected-view", "CURRENT-REASONING");
+            _ = try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, request));
+        }
+
+        pub fn preservation(comptime clarification_only: bool) !void {
             var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
             defer arena.deinit();
             const a = arena.allocator();
@@ -266,7 +301,72 @@ fn Fixture(comptime P: type) type {
             request.plan.prior = second.replay;
             request.plan.watermark = second.replay.?.watermark;
             request.results.items = &.{.{ .call_id = .{ .bytes = "call-2" }, .output = .{ .bytes = "Observed invariant retained." } }};
+            if (!clarification_only) try rejectedHistory(ctx, &objects, request);
+            if (clarification_only) {
+                // Retention follows the authored role, independently of the
+                // provider function's spelling. The application marks ask this way.
+                request.results.items = &.{.{ .call_id = .{ .bytes = "call-2" }, .output = .{ .bytes = "HUMAN-CLARIFICATION: include archived evidence." } }};
+                try advance(ctx, &objects, &request, "later-research", "OLD-REASONING");
+                try advance(ctx, &objects, &request, "select-view", "NEW-REASONING");
+                request.plan.epoch += 1;
+                request.plan.reason = .view_change;
+                request.plan.research = .{ .view = .{ .kind = .view, .id = .{ .bytes = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef" } }, .selected_at = request.plan.watermark };
+                const selected = try native.json.canonical(a, try http(a, try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, request))));
+                try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, selected, "call-2"));
+                try std.testing.expect(std.mem.indexOf(u8, selected, "HUMAN-CLARIFICATION") != null);
+                try std.testing.expect(std.mem.indexOf(u8, selected, "later-research") == null);
+                try std.testing.expect(std.mem.indexOf(u8, selected, "select-view") != null);
+                try std.testing.expect(std.mem.indexOf(u8, selected, "OLD-REASONING") == null);
+                return;
+            }
             try skillOriginRejections(ctx, &objects, request);
+            // CTX-05/06/07: an explicit view replaces research exchanges while
+            // preserving policy, user amendments, current tools, and skills.
+            var viewing = request;
+            viewing.plan.epoch += 1;
+            viewing.plan.reason = .view_change;
+            viewing.plan.research = .{ .view = .{ .kind = .view, .id = .{ .bytes = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef" } }, .selected_at = viewing.plan.watermark };
+            viewing.results.items = &.{.{ .call_id = .{ .bytes = "call-2" }, .output = .{ .bytes = "SELECTED-VIEW: partial evidence; expand retained sources for omitted items." } }};
+            viewing.invocation.messages.items = &.{.{ .role = .user, .content = .{ .bytes = "LATEST-USER-AMENDMENT: include the rare exception." } }};
+            const view_prepared = try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, viewing));
+            const view_http = try http(a, view_prepared);
+            const view_text = try native.json.canonical(a, view_http);
+            try std.testing.expect(std.mem.indexOf(u8, view_text, "call-1") == null);
+            try std.testing.expect(std.mem.indexOf(u8, view_text, "call-2") != null);
+            try std.testing.expect(std.mem.indexOf(u8, view_text, "OPAQUE-") == null);
+            try std.testing.expect(std.mem.indexOf(u8, view_text, "SELECTED-VIEW") != null);
+            try std.testing.expect(std.mem.indexOf(u8, view_text, "LATEST-USER-AMENDMENT") != null);
+            try std.testing.expect(std.mem.indexOf(u8, view_text, "Use actual evidence and approved tools.") != null);
+            try std.testing.expect(std.mem.indexOf(u8, view_text, "Inspect the snapshot.") != null);
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, view_text, skill_body));
+            try std.testing.expectEqual(@as(usize, 2), view_http.object.get("tool_choice").?.object.get("tools").?.array.items.len);
+            var bad_view = viewing;
+            bad_view.plan.epoch = request.plan.epoch;
+            try std.testing.expectError(error.InvalidContext, Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, bad_view)));
+            bad_view = viewing;
+            bad_view.plan.research.?.selected_at -= 1;
+            try std.testing.expectError(error.InvalidContext, Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, bad_view)));
+            try advance(ctx, &objects, &viewing, "after-view", "OPAQUE-AFTER-VIEW");
+            viewing.invocation.messages.items = &.{};
+            viewing.plan.epoch += 1;
+            viewing.plan.reason = .model_change;
+            viewing.plan.eviction_generation += 1;
+            viewing.plan.skills.items = &.{};
+            viewing.materialized = .{ true, false };
+            viewing.offered = .{ true, false };
+            viewing.invocation.tools.items = P.allDeclarations().items[0..1];
+            viewing.invocation.model = other.model;
+            viewing.invocation.parameters.reasoning.?.effort = .medium;
+            viewing.selection = .{ .profile_id = other.id, .profile_digest = try Admission.profileDigest(a, other), .effective_effort = .medium, .control_revision = 2 };
+            const changed_view = try native.json.canonical(a, try http(a, try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, viewing))));
+            try std.testing.expect(std.mem.indexOf(u8, changed_view, "SELECTED-VIEW") != null);
+            try std.testing.expect(std.mem.indexOf(u8, changed_view, "LATEST-USER-AMENDMENT") != null);
+            try std.testing.expect(std.mem.indexOf(u8, changed_view, "OPAQUE-AFTER-VIEW") == null);
+            try std.testing.expect(std.mem.indexOf(u8, changed_view, skill_body) == null);
+            var frozen_predecessor = try contracts.decodeOwned(Adapter.Prepared, a, loaded_bytes);
+            defer frozen_predecessor.deinit();
+            try std.testing.expectEqualSlices(u8, loaded_bytes, try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, frozen_predecessor.value.request)));
+
             loaded[0].active = false;
             request.offered = .{ true, false };
             request.selection.control_revision = 2;

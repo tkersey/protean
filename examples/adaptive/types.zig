@@ -6,9 +6,9 @@ pub const tool_types = @import("tool_types.zig");
 pub const controls = protean.adaptive_controls;
 pub const model = protean.model_invocation;
 pub const application_id = "adaptive-agent";
-pub const application_version = "4.0.0";
+pub const application_version = "5.0.0";
 pub const input_schema_id = "adaptive-agent.input.v2";
-pub const output_schema_id = "adaptive-agent.output.v4";
+pub const output_schema_id = "adaptive-agent.output.v5";
 pub const failure_schema_id = "adaptive-agent.failure.v1";
 pub const message_schema_id = "adaptive-agent.message.v2";
 pub const answer_schema_id = "adaptive-agent.answer.v2";
@@ -16,8 +16,7 @@ pub const bindings_identity = "agent.adaptive.bindings.v2";
 pub const prepare_identity = "agent.adaptive.context.prepare.v2";
 pub const work_identity = "agent.adaptive.snapshot.work.v2";
 pub const inspect_identity = "agent.adaptive.snapshot.guards.v2";
-pub const tool_build_identity = "agent.adaptive.tool.build.v2";
-pub const tool_run_identity = "agent.adaptive.tool.run.v2";
+pub const workspace_identity = "agent.adaptive.workspace.v1";
 pub const question_identity = "agent.adaptive.question.v2";
 pub const Path = contracts.Utf8;
 pub const Summary = contracts.Utf8;
@@ -52,20 +51,22 @@ pub const Action = union(enum) {
     inference_set: controls.InferenceSet,
     skill_set: controls.SkillSet,
     inspect: struct { evidence_index: u64 },
-    tool_build: struct { proposal_json: contracts.Utf8 },
-    tool_run: struct { tool_ref: contracts.Text(96), input_ref: contracts.Text(96) },
+    program: struct { command: contracts.workspace.Program },
+    work: struct { command: contracts.workspace.Work },
+    context: struct { command: contracts.workspace.Context },
 };
 pub const P = model.Profile(Action, .{
     .{ .name = "list", .description = "List a page of the admitted immutable snapshot; next is the following page's after." },
     .{ .name = "read", .description = "Read at most 4096 UTF-8 bytes. Successful reads append zero-indexed evidence." },
-    .{ .name = "ask", .description = "Ask for clarification needed for the current task." },
+    .{ .name = "ask", .description = "Ask for clarification needed for the current task.", .context_retention = .control },
     .{ .name = "report", .description = "Finish with claims citing acquired evidence_indices, reasoning, and limitations. Observations and inferences require citations; inferences and hypotheses require reasoning." },
     .{ .name = "stop", .description = "Stop honestly if the task cannot be supported by the admitted evidence." },
-    .{ .name = "inference_set", .description = "Select an approved profile and effort for the next inference, using the current control revision." },
-    .{ .name = "skill_set", .description = "Load, deactivate or physically unload a pinned approved skill. Use an exact version and current control revision." },
+    .{ .name = "inference_set", .description = "Select an approved profile and effort for the next inference, using the current control revision.", .context_retention = .control },
+    .{ .name = "skill_set", .description = "Load, deactivate or physically unload a pinned approved skill. Use an exact version and current control revision.", .context_retention = .control },
     .{ .name = "inspect", .description = "Locate guard-like lines in source-file evidence by its global evidence_index. Generated results are not source files. Requires an active invariant-review skill; it is not a correctness proof." },
-    .{ .name = "tool_build", .description = "Construct a pure Horos program from a closed JSON link recipe over the admitted component catalog. Construction does not execute it or establish task correctness." },
-    .{ .name = "tool_run", .description = "Run an admitted generated program on one authorized compatible input reference through native Kosmos." },
+    .{ .name = "program", .description = "Describe the existing Horos source-record contract, construct a general program, or inspect its real interface. Construction never runs the algorithm or invokes another model." },
+    .{ .name = "work", .description = "Start, inspect, advance, delegate, wait for, interact with, collect, park, or cancel retained computation. A pending child input never restricts your next action." },
+    .{ .name = "context", .description = "Inspect and materialize authorized evidence, choose a view for future inference, or expand an omitted source range. Views preserve sources and coverage." },
 }, .{});
 pub fn ordinal(comptime name: []const u8) usize {
     return @backingInt(@field(std.meta.Tag(Action), name));
@@ -98,8 +99,7 @@ pub const ReadResult = union(enum) { found: Evidence, missing: Path, invalid: co
 pub const ListObservation = struct { value: Listing, model_text: P.ResultText };
 pub const ReadObservation = struct { value: ReadResult, model_text: P.ResultText };
 pub const SourceEvidenceReference = struct { object: model.ArtifactReference, snapshot: [32]u8, path: Path, sha256: contracts.Text(64), start: u64, end: u64, file_bytes: u64 };
-pub const GeneratedEvidenceReference = struct { object: model.ArtifactReference, program: model.ArtifactReference, input: model.ArtifactReference };
-pub const EvidenceReference = union(enum) { source: SourceEvidenceReference, generated: GeneratedEvidenceReference };
+pub const EvidenceReference = union(enum) { source: SourceEvidenceReference, workspace: contracts.workspace.Ref };
 pub const EvidenceList = contracts.Vector(EvidenceReference, null);
 pub const WorkOutcome = union(enum) {
     list: struct { request: ListRequest, result: Listing },
@@ -114,26 +114,10 @@ pub const WorkRequest = struct {
 };
 pub const WorkArtifact = struct { version: u8, task: [16]u8, policy: [32]u8, context: model.AdaptiveContextReference, call_id: P.CallId, request: @FieldType(WorkRequest, "action"), outcome: WorkOutcome, evidence: ?Evidence, model_text: P.ResultText };
 pub const WorkReply = struct { artifact: model.ArtifactReference, evidence: ?SourceEvidenceReference };
-pub const ToolRequest = struct {
-    context: model.AdaptiveContextReference,
-    call_id: P.CallId,
-    action: union(enum) { build: @FieldType(Action, "tool_build"), run: @FieldType(Action, "tool_run") },
-};
-pub const ToolFailure = struct { stage: enum { admission, recipe, construction, execution }, reason: contracts.Text(128) };
-pub const ToolArtifact = struct {
-    task: [16]u8,
-    policy: [32]u8,
-    call_id: P.CallId,
-    outcome: union(enum) {
-        built: model.ArtifactReference,
-        ran: struct { program: model.ArtifactReference, input: model.ArtifactReference, value: contracts.Bytes(null) },
-        rejected: ToolFailure,
-    },
-    model_text: P.ResultText,
-};
-pub const ToolReply = struct { artifact: model.ArtifactReference, program: ?model.ArtifactReference, evidence: ?GeneratedEvidenceReference };
-pub const Programs = contracts.Vector(model.ArtifactReference, null);
-pub const ResultValue = union(enum) { inline_text: Summary, work: model.ArtifactReference, control: model.ArtifactReference, tool: model.ArtifactReference, report_rejection: ReportRejection };
+pub const WorkspaceRequest = struct { context: model.AdaptiveContextReference, call_id: P.CallId, action: contracts.workspace.Command };
+pub const Programs = contracts.Vector(contracts.workspace.Ref, null);
+pub const WorkspaceResult = struct { reply: contracts.workspace.Reply, evidence_index: ?u64 };
+pub const ResultValue = union(enum) { inline_text: Summary, work: model.ArtifactReference, control: model.ArtifactReference, report_rejection: ReportRejection, workspace: WorkspaceResult };
 pub const PendingResult = struct { call_id: P.CallId, output: ResultValue };
 pub const PendingResults = contracts.Vector(PendingResult, 1);
 pub const ControlReceipt = struct {
@@ -167,6 +151,8 @@ pub const State = struct {
     receipts: Receipts,
     model_calls: u64,
     work_calls: u64,
+    selected_view: ?contracts.workspace.Ref = null,
+    selected_view_at: u64 = 0,
 };
 pub const Output = struct {
     result: Result,
@@ -227,10 +213,8 @@ pub const support_types = .{
     .{ .name = "WorkRequest", .T = WorkRequest },
     .{ .name = "WorkReply", .T = WorkReply },
     .{ .name = "WorkArtifact", .T = WorkArtifact },
-    .{ .name = "ToolRequest", .T = ToolRequest },
-    .{ .name = "ToolReply", .T = ToolReply },
-    .{ .name = "ToolArtifact", .T = ToolArtifact },
-    .{ .name = "ToolProgram", .T = contracts.tool_construction.Program },
+    .{ .name = "WorkspaceRequest", .T = WorkspaceRequest },
+    .{ .name = "WorkspaceReply", .T = contracts.workspace.Reply },
     .{ .name = "ToolInput", .T = contracts.tool_construction.Input },
     .{ .name = "ReceiptArtifact", .T = ReceiptArtifact },
     .{ .name = "Question", .T = Question },

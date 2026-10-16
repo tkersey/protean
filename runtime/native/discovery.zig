@@ -129,8 +129,13 @@ pub const Application = struct {
                 return error.ClientJsonSchemaMismatch;
         }
         const capabilities = json.get(metadata.value, "capabilities") orelse return error.InvalidAssets;
-        if (capabilities != .array or capabilities.array.items.len != handlers.entries.len) return error.CapabilityCountMismatch;
+        var root_capabilities: usize = 0;
+        for (handlers.entries) |entry| if (!entry.declaration.workspace_only) {
+            root_capabilities += 1;
+        };
+        if (capabilities != .array or capabilities.array.items.len != root_capabilities) return error.CapabilityCountMismatch;
         for (handlers.entries) |entry| {
+            if (entry.declaration.workspace_only) continue;
             switch (entry.declaration.kind) {
                 .question => {
                     if (!std.mem.eql(u8, entry.declaration.answer_schema_id.?, Types.answer_schema_id) or
@@ -140,7 +145,7 @@ pub const Application = struct {
                     if (!std.mem.eql(u8, entry.payload_schema, try values.schemaBytes(void, storage)) or
                         !std.mem.eql(u8, entry.resume_schema, try values.schemaBytes(contracts.InboxReply(Types.Message), storage))) return error.InboxSchemaMismatch;
                 },
-                .leaf => {},
+                .leaf, .workspace => {},
             }
             try validateCapability(storage, capabilities.array.items, entry);
         }

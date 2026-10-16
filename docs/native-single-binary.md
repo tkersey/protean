@@ -307,11 +307,34 @@ during archive admission and cold retention audit.
 
 ## Saved state and portability
 
-This release starts fresh with state format 12, adaptive invocation v11, and
-adaptive context v6. Replace disposable example state directories and rerun the
-example. State-format 11 databases and archives, v5 contexts, and old adaptive
-application continuations are not migrated or supported by this release. The
-current examples have one implementation; no private v5 execution bundle is kept.
+Application 5 starts in a new namespace with state format 13, adaptive invocation
+v11, context v7, and output v5. Existing tasks keep their original namespace,
+image, and exact executable. They are continued by that executable; this feature
+does not migrate or transplant their continuations. Do not delete old state as
+part of an update.
+
+The optional installer retains the current executable and its observed build
+manifest under a content-addressed runtime directory before switching the
+default executable:
+
+```sh
+node tools/native/install.mjs zig-out/bin/protean "$HOME/.local"
+```
+
+Qualification archives include the same helper as `install.mjs`; from an
+extracted archive run `node install.mjs ./protean "$HOME/.local"`.
+
+Its JSON output names `previous` and `current` executable paths. Keep the previous
+path with the corresponding state-directory location, and use it for the old
+task. The installer does not modify namespaces, move task data, or grant a new
+binary authority over an old task. `bin/protean` selects the new executable;
+`lib/protean/runtimes/SHA256/protean` remains independently runnable. New task
+namespaces must use distinct paths. This helper requires Node only at install
+time, not at runtime.
+
+`test/protean/workspace_runtime_retention.mjs OLD_BINARY NEW_BINARY` exercises a
+baseline task parked at a real question, installs the successor into a temporary
+prefix, and answers/completes the old task through its retained original binary.
 
 A saved task is bound to its exact image, runtime artifact, schemas, profile,
 resources, and application identity. New binaries do not inherit resume authority
@@ -339,6 +362,14 @@ wire fixtures. `check-native` checks native owners plus the adaptive and HTTPS
 peers. The peers run copied binaries under OS execution/file boundaries, using
 controlled provider replies, real transport, kills/restarts, cancellation, tool
 construction/reuse, and independently altered archives. No paid model calls run.
+The complete aggregate remains `check-native`. CI distributes its existing checks
+across four runners: authoring also runs `check-native-owner` and `check-native-https`;
+workspace runs the program/semantics checks; native runs `check-native-executable`;
+downstream keeps its independent build. Source accounting starts independently; the terminal
+gate requires it and all qualification lanes and retains the 360-second maximum.
+The packaged adaptive peer runs its independent controller/recovery and workspace
+groups concurrently, with separate state, snapshot, and HTTPS fixtures. Both
+groups must finish, and their original assertions and command deadlines remain.
 
 `check-native-recovery-crash`, included in `check-native`, kills the owner process
 at 16 original-acquisition and receipt-lookup boundaries. Two fresh processes
@@ -351,5 +382,14 @@ without a new explicit admission.
 stays outside the product boundary; absolute Node/Python launches are denied
 inside it. Setup, package acquisition, emission, `addNativeSystem`, install,
 `describe-build`, and the offline demo execute there using native tools.
-Kosmos's independent source oracle agreement and optional JS/WASM embedding are
-qualified in Kosmos's existing roots, not reimplemented in Protean.
+`check-workspace-semantics`, included in `check-native`, sends newly constructed
+source through Horos's independent source oracle and native Kosmos. Passing
+`-Dworkspace-wasm=/absolute/path/to/kosmos-kernel.wasm` additionally compares exact
+native/WASM outcomes and alternates checkpoint producers. The oracle and embedding
+are the authenticated dependency implementations, not production dependencies.
+Use `check-workspace-runtime-retention -Dprevious-runtime=/absolute/path/to/protean`
+to exercise an actual prior executable through a temporary installation.
+
+The opt-in [model-use evaluation](../tools/evaluation/README.md) compares ordinary
+actions, pure generated computation, and retained interaction on identical
+evidence. Normal checks use controlled replies and make no paid inference calls.

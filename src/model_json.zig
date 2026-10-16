@@ -145,6 +145,19 @@ fn writeSchema(comptime T: type, writer: anytype) void {
             }
             writer.raw("],\"additionalProperties\":false}");
         },
+        .@"union" => |info| {
+            if (info.tag_type == null) @compileError("model JSON union must be tagged");
+            writer.raw("{\"anyOf\":[");
+            inline for (info.field_names, info.field_types, 0..) |name, Child, index| {
+                if (index != 0) writer.byte(',');
+                writer.raw("{\"type\":\"object\",\"properties\":{\"tag\":{\"type\":\"string\",\"enum\":[");
+                writeString(writer, name);
+                writer.raw("]},\"value\":");
+                writeSchema(Child, writer);
+                writer.raw("},\"required\":[\"tag\",\"value\"],\"additionalProperties\":false}");
+            }
+            writer.raw("]}");
+        },
         else => @compileError("protean JSON schema does not support " ++ @typeName(T)),
     }
 }
@@ -382,6 +395,14 @@ fn maximumValueBytes(comptime T: type) ?usize {
                 if (index != 0) maximum += 1;
                 maximum += 2 + 6 * field_name.len + 1;
                 maximum += maximumValueBytes(FieldType) orelse return null;
+            }
+            break :blk maximum;
+        },
+        .@"union" => |info| blk: {
+            var maximum: usize = 0;
+            inline for (info.field_names, info.field_types) |field_name, FieldType| {
+                const child = maximumValueBytes(FieldType) orelse return null;
+                maximum = @max(maximum, 19 + 6 * field_name.len + child);
             }
             break :blk maximum;
         },

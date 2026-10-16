@@ -25,12 +25,11 @@ jobs:
           sh tools/check_zig_paths.sh
   qualify:
     name: Qualification / ${{ matrix.lane }} / linux-x86_64
-    needs: source
     strategy:
       fail-fast: false
       matrix:
-        lane: [authoring, native, downstream]
-    runs-on: ${{ matrix.lane != 'authoring' && 'ubuntu-22.04' || 'ubuntu-24.04' }}
+        lane: [authoring, workspace, native, downstream]
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
       ZIG_DEBUG_CMD: '1'
@@ -65,7 +64,7 @@ jobs:
           mkdir -p .zig-cache/tmp
           packages=()
           command -v rg >/dev/null || packages+=(ripgrep)
-          if [ "${{ matrix.lane }}" != authoring ]; then
+          if [ "${{ matrix.lane }}" = native ] || [ "${{ matrix.lane }}" = downstream ]; then
             test -x /usr/bin/bwrap || packages+=(bubblewrap)
             test -x /usr/bin/strace || packages+=(strace)
           fi
@@ -78,7 +77,7 @@ jobs:
               sudo apt-get install --yes --no-install-recommends "${packages[@]}"
             fi
           fi
-          if [ "${{ matrix.lane }}" != authoring ]; then
+          if [ "${{ matrix.lane }}" = native ] || [ "${{ matrix.lane }}" = downstream ]; then
             /usr/bin/bwrap --unshare-user --ro-bind / / /usr/bin/true
           fi
       - name: Restore locked native transport bytes
@@ -91,16 +90,22 @@ jobs:
       - name: Authenticate and provision selected native inputs
         if: matrix.lane != 'downstream'
         run: |
-          options=()
-          if [ "${{ matrix.lane }}" = authoring ]; then options+=(--authoring-only); fi
           zig run tools/native/dependencies.zig -- setup \
             conformance/protean/dependencies.lock.json \
             conformance/protean/native-dependencies.lock.json \
-            .protean-native/inputs "$(command -v zig)" "${options[@]}"
+            .protean-native/inputs "$(command -v zig)"
       - name: Run retained qualification
         run: |
           if [ "${{ matrix.lane }}" = authoring ]; then
-            zig build check-protean -Dnative=false -Doptimize=safe --summary all
+            # Keep the independent HTTPS probe with owner tests so its compiler
+            # does not compete with the packaged executable on the native lane.
+            zig build check-protean check-native-owner check-native-https \
+              -Doptimize=safe --summary all
+          elif [ "${{ matrix.lane }}" = workspace ]; then
+            # These independent owner fixtures have no shared runtime state
+            # with the authoring lane and retain their complete assertions.
+            zig build check-workspace-programs check-workspace-semantics \
+              -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = downstream ]; then
             # The downstream witness authenticates its own inputs and builds
             # independently, without competing with native tests on one runner.
@@ -109,7 +114,7 @@ jobs:
             cat "$RUNNER_TEMP/downstream-identity.json"
           else
             result=0
-            zig build check-native -Doptimize=safe --summary all \
+            zig build check-native-executable -Doptimize=safe --summary all \
               --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
               > "$RUNNER_TEMP/native-check.log" 2>&1 || result=$?
             cat "$RUNNER_TEMP/native-check.log"
@@ -131,7 +136,7 @@ jobs:
           JS
           fi
       - name: Retain independently qualified build identity
-        if: matrix.lane != 'authoring'
+        if: matrix.lane == 'native' || matrix.lane == 'downstream'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           path: ${{ runner.temp }}/${{ matrix.lane }}-identity.json
@@ -145,12 +150,13 @@ jobs:
           "$output/protean" describe-build > "$output/protean.build.json"
           cp docs/native-single-binary.md "$output/RUNBOOK.md"
           cp examples/adaptive/README.md "$output/ADAPTIVE.md"
+          cp tools/native/install.mjs "$output/install.mjs"
           mkdir -p "$output/adaptive-example"
           cp examples/adaptive/adaptive.example.json "$output/adaptive-example/"
           cp -R examples/adaptive/skills "$output/adaptive-example/skills"
           cp -R "$RUNNER_TEMP/protean-qualification/protean/adaptive" "$output/adaptive-program"
           tar -czf "$RUNNER_TEMP/protean-$RUNNER_OS-$RUNNER_ARCH-$GITHUB_SHA.tar.gz" \
-            -C "$output" protean protean.build.json RUNBOOK.md ADAPTIVE.md adaptive-program adaptive-example
+            -C "$output" protean protean.build.json install.mjs RUNBOOK.md ADAPTIVE.md adaptive-program adaptive-example
       - name: Retain executed adaptive application
         if: matrix.lane == 'native'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

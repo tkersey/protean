@@ -1,6 +1,9 @@
 //! Compiled native environment. Deliberately separate from Protean authoring.
 pub const json = @import("json.zig");
 pub const values = @import("values.zig");
+pub const dynamic_values = @import("dynamic_values.zig");
+pub const source_records = @import("source_records.zig");
+pub const program_construction = @import("program_construction.zig");
 pub const protocol = @import("protocol.zig");
 pub const registry = @import("registry.zig");
 pub const Context = registry.Context;
@@ -18,6 +21,8 @@ pub const adaptive_responses = @import("adaptive_responses.zig");
 pub const repository = @import("repository.zig");
 pub const tool_construction = @import("tool_construction.zig");
 pub const configuration = @import("configuration.zig");
+pub const workspace = @import("workspace_state.zig");
+pub const workspace_instrument = @import("workspace_instrument.zig");
 pub const tasks = @import("tasks.zig");
 pub const client = @import("client.zig");
 pub const Namespace = @import("namespace.zig").Namespace;
@@ -25,6 +30,7 @@ pub const Namespace = @import("namespace.zig").Namespace;
 test {
     _ = json;
     _ = values;
+    _ = dynamic_values;
     _ = protocol;
     _ = https;
     _ = repository;

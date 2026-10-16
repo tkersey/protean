@@ -131,7 +131,7 @@ pub fn ownerManifest(a: std.mem.Allocator, image: []const u8, identity: [32]u8, 
         .native_host_contract = "unit-native-contract",
         .protocol = "agent-host/2.1",
         .client_mapping = "agent-client-values/1.1",
-        .state_format = "agent-native-state/12",
+        .state_format = "agent-native-state/13",
         .optimize = "safe",
         .program_sha256 = @as([]const u8, &image_hex),
         .program_identity = @as([]const u8, &identity_hex),
@@ -143,7 +143,7 @@ pub fn ownerManifest(a: std.mem.Allocator, image: []const u8, identity: [32]u8, 
 
 // Rehash a well-formed archive while removing one semantic fact. Keep every
 // other object, sequence, revision and operation receipt unchanged.
-const ArchiveFactChange = enum { cancellation_omitted, cancellation_reason, terminal_cancellation_omitted, terminal_cancellation_reason, terminal_omitted, message_not_consumed };
+const ArchiveFactChange = enum { cancellation_omitted, cancellation_reason, terminal_cancellation_omitted, terminal_cancellation_reason, checkpoint_cancellation_reason, checkpoint_cancellation_bytes, terminal_omitted, message_not_consumed };
 fn omitArchiveFact(a: std.mem.Allocator, io: std.Io, shape: anytype, task: anytype, source: []const u8, destination: []const u8, change: ArchiveFactChange) !void {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, source, a, .limited(16 * 1024 * 1024));
     const schema_length = std.mem.readInt(u32, bytes[8..12], .little);
@@ -162,7 +162,32 @@ fn omitArchiveFact(a: std.mem.Allocator, io: std.Io, shape: anytype, task: anyty
     }
     var target: *Reference = undefined;
     var replacement: []const u8 = undefined;
-    if (change == .cancellation_omitted or change == .cancellation_reason or change == .terminal_cancellation_omitted or change == .terminal_cancellation_reason) {
+    if (change == .checkpoint_cancellation_reason or change == .checkpoint_cancellation_bytes) {
+        try std.testing.expect(!task.terminal() and task.cancellation_applied and task.cancellation != null);
+        const checkpoint = for (blobs.items) |blob| {
+            if (std.meta.eql(blob.reference, task.checkpoint)) break blob.bytes;
+        } else return error.MissingCheckpoint;
+        var graph = try horos.data.state_image.decodeGraph(a, checkpoint);
+        defer graph.deinit();
+        const nodes = try a.dupe(horos.data.process_state.Node, graph.state.nodes);
+        defer a.free(nodes);
+        graph.state.nodes = nodes;
+        var cursor = graph.state.roots.exit orelse return error.MissingCancellation;
+        while (nodes[@intCast(cursor.id)].record.exit.outer) |outer| cursor = outer;
+        nodes[@intCast(cursor.id)].record.exit.cancellation = if (change == .checkpoint_cancellation_reason)
+            .{ .text = "different kernel reason" }
+        else
+            .{ .bytes = task.cancellation.?.bytes };
+        const changed_checkpoint = try horos.data.state_image.emit(a, graph.state);
+        var changed = task;
+        std.crypto.hash.sha2.Sha256.hash(changed_checkpoint, &changed.checkpoint.digest, .{});
+        changed.checkpoint.bytes = changed_checkpoint.len;
+        for (blobs.items) |*blob| if (std.meta.eql(blob.reference, task.checkpoint)) {
+            blob.* = .{ .reference = changed.checkpoint, .bytes = changed_checkpoint };
+        };
+        replacement = try protean.contracts.encodeOwned(@TypeOf(task), a, changed);
+        target = &archive.task;
+    } else if (change == .cancellation_omitted or change == .cancellation_reason or change == .terminal_cancellation_omitted or change == .terminal_cancellation_reason) {
         const terminal = change == .terminal_cancellation_omitted or change == .terminal_cancellation_reason;
         try std.testing.expect(task.terminal() == terminal and task.cancellation != null and task.cancellation_applied == terminal);
         var changed = task;
@@ -178,8 +203,26 @@ fn omitArchiveFact(a: std.mem.Allocator, io: std.Io, shape: anytype, task: anyty
             task: [16]u8,
             seq: u64,
             revision: u64,
-            kind: enum { accepted, input_required, input_accepted, message_queued, message_consumed, message_not_consumed, cancellation_requested, parked, resumed, blocked, delivery_unknown, completed, failed, cancelled, imported },
+            kind: enum { accepted, input_required, input_accepted, message_queued, message_consumed, message_not_consumed, cancellation_requested, parked, resumed, blocked, delivery_unknown, completed, failed, cancelled, imported, reconciled, workspace, workspace_progress, workspace_read },
             data: protean.contracts.Bytes(48 * 1024),
+            workspace_publications: protean.contracts.Vector(struct {
+                work: [32]u8,
+                execution_revision: u64,
+                control_revision: u64,
+                observation: [32]u8,
+                control: struct {
+                    policy: struct { stop: enum { next_slice, next_exposed_event, terminal }, continuation: enum { explicit_only, owner_scheduled } },
+                    schedule: enum { queued, active, parked },
+                    blocker: ?enum { missing_capability, denied, capacity, missing_artifact, incompatible_profile, unavailable_environment },
+                    cancellation: ?protean.contracts.Text(256),
+                    cancellation_applied: bool,
+                    outcome: enum { progressed, yielded, requested, completed, failed, cancelled },
+                    instrument: bool,
+                    port: bool,
+                    delivery: ?enum { ready, dispatching, awaiting, unknown, settled_reply, admitted, not_sent, captured },
+                },
+            }, null),
+            workspace_command: ?Reference,
         };
         var found = false;
         const events = try a.dupe(@TypeOf(archive.events.items[0]), archive.events.items);
@@ -230,6 +273,7 @@ fn omitArchiveFact(a: std.mem.Allocator, io: std.Io, shape: anytype, task: anyty
     const manifest = try protean.contracts.encodeOwned(@TypeOf(shape), a, archive);
     var header: [32]u8 = bytes[0..32].*;
     std.mem.writeInt(u32, header[12..16], @intCast(manifest.len), .little);
+    std.mem.writeInt(u32, header[16..20], @intCast(blobs.items.len), .little);
     std.mem.writeInt(u64, header[24..32], body.items.len, .little);
     var output: std.ArrayList(u8) = .empty;
     try output.appendSlice(a, &header);
@@ -1514,6 +1558,14 @@ test "terminal cleanup failures retain allocator-governed shutdown ownership wit
             // invented by the archive mutator. One SQLite owner at a time.
             const archive_path = try std.fmt.allocPrint(frame, "{s}/cleanup.bundle", .{path_buffer[0..length]});
             _ = try service.exportCheckpoint(frame, submitted.receipt.task, archive_path);
+            var manifest_digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(assets.manifest, &manifest_digest, .{});
+            const shape = try namespace.store.archiveIndex(frame, submitted.receipt.task, .{ .digest = manifest_digest, .bytes = assets.manifest.len });
+            var forged_archives: [2][]const u8 = undefined;
+            for ([_]ArchiveFactChange{ .checkpoint_cancellation_reason, .checkpoint_cancellation_bytes }, &forged_archives) |change, *forged_path| {
+                forged_path.* = try std.fmt.allocPrint(frame, "{s}/{s}.bundle", .{ path_buffer[0..length], @tagName(change) });
+                try omitArchiveFact(frame, io, shape, cleaning.value, archive_path, forged_path.*, change);
+            }
             try service.close(frame);
             service_live = false;
             try namespace.close();
@@ -1524,6 +1576,7 @@ test "terminal cleanup failures retain allocator-governed shutdown ownership wit
                 defer imported_namespace.close() catch unreachable;
                 var imported_service = try native.tasks.Service(CleanupTypes).init(a, io, &imported_namespace, assets, &application, handlers, profile);
                 defer imported_service.close(frame) catch unreachable;
+                for (forged_archives) |forged_path| try std.testing.expectError(error.InvalidArchive, imported_service.importCheckpoint(frame, "import-cleanup", forged_path));
                 const admitted = try imported_service.importCheckpoint(frame, "import-cleanup", archive_path);
                 try std.testing.expectEqualSlices(u8, &submitted.receipt.task, &admitted.receipt.task);
                 var imported_task = try imported_service.task(frame, admitted.receipt.task);

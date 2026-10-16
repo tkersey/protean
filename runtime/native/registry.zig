@@ -224,11 +224,13 @@ pub const Context = struct {
         if (self.cancellation) |flag| if (flag.load(.acquire)) return error.Canceled;
     }
 };
-pub const Kind = enum { leaf, question, inbox };
+pub const Kind = enum { leaf, question, inbox, workspace };
 pub const Declaration = struct {
     identity: []const u8,
     resource_role: []const u8,
     kind: Kind,
+    /// Registered for owner-created workspace images, not the root image.
+    workspace_only: bool = false,
     inference: bool = false,
     /// Only this adapter's committed projection objects are public task data.
     /// Raw captures, prepared requests and other adapters' objects stay private.
@@ -243,6 +245,9 @@ pub const Declaration = struct {
     present: ?*const fn (Context, []const u8) anyerror!json.Value = null,
     answer: ?*const fn (std.mem.Allocator, json.Value) anyerror![]u8 = null,
     answer_schema_id: ?[]const u8 = null,
+    /// Authenticate a direct model action using immutable projection inputs.
+    /// The native owner alone interprets the resulting workspace command.
+    workspace: ?*const fn (ProjectionContext, []const u8) anyerror![]u8 = null,
 };
 pub const Entry = struct {
     declaration: Declaration,
@@ -272,6 +277,7 @@ pub const Registry = struct {
                 if (declaration.kind != .leaf or recovery.identity.len == 0 or recovery.version == 0 or (recovery.rederive == null and recovery.lookup == null)) return error.InvalidCapability;
             }
             if (declaration.kind == .question and (declaration.present == null or declaration.answer == null or declaration.answer_schema_id == null)) return error.InvalidCapability;
+            if ((declaration.kind == .workspace) != (declaration.workspace != null)) return error.InvalidCapability;
             entry.* = .{
                 .declaration = declaration,
                 .payload_schema = try declaration.payload_schema(storage),

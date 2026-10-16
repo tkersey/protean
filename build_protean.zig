@@ -189,6 +189,15 @@ pub fn build(b: *std.Build) void {
     check.dependOn(lint);
     g.testModule(check, g.module("test/authoring_tests.zig"));
     g.testModule(check, g.module("src/test_root.zig"));
+    const workspace_values = b.step("check-workspace-values", "Check runtime-schema workspace value projection");
+    g.testModule(workspace_values, g.module("runtime/native/dynamic_values.zig"));
+    check.dependOn(workspace_values);
+    const source_records = b.step("check-source-records", "Check the model-facing Horos source-record transport");
+    g.testModule(source_records, g.module("runtime/native/source_records.zig"));
+    check.dependOn(source_records);
+    const program_construction = b.step("check-program-construction", "Check untrusted general source construction");
+    g.testModule(program_construction, g.module("runtime/native/program_construction.zig"));
+    check.dependOn(program_construction);
     const admitted = g.module("test/protean/admission.zig");
     admitted.addImport("admission", g.helper("admission"));
     g.testModule(check, admitted);
@@ -213,10 +222,16 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&b.addRunArtifact(helper_tests).step);
     const native_checks = b.step("check-native", "Check native and custody contracts against the selected Kosmos");
     const native_product = b.step("check-native-product", "Qualify the native adaptive application on the selected supported platform");
+    const native_owner = b.step("check-native-owner", "Qualify native owner, context, and recovery contracts");
+    const native_packaged = b.step("check-native-packaged", "Qualify the packaged adaptive executable and HTTPS isolation");
+    const native_executable = b.step("check-native-executable", "Qualify the packaged adaptive executable and process isolation");
     const native_consumer = b.step("check-native-https", "Check native HTTPS against an independent endpoint");
     const scheduler_benchmark = b.step("bench-native-scheduler", "Measure idle Service scans with a held worker");
     native_checks.dependOn(native_product);
-    native_product.dependOn(native_consumer);
+    native_product.dependOn(native_owner);
+    native_product.dependOn(native_packaged);
+    native_packaged.dependOn(native_consumer);
+    native_packaged.dependOn(native_executable);
     if (native_enabled) {
         const kosmos = b.createModule(.{
             .root_source_file = kosmos_source.path(b, "src/root.zig"),
@@ -238,7 +253,7 @@ pub fn build(b: *std.Build) void {
         const native_admission_files = b.addWriteFiles();
         native_admission_files.step.dependOn(&native_guard.step);
         const native_admission = b.createModule(.{ .root_source_file = native_admission_files.add("native_dependency_admission.zig", "") });
-        const host_environment = nativeEnvironment(b, b.graph.host, optimize, kosmos, data, contracts, native_admission, sqlite_source, &native_guard.step);
+        const host_environment = nativeEnvironment(b, b.graph.host, optimize, kosmos, data, contracts, horos, protean, native_admission, sqlite_source, &native_guard.step);
         // Host-default Linux packaging selects musl. Explicit unsupported target
         // requests are rejected by the public helper before creating emitters.
         const default_musl = target.query.isNative() and target.result.os.tag == .linux and target.result.cpu.arch == .x86_64;
@@ -275,7 +290,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{.{ .name = "horos_data", .module = native_data }},
         });
-        const public_environment = if (!default_musl and target.query.isNative()) host_environment else nativeEnvironment(b, native_target, optimize, native_kosmos, native_data, native_contracts, native_admission, sqlite_source, &native_guard.step);
+        const public_environment = if (!default_musl and target.query.isNative()) host_environment else nativeEnvironment(b, native_target, optimize, native_kosmos, native_data, native_contracts, native_horos, native_protean, native_admission, sqlite_source, &native_guard.step);
         // Executed native checks use the delivered ABI when it runs on this
         // host. This also shares its C library instead of compiling a GNU-only
         // SQLite copy solely for tests of a musl product.
@@ -289,6 +304,34 @@ pub fn build(b: *std.Build) void {
         }
         const checked_kosmos = if (native_on_host) native_kosmos else kosmos;
         const checked_environment = if (native_on_host) public_environment else host_environment;
+        const workspace_programs = native_graph.module("test/protean/workspace_programs.zig");
+        // Match the retained native suite: compile test orchestration in debug
+        // while imported product modules retain the requested optimization.
+        // Zig 0.17's safe optimizer crashes on this large orchestration root.
+        workspace_programs.optimize = .debug;
+        workspace_programs.strip = optimize != .debug;
+        workspace_programs.addImport("kosmos", checked_kosmos);
+        workspace_programs.addImport("protean_native", checked_environment);
+        const workspace_checks = b.step("check-workspace-programs", "Execute general source-record programs through native Kosmos");
+        native_graph.testModule(workspace_checks, workspace_programs);
+        native_checks.dependOn(workspace_checks);
+        const workspace_semantics_module = native_graph.module("test/protean/workspace_semantics.zig");
+        workspace_semantics_module.optimize = .debug;
+        workspace_semantics_module.strip = optimize != .debug;
+        workspace_semantics_module.addImport("kosmos", checked_kosmos);
+        workspace_semantics_module.addImport("protean_native", checked_environment);
+        const workspace_peer = native_graph.emitter("workspace-semantics", workspace_semantics_module);
+        const workspace_semantics_run = b.addSystemCommand(&.{"node"});
+        workspace_semantics_run.addFileArg2(b.path("test/protean/workspace_semantics.mjs"), .{});
+        workspace_semantics_run.addArtifactArg(workspace_peer);
+        workspace_semantics_run.addFileArg2((source orelse b.dependency("horos", .{ .target = b.graph.host, .optimize = optimize }).path("")).path(b, "test/v2/source_oracle.mjs"), .{ .make_absolute = true });
+        workspace_semantics_run.addFileArg2(kosmos_source.path(b, "src/embedding/index.mjs"), .{ .make_absolute = true });
+        if (b.option(std.Build.LazyPath, "workspace-wasm", "Kosmos kernel for generated workspace native/WASM comparison")) |wasm|
+            workspace_semantics_run.addFileArg2(wasm, .{ .make_absolute = true });
+        workspace_semantics_run.has_side_effects = true;
+        const workspace_semantics = b.step("check-workspace-semantics", "Compare newly generated workspace programs with the independent source oracle");
+        workspace_semantics.dependOn(&workspace_semantics_run.step);
+        native_checks.dependOn(workspace_semantics);
         b.addNamedLazyPath("native-sqlite-source", sqlite_source);
         b.installArtifact(host_tool);
         b.modules.put(b.allocator, b.dupe("protean_native"), public_environment) catch @panic("out of memory");
@@ -319,13 +362,20 @@ pub fn build(b: *std.Build) void {
             const adaptive_reference = b.step("protean", "Build the native Kosmos reference host for the adaptive program");
             adaptive_reference.dependOn(&adaptive_product.install.step);
             adaptive_reference.dependOn(adaptive_image_step);
-            native_product.dependOn(adaptive_reference);
+            native_executable.dependOn(adaptive_reference);
             const adaptive_peer = nativeCheckCommand(b);
             adaptive_peer.addArgs(&.{ "node", "test/protean/native_adaptive.mjs" });
             adaptive_peer.addFileArg2(adaptive_product.executable.getEmittedBin(), .{ .make_absolute = true });
             adaptive_peer.addFileArg2(adaptive_application, .{ .make_absolute = true });
             adaptive_peer.addFileArg2(adaptive_image, .{ .make_absolute = true });
-            native_product.dependOn(&adaptive_peer.step);
+            native_executable.dependOn(&adaptive_peer.step);
+            const retention_check = b.step("check-workspace-runtime-retention", "Resume an old task with its retained original executable after installing the new product");
+            if (b.option(std.Build.LazyPath, "previous-runtime", "Retained previous Protean executable for namespace compatibility qualification")) |previous| {
+                const retention_run = b.addSystemCommand(&.{ "node", "test/protean/workspace_runtime_retention.mjs" });
+                retention_run.addFileArg2(previous, .{ .make_absolute = true });
+                retention_run.addArtifactArg(adaptive_product.executable);
+                retention_check.dependOn(&retention_run.step);
+            } else retention_check.dependOn(&b.addFail("select -Dprevious-runtime=<retained executable> for the old-task witness").step);
             const consumer_module = b.createModule(.{
                 .root_source_file = b.path("test/protean/https_probe.zig"),
                 .target = native_graph.target orelse b.graph.host,
@@ -347,7 +397,8 @@ pub fn build(b: *std.Build) void {
             const unsupported = b.addFail("native product supports aarch64-macos and x86_64-linux-musl");
 
             native_consumer.dependOn(&unsupported.step);
-            native_product.dependOn(&unsupported.step);
+            native_packaged.dependOn(&unsupported.step);
+            native_executable.dependOn(&unsupported.step);
         }
         // These roots share exact module identities; compile their retained
         // tests together instead of rebuilding the same compiler eleven times.
@@ -369,7 +420,11 @@ pub fn build(b: *std.Build) void {
         native_suite.addAnonymousImport("adaptive_image", .{ .root_source_file = adaptive_image });
         native_suite.addAnonymousImport("adaptive_application", .{ .root_source_file = adaptive_application });
         native_suite.addImport("native_asset_writer", native_graph.module("tools/native/emit.zig"));
-        native_graph.testModule(native_product, native_suite);
+        native_graph.testModule(native_owner, native_suite);
+        const workspace_recovery_tests = b.addTest(.{ .root_module = native_suite, .filters = &.{"adaptive workspace"} });
+        workspace_recovery_tests.step.dependOn(native_graph.gate);
+        const workspace_recovery_run = b.addRunArtifact(workspace_recovery_tests);
+        b.step("check-workspace-recovery", "Qualify workspace construction recovery through the adaptive controller").dependOn(&workspace_recovery_run.step);
         // Reuse the fixture's complete import graph; keep the measured root in
         // the requested optimization mode rather than the general suite's Debug.
         const scheduler_module = b.allocator.create(std.Build.Module) catch @panic("out of memory");
@@ -394,14 +449,16 @@ pub fn build(b: *std.Build) void {
             .use_llvm = if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) optimize != .debug else null,
         });
         adaptive_response_tests.step.dependOn(native_graph.gate);
-        native_product.dependOn(&b.addRunArtifact(adaptive_response_tests).step);
+        const adaptive_response_run = b.addRunArtifact(adaptive_response_tests);
+        native_owner.dependOn(&adaptive_response_run.step);
+        b.step("check-adaptive-context", "Qualify retained adaptive context projection and explicit view selection").dependOn(&adaptive_response_run.step);
         // Zig does not collect test declarations from named dependency modules.
         // Run the runtime's own root explicitly; the integration root above
         // independently exercises its public task owner with authored programs.
         const native_unit_tests = b.allocator.create(std.Build.Module) catch @panic("out of memory");
         native_unit_tests.init(b, .{ .existing = checked_environment });
         native_unit_tests.optimize = .debug;
-        native_graph.testModule(native_product, native_unit_tests);
+        native_graph.testModule(native_owner, native_unit_tests);
         const crash_module = native_graph.module("test/protean/native_recovery_crash.zig");
         crash_module.optimize = .debug;
         crash_module.strip = optimize != .debug;
@@ -421,10 +478,13 @@ pub fn build(b: *std.Build) void {
         crash_check.addFileArg2(crash_probe.getEmittedBin(), .{ .make_absolute = true });
         crash_check.has_side_effects = true;
         b.step("check-native-recovery-crash", "Kill and reopen native occurrence/recovery owners at durable boundaries").dependOn(&crash_check.step);
-        native_product.dependOn(&crash_check.step);
+        native_owner.dependOn(&crash_check.step);
     } else {
         const missing = b.addFail("enable -Dnative=true with authenticated Kosmos and SQLite sources");
         native_checks.dependOn(&missing.step);
+        native_owner.dependOn(&missing.step);
+        native_packaged.dependOn(&missing.step);
+        native_executable.dependOn(&missing.step);
         native_consumer.dependOn(&missing.step);
         scheduler_benchmark.dependOn(&missing.step);
     }
@@ -438,8 +498,9 @@ pub fn build(b: *std.Build) void {
     b.default_step = aggregate;
 }
 
-fn nativeEnvironment(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, kosmos: *std.Build.Module, data: *std.Build.Module, contracts: *std.Build.Module, admission: *std.Build.Module, sqlite_source: std.Build.LazyPath, gate: *std.Build.Step) *std.Build.Module {
+fn nativeEnvironment(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, kosmos: *std.Build.Module, data: *std.Build.Module, contracts: *std.Build.Module, horos: *std.Build.Module, protean: *std.Build.Module, admission: *std.Build.Module, sqlite_source: std.Build.LazyPath, gate: *std.Build.Step) *std.Build.Module {
     const options = b.addOptions();
+    options.addOption([]const u8, "horos_identity", @import("build.zig.zon").dependencies.horos.hash);
     options.addOption(u32, "state_format", @import("build_native.zig").state_format);
     options.addOption([]const u8, "host_version", @import("build.zig.zon").version);
     // The exact admitted 0.17 compiler still supplies build-time translate-c.
@@ -476,6 +537,8 @@ fn nativeEnvironment(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
             .{ .name = "kosmos", .module = kosmos },
             .{ .name = "horos_data", .module = data },
             .{ .name = "protean_contracts", .module = contracts },
+            .{ .name = "horos", .module = horos },
+            .{ .name = "protean", .module = protean },
             .{ .name = "_native_dependency_admission", .module = admission },
             .{ .name = "native_c", .module = translated_module },
         },

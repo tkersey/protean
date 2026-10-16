@@ -6,8 +6,6 @@ const contracts = @import("protean_contracts");
 const t = @import("application_types");
 const P = t.P;
 const work = @import("work.zig");
-const tool_work = @import("tool_work.zig");
-const tool_resources = @import("tool_resources.zig");
 const A = native.adaptive_responses.Admission(P);
 const Adapter = native.adaptive_responses.Adapter(P);
 const Product = t.PreparationProduct;
@@ -119,16 +117,19 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
         const content: []const u8 = switch (item.output) {
             .inline_text => |value| value.bytes,
             .report_rejection => |value| try native.json.canonical(a, try native.values.toJson(t.ReportRejection, a, value)),
+            .workspace => |value| blk: {
+                const bytes = value.reply.observation_json.bytes;
+                const parsed = (try native.json.parse(a, bytes, .{ .bytes = bytes.len, .depth = bytes.len, .tokens = bytes.len, .members = bytes.len })).value;
+                var response = native.json.object();
+                try native.json.put(a, &response, "disposition", native.json.string(@tagName(value.reply.disposition)));
+                try native.json.put(a, &response, "observation", parsed);
+                if (value.evidence_index) |index| try native.json.put(a, &response, "evidence_index", try native.json.number(a, index));
+                break :blk try native.json.canonical(a, response);
+            },
             .work => |ref| blk: {
                 var record = try work.open(ctx, ref);
                 defer record.deinit();
                 if (!equal(record.value.call_id.bytes, item.call_id.bytes)) return error.InvalidWorkArtifact;
-                break :blk try a.dupe(u8, record.value.model_text.bytes);
-            },
-            .tool => |ref| blk: {
-                var record = try tool_work.open(ctx, ref);
-                defer record.deinit();
-                if (!equal(record.value.call_id.bytes, item.call_id.bytes)) return error.InvalidToolArtifact;
                 break :blk try a.dupe(u8, record.value.model_text.bytes);
             },
             .control => |ref| blk: {
@@ -191,8 +192,8 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
     var messages = input.state.messages;
     if (input.state.replay) |prior| if (prior.eviction_generation != control.eviction_generation and input.state.programs.items.len != 0) {
         var retained: native.json.Value = .{ .array = .init(a) };
-        for (input.state.programs.items) |ref| try retained.array.append(native.json.string(try tool_resources.referenceText(a, ref)));
-        const text_value = try std.fmt.allocPrint(a, "Retained generated tool references after instruction eviction: {s}. These references carry no authority; tool_run still checks the frozen policy and input. Acquired evidence indexes remain stable.", .{try native.json.canonical(a, retained)});
+        for (input.state.programs.items) |ref| try retained.array.append(try native.values.toJson(contracts.workspace.Ref, a, ref));
+        const text_value = try std.fmt.allocPrint(a, "Retained workspace program references after instruction eviction: {s}. These references carry no authority; work.start checks the current grants and input. Evidence indexes remain stable.", .{try native.json.canonical(a, retained)});
         const items = try a.alloc(t.P.Message, messages.items.len + 1);
         @memcpy(items[0..messages.items.len], messages.items);
         items[messages.items.len] = .{ .role = .developer, .content = .{ .bytes = text_value } };
@@ -204,7 +205,7 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
         .materialized = materialized,
         .offered = offered,
         .results = results,
-        .plan = .{ .epoch = control.epoch, .reason = control.epoch_reason, .watermark = if (input.state.replay) |ref| ref.watermark else 0, .eviction_generation = control.eviction_generation, .prior = input.state.replay, .catalog = policy.catalog, .skills = control.skills },
+        .plan = .{ .epoch = control.epoch, .reason = control.epoch_reason, .watermark = if (input.state.replay) |ref| ref.watermark else 0, .eviction_generation = control.eviction_generation, .prior = input.state.replay, .catalog = policy.catalog, .skills = control.skills, .research = if (input.state.selected_view) |view| .{ .view = view, .selected_at = input.state.selected_view_at } else null },
         .invocation = .{
             .protocol = .{ .bytes = t.model.protocol_identity },
             .model = .{ .bytes = selected.model.bytes },

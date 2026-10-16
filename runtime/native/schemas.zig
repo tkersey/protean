@@ -177,6 +177,8 @@ fn eventFields(kind: state.EventType) []const EventField {
         .blocked => &.{.{ .name = "delivery", .kind = .delivery, .optional = true }},
         .imported => &.{.{ .name = "archive_sha256", .kind = .digest }},
         .reconciled => &.{.{ .name = "reconciliation_id", .kind = .digest }},
+        .workspace_read => &.{.{ .name = "occurrence_id", .kind = .digest }},
+        .workspace, .workspace_progress => &.{.{ .name = "workspace_id", .kind = .digest }},
         .accepted, .input_accepted, .cancellation_requested, .parked, .resumed, .delivery_unknown, .completed, .failed, .cancelled => &.{},
     };
 }
@@ -294,6 +296,7 @@ pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.
     }, &.{});
     const availability = try shape(a, &.{ .{ "occurrence_id", digest }, .{ "attempt_id", digest }, .{ "mechanisms", try array(a, try enumSchema(state.RecoveryRequest, a), null) } }, &.{});
     snapshot = try extend(a, snapshot, &.{.{ "recovery", try nullable(a, availability) }}, &.{});
+    snapshot = try extend(a, snapshot, &.{.{ "associated_work_disposed", boolean }}, &.{});
     try json.put(a, &definitions, "snapshot", snapshot);
     const artifact = try shape(a, &.{ .{ "artifact_id", digest }, .{ "sha256", digest }, .{ "bytes", count }, .{ "media_type", try constant(a, "application/json") }, .{ "schema_id", try text(a, 1, 128) }, .{ "retention", try constant(a, "state-namespace") } }, &.{});
     var outcomes: std.array_list.Managed(json.Value) = .init(a);

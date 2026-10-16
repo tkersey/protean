@@ -14,7 +14,7 @@ export function contract(application, name) {
 const ordered = value => Array.isArray(value) ? value.map(ordered) : value && typeof value === 'object' ?
   Object.fromEntries(Object.keys(value).sort().map(key => [key, ordered(value[key])])) : value;
 const canonical = value => Buffer.from(JSON.stringify(ordered(value)));
-const names = ['list', 'read', 'ask', 'report', 'stop', 'inference_set', 'skill_set', 'inspect'];
+const names = ['list', 'read', 'ask', 'report', 'stop', 'inference_set', 'skill_set', 'inspect', 'program', 'work', 'context'];
 function markers(body) {
   return body.input.flatMap((item, index) => {
     const field = item.type === 'function_call_output' ? 'output' : 'content';

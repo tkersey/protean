@@ -135,3 +135,12 @@ test "nested tool codecs describe bounded vectors without changing flat field co
     // Existing flat consumers still receive their six-field metadata records.
     try std.testing.expectEqual(@as(usize, 6), @typeInfo(Fixture.ArgumentCodec.Child).@"struct".field_names.len);
 }
+
+test "bounded tool arguments support nested union payloads" {
+    const Nested = invocation.Profile(union(enum) {
+        choose: struct { option: union(enum) { left: bool, right: u8 } },
+    }, .{.{ .name = "choose", .description = "Choose a value." }}, .{ .arguments_json_bytes = 256 });
+    const tool = Nested.allDeclarations().items[0];
+    try std.testing.expectEqual(@as(?u32, 256), Nested.normalizationLimits().maximum_arguments_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, tool.input_schema_json.bytes, "\"anyOf\"") != null);
+}

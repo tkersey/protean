@@ -6,7 +6,7 @@ const codecs = @import("model_codec.zig");
 const models = @import("model.zig");
 
 pub const semantic_identity = "agent.model.invoke.v11";
-pub const adaptive_context_semantic_identity = "agent.model.context.responses.adaptive.v6";
+pub const adaptive_context_semantic_identity = "agent.model.context.responses.adaptive.v7";
 pub const adaptive_policy_semantic_identity = "agent.model.policy.adaptive.v2";
 pub fn isModelIdentity(identity: []const u8) bool {
     // Reserve the model namespace against raw leaf-effect relabeling. Only v11
@@ -39,7 +39,7 @@ pub const AdaptiveInferenceProfile = struct {
     response_bytes: ?u32,
     timeout_ms: ?u32,
 };
-pub const EpochReason = enum { initial, model_change, effort_change, eviction };
+pub const EpochReason = enum { initial, model_change, effort_change, eviction, view_change };
 pub const SkillResidency = enum { resident, transient };
 pub const SkillMaterialization = struct {
     resource: ArtifactReference,
@@ -63,6 +63,13 @@ pub const AdaptiveContextReference = struct {
 };
 /// Large immutable history stays outside Kosmos values. Adapters validate each
 /// continuation against its original capture/resource closure before dispatch.
+/// A controller-selected view replaces preceding research exchanges. The
+/// reference is data, never object access authority; its actual material enters
+/// through the paired workspace result at selected_at.
+pub const ResearchSelection = struct { view: contracts.workspace.Ref, selected_at: u64 };
+/// Authored classification of paired call/results during research replacement.
+/// Human input and other operative controls must survive a selected data view.
+pub const ContextRetention = enum { research, control };
 pub const AdaptivePlan = struct {
     epoch: u64,
     reason: EpochReason,
@@ -71,6 +78,7 @@ pub const AdaptivePlan = struct {
     prior: ?AdaptiveContextReference,
     catalog: ArtifactReference,
     skills: contracts.Vector(SkillMaterialization, null),
+    research: ?ResearchSelection = null,
 };
 pub const AdaptiveUsage = struct {
     input_tokens: ?u64,
@@ -147,8 +155,13 @@ fn checkDeclarations(comptime Answer: type, comptime declarations: anytype) void
     inline for (declarations, 0..) |declaration, index| {
         inline for (@typeInfo(@TypeOf(declaration)).@"struct".field_names) |field_name| {
             if (!std.mem.eql(u8, field_name, "name") and
-                !std.mem.eql(u8, field_name, "description"))
+                !std.mem.eql(u8, field_name, "description") and
+                !std.mem.eql(u8, field_name, "context_retention"))
                 @compileError("Protean model declaration has unknown field '" ++ field_name ++ "'");
+        }
+        if (@hasField(@TypeOf(declaration), "context_retention")) {
+            const retention: ContextRetention = declaration.context_retention;
+            _ = retention;
         }
         const name: []const u8 = declaration.name;
         if (name.len == 0 or name.len > 64)
@@ -202,7 +215,7 @@ pub fn Profile(
         const Self = @This();
         pub const identity = semantic_identity;
         pub const adaptive_context_identity = adaptive_context_semantic_identity;
-        pub const adaptive_context_version: u8 = 6;
+        pub const adaptive_context_version: u8 = 7;
         pub const adaptive_policy_identity = adaptive_policy_semantic_identity;
         pub const AnswerType = Answer;
         pub const Interpretation = @import("model_interpretation.zig").Result(Answer);
@@ -210,6 +223,15 @@ pub fn Profile(
         pub const InterpretationFailure = @import("model_interpretation.zig").Failure;
         pub const representation = limits;
         pub const declaration_count = declarations.len;
+        /// Compile-time application semantics, never provider-supplied metadata.
+        pub const retained_control_calls: [declarations.len]bool = blk: {
+            var result: [declarations.len]bool = @splat(false);
+            for (declarations, 0..) |declaration, i| {
+                if (@hasField(@TypeOf(declaration), "context_retention"))
+                    result[i] = @as(ContextRetention, declaration.context_retention) == .control;
+            }
+            break :blk result;
+        };
         pub const ArgumentCodec = CodecProfile.Codec;
         pub const DecodedAnswer = CodecProfile.Decoded;
         pub const ModelId = contracts.Text(schemaBound(limits.model_id_bytes));

@@ -280,6 +280,7 @@ const AdmissionFact = struct {
     question: ?state.Digest,
     message: ?state.Digest,
     reconciliation: ?state.Digest,
+    workspace: ?state.Digest,
     event_seen: bool = false,
 };
 const AdmissionFacts = std.AutoHashMap(u64, AdmissionFact);
@@ -295,6 +296,9 @@ fn admissionMethod(kind: state.EventType) ?state.Method {
         .resumed => .@"resume",
         .imported => .import_checkpoint,
         .reconciled => .reconcile,
+        .workspace => .workspace,
+        .workspace_progress,
+        .workspace_read,
         .input_required,
         .message_consumed,
         .message_not_consumed,
@@ -383,7 +387,13 @@ fn validateEventFacts(store: *storage.Store, archive: state.Archive, task: state
             if (origin.source_revision != event.revision - 1) return error.InvalidArchive;
             return null;
         },
-        .accepted, .cancellation_requested, .resumed => return null,
+        .workspace => {
+            var id: state.Digest = undefined;
+            _ = std.fmt.hexToBytes(&id, data.object.get("workspace_id").?.string) catch return error.InvalidArchive;
+            if (admission.?.workspace == null or !same(&id, &admission.?.workspace.?)) return error.InvalidArchive;
+            return null;
+        },
+        .workspace_progress, .workspace_read, .accepted, .cancellation_requested, .resumed => return null,
         // These may precede later progress and have no retained receipt or
         // immutable record of the historical schedule/blocker. Their shape and
         // journal range remain checked; current state cannot refute old state.
@@ -492,6 +502,8 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         defer store.allocator.free(bytes);
         var decoded = try contracts.decodeOwned(state.Receipt, store.allocator, bytes);
         defer decoded.deinit();
+        try collector.visit(state.Receipt, decoded.value);
+        try state.visitWorkspaceReceipt(a, store, decoded.value, &collector);
         if (!same(&decoded.value.task, &value.id) or !same(&decoded.value.request_digest, &row.request) or decoded.value.revision == 0 or decoded.value.revision > value.revision) return error.CorruptState;
         // Kosmos cannot attest control which the host acknowledged but has not
         // applied yet. A nonterminal task must retain that durable intent.
@@ -499,9 +511,9 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         if (decoded.value.method == .cancel and !value.terminal() and value.cancellation == null) return error.InvalidArchive;
         switch (decoded.value.method) {
             .submit, .respond, .message, .@"resume", .reconcile => last_nonterminal_revision = @max(last_nonterminal_revision, decoded.value.revision),
-            .cancel, .import_checkpoint => {},
+            .cancel, .import_checkpoint, .workspace => {},
         }
-        const fact: AdmissionFact = .{ .method = decoded.value.method, .receipt = row.body.digest, .question = decoded.value.question, .message = decoded.value.message, .reconciliation = decoded.value.reconciliation };
+        const fact: AdmissionFact = .{ .method = decoded.value.method, .receipt = row.body.digest, .question = decoded.value.question, .message = decoded.value.message, .reconciliation = decoded.value.reconciliation, .workspace = decoded.value.workspace };
         const entry = try admissions.getOrPut(decoded.value.revision);
         if (entry.found_existing and !std.meta.eql(entry.value_ptr.*, fact)) return error.InvalidArchive;
         entry.value_ptr.* = fact;
@@ -539,6 +551,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         defer store.allocator.free(bytes);
         var decoded = try contracts.decodeOwned(state.Event, store.allocator, bytes);
         defer decoded.deinit();
+        try collector.visit(state.Event, decoded.value);
         if (!same(&decoded.value.task, &value.id) or decoded.value.seq != row.seq or decoded.value.revision != row.revision) return error.CorruptState;
         try @import("schemas.zig").validateEventData(store.allocator, decoded.value.kind, decoded.value.data.bytes);
         const identity = try validateEventFacts(store, archive, value, &admissions, decoded.value);
@@ -564,7 +577,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
                 terminal = position;
             },
             // These are the only publications that may follow termination.
-            .cancellation_requested, .imported, .message_not_consumed => {},
+            .cancellation_requested, .imported, .message_not_consumed, .workspace, .workspace_progress => {},
             else => {
                 if (terminal != null) return error.InvalidArchive;
                 nonterminal_event = true;

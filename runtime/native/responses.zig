@@ -94,6 +94,17 @@ fn argument(comptime T: type, a: std.mem.Allocator, value: json.Value) ArgumentE
             inline for (info.field_names, info.field_types) |name, FieldType| @field(result, name) = try argument(FieldType, a, value.object.get(name) orelse return error.MissingField);
             break :blk result;
         },
+        .@"union" => |info| blk: {
+            if (value != .object) return error.WrongType;
+            for (value.object.keys()) |key| if (!equal(key, "tag") and !equal(key, "value")) return error.UnknownField;
+            const tag = value.object.get("tag") orelse return error.MissingField;
+            const payload = value.object.get("value") orelse return error.MissingField;
+            if (tag != .string) return error.WrongType;
+            inline for (info.field_names, info.field_types) |name, Child| {
+                if (equal(tag.string, name)) break :blk @unionInit(T, name, try argument(Child, a, payload));
+            }
+            return error.WrongType;
+        },
         else => @compileError("unsupported model argument"),
     };
 }
@@ -101,28 +112,34 @@ fn argument(comptime T: type, a: std.mem.Allocator, value: json.Value) ArgumentE
 /// Provider output grammar shared by the sole v11 adapter and pure recovery.
 pub fn OutputNormalizer(comptime P: type) type {
     return struct {
+        fn malformed(err: anyerror) error{OutOfMemory}!P.DecodedAnswer {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return .{ .invalid = .malformed };
+        }
+
         fn decodeAction(a: std.mem.Allocator, name: []const u8, arguments: []const u8) !P.DecodedAnswer {
             // Admission bounds count supplied fields, including duplicates,
             // before typed decoding, as in the retained shared contract.
             var scanner = std.json.Scanner.initCompleteInput(a, arguments);
             defer scanner.deinit();
-            if ((scanner.next() catch return .{ .invalid = .malformed }) != .object_begin) return .{ .invalid = .malformed };
+            if ((scanner.next() catch |err| return malformed(err)) != .object_begin) return .{ .invalid = .malformed };
             var fields: usize = 0;
             const limits = P.normalizationLimits();
             while ((scanner.peekNextTokenType() catch return .{ .invalid = .malformed }) != .object_end) : (fields += 1) {
                 if (fields == limits.maximum_argument_fields) return .{ .invalid = .capacity };
-                const token = scanner.nextAllocMax(a, .alloc_if_needed, arguments.len) catch return .{ .invalid = .malformed };
+                const token = scanner.nextAllocMax(a, .alloc_if_needed, arguments.len) catch |err| return malformed(err);
                 const key = switch (token) {
                     .string, .allocated_string => |bytes| bytes,
                     else => return .{ .invalid = .malformed },
                 };
                 defer if (token == .allocated_string) a.free(token.allocated_string);
                 if (key.len > limits.maximum_argument_name_bytes) return .{ .invalid = .malformed };
-                scanner.skipValue() catch return .{ .invalid = .malformed };
+                scanner.skipValue() catch |err| return malformed(err);
             }
-            _ = scanner.next() catch return .{ .invalid = .malformed };
-            if ((scanner.next() catch return .{ .invalid = .malformed }) != .end_of_document) return .{ .invalid = .malformed };
+            _ = scanner.next() catch |err| return malformed(err);
+            if ((scanner.next() catch |err| return malformed(err)) != .end_of_document) return .{ .invalid = .malformed };
             const parsed = json.parse(a, arguments, .{ .bytes = P.representation.arguments_json_bytes orelse arguments.len, .tokens = arguments.len, .members = arguments.len }) catch |err| return .{ .invalid = switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
                 error.DuplicateKey => .duplicate_field,
                 error.Capacity => .capacity,
                 else => .malformed,

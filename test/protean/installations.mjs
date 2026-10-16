@@ -5,6 +5,7 @@ import {execFileSync, spawnSync} from 'node:child_process';
 import {copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
+import {pathToFileURL} from 'node:url';
 
 const usage = 'usage: installations.mjs [ARCHIVE_SEED_DIRECTORY [REFERENCE_EXECUTABLE]]';
 if (process.argv.length === 3 && process.argv[2] === '--help') { console.log(usage); process.exit(0); }
@@ -81,6 +82,9 @@ try {
   run('/usr/bin/tar', ['-xzf', join(cache, 'p', `${packageHash}.tar.gz`), '-C', packageDir]);
   const source = join(packageDir, packageHash);
   assert(existsSync(join(source, 'build.zig')));
+  // Resolve the native qualifier's full module graph from the published bytes.
+  // Loading its fixture helpers performs no provider or native execution.
+  await import(pathToFileURL(join(source, 'test/protean/adaptive_native_peer.mjs')).href);
   for (const retired of ['runtime/model.mjs', 'runtime/mobility', 'examples/native-minimal', 'examples/repository-agent', 'tools/agent4/setup.mjs'])
     assert(!existsSync(join(source, retired)), `retired package member: ${retired}`);
   const consumer = join(scratch, 'consumer'); mkdirSync(consumer);

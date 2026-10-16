@@ -44,6 +44,16 @@ pub fn Record(comptime kind: []const u8) type {
         .attempt => state.Attempt,
         .reconciliation => state.Reconciliation,
         .origin => state.Origin,
+        .workspace_program => @import("workspace_state.zig").Program,
+        .workspace_work => @import("workspace_state.zig").Work,
+        .workspace_value => @import("workspace_state.zig").Value,
+        .workspace_view => @import("workspace_state.zig").View,
+        .workspace_port => @import("workspace_state.zig").Port,
+        .workspace_port_reply => @import("workspace_state.zig").PortReply,
+        .execution_route => @import("workspace_state.zig").ExecutionRoute,
+        .workspace_wait => @import("workspace_state.zig").Wait,
+        .workspace_delegation => @import("workspace_state.zig").Delegation,
+        .workspace_reply => @import("workspace_state.zig").ReplyObservation,
     };
 }
 pub const Store = struct {
@@ -535,14 +545,14 @@ pub const Store = struct {
     }
     fn retainValue(self: *Store, comptime T: type, parent: state.Reference, value: T) !void {
         try self.retainValueDirect(T, parent, value);
-        if (T == state.Reconciliation) {
+        if (T == state.Reconciliation or T == state.Receipt) {
             var history = struct {
                 store: *Store,
                 pub fn typed(this: *@This(), comptime V: type, ref: state.Reference, item: V) !void {
                     try this.store.retainValueDirect(V, ref, item);
                 }
             }{ .store = self };
-            try state.visitReconciliationHistory(self.allocator, self, value, &history);
+            if (T == state.Reconciliation) try state.visitReconciliationHistory(self.allocator, self, value, &history) else try state.visitWorkspaceReceipt(self.allocator, self, value, &history);
         }
     }
     fn retainValueDirect(self: *Store, comptime T: type, parent: state.Reference, value: T) !void {
@@ -596,7 +606,7 @@ pub const Store = struct {
     }
     pub fn putRecord(self: *Store, comptime T: type, comptime kind: []const u8, id: Digest, task: state.TaskId, value: T) !void {
         if (T != Record(kind)) @compileError("native record type/kind mismatch");
-        if (comptime std.mem.eql(u8, kind, "artifact") or std.mem.eql(u8, kind, "attempt") or std.mem.eql(u8, kind, "origin")) @compileError("immutable native records are created once");
+        if (comptime std.mem.eql(u8, kind, "artifact") or std.mem.eql(u8, kind, "attempt") or std.mem.eql(u8, kind, "origin") or std.mem.eql(u8, kind, "workspace_program") or std.mem.eql(u8, kind, "workspace_value") or std.mem.eql(u8, kind, "workspace_view") or std.mem.eql(u8, kind, "workspace_port") or std.mem.eql(u8, kind, "workspace_port_reply") or std.mem.eql(u8, kind, "execution_route") or std.mem.eql(u8, kind, "workspace_wait") or std.mem.eql(u8, kind, "workspace_delegation") or std.mem.eql(u8, kind, "workspace_reply")) @compileError("immutable native records are created once");
         try self.writing();
         errdefer self.rollback();
         const body = try contracts.encodeOwned(T, self.allocator, value);

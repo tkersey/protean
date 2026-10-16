@@ -167,13 +167,20 @@ artifacts. Status includes the total pending-message count and a bounded view;
 limits, archive integer fields, checked machine arithmetic and OS capacity still
 apply. Finite tests do not establish infinite capacity or termination.
 
-## Construct and reuse a pure tool
+## Construct and retain computations
 
-The `tool-construction` skill exposes a frozen catalog of compiled BMO1
-components. `tool_build` links a recipe with Horos's data-only
-linker; `tool_run` executes the resulting BPI3 with native Kosmos. Neither invokes
-the Zig compiler, another model, or a host interpreter for the recipe. Generated
-programs receive ordinary values and cannot perform external effects.
+Application 5 exposes `program`, `work`, and `context` alongside ordinary reads,
+questions, reports, and adaptive controls. Computation is optional. A pending
+child question never narrows the controller to the child's answer type.
+
+`program.describe` returns paged source-record schemas, examples, component
+interfaces, or binding contracts. `program.build` accepts existing Horos source
+records (`source_kind: "source_records"`) or a frozen component recipe
+(`"component_recipe"`). The source is a `json_text` string or an authorized
+source reference. Compilation uses the linked Horos checker/lowerer; execution
+uses native Kosmos. Neither requires a compiler executable or a source checkout.
+The build worker does not run the program or invoke a model. Admission establishes
+structural validity, not that the algorithm answers the user's question.
 
 Enable this explicitly with configuration version 3:
 
@@ -208,7 +215,9 @@ For example, the `tools` object can admit two compatible inputs:
 }
 ```
 
-The host supplies each input's opaque reference in the initial bindings. All
+The host lists authorized input IDs in the initial bindings.
+`context.materialize` with `input: {tag: "authorized_input", value: "first"}`
+returns its typed value reference and provenance. All
 64-bit numbers use decimal strings. Admission converts these records to the
 ordinary `Table` schema and initializes result fields; it performs no audit.
 Table rows, related records, selected keys and the admitted input collection
@@ -234,30 +243,67 @@ and is a small working example, not a complete audit:
 }
 ```
 
-The model passes that complete JSON as the string field `proposal_json` to
-`tool_build`. Its successful response says `structurally_admitted`, supplies
-`tool_ref`, and identifies the actual input, output and failure schemas. It
-does not establish that the composition meets the task. A subsequent
-`tool_run` call takes that `tool_ref` and an admitted `input_ref`; its result
-contains the actual computed table. The same tool reference can run on the
-second compatible input after a normal parent restart.
+Pass the recipe JSON as the string in this `program` action:
 
-Construction is offered only while the skill is active and policy allows it.
-Execution has an independent `run` permission; deactivation or unload does not
-destroy a constructed program. After unload, the parent exposes retained tool
-references without reinserting the removed instructions. References from a
-different task or policy do not confer authority.
+```json
+{"command":{"tag":"build","value":{"source":{"tag":"json_text","value":"RECIPE_JSON"},"source_kind":"component_recipe","exposures":[]}}}
+```
 
-`inspect` accepts source-file evidence only; generated results remain reportable,
-and selecting one for inspection returns a recoverable tool rejection.
+A successful response is `admitted` and contains `observation.program`, actual
+input/result/failure descriptors, source provenance, and ports. Source records
+can define new algorithms, recursive functions, and recursive schemas. They
+cannot create native callbacks or claim protected model/commit identities.
 
-Recipes require unique instance keys, schema-compatible bindings and an acyclic
-inter-instance graph. There is no recipe/count/image-size allowance. Generated
-execution validates the retained derivation and runs the exact referenced image;
-it does not replace the artifact or ask another model to synthesize a program.
-Failed attempts remain recorded and do not suppress otherwise authorized tools.
+Start the returned program with a compatible value reference:
 
-Application version 4 reports `adaptive-agent.output.v4`. Its `result` is one
+```json
+{"command":{"tag":"start","value":{"program":{"kind":"program","id":"PROGRAM_DIGEST"},"input":{"tag":"reference","value":{"kind":"value","id":"VALUE_DIGEST"}},"policy":{"stop":"terminal","continuation":"owner_scheduled"}}}}
+```
+
+Use `next_slice` or `next_exposed_event` instead of `terminal` to choose a smaller
+commitment. `explicit_only` retains the successor without scheduling more work.
+`owner_scheduled` permits mechanical progress to the chosen stopping condition;
+it does not require an inference per quantum. `work.inspect` does not execute.
+`work.collect` returns requested work in order, including missing and pending
+results. `work.wait` yields until selected observations change or a user message
+arrives. A kernel boundary remains parkable/cancellable even without authored ports.
+
+Source exposures name an actual effect index and `observation`, `input`, or
+`alternative` class. The ordinary compiled driver retains typed futures. An
+alternative port invokes an admitted multi-shot resumption; it does not copy an
+external checkpoint. `work.interact` binds the work's execution/control revisions,
+port identity, and generation. Repeated `resume_value` commands at an alternative
+port create actual alternatives while retaining the template. `finish` disposes
+the retained future. Illegal exclusive or cleanup captures remain compiler errors.
+The model may choose zero alternatives or leave an input port unanswered.
+
+For example, after a child asks for a binary classification, the controller can
+use `context.expand` to inspect omitted source, `work.park` the child, and
+`program.build` a different identity comparison. There is no native transition
+for that investigative decision. The original port still accepts its original
+type if the model later resumes it.
+
+`context.materialize` admits exact typed values or snapshot slices with coverage
+and provenance. `context.select` chooses retained values for a subsequent model
+request; `context.expand` exposes source, value, or view pages. Views preserve
+raw evidence access and cannot remove policy, current user messages, skills, or
+authorized actions. A view change leaves an already-prepared request unchanged.
+Old research exchanges and opaque reasoning are removed at the next context epoch.
+
+`work.delegate` explicitly selects a policy and optional interpretation: `none`,
+`snapshot`, or `model`. A model binding names an authorized profile/effort,
+subproblem, typed target port, and input references. The resulting child has its
+own occurrence, capture, and provenance. A pending port alone grants no inference.
+Captured, unknown, rejected, cancelled, and completed states remain distinct.
+Cancellation cannot turn ambiguous external delivery into a completed answer.
+
+Build and execution permissions are independent of construction-skill residency.
+Unloading a skill removes its instructions without destroying retained programs.
+Every reference is checked against task custody; a digest grants no authority.
+Recipes still require unique keys, compatible bindings, and acyclic component
+wiring. General source recursion is governed by Horos, not that recipe restriction.
+
+Application version 5 reports `adaptive-agent.output.v5`. Its `result` is one
 of `report`, `no_result`, `refusal`, or `capacity`. A report has a summary,
 claims, and limitations. Each claim states its kind (`observation`, `inference`,
 or `hypothesis`), statement, reasoning, and zero-based `evidence_indices`.
@@ -266,18 +312,19 @@ reasoning. At least one claim must cite evidence. Invalid proposals receive a
 typed rejection under the original tool-call ID and can be corrected.
 
 The output retains every acquired evidence entry in its original order, tagged
-`source` or `generated`, plus constructed program references in `programs`.
+`source` or `workspace`, plus constructed program references in `programs`.
 Claims may share evidence; a claim cannot repeat an index. These checks establish
 membership and structural support, not the truth of model-written statements.
-This release uses context v6 and fresh format-12 state directories; old example
-databases and archives are disposable and are not migrated.
+The new image uses context v7 and native state format 13 in a **new namespace**.
+Keep an existing task's namespace, original image, and exact executable together;
+continue it with that executable. Do not point the new binary at its old namespace
+or transplant the old continuation. Building this repository does not update an
+installed runtime. Preserve the previous executable and its `describe-build`
+output before installing a replacement, and keep the old namespace discoverable.
 
-Use the existing `artifact.read` method with `task_id` and the reference's
-hex digest as `artifact_id` to inspect a generated program or result in bounded
-chunks. `ToolProgram` and `ToolArtifact` in the application metadata describe
-their ordinary wire values. Disclosure requires that the producing capability
-explicitly permits public output objects; raw captures, prepared requests and
-private context objects remain unavailable.
+Workspace inspection and expansion return bounded pages with completeness and
+coverage. Raw provider captures, prepared requests, and private context objects
+remain private; possession of their digest does not make them public artifacts.
 
 ## Controls and context
 
@@ -306,15 +353,15 @@ definitions, and work dispatch binds to that captured call. Queued user messages
 are consumed through the authored inbox only after the current call settles.
 
 The current adaptive contracts are `agent.model.invoke.v11`,
-`agent.model.context.responses.adaptive.v6` and `agent.model.policy.adaptive.v2`.
-Replace old example databases and archives with fresh state under these contracts.
+`agent.model.context.responses.adaptive.v7` and `agent.model.policy.adaptive.v2`.
+Start new tasks in fresh state under these contracts; retain old tasks with their original runtime.
 Raw provider captures and opaque reasoning remain private.
 Absent usage remains unavailable. Explicit cache markers and unchanged request
 prefixes do not establish provider cache reuse.
 
 ## Qualification status
 
-Deterministic checks cover 38 continuing model calls across restart/import,
+Deterministic checks retain the long continuing model trace across restart/import,
 17 control revisions, 12 generated runs, larger catalogs/resources/snapshots,
 large-prompt artifact reads, and honest recovery from failed capture publication.
 These use controlled provider replies. They do not establish real model access,
@@ -322,3 +369,8 @@ actual configuration-update acceptance, a provider cache hit, or live task quali
 Live qualification requires an explicitly supplied credential binding. Record the
 exact source/dependency/program/executable identities, UTC run times, returned
 models, effective efforts, physical attempts, usage and useful outcomes in the PR.
+
+The [workspace acceptance map](../../docs/computational-workspace.md) identifies
+the source/native/owner witnesses and their limits. The optional
+[three-arm evaluation](../../tools/evaluation/README.md) records model efficacy
+only after explicitly authorized live runs and result adjudication.

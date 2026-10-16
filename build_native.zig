@@ -1,7 +1,7 @@
 //! Build/environmental API. No target program executes while generating assets.
 const std = @import("std");
 /// One packaging constant supplies both the namespace reader and manifest.
-pub const state_format: u32 = 12;
+pub const state_format: u32 = 13;
 pub const sqlite_flags: []const []const u8 = &.{ "-std=c99", "-DSQLITE_THREADSAFE=1", "-DSQLITE_OMIT_LOAD_EXTENSION=1", "-DSQLITE_DQS=0", "-DSQLITE_DEFAULT_MEMSTATUS=1", "-DSQLITE_DEFAULT_FOREIGN_KEYS=1" };
 
 pub fn sqliteFlags(optimize: std.lang.Optimize) []const []const u8 {
@@ -136,7 +136,7 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
     const executable = b.addExecutable(.{
         .name = options.name,
         .root_module = root,
-        .use_llvm = if (target.result.os.tag == .linux and target.result.cpu.arch == .x86_64) false else null,
+        .use_llvm = if (target.result.os.tag == .linux and target.result.cpu.arch == .x86_64) true else null,
     });
     const install = b.addInstallArtifact(executable, .{});
     return .{ .executable = executable, .install = install, .assets = assets, .manifest = manifest_file };
