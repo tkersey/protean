@@ -3752,7 +3752,7 @@ test "native placement carries a suspended evaluator with exclusive per-work cus
     defer root_builder.deinit();
     const root_module = try gcd(&root_builder);
     const root_body = root_builder.functions.items[@intCast(root_module.entry)].body.?;
-    root_builder.functions.items[@intCast(root_module.entry)].body = try root_builder.term(.{ .yield_then = root_body });
+    root_builder.functions.items[@intCast(root_module.entry)].body = try root_builder.term(.{ .yield_then = try root_builder.term(.{ .yield_then = root_body }) });
     var root = try compile(a, &root_builder, root_builder.module(root_module.entry, root_module.failure));
     defer root.deinit();
     const admitted = try data.program_image.Admitted.decode(a, root.image);
@@ -3995,6 +3995,7 @@ test "native placement carries a suspended evaluator with exclusive per-work cus
     // Advance the controller after its worker was exported. The worker has
     // never received this controller checkpoint, and a succession proof must
     // not require that private object to be retained locally.
+    _ = try sender.resumeTask(scratch, "advance-controller-after-export", subject.task, controller_cut.control);
     var advanced_controller = controller_cut;
     for (0..64) |_| {
         _ = try sender.pump(scratch);
