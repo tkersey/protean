@@ -205,6 +205,15 @@ export async function evaluateCase({subject, build, output, binary, credential, 
   return report;
 }
 
+// Bind every prepared input before opening an attempt, including the oracle
+// used later for manual adjudication. Reports retain these identities in subject.
+export async function validatePreparedCase(subject) {
+  assert.equal(hash(await readFile(subject.config)), subject.config_sha256, 'Prepared configuration changed; prepare a new comparison.');
+  assert.deepEqual((await readdir(subject.snapshot)).sort(), subject.evidence.map(item => item.path).sort(), 'Evidence universe changed.');
+  for (const item of subject.evidence) assert.equal(hash(await readFile(join(subject.snapshot, item.path))), item.sha256, 'Frozen evidence changed.');
+  assert.equal(hash(await readFile(subject.expected)), subject.expected_sha256, 'Expected answers changed or are unbound; prepare a new comparison.');
+}
+
 if (import.meta.main) {
 if (mode === 'prepare') {
   const configFile = resolve(option(args, '--config', '')), directory = resolve(option(args, '--out', ''));
@@ -228,14 +237,15 @@ if (mode === 'prepare') {
   for (const family of families) {
     const snapshot = join(directory, family.id, 'snapshot'); await mkdir(snapshot, {recursive: true});
     for (const [name, value] of Object.entries(family.files)) await writeFile(join(snapshot,name), value);
-    await writeFile(join(directory,family.id,'expected.json'), json(family.expected));
+    const expected = json(family.expected), expected_sha256 = hash(expected);
+    await writeFile(join(directory,family.id,'expected.json'), expected);
     const evidence = Object.entries(family.files).sort(([a],[b]) => a.localeCompare(b)).map(([path, text]) => ({path, sha256: hash(text)}));
     const evidence_sha256 = hash(json(evidence));
     for (let repetition = 0; repetition < repetitions; repetition++) for (const [arm, instruction] of Object.entries(arms)) {
       const id = `${family.id}-${repetition}-${arm}`, configPath = join(directory, `${id}.json`);
       const selected = {...frozen, adaptive: {...frozen.adaptive, snapshot_root: snapshot}, tools: {build: arm !== 'ordinary', run: arm !== 'ordinary', inputs: family.inputs}};
       await writeFile(configPath, json(selected));
-      plan.cases.push({id, family: family.id, arm, repetition, config: configPath, config_sha256: hash(json(selected)), evidence, evidence_sha256, snapshot, prompt: `${family.prompt}\n\nEvaluation capability condition: ${instruction}`, expected: join(directory,family.id,'expected.json')});
+      plan.cases.push({id, family: family.id, arm, repetition, config: configPath, config_sha256: hash(json(selected)), evidence, evidence_sha256, snapshot, prompt: `${family.prompt}\n\nEvaluation capability condition: ${instruction}`, expected: join(directory,family.id,'expected.json'), expected_sha256});
     }
   }
   await writeFile(join(directory,'plan.json'), json(plan));
@@ -248,9 +258,7 @@ if (mode === 'prepare') {
   const build = command(binary,['describe-build']); assert.equal(build.application_assets_sha256, hash(await readFile(resolve(option(args,'--application','')))));
   const reports = [];
   for (const subject of plan.cases) {
-    assert.equal(hash(await readFile(subject.config)),subject.config_sha256, 'Prepared configuration changed; prepare a new comparison.');
-    assert.deepEqual((await readdir(subject.snapshot)).sort(),subject.evidence.map(item => item.path).sort(), 'Evidence universe changed.');
-    for (const item of subject.evidence) assert.equal(hash(await readFile(join(subject.snapshot,item.path))),item.sha256,'Frozen evidence changed.');
+    await validatePreparedCase(subject);
     const output = join(directory,subject.id); await mkdir(output); // Refuse to overwrite an earlier paid attempt.
     const report = await evaluateCase({subject, build, output, binary, credential, application, seconds: plan.seconds_per_case});
     reports.push(report);

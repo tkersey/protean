@@ -4,9 +4,10 @@ import assert from 'node:assert/strict';
 import {createServer} from 'node:https';
 import {X509Certificate, createHash} from 'node:crypto';
 import {once} from 'node:events';
-import {mkdir, writeFile, readFile} from 'node:fs/promises';
+import {mkdir, writeFile, readFile, unlink} from 'node:fs/promises';
 import {execFile} from 'node:child_process';
 import {join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {ProteanClient} from '../support/stdio-client.mts';
 import {certificates} from '../support/tls.mjs';
 import {readArchive, missingCaptures, tamperedAdaptiveControl, missingCheckpoint, changedProfile, extraPrivateArtifact, omittedAttempts, changedOperationKey, invalidEventData} from './native_archive.mjs';
@@ -205,6 +206,29 @@ const execute = (command, args, options) => new Promise(resolve => {
   }));
 });
 
+export async function verifyEvaluationPreparation({configPath, directory}) {
+  const script = fileURLToPath(new URL('../../tools/evaluation/workspace.mjs', import.meta.url));
+  const prepared = await execute(process.execPath, [script, 'prepare', '--config', configPath, '--out', directory], {encoding: 'utf8'});
+  assert.equal(prepared.status, 0, prepared.stderr);
+  assert.equal(JSON.parse(prepared.stdout).live_calls, 0);
+  const plan = JSON.parse(await readFile(join(directory, 'plan.json'), 'utf8'));
+  assert.equal(plan.cases.length, 9);
+  const {validatePreparedCase} = await import('../../tools/evaluation/workspace.mjs');
+  for (const subject of plan.cases) {
+    assert.equal(subject.expected_sha256, hash(await readFile(subject.expected)));
+    await validatePreparedCase(subject);
+  }
+  const subject = plan.cases[0], original = await readFile(subject.expected);
+  await writeFile(subject.expected, '{"port":1}\n');
+  await assert.rejects(validatePreparedCase(subject), /Expected answers changed/);
+  await unlink(subject.expected);
+  await assert.rejects(validatePreparedCase(subject), {code: 'ENOENT'});
+  await writeFile(subject.expected, original);
+  await validatePreparedCase(subject);
+  const unbound = {...subject}; delete unbound.expected_sha256;
+  await assert.rejects(validatePreparedCase(unbound), /Expected answers changed/);
+}
+
 async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
   const assetBytes = await readFile(applicationPath), asset = JSON.parse(assetBytes);
   const fixture = JSON.parse(Buffer.from(asset.resources.find(row => row.id === 'adaptive-agent.offline-responses').base64url, 'base64url'));
@@ -322,6 +346,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite}) {
   };
   try {
     if (suite === 'controls') {
+      await verifyEvaluationPreparation({configPath, directory: join(app.data, 'prepared evaluation')});
       await invoke('validate', '--config', configPath); assert.equal(requests.length, 0);
       const retiredConfig = join(app.data, 'retired-quota-contract.json');
       await writeFile(retiredConfig, JSON.stringify({...configuration(config), schema: 'adaptive-agent.configuration.v2'}));

@@ -18,8 +18,9 @@ effort. Preparation freezes that profile and effort, removes optional skills,
 and creates three workloads: a direct configuration lookup, grouped GCDs over
 256 rows, and a misleading ingestion hypothesis requiring broader evidence.
 Each has ordinary, pure-program, and retained-workspace arms. Evidence and time
-budgets match across arms; preparation records configuration and evidence hashes.
-The runner refuses changed evidence and existing attempt directories.
+budgets match across arms; preparation records configuration, evidence, and expected-answer hashes.
+The runner refuses changed inputs, unbound expected answers, and existing attempt
+directories. Regenerate older plans that lack expected-answer hashes.
 
 The arms are prompt ablations. Build/run grants disable construction in the
 ordinary arm; the pure arm asks the controller to use only completed pure work.
@@ -64,7 +65,8 @@ their provider calls and available usage still contribute costs.
 
 Adjudicate `task_correctness`, `evidence_coverage`, `successful_reframing`,
 `unnecessary_construction`, and `branch_executions_not_used` against each frozen
-`expected.json`, result, and action trace. These fields start null rather than
+`expected.json`, result, and action trace. Verify the expected file against the
+report's `subject.expected_sha256` before adjudicating. These fields start null rather than
 being guessed from termination. Record the evaluator's reasoning, including
 failed or incomplete attempts. Compare all repetitions and all costs; no required
 success rate, token reduction, minimum branch count, or mandatory construction
