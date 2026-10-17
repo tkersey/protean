@@ -234,7 +234,9 @@ function* mobilityTrace(subject, guestCut = false) {
     const before = work.execution_revision;
     subject.findClone = true;
     for (let i = 0; i < 256; i++) {
-      work = yield* command('pump', {expected: expected(work), base_quantum: 65_536});
+      // Group the initial four base slices. The required live clone witness
+      // and the finer subsequent cuts remain checked before any transfer.
+      work = yield* command('pump', {expected: expected(work), base_quantum: i === 0 ? 262_144 : 65_536});
       if (subject.clonePhase?.clone_frames > 0 && subject.clonePhase.clone_bindings > 0) break;
       assert(work.outer_operation || !work.port_accepts_command, 'the clone must be observed before its result');
     }

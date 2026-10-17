@@ -4,7 +4,7 @@ import {spawn, type ChildProcessWithoutNullStreams} from 'node:child_process';
 export type Json = null | boolean | number | string | Json[] | {[key: string]: Json};
 export type Notification = {jsonrpc: '2.0'; method: string; params: Json};
 export type Exit = {code: number | null; signal: NodeJS.Signals | null};
-type Pending = {resolve: (value: Json) => void; reject: (error: Error) => void; timer: NodeJS.Timeout};
+type Pending = {resolve: (value: Json) => void; reject: (error: Error) => void; timer: NodeJS.Timeout | undefined};
 
 export class RpcError extends Error {
   readonly code: number;
@@ -78,10 +78,11 @@ export class ProteanClient {
     return value;
   }
 
-  call(method: string, params: {[key: string]: Json} = {}, timeoutMs = 30_000): Promise<Json> {
+  /** A null timeout waits for a response or connection failure. */
+  call(method: string, params: {[key: string]: Json} = {}, timeoutMs: number | null = 30_000): Promise<Json> {
     if (this.ending || this.failure) return Promise.reject(this.failure ?? new Error('client closing'));
     if (this.pending.size >= this.maxPending) return Promise.reject(new Error('client request capacity reached'));
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) return Promise.reject(new Error('invalid timeout'));
+    if (timeoutMs !== null && (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)) return Promise.reject(new Error('invalid timeout'));
     const id = `rpc-${++this.serial}`;
     let frame: Buffer;
     try { frame = Buffer.from(JSON.stringify({jsonrpc: '2.0', id, method, params}) + '\n'); }
@@ -89,7 +90,7 @@ export class ProteanClient {
     if (frame.length > this.frameBytes || this.writingBytes + frame.length > this.queueBytes)
       return Promise.reject(new Error('client frame/queue capacity reached'));
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => this.fail(new Error('RPC timeout; inspect or replay the same durable operation')), timeoutMs);
+      const timer = timeoutMs === null ? undefined : setTimeout(() => this.fail(new Error('RPC timeout; inspect or replay the same durable operation')), timeoutMs);
       this.pending.set(id, {resolve, reject, timer});
       this.writingBytes += frame.length;
       this.child.stdin.write(frame, error => {

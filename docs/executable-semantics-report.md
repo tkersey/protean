@@ -29,7 +29,7 @@ source archive, a Zig package and a final executable have distinct identities.
 | Compiler policy | `kosmos.source-lower/1` |
 | Authored semantic source | `aa7a3b20f6dc0dd6d34efab9254109aeab4811249e83339984d373f0c0063571` |
 | Generic artifact SHA-256 | `65da76d8cbd0addf02d99caa23631c5205c022b95c1482b9dde1da5571ae7bcc` (1,186,158 bytes) |
-| macOS executable SHA-256 | `9f19af0700232c5f385feaea1f71f2ca45d529362ee2360c394474f424715fdc` (11,295,928 bytes; authenticated build, native adaptive and process-placement fixtures pass; runtime and independent packaging qualification remain in progress) |
+| macOS executable SHA-256 | `9f19af0700232c5f385feaea1f71f2ca45d529362ee2360c394474f424715fdc` (11,295,928 bytes; authenticated build, native adaptive and process-placement fixtures pass; independent packaging passes; runtime qualification remains in progress) |
 | WASM kernel SHA-256 | `617072aaf823b549d66055f25dcfb035b742f4b33911025a2af70c173cd255d6` (current full local qualification passes) |
 
 These are built artifacts, not published release assets. The native manifest
@@ -137,10 +137,11 @@ do not establish these host laws.
 | Current package and upstream admission | Current Kosmos clean extracted source-package consumer passes 9/9 steps; the retained core matches a fresh derivation. Horos passes 264/264 steps and 865/865 tests locally, plus Linux contracts and independent installation in run 38995435856. Protean's Horos-only authoring suite passes 39/39 steps and 157/157 tests. |
 | Current Kosmos complete local qualification | `check build-runtime emit-native-input` passes 67/67 steps. The native tests reuse their preceding current-input pass. Independent source comparison covers 47 fixtures and 9,570 observations; ABI3 native/WASM comparison covers 235 boundaries and 23 transfers. Chromium and Firefox worker transfers and extracted runtime/CLI checks pass on the kernel above. |
 | Current native owners and workspace | `check-native-owner check-workspace-programs check-native-https check-workspace-semantics` passes 45/45 steps and 172/172 executed tests. HTTPS makes nine calls with no redirects/retries; crash recovery checks 16 crashes and 32 reopens with no original reinvocation or automatic lookup. |
-| Current macOS deployment | The authenticated `9f19af07` product passes the complete native adaptive fixture, including negative provider requests, response accounting, protocol/SIGINT/SIGTERM cancellation, reuse and foreign-runtime rejection. The separate process-placement fixture passes with duplicate acceptance, destination reopening and stale-source rejection. The adaptive fixture took 599.13 seconds locally; this is a cost observation, not a macOS performance acceptance target. Both this product and preceding `c5d8dbc9` had timed out under the original 60-second offline-demo allowance. The current demo completed in a separate 105.97-second diagnostic; its macOS allowance is now 120 seconds. Linux retains its sixty-second demo and ten-minute whole-workflow limits. Runtime and independent packaging qualification remain pending. |
+| Current macOS deployment | The authenticated `9f19af07` product passes the complete native adaptive fixture, including negative provider requests, response accounting, protocol/SIGINT/SIGTERM cancellation, reuse and foreign-runtime rejection. The separate process-placement fixture passes with duplicate acceptance, destination reopening and stale-source rejection. The adaptive fixture took 599.13 seconds locally; this is a cost observation, not a macOS performance acceptance target. Both this product and preceding `c5d8dbc9` had timed out under the original 60-second offline-demo allowance. The current demo completed in a separate 105.97-second diagnostic; its macOS allowance is now 120 seconds. Linux retains its sixty-second demo and ten-minute whole-workflow limits. Independent source-package acquisition, build, installation, Node/Python rejection, tamper detection and artifact identity pass in 1274.42 seconds; this is a correctness result, not a macOS performance gate. The first three runtime scenarios complete with archive accounting; the remaining scenarios are in progress. |
 | Linux current-input deployment | Run `38998100625`, attempt 2, on `50b8b2e` passes the native adaptive/placement fixtures, both runtime-mobility lanes, both workspace roots, correspondence, authoring, owner support and independent downstream installation. The native and outer-mobility fixtures execute binary `4a56682de5e1aa0c0b97923f031a6f602c7572e1cbe51519facae7f5833b96f0`. Downstream installation completes in 326.52 seconds. Tasks, adaptive owners and the general runtime lane still reach the ten-minute cancellation limit; the whole run does not pass. |
 | Linux scheduling successor | Run `39000098006` on `bcacecb6` retains the same Linux executable. Attempt 1 restores a compiler cache but rebuilds deployment artifacts: task owners pass in 6m59s, adaptive owners in 6m02s and general runtime in 9m09s; four other lanes reach cancellation. Attempt 2 restores those exact deployment artifacts and passes every lane except outer mobility. Outer mobility completes all assertions in approximately 546 seconds, including both branch results, controller movement and cleanup, but the job is cancelled before publishing its identity after about 56 seconds of setup. The whole workflow fails. General runtime passes in 3m43s and independent downstream installation in 327.26 seconds. Neither attempt is a fully cold-cache measurement. |
 | Workspace comparison | Nine generated cases, 328 boundaries: independent Horos source oracle, native/WASM byte equality and alternating checkpoint producers. Exact outer restore and duplicate-custody rejection also passed. |
+| Linux cache-write successor | Run `39001928396` on `9c88e93` fails the complete workflow in both attempts. The first rebuilds exact deployment artifacts with a restored compiler cache. The cached second attempt passes task owners and general runtime, but adaptive owners and general workspace reach cancellation. Outer mobility completes all behavioral assertions and publishes its identity, then reaches cancellation during cleanup. Compiler-cache writes are correctly skipped on exact deployment hits; removing that work is insufficient for the full ten-minute gate. The successor exports the existing 67 task, 14 adaptive and 15 general workspace test executables for exact compilation reuse, and groups four initial clone-search slices into one request. Its full timing and clone-witness result remain pending. |
 | Old tasks | The public Protean 5.0.0 macOS executable continued its old task after the new product was selected, preserving the original question and separate namespaces. Baseline executable SHA-256: `53471a265a095481ab9eaccf3cfc685cfa85ed243a6104db1d0e2ac166a4f935`. |
 | Earlier native owner and workspace aggregate | 172/172 tests, 29/29 build steps; 352.87 seconds including compilation on macOS. |
 | Compiler scratch lifetime | Protean safe workspace suite: all 17 tests pass, including specialization with a 1 MiB request allocator. Releasing compiler/validator scratch between phases decreased maximum resident set from 8.57 GB to 3.14 GB on local runs. The separate owner suite passes 155/155 tests, 26/26 build steps in 344.53 seconds. |
@@ -186,16 +187,24 @@ but still rebuilt deployment binaries and exceeded ten minutes. Specialization
 completed with the corrected polling allowance; deployment jobs exhausted their
 remaining time during the scenarios. This is not a timing pass.
 
-Deployment inputs now have a separate exact-match cache keyed by the entire Git
+Compiled qualification inputs now have a separate exact-match cache keyed by the entire Git
 tree, compiler executable/library/license contents and modes, runner OS/architecture,
-safe mode, and product/verification-peer profile. There is no prefix fallback.
+safe mode, and product, verification-peer, task-owner, adaptive-owner or general-workspace profile. There is no prefix fallback.
 Every dependency authentication, deployment scenario and independent downstream
 build still runs. The cached Linux product and peer target baseline x86-64 musl.
 A cache hit reuses completed compilation only; it is not previous test credit.
-Deployment cache hits now skip compiler-cache writes: the measured outer-mobility
+Exact compiled-artifact cache hits skip compiler-cache writes: the measured outer-mobility
 job spent about ten seconds repacking and uploading compiler files despite having
-no deployment compilation to retain. New builds and nondeployment lanes still
-save compiler work. The resulting whole-workflow timing remains to be measured.
+no deployment compilation to retain. New builds and other lanes still save
+compiler work. This change alone did not satisfy the full workflow deadline.
+The three exported test roots use the same Zig Compile objects as the original
+check targets. Each run executes every test with the standard runner, requires
+success and the complete expected test count, and retains allocator-leak and
+logged-error failures. No cached test outcome substitutes for execution.
+Outer mobility groups the first four 65,536-step search slices into one request,
+then retains the finer slices and requires a live clone frame and binding before
+transfer. All cut, custody, branch-result and cleanup assertions remain. The
+successor still requires an actual full Linux run.
 Any source-tree change invalidates it, including documentation and workflow edits.
 This can reduce repeated qualification cost but does not improve or establish
 cold-build latency. The owner aggregate retains all 155 tests and crash/reopen
@@ -217,15 +226,19 @@ setup helper's 120-second limit; no cold-cache pass is established by that attem
 CI replaces its own prior attempt's named result artifacts when rerun, so the
 terminal comparison receives the newly executed results instead of conflicting
 with an earlier upload. This does not grant prior results timing credit.
-Runtime result polls use the existing
-120-second long-operation allowance because synchronous specialization can exceed
-the short RPC default. The ten-minute limits and behavioral assertions remain.
+Linux runtime result polls use the existing 120-second long-operation allowance
+because synchronous specialization can exceed the short RPC default. macOS
+runtime result reads and archive CLI operations wait for response or process
+failure without a fixture wall-time gate. The earlier macOS specialization
+timeouts and later archive-export timeout establish incomplete qualification;
+they do not establish semantic defects. Default RPC limits for other suites and
+native placement transport limits remain intact. The ten-minute limits and behavioral assertions remain.
 The native fixture logs stream directly so interrupted runs retain stage evidence. On Linux the downstream script shares a nine-minute deadline across its subprocesses,
 allowing up to eight minutes for cold compilation. macOS runs the same packaging
 assertions without that Linux wall-time gate. A prior macOS consumer compilation
 reached its 480-second fixture timeout without a semantic assertion failure;
-that attempt leaves packaging qualification incomplete and does not establish a
-semantic defect or regression. The full portable offline demo
+that attempt did not establish a semantic defect or regression. The subsequent
+complete packaging run passes all required assertions in 1274.42 seconds. The full portable offline demo
 has a sixty-second Linux subprocess allowance and a 120-second macOS allowance;
 short CLI commands retain thirty seconds. The specification's performance contract
 requires measured costs and structural savings, not a sixty-second macOS demo.

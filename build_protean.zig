@@ -26,13 +26,14 @@ const Graph = struct {
     fn helper(g: Graph, name: []const u8) *std.Build.Module {
         return g.module(g.b.fmt("src/{s}.zig", .{name}));
     }
-    fn testModule(g: Graph, step: *std.Build.Step, module_value: *std.Build.Module) void {
+    fn testModule(g: Graph, step: *std.Build.Step, module_value: *std.Build.Module) *std.Build.Step.Compile {
         const tests = g.b.addTest(.{
             .root_module = module_value,
             .use_llvm = if (g.b.graph.host.result.os.tag == .linux and g.b.graph.host.result.cpu.arch == .x86_64) g.optimize != .debug else null,
         });
         tests.step.dependOn(g.gate);
         step.dependOn(&g.b.addRunArtifact(tests).step);
+        return tests;
     }
     fn emitter(g: Graph, name: []const u8, module_value: *std.Build.Module) *std.Build.Step.Compile {
         const executable = g.b.addExecutable(.{
@@ -191,23 +192,23 @@ pub fn build(b: *std.Build) void {
     lint.dependOn(&format_check.step);
     lint.dependOn(&b.addSystemCommand(&.{ "sh", "tools/check_zig_paths.sh" }).step);
     check.dependOn(lint);
-    g.testModule(check, g.module("test/authoring_tests.zig"));
-    g.testModule(check, g.module("src/test_root.zig"));
+    _ = g.testModule(check, g.module("test/authoring_tests.zig"));
+    _ = g.testModule(check, g.module("src/test_root.zig"));
     const workspace_values = b.step("check-workspace-values", "Check runtime-schema workspace value projection");
-    g.testModule(workspace_values, g.module("runtime/native/dynamic_values.zig"));
+    _ = g.testModule(workspace_values, g.module("runtime/native/dynamic_values.zig"));
     check.dependOn(workspace_values);
     const source_records = b.step("check-source-records", "Check the model-facing Horos source-record transport");
-    g.testModule(source_records, g.module("runtime/native/source_records.zig"));
+    _ = g.testModule(source_records, g.module("runtime/native/source_records.zig"));
     check.dependOn(source_records);
     const program_construction = b.step("check-program-construction", "Check untrusted general source construction");
-    g.testModule(program_construction, g.module("runtime/native/program_construction.zig"));
+    _ = g.testModule(program_construction, g.module("runtime/native/program_construction.zig"));
     check.dependOn(program_construction);
     const admitted = g.module("test/protean/admission.zig");
     admitted.addImport("admission", g.helper("admission"));
-    g.testModule(check, admitted);
+    _ = g.testModule(check, admitted);
     const dialogue = g.module("test/protean/dialogue_probe.zig");
     dialogue.addImport("interaction", g.helper("interaction"));
-    g.testModule(check, dialogue);
+    _ = g.testModule(check, dialogue);
     inline for (.{
         .{ "model_runtime_callback", "Protean model declaration has unknown field 'execute'" },
         .{ "model_unsupported_codec", "Protean model codec is unsupported for 'value': []const u8" },
@@ -342,13 +343,18 @@ pub fn build(b: *std.Build) void {
         workspace_programs.addImport("protean_native", checked_environment);
         const workspace_checks = b.step("check-workspace-programs", "Execute general source-record programs through native Kosmos");
         const workspace_general = b.step("check-workspace-general", "Qualify workspace execution, inputs and provenance");
-        native_graph.testModule(workspace_general, workspace_programs);
+        const workspace_general_tests = native_graph.testModule(workspace_general, workspace_programs);
+        b.step("build-workspace-general-check", "Build the retained workspace test executable")
+            .dependOn(&b.addInstallArtifact(workspace_general_tests, .{
+            .dest_dir = .{ .override = .{ .custom = "verification" } },
+            .dest_sub_path = "workspace-general",
+        }).step);
         const workspace_runtime_module = native_graph.module("test/protean/workspace_runtime.zig");
         workspace_runtime_module.strip = optimize != .debug;
         workspace_runtime_module.addImport("kosmos", checked_kosmos);
         workspace_runtime_module.addImport("protean_native", checked_environment);
         const workspace_runtime_checks = b.step("check-workspace-runtime", "Qualify runtime selection and bilateral workspace custody");
-        native_graph.testModule(workspace_runtime_checks, workspace_runtime_module);
+        _ = native_graph.testModule(workspace_runtime_checks, workspace_runtime_module);
         workspace_checks.dependOn(workspace_general);
         workspace_checks.dependOn(workspace_runtime_checks);
         native_checks.dependOn(workspace_checks);
@@ -483,7 +489,12 @@ pub fn build(b: *std.Build) void {
             suite.init(b, .{ .existing = native_suite });
             suite.root_source_file = b.path(group[1]);
             const checks = b.step("check-native-owner-" ++ group[0], "Qualify native " ++ group[0] ++ " contracts");
-            native_graph.testModule(checks, suite);
+            const tests = native_graph.testModule(checks, suite);
+            b.step("build-native-owner-" ++ group[0] ++ "-check", "Build the retained native " ++ group[0] ++ " test executable")
+                .dependOn(&b.addInstallArtifact(tests, .{
+                .dest_dir = .{ .override = .{ .custom = "verification" } },
+                .dest_sub_path = "native-owner-" ++ group[0],
+            }).step);
             native_owner_integration.dependOn(checks);
         }
         const workspace_recovery_tests = b.addTest(.{
@@ -527,7 +538,7 @@ pub fn build(b: *std.Build) void {
         const native_unit_tests = b.allocator.create(std.Build.Module) catch @panic("out of memory");
         native_unit_tests.init(b, .{ .existing = checked_environment });
         native_unit_tests.optimize = optimize;
-        native_graph.testModule(native_owner_support, native_unit_tests);
+        _ = native_graph.testModule(native_owner_support, native_unit_tests);
         const crash_module = native_graph.module("test/protean/native_recovery_crash.zig");
         crash_module.strip = optimize != .debug;
         crash_module.addImport("kosmos", checked_kosmos);

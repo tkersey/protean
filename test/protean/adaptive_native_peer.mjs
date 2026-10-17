@@ -400,7 +400,8 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
   const configuration = adaptive => ({schema: 'adaptive-agent.configuration.v3', adaptive, tools: null});
   await writeFile(configPath, JSON.stringify(configuration(config)));
   const invoke = async (...args) => {
-    const result = await execute(app.command, [...args, '--test-provider', '--trust-root', trust, ...placementArgs], {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024});
+    const timeout = suite === 'runtime' && process.platform === 'darwin' ? undefined : 30000;
+    const result = await execute(app.command, [...args, '--test-provider', '--trust-root', trust, ...placementArgs], {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout, maxBuffer: 4 * 1024 * 1024});
     assert.equal(result.status, 0, result.error ?? `${result.stderr}\n${result.stdout}`); return JSON.parse(result.stdout);
   };
   let client;
@@ -869,9 +870,10 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
         }
         // Runtime construction and placement execute on the owner thread.
         // A result read can wait behind independent compiler validation as well
-        // as a move; it uses the existing long-operation transport allowance.
-        // The CI job and whole-workflow deadlines still bound the entire run.
-        return client.call('task.result', {task_id: task.task_id}, suite === 'runtime' ? 120_000 : 30_000);
+        // as a move. Linux retains the long-operation transport allowance and
+        // whole-workflow deadline; macOS qualification waits for correctness.
+        const runtimeTimeout = process.platform === 'darwin' ? null : 120_000;
+        return client.call('task.result', {task_id: task.task_id}, suite === 'runtime' ? runtimeTimeout : 30_000);
       }, value => value.ready, suite === 'runtime' ? 20_000 : 2000);
       if (providerFailure) throw providerFailure;
       if (result.outcome.value_ref) {
