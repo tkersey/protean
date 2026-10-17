@@ -1819,7 +1819,10 @@ pub fn Service(comptime Types: type) type {
             // Physical pumping is transactional. An allocation failure leaves
             // the accepted operation live and retryable without fencing storage.
             if (!self.active.?.root_cut_ready) {
-                if (try driver.pump(65536) != .cut) return .progressed;
+                var progress = try driver.pump(65536);
+                defer progress.deinit();
+                if (progress == .suspended) return .progressed;
+                if (progress != .event or progress.event.value != .cut) return error.InvalidRuntimeProgress;
                 self.active.?.root_cut_ready = true;
             }
             // Publication is transactional too. Keep the completed-cut phase
@@ -7929,15 +7932,17 @@ pub fn Service(comptime Types: type) type {
                 try driver.beginAdvance(control, guest_quantum);
             }
             errdefer self.store().fence();
-            const progress = try driver.pump(base_quantum);
+            var progress = try driver.pump(base_quantum);
+            defer progress.deinit();
             const elapsed = std.math.cast(u64, @max(0, std.Io.Clock.awake.now(self.io).nanoseconds - native_started.nanoseconds)) orelse std.math.maxInt(u64);
-            if (progress == .cut) {
+            if (progress == .event and progress.event.value == .cut) {
                 // The operation already applied its control. Publish the cut
                 // with a read-only zero-quantum observation, never another reply.
                 const publication = try driver.drive(a, .none, 0);
                 defer a.free(publication.outcome);
                 return self.workspaceFinish(a, parent, initial, control, publication, elapsed, operation_id, request, command);
             }
+            if (progress != .suspended) return error.InvalidRuntimeProgress;
             const capsule = try driver.retainCapsule(runtimeProvenance(initial));
             const code = try driver.runtimeBytes(a);
             defer a.free(code);

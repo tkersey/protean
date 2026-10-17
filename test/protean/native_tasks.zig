@@ -3135,7 +3135,13 @@ fn controllerMicroprogress(comptime moving: bool) !void {
     try std.testing.expect(imported.active.?.root_control != null);
     // Stop at the owner boundary immediately after physical completion. The
     // next service turn must publish this cut without pumping the command again.
-    while (try imported.active.?.driver.pump(65536) != .cut) {}
+    while (true) {
+        var progress = try imported.active.?.driver.pump(65536);
+        defer progress.deinit();
+        if (progress == .suspended) continue;
+        try std.testing.expect(progress == .event and progress.event.value == .cut);
+        break;
+    }
     imported.active.?.root_cut_ready = true;
     failing.fail_index = failing.alloc_index;
     failing.resize_fail_index = failing.resize_index;
