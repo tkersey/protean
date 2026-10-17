@@ -345,16 +345,43 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
         assert(!next.done, 'the recorded scenario must finish through a real controller action');
         const call = next.value;
         if (suite === 'runtime') console.error(JSON.stringify({runtime_fixture: scenario, model_call: index, action: call[0], command: call[1]?.command?.tag ?? null}));
-        // The destination validates transferred code in another process. Keep
-        // at least a second between placement requests, counting controller
-        // work already elapsed since the previous request.
-        if (suite === 'runtime' && call[0] === 'placement' &&
-            (call[1]?.command?.tag === 'inspect' ||
-             (call[1]?.command?.tag === 'control' && previous?.observation?.status === 'queued'))) {
-          const remaining = 1000 - (performance.now() - (subject.lastPlacementReplyAt ?? performance.now()));
-          if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
+        // Let the actual transport settle before issuing the model's custody
+        // observation. Poll only the public, read-only status operation while
+        // the model request is pending; the trace still obtains and checks its
+        // own signed observation through the ordinary controller action.
+        if (suite === 'runtime' && call[0] === 'placement' && call[1]?.command?.tag === 'inspect') {
+          const selected = call[1].command.value;
+          assert.equal(selected.tag, 'work');
+          const transferSubject = {task: [...Buffer.from(subject.task, 'hex')], work: [...Buffer.from(selected.value.id, 'hex')]};
+          const custody = await within(until(async () => (await placementRequest(client, 'status', transferSubject)) ?? {}, custody => custody.phase === 'away', 12_000),
+            120_000, 'runtime fixture work transfer did not settle');
+          const archive = join(subject.placement.source.spool, `outgoing-${Buffer.from(custody.intent.transfer).toString('hex')}.par`);
+          subject.controlSchema = readArchive(await readFile(archive)).schemas.get('placement_control');
         }
-        if (call[0] === 'placement') subject.lastPlacementReplyAt = performance.now();
+        // Wait for the native owner to retain the real report. This read-only
+        // timing witness never supplies a reply or advances work. The next
+        // model action still fetches the report and checks its signed result.
+        if (suite === 'runtime' && call[0] === 'placement' &&
+            call[1]?.command?.tag === 'control' && previous?.observation?.status === 'queued' &&
+            typeof previous.observation.control === 'string') {
+          assert(subject.controlSchema);
+          const database = new DatabaseSync(join(subject.state, 'state.sqlite'), {readOnly: true});
+          try {
+            const query = database.prepare("SELECT o.body, r.body AS digest FROM records r JOIN objects o ON o.digest=r.body WHERE r.kind='placement_control' AND r.id=? AND r.task=?");
+            const id = Buffer.from(previous.observation.control, 'hex'), task = Buffer.from(subject.task, 'hex');
+            let settled = false;
+            const deadline = performance.now() + 120_000;
+            while (performance.now() < deadline) {
+              const row = query.get(id, task);
+              assert(row, 'the queued control must already be retained');
+              assert.equal(hash(row.body), Buffer.from(row.digest).toString('hex'));
+              const record = decodeValue(subject.controlSchema, row.body);
+              if (record[4].tag === 1 || record[5].tag === 1) { settled = true; break; }
+              await delay(25);
+            }
+            assert(settled, 'runtime fixture control report did not settle');
+          } finally { database.close(); }
+        }
         (subject.actions ??= []).push(JSON.parse(JSON.stringify({name: call[0], arguments: call[1]})));
         response.writeHead(200, {'content-type': 'application/json'});
         response.end(JSON.stringify({id: `tools-response-${index}`, status: 'completed', error: null, output: [{type: 'function_call', status: 'completed', call_id: `tools-${index}`, name: call[0], arguments: JSON.stringify(call[1])}]}));
@@ -798,6 +825,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
       ] : inputs;
       await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: name === 'tools-reuse' ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, inputs: selectedInputs}}));
       const placement = ['tools-runtime-placement', 'tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name) ? await runtimePlacementFixture(app, selectedConfig, trust, selectedState) : null;
+      toolSubject.placement = placement;
       // Each scenario selects its own initial directory. A prior controller
       // transfer can change this scenario's arguments, never the next one's.
       placementArgs = emptyPlacement ? ['--placement-config', placement?.source.config ?? emptyPlacement] : [];
@@ -805,6 +833,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
       const description = await client.call('describe');
       const task = await client.call('task.submit', {client_operation_id: name, application_id: 'adaptive-agent', profile_id: description.profile.id,
         input: {schema_id: 'adaptive-agent.input.v2', value: {task: name === 'tools-reverse' ? 'Group source records unsupported by the selected lock scope.' : 'Audit selected lock records against source records, retaining all classifications and reuse the tool on the second input.'}}});
+      toolSubject.task = task.task_id;
       if (suite === 'runtime') console.error(JSON.stringify({runtime_fixture: name, stage: 'submitted'}));
       if (name === 'tools-reuse') {
         const waiting = await until(async () => {
@@ -863,6 +892,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
             await assert.rejects(client.call('task.resume', {client_operation_id: 'stale-controller-resume', task_id: task.task_id, expected_revision: custody.intent.cut.control}), error => error.data?.kind === 'StateConflict');
             assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
             selectedState = placement.successor.state;
+            toolSubject.state = selectedState;
             placementArgs[1] = placement.successor.config;
             await launch(['--config', selectedConfig], selectedState);
             const accepted = await placementRequest(client, 'status', subject);

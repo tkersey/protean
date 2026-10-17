@@ -27,8 +27,12 @@ const Graph = struct {
         return g.module(g.b.fmt("src/{s}.zig", .{name}));
     }
     fn testModule(g: Graph, step: *std.Build.Step, module_value: *std.Build.Module) *std.Build.Step.Compile {
+        return g.testModuleFiltered(step, module_value, &.{});
+    }
+    fn testModuleFiltered(g: Graph, step: *std.Build.Step, module_value: *std.Build.Module, filters: []const []const u8) *std.Build.Step.Compile {
         const tests = g.b.addTest(.{
             .root_module = module_value,
+            .filters = filters,
             .use_llvm = if (g.b.graph.host.result.os.tag == .linux and g.b.graph.host.result.cpu.arch == .x86_64) g.optimize != .debug else null,
         });
         tests.step.dependOn(g.gate);
@@ -343,7 +347,11 @@ pub fn build(b: *std.Build) void {
         workspace_programs.addImport("protean_native", checked_environment);
         const workspace_checks = b.step("check-workspace-programs", "Execute general source-record programs through native Kosmos");
         const workspace_general = b.step("check-workspace-general", "Qualify workspace execution, inputs and provenance");
-        const workspace_general_tests = native_graph.testModule(workspace_general, workspace_programs);
+        const workspace_group = b.option(enum { execution, retention }, "workspace-group", "Select independent workspace qualification cases (default: all)");
+        const workspace_general_tests = native_graph.testModuleFiltered(workspace_general, workspace_programs, if (workspace_group) |group| switch (group) {
+            .execution => &.{ "BUILD-", "WORK-06", "WORK-08", "exposure carries", "workspace commands", "CTX-01", "deep recursive workspace" },
+            .retention => &.{ "WORK-01", "AUT-07", "OWN-02", "collected history", "WORK-14", "delegated model interpretation" },
+        } else &.{});
         b.step("build-workspace-general-check", "Build the retained workspace test executable")
             .dependOn(&b.addInstallArtifact(workspace_general_tests, .{
             .dest_dir = .{ .override = .{ .custom = "verification" } },
@@ -354,7 +362,12 @@ pub fn build(b: *std.Build) void {
         workspace_runtime_module.addImport("kosmos", checked_kosmos);
         workspace_runtime_module.addImport("protean_native", checked_environment);
         const workspace_runtime_checks = b.step("check-workspace-runtime", "Qualify runtime selection and bilateral workspace custody");
-        const workspace_runtime_tests = native_graph.testModule(workspace_runtime_checks, workspace_runtime_module);
+        const runtime_workspace_group = b.option(enum { selection, custody, succession }, "runtime-workspace-group", "Select independent runtime workspace qualification cases (default: all)");
+        const workspace_runtime_tests = native_graph.testModuleFiltered(workspace_runtime_checks, workspace_runtime_module, if (runtime_workspace_group) |group| switch (group) {
+            .selection => &.{ "runtime selection", "terminal parent cancellation" },
+            .custody => &.{ "native placement carries", "frozen controller" },
+            .succession => &.{"delayed controls"},
+        } else &.{});
         b.step("build-workspace-runtime-check", "Build the retained runtime workspace test executable")
             .dependOn(&b.addInstallArtifact(workspace_runtime_tests, .{
             .dest_dir = .{ .override = .{ .custom = "verification" } },
@@ -486,6 +499,7 @@ pub fn build(b: *std.Build) void {
         native_suite.addAnonymousImport("adaptive_image", .{ .root_source_file = adaptive_image });
         native_suite.addAnonymousImport("adaptive_application", .{ .root_source_file = adaptive_application });
         native_suite.addImport("native_asset_writer", native_graph.module("tools/native/emit.zig"));
+        const adaptive_group = b.option(enum { capture, control }, "adaptive-owner-group", "Select independent adaptive owner qualification cases (default: all)");
         inline for (.{
             .{ "adaptive", "test/protean/native_adaptive_tests.zig" },
             .{ "tasks", "test/protean/native_owner_tests.zig" },
@@ -494,7 +508,11 @@ pub fn build(b: *std.Build) void {
             suite.init(b, .{ .existing = native_suite });
             suite.root_source_file = b.path(group[1]);
             const checks = b.step("check-native-owner-" ++ group[0], "Qualify native " ++ group[0] ++ " contracts");
-            const tests = native_graph.testModule(checks, suite);
+            const filters: []const []const u8 = if (comptime std.mem.eql(u8, group[0], "adaptive")) if (adaptive_group) |selected| switch (selected) {
+                .capture => &.{ "adaptive unload capture", "adaptive imported capture", "adaptive report correction" },
+                .control => &.{ "authored inference", "authored skill", "authored report", "report model arguments", "compiled catalog", "adaptive snapshot", "adaptive provider", "adaptive malformed", "adaptive workspace" },
+            } else &.{} else &.{};
+            const tests = native_graph.testModuleFiltered(checks, suite, filters);
             b.step("build-native-owner-" ++ group[0] ++ "-check", "Build the retained native " ++ group[0] ++ " test executable")
                 .dependOn(&b.addInstallArtifact(tests, .{
                 .dest_dir = .{ .override = .{ .custom = "verification" } },

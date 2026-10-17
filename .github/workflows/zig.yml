@@ -33,13 +33,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [authoring, owners, owner-adaptive, owner-support, workspace, workspace-runtime, correspondence, native, runtime, runtime-placement, runtime-outer, runtime-guest, downstream]
+        lane: [authoring, owners, owner-adaptive, owner-adaptive-control, owner-support, workspace, workspace-retention, workspace-runtime, workspace-custody, workspace-succession, correspondence, native, native-placement, runtime, runtime-placement, runtime-outer, runtime-guest, downstream]
         include:
           - {lane: owners, compiled_profile: owners}
           - {lane: owner-adaptive, compiled_profile: owner-adaptive}
+          - {lane: owner-adaptive-control, compiled_profile: owner-adaptive-control}
           - {lane: workspace, compiled_profile: workspace}
+          - {lane: workspace-retention, compiled_profile: workspace-retention}
           - {lane: workspace-runtime, compiled_profile: workspace-runtime}
+          - {lane: workspace-custody, compiled_profile: workspace-custody}
+          - {lane: workspace-succession, compiled_profile: workspace-succession}
           - {lane: native, compiled_profile: product}
+          - {lane: native-placement, compiled_profile: product}
           - {lane: runtime, compiled_profile: product}
           - {lane: runtime-placement, compiled_profile: product}
           - {lane: runtime-outer, compiled_profile: peer}
@@ -85,7 +90,7 @@ jobs:
           lane="${{ matrix.lane }}"
           packages=()
           command -v rg >/dev/null || packages+=(ripgrep)
-          if [ "$lane" = native ] || [[ "$lane" == runtime* ]] || [ "$lane" = downstream ]; then
+          if [[ "$lane" == native* ]] || [[ "$lane" == runtime* ]] || [ "$lane" = downstream ]; then
             test -x /usr/bin/bwrap || packages+=(bubblewrap)
             test -x /usr/bin/strace || packages+=(strace)
           fi
@@ -98,7 +103,7 @@ jobs:
               sudo apt-get install --yes --no-install-recommends "${packages[@]}"
             fi
           fi
-          if [ "$lane" = native ] || [[ "$lane" == runtime* ]] || [ "$lane" = downstream ]; then
+          if [[ "$lane" == native* ]] || [[ "$lane" == runtime* ]] || [ "$lane" = downstream ]; then
             /usr/bin/bwrap --unshare-user --ro-bind / / /usr/bin/true
           fi
       - name: Restore locked native transport bytes
@@ -157,15 +162,20 @@ jobs:
         run: |
           set -o pipefail
           targets=(protean)
+          selection=()
           lane="${{ matrix.lane }}"
           case "$lane" in
             owners) targets=(build-native-owner-tasks-check) ;;
-            owner-adaptive) targets=(build-native-owner-adaptive-check) ;;
-            workspace) targets=(build-workspace-general-check) ;;
-            workspace-runtime) targets=(build-workspace-runtime-check) ;;
+            owner-adaptive) targets=(build-native-owner-adaptive-check); selection=(-Dadaptive-owner-group=capture) ;;
+            owner-adaptive-control) targets=(build-native-owner-adaptive-check); selection=(-Dadaptive-owner-group=control) ;;
+            workspace) targets=(build-workspace-general-check); selection=(-Dworkspace-group=execution) ;;
+            workspace-retention) targets=(build-workspace-general-check); selection=(-Dworkspace-group=retention) ;;
+            workspace-runtime) targets=(build-workspace-runtime-check); selection=(-Druntime-workspace-group=selection) ;;
+            workspace-custody) targets=(build-workspace-runtime-check); selection=(-Druntime-workspace-group=custody) ;;
+            workspace-succession) targets=(build-workspace-runtime-check); selection=(-Druntime-workspace-group=succession) ;;
             runtime-outer|runtime-guest) targets+=(build-workspace-peer) ;;
           esac
-          zig build "${targets[@]}" -Doptimize=safe --summary all \
+          zig build "${targets[@]}" "${selection[@]}" -Doptimize=safe --summary all \
             --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
             2>&1 | tee "$RUNNER_TEMP/$lane-check.log"
       - name: Save completed compiled qualification inputs
@@ -211,13 +221,21 @@ jobs:
           elif [ "${{ matrix.lane }}" = owners ]; then
             run_compiled_tests native-owner-tasks 68
           elif [ "${{ matrix.lane }}" = owner-adaptive ]; then
-            run_compiled_tests native-owner-adaptive 14
+            run_compiled_tests native-owner-adaptive 3
+          elif [ "${{ matrix.lane }}" = owner-adaptive-control ]; then
+            run_compiled_tests native-owner-adaptive 11
           elif [ "${{ matrix.lane }}" = owner-support ]; then
             zig build check-native-owner-support -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = workspace ]; then
-            run_compiled_tests workspace-general 15
+            run_compiled_tests workspace-general 9
+          elif [ "${{ matrix.lane }}" = workspace-retention ]; then
+            run_compiled_tests workspace-general 6
           elif [ "${{ matrix.lane }}" = workspace-runtime ]; then
-            run_compiled_tests workspace-runtime 6
+            run_compiled_tests workspace-runtime 3
+          elif [ "${{ matrix.lane }}" = workspace-custody ]; then
+            run_compiled_tests workspace-runtime 2
+          elif [ "${{ matrix.lane }}" = workspace-succession ]; then
+            run_compiled_tests workspace-runtime 1
           elif [ "${{ matrix.lane }}" = correspondence ]; then
             zig build check-workspace-semantics -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = downstream ]; then
@@ -230,8 +248,6 @@ jobs:
             lane="${{ matrix.lane }}"
             result=0
             if [ "$lane" = native ]; then
-              # This target retains both the adaptive CLI and process-placement
-              # fixtures. The independent runtime lane runs the third fixture.
               if [ "$result" -eq 0 ]; then
                 node test/protean/native_adaptive.mjs \
                   "$RUNNER_TEMP/protean-qualification/executables/protean" \
@@ -239,6 +255,7 @@ jobs:
                   "$RUNNER_TEMP/protean-qualification/protean/adaptive/program.bpi3" \
                   2>&1 | tee -a "$RUNNER_TEMP/$lane-check.log" || result=$?
               fi
+            elif [ "$lane" = native-placement ]; then
               if [ "$result" -eq 0 ]; then
                 node test/protean/native_placement.mjs \
                   "$RUNNER_TEMP/protean-qualification/executables/protean" \
@@ -268,7 +285,7 @@ jobs:
           const [binary, nativeLog, output, lane] = process.argv.slice(2);
           const manifest = JSON.parse(execFileSync(binary, ['describe-build'], {encoding: 'utf8'}));
           const executions = readFileSync(nativeLog, 'utf8').split('\n').filter(line => line.startsWith('{"native_deployment":')).map(line => JSON.parse(line));
-          assert.equal(executions.length, lane === 'native' ? 2 : 1, 'every selected deployment qualified');
+          assert.equal(executions.length, 1, 'every selected deployment qualified');
           for (const execution of executions) {
             assert.equal(execution.passed, true);
             assert.equal(execution.sha256, manifest.artifact_sha256);
@@ -279,7 +296,7 @@ jobs:
           JS
           fi
       - name: Retain independently qualified build identity
-        if: matrix.lane == 'native' || startsWith(matrix.lane, 'runtime') || matrix.lane == 'downstream'
+        if: startsWith(matrix.lane, 'native') || startsWith(matrix.lane, 'runtime') || matrix.lane == 'downstream'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           path: ${{ runner.temp }}/${{ matrix.lane }}-identity.json
@@ -368,7 +385,7 @@ jobs:
             return JSON.parse(bytes);
           };
           const native = load('native'), downstream = load('downstream');
-          const runtimes = ['runtime', 'runtime-placement', 'runtime-outer', 'runtime-guest'].map(load);
+          const runtimes = ['native-placement', 'runtime', 'runtime-placement', 'runtime-outer', 'runtime-guest'].map(load);
           for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target']) {
             assert.notEqual(native.identity[key], undefined, key);
             assert.deepEqual(downstream.identity[key], native.identity[key], key);

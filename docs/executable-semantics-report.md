@@ -16,7 +16,7 @@ model evaluation is claimed.
 
 The integrated runtime inputs are Horos
 `a58967d541402b3661c05b4d599926114df75123` and Kosmos
-`85a51d7a97fe3c4e9df8362fe55f71304660f6c8`. The dependency lock authenticates the
+`0cb83a6255850851df24ec86ca90218c3db3ade0`. The dependency lock authenticates the
 selected source archives, Git trees and inventories. A repository checkout, a
 source archive, a Zig package and a final executable have distinct identities.
 
@@ -265,11 +265,29 @@ authoring, owner, workspace, correspondence, installation and deployment lanes
 retain all original assertions. General runtime choices, placement, mid-clone
 transfer and canonical guest-cut transfer run in four lanes; all deployment
 executable hashes must match the independently packaged product.
+The native adaptive CLI and native placement fixtures run independently. The
+15 workspace cases are partitioned into nine execution and six retention cases;
+the six runtime cases into three selection/cancellation, two custody and one
+succession case. These are disjoint filters over the same test roots, with exact
+executed counts checked in CI. The ordinary build targets still run the full roots.
+The 14 adaptive-owner cases similarly divide into three capture-recovery and
+eleven control/reconciliation cases; their previous combined job took 589 seconds.
+
+The scripted provider waits for real transfer completion through the public
+status API. After observing a queued remote control, it waits for the native
+owner's retained report using a read-only database connection and the schema
+from the actual transferred archive. These observations only schedule the next
+model reply: the unchanged model action still obtains and checks custody and
+the signed remote result. No fixture supplies an acknowledgement or advances
+the transferred work outside the prescribed model actions.
 
 Completed compilation can be reused only through an exact cache key containing
-the complete Git tree, compiler executable/library/license contents and modes,
+the Git build inputs, compiler executable/library/license contents and modes,
 runner OS/architecture, safe mode and compilation profile. There is no prefix
-fallback. Dependency authentication, each test, every deployment scenario and the
+fallback for compiled executables. The audited root `docs/`, `README.md` and
+`AGENTS.md` prose is excluded; embedded Markdown in application skills remains
+an input. Raw compiler caches can reuse older entries because Zig validates
+their actual inputs. Dependency authentication, each test, every deployment scenario and the
 independent downstream build still execute. Compiled test roots use the same Zig
 Compile objects and standard runner as the owning checks, with complete expected
 test counts and leak/error failures. No cached test outcome receives credit.
