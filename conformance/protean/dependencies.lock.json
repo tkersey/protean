@@ -97,18 +97,18 @@
   },
   "world": {
     "repository": "tkersey/kosmos",
-    "commit": "29c908c1c18c5c6fd6041268fc0e4acc3e6d0a08",
-    "gitTree": "017ae17527a9a6ee0c5b0d69c087c87e1b58eae9",
+    "commit": "731a4ed1fce8d22e036a251c421f64ececbb9b21",
+    "gitTree": "79ecea437e0ae0e3aac88427367bed7217cd9417",
     "version": "9.0.0",
     "source": {
-      "inventorySha256": "c13971ed0a6d4a23dc16fe0d13a4c2eb666b750c415de777a0f962c0fe803745",
+      "inventorySha256": "013fefa8fa75bb292e07d02df5133aec09c90f5c7ccd8e008b86bf7e1ebb0986",
       "entries": 199,
-      "bytes": 2602316
+      "bytes": 2603297
     },
     "archive": {
-      "url": "https://github.com/tkersey/kosmos/archive/29c908c1c18c5c6fd6041268fc0e4acc3e6d0a08.tar.gz",
-      "sha256": "4c42c66a0b04080e22a5751a462a145fde94aac3c21e5a1ec87134b73c1ecb6f",
-      "bytes": 596534,
+      "url": "https://github.com/tkersey/kosmos/archive/731a4ed1fce8d22e036a251c421f64ececbb9b21.tar.gz",
+      "sha256": "0192a12d7104716f216fc6931a335067b5840d17e975d18143881735ac9dbc8f",
+      "bytes": 596765,
       "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
     "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree."

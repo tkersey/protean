@@ -345,13 +345,16 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
         assert(!next.done, 'the recorded scenario must finish through a real controller action');
         const call = next.value;
         if (suite === 'runtime') console.error(JSON.stringify({runtime_fixture: scenario, model_call: index, action: call[0], command: call[1]?.command?.tag ?? null}));
-        // The destination validates transferred code in another process. Give
-        // it wall time between status observations instead of exhausting a
-        // model-call count while admission is still running.
+        // The destination validates transferred code in another process. Keep
+        // at least a second between placement requests, counting controller
+        // work already elapsed since the previous request.
         if (suite === 'runtime' && call[0] === 'placement' &&
             (call[1]?.command?.tag === 'inspect' ||
-             (call[1]?.command?.tag === 'control' && previous?.observation?.status === 'queued')))
-          await new Promise(resolve => setTimeout(resolve, 1000));
+             (call[1]?.command?.tag === 'control' && previous?.observation?.status === 'queued'))) {
+          const remaining = 1000 - (performance.now() - (subject.lastPlacementReplyAt ?? performance.now()));
+          if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
+        }
+        if (call[0] === 'placement') subject.lastPlacementReplyAt = performance.now();
         (subject.actions ??= []).push(JSON.parse(JSON.stringify({name: call[0], arguments: call[1]})));
         response.writeHead(200, {'content-type': 'application/json'});
         response.end(JSON.stringify({id: `tools-response-${index}`, status: 'completed', error: null, output: [{type: 'function_call', status: 'completed', call_id: `tools-${index}`, name: call[0], arguments: JSON.stringify(call[1])}]}));

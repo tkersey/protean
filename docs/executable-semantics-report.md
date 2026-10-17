@@ -16,7 +16,7 @@ model evaluation is claimed.
 
 The integrated runtime inputs are Horos
 `a58967d541402b3661c05b4d599926114df75123` and Kosmos
-`29c908c1c18c5c6fd6041268fc0e4acc3e6d0a08`. The dependency lock authenticates the
+`731a4ed1fce8d22e036a251c421f64ececbb9b21`. The dependency lock authenticates the
 selected source archives, Git trees and inventories. A repository checkout, a
 source archive, a Zig package and a final executable have distinct identities.
 
@@ -29,8 +29,8 @@ source archive, a Zig package and a final executable have distinct identities.
 | Compiler policy | `kosmos.source-lower/2` |
 | Authored semantic source | `1897ed209557817c475bd14d10614024ea5f327823aec7a143d0e0337eb3bbfc` |
 | Generic artifact SHA-256 | `cb4af30f5c58aee7159f56aa4a08a5fb41a6748061260066edc24f7dadf74714` (231,839 bytes) |
-| macOS executable SHA-256 | `5bbb709496178be9201d05898ddd671adaf4a81b11cd3ea709dfffee034af7e9` (10,458,712 bytes; authenticated build; deployment qualification is pending) |
-| WASM kernel SHA-256 | `205efb2a49deb576f3cf43860fcd978fab3b7e7967fc4d104d394f6286399757` (current Kosmos packaged kernel; complete platform and Protean correspondence qualification are pending) |
+| macOS executable SHA-256 | `7bddec5ef58c360bc9d75559238d32cd312c2ca59c72d65d8290b503097177c1` (10,458,712 bytes; authenticated build; deployment qualification is pending) |
+| WASM kernel SHA-256 | `1a5319b0cbfa14712e8c3eec45fe348af08936bbacc6a009961902f22f8292c6` (current Kosmos packaged kernel; complete platform and Protean correspondence qualification are pending) |
 
 These are built artifacts, not published release assets. The native manifest
 reports the authenticated inputs and compiler separately from the externally
@@ -183,14 +183,23 @@ do not establish these host laws.
 
 ## Qualification evidence
 
-The table below preserves predecessor results. The current tuple adds full runtime
-operation capsule recovery, an owning pump-result API, collection at public cuts
-and release of dead initialization input. Protean now consumes and releases pump
-results in both controller and workspace paths. The current owner-task check
-passes 20/20 build steps and 68/68 tests. Remaining native and platform
-qualification is running; deployment, correspondence, the ten-minute Linux
-workflow and fresh serial reviews remain pending. Predecessor passes do not
-qualify this successor.
+The table below preserves predecessor results. The current tuple includes full
+runtime operation capsule recovery, an owning pump-result API, collection at
+public cuts, release of dead initialization input, and strong lease acquisition
+before checkpoint decoding. Protean consumes and releases pump results in both
+controller and workspace paths. Authenticated dependency setup passes; current
+native and platform qualification is running. Deployment, correspondence, the
+ten-minute Linux workflow and fresh serial reviews remain pending.
+
+On predecessor `a46cbf8`, all thirteen Linux qualification lanes and source
+accounting passed on attempt 2 of run 39068362474, but the aggregate rejected the
+604-second gate interval (606 seconds through workflow completion). This remains
+a failed workflow. Runtime fixture polling now preserves a one-second minimum
+interval by counting elapsed controller work, removing the former unconditional
+extra second per poll. The timing ceiling, attempt bounds, guest inputs, live
+clone witness and all behavioral assertions are unchanged. This is fixture
+pacing, not a claim of faster production execution. The successor needs a new
+complete workflow result.
 
 | Evidence | Result and scope |
 | --- | --- |
