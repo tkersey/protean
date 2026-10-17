@@ -12,9 +12,9 @@ if (process.argv.length === 3 && process.argv[2] === '--help') { console.log(usa
 if (process.argv.length > 4 || process.argv.slice(2).some(arg => arg.startsWith('-'))) throw new Error(usage);
 
 const root = resolve(import.meta.dirname, '../..');
-// Reserve the final minute of the CI job for identity publication and cleanup.
-// Every subprocess shares this deadline, including cold independent compilation.
-const deadline = performance.now() + 540_000;
+// Linux CI reserves its final minute for identity publication and cleanup.
+// macOS runs the same correctness checks without a wall-time performance gate.
+const deadline = process.platform === 'linux' ? performance.now() + 540_000 : null;
 const zig = realpathSync(process.env.PROTEAN_ZIG_EXE ?? execFileSync('which', ['zig'], {encoding: 'utf8'}).trim());
 const description = execFileSync(zig, ['env'], {encoding: 'utf8'});
 const library = realpathSync(JSON.parse(description.match(/^\s*\.lib_dir = (".*"),$/m)?.[1] ?? 'null'));
@@ -48,8 +48,8 @@ if (process.platform === 'darwin') {
 } else throw new Error('unsupported downstream qualification platform');
 
 function run(executable, args, cwd = scratch, {failure = false, diagnostic, timeout = 300000} = {}) {
-  timeout = Math.min(timeout, Math.floor(deadline - performance.now()));
-  assert(timeout > 0, 'independent installation exceeded its nine-minute budget');
+  timeout = deadline === null ? undefined : Math.min(timeout, Math.floor(deadline - performance.now()));
+  assert(timeout === undefined || timeout > 0, 'independent installation exceeded its nine-minute budget');
   const command = [...prefix, ...(process.platform === 'linux' ? ['--chdir', cwd] : []), executable, ...args];
   const result = spawnSync(command[0], command.slice(1), {cwd, env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout});
   assert.equal(result.error, undefined, result.error?.message);

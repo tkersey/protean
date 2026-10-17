@@ -140,7 +140,7 @@ jobs:
           key: ${{ steps.deployment_inputs.outputs.key }}
       - name: Retain completed compiler work before deployment
         id: build_cache_size
-        if: matrix.lane == 'native' || startsWith(matrix.lane, 'runtime')
+        if: (matrix.lane == 'native' || startsWith(matrix.lane, 'runtime')) && steps.deployment_cache.outputs.cache-hit != 'true'
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
@@ -270,7 +270,7 @@ jobs:
           retention-days: 14
       - name: Admit a complete bounded cache snapshot
         id: cache_size
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.deployment_cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
