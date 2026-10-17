@@ -16,7 +16,7 @@ model evaluation is claimed.
 
 The integrated runtime inputs are Horos
 `a58967d541402b3661c05b4d599926114df75123` and Kosmos
-`c023f97fb796e49a760ffb6b0e5764f7ac56d588`. The dependency lock authenticates the
+`f7d36c962a36e6b073a637e313269d4b9587aab2`. The dependency lock authenticates the
 selected source archives, Git trees and inventories. A repository checkout, a
 source archive, a Zig package and a final executable have distinct identities.
 
@@ -27,10 +27,10 @@ source archive, a Zig package and a final executable have distinct identities.
 | Private linear bridge | `kosmos.semantic-service/2` |
 | Artifact envelope | `kosmos.semantic-artifact/2` |
 | Compiler policy | `kosmos.source-lower/2` |
-| Authored semantic source | `28a7dcbb8f79782b70255b7d9cc092ec2b3094d84a4fc2930d58d97a1b49f112` |
-| Generic artifact SHA-256 | `428b9cee3ebc1aa18aa91e2bc6fc5272e520dbd75fe0dc1ffa95f1eb7614896f` (231,649 bytes) |
-| macOS executable SHA-256 | `679d45f7a1ef0194b90e01ded401af8e513d7dbf9a7b27d80f409c334740cad4` (10,310,968 bytes; authenticated build; current deployment qualification is recorded on the pull request) |
-| WASM kernel SHA-256 | `b110c95045ffb0a513dd06428c6a0ec42c57ba62a665ab2dd767b9b013465cce` (current packaged kernel; generated-program correspondence passes; complete platform qualification is recorded on the pull request) |
+| Authored semantic source | `81c7c457dc6fd8ccc75e3ed1fb0a8b77cfd8e98af792499dcfc4f4651ca671db` |
+| Generic artifact SHA-256 | `2e5b5a1b7be183edfb1349904fb3df9a2c41f2d2740162ffafba20e5c3639750` (231,672 bytes) |
+| macOS executable SHA-256 | `4421665820bf845379e882525114e13c42b2ae9dea01f2cd3e3fa3b356534031` (10,360,216 bytes; authenticated build; deployment qualification is recorded on the pull request) |
+| WASM kernel SHA-256 | `718ea5f9dae67d7f136f06d450a61c7ab4f9bd0ca4f31a17161481f4f45e0e2a` (current packaged kernel; generated-program correspondence passes; complete platform qualification is recorded on the pull request) |
 
 These are built artifacts, not published release assets. The native manifest
 reports the authenticated inputs and compiler separately from the externally
@@ -65,6 +65,15 @@ tests supply bounded independent observations, not a proof over every program.
 Kosmos `docs/executable-semantics.md` gives the detailed operation arguments.
 
 ## Validation and control boundaries
+
+The pure hypothetical interpreter validates raw arguments and the selected pending
+reply against the embedded guest's admitted schema facts. Ordinary Horos functions
+recognize canonical lengths, scalar values, aggregate shapes and UTF-8 before
+initialization or response; they expose no native guest-transition callback or
+live effect. Empty text slices are valid at every in-bounds offset, while nonempty
+slices retain UTF-8 endpoint checks and existing range/capacity precedence.
+The WASM default permits 128 MiB of working memory with 1 MiB of initial backing;
+physical growth and explicit caller budgets remain enforced.
 
 The composed correspondence checker derives the reachable source catalogs before
 allocating target indexes. Every target catalog must fit within that source
@@ -163,14 +172,14 @@ do not establish these host laws.
 | Evidence | Result and scope |
 | --- | --- |
 | Horos construction and recovery | On `a58967d`, safe `check` passes 264/264 steps and 877/877 tests. Bounded-allocator recovery checks reject admitted oversized target domains through both public paths; valid unused maximum source region names and referenced sparse names still pass. The hostile regression returned `OutOfMemory` before the correction. The complete roots retain sentinel-array ownership, lexical-capture, nominal-resource, public-example and well-typed permission-mutant coverage. [Linux source, contracts and independent installation](https://github.com/tkersey/horos/actions/runs/39037753652) pass; the Linux contract root reports 877/877 tests. |
-| Kosmos native and optional platforms | On `c023f97`, safe `check-native check-zig17 emit-native-input` passes 28/28 steps and 331/331 tests. Complete optional-platform and Linux results are recorded on [Kosmos #71](https://github.com/tkersey/kosmos/pull/71). The native specialization and reconstruction witnesses remain intact; pending platform results are not credited here. |
-| Kosmos committed source package | Clean extraction and public native consumption pass 9/9 steps on `c023f97`. The regenerated artifact differs from the predecessor only in its Horos package identifier: executable, recovery helpers and evidence bytes are identical. [Current Linux qualification](https://github.com/tkersey/kosmos/actions/runs/39038130068) is tracked on [Kosmos #71](https://github.com/tkersey/kosmos/pull/71). |
-| Specialization economy | The recorded Horos `31aa79f` measurement contains 421 records across eleven families, all matching independent direct-native traces, canonical states and outcomes. Dynamic loops and repeated calls have positive start-plus-execution savings in all nine matched observations each. These are retained measurements of their stated inputs, not new corrected-compiler timings. Costs, artifact comparison and limits are in Kosmos `docs/semantic-economy.md`. |
-| Protean owners, workspace and source correspondence | With the current authenticated dependencies, safe `check-protean` passes 39/39 steps and 154/154 tests; product/peer build plus `check-native-owner check-native-https check-workspace-programs check-workspace-semantics` passes 54/54 steps and 172/172 tests. Crash recovery verifies 16 crashes / 32 reopens without original reinvocation or automatic lookup. Native HTTPS verifies nine calls with no redirects/retries, exact bodies, TLS rejection, bounded responses and deadlines. |
-| Current native delivery | The current executable is `679d45f7`. Its adaptive, process-placement, six runtime-scenario and independent downstream results are recorded on the pull request. The fixtures retain negative provider requests, response accounting, protocol/SIGINT/SIGTERM cancellation, reuse/foreign-runtime rejection, duplicate transfer, destination reopening and stale-source rejection. Downstream qualification independently acquires/builds/installs and compares program, assets, dependencies, compiler and target; absolute Node/Python rejection and source-tamper detection remain enforced. |
+| Kosmos native and optional platforms | On `f7d36c9`, macOS native checks pass. The complete optional-platform suite passes 64/64 steps, including 47 independent-source fixtures, 9,570 observations, 235 ABI boundaries and 23 transfers. Canonical analysis admission agrees with independent Horos checks over the tested schema/value domain; 270 text-slice cases match the frozen native oracle at every guest cut. A final 38-step package rerun covers actual default API prepare/invoke and CLI execution alongside retained capacity failures. Linux qualification is recorded on [Kosmos #71](https://github.com/tkersey/kosmos/pull/71). |
+| Kosmos committed source package | Clean extraction and public native consumption pass 9/9 steps on `f7d36c9`, after the 28-step native aggregate passed. The changed semantic artifact includes the empty-text-slice correction. [Current Linux qualification](https://github.com/tkersey/kosmos/actions/runs/39047337506) is tracked on [Kosmos #71](https://github.com/tkersey/kosmos/pull/71). |
+| Specialization economy | The current Horos `a58967d` and semantic-source `81c7c457` measurement contains 421 records across eleven families, all matching independent direct-native traces, canonical states and outcomes. Dynamic loops and repeated calls show positive mean start-plus-execution savings. The complete construction, validation, recovery, switching, retention and amortization costs, including unfavorable cases, are in Kosmos `docs/semantic-economy.md`. |
+| Protean owners, workspace and source correspondence | With the current authenticated dependencies, safe `check-protean` passes 39/39 steps (previously executed unchanged authoring tests are cached); product/peer build plus `check-native-owner check-native-https check-workspace-programs check-workspace-semantics` passes 54/54 steps and 172/172 tests. Crash recovery verifies 16 crashes / 32 reopens without original reinvocation or automatic lookup. Native HTTPS verifies nine calls with no redirects/retries, exact bodies, TLS rejection, bounded responses and deadlines. |
+| Current native delivery | Current adaptive, process-placement, six runtime-scenario and independent downstream qualification is in progress. No predecessor result is counted as current evidence. |
 | Linux timing | On the predecessor Protean `0e9bf89`, [run 39029109805, attempt 2](https://github.com/tkersey/protean/actions/runs/39029109805) passes all thirteen qualification lanes and aggregate identity checks in 530 seconds from workflow start through the last job's completion. Exact compiled inputs were cached; every test and deployment scenario ran again. Rebuilding attempt 1 failed four ten-minute jobs. This establishes no cold-build timing pass and does not qualify the current successor. The workflow retains the same ten-minute ceiling. |
 | Current old-task compatibility | The retention fixture runs the public Protean 5.0.0 executable after selecting the current product, checking continuation of its original question in a separate namespace. Baseline SHA-256: `53471a265a095481ab9eaccf3cfc685cfa85ed243a6104db1d0e2ac166a4f935`. Its current result is recorded on the pull request. |
-| Current source/native/WASM correspondence | All nine generated cases and 328 boundaries pass independent Horos source comparison, native/WASM byte equality and alternating checkpoint producers with the current packaged kernel. Exact outer restore and duplicate-custody rejection pass. Outer packet SHA-256 is `3311d6213a07f6261faf20237a66cfece58ecc0f374de8bc4c1c2095fb97d4ea`; guest cut SHA-256 is `da41bbae343a1679a4fc31e10ada97e2cb7b27eeff44b3ad86a97005523c2ec8`. |
+| Current source/native/WASM correspondence | All nine generated cases and 328 boundaries pass independent Horos source comparison, native/WASM byte equality and alternating checkpoint producers with the current packaged kernel. Exact outer restore and duplicate-custody rejection pass. Outer packet SHA-256 is `ad9601099ec5d2a7c65a22d3ca5ec4913d1467480f23a21c0315ca1a775fcd01`; guest cut SHA-256 is `da41bbae343a1679a4fc31e10ada97e2cb7b27eeff44b3ad86a97005523c2ec8`. |
 | Current Linux and serial reviews | Exact-head results and review dispositions are recorded on the pull request. This report does not substitute predecessor results or raw clean labels for those obligations. |
 
 The first aggregate run failed the investigation fixture after mobility because
@@ -197,22 +206,21 @@ records construction, independent validation, admission, preparation, start,
 execution, reconstruction, restore, capsules, switching, work and allocator bytes.
 Kosmos `docs/semantic-economy.md` contains all tables and the raw-output digest.
 
-In the recorded Horos `31aa79f` Apple M2 Pro safe measurement, mean
-start-plus-execution time is
-48.639/43.930 ms generic/specialized for dynamic loops and 81.904/75.163 ms for
-repeated calls. Including construction, independent validation, admission and
-additional preparation gives estimated strict break-even at 3,200 and 2,242
-new-session uses, respectively, under the measured equally weighted three-input
-mix and reusable preparation owners. These are estimates from nine observations
-per realization, not executions of thousands of sessions. Projection, restore,
-network staging and durable publication are measured separately or explicitly
-excluded; they can reverse these local savings.
+In the current Horos `a58967d` Apple M2 Pro safe measurement, mean
+start-plus-execution time is 53.121/47.981 ms generic/specialized for dynamic loops
+and 91.370/84.125 ms for repeated calls. Including construction, independent
+validation, admission and additional preparation gives estimated strict break-even
+at 3,188 and 2,210 new-session uses, respectively, under the measured equally
+weighted three-input mix and reusable preparation owners. These are estimates from
+nine observations per realization, not executions of thousands of sessions.
+Projection, restore, network staging and durable publication are measured
+separately or explicitly excluded; they can reverse these local savings.
 
 Direct-native execution remains substantially faster. Long cleanup averages
-226.962/432.725 ms generic/specialized start-plus-execution; several other
+249.800/480.501 ms generic/specialized start-plus-execution; several other
 specialized workloads also remain slower. Specialized artifacts span roughly
 13–33 MB; construction peaks range from about 5.6 to 10.1 GB of requested
-allocator bytes, not RSS. Independent validation takes approximately 5.5–6.9
+allocator bytes, not RSS. Independent validation takes approximately 5.8–7.3
 seconds for these artifacts. The report makes no universal speedup claim.
 
 Protean CI retains a ten-minute per-job and whole-workflow ceiling. Independent
