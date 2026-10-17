@@ -223,6 +223,10 @@ pub fn build(b: *std.Build) void {
     const native_checks = b.step("check-native", "Check native and custody contracts against the selected Kosmos");
     const native_product = b.step("check-native-product", "Qualify the native adaptive application on the selected supported platform");
     const native_owner = b.step("check-native-owner", "Qualify native owner, context, and recovery contracts");
+    const native_owner_integration = b.step("check-native-owner-integration", "Qualify native task and occurrence ownership");
+    const native_owner_support = b.step("check-native-owner-support", "Qualify native unit, context, and crash recovery contracts");
+    native_owner.dependOn(native_owner_integration);
+    native_owner.dependOn(native_owner_support);
     const native_packaged = b.step("check-native-packaged", "Qualify the packaged adaptive executable and HTTPS isolation");
     const native_executable = b.step("check-native-executable", "Qualify the packaged adaptive executable and process isolation");
     const native_consumer = b.step("check-native-https", "Check native HTTPS against an independent endpoint");
@@ -467,7 +471,7 @@ pub fn build(b: *std.Build) void {
         native_suite.addAnonymousImport("adaptive_image", .{ .root_source_file = adaptive_image });
         native_suite.addAnonymousImport("adaptive_application", .{ .root_source_file = adaptive_application });
         native_suite.addImport("native_asset_writer", native_graph.module("tools/native/emit.zig"));
-        native_graph.testModule(native_owner, native_suite);
+        native_graph.testModule(native_owner_integration, native_suite);
         const workspace_recovery_tests = b.addTest(.{
             .root_module = native_suite,
             .filters = &.{"adaptive workspace"},
@@ -501,7 +505,7 @@ pub fn build(b: *std.Build) void {
         });
         adaptive_response_tests.step.dependOn(native_graph.gate);
         const adaptive_response_run = b.addRunArtifact(adaptive_response_tests);
-        native_owner.dependOn(&adaptive_response_run.step);
+        native_owner_support.dependOn(&adaptive_response_run.step);
         b.step("check-adaptive-context", "Qualify retained adaptive context projection and explicit view selection").dependOn(&adaptive_response_run.step);
         // Zig does not collect test declarations from named dependency modules.
         // Run the runtime's own root explicitly; the integration root above
@@ -509,7 +513,7 @@ pub fn build(b: *std.Build) void {
         const native_unit_tests = b.allocator.create(std.Build.Module) catch @panic("out of memory");
         native_unit_tests.init(b, .{ .existing = checked_environment });
         native_unit_tests.optimize = optimize;
-        native_graph.testModule(native_owner, native_unit_tests);
+        native_graph.testModule(native_owner_support, native_unit_tests);
         const crash_module = native_graph.module("test/protean/native_recovery_crash.zig");
         crash_module.strip = optimize != .debug;
         crash_module.addImport("kosmos", checked_kosmos);
@@ -528,11 +532,12 @@ pub fn build(b: *std.Build) void {
         crash_check.addFileArg2(crash_probe.getEmittedBin(), .{ .make_absolute = true });
         crash_check.has_side_effects = true;
         b.step("check-native-recovery-crash", "Kill and reopen native occurrence/recovery owners at durable boundaries").dependOn(&crash_check.step);
-        native_owner.dependOn(&crash_check.step);
+        native_owner_support.dependOn(&crash_check.step);
     } else {
         const missing = b.addFail("enable -Dnative=true with authenticated Kosmos and SQLite sources");
         native_checks.dependOn(&missing.step);
-        native_owner.dependOn(&missing.step);
+        native_owner_integration.dependOn(&missing.step);
+        native_owner_support.dependOn(&missing.step);
         native_packaged.dependOn(&missing.step);
         native_executable.dependOn(&missing.step);
         native_consumer.dependOn(&missing.step);

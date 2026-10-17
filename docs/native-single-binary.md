@@ -367,11 +367,17 @@ construction/reuse, and independently altered archives. No paid model calls run.
 The complete aggregate remains `check-native`. CI separates authoring/HTTPS,
 owner/recovery, general workspace, runtime/custody workspace, correspondence,
 native deployment, three runtime scenario groups and an independent downstream
-build. All 17 workspace tests remain in `check-workspace-programs`. The terminal
+build. All 17 workspace tests remain in `check-workspace-programs`. The 155 owner
+tests and crash/reopen checks remain in `check-native-owner`, with separate
+integration and support targets for CI scheduling. The terminal
 gate requires source accounting and every qualification lane within 600 seconds.
 Compiler caches contain complete outputs for exact dependency locks and are
 checked by Zig on reuse. Deployment lanes save completed compiler work before
 running scenarios, so a scenario timeout does not discard the build cache.
+Completed deployment inputs also use an exact-match cache for the entire Git tree,
+installed compiler executable/library/license bytes and modes, OS/architecture,
+safe mode and product/peer profile. Every fixture, dependency authentication and
+independent downstream build still runs; no previous test result is reused.
 A cache-assisted pass does not establish the cold-build latency.
 The packaged adaptive peer runs its independent controller/recovery and workspace
 groups concurrently, with separate state, snapshot, and HTTPS fixtures. Both

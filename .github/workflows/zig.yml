@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [authoring, owners, workspace, workspace-runtime, correspondence, native, runtime, runtime-outer, runtime-guest, downstream]
+        lane: [authoring, owners, owner-support, workspace, workspace-runtime, correspondence, native, runtime, runtime-outer, runtime-guest, downstream]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -97,8 +97,30 @@ jobs:
             conformance/protean/dependencies.lock.json \
             conformance/protean/native-dependencies.lock.json \
             .protean-native/inputs "$(command -v zig)"
-      - name: Build deployment inputs
+      - name: Identify complete deployment inputs
+        id: deployment_inputs
         if: matrix.lane == 'native' || startsWith(matrix.lane, 'runtime')
+        run: |
+          # Include the complete committed tree, not an inferred input glob.
+          # Compiler metadata is normalized; names, modes and bytes are retained.
+          compiler_root="$(dirname "$(realpath "$(command -v zig)")")"
+          compiler=$(tar -C "$compiler_root" --sort=name --mtime=@0 \
+            --owner=0 --group=0 --numeric-owner --dereference -cf - zig lib LICENSE \
+            | sha256sum | cut -d' ' -f1)
+          profile=product
+          lane="${{ matrix.lane }}"
+          if [ "$lane" = runtime-outer ] || [ "$lane" = runtime-guest ]; then profile=peer; fi
+          echo "key=protean-deployment-v1-$RUNNER_OS-$RUNNER_ARCH-safe-$profile-$(git rev-parse 'HEAD^{tree}')-$compiler" >> "$GITHUB_OUTPUT"
+      - name: Restore exact deployment inputs
+        id: deployment_cache
+        if: matrix.lane == 'native' || startsWith(matrix.lane, 'runtime')
+        continue-on-error: true
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ runner.temp }}/protean-qualification
+          key: ${{ steps.deployment_inputs.outputs.key }}
+      - name: Build deployment inputs
+        if: (matrix.lane == 'native' || startsWith(matrix.lane, 'runtime')) && steps.deployment_cache.outputs.cache-hit != 'true'
         run: |
           set -o pipefail
           targets=(protean)
@@ -109,6 +131,13 @@ jobs:
           zig build "${targets[@]}" -Doptimize=safe --summary all \
             --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
             2>&1 | tee "$RUNNER_TEMP/$lane-check.log"
+      - name: Save completed deployment inputs
+        if: (matrix.lane == 'native' || startsWith(matrix.lane, 'runtime')) && steps.deployment_cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ runner.temp }}/protean-qualification
+          key: ${{ steps.deployment_inputs.outputs.key }}
       - name: Retain completed compiler work before deployment
         id: build_cache_size
         if: matrix.lane == 'native' || startsWith(matrix.lane, 'runtime')
@@ -138,9 +167,9 @@ jobs:
             zig build check-protean check-native-https \
               -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = owners ]; then
-            # Owner/recovery fixtures retain checking allocators and all fault
-            # sweeps without competing with the independent authoring compilers.
-            zig build check-native-owner -Doptimize=safe --summary all
+            zig build check-native-owner-integration -Doptimize=safe --summary all
+          elif [ "${{ matrix.lane }}" = owner-support ]; then
+            zig build check-native-owner-support -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = workspace ]; then
             zig build check-workspace-general -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = workspace-runtime ]; then

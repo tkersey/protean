@@ -174,17 +174,30 @@ three separate lanes; their executable hashes must all match the packaged produc
 The workspace aggregate retains all 17 tests in two roots, separating general
 execution from runtime selection/custody. Independent lanes may restore a complete
 compiler cache for the same dependency locks; native source guards still run,
-and Zig decides reuse from its own inputs. Completed deployment compiler outputs
-are saved before scenario execution. The failed run spent roughly six minutes
-building each mobility lane; preserving that work can help a subsequent run but
-does not establish a cold-build improvement. Runtime result polls use the existing
+and Zig decides reuse from its own inputs. Run 38988145652 restored those caches
+but still rebuilt deployment binaries and exceeded ten minutes. Specialization
+completed with the corrected polling allowance; deployment jobs exhausted their
+remaining time during the scenarios. This is not a timing pass.
+
+Deployment inputs now have a separate exact-match cache keyed by the entire Git
+tree, compiler executable/library/license contents and modes, runner OS/architecture,
+safe mode, and product/verification-peer profile. There is no prefix fallback.
+Every dependency authentication, deployment scenario and independent downstream
+build still runs. The cached Linux product and peer target baseline x86-64 musl.
+A cache hit reuses completed compilation only; it is not previous test credit.
+Any source-tree change invalidates it, including documentation and workflow edits.
+This can reduce repeated qualification cost but does not improve or establish
+cold-build latency. The owner aggregate retains all 155 tests and crash/reopen
+checks across two independently runnable groups of its existing roots.
+Runtime result polls use the existing
 120-second long-operation allowance because synchronous specialization can exceed
 the short RPC default. The ten-minute limits and behavioral assertions remain.
 The native fixture logs stream directly so interrupted runs retain stage evidence. The downstream script shares a nine-minute deadline across its subprocesses,
 allowing up to eight minutes for cold compilation. The full portable offline demo
 has a sixty-second subprocess allowance; short CLI commands retain thirty seconds.
 These scheduling bounds retain every semantic assertion and still require a
-passing current Linux run.
+passing current Linux run. Current candidate status is reported by the PR checks;
+these measurements retain their original source and run attribution.
 
 The scalar chain measured 19.346 ms generic and 18.757 ms specialized execution.
 Including measured start cost leaves about 0.093 ms saved per new session;
