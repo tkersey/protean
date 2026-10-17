@@ -124,10 +124,13 @@ test/protean/model_runtime_callback.zig
 test/protean/model_unknown_field.zig
 test/protean/model_unknown_parameter.zig
 test/protean/model_unsupported_codec.zig
+test/protean/native_adaptive_tests.zig
+test/protean/native_owner_tests.zig
 test/protean/native_recovery_crash.zig
 test/protean/native_responses.zig
 test/protean/native_scheduler_benchmark.zig
 test/protean/native_tasks.zig
+test/protean/native_test_support.zig
 test/protean/native_tests.zig
 test/protean/observation.zig
 test/protean/participant.zig

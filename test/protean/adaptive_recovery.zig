@@ -338,7 +338,7 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void
     const metadata = @embedFile("adaptive_application");
     var admitted_image = try horos.data.program_image.Admitted.decode(a, image);
     defer admitted_image.deinit();
-    const manifest = try @import("native_tasks.zig").ownerManifest(permanent, image, admitted_image.identity(), metadata);
+    const manifest = try @import("native_test_support.zig").ownerManifest(permanent, image, admitted_image.identity(), metadata);
     const assets: native.discovery.Assets = .{ .image = image, .application = metadata, .manifest = manifest };
     var declarations = environment.handlers;
     for (&declarations) |*entry| if (entry.inference) {
@@ -515,7 +515,7 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
     const metadata = @embedFile("adaptive_application");
     const admitted_image = try horos.data.program_image.Admitted.decode(a, image);
     defer admitted_image.deinit();
-    const manifest = try @import("native_tasks.zig").ownerManifest(permanent, image, admitted_image.identity(), metadata);
+    const manifest = try @import("native_test_support.zig").ownerManifest(permanent, image, admitted_image.identity(), metadata);
     const assets: native.discovery.Assets = .{ .image = image, .application = metadata, .manifest = manifest };
     var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "adaptive-unit", .image_identity = admitted_image.identity() };
     defer application.deinit();

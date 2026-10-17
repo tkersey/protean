@@ -471,7 +471,17 @@ pub fn build(b: *std.Build) void {
         native_suite.addAnonymousImport("adaptive_image", .{ .root_source_file = adaptive_image });
         native_suite.addAnonymousImport("adaptive_application", .{ .root_source_file = adaptive_application });
         native_suite.addImport("native_asset_writer", native_graph.module("tools/native/emit.zig"));
-        native_graph.testModule(native_owner_integration, native_suite);
+        inline for (.{
+            .{ "adaptive", "test/protean/native_adaptive_tests.zig" },
+            .{ "tasks", "test/protean/native_owner_tests.zig" },
+        }) |group| {
+            const suite = b.allocator.create(std.Build.Module) catch @panic("out of memory");
+            suite.init(b, .{ .existing = native_suite });
+            suite.root_source_file = b.path(group[1]);
+            const checks = b.step("check-native-owner-" ++ group[0], "Qualify native " ++ group[0] ++ " contracts");
+            native_graph.testModule(checks, suite);
+            native_owner_integration.dependOn(checks);
+        }
         const workspace_recovery_tests = b.addTest(.{
             .root_module = native_suite,
             .filters = &.{"adaptive workspace"},

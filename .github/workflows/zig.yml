@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [authoring, owners, owner-support, workspace, workspace-runtime, correspondence, native, runtime, runtime-outer, runtime-guest, downstream]
+        lane: [authoring, owners, owner-adaptive, owner-support, workspace, workspace-runtime, correspondence, native, runtime, runtime-outer, runtime-guest, downstream]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -167,7 +167,9 @@ jobs:
             zig build check-protean check-native-https \
               -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = owners ]; then
-            zig build check-native-owner-integration -Doptimize=safe --summary all
+            zig build check-native-owner-tasks -Doptimize=safe --summary all
+          elif [ "${{ matrix.lane }}" = owner-adaptive ]; then
+            zig build check-native-owner-adaptive -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = owner-support ]; then
             zig build check-native-owner-support -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = workspace ]; then
@@ -239,6 +241,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/${{ matrix.lane }}-identity.json
           archive: false
+          overwrite: true
           if-no-files-found: error
           retention-days: 14
       - name: Package the executed adaptive application
@@ -261,6 +264,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/protean-*.tar.gz
           archive: false
+          overwrite: true
           if-no-files-found: error
           retention-days: 14
       - name: Admit a complete bounded cache snapshot

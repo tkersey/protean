@@ -188,7 +188,17 @@ A cache hit reuses completed compilation only; it is not previous test credit.
 Any source-tree change invalidates it, including documentation and workflow edits.
 This can reduce repeated qualification cost but does not improve or establish
 cold-build latency. The owner aggregate retains all 155 tests and crash/reopen
-checks across two independently runnable groups of its existing roots.
+checks across three independently runnable groups. Per-test stream timing of the
+existing 81-test integration executable measured 142.52 seconds locally: 103.59
+seconds in the 14 adaptive-controller cases and 38.89 seconds in the remaining
+67 cases. These figures exclude compilation. The two integration roots retain
+the original 13 fixture imports exactly once. A shared manifest helper moved
+byte-for-byte to test support so using it does not also collect the other root's
+tests; all assertions remain. The original aggregate still runs both groups and
+the 74 support tests.
+CI replaces its own prior attempt's named result artifacts when rerun, so the
+terminal comparison receives the newly executed results instead of conflicting
+with an earlier upload. This does not grant prior results timing credit.
 Runtime result polls use the existing
 120-second long-operation allowance because synchronous specialization can exceed
 the short RPC default. The ten-minute limits and behavioral assertions remain.
