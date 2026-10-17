@@ -416,8 +416,8 @@ pub fn build(b: *std.Build) void {
             const placement_peer = nativeCheckCommand(b);
             placement_peer.addArgs(&.{ "node", "test/protean/native_placement.mjs" });
             placement_peer.addFileArg2(adaptive_product.executable.getEmittedBin(), .{ .make_absolute = true });
-            // The adaptive CLI has a wall-time contract. Do not run other
-            // CPU-heavy deployment fixtures against that same measurement.
+            // Run CPU-heavy deployment fixtures in order so qualification
+            // does not compete with itself for host resources.
             placement_peer.step.dependOn(&adaptive_peer.step);
             b.step("check-native-placement", "Qualify authenticated placement between native processes").dependOn(&placement_peer.step);
             native_executable.dependOn(&placement_peer.step);
