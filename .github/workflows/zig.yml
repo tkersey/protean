@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      compiler-cache:
+        description: Restore dependency and compiler artifacts (disable for a cold run)
+        type: boolean
+        default: true
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -33,6 +38,7 @@ jobs:
           - {lane: owners, compiled_profile: owners}
           - {lane: owner-adaptive, compiled_profile: owner-adaptive}
           - {lane: workspace, compiled_profile: workspace}
+          - {lane: workspace-runtime, compiled_profile: workspace-runtime}
           - {lane: native, compiled_profile: product}
           - {lane: runtime, compiled_profile: product}
           - {lane: runtime-placement, compiled_profile: product}
@@ -57,6 +63,7 @@ jobs:
           use-cache: false
       - name: Restore complete compiler cache
         id: cache
+        if: github.event_name != 'workflow_dispatch' || inputs.compiler-cache
         continue-on-error: true
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
@@ -66,6 +73,8 @@ jobs:
             zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
             zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-runtime-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
             zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ (matrix.lane == 'runtime-outer' || matrix.lane == 'runtime-guest') && 'correspondence' || 'authoring' }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
+            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-
+            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-
       - name: Prepare compiler scratch and native isolation tools
         run: |
           if [ -d .zig-cache-upload ]; then
@@ -93,6 +102,7 @@ jobs:
             /usr/bin/bwrap --unshare-user --ro-bind / / /usr/bin/true
           fi
       - name: Restore locked native transport bytes
+        if: github.event_name != 'workflow_dispatch' || inputs.compiler-cache
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
@@ -110,17 +120,33 @@ jobs:
         id: deployment_inputs
         if: matrix.compiled_profile
         run: |
-          # Include the complete committed tree, not an inferred input glob.
+          # Keep all committed inputs except the audited top-level prose that
+          # no build reads. Embedded Markdown under examples remains an input.
           # Compiler metadata is normalized; names, modes and bytes are retained.
           compiler_root="$(dirname "$(realpath "$(command -v zig)")")"
           compiler=$(tar -C "$compiler_root" --sort=name --mtime=@0 \
             --owner=0 --group=0 --numeric-owner --dereference -cf - zig lib LICENSE \
             | sha256sum | cut -d' ' -f1)
           profile="${{ matrix.compiled_profile }}"
-          echo "key=protean-compiled-v1-$RUNNER_OS-$RUNNER_ARCH-safe-$profile-$(git rev-parse 'HEAD^{tree}')-$compiler" >> "$GITHUB_OUTPUT"
+          inputs=$(node --input-type=module <<'JS'
+          import {execFileSync} from 'node:child_process';
+          import {createHash} from 'node:crypto';
+          const tree = execFileSync('git', ['ls-tree', '-r', '-z', 'HEAD']);
+          const hash = createHash('sha256');
+          const prose = ['README.md', 'AGENTS.md'].map(value => Buffer.from(value));
+          for (let start = 0, end; (end = tree.indexOf(0, start)) >= 0; start = end + 1) {
+            const record = tree.subarray(start, end);
+            const path = record.subarray(record.indexOf(9) + 1);
+            if (path.subarray(0, 5).equals(Buffer.from('docs/')) || prose.some(value => path.equals(value))) continue;
+            hash.update(record).update(Buffer.from([0]));
+          }
+          console.log(hash.digest('hex'));
+          JS
+          )
+          echo "key=protean-compiled-v2-$RUNNER_OS-$RUNNER_ARCH-safe-$profile-$inputs-$compiler" >> "$GITHUB_OUTPUT"
       - name: Restore exact compiled qualification inputs
         id: deployment_cache
-        if: matrix.compiled_profile
+        if: matrix.compiled_profile && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache)
         continue-on-error: true
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
@@ -136,6 +162,7 @@ jobs:
             owners) targets=(build-native-owner-tasks-check) ;;
             owner-adaptive) targets=(build-native-owner-adaptive-check) ;;
             workspace) targets=(build-workspace-general-check) ;;
+            workspace-runtime) targets=(build-workspace-runtime-check) ;;
             runtime-outer|runtime-guest) targets+=(build-workspace-peer) ;;
           esac
           zig build "${targets[@]}" -Doptimize=safe --summary all \
@@ -190,7 +217,7 @@ jobs:
           elif [ "${{ matrix.lane }}" = workspace ]; then
             run_compiled_tests workspace-general 15
           elif [ "${{ matrix.lane }}" = workspace-runtime ]; then
-            zig build check-workspace-runtime -Doptimize=safe --summary all
+            run_compiled_tests workspace-runtime 6
           elif [ "${{ matrix.lane }}" = correspondence ]; then
             zig build check-workspace-semantics -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = downstream ]; then

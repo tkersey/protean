@@ -354,7 +354,12 @@ pub fn build(b: *std.Build) void {
         workspace_runtime_module.addImport("kosmos", checked_kosmos);
         workspace_runtime_module.addImport("protean_native", checked_environment);
         const workspace_runtime_checks = b.step("check-workspace-runtime", "Qualify runtime selection and bilateral workspace custody");
-        _ = native_graph.testModule(workspace_runtime_checks, workspace_runtime_module);
+        const workspace_runtime_tests = native_graph.testModule(workspace_runtime_checks, workspace_runtime_module);
+        b.step("build-workspace-runtime-check", "Build the retained runtime workspace test executable")
+            .dependOn(&b.addInstallArtifact(workspace_runtime_tests, .{
+            .dest_dir = .{ .override = .{ .custom = "verification" } },
+            .dest_sub_path = "workspace-runtime",
+        }).step);
         workspace_checks.dependOn(workspace_general);
         workspace_checks.dependOn(workspace_runtime_checks);
         native_checks.dependOn(workspace_checks);
