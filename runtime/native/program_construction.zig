@@ -96,6 +96,19 @@ pub fn example(a: std.mem.Allocator) ![]u8 {
     return records.encode(a, try horos.source.examples.lexical(&builder));
 }
 
+pub fn runtimeQuery(a: std.mem.Allocator, retention: bool) ![]u8 {
+    var builder = horos.source.Builder.init(a);
+    defer builder.deinit();
+    const queries = @import("kosmos").RuntimeViews.queries;
+    return records.encode(a, if (retention) try queries.retention(&builder) else try queries.divergence(&builder));
+}
+
+pub fn hypotheticalReply(a: std.mem.Allocator) ![]u8 {
+    var builder = horos.source.Builder.init(a);
+    defer builder.deinit();
+    return records.encode(a, try @import("kosmos").RuntimeAnalysis.example(&builder));
+}
+
 /// The exact canonical descriptors come from compiled code, never model claims.
 pub fn interfaceOf(a: std.mem.Allocator, program: data.activation.Program) !contracts.tool_construction.Interface {
     const entry = program.functions[@intCast(program.roots.entry)];

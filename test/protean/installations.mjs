@@ -12,6 +12,9 @@ if (process.argv.length === 3 && process.argv[2] === '--help') { console.log(usa
 if (process.argv.length > 4 || process.argv.slice(2).some(arg => arg.startsWith('-'))) throw new Error(usage);
 
 const root = resolve(import.meta.dirname, '../..');
+// Linux CI reserves its final minute for identity publication and cleanup.
+// macOS runs the same correctness checks without a wall-time performance gate.
+const deadline = process.platform === 'linux' ? performance.now() + 540_000 : null;
 const zig = realpathSync(process.env.PROTEAN_ZIG_EXE ?? execFileSync('which', ['zig'], {encoding: 'utf8'}).trim());
 const description = execFileSync(zig, ['env'], {encoding: 'utf8'});
 const library = realpathSync(JSON.parse(description.match(/^\s*\.lib_dir = (".*"),$/m)?.[1] ?? 'null'));
@@ -28,7 +31,9 @@ delete env.NODE_OPTIONS; delete env.NODE_TEST_CONTEXT; delete env.TAR_OPTIONS;
 let prefix;
 if (process.platform === 'darwin') {
   const profile = join(scratch, 'build.sb');
-  writeFileSync(profile, `(version 1)\n(allow default)\n(deny process-exec)\n(allow process-exec (literal ${JSON.stringify(zig)}) (literal ${JSON.stringify(realpathSync("/usr/bin/tar"))}) (literal "/usr/bin/unzip") (subpath ${JSON.stringify(scratch)}) (subpath ${JSON.stringify(cache)}))\n`);
+  // Zig discovers the installed macOS SDK through these native system tools.
+  // Denying them changes compiler bootstrap behavior inside this fixture.
+  writeFileSync(profile, `(version 1)\n(allow default)\n(deny process-exec)\n(allow process-exec (literal ${JSON.stringify(zig)}) (literal ${JSON.stringify(realpathSync("/usr/bin/tar"))}) (literal "/usr/bin/unzip") (literal "/usr/bin/xcode-select") (literal "/usr/bin/xcrun") (subpath ${JSON.stringify(scratch)}) (subpath ${JSON.stringify(cache)}))\n`);
   prefix = ['/usr/bin/sandbox-exec', '-f', profile];
 } else if (process.platform === 'linux') {
   prefix = ['/usr/bin/bwrap', '--unshare-user', '--die-with-parent', '--new-session', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp'];
@@ -43,6 +48,8 @@ if (process.platform === 'darwin') {
 } else throw new Error('unsupported downstream qualification platform');
 
 function run(executable, args, cwd = scratch, {failure = false, diagnostic, timeout = 300000} = {}) {
+  timeout = deadline === null ? undefined : Math.min(timeout, Math.floor(deadline - performance.now()));
+  assert(timeout === undefined || timeout > 0, 'independent installation exceeded its nine-minute budget');
   const command = [...prefix, ...(process.platform === 'linux' ? ['--chdir', cwd] : []), executable, ...args];
   const result = spawnSync(command[0], command.slice(1), {cwd, env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout});
   assert.equal(result.error, undefined, result.error?.message);
@@ -77,7 +84,7 @@ try {
     const target = join(exportRoot, file); mkdirSync(dirname(target), {recursive: true}); copyFileSync(join(root, file), target);
   }
   const packageHash = run(zig, ['fetch', exportRoot]);
-  assert.match(packageHash, /^protean-5\.0\.0-[A-Za-z0-9_-]+$/);
+  assert.match(packageHash, /^protean-6\.0\.0-[A-Za-z0-9_-]+$/);
   const packageDir = join(scratch, 'package'); mkdirSync(packageDir);
   run('/usr/bin/tar', ['-xzf', join(cache, 'p', `${packageHash}.tar.gz`), '-C', packageDir]);
   const source = join(packageDir, packageHash);
@@ -93,7 +100,7 @@ try {
   writeFileSync(join(consumer, 'build.zig.zon'), zon);
   const prefixDir = join(scratch, 'installed');
   const buildArgs = ['build', '-Doptimize=safe', `-Dkosmos-source=${join(inputs, 'kosmos')}`, `-Dsqlite-source=${join(inputs, 'sqlite')}`, '--prefix', prefixDir, '--prefix-exe-dir', 'executables', '--summary', 'all'];
-  run(zig, buildArgs, consumer);
+  run(zig, buildArgs, consumer, {timeout: 480_000});
   // The actual exported module graph must stop on either a changed package or
   // a changed native source override, before compiling/claiming new assets.
   for (const path of [join(consumer, 'zig-pkg', lock.boundary.package.zigHash, 'src/root.zig'), join(inputs, 'kosmos/src/root.zig')]) {

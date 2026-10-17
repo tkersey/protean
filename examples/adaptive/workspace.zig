@@ -13,6 +13,7 @@ fn authorize(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
         .program => |v| .{ .program = .{ .command = v } },
         .work => |v| .{ .work = .{ .command = v } },
         .context => |v| .{ .context = .{ .command = v } },
+        .placement => |v| .{ .placement = .{ .command = v } },
     };
     try work.admitAction(ctx, request.value.context, request.value.call_id, action);
     // Descriptions and retained observations grant no new execution. Mutations
@@ -24,14 +25,29 @@ fn authorize(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
         if (!policy.build) return error.Unauthorized;
         if (command.program.build.source_kind == .component_recipe) catalog = .{ .digest = policy.catalog.digest, .bytes = policy.catalog.bytes };
     }
+    if (command == .program and command.program == .specialize) {
+        if (!(try resources.policy(ctx)).build) return error.Unauthorized;
+    }
     if (command == .program and command.program == .describe and command.program.describe.section == .components) {
         const policy = try resources.policy(ctx);
         catalog = .{ .digest = policy.catalog.digest, .bytes = policy.catalog.bytes };
     }
     if (command == .work) switch (command.work) {
-        .start, .advance, .delegate, .interact => {
+        .start, .advance, .pump, .delegate, .interact, .realize, .request_cut => {
             const policy = try resources.policy(ctx);
             if (!policy.run) return error.Unauthorized;
+        },
+        else => {},
+    };
+    if (command == .placement) switch (command.placement) {
+        .move, .retry => {
+            if (!(try resources.policy(ctx)).run) return error.Unauthorized;
+        },
+        .control => |selected| switch (selected.command) {
+            .start, .advance, .pump, .delegate, .interact, .realize, .request_cut => {
+                if (!(try resources.policy(ctx)).run) return error.Unauthorized;
+            },
+            else => {},
         },
         else => {},
     };

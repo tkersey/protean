@@ -391,8 +391,7 @@ fn respond(outcome: *kosmos.invocation.Outcome, program: horos.data.activation.P
             .state => |state| try kosmos.Session.restoreImage(a, invocation_image_1, state),
         };
         defer session.deinit();
-        session.statistics = statistics;
-        if (statistics) |observed_statistics| session.store.statistics = &observed_statistics.storage;
+        session.setStatistics(statistics);
         _ = try kosmos.invocation.advance(&session, .{ .reply = encoded }, null);
         break :observed try kosmos.invocation.finish(a, &session, true);
     };
@@ -418,8 +417,7 @@ test "protected composition resumes captured futures, groups non-tail results, a
                 .state => |state| try kosmos.Session.restoreImage(a, invocation_image_2, state),
             };
             defer session.deinit();
-            session.statistics = &statistics;
-            session.store.statistics = &statistics.storage;
+            session.setStatistics(&statistics);
             _ = try kosmos.invocation.advance(&session, .none, null);
             break :observed try kosmos.invocation.finish(a, &session, true);
         };
@@ -580,8 +578,7 @@ fn growingDomain(count: usize) !void {
             .state => |state| try kosmos.Session.restoreImage(a, invocation_image_3, state),
         };
         defer session.deinit();
-        session.statistics = &statistics;
-        session.store.statistics = &statistics.storage;
+        session.setStatistics(&statistics);
         _ = try kosmos.invocation.advance(&session, .none, null);
         break :observed try kosmos.invocation.finish(a, &session, true);
     };

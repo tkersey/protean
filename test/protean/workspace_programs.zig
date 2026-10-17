@@ -1,5 +1,6 @@
 //! Independent execution witnesses for the source-record transport. Algorithms
 //! are authored records; no build-time result or native callback is supplied.
+const support = @import("workspace_test_support.zig");
 const std = @import("std");
 const horos = @import("horos");
 const data = @import("horos_data");
@@ -9,9 +10,7 @@ const contracts = @import("protean_contracts");
 const source = horos.source;
 const Id = source.Id;
 
-fn workspaceRef(a: std.mem.Allocator, kind: @FieldType(contracts.workspace.Ref, "kind"), id: [32]u8) !contracts.workspace.Ref {
-    return .{ .kind = kind, .id = .{ .bytes = try a.dupe(u8, &std.fmt.bytesToHex(id, .lower)) } };
-}
+const workspaceRef = support.workspaceRef;
 
 const gcd = @import("workspace_sources.zig").gcd;
 const listLength = @import("workspace_sources.zig").listLength;
@@ -19,40 +18,7 @@ const alternatives = @import("workspace_sources.zig").alternatives;
 
 /// Reject allocation after an actual store commit, without depending on an
 /// allocation ordinal or adding a fault hook to the production owner.
-const AfterCommitAllocator = struct {
-    backing: std.mem.Allocator,
-    namespace: *native.Namespace,
-    generation: u64,
-    rejected: usize = 0,
-
-    fn allocator(self: *@This()) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
-    }
-    fn blocked(self: *@This()) bool {
-        if (self.namespace.store.head.generation == self.generation) return false;
-        self.rejected += 1;
-        return true;
-    }
-    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
-        const self: *@This() = @ptrCast(@alignCast(ctx));
-        if (self.blocked()) return null;
-        return self.backing.rawAlloc(len, alignment, ra);
-    }
-    fn resize(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
-        const self: *@This() = @ptrCast(@alignCast(ctx));
-        if (len > bytes.len and self.blocked()) return false;
-        return self.backing.rawResize(bytes, alignment, len, ra);
-    }
-    fn remap(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
-        const self: *@This() = @ptrCast(@alignCast(ctx));
-        if (len > bytes.len and self.blocked()) return null;
-        return self.backing.rawRemap(bytes, alignment, len, ra);
-    }
-    fn free(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
-        const self: *@This() = @ptrCast(@alignCast(ctx));
-        self.backing.rawFree(bytes, alignment, ra);
-    }
-};
+const AfterCommitAllocator = support.AfterCommitAllocator;
 
 /// Keep allocations in an outer arena, but destroy freed contents so an arena
 /// cannot accidentally hide a projection borrowing a decoded record's storage.
@@ -297,13 +263,7 @@ test "exposure carries capabilities through closed handler returns clauses and s
     }
 }
 
-fn compile(a: std.mem.Allocator, b: *source.Builder, module: source.Module) !native.program_construction.Built {
-    _ = b;
-    const text = try native.source_records.encode(a, module);
-    defer a.free(text);
-    var diagnostic: native.program_construction.Diagnostic = .{};
-    return native.program_construction.build(a, text, null, &diagnostic);
-}
+const compile = support.compile;
 
 fn execute(a: std.mem.Allocator, prepared: *kosmos.Prepared, input: []const u8, expected: u64) !u64 {
     var session = try kosmos.Session.start(a, prepared, input);
@@ -367,66 +327,9 @@ test "BUILD-02 concrete native execution traverses recursive structured input ov
     }
 }
 
-const OwnerTypes = struct {
-    pub const application_id = "workspace-owner-test";
-    pub const input_schema_id = "workspace-owner.input/1";
-    pub const output_schema_id = "workspace-owner.output/1";
-    pub const failure_schema_id = "workspace-owner.failure/1";
-    pub const message_schema_id = "workspace-owner.message/1";
-    pub const Input = struct { u64, u64 };
-    pub const Output = u64;
-    pub const Failure = void;
-    pub const Message = void;
-};
+const OwnerTypes = support.OwnerTypes;
 
-fn expectContextOutputBound(service: anytype, a: std.mem.Allocator, task: native.testing.state.TaskId, operation_id: []const u8, replacement: contracts.workspace.Ref, replacement_reply: ?contracts.workspace.Reply) !void {
-    const store = &service.namespace.store;
-    var manifest_digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
-    const index = try store.archiveIndex(a, task, .{ .digest = manifest_digest, .bytes = service.assets.manifest.len });
-    try store.begin();
-    defer store.rollback();
-    var operations = try store.database.prepare("SELECT p.id,o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?", &.{.{ .blob = &task }});
-    defer operations.deinit();
-    var changed = false;
-    var revision: u64 = 0;
-    while (try operations.step() == .row) {
-        var receipt = (try contracts.decodeOwned(native.testing.state.Receipt, a, try operations.bytes(1))).value;
-        if (!std.mem.eql(u8, receipt.client_operation_id.bytes, operation_id)) continue;
-        revision = receipt.revision;
-        try std.testing.expectEqual(replacement.kind, receipt.workspace_kind.?);
-        receipt.workspace = try nativeIdentity(replacement);
-        receipt.workspace_observation = try store.objectReference(receipt.workspace.?, null);
-        const rewritten = try store.putObject(try contracts.encodeOwned(native.testing.state.Receipt, a, receipt));
-        try store.database.run("UPDATE operations SET receipt=? WHERE id=?", &.{ .{ .blob = &rewritten.digest }, .{ .text = try operations.bytes(0) } });
-        var events = try store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.revision=?", &.{ .{ .blob = &task }, .{ .integer = @intCast(receipt.revision) } });
-        defer events.deinit();
-        try std.testing.expect(try events.step() == .row);
-        var event_value = (try contracts.decodeOwned(native.testing.state.Event, a, try events.bytes(0))).value;
-        event_value.data.bytes = try std.fmt.allocPrint(a, "{{\"workspace_id\":\"{s}\"}}", .{replacement.id.bytes});
-        const event_ref = try store.putObject(try contracts.encodeOwned(native.testing.state.Event, a, event_value));
-        try store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &event_ref.digest }, .{ .blob = &task }, .{ .integer = @intCast(event_value.seq) } });
-        changed = true;
-        break;
-    }
-    try std.testing.expect(changed);
-    if (replacement_reply) |reply| {
-        var id: [32]u8 = undefined;
-        _ = try std.fmt.hexToBytes(&id, operation_id);
-        var pending = (try contracts.decodeOwned(native.testing.occurrence.Occurrence, a, (try store.recordBytes(a, "occurrence", id, task)).?)).value;
-        var projected = reply;
-        var observation = (try native.json.parse(a, reply.observation_json.bytes, .{})).value;
-        try native.json.put(a, &observation, "receipt_revision", try native.json.number(a, revision));
-        projected.observation_json.bytes = try native.json.canonical(a, observation);
-        const payload = try contracts.encodeOwned(contracts.workspace.Reply, a, projected);
-        const bound = try data.invocation.encodeOwned(data.invocation.Result, a, .{ .request_identity = pending.request, .value = payload });
-        pending.state.settled_reply.reply = (try store.putObject(bound)).digest;
-        try store.putRecord(native.testing.occurrence.Occurrence, "occurrence", id, task, pending);
-    }
-    // All substituted objects remain legitimate task-owned artifacts; receipt,
-    // event and optional acquired reply have coherent content hashes.
-    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(a, task, index.records.items));
-}
+const expectContextOutputBound = support.expectContextOutputBound;
 
 fn expectWorkInputHistoryBound(service: anytype, a: std.mem.Allocator, task: native.testing.state.TaskId, work_id: [32]u8, inputs: []const native.testing.state.Reference) !void {
     const store = &service.namespace.store;
@@ -2699,33 +2602,9 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
     }
 }
 
-fn nativeIdentity(ref: contracts.workspace.Ref) ![32]u8 {
-    var result: [32]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&result, ref.id.bytes);
-    return result;
-}
+const nativeIdentity = support.nativeIdentity;
 
-fn fixtureManifest(a: std.mem.Allocator, image: []const u8, identity: [32]u8, application_bytes: []const u8) ![]u8 {
-    var image_digest: [32]u8 = undefined;
-    var assets_digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(image, &image_digest, .{});
-    std.crypto.hash.sha2.Sha256.hash(application_bytes, &assets_digest, .{});
-    const image_hex = std.fmt.bytesToHex(image_digest, .lower);
-    const identity_hex = std.fmt.bytesToHex(identity, .lower);
-    const assets_hex = std.fmt.bytesToHex(assets_digest, .lower);
-    return std.json.Stringify.valueAlloc(a, .{
-        .native_host_contract = "unit-native-contract",
-        .protocol = "agent-host/2.1",
-        .client_mapping = "agent-client-values/1.1",
-        .state_format = "agent-native-state/13",
-        .optimize = "debug",
-        .program_sha256 = @as([]const u8, &image_hex),
-        .program_identity = @as([]const u8, &identity_hex),
-        .application_assets_sha256 = @as([]const u8, &assets_hex),
-        .dependencies = .{ .world = "unit-kosmos", .boundary = "unit-horos" },
-        .compiler = .{ .version = "0.17.0" },
-    }, .{});
-}
+const fixtureManifest = support.fixtureManifest;
 
 test "deep recursive workspace values support input admission inspection expansion and port replies" {
     const a = std.testing.allocator;

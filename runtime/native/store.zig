@@ -34,8 +34,14 @@ test "object digests retain SHA-256 across padding and large input boundaries" {
 }
 
 pub const Head = struct { generation: u64, parent: Digest, digest: Digest };
+/// Native retention includes every portable kind and source-local snapshots.
+/// Deriving the inclusion keeps new portable kinds in the native audit too.
+pub const RecordKind = blk: {
+    const names = @typeInfo(state.RecordKind).@"enum".field_names ++ &[_][]const u8{"placement_snapshot"};
+    break :blk @Enum(u32, .exhaustive, names, &std.simd.iota(u32, names.len));
+};
 pub fn Record(comptime kind: []const u8) type {
-    return switch (@field(state.RecordKind, kind)) {
+    return switch (@field(RecordKind, kind)) {
         .occurrence => occurrence.Occurrence,
         .question => state.Question,
         .message => state.Message,
@@ -45,6 +51,7 @@ pub fn Record(comptime kind: []const u8) type {
         .reconciliation => state.Reconciliation,
         .origin => state.Origin,
         .workspace_program => @import("workspace_state.zig").Program,
+        .workspace_runtime => @import("workspace_state.zig").Runtime,
         .workspace_work => @import("workspace_state.zig").Work,
         .workspace_value => @import("workspace_state.zig").Value,
         .workspace_view => @import("workspace_state.zig").View,
@@ -54,6 +61,13 @@ pub fn Record(comptime kind: []const u8) type {
         .workspace_wait => @import("workspace_state.zig").Wait,
         .workspace_delegation => @import("workspace_state.zig").Delegation,
         .workspace_reply => @import("workspace_state.zig").ReplyObservation,
+        .placement_custody => @import("placement.zig").Custody,
+        .placement_control => @import("placement.zig").ControlRecord,
+        .placement_action => @import("placement.zig").ActionRecord,
+        .placement_move => @import("placement.zig").Move,
+        .placement_succession => @import("placement.zig").Succession,
+        .placement_snapshot => @import("placement.zig").Snapshot,
+        .root_operation => state.RootOperation,
     };
 }
 pub const Store = struct {
@@ -93,6 +107,8 @@ pub const Store = struct {
                 \\CREATE INDEX operation_tasks ON operations(task,id);
                 \\CREATE TABLE records(kind TEXT NOT NULL, id BLOB NOT NULL, task BLOB NOT NULL REFERENCES tasks(id), body BLOB NOT NULL REFERENCES objects(digest), PRIMARY KEY(kind,id)) WITHOUT ROWID;
                 \\CREATE TABLE events(task BLOB NOT NULL REFERENCES tasks(id), seq INTEGER NOT NULL, revision INTEGER NOT NULL, body BLOB NOT NULL REFERENCES objects(digest), PRIMARY KEY(task,seq)) WITHOUT ROWID;
+                \\CREATE TABLE placement_decisions(transfer BLOB PRIMARY KEY CHECK(length(transfer)=32), body BLOB NOT NULL) WITHOUT ROWID;
+                \\CREATE TABLE local_admissions(task BLOB PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE) WITHOUT ROWID;
             );
             try database.run("INSERT INTO meta VALUES(1,?, ?,0,?,?)", &.{ .{ .integer = format }, .{ .blob = &namespace }, .{ .blob = &@as(Digest, @splat(0)) }, .{ .blob = &namespace } });
             try database.exec("COMMIT;");
@@ -545,14 +561,14 @@ pub const Store = struct {
     }
     fn retainValue(self: *Store, comptime T: type, parent: state.Reference, value: T) !void {
         try self.retainValueDirect(T, parent, value);
-        if (T == state.Reconciliation or T == state.Receipt) {
+        if (T == state.Reconciliation or T == state.Receipt or T == state.Event) {
             var history = struct {
                 store: *Store,
                 pub fn typed(this: *@This(), comptime V: type, ref: state.Reference, item: V) !void {
                     try this.store.retainValueDirect(V, ref, item);
                 }
             }{ .store = self };
-            if (T == state.Reconciliation) try state.visitReconciliationHistory(self.allocator, self, value, &history) else try state.visitWorkspaceReceipt(self.allocator, self, value, &history);
+            if (T == state.Reconciliation) try state.visitReconciliationHistory(self.allocator, self, value, &history) else if (T == state.Event) try state.visitWorkspaceCommand(self.allocator, self, value, &history) else try state.visitWorkspaceReceipt(self.allocator, self, value, &history);
         }
     }
     fn retainValueDirect(self: *Store, comptime T: type, parent: state.Reference, value: T) !void {
@@ -591,7 +607,15 @@ pub const Store = struct {
         } else {
             if (task.revision != 1) return error.StaleRevision;
             try self.database.run("INSERT INTO tasks VALUES(?,?,?,?)", &.{ .{ .blob = &task.id }, .{ .integer = 1 }, .{ .integer = @intFromBool(task.terminal()) }, .{ .blob = &ref.digest } });
+            // This namespace-local admission is deliberately absent from
+            // archives. Import restores task data through its separate owner.
+            try self.database.run("INSERT INTO local_admissions VALUES(?)", &.{.{ .blob = &task.id }});
         }
+    }
+    pub fn locallyAdmitted(self: *Store, task_id: state.TaskId) !bool {
+        var query = try self.database.prepare("SELECT 1 FROM local_admissions WHERE task=?", &.{.{ .blob = &task_id }});
+        defer query.deinit();
+        return try query.step() == .row;
     }
     pub fn taskBytes(self: *Store, a: std.mem.Allocator, id: state.TaskId) ![]u8 {
         var query = try self.database.prepare("SELECT body,revision,terminal FROM tasks WHERE id=?", &.{.{ .blob = &id }});
@@ -606,6 +630,9 @@ pub const Store = struct {
     }
     pub fn putRecord(self: *Store, comptime T: type, comptime kind: []const u8, id: Digest, task: state.TaskId, value: T) !void {
         if (T != Record(kind)) @compileError("native record type/kind mismatch");
+        if (comptime std.mem.eql(u8, kind, "placement_action")) @compileError("placement observations are immutable");
+        if (comptime std.mem.eql(u8, kind, "placement_succession")) @compileError("placement succession proofs are immutable");
+        if (comptime std.mem.eql(u8, kind, "workspace_runtime")) @compileError("immutable runtime records are created once");
         if (comptime std.mem.eql(u8, kind, "artifact") or std.mem.eql(u8, kind, "attempt") or std.mem.eql(u8, kind, "origin") or std.mem.eql(u8, kind, "workspace_program") or std.mem.eql(u8, kind, "workspace_value") or std.mem.eql(u8, kind, "workspace_view") or std.mem.eql(u8, kind, "workspace_port") or std.mem.eql(u8, kind, "workspace_port_reply") or std.mem.eql(u8, kind, "execution_route") or std.mem.eql(u8, kind, "workspace_wait") or std.mem.eql(u8, kind, "workspace_delegation") or std.mem.eql(u8, kind, "workspace_reply")) @compileError("immutable native records are created once");
         try self.writing();
         errdefer self.rollback();
@@ -697,8 +724,10 @@ pub const Store = struct {
 
     /// A task-scoped index snapshot. The archive owner validates each
     /// canonical record and computes its artifact closure before publication.
+    /// Inside a transaction this observes its unpublished state. Source-local
+    /// transfer snapshots are native obligations, never portable task records.
     pub fn archiveIndex(self: *Store, a: std.mem.Allocator, task_id: state.TaskId, build: state.Reference) !state.Archive {
-        if (self.transaction or self.fenced) return error.Busy;
+        if (self.fenced) return error.Busy;
         const task_bytes = try self.taskBytes(a, task_id);
         defer a.free(task_bytes);
         var records: std.ArrayList(state.ArchiveRecord) = .empty;
@@ -706,7 +735,7 @@ pub const Store = struct {
         var operations: std.ArrayList(state.ArchiveOperation) = .empty;
         // The caller supplies an arena. No borrowed SQLite column escapes.
         {
-            var query = try self.database.prepare("SELECT kind,id,body FROM records WHERE task=? ORDER BY kind,id", &.{.{ .blob = &task_id }});
+            var query = try self.database.prepare("SELECT kind,id,body FROM records WHERE task=? AND kind!='placement_snapshot' ORDER BY kind,id", &.{.{ .blob = &task_id }});
             defer query.deinit();
             while (try query.step() == .row) {
                 const kind = std.meta.stringToEnum(state.RecordKind, try query.bytes(0)) orelse return error.NonPortable;
@@ -749,13 +778,13 @@ pub const Store = struct {
         };
     }
 
-    /// Import is confined to a fresh namespace transaction. It preserves the
+    /// Import is confined to an empty task namespace transaction. It preserves the
     /// archived task ID and history; grants and resume remain caller-owned.
     pub fn restoreArchiveIndex(self: *Store, a: std.mem.Allocator, archive: state.Archive, task: state.Task) !void {
         try self.writing();
         errdefer self.rollback();
         self.invalidateIntegrity();
-        if (self.head.generation != 0 or task.revision == 0 or task.revision > std.math.maxInt(i64) or try self.scalar("SELECT count(*) FROM tasks") != 0) return error.InvalidState;
+        if (task.revision == 0 or task.revision > std.math.maxInt(i64) or try self.scalar("SELECT count(*) FROM tasks") != 0) return error.InvalidState;
         const bytes = try contracts.encodeOwned(state.Task, a, task);
         defer a.free(bytes);
         const body = try self.putObject(bytes);

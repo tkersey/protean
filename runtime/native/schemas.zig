@@ -118,6 +118,10 @@ fn typed(a: std.mem.Allocator, application: json.Value, name: []const u8) !json.
     return shape(a, &.{ .{ "schema_id", try constant(a, item.object.get("schema_id").?.string) }, .{ "value", item.object.get("json").? } }, &.{});
 }
 fn parameter(a: std.mem.Allocator, method: protocol.Method, key: []const u8, application: json.Value, limits: protocol.Limits) !json.Value {
+    if (method == .placement and std.mem.eql(u8, key, "request")) {
+        const bytes = &@import("values.zig").schemas.ClientSchema(@import("placement.zig").Request).value;
+        return (try json.parseAsset(a, bytes, bytes.len)).value;
+    }
     if (std.mem.eql(u8, key, "task_id") or std.mem.eql(u8, key, "subscription_id")) return reference(a, "id128");
     if (std.mem.eql(u8, key, "question_id") or std.mem.eql(u8, key, "request_digest") or std.mem.eql(u8, key, "artifact_id") or std.mem.eql(u8, key, "occurrence_id") or std.mem.eql(u8, key, "attempt_id")) return reference(a, "digest");
     if (std.mem.eql(u8, key, "recovery")) return shape(a, &.{.{ "mechanism", try enumSchema(state.RecoveryRequest, a) }}, &.{});

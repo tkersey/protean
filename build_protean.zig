@@ -26,19 +26,20 @@ const Graph = struct {
     fn helper(g: Graph, name: []const u8) *std.Build.Module {
         return g.module(g.b.fmt("src/{s}.zig", .{name}));
     }
-    fn testModule(g: Graph, step: *std.Build.Step, module_value: *std.Build.Module) void {
+    fn testModule(g: Graph, step: *std.Build.Step, module_value: *std.Build.Module) *std.Build.Step.Compile {
         const tests = g.b.addTest(.{
             .root_module = module_value,
-            .use_llvm = if (g.b.graph.host.result.os.tag == .linux and g.b.graph.host.result.cpu.arch == .x86_64) false else null,
+            .use_llvm = if (g.b.graph.host.result.os.tag == .linux and g.b.graph.host.result.cpu.arch == .x86_64) g.optimize != .debug else null,
         });
         tests.step.dependOn(g.gate);
         step.dependOn(&g.b.addRunArtifact(tests).step);
+        return tests;
     }
     fn emitter(g: Graph, name: []const u8, module_value: *std.Build.Module) *std.Build.Step.Compile {
         const executable = g.b.addExecutable(.{
             .name = name,
             .root_module = module_value,
-            .use_llvm = if (g.b.graph.host.result.os.tag == .linux and g.b.graph.host.result.cpu.arch == .x86_64) false else null,
+            .use_llvm = if (g.b.graph.host.result.os.tag == .linux and g.b.graph.host.result.cpu.arch == .x86_64) g.optimize != .debug else null,
         });
         executable.step.dependOn(g.gate);
         return executable;
@@ -173,7 +174,11 @@ pub fn build(b: *std.Build) void {
     const emitter_module = g.module("tools/native/emit.zig");
     emitter_module.addImport("definition", adaptive_definition);
     emitter_module.addImport("application_types", adaptive_types);
-    const adaptive_assets = b.addRunArtifact(g.emitter("protean-assets", emitter_module));
+    const adaptive_emitter = g.emitter("protean-assets", emitter_module);
+    // Match the public builder's backend for this build-time authoring tool.
+    // The emitted image is independently compared with the installed product.
+    if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) adaptive_emitter.use_llvm = false;
+    const adaptive_assets = b.addRunArtifact(adaptive_emitter);
     const adaptive_image = adaptive_assets.addOutputFileArg2("program.bpi3", .{});
     const adaptive_application = adaptive_assets.addOutputFileArg2("application.json", .{});
     check.dependOn(&adaptive_assets.step);
@@ -187,23 +192,23 @@ pub fn build(b: *std.Build) void {
     lint.dependOn(&format_check.step);
     lint.dependOn(&b.addSystemCommand(&.{ "sh", "tools/check_zig_paths.sh" }).step);
     check.dependOn(lint);
-    g.testModule(check, g.module("test/authoring_tests.zig"));
-    g.testModule(check, g.module("src/test_root.zig"));
+    _ = g.testModule(check, g.module("test/authoring_tests.zig"));
+    _ = g.testModule(check, g.module("src/test_root.zig"));
     const workspace_values = b.step("check-workspace-values", "Check runtime-schema workspace value projection");
-    g.testModule(workspace_values, g.module("runtime/native/dynamic_values.zig"));
+    _ = g.testModule(workspace_values, g.module("runtime/native/dynamic_values.zig"));
     check.dependOn(workspace_values);
     const source_records = b.step("check-source-records", "Check the model-facing Horos source-record transport");
-    g.testModule(source_records, g.module("runtime/native/source_records.zig"));
+    _ = g.testModule(source_records, g.module("runtime/native/source_records.zig"));
     check.dependOn(source_records);
     const program_construction = b.step("check-program-construction", "Check untrusted general source construction");
-    g.testModule(program_construction, g.module("runtime/native/program_construction.zig"));
+    _ = g.testModule(program_construction, g.module("runtime/native/program_construction.zig"));
     check.dependOn(program_construction);
     const admitted = g.module("test/protean/admission.zig");
     admitted.addImport("admission", g.helper("admission"));
-    g.testModule(check, admitted);
+    _ = g.testModule(check, admitted);
     const dialogue = g.module("test/protean/dialogue_probe.zig");
     dialogue.addImport("interaction", g.helper("interaction"));
-    g.testModule(check, dialogue);
+    _ = g.testModule(check, dialogue);
     inline for (.{
         .{ "model_runtime_callback", "Protean model declaration has unknown field 'execute'" },
         .{ "model_unsupported_codec", "Protean model codec is unsupported for 'value': []const u8" },
@@ -223,6 +228,10 @@ pub fn build(b: *std.Build) void {
     const native_checks = b.step("check-native", "Check native and custody contracts against the selected Kosmos");
     const native_product = b.step("check-native-product", "Qualify the native adaptive application on the selected supported platform");
     const native_owner = b.step("check-native-owner", "Qualify native owner, context, and recovery contracts");
+    const native_owner_integration = b.step("check-native-owner-integration", "Qualify native task and occurrence ownership");
+    const native_owner_support = b.step("check-native-owner-support", "Qualify native unit, context, and crash recovery contracts");
+    native_owner.dependOn(native_owner_integration);
+    native_owner.dependOn(native_owner_support);
     const native_packaged = b.step("check-native-packaged", "Qualify the packaged adaptive executable and HTTPS isolation");
     const native_executable = b.step("check-native-executable", "Qualify the packaged adaptive executable and process isolation");
     const native_consumer = b.step("check-native-https", "Check native HTTPS against an independent endpoint");
@@ -248,6 +257,24 @@ pub fn build(b: *std.Build) void {
         native_guard.has_side_effects = true;
         native_guard.expectExitCode(0);
         native_guard.step.dependOn(&source_guard.step);
+        // Kosmos checks these ordinary bytes against an independent source
+        // rebuild. Verify their exact source/compiler/content bindings here;
+        // downstream builds need not compile that same host generator again.
+        const runtime_options = b.addOptions();
+        runtime_options.addOption([]const u8, "horos_package", @import("build.zig.zon").dependencies.horos.hash);
+        const runtime_emitter = b.addExecutable(.{ .name = "protean-runtime-artifact", .root_module = b.createModule(.{
+            .root_source_file = kosmos_source.path(b, "src/semantic_packaged.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }) });
+        runtime_emitter.root_module.addOptions("artifact_options", runtime_options);
+        runtime_emitter.step.dependOn(&native_guard.step);
+        const emit_runtime = b.addRunArtifact(runtime_emitter);
+        const runtime_files = b.addWriteFiles();
+        _ = runtime_files.addCopyFile(emit_runtime.captureStdOut(.{}), "semantic-core.kar");
+        const runtime_source = runtime_files.add("runtime.zig", "pub const bytes = @embedFile(\"semantic-core.kar\");\n");
+        kosmos.addImport("horos", horos);
+        kosmos.addImport("packaged_runtime", b.createModule(.{ .root_source_file = runtime_source, .target = b.graph.host, .optimize = optimize }));
         var native_graph = g;
         native_graph.gate = &native_guard.step;
         const native_admission_files = b.addWriteFiles();
@@ -290,6 +317,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{.{ .name = "horos_data", .module = native_data }},
         });
+        if (native_kosmos != kosmos) {
+            native_kosmos.addImport("horos", native_horos);
+            native_kosmos.addImport("packaged_runtime", b.createModule(.{ .root_source_file = runtime_source, .target = native_target, .optimize = optimize }));
+        }
         const public_environment = if (!default_musl and target.query.isNative()) host_environment else nativeEnvironment(b, native_target, optimize, native_kosmos, native_data, native_contracts, native_horos, native_protean, native_admission, sqlite_source, &native_guard.step);
         // Executed native checks use the delivered ABI when it runs on this
         // host. This also shares its C library instead of compiling a GNU-only
@@ -305,22 +336,40 @@ pub fn build(b: *std.Build) void {
         const checked_kosmos = if (native_on_host) native_kosmos else kosmos;
         const checked_environment = if (native_on_host) public_environment else host_environment;
         const workspace_programs = native_graph.module("test/protean/workspace_programs.zig");
-        // Match the retained native suite: compile test orchestration in debug
-        // while imported product modules retain the requested optimization.
-        // Zig 0.17's safe optimizer crashes on this large orchestration root.
-        workspace_programs.optimize = .debug;
+        // Execute generated programs in the requested optimization mode.
+        // These roots instantiate the evaluator as well as test orchestration.
         workspace_programs.strip = optimize != .debug;
         workspace_programs.addImport("kosmos", checked_kosmos);
         workspace_programs.addImport("protean_native", checked_environment);
         const workspace_checks = b.step("check-workspace-programs", "Execute general source-record programs through native Kosmos");
-        native_graph.testModule(workspace_checks, workspace_programs);
+        const workspace_general = b.step("check-workspace-general", "Qualify workspace execution, inputs and provenance");
+        const workspace_general_tests = native_graph.testModule(workspace_general, workspace_programs);
+        b.step("build-workspace-general-check", "Build the retained workspace test executable")
+            .dependOn(&b.addInstallArtifact(workspace_general_tests, .{
+            .dest_dir = .{ .override = .{ .custom = "verification" } },
+            .dest_sub_path = "workspace-general",
+        }).step);
+        const workspace_runtime_module = native_graph.module("test/protean/workspace_runtime.zig");
+        workspace_runtime_module.strip = optimize != .debug;
+        workspace_runtime_module.addImport("kosmos", checked_kosmos);
+        workspace_runtime_module.addImport("protean_native", checked_environment);
+        const workspace_runtime_checks = b.step("check-workspace-runtime", "Qualify runtime selection and bilateral workspace custody");
+        const workspace_runtime_tests = native_graph.testModule(workspace_runtime_checks, workspace_runtime_module);
+        b.step("build-workspace-runtime-check", "Build the retained runtime workspace test executable")
+            .dependOn(&b.addInstallArtifact(workspace_runtime_tests, .{
+            .dest_dir = .{ .override = .{ .custom = "verification" } },
+            .dest_sub_path = "workspace-runtime",
+        }).step);
+        workspace_checks.dependOn(workspace_general);
+        workspace_checks.dependOn(workspace_runtime_checks);
         native_checks.dependOn(workspace_checks);
         const workspace_semantics_module = native_graph.module("test/protean/workspace_semantics.zig");
-        workspace_semantics_module.optimize = .debug;
         workspace_semantics_module.strip = optimize != .debug;
         workspace_semantics_module.addImport("kosmos", checked_kosmos);
         workspace_semantics_module.addImport("protean_native", checked_environment);
         const workspace_peer = native_graph.emitter("workspace-semantics", workspace_semantics_module);
+        b.step("build-workspace-peer", "Build the verification-only source and capsule byte peer")
+            .dependOn(&b.addInstallArtifact(workspace_peer, .{ .dest_dir = .{ .override = .{ .custom = "verification" } } }).step);
         const workspace_semantics_run = b.addSystemCommand(&.{"node"});
         workspace_semantics_run.addFileArg2(b.path("test/protean/workspace_semantics.mjs"), .{});
         workspace_semantics_run.addArtifactArg(workspace_peer);
@@ -369,6 +418,23 @@ pub fn build(b: *std.Build) void {
             adaptive_peer.addFileArg2(adaptive_application, .{ .make_absolute = true });
             adaptive_peer.addFileArg2(adaptive_image, .{ .make_absolute = true });
             native_executable.dependOn(&adaptive_peer.step);
+            const placement_peer = nativeCheckCommand(b);
+            placement_peer.addArgs(&.{ "node", "test/protean/native_placement.mjs" });
+            placement_peer.addFileArg2(adaptive_product.executable.getEmittedBin(), .{ .make_absolute = true });
+            // Run CPU-heavy deployment fixtures in order so qualification
+            // does not compete with itself for host resources.
+            placement_peer.step.dependOn(&adaptive_peer.step);
+            b.step("check-native-placement", "Qualify authenticated placement between native processes").dependOn(&placement_peer.step);
+            native_executable.dependOn(&placement_peer.step);
+            const runtime_peer = nativeCheckCommand(b);
+            runtime_peer.addArgs(&.{ "node", "test/protean/native_runtime.mjs" });
+            runtime_peer.addFileArg2(adaptive_product.executable.getEmittedBin(), .{ .make_absolute = true });
+            runtime_peer.addFileArg2(adaptive_application, .{ .make_absolute = true });
+            runtime_peer.addArg("");
+            runtime_peer.addArtifactArg(workspace_peer);
+            runtime_peer.step.dependOn(&placement_peer.step);
+            b.step("check-native-runtime", "Qualify scripted optional runtime choices through native inference and workspace boundaries").dependOn(&runtime_peer.step);
+            native_executable.dependOn(&runtime_peer.step);
             const retention_check = b.step("check-workspace-runtime-retention", "Resume an old task with its retained original executable after installing the new product");
             if (b.option(std.Build.LazyPath, "previous-runtime", "Retained previous Protean executable for namespace compatibility qualification")) |previous| {
                 const retention_run = b.addSystemCommand(&.{ "node", "test/protean/workspace_runtime_retention.mjs" });
@@ -403,8 +469,8 @@ pub fn build(b: *std.Build) void {
         // These roots share exact module identities; compile their retained
         // tests together instead of rebuilding the same compiler eleven times.
         const native_suite = native_graph.module("test/protean/native_tests.zig");
-        // Keep the general suite on the fast compilation path.
-        native_suite.optimize = .debug;
+        // Generic owner/evaluator instantiations inherit the root's mode.
+        // Keep execution representative of the requested product build.
         native_suite.strip = optimize != .debug;
         native_suite.addImport("kosmos", checked_kosmos);
         native_suite.addImport("protean_native", checked_environment);
@@ -420,13 +486,32 @@ pub fn build(b: *std.Build) void {
         native_suite.addAnonymousImport("adaptive_image", .{ .root_source_file = adaptive_image });
         native_suite.addAnonymousImport("adaptive_application", .{ .root_source_file = adaptive_application });
         native_suite.addImport("native_asset_writer", native_graph.module("tools/native/emit.zig"));
-        native_graph.testModule(native_owner, native_suite);
-        const workspace_recovery_tests = b.addTest(.{ .root_module = native_suite, .filters = &.{"adaptive workspace"} });
+        inline for (.{
+            .{ "adaptive", "test/protean/native_adaptive_tests.zig" },
+            .{ "tasks", "test/protean/native_owner_tests.zig" },
+        }) |group| {
+            const suite = b.allocator.create(std.Build.Module) catch @panic("out of memory");
+            suite.init(b, .{ .existing = native_suite });
+            suite.root_source_file = b.path(group[1]);
+            const checks = b.step("check-native-owner-" ++ group[0], "Qualify native " ++ group[0] ++ " contracts");
+            const tests = native_graph.testModule(checks, suite);
+            b.step("build-native-owner-" ++ group[0] ++ "-check", "Build the retained native " ++ group[0] ++ " test executable")
+                .dependOn(&b.addInstallArtifact(tests, .{
+                .dest_dir = .{ .override = .{ .custom = "verification" } },
+                .dest_sub_path = "native-owner-" ++ group[0],
+            }).step);
+            native_owner_integration.dependOn(checks);
+        }
+        const workspace_recovery_tests = b.addTest(.{
+            .root_module = native_suite,
+            .filters = &.{"adaptive workspace"},
+            .use_llvm = if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) optimize != .debug else null,
+        });
         workspace_recovery_tests.step.dependOn(native_graph.gate);
         const workspace_recovery_run = b.addRunArtifact(workspace_recovery_tests);
         b.step("check-workspace-recovery", "Qualify workspace construction recovery through the adaptive controller").dependOn(&workspace_recovery_run.step);
         // Reuse the fixture's complete import graph; keep the measured root in
-        // the requested optimization mode rather than the general suite's Debug.
+        // the requested optimization mode.
         const scheduler_module = b.allocator.create(std.Build.Module) catch @panic("out of memory");
         scheduler_module.init(b, .{ .existing = native_suite });
         scheduler_module.root_source_file = b.path("test/protean/native_scheduler_benchmark.zig");
@@ -450,17 +535,16 @@ pub fn build(b: *std.Build) void {
         });
         adaptive_response_tests.step.dependOn(native_graph.gate);
         const adaptive_response_run = b.addRunArtifact(adaptive_response_tests);
-        native_owner.dependOn(&adaptive_response_run.step);
+        native_owner_support.dependOn(&adaptive_response_run.step);
         b.step("check-adaptive-context", "Qualify retained adaptive context projection and explicit view selection").dependOn(&adaptive_response_run.step);
         // Zig does not collect test declarations from named dependency modules.
         // Run the runtime's own root explicitly; the integration root above
         // independently exercises its public task owner with authored programs.
         const native_unit_tests = b.allocator.create(std.Build.Module) catch @panic("out of memory");
         native_unit_tests.init(b, .{ .existing = checked_environment });
-        native_unit_tests.optimize = .debug;
-        native_graph.testModule(native_owner, native_unit_tests);
+        native_unit_tests.optimize = optimize;
+        _ = native_graph.testModule(native_owner_support, native_unit_tests);
         const crash_module = native_graph.module("test/protean/native_recovery_crash.zig");
-        crash_module.optimize = .debug;
         crash_module.strip = optimize != .debug;
         crash_module.addImport("kosmos", checked_kosmos);
         crash_module.addImport("protean_native", checked_environment);
@@ -470,7 +554,7 @@ pub fn build(b: *std.Build) void {
             .name = "protean-recovery-crash",
             .root_module = crash_module,
             .filters = &.{"process-crash-controller-only"},
-            .use_llvm = if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) false else null,
+            .use_llvm = if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) optimize != .debug else null,
         });
         crash_probe.step.dependOn(&native_guard.step);
         const crash_check = nodeCommand(b);
@@ -478,11 +562,12 @@ pub fn build(b: *std.Build) void {
         crash_check.addFileArg2(crash_probe.getEmittedBin(), .{ .make_absolute = true });
         crash_check.has_side_effects = true;
         b.step("check-native-recovery-crash", "Kill and reopen native occurrence/recovery owners at durable boundaries").dependOn(&crash_check.step);
-        native_owner.dependOn(&crash_check.step);
+        native_owner_support.dependOn(&crash_check.step);
     } else {
         const missing = b.addFail("enable -Dnative=true with authenticated Kosmos and SQLite sources");
         native_checks.dependOn(&missing.step);
-        native_owner.dependOn(&missing.step);
+        native_owner_integration.dependOn(&missing.step);
+        native_owner_support.dependOn(&missing.step);
         native_packaged.dependOn(&missing.step);
         native_executable.dependOn(&missing.step);
         native_consumer.dependOn(&missing.step);

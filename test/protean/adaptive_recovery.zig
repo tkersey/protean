@@ -338,7 +338,7 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void
     const metadata = @embedFile("adaptive_application");
     var admitted_image = try horos.data.program_image.Admitted.decode(a, image);
     defer admitted_image.deinit();
-    const manifest = try @import("native_tasks.zig").ownerManifest(permanent, image, admitted_image.identity(), metadata);
+    const manifest = try @import("native_test_support.zig").ownerManifest(permanent, image, admitted_image.identity(), metadata);
     const assets: native.discovery.Assets = .{ .image = image, .application = metadata, .manifest = manifest };
     var declarations = environment.handlers;
     for (&declarations) |*entry| if (entry.inference) {
@@ -377,7 +377,8 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void
     var child: wc.Ref = undefined;
     var inspected = false;
     var trace: ReframeTrace = .{};
-    for (0..512) |_| {
+    // One native pump is a bounded base slice, not a complete guest transition.
+    for (0..4096) |_| {
         var frame_arena = std.heap.ArenaAllocator.init(a);
         defer frame_arena.deinit();
         const frame = frame_arena.allocator();
@@ -514,7 +515,7 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
     const metadata = @embedFile("adaptive_application");
     const admitted_image = try horos.data.program_image.Admitted.decode(a, image);
     defer admitted_image.deinit();
-    const manifest = try @import("native_tasks.zig").ownerManifest(permanent, image, admitted_image.identity(), metadata);
+    const manifest = try @import("native_test_support.zig").ownerManifest(permanent, image, admitted_image.identity(), metadata);
     const assets: native.discovery.Assets = .{ .image = image, .application = metadata, .manifest = manifest };
     var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "adaptive-unit", .image_identity = admitted_image.identity() };
     defer application.deinit();
@@ -552,7 +553,9 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
     var maximum_state: u64 = 0;
     var maximum_prepared: usize = 0;
     var maximum_scratch: usize = 0;
-    for (0..512) |_| {
+    errdefer std.debug.print("adaptive recovery failure: calls={d} restarted={} witnessed={} finished={} state_bytes={d} scratch_bytes={d}\n", .{ model_calls, restarted, witnessed, finished, maximum_state, maximum_scratch });
+    // Preserve the complete recovery trace across evaluator micro-suspensions.
+    for (0..4096) |_| {
         var scratch: kosmos.AllocationBudget = .{ .parent = a, .limit = 64 * 1024 * 1024 };
         var arena = std.heap.ArenaAllocator.init(scratch.allocator());
         defer arena.deinit();

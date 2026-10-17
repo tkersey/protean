@@ -119,27 +119,7 @@ test "durable owner replays admissions and acquired work, binds answers, and con
     };
 }
 
-pub fn ownerManifest(a: std.mem.Allocator, image: []const u8, identity: [32]u8, application: []const u8) ![]u8 {
-    var image_digest: [32]u8 = undefined;
-    var assets_digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(image, &image_digest, .{});
-    std.crypto.hash.sha2.Sha256.hash(application, &assets_digest, .{});
-    const image_hex = std.fmt.bytesToHex(image_digest, .lower);
-    const identity_hex = std.fmt.bytesToHex(identity, .lower);
-    const assets_hex = std.fmt.bytesToHex(assets_digest, .lower);
-    return std.json.Stringify.valueAlloc(a, .{
-        .native_host_contract = "unit-native-contract",
-        .protocol = "agent-host/2.1",
-        .client_mapping = "agent-client-values/1.1",
-        .state_format = "agent-native-state/13",
-        .optimize = "safe",
-        .program_sha256 = @as([]const u8, &image_hex),
-        .program_identity = @as([]const u8, &identity_hex),
-        .application_assets_sha256 = @as([]const u8, &assets_hex),
-        .dependencies = .{ .world = "unit-kosmos", .boundary = "unit-horos" },
-        .compiler = .{ .version = "0.17.0" },
-    }, .{});
-}
+pub const ownerManifest = @import("native_test_support.zig").ownerManifest;
 
 // Rehash a well-formed archive while removing one semantic fact. Keep every
 // other object, sequence, revision and operation receipt unchanged.
@@ -1219,6 +1199,7 @@ fn largeResultWitness(comptime Types: type) !void {
     // Authoring/image bytes above model build-time work and embedded read-only
     // assets. All runtime owners below share the real 64MiB allocation budget.
     var budget: kosmos.AllocationBudget = .{ .parent = harness, .limit = 64 * 1024 * 1024 };
+    errdefer std.debug.print("large-result memory: live={d} peak={d} required={d} limit={d}\n", .{ budget.live, budget.peak, budget.required, budget.limit });
     const a = budget.allocator();
     // SQLite is charged by Namespace.open. Reserve only the absent process
     // worker and input framer, then actually admit the large resource set.
@@ -2987,5 +2968,195 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
             _ = try namespace.store.auditRetention(handlers, application.image_identity);
             try std.testing.expectEqual(2, fixture.calls.load(.acquire));
         }
+    }
+}
+
+test "controller microprogress survives park export import and cancellation without publishing a guest cut" {
+    try controllerMicroprogress(false);
+}
+
+test "controller outer capsule moves without compatibility acquiring an execution obligation" {
+    try controllerMicroprogress(true);
+}
+
+fn controllerMicroprogress(comptime moving: bool) !void {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const frame = arena.allocator();
+    const Long = struct {
+        pub fn emit(c: protean.Context) !horos.source.Module {
+            const b = c.builder;
+            const number = try b.scalar(u32);
+            const entry = try b.declare(&.{number}, number, &.{}, &.{});
+            var result = try b.reference(b.parameter(entry, 0));
+            for (0..256) |_| result = try b.primitive(number, .integer_bit_xor, &.{ result, try b.constant(u32, 1) }, 0);
+            try b.define(entry, try b.pure(result));
+            return b.module(entry, try b.scalar(void));
+        }
+    };
+    var compiled = try protean.compile(a, protean.system(.{ .InitialArgs = u32, .Result = u32, .Failure = void, .application = Long }));
+    defer compiled.deinit();
+    const image = try frame.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
+    _ = try compiled.encode(a, image);
+    const admitted = try horos.data.program_image.Admitted.decode(a, image);
+    defer admitted.deinit();
+    const manifest = try ownerManifest(frame, image, admitted.identity(), "controller-microprogress");
+    const assets: native.discovery.Assets = .{ .image = image, .application = "controller-microprogress", .manifest = manifest };
+    var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "unit", .image_identity = admitted.identity() };
+    defer application.deinit();
+    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
+    var handlers = try native.Registry.init(a, &.{});
+    defer handlers.deinit();
+    const profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "controller-profile", .authority = .{ .grants = &.{}, .principal = "test", .tenant = "test" } };
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(io, &path_buffer);
+    const path = try std.fmt.allocPrint(frame, "{s}/source", .{path_buffer[0..length]});
+    const copy_path = try std.fmt.allocPrint(frame, "{s}/copy", .{path_buffer[0..length]});
+    const bundle = try std.fmt.allocPrint(frame, "{s}/outer.bundle", .{path_buffer[0..length]});
+    var initial_destination = try native.Namespace.open(a, io, copy_path);
+    const destination_identity = initial_destination.identity;
+    try initial_destination.close();
+    var namespace = try native.Namespace.open(a, io, path);
+    var namespace_live = true;
+    defer if (namespace_live) namespace.close() catch unreachable;
+    var service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    var live = true;
+    defer if (live) service.close(frame) catch unreachable;
+    const submitted = try service.submit(frame, "long-controller", 10);
+    var original = try service.task(frame, submitted.receipt.task);
+    defer original.deinit();
+    try std.testing.expectEqual(.progressed, try service.pump(frame));
+    var partial = try service.task(frame, submitted.receipt.task);
+    defer partial.deinit();
+    try std.testing.expectEqual(original.value.execution_revision, partial.value.execution_revision);
+    try std.testing.expectEqualDeep(original.value.checkpoint, partial.value.checkpoint);
+    try service.park(frame);
+    const root_rows = try namespace.store.archiveIndex(frame, submitted.receipt.task, .{ .digest = @splat(0), .bytes = 0 });
+    var outer_ref: ?@TypeOf(original.value.checkpoint) = null;
+    for (root_rows.records.items) |row| if (row.kind == .root_operation) {
+        outer_ref = row.body;
+    };
+    try std.testing.expect(outer_ref != null);
+    const root_bytes = try namespace.store.object(frame, outer_ref.?, null);
+    var root_record = try protean.contracts.decodeOwned(native.testing.state.RootOperation, frame, root_bytes);
+    defer root_record.deinit();
+    const root_original = root_record.value;
+    try std.testing.expect(root_original.pending != null);
+    for (0..3) |mutation| {
+        var forged = root_original;
+        try namespace.store.begin();
+        if (mutation == 0) {
+            forged.pending.?.control = try namespace.store.putObject(try protean.contracts.encodeOwned(protocol.Control, frame, .resume_yield));
+        } else if (mutation == 1) {
+            forged.pending.?.guest_quantum += 1;
+        } else {
+            forged.pending.?.dependencies.items = &.{};
+        }
+        try namespace.store.putRecord(native.testing.state.RootOperation, "root_operation", forged.id, forged.task, forged);
+        try namespace.commit("test.forge-controller-operation");
+        try std.testing.expectError(error.InvalidArchive, service.exportCheckpoint(frame, submitted.receipt.task, bundle));
+        try namespace.store.begin();
+        try namespace.store.putRecord(native.testing.state.RootOperation, "root_operation", root_original.id, root_original.task, root_original);
+        try namespace.commit("test.restore-controller-operation");
+    }
+    const p = native.placement;
+    const source_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(31));
+    const destination_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(32));
+    const source_site: p.Site = .{ .key = source_key.public_key.bytes, .namespace = namespace.identity };
+    const destination_site: p.Site = .{ .key = destination_key.public_key.bytes, .namespace = destination_identity };
+    const subject: p.Subject = .{ .task = submitted.receipt.task };
+    try std.testing.expect(service.active == null);
+    const compatibility = try service.placementCompatibility(frame, subject);
+    try std.testing.expect(service.active == null);
+    const resources = try profile.resourceIdentity(frame, application.image_identity);
+    const Allow = struct {
+        fn disclose(_: *anyopaque, _: p.Subject, _: []const native.testing.state.Reference) !void {}
+    };
+    const source_peer: p.Peer = .{ .name = "source", .site = source_site, .native_build = profile.runtime_identity, .compatibility = compatibility, .resource_binding = resources, .disclosure_policy = @splat(33), .context = undefined, .disclose = Allow.disclose };
+    const destination_peer: p.Peer = .{ .name = "destination", .site = destination_site, .native_build = profile.runtime_identity, .compatibility = compatibility, .resource_binding = resources, .disclosure_policy = @splat(33), .context = undefined, .disclose = Allow.disclose };
+    const source_config: p.Configuration = .{ .signing_key = source_key, .peers = &.{destination_peer} };
+    const destination_config: p.Configuration = .{ .signing_key = destination_key, .peers = &.{source_peer} };
+    var offer: ?p.Signed(p.Offer) = null;
+    if (moving) {
+        service.profile.placement = &source_config;
+        _ = try service.requestCancel(frame, "cancel-before-controller-transfer", submitted.receipt.task, "interrupted");
+        const cut = try service.placementCut(frame, subject);
+        try std.testing.expect(cut.outer != null);
+        _ = try service.placementFreeze(frame, subject, "destination", cut, @splat(34));
+        try std.testing.expect(try service.shutdownIncomplete(frame));
+        offer = try service.placementOffer(frame, subject, "destination", bundle);
+    } else _ = try service.exportCheckpoint(frame, submitted.receipt.task, bundle);
+    try service.close(frame);
+    live = false;
+    try namespace.close();
+    namespace_live = false;
+    var destination = try native.Namespace.open(a, io, copy_path);
+    defer destination.close() catch unreachable;
+    var failing = std.testing.FailingAllocator.init(a, .{});
+    var destination_profile = profile;
+    if (moving) destination_profile.placement = &destination_config;
+    var imported = try native.tasks.Service(FairTypes).init(failing.allocator(), io, &destination, assets, &application, handlers, destination_profile);
+    defer imported.close(frame) catch unreachable;
+    if (moving) {
+        const decision = try imported.placementAccept(frame, "outer-accept", "source", offer.?, bundle);
+        try std.testing.expect(decision.value.verdict == .accepted);
+        var accepted_cut = offer.?.value.intent.cut;
+        // Admission records its native receipt without advancing the guest.
+        accepted_cut.control += 1;
+        try std.testing.expectEqualDeep(accepted_cut, try imported.placementCut(frame, subject));
+    } else _ = try imported.importCheckpoint(frame, "outer-import", bundle);
+    var restored = try imported.task(frame, submitted.receipt.task);
+    defer restored.deinit();
+    try std.testing.expectEqualDeep(original.value.checkpoint, restored.value.checkpoint);
+    _ = try imported.requestCancel(frame, "cancel-during-physical-progress", submitted.receipt.task, "interrupted");
+    // Cancellation waits for the already accepted advance, then applies once.
+    // The budget bounds this witness, not the lifetime of an admitted task.
+    var completed = false;
+    for (0..2048) |_| {
+        try std.testing.expect(try imported.pump(frame) != .work);
+        var current = try imported.task(frame, submitted.receipt.task);
+        defer current.deinit();
+        if (current.value.terminal()) {
+            try std.testing.expectEqual(.cancelled, current.value.outcome_kind);
+            try std.testing.expect(current.value.cancellation_applied);
+            completed = true;
+            break;
+        }
+    }
+    try std.testing.expect(completed);
+    _ = try imported.exportCheckpoint(frame, submitted.receipt.task, try std.fmt.allocPrint(frame, "{s}/cancelled.bundle", .{path_buffer[0..length]}));
+    if (moving) return;
+    const retry = try imported.submit(frame, "retry-cut-publication", 12);
+    try std.testing.expectEqual(.progressed, try imported.pump(frame));
+    try std.testing.expect(imported.active.?.root_control != null);
+    // Stop at the owner boundary immediately after physical completion. The
+    // next service turn must publish this cut without pumping the command again.
+    while (true) {
+        var progress = try imported.active.?.driver.pump(65536);
+        defer progress.deinit();
+        if (progress == .suspended) continue;
+        try std.testing.expect(progress == .event and progress.event.value == .cut);
+        break;
+    }
+    imported.active.?.root_cut_ready = true;
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    try std.testing.expectError(error.OutOfMemory, imported.pump(frame));
+    try std.testing.expect(!destination.store.fenced);
+    try std.testing.expect(imported.active.?.root_cut_ready);
+    try std.testing.expect(imported.active.?.root_control != null);
+    failing.fail_index = std.math.maxInt(usize);
+    failing.resize_fail_index = std.math.maxInt(usize);
+    try std.testing.expectEqual(.progressed, try imported.pump(frame));
+    var retried = try imported.task(frame, retry.receipt.task);
+    defer retried.deinit();
+    try std.testing.expectEqual(1, retried.value.execution_revision);
+    if (imported.active) |active| {
+        try std.testing.expect(active.root_control == null);
+        try std.testing.expect(!active.root_cut_ready);
     }
 }

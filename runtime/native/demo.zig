@@ -14,7 +14,9 @@ pub fn run(comptime Types: type, comptime Environment: type, a: std.mem.Allocato
     const accepted = try service.submit(a, operation_id, Environment.demo_input);
     var effects: u32 = 0;
     var yields: u32 = 0;
-    for (0..1024) |_| {
+    // A scheduler turn may now be only an outer evaluator slice. It is not a
+    // guest transition or an effect, so it cannot impose a task lifetime quota.
+    while (true) {
         // Requests and projections are already durably owned by the service.
         // Keep only this iteration's decoded values; a long adaptive demo must
         // not retain every historical decoding in the caller's report arena.
@@ -65,5 +67,4 @@ pub fn run(comptime Types: type, comptime Environment: type, a: std.mem.Allocato
         try json.put(a, &report, "output", result.object.get("outcome").?.object.get("value") orelse return error.DemoCapacity);
         return report;
     }
-    return error.DemoCapacity;
 }

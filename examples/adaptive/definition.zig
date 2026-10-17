@@ -292,8 +292,8 @@ const Program = struct {
             },
             4 => return e.finish(b, state, .no_result, try e.widen(b, t.Summary, try b.field(value, "reason"))),
             5, 6 => return p.control(b, bindings, state, call_id, value, index == 5),
-            t.ordinal("program"), t.ordinal("work"), t.ordinal("context") => {
-                const command = comptime if (index == t.ordinal("program")) "program" else if (index == t.ordinal("work")) "work" else "context";
+            t.ordinal("program"), t.ordinal("work"), t.ordinal("context"), t.ordinal("placement") => {
+                const command = comptime if (index == t.ordinal("program")) "program" else if (index == t.ordinal("work")) "work" else if (index == t.ordinal("placement")) "placement" else "context";
                 const request = try b.product(try e.context.schema(t.WorkspaceRequest), .{ .context = try b.variantPayload(try b.field(state, "replay"), "some", try e.failure()), .call_id = call_id, .action = try b.variant(try e.context.schema(@FieldType(t.WorkspaceRequest, "action")), command, try b.field(value, "command")) });
                 const reply = try b.perform(p.ops.workspace, request);
                 const selected = try b.field(reply, "selected_view");

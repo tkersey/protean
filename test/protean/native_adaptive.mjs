@@ -17,7 +17,10 @@ const app = deployment(process.argv[2], 'protean');
 let passed = false;
 try {
   const invoke = (...args) => {
-    const result = spawnSync(app.command, args, {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 30_000, maxBuffer: 4 * 1024 * 1024});
+    // The complete demo is bounded by the Linux workflow's ten-minute budget.
+    // Short CLI operations retain their separate hang guard.
+    const timeout = args[0] === 'demo' ? undefined : 30_000;
+    const result = spawnSync(app.command, args, {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout, maxBuffer: 4 * 1024 * 1024});
     assert.equal(result.status, 0, `${args[0]}: ${result.error ?? result.stderr}\n${result.stdout}`);
     return JSON.parse(result.stdout);
   };

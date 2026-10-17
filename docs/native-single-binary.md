@@ -352,8 +352,10 @@ invoke an adapter. A captured response still needs its original interpretation
 before reply settlement; an unknown attempt still needs explicit reconciliation.
 Export refuses an occurrence with an active environmental dispatch.
 
-Distributed adaptive mobility is not delivered. Copying an archive does not
-transfer exclusive custody, credentials, or authority over ambiguous effects.
+Authenticated placement transfers work and controller custody through signed
+offers and decisions. Runtime selection, canonical guest cuts and exact outer
+capsules travel through that owner. Copying an archive alone does not transfer
+exclusive custody, credentials, or authority over ambiguous effects.
 
 ## Verification boundaries
 
@@ -362,14 +364,31 @@ wire fixtures. `check-native` checks native owners plus the adaptive and HTTPS
 peers. The peers run copied binaries under OS execution/file boundaries, using
 controlled provider replies, real transport, kills/restarts, cancellation, tool
 construction/reuse, and independently altered archives. No paid model calls run.
-The complete aggregate remains `check-native`. CI distributes its existing checks
-across four runners: authoring also runs `check-native-owner` and `check-native-https`;
-workspace runs the program/semantics checks; native runs `check-native-executable`;
-downstream keeps its independent build. Source accounting starts independently; the terminal
-gate requires it and all qualification lanes and retains the 360-second maximum.
+The complete aggregate remains `check-native`. CI separates authoring/HTTPS,
+owner/recovery, general workspace, runtime/custody workspace, correspondence,
+native deployment, three runtime scenario groups and an independent downstream
+build. All 17 workspace tests remain in `check-workspace-programs`. The 155 owner
+tests and crash/reopen checks remain in `check-native-owner`, with separate
+adaptive-controller, task-ownership and support targets for CI scheduling. The terminal
+gate requires source accounting and every qualification lane within 600 seconds.
+Compiler caches contain complete outputs for exact dependency locks and are
+checked by Zig on reuse. Deployment lanes save completed compiler work before
+running scenarios, so a scenario timeout does not discard the build cache.
+Completed deployment inputs also use an exact-match cache for the entire Git tree,
+installed compiler executable/library/license bytes and modes, OS/architecture,
+safe mode and product/peer profile. Every deployment fixture, dependency
+authentication and independent downstream build still runs. This artifact cache
+contains deployment inputs only; Zig's normal input-checked test caching remains
+separate and is reported as cached when used.
+Rerunning all jobs replaces that run's prior named result artifacts with the new
+results. A partial job rerun does not establish full workflow timing.
+A cache-assisted pass does not establish the cold-build latency.
 The packaged adaptive peer runs its independent controller/recovery and workspace
 groups concurrently, with separate state, snapshot, and HTTPS fixtures. Both
 groups must finish, and their original assertions and command deadlines remain.
+The additional runtime suite allows a result poll to wait up to 120 seconds behind
+synchronous specialization or placement; other RPCs keep their existing limits.
+This does not extend the ten-minute job or workflow limits.
 
 `check-native-recovery-crash`, included in `check-native`, kills the owner process
 at 16 original-acquisition and receipt-lookup boundaries. Two fresh processes
@@ -387,6 +406,14 @@ source through Horos's independent source oracle and native Kosmos. Passing
 `-Dworkspace-wasm=/absolute/path/to/kosmos-kernel.wasm` additionally compares exact
 native/WASM outcomes and alternates checkpoint producers. The oracle and embedding
 are the authenticated dependency implementations, not production dependencies.
+The same check exports a synthetic capsule during an actual clone operation,
+restores its exact outer state, and rejects a second custody claim. For native
+platform comparison, build `build-workspace-peer -Doptimize=safe` on each host.
+`zig-out/verification/workspace-semantics capsule-export` emits a qualification
+packet; `capsule-import` reads that packet on stdin and emits the next canonical
+guest checkpoint. Compare both directions byte for byte. This fixture has no
+environmental authority; `check-native-runtime` separately exercises real signed
+custody transfer, controller succession and cleanup between native processes.
 Use `check-workspace-runtime-retention -Dprevious-runtime=/absolute/path/to/protean`
 to exercise an actual prior executable through a temporary installation.
 
