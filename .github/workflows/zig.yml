@@ -312,10 +312,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        if: needs.source.result == 'success' && needs.qualify.result == 'success'
-        with:
-          node-version: '26.9.0'
       - name: Require complete qualification within ten minutes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -326,6 +322,8 @@ jobs:
         run: |
           test "$SOURCE" = success
           test "$QUALIFICATION" = success
+          # JSON/hash comparison uses the runner's Node; product checks pin 26.9.0.
+          node --version
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
           import {execFileSync} from 'node:child_process';
