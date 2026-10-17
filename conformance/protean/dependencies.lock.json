@@ -3,39 +3,39 @@
   "status": "development-integration",
   "boundary": {
     "repository": "tkersey/horos",
-    "commit": "780da6ea43c4d1deb4290a58d56b4eaa462320ca",
-    "gitTree": "6e3a6ebe955d5cc4e91442a8e0d23e9bd0bcd1cd",
+    "commit": "8cfa8d64552a864f83713e4fc4ada78cbfe377dd",
+    "gitTree": "fe6761e7d74171ac5e48d4b75fe4ba994d3181e4",
     "version": "6.0.0",
     "source": {
-      "inventorySha256": "38b63f1e9bb0a55932e08b8ea15a0b9ddc1311b1e4de9b2efc6924f9b2a9818c",
+      "inventorySha256": "f0d90f55a13a23c419ce9803f8e0dce9e33a26ce054e03f6226e1deb1851f011",
       "entries": 418,
-      "bytes": 8933689
+      "bytes": 8935023
     },
     "archive": {
-      "url": "https://github.com/tkersey/horos/archive/780da6ea43c4d1deb4290a58d56b4eaa462320ca.tar.gz",
-      "sha256": "787573ed7ac05443c070e33b7cbcee37e2643a4b9b7598584a3d520e6000daf3",
-      "bytes": 1647074,
+      "url": "https://github.com/tkersey/horos/archive/8cfa8d64552a864f83713e4fc4ada78cbfe377dd.tar.gz",
+      "sha256": "9832dea91fdfaf65660508fbc6837c13ad87015a03ace09e877be9f13614b329",
+      "bytes": 1647347,
       "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
     "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree.",
     "package": {
-      "zigHash": "horos-6.0.0-flclaIbEQADPdntvXZaUuHK4aUq1ipZ3ee4zGfy5DJD5",
+      "zigHash": "horos-6.0.0-flclaLzJQACCEHrcSkR8HiAoV4uD94NOC5lfDGVOcvQq",
       "defaultProfile": "zig-managed",
       "profiles": {
         "zig-managed": {
-          "inventorySha256": "4c1f8a0f13098fd4e46a271b68b70851b5b0261019e7cc8edf3b757aa4127dc7",
+          "inventorySha256": "a93fc32a582a781acbe6d8bc84b97a540c59db27bec29b469e4442d321265728",
           "entries": 398,
-          "bytes": 4244614
+          "bytes": 4245948
         },
         "archive-extracted": {
-          "inventorySha256": "4c1f8a0f13098fd4e46a271b68b70851b5b0261019e7cc8edf3b757aa4127dc7",
+          "inventorySha256": "a93fc32a582a781acbe6d8bc84b97a540c59db27bec29b469e4442d321265728",
           "entries": 398,
-          "bytes": 4244614
+          "bytes": 4245948
         }
       },
       "archive": {
-        "sha256": "a5d5518ffc415fba48d6216518618b3d30a1a8199a296bd5ce9edb22fe435f8c",
-        "bytes": 856675
+        "sha256": "01d447b1b74c012d901dae148d7978c560b42d18e66b68068605b6d7f223ffa0",
+        "bytes": 856987
       }
     },
     "api": {
@@ -54,7 +54,7 @@
         },
         {
           "path": "src/source.zig",
-          "sha256": "772f868bdcac9ae0f738d2f7a060453856c246e72ca84ed0d744f66030a23807"
+          "sha256": "dba84f92c23e2e3ff2a450d4e7d6e8a7998f98786d929dac9f24b0a154c19214"
         },
         {
           "path": "docs/bpi3-wire.md",
@@ -97,18 +97,18 @@
   },
   "world": {
     "repository": "tkersey/kosmos",
-    "commit": "0f94b0f47bcb8dfceb8949e2fdff92801a8702bf",
-    "gitTree": "95ddb82ff29472e6ec707513dc8abcfdb0d8e804",
+    "commit": "063d6c7090ce0486eb1f2e732f00583521030690",
+    "gitTree": "e27090eaf9176b99dff4abcd6d368bc85689137f",
     "version": "9.0.0",
     "source": {
-      "inventorySha256": "1dc657708f7e14780fce931f9e29c97c10cae8ce798d2d7c21d289a6e1f2532c",
+      "inventorySha256": "7e3c53a6b2b75352cd7631bf4b70409d3246ef4ca936d2088ba0d95bac13a03c",
       "entries": 208,
-      "bytes": 2693390
+      "bytes": 2693417
     },
     "archive": {
-      "url": "https://github.com/tkersey/kosmos/archive/0f94b0f47bcb8dfceb8949e2fdff92801a8702bf.tar.gz",
-      "sha256": "9aacfd752850c473815ceb1662ea29f708f8d4046654c2ba4d4662d3b4186f35",
-      "bytes": 614903,
+      "url": "https://github.com/tkersey/kosmos/archive/063d6c7090ce0486eb1f2e732f00583521030690.tar.gz",
+      "sha256": "921b42bc3ab6dcef053ae45bd8082bba1f46c6d742b433e7294638cfef585a60",
+      "bytes": 614892,
       "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
     "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree."
