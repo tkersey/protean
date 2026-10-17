@@ -147,7 +147,7 @@ do not establish these host laws.
 | Specialization economy | All 421 records across eleven families match independent direct-native traces, canonical states and outcomes. Dynamic loops and repeated calls have positive start-plus-execution savings in all nine matched observations each. Detailed construction, validation, materialization and amortization costs are in Kosmos `docs/semantic-economy.md`. |
 | Protean owners, workspace and source correspondence | Current safe `check-protean check-native-owner check-workspace-programs check-native-https check-workspace-semantics -j2` passes 77/77 steps and 326/326 executed tests, including all 155 owner and 17 workspace cases. Crash recovery verifies 16 crashes / 32 reopens without original reinvocation or automatic lookup. Native HTTPS verifies nine calls with no redirects/retries, exact bodies, TLS rejection, bounded responses and deadlines. |
 | Current native delivery | Executable `6892cf2f` passes the adaptive fixture in 135.84 seconds and process placement in 1.15 seconds. This includes negative provider requests, response accounting, protocol/SIGINT/SIGTERM cancellation, reuse/foreign-runtime rejection, duplicate transfer, destination reopening and stale-source rejection. All six runtime scenarios pass in 450.99 seconds: outer mobility, guest-cut mobility, ordinary investigation, reused specialization, reframing and separate work/controller placement. The outer-mobility group takes 203.80 seconds; the other five scenarios take 450.66 seconds. These overlapping local groups are not additive or Linux timing evidence. Independent downstream acquisition/build/install passes in 325.00 seconds with matching program, assets, dependencies, compiler and target; absolute Node/Python rejection and source-tamper detection remain enforced. |
-| Historical Linux timing | On preceding Protean `2b7e3fa`, complete cached qualification passed in 548/600 seconds. Rebuilding attempt 1 failed the limit; earlier attempts also exhausted ten minutes. This establishes neither a cold-build timing pass nor current-input acceptance. The current workflow retains the same ten-minute ceiling. |
+| Linux timing | On Protean `e6b8f45`, [run 39019392791, attempt 2](https://github.com/tkersey/protean/actions/runs/39019392791) passes all thirteen qualification lanes and aggregate identity checks in 530 seconds from workflow start through the last job's completion. Exact compiled inputs were cached; every test and deployment scenario ran again. Rebuilding attempt 1 failed three ten-minute jobs. This establishes no cold-build timing pass. The workflow retains the same ten-minute ceiling. |
 | Current old-task compatibility | The public Protean 5.0.0 executable continued its old task after selection of `6892cf2f`, preserving its original question and separate namespaces. Baseline SHA-256: `53471a265a095481ab9eaccf3cfc685cfa85ed243a6104db1d0e2ac166a4f935`. |
 | Current source/native/WASM correspondence | All nine generated cases and 328 boundaries pass independent Horos source comparison, native/WASM byte equality and alternating checkpoint producers. Exact outer restore and duplicate-custody rejection pass. Outer packet SHA-256 is `3056457fc101b3172b22c5ad76c98479b113b6121d3b1f470d0672109d51139b`; guest cut SHA-256 is `da41bbae343a1679a4fc31e10ada97e2cb7b27eeff44b3ad86a97005523c2ec8`. |
 | Current Linux and serial reviews | Exact-head results and review dispositions are recorded on the pull request. This report does not substitute predecessor results or raw clean labels for those obligations. |
@@ -211,9 +211,11 @@ gate. Earlier macOS specialization, archive-export and packaging timeouts did no
 establish semantic failures; subsequent unchanged assertions completed. Linux
 runtime result polling retains its 120-second long-operation allowance and the
 ten-minute workflow ceiling. Independent downstream subprocesses share a
-nine-minute Linux deadline. The offline-demo allowances remain sixty seconds on
-Linux and 120 seconds on macOS. No timeout or assertion was relaxed for the
-current source reconstruction or slot representation.
+nine-minute Linux deadline. The offline demo now runs under the enclosing
+workflow deadline; its former sixty-second Linux and 120-second macOS subprocess
+limits were incidental fixture limits, not accepted performance requirements.
+All demo assertions remain unchanged. Linux qualification must still complete
+the entire workflow within ten minutes.
 
 `tools/evaluation/workspace.mjs prepare --suite runtime` prepares matched ordinary,
 generic and runtime-optional arms for repetitive work, adaptive exploration and a
