@@ -136,10 +136,11 @@ function* mobilityTrace(subject) {
   }
   function* atPort(work, generation) {
     for (let i = 0; i < 128; i++) {
-      work = yield* command('inspect', {work: work.work});
       if (!work.outer_operation && work.port_accepts_command && Number(work.port.generation) === generation) return work;
       assert(!['completed', 'failed', 'cancelled'].includes(work.outcome), JSON.stringify(work));
-      if (work.schedule === 'parked') work = yield* command('pump', {expected: expected(work), base_quantum: 1_000_000});
+      if (work.schedule !== 'parked') work = yield* command('inspect', {work: work.work});
+      else if (work.outer_operation) work = yield* command('pump', {expected: expected(work), base_quantum: 1_000_000});
+      else work = yield* command('advance', expected(work));
     }
     assert.fail('mobility fixture did not reach its next port');
   }
@@ -155,18 +156,69 @@ function* mobilityTrace(subject) {
   work = yield* answer(work, {});
   work = yield* atPort(work, 2);
   assert.equal(JSON.parse(work.port.preview.text), '0');
+  work = yield* answer(work, {tag: 0, value: '10'});
+  work = yield* atPort(work, 3);
+  subject.branchValues = [JSON.parse(work.port.preview.text)];
+  assert.equal(subject.branchValues[0], '366');
   const view = observed(yield call('context', 'materialize', {input: {tag: 'guest_view', value: {
     expected: expected(work), realization_revision: work.realization_revision, nodes: {tag: 'all', value: {}}}}, sources: []}));
   subject.view = view.value;
+  function* pages(name, tag, value) {
+    let text = '', offset = 0;
+    for (let i = 0; i < 256; i++) {
+      const page = observed(yield call(name, tag, {...value, page: {offset, maximum: 48 * 1024}}));
+      assert.equal(Number(page.offset), offset);
+      text += page.text;
+      assert.equal(Number(page.next_offset), Buffer.byteLength(text));
+      if (page.eof) {
+        assert.equal(Number(page.total_bytes), Buffer.byteLength(text));
+        return text;
+      }
+      assert(Number(page.next_offset) > offset);
+      offset = Number(page.next_offset);
+    }
+    assert.fail('fixture description exceeded its paging bound');
+  }
+  const guestView = JSON.parse(yield* pages('context', 'expand', {reference: subject.view}));
+  const roots = guestView[3], edges = guestView[4];
+  const rootIds = new Set(roots.map(root => root[0]));
+  const retainedEdge = edges.find(edge => rootIds.has(edge[0]) && !rootIds.has(edge[1]));
+  assert(retainedEdge, 'the actual branch view must expose a nontrivial retention path');
+  const querySource = yield* pages('program', 'describe', {section: 'retention_query'});
+  const query = observed(yield call('program', 'build', {source: {tag: 'json_text', value: querySource}, source_kind: 'source_records', exposures: []}));
+  const queryInput = observed(yield call('context', 'materialize', {input: {tag: 'value', value: {tag: 'inline_json', value: {
+    schema: query.input_schema, json_text: JSON.stringify([guestView, retainedEdge[1]]),
+  }}}, sources: [subject.view]})).value;
+  let queryWork = observed(yield call('work', 'start', {program: query.program, input: {tag: 'reference', value: queryInput},
+    policy: {stop: 'terminal', continuation: 'owner_scheduled'}, runtime: {tag: 'packaged', value: {}}}));
+  if (queryWork.outcome !== 'completed') {
+    observed(yield call('work', 'wait', {works: [queryWork.work], after: Number.MAX_SAFE_INTEGER}));
+    queryWork = observed(yield call('work', 'inspect', {work: queryWork.work}));
+  }
+  assert.equal(queryWork.outcome, 'completed');
+  const retention = JSON.parse(yield* pages('context', 'expand', {reference: queryWork.result}));
+  assert.deepEqual(retention[0], guestView[0]);
+  assert.equal(Number(retention[1]), 0);
+  assert.equal(retention[2].tag, 1);
+  assert(roots.some(root => JSON.stringify(root) === JSON.stringify(retention[2].value)));
+  assert(retention[3].length > 0);
+  let node = retention[2].value[0];
+  for (const edge of retention[3]) {
+    assert.equal(edge[0], node);
+    assert(edges.some(actual => JSON.stringify(actual) === JSON.stringify(edge)));
+    node = edge[1];
+  }
+  assert.equal(node, retainedEdge[1]);
+  subject.retention = {target: node, result: queryWork.result, path: retention[3]};
+  const afterQuery = yield* command('inspect', {work: work.work});
+  assert.deepEqual(expected(afterQuery), expected(work));
+  assert.equal(afterQuery.realization_revision, work.realization_revision);
+  assert.deepEqual(afterQuery.port, work.port);
   const specialized = observed(yield call('program', 'specialize', {program: subject.program, hooks: {control: true, storage: true}}));
   subject.runtime = specialized.runtime;
   const revision = work.execution_revision;
   work = yield* command('realize', {expected: expected(work), realization_revision: work.realization_revision, runtime: {tag: 'selected', value: subject.runtime}});
   assert.equal(work.execution_revision, revision);
-  work = yield* answer(work, {tag: 0, value: '10'});
-  work = yield* atPort(work, 3);
-  subject.branchValues = [JSON.parse(work.port.preview.text)];
-  assert.equal(subject.branchValues[0], '366');
   work = yield* answer(work, {tag: 0, value: '20'});
   for (let i = 0; i < 128; i++) {
     work = yield* command('inspect', {work: work.work});
@@ -218,5 +270,5 @@ function* mobilityTrace(subject) {
   assert.equal(work.outcome, 'cancelled');
   assert.equal(work.cleanup_complete, true);
   subject.cleanupComplete = true;
-  yield ['stop', {reason: 'One dynamic prefix supplied two isolated alternatives. The chosen evaluator and suspended work moved with their controller; cancellation completed the single outer cleanup.'}];
+  yield ['stop', {reason: 'One dynamic prefix supplied two isolated alternatives. An ordinary query explained a retained node from the first branch view. The chosen evaluator and suspended work moved with their controller; cancellation completed the single outer cleanup.'}];
 }

@@ -348,8 +348,10 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
         // The destination validates transferred code in another process. Give
         // it wall time between status observations instead of exhausting a
         // model-call count while admission is still running.
-        if (suite === 'runtime' && call[0] === 'placement' && call[1]?.command?.tag === 'inspect')
-          await new Promise(resolve => setTimeout(resolve, 100));
+        if (suite === 'runtime' && call[0] === 'placement' &&
+            (call[1]?.command?.tag === 'inspect' ||
+             (call[1]?.command?.tag === 'control' && previous?.observation?.status === 'queued')))
+          await new Promise(resolve => setTimeout(resolve, 1000));
         (subject.actions ??= []).push(JSON.parse(JSON.stringify({name: call[0], arguments: call[1]})));
         response.writeHead(200, {'content-type': 'application/json'});
         response.end(JSON.stringify({id: `tools-response-${index}`, status: 'completed', error: null, output: [{type: 'function_call', status: 'completed', call_id: `tools-${index}`, name: call[0], arguments: JSON.stringify(call[1])}]}));
@@ -885,7 +887,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
         }
       } else if (name.startsWith('tools-runtime-')) {
         assert.equal(result.outcome.value.result.tag, 'no_result');
-        assert.equal(result.outcome.value.programs.length, name === 'tools-runtime-ordinary' ? 0 : 1);
+        assert.equal(result.outcome.value.programs.length, name === 'tools-runtime-ordinary' ? 0 : name === 'tools-runtime-mobility' ? 2 : 1);
         if (name === 'tools-runtime-ordinary') assert(!toolSubject.actions.some(action => ['program', 'work', 'context', 'placement'].includes(action.name)));
         if (name === 'tools-runtime-specialized') {
           assert.equal(toolSubject.results.length, 3);
@@ -898,6 +900,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
         }
         if (name === 'tools-runtime-mobility') {
           assert(toolSubject.outer && toolSubject.controllerMoved && toolSubject.cleanupComplete);
+          assert(toolSubject.retention?.path.length > 0);
           assert.deepEqual(toolSubject.branchValues, ['366', '376']);
           assert.equal(hash(await readFile(app.executable)), placement.binary);
         }
@@ -921,6 +924,10 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
         assert.equal(result.outcome.value.control.skills.length, 0);
       }
       toolRuns.push({scenario: name, provider_calls: alternateIndex, disposition: result.outcome.value.result.tag});
+      if (name === 'tools-runtime-mobility') toolRuns.at(-1).retention = {
+        target: toolSubject.retention.target, path_edges: toolSubject.retention.path.length,
+        result: toolSubject.retention.result,
+      };
       assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
       if (name.startsWith('tools-runtime-')) {
         // Movement already produced and admitted an exact archive containing

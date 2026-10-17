@@ -14,7 +14,7 @@ evidence. No release, installation, deployment or live model evaluation is claim
 
 The integrated runtime inputs are Horos
 `4b29dd0a2c9ccce6d5cd424542389bc8bcfcf9b1` and Kosmos
-`bd35d9c1efce6a7f690cf9aa3a05bb2eb5796beb`. The dependency lock authenticates the
+`aa263f6c5e33812abe0d260fc090c4f62daffc77`. The dependency lock authenticates the
 selected source archives, Git trees and inventories. A repository checkout, a
 source archive, a Zig package and a final executable have distinct identities.
 
@@ -27,7 +27,7 @@ source archive, a Zig package and a final executable have distinct identities.
 | Compiler policy | `kosmos.source-lower/1` |
 | Authored semantic source | `aa7a3b20f6dc0dd6d34efab9254109aeab4811249e83339984d373f0c0063571` |
 | Generic artifact SHA-256 | `e58be22ba27ad3586b906a4b73d0647fc5fafcb37c2fc859af3ebd327d389a48` (1,186,158 bytes) |
-| macOS executable SHA-256 | `55e50e94bfca56773ad39dbb6f728a4cdada75d7ec7f899bb9b777524c76aa79` (11,295,928 bytes; final deployment qualification pending) |
+| macOS executable SHA-256 | `c5d8dbc91564ea348a1714d095989b77e1e91237248b287aba4536ba9a33c2a7` (11,295,928 bytes; current build passed, full deployment qualification pending) |
 | WASM kernel SHA-256 | `f7d9ae50e4313fb7cd45f91aac6613315f8b45f8f0f5b849131d7f465b4afda4` |
 
 These are built artifacts, not published release assets. The native manifest
@@ -116,7 +116,9 @@ continue controlling already-moved work without transferring ownership twice.
 
 The deterministic native demonstration includes ordinary investigation, one
 specialization reused on changed inputs, leaving a runtime investigation for source
-evidence, and separate work/controller movement. The hardest scenario suspends
+evidence, and separate work/controller movement. The first real branch supplies a guest view
+to an ordinary retention-query program; its nonempty path is checked against the
+view, and the original work revisions and port remain unchanged. The hardest scenario suspends
 inside an actual progressed multi-shot clone, moves its selected instrumented
 runtime, resumes both alternatives (366 and 376), then completes the real outer
 cleanup. Local capsule-verifier tests alone do not establish these host laws.
@@ -130,10 +132,11 @@ cleanup. Local capsule-verifier tests alone do not establish these host laws.
 | Workspace comparison | Nine generated cases, 328 boundaries: independent Horos source oracle, native/WASM byte equality and alternating checkpoint producers. Exact outer restore and duplicate-custody rejection also passed. |
 | Old tasks | The public Protean 5.0.0 macOS executable continued its old task after the new product was selected, preserving the original question and separate namespaces. Baseline executable SHA-256: `53471a265a095481ab9eaccf3cfc685cfa85ed243a6104db1d0e2ac166a4f935`. |
 | Native owner and workspace aggregate | 172/172 tests, 29/29 build steps; 352.87 seconds including compilation on macOS. |
-| Compiler scratch lifetime | Protean safe workspace suite: all 17 tests pass after releasing compiler/validator scratch between phases; maximum resident set decreased from 8.57 GB to 3.14 GB on local runs. The new 1 MiB request-budget witness is pending. |
-| Native executable | All three deployment fixtures and five runtime scenarios passed on the preceding `1c70e732` product in 544.32 seconds with two isolated runtime groups. Qualification of the compiler-scratch successor above is pending. |
-| Linux Kosmos and optional boundaries | [Run 38978873767](https://github.com/tkersey/kosmos/actions/runs/38978873767) passed on the exact runtime input `bd35d9c`: native owners, independent source package, source oracle, JS and browser checks. Subsequent Kosmos edits add only documentation and the source-mutation test. |
-| Protean authoring and independent package | macOS authoring/HTTPS checks passed 52/52 build steps. Independent source-package installation passed in 305.38 seconds before the compiler-scratch change. Current Linux integration remains pending. |
+| Compiler scratch lifetime | Protean safe workspace suite: all 17 tests pass, including specialization with a 1 MiB request allocator. Releasing compiler/validator scratch between phases decreased maximum resident set from 8.57 GB to 3.14 GB on local runs. The separate owner suite passes 155/155 tests, 26/26 build steps in 344.53 seconds. |
+| Native executable | All three deployment fixtures and five runtime scenarios passed on executable `55e50e94bfca56773ad39dbb6f728a4cdada75d7ec7f899bb9b777524c76aa79` in 692.58 seconds, including compilation under concurrent local load. Runtime groups took 429.28 and 257.57 seconds. This establishes correctness for those scenarios, not the ten-minute CI budget. The preceding product passed the same checks in 544.32 seconds. The expanded retention-query demonstration passed separately on that same `55e50e94` executable in 378.34 seconds with 88 provider calls, branch results 366/376, actual mid-clone movement, controller succession and cleanup. Its preceding polling variant took 411.28 seconds and 134 calls; these are single local measurements. |
+| Linux Kosmos and optional boundaries | [Run 38978873767](https://github.com/tkersey/kosmos/actions/runs/38978873767) passed on runtime source `bd35d9c`: native owners, independent source package, source oracle, JS and browser checks. Successor `aa263f6` adds documentation, a source-mutation test and the packaged generic artifact; its CI remains pending. |
+| Protean authoring and independent package | macOS authoring/HTTPS checks passed 52/52 build steps. Independent source-package installation for the compiler-scratch successor passed in 319.41 seconds, with matching program, assets, dependencies, compiler and target. Linux run 38982821179 passed authoring, owners, correspondence and downstream lanes; native, workspace and runtime reached the ten-minute cancellation limit. The successor still requires complete Linux qualification. |
+| Packaged generic artifact | Fresh Kosmos derivation matches the retained artifact bytes; 50/50 driver tests passed. Corrupted artifact and changed-source probes fail before emitting bytes. The Protean successor build passed 27/27 steps in 143.15 seconds locally; the bound artifact emitter compiled in seven seconds. Actual full deployment and downstream qualification of the new executable are pending. |
 | Serial reviews | Pending. |
 
 WASM common-domain tests explicitly provide sufficient working memory for the
@@ -195,3 +198,13 @@ and benchmark oracle remain verification dependencies. Production guest executio
 imports the authored semantic service and restricted base. Host-side source
 construction and independent translation validation are outside that execution
 closure and remain explicit trusted tooling.
+
+## Resume checkpoint
+
+Implementation is paused at the user's request. Before closure, qualify the
+current executable and independent downstream package, finish the canonical
+guest-cut version of the real mobility demonstration required by §22.1, obtain
+complete Linux qualification within the unchanged ten-minute limit, reconcile the
+final proof inventory, and run the requested serial reviews on frozen heads.
+The existing real mid-clone outer-capsule demonstration remains passing evidence;
+it does not substitute for that additional canonical-guest-cut demonstration.

@@ -248,15 +248,15 @@ pub fn build(b: *std.Build) void {
         native_guard.has_side_effects = true;
         native_guard.expectExitCode(0);
         native_guard.step.dependOn(&source_guard.step);
-        // Compile the authenticated portable evaluator during the build. The
-        // deployed execution path only admits and runs these ordinary bytes.
+        // Kosmos checks these ordinary bytes against an independent source
+        // rebuild. Verify their exact source/compiler/content bindings here;
+        // downstream builds need not compile that same host generator again.
         const runtime_options = b.addOptions();
         runtime_options.addOption([]const u8, "horos_package", @import("build.zig.zon").dependencies.horos.hash);
         const runtime_emitter = b.addExecutable(.{ .name = "protean-runtime-artifact", .root_module = b.createModule(.{
-            .root_source_file = kosmos_source.path(b, "src/semantic_artifact.zig"),
+            .root_source_file = kosmos_source.path(b, "src/semantic_packaged.zig"),
             .target = b.graph.host,
             .optimize = optimize,
-            .imports = &.{ .{ .name = "horos_data", .module = data }, .{ .name = "horos", .module = horos } },
         }) });
         runtime_emitter.root_module.addOptions("artifact_options", runtime_options);
         runtime_emitter.step.dependOn(&native_guard.step);
