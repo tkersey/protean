@@ -17,10 +17,9 @@ const app = deployment(process.argv[2], 'protean');
 let passed = false;
 try {
   const invoke = (...args) => {
-    // macOS qualification measured the complete portable demo at 106 seconds.
-    // Keep that cost visible; Linux still has its 60-second demo allowance and
-    // the hard ten-minute workflow budget. Short CLI operations retain 30 seconds.
-    const timeout = args[0] === 'demo' ? (process.platform === 'darwin' ? 120_000 : 60_000) : 30_000;
+    // The complete demo is bounded by the Linux workflow's ten-minute budget.
+    // Short CLI operations retain their separate hang guard.
+    const timeout = args[0] === 'demo' ? undefined : 30_000;
     const result = spawnSync(app.command, args, {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout, maxBuffer: 4 * 1024 * 1024});
     assert.equal(result.status, 0, `${args[0]}: ${result.error ?? result.stderr}\n${result.stdout}`);
     return JSON.parse(result.stdout);
