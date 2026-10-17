@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [authoring, owners, owner-adaptive, owner-support, workspace, workspace-runtime, correspondence, native, runtime, runtime-outer, runtime-guest, downstream]
+        lane: [authoring, owners, owner-adaptive, owner-support, workspace, workspace-runtime, correspondence, native, runtime, runtime-placement, runtime-outer, runtime-guest, downstream]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -203,7 +203,8 @@ jobs:
                   2>&1 | tee -a "$RUNNER_TEMP/$lane-check.log" || result=$?
               fi
             else
-              scenarios='tools-runtime-ordinary,tools-runtime-specialized,tools-runtime-reframe,tools-runtime-placement'
+              scenarios='tools-runtime-ordinary,tools-runtime-specialized,tools-runtime-reframe'
+              if [ "$lane" = runtime-placement ]; then scenarios=tools-runtime-placement; fi
               if [ "$lane" = runtime-outer ] || [ "$lane" = runtime-guest ]; then
                 scenarios=tools-runtime-mobility
                 if [ "$lane" = runtime-guest ]; then scenarios=tools-runtime-guest-mobility; fi
@@ -327,7 +328,7 @@ jobs:
             return JSON.parse(bytes);
           };
           const native = load('native'), downstream = load('downstream');
-          const runtimes = ['runtime', 'runtime-outer', 'runtime-guest'].map(load);
+          const runtimes = ['runtime', 'runtime-placement', 'runtime-outer', 'runtime-guest'].map(load);
           for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target']) {
             assert.notEqual(native.identity[key], undefined, key);
             assert.deepEqual(downstream.identity[key], native.identity[key], key);

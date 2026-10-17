@@ -173,7 +173,11 @@ pub fn build(b: *std.Build) void {
     const emitter_module = g.module("tools/native/emit.zig");
     emitter_module.addImport("definition", adaptive_definition);
     emitter_module.addImport("application_types", adaptive_types);
-    const adaptive_assets = b.addRunArtifact(g.emitter("protean-assets", emitter_module));
+    const adaptive_emitter = g.emitter("protean-assets", emitter_module);
+    // Match the public builder's backend for this build-time authoring tool.
+    // The emitted image is independently compared with the installed product.
+    if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) adaptive_emitter.use_llvm = false;
+    const adaptive_assets = b.addRunArtifact(adaptive_emitter);
     const adaptive_image = adaptive_assets.addOutputFileArg2("program.bpi3", .{});
     const adaptive_application = adaptive_assets.addOutputFileArg2("application.json", .{});
     check.dependOn(&adaptive_assets.step);

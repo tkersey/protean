@@ -31,7 +31,9 @@ delete env.NODE_OPTIONS; delete env.NODE_TEST_CONTEXT; delete env.TAR_OPTIONS;
 let prefix;
 if (process.platform === 'darwin') {
   const profile = join(scratch, 'build.sb');
-  writeFileSync(profile, `(version 1)\n(allow default)\n(deny process-exec)\n(allow process-exec (literal ${JSON.stringify(zig)}) (literal ${JSON.stringify(realpathSync("/usr/bin/tar"))}) (literal "/usr/bin/unzip") (subpath ${JSON.stringify(scratch)}) (subpath ${JSON.stringify(cache)}))\n`);
+  // Zig discovers the installed macOS SDK through these native system tools.
+  // Denying them changes compiler bootstrap behavior inside this fixture.
+  writeFileSync(profile, `(version 1)\n(allow default)\n(deny process-exec)\n(allow process-exec (literal ${JSON.stringify(zig)}) (literal ${JSON.stringify(realpathSync("/usr/bin/tar"))}) (literal "/usr/bin/unzip") (literal "/usr/bin/xcode-select") (literal "/usr/bin/xcrun") (subpath ${JSON.stringify(scratch)}) (subpath ${JSON.stringify(cache)}))\n`);
   prefix = ['/usr/bin/sandbox-exec', '-f', profile];
 } else if (process.platform === 'linux') {
   prefix = ['/usr/bin/bwrap', '--unshare-user', '--die-with-parent', '--new-session', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp'];
