@@ -215,7 +215,7 @@ export async function verifyAdaptiveRuntime({app, applicationPath, scenarios, so
   // not all compete for the same runner's memory. Await both cleanup paths.
   const groups = [
     ['tools-runtime-mobility'],
-    ['tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe', 'tools-runtime-placement'],
+    ['tools-runtime-guest-mobility', 'tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe', 'tools-runtime-placement'],
   ];
   const results = await Promise.allSettled(groups.map(async (runtimeScenarios, index) => {
     const data = join(app.data, `runtime-${index}`), controller = join(app.controller, `runtime-${index}`);
@@ -775,12 +775,12 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
     const reverseRecipe = linkRecipe([['filter', 'selected'], ['swap'], ['map', 'join'], ['filter', 'orphan'], ['group']]);
     let retainedProgram, retainedState;
     const toolRuns = [];
-    const scenarios = suite === 'runtime' ? (runtimeScenarios ?? ['tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe', 'tools-runtime-placement', 'tools-runtime-mobility']) : ['tools-reuse', 'tools-reverse', 'tools-disabled', 'tools-foreign'];
+    const scenarios = suite === 'runtime' ? (runtimeScenarios ?? ['tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe', 'tools-runtime-placement', 'tools-runtime-mobility', 'tools-runtime-guest-mobility']) : ['tools-reuse', 'tools-reverse', 'tools-disabled', 'tools-foreign'];
     for (const name of scenarios) {
       if (suite === 'runtime') console.error(JSON.stringify({runtime_fixture: name, stage: 'launch'}));
       scenario = name; alternateIndex = 0;
       toolSubject = {recipe: name === 'tools-reverse' ? reverseRecipe : coverageRecipe, foreign: retainedProgram};
-      if (name === 'tools-runtime-mobility') {
+      if (['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name)) {
         assert(sourcePeer, 'the mobility scenario requires its Horos source emitter');
         const emitted = await execute(sourcePeer, ['mobility'], {encoding: 'utf8', maxBuffer: 16 << 20});
         assert.equal(emitted.status, 0, emitted.stderr);
@@ -793,7 +793,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
         {...inputs[0], rows: Array.from({length: 16}, (_, i) => row(2000 + i, 10, 100, 1))}, inputs[1],
       ] : inputs;
       await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: name === 'tools-reuse' ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, inputs: selectedInputs}}));
-      const placement = ['tools-runtime-placement', 'tools-runtime-mobility'].includes(name) ? await runtimePlacementFixture(app, selectedConfig, trust, selectedState) : null;
+      const placement = ['tools-runtime-placement', 'tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name) ? await runtimePlacementFixture(app, selectedConfig, trust, selectedState) : null;
       if (placement) placementArgs[1] = placement.source.config;
       await launch(['--config', selectedConfig], selectedState);
       const description = await client.call('describe');
@@ -887,7 +887,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
         }
       } else if (name.startsWith('tools-runtime-')) {
         assert.equal(result.outcome.value.result.tag, 'no_result');
-        assert.equal(result.outcome.value.programs.length, name === 'tools-runtime-ordinary' ? 0 : name === 'tools-runtime-mobility' ? 2 : 1);
+        assert.equal(result.outcome.value.programs.length, name === 'tools-runtime-ordinary' ? 0 : ['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name) ? 2 : 1);
         if (name === 'tools-runtime-ordinary') assert(!toolSubject.actions.some(action => ['program', 'work', 'context', 'placement'].includes(action.name)));
         if (name === 'tools-runtime-specialized') {
           assert.equal(toolSubject.results.length, 3);
@@ -898,8 +898,9 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
           assert.equal(toolSubject.results.length, 1);
           assert.equal(hash(await readFile(app.executable)), placement.binary);
         }
-        if (name === 'tools-runtime-mobility') {
-          assert(toolSubject.outer && toolSubject.controllerMoved && toolSubject.cleanupComplete);
+        if (['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name)) {
+          assert(name === 'tools-runtime-mobility' ? toolSubject.outer && toolSubject.controllerMoved : toolSubject.guestCut);
+          assert(toolSubject.cleanupComplete);
           assert(toolSubject.retention?.path.length > 0);
           assert.deepEqual(toolSubject.branchValues, ['366', '376']);
           assert.equal(hash(await readFile(app.executable)), placement.binary);
@@ -924,7 +925,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
         assert.equal(result.outcome.value.control.skills.length, 0);
       }
       toolRuns.push({scenario: name, provider_calls: alternateIndex, disposition: result.outcome.value.result.tag});
-      if (name === 'tools-runtime-mobility') toolRuns.at(-1).retention = {
+      if (['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name)) toolRuns.at(-1).retention = {
         target: toolSubject.retention.target, path_edges: toolSubject.retention.path.length,
         result: toolSubject.retention.result,
       };
@@ -935,7 +936,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
         // transfer cut without performing another full export for measurement.
         // Terminal cleanup remains checked above through the successor owner.
         let archiveBytes;
-        if (placement) {
+        if (placement && name !== 'tools-runtime-guest-mobility') {
           const transfer = toolSubject.transferArchive;
           assert(transfer);
           archiveBytes = await readFile(transfer.path);
@@ -956,7 +957,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
           assert(metrics.distinct_runtime_artifact_bytes > 0);
         }
         toolRuns.at(-1).runtime_accounting = {
-          stage: placement ? 'controller-transfer' : 'terminal',
+          stage: placement && name !== 'tools-runtime-guest-mobility' ? 'controller-transfer' : 'terminal',
           admitted_runtimes: metrics.admitted_runtimes,
           artifact_bytes: metrics.distinct_runtime_artifact_bytes,
           current_capsule_bytes: metrics.distinct_current_runtime_capsule_bytes,

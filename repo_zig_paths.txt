@@ -138,8 +138,10 @@ test/protean/selection.zig
 test/protean/skill_unknown_field.zig
 test/protean/values.zig
 test/protean/workspace_programs.zig
+test/protean/workspace_runtime.zig
 test/protean/workspace_semantics.zig
 test/protean/workspace_sources.zig
+test/protean/workspace_test_support.zig
 tools/native/build_entry.zig
 tools/native/dependencies.zig
 tools/native/emit.zig

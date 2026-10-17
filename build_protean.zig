@@ -333,7 +333,16 @@ pub fn build(b: *std.Build) void {
         workspace_programs.addImport("kosmos", checked_kosmos);
         workspace_programs.addImport("protean_native", checked_environment);
         const workspace_checks = b.step("check-workspace-programs", "Execute general source-record programs through native Kosmos");
-        native_graph.testModule(workspace_checks, workspace_programs);
+        const workspace_general = b.step("check-workspace-general", "Qualify workspace execution, inputs and provenance");
+        native_graph.testModule(workspace_general, workspace_programs);
+        const workspace_runtime_module = native_graph.module("test/protean/workspace_runtime.zig");
+        workspace_runtime_module.strip = optimize != .debug;
+        workspace_runtime_module.addImport("kosmos", checked_kosmos);
+        workspace_runtime_module.addImport("protean_native", checked_environment);
+        const workspace_runtime_checks = b.step("check-workspace-runtime", "Qualify runtime selection and bilateral workspace custody");
+        native_graph.testModule(workspace_runtime_checks, workspace_runtime_module);
+        workspace_checks.dependOn(workspace_general);
+        workspace_checks.dependOn(workspace_runtime_checks);
         native_checks.dependOn(workspace_checks);
         const workspace_semantics_module = native_graph.module("test/protean/workspace_semantics.zig");
         workspace_semantics_module.strip = optimize != .debug;

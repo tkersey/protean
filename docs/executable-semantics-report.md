@@ -27,7 +27,7 @@ source archive, a Zig package and a final executable have distinct identities.
 | Compiler policy | `kosmos.source-lower/1` |
 | Authored semantic source | `aa7a3b20f6dc0dd6d34efab9254109aeab4811249e83339984d373f0c0063571` |
 | Generic artifact SHA-256 | `e58be22ba27ad3586b906a4b73d0647fc5fafcb37c2fc859af3ebd327d389a48` (1,186,158 bytes) |
-| macOS executable SHA-256 | `c5d8dbc91564ea348a1714d095989b77e1e91237248b287aba4536ba9a33c2a7` (11,295,928 bytes; current build passed, full deployment qualification pending) |
+| macOS executable SHA-256 | `c5d8dbc91564ea348a1714d095989b77e1e91237248b287aba4536ba9a33c2a7` (11,295,928 bytes; all three native deployment fixtures and six runtime scenarios passed) |
 | WASM kernel SHA-256 | `f7d9ae50e4313fb7cd45f91aac6613315f8b45f8f0f5b849131d7f465b4afda4` |
 
 These are built artifacts, not published release assets. The native manifest
@@ -121,7 +121,11 @@ to an ordinary retention-query program; its nonempty path is checked against the
 view, and the original work revisions and port remain unchanged. The hardest scenario suspends
 inside an actual progressed multi-shot clone, moves its selected instrumented
 runtime, resumes both alternatives (366 and 376), then completes the real outer
-cleanup. Local capsule-verifier tests alone do not establish these host laws.
+cleanup. A second version requests a canonical guest cut after specialization,
+moves it to a fresh native executor, checks the identical selected runtime,
+capsule and execution revision, and only then supplies the second branch input.
+Its first prefix and response are not replayed. Local capsule-verifier tests alone
+do not establish these host laws.
 
 ## Qualification evidence
 
@@ -135,8 +139,11 @@ cleanup. Local capsule-verifier tests alone do not establish these host laws.
 | Compiler scratch lifetime | Protean safe workspace suite: all 17 tests pass, including specialization with a 1 MiB request allocator. Releasing compiler/validator scratch between phases decreased maximum resident set from 8.57 GB to 3.14 GB on local runs. The separate owner suite passes 155/155 tests, 26/26 build steps in 344.53 seconds. |
 | Native executable | All three deployment fixtures and five runtime scenarios passed on executable `55e50e94bfca56773ad39dbb6f728a4cdada75d7ec7f899bb9b777524c76aa79` in 692.58 seconds, including compilation under concurrent local load. Runtime groups took 429.28 and 257.57 seconds. This establishes correctness for those scenarios, not the ten-minute CI budget. The preceding product passed the same checks in 544.32 seconds. The expanded retention-query demonstration passed separately on that same `55e50e94` executable in 378.34 seconds with 88 provider calls, branch results 366/376, actual mid-clone movement, controller succession and cleanup. Its preceding polling variant took 411.28 seconds and 134 calls; these are single local measurements. |
 | Linux Kosmos and optional boundaries | [Run 38978873767](https://github.com/tkersey/kosmos/actions/runs/38978873767) passed on runtime source `bd35d9c`: native owners, independent source package, source oracle, JS and browser checks. Successor `aa263f6` adds documentation, a source-mutation test and the packaged generic artifact; its CI remains pending. |
-| Protean authoring and independent package | macOS authoring/HTTPS checks passed 52/52 build steps. Independent source-package installation for the compiler-scratch successor passed in 319.41 seconds, with matching program, assets, dependencies, compiler and target. Linux run 38982821179 passed authoring, owners, correspondence and downstream lanes; native, workspace and runtime reached the ten-minute cancellation limit. The successor still requires complete Linux qualification. |
+| Protean authoring and independent package | macOS authoring/HTTPS checks passed 52/52 build steps. Independent source-package installation for the compiler-scratch successor passed in 319.41 seconds, with matching program, assets, dependencies, compiler and target. Linux runs 38982821179 and 38985369747 passed authoring, owners, correspondence and downstream lanes; native, workspace and runtime reached the ten-minute cancellation limit. The successor still requires complete Linux qualification. |
 | Packaged generic artifact | Fresh Kosmos derivation matches the retained artifact bytes; 50/50 driver tests passed. Corrupted artifact and changed-source probes fail before emitting bytes. The Protean successor build passed 27/27 steps in 143.15 seconds locally; the bound artifact emitter compiled in seven seconds. Actual full deployment and downstream qualification of the new executable are pending. |
+| Canonical guest-cut mobility | Current `c5d8dbc9` executable passes the real scripted transfer in 174.05 seconds, with 64 provider calls, a checked nonempty retention path, branches 366/376 and actual outer cleanup. The first attempt completed the behavior but failed its accounting harness because no controller transfer archive existed; the corrected harness uses the terminal export for this case. |
+| Current native delivery | `check-native-placement` passes adaptive CLI and native process-placement fixtures, 22/22 steps in 143.99 seconds. All six runtime scenarios pass on the same `c5d8dbc9` executable: four general cases in 280.35 seconds, mid-clone/controller movement in 400.57 seconds and canonical guest-cut movement in 174.05 seconds. These separate runs include concurrent local work and are not additive latency or CI measurements. Independent downstream acquisition/build passes in 310.94 seconds with matching program, assets, dependencies, compiler and target. |
+| Split workspace aggregate | All original 17 tests pass across the two owning roots (15 general, 2 runtime/custody), 22/22 build steps in 233.73 seconds locally. Test names are retained and the two moved runtime test bodies are unchanged. |
 | Serial reviews | Pending. |
 
 WASM common-domain tests explicitly provide sufficient working memory for the
@@ -160,7 +167,13 @@ measurements exclude compilation and do not certify the ten-minute CI ceiling.
 
 Protean CI retains a ten-minute per-job and whole-workflow ceiling. Independent
 authoring, owner, workspace, correspondence and deployment work runs in separate
-lanes. The downstream script shares a nine-minute deadline across its subprocesses,
+lanes. Runtime choices, mid-clone transfer and canonical guest-cut transfer run in
+three separate lanes; their executable hashes must all match the packaged product.
+The workspace aggregate retains all 17 tests in two roots, separating general
+execution from runtime selection/custody. Independent lanes may restore a complete
+compiler cache for the same dependency locks; native source guards still run,
+and Zig decides reuse from its own inputs. The native fixture logs stream directly
+so interrupted runs retain stage evidence. The downstream script shares a nine-minute deadline across its subprocesses,
 allowing up to eight minutes for cold compilation. The full portable offline demo
 has a sixty-second subprocess allowance; short CLI commands retain thirty seconds.
 These scheduling bounds retain every semantic assertion and still require a
@@ -199,12 +212,10 @@ imports the authored semantic service and restricted base. Host-side source
 construction and independent translation validation are outside that execution
 closure and remain explicit trusted tooling.
 
-## Resume checkpoint
+## Remaining qualification
 
-Implementation is paused at the user's request. Before closure, qualify the
-current executable and independent downstream package, finish the canonical
-guest-cut version of the real mobility demonstration required by §22.1, obtain
-complete Linux qualification within the unchanged ten-minute limit, reconcile the
-final proof inventory, and run the requested serial reviews on frozen heads.
-The existing real mid-clone outer-capsule demonstration remains passing evidence;
-it does not substitute for that additional canonical-guest-cut demonstration.
+Complete Linux
+qualification within the unchanged ten-minute limit, reconcile the final proof
+inventory, and run the requested serial reviews on frozen heads. The canonical
+guest-cut and actual mid-clone outer-capsule demonstrations are distinct required
+observations; both remain in the owning runtime suite.

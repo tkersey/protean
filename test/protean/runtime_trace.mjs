@@ -15,8 +15,8 @@ export function* runtimeTrace(subject, scenario) {
     return;
   }
   yield ['skill_set', {operation: 'load', skill_id: 'tool-construction', version: '1', residency: 'resident', expected_revision: 0, reason: 'Exercise optional runtime selection and inspection.'}];
-  if (scenario === 'tools-runtime-mobility') {
-    yield* mobilityTrace(subject);
+  if (['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(scenario)) {
+    yield* mobilityTrace(subject, scenario === 'tools-runtime-guest-mobility');
     return;
   }
   const built = observed(yield call('program', 'build', {source: {tag: 'json_text', value: JSON.stringify(subject.recipe)}, source_kind: 'component_recipe', exposures: []}));
@@ -124,7 +124,7 @@ function* placementTrace(subject) {
   yield ['stop', {reason: 'The selected runtime and suspended work moved to a native executor. The controller moved separately, resumed, and collected the exact result through signed control reports.'}];
 }
 
-function* mobilityTrace(subject) {
+function* mobilityTrace(subject, guestCut = false) {
   const built = observed(yield call('program', 'build', {source: {tag: 'json_text', value: subject.mobility.transport}, source_kind: 'source_records',
     exposures: [{effect: 0, class: 'observation'}, {effect: 1, class: 'input'}, {effect: 2, class: 'observation'}]}));
   subject.program = built.program;
@@ -219,26 +219,34 @@ function* mobilityTrace(subject) {
   const revision = work.execution_revision;
   work = yield* command('realize', {expected: expected(work), realization_revision: work.realization_revision, runtime: {tag: 'selected', value: subject.runtime}});
   assert.equal(work.execution_revision, revision);
-  work = yield* answer(work, {tag: 0, value: '20'});
-  for (let i = 0; i < 128; i++) {
-    work = yield* command('inspect', {work: work.work});
-    if (work.schedule === 'parked') break;
+  if (guestCut) {
+    work = yield* command('request_cut', {expected: expected(work), level: 'guest_cut'});
+    assert(!work.outer_operation);
+    assert(work.runtime_capsule);
+    subject.guestCut = work.runtime_capsule;
+    subject.guestRevision = work.execution_revision;
+  } else {
+    work = yield* answer(work, {tag: 0, value: '20'});
+    for (let i = 0; i < 128; i++) {
+      work = yield* command('inspect', {work: work.work});
+      if (work.schedule === 'parked') break;
+    }
+    const before = work.execution_revision;
+    subject.findClone = true;
+    for (let i = 0; i < 256; i++) {
+      work = yield* command('pump', {expected: expected(work), base_quantum: 65_536});
+      if (subject.clonePhase?.clone_frames > 0 && subject.clonePhase.clone_bindings > 0) break;
+      assert(work.outer_operation || !work.port_accepts_command, 'the clone must be observed before its result');
+    }
+    subject.findClone = false;
+    assert(subject.clonePhase?.clone_frames > 0 && subject.clonePhase.clone_bindings > 0, 'the actual capsule must retain live locals inside a progressed clone function');
+    assert(work.outer_operation);
+    assert.equal(work.execution_revision, before);
+    subject.outer = work.outer_operation;
+    const unavailable = yield call('work', 'request_cut', {expected: expected(work), level: 'guest_cut'});
+    assert.equal(unavailable.disposition, 'rejected');
+    assert.equal(unavailable.observation.error, 'GuestCutUnavailable');
   }
-  const before = work.execution_revision;
-  subject.findClone = true;
-  for (let i = 0; i < 256; i++) {
-    work = yield* command('pump', {expected: expected(work), base_quantum: 65_536});
-    if (subject.clonePhase?.clone_frames > 0 && subject.clonePhase.clone_bindings > 0) break;
-    assert(work.outer_operation || !work.port_accepts_command, 'the clone must be observed before its result');
-  }
-  subject.findClone = false;
-  assert(subject.clonePhase?.clone_frames > 0 && subject.clonePhase.clone_bindings > 0, 'the actual capsule must retain live locals inside a progressed clone function');
-  assert(work.outer_operation);
-  assert.equal(work.execution_revision, before);
-  subject.outer = work.outer_operation;
-  const unavailable = yield call('work', 'request_cut', {expected: expected(work), level: 'guest_cut'});
-  assert.equal(unavailable.disposition, 'rejected');
-  assert.equal(unavailable.observation.error, 'GuestCutUnavailable');
   const selected = {tag: 'work', value: work.work};
   assert.equal(observed(yield call('placement', 'assess', {subject: selected, site: 'executor'})).compatible, true);
   observed(yield call('placement', 'move', {operation: 'move-mobility-work', subject: selected, site: 'executor', custody_epoch: 0}));
@@ -250,12 +258,20 @@ function* mobilityTrace(subject) {
     if (placement.custody?.phase === 'away') { moved = true; break; }
   }
   assert(moved, JSON.stringify(latestPlacement));
-  subject.controllerMove = true;
-  observed(yield call('placement', 'move', {operation: 'move-mobility-controller', subject: {tag: 'controller', value: {}}, site: 'successor', custody_epoch: 0}));
+  if (!guestCut) {
+    subject.controllerMove = true;
+    observed(yield call('placement', 'move', {operation: 'move-mobility-controller', subject: {tag: 'controller', value: {}}, site: 'successor', custody_epoch: 0}));
+  }
   remote = true;
   work = yield* command('inspect', {work: work.work});
-  assert(subject.controllerMoved);
-  assert.deepEqual(work.outer_operation, subject.outer);
+  if (!guestCut) assert(subject.controllerMoved);
+  assert.deepEqual(work.runtime, subject.runtime);
+  if (guestCut) {
+    assert(!work.outer_operation);
+    assert.deepEqual(work.runtime_capsule, subject.guestCut);
+    assert.equal(work.execution_revision, subject.guestRevision);
+    work = yield* answer(work, {tag: 0, value: '20'});
+  } else assert.deepEqual(work.outer_operation, subject.outer);
   work = yield* atPort(work, 4);
   subject.branchValues.push(JSON.parse(work.port.preview.text));
   assert.equal(subject.branchValues[1], '376', 'the second branch starts from the saved cell, not the first branch mutation');
@@ -270,5 +286,7 @@ function* mobilityTrace(subject) {
   assert.equal(work.outcome, 'cancelled');
   assert.equal(work.cleanup_complete, true);
   subject.cleanupComplete = true;
-  yield ['stop', {reason: 'One dynamic prefix supplied two isolated alternatives. An ordinary query explained a retained node from the first branch view. The chosen evaluator and suspended work moved with their controller; cancellation completed the single outer cleanup.'}];
+  yield ['stop', {reason: guestCut
+    ? 'One dynamic prefix supplied two isolated alternatives. After an ordinary retention query and specialization, the canonical guest cut moved to a fresh native executor. Its second alternative and cancellation cleanup completed there.'
+    : 'One dynamic prefix supplied two isolated alternatives. An ordinary query explained a retained node from the first branch view. The chosen evaluator and suspended work moved with their controller; cancellation completed the single outer cleanup.'}];
 }
