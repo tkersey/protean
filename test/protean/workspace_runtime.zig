@@ -263,6 +263,9 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     var suspended = try service.workspaceWork(a, parent.receipt.task, traced_id);
     defer suspended.deinit();
     try std.testing.expect(suspended.value.outer_operation != null);
+    const suspended_observation = try service.workspaceCommand(scratch, "inspect-bounded", parent.receipt.task, .{ .work = .{ .inspect = .{ .work = pump_command.expected.work } } });
+    const suspended_json = try native.json.parseAsset(scratch, suspended_observation.observation_json.bytes, suspended_observation.observation_json.bytes.len);
+    try std.testing.expectEqualStrings("outer_execution", suspended_json.value.object.get("available_cut").?.string);
     try std.testing.expectEqual(trace_before_pump.value.execution_revision, suspended.value.execution_revision);
     try std.testing.expectEqualDeep(trace_before_pump.value.checkpoint, suspended.value.checkpoint);
     const suspended_expected: contracts.workspace.Expected = .{ .work = pump_command.expected.work, .execution_revision = suspended.value.execution_revision, .control_revision = suspended.value.control_revision };
@@ -339,6 +342,26 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
 }
 
 test "native placement carries a suspended evaluator with exclusive per-work custody" {
+    try placementCase(.work);
+}
+
+test "frozen controller retains its exact cut while local work advances" {
+    try placementCase(.root);
+}
+
+test "delayed controls follow executor succession and retain prior exact reports" {
+    try placementCase(.onward);
+}
+
+test "terminal parent cancellation resumes after frozen work is aborted" {
+    try placementCase(.cancel_abort);
+}
+
+test "terminal parent cancellation resumes after a signed refusal" {
+    try placementCase(.cancel_refused);
+}
+
+fn placementCase(comptime scenario: enum { work, root, onward, cancel_abort, cancel_refused }) !void {
     const a = std.testing.allocator;
     const io = std.testing.io;
     const p = native.placement;
@@ -478,11 +501,118 @@ test "native placement carries a suspended evaluator with exclusive per-work cus
     const retry_withdrawn = try sender.workspaceCommand(scratch, "placement-retry-withdrawn", subject.task, .{ .placement = .{ .retry = .{ .operation = .{ .bytes = "withdraw-before-send" } } } });
     try std.testing.expectEqual(.observed, retry_withdrawn.disposition);
     source_peers[0].channel = null;
+    if (scenario == .root) {
+        const controller: p.Subject = .{ .task = subject.task };
+        const controller_cut = try sender.placementCut(scratch, controller);
+        _ = try sender.placementFreeze(scratch, controller, "successor", controller_cut, @splat(98));
+        _ = try sender.workspacePump(scratch, "independent-local-progress", subject.task, .{ .expected = .{ .work = work_ref, .execution_revision = cut.execution, .control_revision = cut.control }, .base_quantum = 1 });
+        var progressed_parent = try sender.task(scratch, subject.task);
+        defer progressed_parent.deinit();
+        try std.testing.expect(progressed_parent.value.revision > controller_cut.control);
+        const snapshot_path = try std.fmt.allocPrint(scratch, "{s}/frozen-controller.par", .{path_buffer[0..length]});
+        const snapshot_offer = try sender.placementOffer(scratch, controller, "successor", snapshot_path);
+        try std.testing.expectEqualDeep(controller_cut, snapshot_offer.value.intent.cut);
+        try sender.close(a);
+        sender_open = false;
+        try source_namespace.close();
+        source_open = false;
+        {
+            const copy_path = try std.fmt.allocPrint(scratch, "{s}/foreign-frozen-copy", .{path_buffer[0..length]});
+            var copy_namespace = try native.Namespace.open(a, io, copy_path);
+            defer copy_namespace.close() catch unreachable;
+            var copy_profile = profile;
+            // A copied namespace can share the signing key without sharing
+            // the source namespace's actual custody or export obligation.
+            copy_profile.placement = &source_config;
+            var copied = try native.tasks.Service(OwnerTypes).init(a, io, &copy_namespace, assets, &application, handlers, copy_profile);
+            defer copied.close(a) catch unreachable;
+            _ = try copied.importCheckpoint(scratch, "copy-frozen", snapshot_path);
+            try std.testing.expectError(error.InvalidTransfer, copied.placementOffer(scratch, controller, "successor", snapshot_path));
+        }
+        var snapshot_namespace = try native.Namespace.open(a, io, successor_path);
+        var snapshot_profile = profile;
+        snapshot_profile.placement = &successor_config;
+        var snapshot_receiver = try native.tasks.Service(OwnerTypes).init(a, io, &snapshot_namespace, assets, &application, handlers, snapshot_profile);
+        const decision = try snapshot_receiver.placementAccept(scratch, "accept-frozen-controller", "source", snapshot_offer, snapshot_path);
+        try std.testing.expectEqual(.local, (try snapshot_receiver.placementStatus(scratch, controller)).?.phase);
+        try std.testing.expectEqual(.away, (try snapshot_receiver.placementStatus(scratch, subject)).?.phase);
+        try snapshot_receiver.close(a);
+        try snapshot_namespace.close();
+        source_namespace = try native.Namespace.open(a, io, source_path);
+        source_open = true;
+        var source_profile = profile;
+        source_profile.placement = &source_config;
+        sender = try native.tasks.Service(OwnerTypes).init(a, io, &source_namespace, assets, &application, handlers, source_profile);
+        sender_open = true;
+        try sender.placementApplyDecision(scratch, controller, decision);
+        try std.testing.expectEqual(.local, (try sender.placementStatus(scratch, subject)).?.phase);
+        return;
+    }
     _ = try sender.placementFreeze(scratch, subject, "destination", cut, @splat(14));
+    if (scenario == .cancel_abort or scenario == .cancel_refused) {
+        var refused: ?p.Signed(p.Decision) = null;
+        if (scenario == .cancel_refused) {
+            const refused_path = try std.fmt.allocPrint(scratch, "{s}/refused.par", .{path_buffer[0..length]});
+            const refused_offer = try sender.placementOffer(scratch, subject, "destination", refused_path);
+            refused = try p.sign(p.Decision, scratch, destination_key, .{ .transfer = refused_offer.value.intent.transfer, .offer_digest = try p.digest(p.Offer, scratch, refused_offer.value), .source = source_site, .destination = destination_site, .epoch = refused_offer.value.intent.epoch + 1, .verdict = .{ .refused = .withdrawn } });
+        }
+        _ = try sender.requestCancel(scratch, "cancel-with-frozen-work", subject.task, "stop");
+        var terminal = false;
+        for (0..512) |_| {
+            _ = try sender.pump(scratch);
+            var current = try sender.task(scratch, subject.task);
+            defer current.deinit();
+            if (current.value.terminal()) {
+                terminal = true;
+                break;
+            }
+        }
+        try std.testing.expect(terminal);
+        // Remove the terminal root's ordinary runnable entry. The retained
+        // cancellation still owns the frozen child obligation.
+        for (0..8) |_| if (try sender.pump(scratch) == .idle) break;
+        try std.testing.expect(sender.owned.items.len != 0);
+        try std.testing.expect(try sender.shutdownIncomplete(scratch));
+        if (refused) |decision| {
+            try sender.placementApplyDecision(scratch, subject, decision);
+        } else try sender.placementAbortUnsent(scratch, subject, @splat(14));
+        var disposed = false;
+        for (0..512) |_| {
+            _ = try sender.pump(scratch);
+            var current = try sender.task(scratch, subject.task);
+            defer current.deinit();
+            if (try sender.taskCleanupComplete(scratch, current.value)) {
+                disposed = true;
+                break;
+            }
+        }
+        try std.testing.expect(disposed);
+        try std.testing.expect(!try sender.shutdownIncomplete(scratch));
+        return;
+    }
     try std.testing.expectError(error.CustodyNotLocal, sender.workspaceControl(scratch, "source-must-stop", subject.task, work_id, cut.execution, cut.control, .advance));
     const archive_path = try std.fmt.allocPrint(scratch, "{s}/transfer.par", .{path_buffer[0..length]});
+    // Leave the complete file without a published offer, as an interrupted
+    // writer can. The retry must validate and durably reuse that exact file.
+    disclosure.deny_runtime = true;
+    try std.testing.expectError(error.DisclosureDenied, sender.placementOffer(scratch, subject, "destination", archive_path));
+    try std.testing.expect((try sender.placementStatus(scratch, subject)).?.offer == null);
+    disclosure.deny_runtime = false;
     const offer = try sender.placementOffer(scratch, subject, "destination", archive_path);
     try std.testing.expect(disclosure.saw_runtime);
+    disclosure.deny_runtime = true;
+    try std.testing.expectError(error.DisclosureDenied, sender.placementOffer(scratch, subject, "destination", archive_path));
+    disclosure.deny_runtime = false;
+    try std.testing.expectEqualDeep(offer, try sender.placementOffer(scratch, subject, "destination", archive_path));
+    source_peers[0].disclosure_policy[0] ^= 1;
+    try std.testing.expectError(error.IncompatibleProfile, sender.placementOffer(scratch, subject, "destination", archive_path));
+    source_peers[0].disclosure_policy[0] ^= 1;
+    sender.profile.runtime_identity[0] ^= 1;
+    try std.testing.expectError(error.IncompatibleProfile, sender.placementOffer(scratch, subject, "destination", archive_path));
+    sender.profile.runtime_identity[0] ^= 1;
+    sender.profile.authority.disclosure = false;
+    try std.testing.expectError(error.Denied, sender.placementOffer(scratch, subject, "destination", archive_path));
+    sender.profile.authority.disclosure = true;
     try std.testing.expectError(error.InvalidTransfer, sender.placementAbortUnsent(scratch, subject, @splat(14)));
     try sender.close(a);
     sender_open = false;
@@ -506,6 +636,12 @@ test "native placement carries a suspended evaluator with exclusive per-work cus
     resumed_profile.placement = &destination_config;
     receiver = try native.tasks.Service(OwnerTypes).init(a, io, &destination_namespace, assets, &application, handlers, resumed_profile);
     receiver_open = true;
+    // Refusing one transfer is durable history, not task occupancy.
+    var unrelated_offer = offer.value;
+    unrelated_offer.intent.transfer = @splat(99);
+    const unrelated_signed = try p.sign(p.Offer, scratch, source_key, unrelated_offer);
+    const prior_refusal = try receiver.placementRefuse(scratch, "source", unrelated_signed, .withdrawn);
+    try std.testing.expect(prior_refusal.value.verdict == .refused);
     const receiver_head = destination_namespace.store.head;
     destination_peers[0].compatibility.admission[0] ^= 1;
     try std.testing.expectError(error.IncompatibleProfile, receiver.placementAccept(scratch, "accept", "source", offer, archive_path));
@@ -517,6 +653,7 @@ test "native placement carries a suspended evaluator with exclusive per-work cus
     disclosure.deny_runtime = false;
     const accepted = try receiver.placementAccept(scratch, "accept", "source", offer, archive_path);
     try std.testing.expectEqual(.accepted, accepted.value.verdict);
+    try std.testing.expectEqualDeep(prior_refusal, try receiver.placementRefuse(scratch, "source", unrelated_signed, .withdrawn));
     try std.testing.expectEqualDeep(accepted, try receiver.placementAccept(scratch, "accept-again", "source", offer, archive_path));
     try std.testing.expectEqualDeep(accepted, try receiver.placementRefuse(scratch, "source", offer, .withdrawn));
     // Lose the acceptance reply and restart the destination. Only its work is
@@ -586,6 +723,129 @@ test "native placement carries a suspended evaluator with exclusive per-work cus
     sender_open = true;
     try sender.placementApplyReport(scratch, subject.task, p.controlId(control.value.value), report.value);
     try sender.placementApplyReport(scratch, subject.task, p.controlId(control.value.value), report.value);
+    if (scenario == .onward) {
+        const delayed_bytes = try sender.placementControl(scratch, "delayed-inspect", subject.task, .{ .inspect = .{ .work = work_ref } });
+        var delayed = try contracts.decodeOwned(p.Signed(p.Control), scratch, delayed_bytes);
+        defer delayed.deinit();
+        try sender.close(a);
+        sender_open = false;
+        try source_namespace.close();
+        source_open = false;
+        destination_namespace = try native.Namespace.open(a, io, destination_path);
+        destination_open = true;
+        receiver = try native.tasks.Service(OwnerTypes).init(a, io, &destination_namespace, assets, &application, handlers, resumed_profile);
+        receiver_open = true;
+        const next_cut = try receiver.placementCut(scratch, subject);
+        _ = try receiver.placementFreeze(scratch, subject, "successor", next_cut, @splat(71));
+        const next_path = try std.fmt.allocPrint(scratch, "{s}/onward.par", .{path_buffer[0..length]});
+        const next_offer = try receiver.placementOffer(scratch, subject, "successor", next_path);
+        try receiver.close(a);
+        receiver_open = false;
+        try destination_namespace.close();
+        destination_open = false;
+        var next_decision: p.Signed(p.Decision) = undefined;
+        {
+            successor_namespace = try native.Namespace.open(a, io, successor_path);
+            defer successor_namespace.close() catch unreachable;
+            var successor_profile = profile;
+            successor_profile.placement = &successor_config;
+            var successor = try native.tasks.Service(OwnerTypes).init(a, io, &successor_namespace, assets, &application, handlers, successor_profile);
+            defer successor.close(a) catch unreachable;
+            next_decision = try successor.placementAccept(scratch, "accept-onward", "destination", next_offer, next_path);
+        }
+        destination_namespace = try native.Namespace.open(a, io, destination_path);
+        destination_open = true;
+        receiver = try native.tasks.Service(OwnerTypes).init(a, io, &destination_namespace, assets, &application, handlers, resumed_profile);
+        receiver_open = true;
+        try receiver.placementApplyDecision(scratch, subject, next_decision);
+        var resolution = try contracts.decodeOwned(p.ControlResolution, scratch, try receiver.placementResolveControl(scratch, "source", delayed.value, &.{}));
+        defer resolution.deinit();
+        try std.testing.expect(resolution.value == .next);
+        const route = [_]p.Succession{resolution.value.next};
+        try std.testing.expectEqualDeep(next_decision, route[0].decision);
+        try receiver.close(a);
+        receiver_open = false;
+        try destination_namespace.close();
+        destination_open = false;
+        source_namespace = try native.Namespace.open(a, io, source_path);
+        source_open = true;
+        sender = try native.tasks.Service(OwnerTypes).init(a, io, &source_namespace, assets, &application, handlers, source_profile);
+        sender_open = true;
+        var forged = route[0];
+        forged.offer.value.intent.epoch += 1;
+        try std.testing.expectError(error.SignatureVerificationFailed, sender.placementFollowExecutor(scratch, subject.task, p.controlId(delayed.value.value), forged));
+        try sender.placementFollowExecutor(scratch, subject.task, p.controlId(delayed.value.value), route[0]);
+        try std.testing.expectEqualDeep(successor_site, (try sender.placementStatus(scratch, subject)).?.owner);
+        try std.testing.expectEqualSlices(u8, delayed_bytes, try sender.placementControl(scratch, "delayed-inspect", subject.task, .{ .inspect = .{ .work = work_ref } }));
+        try sender.close(a);
+        sender_open = false;
+        try source_namespace.close();
+        source_open = false;
+        var delayed_report_bytes: []u8 = undefined;
+        {
+            successor_namespace = try native.Namespace.open(a, io, successor_path);
+            defer successor_namespace.close() catch unreachable;
+            var successor_profile = profile;
+            successor_profile.placement = &successor_config;
+            var successor = try native.tasks.Service(OwnerTypes).init(a, io, &successor_namespace, assets, &application, handlers, successor_profile);
+            defer successor.close(a) catch unreachable;
+            const before = successor_namespace.store.head;
+            var old_receipt = try contracts.decodeOwned(p.ControlResolution, scratch, try successor.placementResolveControl(scratch, "source", control.value, &route));
+            defer old_receipt.deinit();
+            try std.testing.expect(old_receipt.value == .report);
+            try std.testing.expectEqualSlices(u8, report_bytes, try contracts.encodeOwned(p.Signed(p.Report), scratch, old_receipt.value.report));
+            try std.testing.expectEqualDeep(before, successor_namespace.store.head);
+            disclosure.deny_runtime = true;
+            try std.testing.expectError(error.DisclosureDenied, successor.placementResolveControl(scratch, "source", control.value, &route));
+            disclosure.deny_runtime = false;
+            const executed = try successor.placementResolveControl(scratch, "source", delayed.value, &route);
+            var result = try contracts.decodeOwned(p.ControlResolution, scratch, executed);
+            defer result.deinit();
+            const delayed_report = result.value.report;
+            delayed_report_bytes = try contracts.encodeOwned(p.Signed(p.Report), scratch, delayed_report);
+            try std.testing.expectEqualDeep(successor_site, delayed_report.value.executor);
+            try std.testing.expectEqual(next_decision.value.epoch, delayed_report.value.custody_epoch);
+            const after = successor_namespace.store.head;
+            try std.testing.expectEqualSlices(u8, executed, try successor.placementResolveControl(scratch, "source", delayed.value, &route));
+            try std.testing.expectEqualDeep(after, successor_namespace.store.head);
+            // This process owns the executor, while the copied controller is
+            // still at A. Shutdown must cancel only its actual local work.
+            const current_cut = try successor.placementCut(scratch, subject);
+            _ = try successor.workspaceControl(scratch, "claim-onward-executor", subject.task, work_id, current_cut.execution, current_cut.control, .park);
+            var before_cancel = try successor.workspaceWork(scratch, subject.task, work_id);
+            defer before_cancel.deinit();
+            try std.testing.expect(!before_cancel.value.terminal());
+            try std.testing.expect(successor.owned.items.len != 0);
+            try successor.cancelOwned(scratch, "executor-shutdown", "stop local executor");
+            var after_cancel = try successor.workspaceWork(scratch, subject.task, work_id);
+            defer after_cancel.deinit();
+            try std.testing.expect(after_cancel.value.cancellation != null);
+            // Cancellation can finish synchronously. Unfinished local work is
+            // incomplete; a remote controller copy is not a local obligation.
+            try std.testing.expectEqual(!after_cancel.value.terminal(), try successor.shutdownIncomplete(scratch));
+            var settled = false;
+            for (0..512) |_| {
+                _ = try successor.pump(scratch);
+                if (!try successor.shutdownIncomplete(scratch)) {
+                    settled = true;
+                    break;
+                }
+            }
+            try std.testing.expect(settled);
+            var closed_work = try successor.workspaceWork(scratch, subject.task, work_id);
+            defer closed_work.deinit();
+            try std.testing.expect(closed_work.value.terminal());
+            try std.testing.expectEqual(.away, (try successor.placementStatus(scratch, .{ .task = subject.task })).?.phase);
+        }
+        source_namespace = try native.Namespace.open(a, io, source_path);
+        source_open = true;
+        sender = try native.tasks.Service(OwnerTypes).init(a, io, &source_namespace, assets, &application, handlers, source_profile);
+        sender_open = true;
+        var delayed_report = try contracts.decodeOwned(p.Signed(p.Report), scratch, delayed_report_bytes);
+        defer delayed_report.deinit();
+        try sender.placementApplyReport(scratch, subject.task, p.controlId(delayed.value.value), delayed_report.value);
+        return;
+    }
     // Advance the controller after its worker was exported. The worker has
     // never received this controller checkpoint, and a succession proof must
     // not require that private object to be retained locally.
@@ -647,6 +907,8 @@ test "native placement carries a suspended evaluator with exclusive per-work cus
     var cleanup_control = successor_control.value;
     var cleanup_report = successor_report.value;
     var disposed = false;
+    var parked_once = false;
+    var resumed_after_park = false;
     for (0..512) |iteration| {
         {
             successor_namespace = try native.Namespace.open(a, io, successor_path);
@@ -659,6 +921,20 @@ test "native placement carries a suspended evaluator with exclusive per-work cus
             if (iteration == 0) {
                 try std.testing.expect(!try successor.associatedWorkDisposed(scratch, subject.task));
                 _ = try successor.requestCancel(scratch, "cancel-with-remote-work", subject.task, "controller stopped");
+            }
+            if (cleanup_report.value.work_state.?.explicitly_parked and !resumed_after_park) {
+                try std.testing.expect(parked_once);
+                _ = try successor.pump(scratch);
+                var pending = try successor_namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='placement_control'", &.{.{ .blob = &subject.task }});
+                defer pending.deinit();
+                while (try pending.step() == .row) {
+                    var saved = try contracts.decodeOwned(p.ControlRecord, scratch, try pending.bytes(0));
+                    defer saved.deinit();
+                    try std.testing.expect(saved.value.report != null);
+                }
+                try std.testing.expect(try successor.shutdownIncomplete(scratch));
+                _ = try successor.requestCancel(scratch, "fresh-cancel-after-remote-park", subject.task, "controller stopped");
+                resumed_after_park = true;
             }
             if (try successor.associatedWorkDisposed(scratch, subject.task)) {
                 for (0..512) |_| {
@@ -695,9 +971,19 @@ test "native placement carries a suspended evaluator with exclusive per-work cus
             const bytes = try executor.placementExecuteControl(scratch, "successor", cleanup_control);
             const decoded_report = try contracts.decodeOwned(p.Signed(p.Report), scratch, bytes);
             cleanup_report = decoded_report.value;
-            try std.testing.expectEqual(.observed, cleanup_report.value.reply.disposition);
+            if (cleanup_report.value.reply.disposition == .rejected) {
+                try std.testing.expect(parked_once and !resumed_after_park);
+                try std.testing.expect(cleanup_control.value.command == .pump);
+                try std.testing.expect(cleanup_report.value.work_state.?.explicitly_parked);
+            } else try std.testing.expectEqual(.observed, cleanup_report.value.reply.disposition);
             try std.testing.expectEqualSlices(u8, bytes, try executor.placementExecuteControl(scratch, "successor", cleanup_control));
+            if (!parked_once and cleanup_control.value.command == .cancel) {
+                const current = cleanup_report.value.work_state.?;
+                _ = try executor.workspaceControl(scratch, "park-after-controller-cancel", subject.task, work_id, current.execution_revision, current.control_revision, .park);
+                parked_once = true;
+            }
         }
     }
     try std.testing.expect(disposed);
+    try std.testing.expect(parked_once and resumed_after_park);
 }

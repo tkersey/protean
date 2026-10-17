@@ -34,8 +34,14 @@ test "object digests retain SHA-256 across padding and large input boundaries" {
 }
 
 pub const Head = struct { generation: u64, parent: Digest, digest: Digest };
+/// Native retention includes every portable kind and source-local snapshots.
+/// Deriving the inclusion keeps new portable kinds in the native audit too.
+pub const RecordKind = blk: {
+    const names = @typeInfo(state.RecordKind).@"enum".field_names ++ &[_][]const u8{"placement_snapshot"};
+    break :blk @Enum(u32, .exhaustive, names, &std.simd.iota(u32, names.len));
+};
 pub fn Record(comptime kind: []const u8) type {
-    return switch (@field(state.RecordKind, kind)) {
+    return switch (@field(RecordKind, kind)) {
         .occurrence => occurrence.Occurrence,
         .question => state.Question,
         .message => state.Message,
@@ -60,6 +66,7 @@ pub fn Record(comptime kind: []const u8) type {
         .placement_action => @import("placement.zig").ActionRecord,
         .placement_move => @import("placement.zig").Move,
         .placement_succession => @import("placement.zig").Succession,
+        .placement_snapshot => @import("placement.zig").Snapshot,
         .root_operation => state.RootOperation,
     };
 }
@@ -717,8 +724,10 @@ pub const Store = struct {
 
     /// A task-scoped index snapshot. The archive owner validates each
     /// canonical record and computes its artifact closure before publication.
+    /// Inside a transaction this observes its unpublished state. Source-local
+    /// transfer snapshots are native obligations, never portable task records.
     pub fn archiveIndex(self: *Store, a: std.mem.Allocator, task_id: state.TaskId, build: state.Reference) !state.Archive {
-        if (self.transaction or self.fenced) return error.Busy;
+        if (self.fenced) return error.Busy;
         const task_bytes = try self.taskBytes(a, task_id);
         defer a.free(task_bytes);
         var records: std.ArrayList(state.ArchiveRecord) = .empty;
@@ -726,7 +735,7 @@ pub const Store = struct {
         var operations: std.ArrayList(state.ArchiveOperation) = .empty;
         // The caller supplies an arena. No borrowed SQLite column escapes.
         {
-            var query = try self.database.prepare("SELECT kind,id,body FROM records WHERE task=? ORDER BY kind,id", &.{.{ .blob = &task_id }});
+            var query = try self.database.prepare("SELECT kind,id,body FROM records WHERE task=? AND kind!='placement_snapshot' ORDER BY kind,id", &.{.{ .blob = &task_id }});
             defer query.deinit();
             while (try query.step() == .row) {
                 const kind = std.meta.stringToEnum(state.RecordKind, try query.bytes(0)) orelse return error.NonPortable;
@@ -769,13 +778,13 @@ pub const Store = struct {
         };
     }
 
-    /// Import is confined to a fresh namespace transaction. It preserves the
+    /// Import is confined to an empty task namespace transaction. It preserves the
     /// archived task ID and history; grants and resume remain caller-owned.
     pub fn restoreArchiveIndex(self: *Store, a: std.mem.Allocator, archive: state.Archive, task: state.Task) !void {
         try self.writing();
         errdefer self.rollback();
         self.invalidateIntegrity();
-        if (self.head.generation != 0 or task.revision == 0 or task.revision > std.math.maxInt(i64) or try self.scalar("SELECT count(*) FROM tasks") != 0) return error.InvalidState;
+        if (task.revision == 0 or task.revision > std.math.maxInt(i64) or try self.scalar("SELECT count(*) FROM tasks") != 0) return error.InvalidState;
         const bytes = try contracts.encodeOwned(state.Task, a, task);
         defer a.free(bytes);
         const body = try self.putObject(bytes);

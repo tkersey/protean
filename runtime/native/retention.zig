@@ -10,7 +10,7 @@ const registry = @import("registry.zig");
 const occurrence = @import("occurrence.zig");
 const Ref = state.Reference;
 const Digest = state.Digest;
-const Key = struct { kind: state.RecordKind, task: state.TaskId, id: Digest };
+const Key = struct { kind: storage.RecordKind, task: state.TaskId, id: Digest };
 const Edge = struct { parent: Digest, child: Digest };
 pub const Statistics = struct { objects: u64 = 0, bytes: u64 = 0, edges: u64 = 0 };
 const Object = struct { length: u64, body: ?[]const u8 = null };
@@ -118,14 +118,14 @@ const Audit = struct {
         var rows = try self.store.database.prepare("SELECT kind,id,task,body FROM records", &.{});
         defer rows.deinit();
         while (try rows.step() == .row) {
-            const kind = std.meta.stringToEnum(state.RecordKind, try rows.bytes(0)) orelse return error.CorruptState;
+            const kind = std.meta.stringToEnum(storage.RecordKind, try rows.bytes(0)) orelse return error.CorruptState;
             const id = try fixed(32, try rows.bytes(1));
             const task = try fixed(16, try rows.bytes(2));
             if (!self.tasks.contains(task)) return error.CorruptState;
             const ref = try self.indexed(try rows.bytes(3));
             try self.records.put(self.a, .{ .kind = kind, .task = task, .id = id }, ref);
-            inline for (@typeInfo(state.RecordKind).@"enum".field_names) |name| {
-                if (kind == @field(state.RecordKind, name)) {
+            inline for (@typeInfo(storage.RecordKind).@"enum".field_names) |name| {
+                if (kind == @field(storage.RecordKind, name)) {
                     const T = storage.Record(name);
                     var decoded = try contracts.decodeOwned(T, self.a, try self.body(ref));
                     defer decoded.deinit();
@@ -181,7 +181,7 @@ const Audit = struct {
     pub fn typed(self: *Audit, comptime T: type, parent: Ref, input: T) !void {
         try self.value(T, parent, input);
     }
-    fn record(self: *Audit, comptime kind: state.RecordKind, task: state.TaskId, id: Digest) !contracts.Decoded(storage.Record(@tagName(kind))) {
+    fn record(self: *Audit, comptime kind: storage.RecordKind, task: state.TaskId, id: Digest) !contracts.Decoded(storage.Record(@tagName(kind))) {
         const ref = self.records.get(.{ .kind = kind, .task = task, .id = id }) orelse return error.CorruptState;
         return contracts.decodeOwned(storage.Record(@tagName(kind)), self.a, try self.body(ref));
     }

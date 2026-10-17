@@ -197,12 +197,23 @@ reply or a disconnected process never releases frozen source custody. If the
 destination already accepted, withdrawal returns that acceptance. Reusing the
 same operation with changed parameters rejects. Imported copies cannot activate
 serialized local-custody tags.
+Freezing retains the complete archive manifest in the source transaction.
+Other locally owned work may progress afterward without changing that export.
+The retained export is a source obligation and is excluded from transferred
+archives. Replaying an offer still checks the current runtime, peer profile,
+size limit and disclosure policy.
 
 `placement.control` sends a revision-bound work command to the current executor;
 `placement.expand` requests a page from that executor. Signed controller
 succession accompanies controls after controller movement. Returned references
 remain remote references and do not become locally owned values or selected
 views. Remote reply observations preserve the original signed response.
+If work moves onward, the previous executor returns its signed bilateral
+succession proof. The controller verifies each transfer, updates its directory
+and sends the original command to the configured successor. A retained report
+from an earlier executor remains an exact receipt; it is not fresh progress at
+the successor. Cached messages and newly routed messages require current
+disclosure admission before transmission.
 
 Parent cancellation uses signed executor observations to cancel and pump
 separately placed work. Completion requires a terminal executor observation
@@ -211,6 +222,12 @@ incomplete; a stale local work copy cannot certify remote cleanup. A fresh paren
 cancellation after reopening retries an unanswered idempotent control whose
 transport has not recorded a failure. Recorded failures require explicit retry
 or reconciliation.
+Each automatic cleanup request names the controller's durable cancellation
+event. A later explicit executor park remains parked until a fresh cancellation
+request. Cancellation remains an owned obligation while custody is frozen and
+resumes when an abort or refusal restores local custody. Cancel-mode shutdown
+drains active placement transport within its existing deadline and reports
+unresolved cleanup as incomplete.
 
 Destination admission currently requires an empty task namespace. Placement
 does not merge independently advancing task archives. Acceptance retains the

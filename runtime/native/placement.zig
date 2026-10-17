@@ -98,6 +98,9 @@ pub const Control = struct {
     operation: state.Name,
     command: contracts.workspace.Work,
     expansion: ?struct { reference: contracts.workspace.Ref, page: contracts.workspace.Page } = null,
+    /// The controller's durable cancellation event revision. It orders repeated
+    /// cleanup requests without comparing clocks across namespaces.
+    cleanup_request: ?u64 = null,
 };
 /// Signed lifecycle facts from the current executor. These are observations;
 /// they carry no local continuation, value reference, or environmental grant.
@@ -108,6 +111,7 @@ pub const WorkState = struct {
     outcome: state.Outcome,
     cleanup_complete: bool,
     cancellation: ?state.Reason,
+    explicitly_parked: bool = false,
 };
 pub const Report = struct {
     control: Digest,
@@ -120,6 +124,7 @@ pub const ControlRecord = struct {
     id: Digest,
     task: state.TaskId,
     control: Signed(Control),
+    route: contracts.Vector(Succession, null) = .{ .items = &.{} },
     report: ?Signed(Report) = null,
     last_error: ?state.Name = null,
 };
@@ -134,6 +139,44 @@ pub const Action = struct {
 };
 pub const ActionRecord = struct { id: Digest, task: state.TaskId, action: Signed(Action) };
 pub const Succession = struct { id: Digest, task: state.TaskId, offer: Signed(Offer), decision: Signed(Decision) };
+pub const Executor = struct { site: Site, epoch: u64 };
+pub const ControlResolution = union(enum) { report: Signed(Report), next: Succession };
+
+/// A route extends the original signed command without changing its identity.
+/// Every edge is an accepted bilateral transfer of that exact work subject.
+pub fn routeNext(a: std.mem.Allocator, subject: Subject, current: Executor, next: Succession) !Executor {
+    const intent = next.offer.value.intent;
+    try verify(Offer, a, next.offer, current.site);
+    try matchDecision(a, next.offer.value, next.decision);
+    if (!std.meta.eql(subject, intent.subject) or subject.work == null or
+        !std.meta.eql(next.task, subject.task) or !std.meta.eql(next.id, intent.transfer) or
+        intent.epoch != current.epoch or next.decision.value.verdict != .accepted) return error.InvalidRemoteCommand;
+    return .{ .site = next.decision.value.destination, .epoch = next.decision.value.epoch };
+}
+pub fn routeHead(a: std.mem.Allocator, control: Control, route: []const Succession) !Executor {
+    var current: Executor = .{ .site = control.executor, .epoch = control.custody_epoch };
+    for (route) |next| current = try routeNext(a, control.subject, current, next);
+    return current;
+}
+pub fn matchReport(a: std.mem.Allocator, control: Control, route: []const Succession, report: Signed(Report)) !void {
+    var current: Executor = .{ .site = control.executor, .epoch = control.custody_epoch };
+    var matches = std.meta.eql(current.site, report.value.executor) and current.epoch == report.value.custody_epoch;
+    for (route) |next| {
+        current = try routeNext(a, control.subject, current, next);
+        matches = matches or (std.meta.eql(current.site, report.value.executor) and current.epoch == report.value.custody_epoch);
+    }
+    if (!matches or !std.meta.eql(report.value.control, try digest(Control, a, control))) return error.InvalidRemoteCommand;
+    try verify(Report, a, report, report.value.executor);
+}
+/// Source-local retained export. It is never part of another transfer's
+/// archive: copied custody cannot acquire the source's publication obligation.
+pub const Snapshot = struct {
+    id: Digest,
+    task: state.TaskId,
+    work: ?Digest,
+    frozen: ?struct { intent: Intent, manifest: state.Archive },
+};
+
 pub const Move = struct {
     id: Digest,
     task: state.TaskId,
@@ -167,6 +210,7 @@ pub const Request = union(enum) {
     withdraw: struct { task: state.TaskId, transfer: Digest },
     control: struct { operation: state.Name, task: state.TaskId, command: contracts.workspace.Work },
     execute_control: struct { peer: state.Name, control: Signed(Control) },
+    resolve_control: struct { peer: state.Name, control: Signed(Control), route: contracts.Vector(Succession, null) },
     report: struct { task: state.TaskId, control: Digest, report: Signed(Report) },
     follow_controller: struct { source: state.Name, destination: state.Name, offer: Signed(Offer), decision: Signed(Decision) },
     follow_controller_proof: struct { offer: Signed(Offer), decision: Signed(Decision) },

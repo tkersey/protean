@@ -461,9 +461,9 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
                     const p = @import("placement.zig");
                     try p.verify(p.Control, a, item.control, item.control.value.controller);
                     if (!std.meta.eql(item.id, p.controlId(item.control.value)) or !std.meta.eql(item.task, item.control.value.subject.task)) return error.InvalidArchive;
+                    _ = try p.routeHead(a, item.control.value, item.route.items);
                     if (item.report) |report| {
-                        try p.verify(p.Report, a, report, item.control.value.executor);
-                        if (!std.meta.eql(report.value.control, try p.digest(p.Control, a, item.control.value)) or report.value.custody_epoch != item.control.value.custody_epoch) return error.InvalidArchive;
+                        try p.matchReport(a, item.control.value, item.route.items, report);
                     }
                 }
                 if (comptime same(kind, "placement_move")) {
@@ -723,16 +723,54 @@ pub fn disclosureClosure(a: std.mem.Allocator, store: *storage.Store, task: stat
     return result.toOwnedSlice(a);
 }
 
+/// Build a complete immutable index while the caller owns its snapshot scope.
+/// A caller retaining it beyond the current store state must retain its edges.
+pub fn prepare(a: std.mem.Allocator, store: *storage.Store, task: state.TaskId, build: []const u8) !state.Archive {
+    var manifest = try store.archiveIndex(a, task, .{ .digest = storage.digest(build), .bytes = build.len });
+    const definitions = try schemaSet(a);
+    manifest.schemas.items = definitions.schemas;
+    var inspected = try inspect(a, store, manifest, build);
+    defer inspected.task.deinit();
+    manifest.objects.items = inspected.objects;
+    return manifest;
+}
+
+/// The transaction retaining a prepared snapshot must also retain the supplied
+/// build and schema bytes. All other objects already belong to the Store.
+pub fn retainAssets(a: std.mem.Allocator, store: *storage.Store, build: []const u8) !void {
+    _ = try store.putObject(build);
+    const definitions = try schemaSet(a);
+    for (definitions.blobs) |blob| _ = try store.putObject(blob.bytes);
+}
+
 pub fn write(a: std.mem.Allocator, io: std.Io, store: *storage.Store, task: state.TaskId, build: []const u8, path: []const u8, state_directory: c_int) !Exported {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    const temporary = arena.allocator();
-    var manifest = try store.archiveIndex(temporary, task, .{ .digest = storage.digest(build), .bytes = build.len });
-    const definitions = try schemaSet(temporary);
-    manifest.schemas.items = definitions.schemas;
-    var inspected = try inspect(temporary, store, manifest, build);
+    const manifest = try prepare(arena.allocator(), store, task, build);
+    return writeManifest(a, io, store, manifest, build, path, state_directory, false);
+}
+
+fn sameReferences(left: []const state.Reference, right: []const state.Reference) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |lhs, rhs| if (!std.meta.eql(lhs, rhs)) return false;
+    return true;
+}
+
+pub fn writePrepared(a: std.mem.Allocator, io: std.Io, store: *storage.Store, manifest: state.Archive, build: []const u8, path: []const u8, state_directory: c_int) !Exported {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var inspected = try inspect(arena.allocator(), store, manifest, build);
     defer inspected.task.deinit();
-    manifest.objects.items = inspected.objects;
+    if (!std.meta.eql(storage.digest(build), manifest.build.digest) or build.len != manifest.build.bytes or
+        !sameReferences(inspected.objects, manifest.objects.items)) return error.InvalidArchive;
+    return writeManifest(a, io, store, manifest, build, path, state_directory, true);
+}
+
+fn writeManifest(a: std.mem.Allocator, io: std.Io, store: *storage.Store, manifest: state.Archive, build: []const u8, path: []const u8, state_directory: c_int, replay: bool) !Exported {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const temporary = arena.allocator();
+    const definitions = try schemaSet(temporary);
     const schema = try values.schemaBytes(state.Archive, temporary);
     const encoded = try contracts.encodeOwned(state.Archive, temporary, manifest);
     var total: u64 = 0;
@@ -770,5 +808,18 @@ pub fn write(a: std.mem.Allocator, io: std.Io, store: *storage.Store, task: stat
             try store.writeObject(ref, &output);
         }
     }
-    return output.finish();
+    return output.finish() catch |err| {
+        if (!replay or err != error.AlreadyExists) return err;
+        // A crash may publish the file before its signed offer. Compare every
+        // byte with the retained snapshot, including all sibling records.
+        var expected: state.Digest = undefined;
+        output.hash.final(&expected);
+        var retained = try Reader.open(a, path);
+        defer retained.deinit();
+        if (!std.meta.eql(retained.identity, expected) or retained.bytes != output.bytes) return error.InvalidTransfer;
+        // The interrupted writer may have linked before syncing the directory.
+        // The offer can become durable only after both retained bytes and name.
+        if (c.fsync(retained.fd) != 0 or c.fsync(output.directory) != 0) return error.StorageUnavailable;
+        return .{ .sha256 = expected, .bytes = output.bytes };
+    };
 }

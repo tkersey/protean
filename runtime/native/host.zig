@@ -650,6 +650,20 @@ fn shutdownDisposition(code: u8, settled: bool, delivery_pending: bool) u8 {
     return if (code == 0 and !settled) 2 else code;
 }
 
+fn shutdownCanPark(mode: Shutdown, code: u8, pump_idle: bool, placement_active: bool) bool {
+    return mode == .park or code != 0 or (pump_idle and !placement_active);
+}
+
+test "cancel shutdown retains placement activity until quiescence or failure" {
+    for ([_]bool{ false, true }) |idle| {
+        for ([_]bool{ false, true }) |placement_active| {
+            try std.testing.expectEqual(idle and !placement_active, shutdownCanPark(.cancel, 0, idle, placement_active));
+            try std.testing.expect(shutdownCanPark(.park, 0, idle, placement_active));
+            try std.testing.expect(shutdownCanPark(.cancel, 74, idle, placement_active));
+        }
+    }
+}
+
 test "shutdown deadline preserves task and delivery failure distinctions" {
     for ([_]bool{ false, true }) |settled| {
         try std.testing.expectEqual(74, shutdownDisposition(0, settled, true));
@@ -914,10 +928,7 @@ fn serve(comptime Types: type, io: std.Io, a: std.mem.Allocator, connection: *Co
             const service = client.service;
             const slot = worker.?;
             if (shutdown_at != null and mode == .cancel and !cancelled_owned) {
-                for (service.owned.items) |id| {
-                    const operation = try std.fmt.allocPrint(frame, "shutdown-{s}-{s}", .{ connection.instance, std.fmt.bytesToHex(id, .lower) });
-                    _ = try service.requestCancel(frame, operation, id, "host requested cancellation");
-                }
+                try service.cancelOwned(frame, connection.instance, "host requested cancellation");
                 cancelled_owned = true;
             }
             if (slot.future != null) {
@@ -932,6 +943,7 @@ fn serve(comptime Types: type, io: std.Io, a: std.mem.Allocator, connection: *Co
                     progressed = true;
                 }
             }
+            var pump_idle = true;
             if (!parked and (shutdown_at == null or (mode == .cancel and code == 0))) {
                 const step = service.pump(frame) catch |err| blk: {
                     if (shutdown_at == null) shutdown_at = time;
@@ -939,6 +951,7 @@ fn serve(comptime Types: type, io: std.Io, a: std.mem.Allocator, connection: *Co
                     code = if (err == error.Denied) 2 else 74;
                     break :blk tasks.Step.idle;
                 };
+                pump_idle = step == .idle;
                 switch (step) {
                     .work => |work| slot.start(work, service.profile.authority, service.profile.environment) catch {
                         try service.notSent(frame, work);
@@ -953,7 +966,7 @@ fn serve(comptime Types: type, io: std.Io, a: std.mem.Allocator, connection: *Co
                     progressed = true;
                 }
             }
-            if (shutdown_at != null and !parked and slot.future == null and (mode == .park or service.runnable.items.len == 0 or code != 0)) {
+            if (shutdown_at != null and !parked and slot.future == null and shutdownCanPark(mode, code, pump_idle, service.placementActive())) {
                 if (!service.namespace.store.fenced) try service.park(frame);
                 parked = true;
                 if (code == 0 and try service.shutdownIncomplete(frame)) code = 2;

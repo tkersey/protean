@@ -4,7 +4,7 @@ const std = @import("std");
 const p = @import("placement.zig");
 const transport = @import("placement_transport.zig");
 const contracts = @import("protean_contracts");
-pub const Input = union(enum) { move: struct { offer: p.Signed(p.Offer), path: contracts.Utf8 }, withdraw: p.Signed(p.Offer), control: struct { message: p.Signed(p.Control), lineage: contracts.Vector(p.Succession, null) } };
+pub const Input = union(enum) { move: struct { offer: p.Signed(p.Offer), path: contracts.Utf8 }, withdraw: p.Signed(p.Offer), control: struct { message: p.Signed(p.Control), route: contracts.Vector(p.Succession, null), lineage: contracts.Vector(p.Succession, null) } };
 pub const Result = union(enum) { decision: p.Signed(p.Decision), report: []u8 };
 pub const Job = struct {
     allocator: std.mem.Allocator,
@@ -49,11 +49,15 @@ pub const Job = struct {
                     if (succession.decision.value.epoch <= remote.epoch) continue;
                     _ = try connection.request(arena.allocator(), .{ .follow_controller_proof = .{ .offer = succession.offer, .decision = succession.decision } });
                 }
-                const json = try connection.request(arena.allocator(), .{ .execute_control = .{ .peer = .{ .bytes = connection.channel.remote_name }, .control = control } });
-                const report = try @import("values.zig").fromJson(p.Signed(p.Report), arena.allocator(), json);
-                try p.verify(p.Report, arena.allocator(), report, self.peer.site);
-                if (!std.meta.eql(report.value.control, try p.digest(p.Control, arena.allocator(), control.value)) or report.value.custody_epoch != control.value.custody_epoch) return error.InvalidRemoteCommand;
-                break :control_result .{ .report = try contracts.encodeOwned(p.Signed(p.Report), self.allocator, report) };
+                const head = try p.routeHead(arena.allocator(), control.value, selected.route.items);
+                if (!std.meta.eql(head.site, self.peer.site)) return error.InvalidRemoteCommand;
+                const json = try connection.request(arena.allocator(), .{ .resolve_control = .{ .peer = .{ .bytes = connection.channel.remote_name }, .control = control, .route = selected.route } });
+                const resolution = try @import("values.zig").fromJson(p.ControlResolution, arena.allocator(), json);
+                switch (resolution) {
+                    .report => |report| try p.matchReport(arena.allocator(), control.value, selected.route.items, report),
+                    .next => |next| _ = try p.routeNext(arena.allocator(), control.value.subject, head, next),
+                }
+                break :control_result .{ .report = try contracts.encodeOwned(p.ControlResolution, self.allocator, resolution) };
             },
         };
     }

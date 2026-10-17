@@ -17,6 +17,18 @@ pub fn custody(store: *storage.Store, a: std.mem.Allocator, subject: p.Subject) 
 }
 
 pub fn putCustody(store: *storage.Store, a: std.mem.Allocator, value: p.Custody) !void {
+    // Snapshot retirement is part of the same native custody transition.
+    if (value.phase != .frozen) {
+        if (try store.recordBytes(a, "placement_snapshot", value.id, value.task)) |bytes| {
+            defer a.free(bytes);
+            var snapshot = try contracts.decodeOwned(p.Snapshot, a, bytes);
+            defer snapshot.deinit();
+            if (snapshot.value.frozen != null) {
+                snapshot.value.frozen = null;
+                try store.putRecord(p.Snapshot, "placement_snapshot", value.id, value.task, snapshot.value);
+            }
+        }
+    }
     if (value.decision) |signed| if (signed.value.verdict == .accepted) {
         const offer = value.offer orelse return error.InvalidTransfer;
         try p.verify(p.Offer, a, offer, offer.value.intent.source);
@@ -64,6 +76,20 @@ pub fn control(store: *storage.Store, a: std.mem.Allocator, task: state.TaskId, 
     return result;
 }
 
+pub fn nextExecutor(store: *storage.Store, a: std.mem.Allocator, subject: p.Subject, current: p.Executor) !?p.Succession {
+    var rows = try store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.kind='placement_succession' AND r.task=?", &.{.{ .blob = &subject.task }});
+    defer rows.deinit();
+    while (try rows.step() == .row) {
+        var saved = try contracts.decodeOwned(p.Succession, a, try rows.bytes(0));
+        defer saved.deinit();
+        const intent = saved.value.offer.value.intent;
+        if (!std.meta.eql(intent.subject, subject) or !std.meta.eql(intent.source, current.site) or intent.epoch != current.epoch) continue;
+        _ = try p.routeNext(a, subject, current, saved.value);
+        return saved.value;
+    }
+    return null;
+}
+
 pub fn putControl(store: *storage.Store, a: std.mem.Allocator, value: p.ControlRecord) !void {
     var prior = try control(store, a, value.task, value.id);
     defer if (prior) |*saved| saved.deinit();
@@ -72,13 +98,31 @@ pub fn putControl(store: *storage.Store, a: std.mem.Allocator, value: p.ControlR
     } else try store.createRecord(p.ControlRecord, "placement_control", value.id, value.task, value);
 }
 
-pub fn requireSettled(store: *storage.Store, a: std.mem.Allocator, subject: p.Subject) !void {
+pub fn requireSettled(store: *storage.Store, a: std.mem.Allocator, subject: p.Subject, site: p.Site) !void {
+    var controller = try custody(store, a, .{ .task = subject.task });
+    defer if (controller) |*saved| saved.deinit();
+    const controller_site = if (controller) |saved| saved.value.owner else site;
+    const controller_epoch = if (controller) |saved| saved.value.epoch else 0;
     var rows = try store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.kind='placement_control' AND r.task=?", &.{.{ .blob = &subject.task }});
     defer rows.deinit();
     while (try rows.step() == .row) {
         var saved = try contracts.decodeOwned(p.ControlRecord, a, try rows.bytes(0));
         defer saved.deinit();
-        if (saved.value.report == null and (subject.work == null or std.meta.eql(saved.value.control.value.subject, subject))) return error.UnsettledRemoteControl;
+        if (saved.value.report != null) continue;
+        const message = saved.value.control.value;
+        if (subject.work != null and !std.meta.eql(message.subject, subject)) continue;
+        if (!std.meta.eql(message.controller, controller_site) or message.controller_epoch != controller_epoch) continue;
+        if (std.meta.eql(message.controller, site)) return error.UnsettledRemoteControl;
+        const head = try p.routeHead(a, message, saved.value.route.items);
+        if (!std.meta.eql(head.site, site)) continue;
+        var executor = try custody(store, a, message.subject);
+        defer if (executor) |*current| current.deinit();
+        if (executor) |current| {
+            if (std.meta.eql(current.value.owner, site) and current.value.epoch == head.epoch and
+                (current.value.phase == .local or current.value.phase == .frozen)) return error.UnsettledRemoteControl;
+        }
+        // A copied pending record at another executor is historical evidence,
+        // not an obligation this namespace can settle.
     }
 }
 

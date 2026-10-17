@@ -2972,6 +2972,14 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
 }
 
 test "controller microprogress survives park export import and cancellation without publishing a guest cut" {
+    try controllerMicroprogress(false);
+}
+
+test "controller outer capsule moves without compatibility acquiring an execution obligation" {
+    try controllerMicroprogress(true);
+}
+
+fn controllerMicroprogress(comptime moving: bool) !void {
     const a = std.testing.allocator;
     const io = std.testing.io;
     var arena = std.heap.ArenaAllocator.init(a);
@@ -3009,6 +3017,9 @@ test "controller microprogress survives park export import and cancellation with
     const path = try std.fmt.allocPrint(frame, "{s}/source", .{path_buffer[0..length]});
     const copy_path = try std.fmt.allocPrint(frame, "{s}/copy", .{path_buffer[0..length]});
     const bundle = try std.fmt.allocPrint(frame, "{s}/outer.bundle", .{path_buffer[0..length]});
+    var initial_destination = try native.Namespace.open(a, io, copy_path);
+    const destination_identity = initial_destination.identity;
+    try initial_destination.close();
     var namespace = try native.Namespace.open(a, io, path);
     var namespace_live = true;
     defer if (namespace_live) namespace.close() catch unreachable;
@@ -3052,7 +3063,33 @@ test "controller microprogress survives park export import and cancellation with
         try namespace.store.putRecord(native.testing.state.RootOperation, "root_operation", root_original.id, root_original.task, root_original);
         try namespace.commit("test.restore-controller-operation");
     }
-    _ = try service.exportCheckpoint(frame, submitted.receipt.task, bundle);
+    const p = native.placement;
+    const source_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(31));
+    const destination_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(32));
+    const source_site: p.Site = .{ .key = source_key.public_key.bytes, .namespace = namespace.identity };
+    const destination_site: p.Site = .{ .key = destination_key.public_key.bytes, .namespace = destination_identity };
+    const subject: p.Subject = .{ .task = submitted.receipt.task };
+    try std.testing.expect(service.active == null);
+    const compatibility = try service.placementCompatibility(frame, subject);
+    try std.testing.expect(service.active == null);
+    const resources = try profile.resourceIdentity(frame, application.image_identity);
+    const Allow = struct {
+        fn disclose(_: *anyopaque, _: p.Subject, _: []const native.testing.state.Reference) !void {}
+    };
+    const source_peer: p.Peer = .{ .name = "source", .site = source_site, .native_build = profile.runtime_identity, .compatibility = compatibility, .resource_binding = resources, .disclosure_policy = @splat(33), .context = undefined, .disclose = Allow.disclose };
+    const destination_peer: p.Peer = .{ .name = "destination", .site = destination_site, .native_build = profile.runtime_identity, .compatibility = compatibility, .resource_binding = resources, .disclosure_policy = @splat(33), .context = undefined, .disclose = Allow.disclose };
+    const source_config: p.Configuration = .{ .signing_key = source_key, .peers = &.{destination_peer} };
+    const destination_config: p.Configuration = .{ .signing_key = destination_key, .peers = &.{source_peer} };
+    var offer: ?p.Signed(p.Offer) = null;
+    if (moving) {
+        service.profile.placement = &source_config;
+        _ = try service.requestCancel(frame, "cancel-before-controller-transfer", submitted.receipt.task, "interrupted");
+        const cut = try service.placementCut(frame, subject);
+        try std.testing.expect(cut.outer != null);
+        _ = try service.placementFreeze(frame, subject, "destination", cut, @splat(34));
+        try std.testing.expect(try service.shutdownIncomplete(frame));
+        offer = try service.placementOffer(frame, subject, "destination", bundle);
+    } else _ = try service.exportCheckpoint(frame, submitted.receipt.task, bundle);
     try service.close(frame);
     live = false;
     try namespace.close();
@@ -3060,9 +3097,18 @@ test "controller microprogress survives park export import and cancellation with
     var destination = try native.Namespace.open(a, io, copy_path);
     defer destination.close() catch unreachable;
     var failing = std.testing.FailingAllocator.init(a, .{});
-    var imported = try native.tasks.Service(FairTypes).init(failing.allocator(), io, &destination, assets, &application, handlers, profile);
+    var destination_profile = profile;
+    if (moving) destination_profile.placement = &destination_config;
+    var imported = try native.tasks.Service(FairTypes).init(failing.allocator(), io, &destination, assets, &application, handlers, destination_profile);
     defer imported.close(frame) catch unreachable;
-    _ = try imported.importCheckpoint(frame, "outer-import", bundle);
+    if (moving) {
+        const decision = try imported.placementAccept(frame, "outer-accept", "source", offer.?, bundle);
+        try std.testing.expect(decision.value.verdict == .accepted);
+        var accepted_cut = offer.?.value.intent.cut;
+        // Admission records its native receipt without advancing the guest.
+        accepted_cut.control += 1;
+        try std.testing.expectEqualDeep(accepted_cut, try imported.placementCut(frame, subject));
+    } else _ = try imported.importCheckpoint(frame, "outer-import", bundle);
     var restored = try imported.task(frame, submitted.receipt.task);
     defer restored.deinit();
     try std.testing.expectEqualDeep(original.value.checkpoint, restored.value.checkpoint);
@@ -3083,6 +3129,7 @@ test "controller microprogress survives park export import and cancellation with
     }
     try std.testing.expect(completed);
     _ = try imported.exportCheckpoint(frame, submitted.receipt.task, try std.fmt.allocPrint(frame, "{s}/cancelled.bundle", .{path_buffer[0..length]}));
+    if (moving) return;
     const retry = try imported.submit(frame, "retry-cut-publication", 12);
     try std.testing.expectEqual(.progressed, try imported.pump(frame));
     try std.testing.expect(imported.active.?.root_control != null);

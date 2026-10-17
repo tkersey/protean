@@ -29,7 +29,7 @@ source archive, a Zig package and a final executable have distinct identities.
 | Compiler policy | `kosmos.source-lower/2` |
 | Authored semantic source | `81c7c457dc6fd8ccc75e3ed1fb0a8b77cfd8e98af792499dcfc4f4651ca671db` |
 | Generic artifact SHA-256 | `2e5b5a1b7be183edfb1349904fb3df9a2c41f2d2740162ffafba20e5c3639750` (231,672 bytes) |
-| macOS executable SHA-256 | `4421665820bf845379e882525114e13c42b2ae9dea01f2cd3e3fa3b356534031` (10,360,216 bytes; authenticated build; deployment qualification is recorded on the pull request) |
+| macOS executable SHA-256 | `72e14c2aa25d3bf2c4571dc4319805c3cfc1ae2be62bd4559aaadb6f008937a1` (10,458,712 bytes; authenticated build; deployment qualification is recorded on the pull request) |
 | WASM kernel SHA-256 | `718ea5f9dae67d7f136f06d450a61c7ab4f9bd0ca4f31a17161481f4f45e0e2a` (current packaged kernel; generated-program correspondence passes; complete platform qualification is recorded on the pull request) |
 
 These are built artifacts, not published release assets. The native manifest
@@ -153,6 +153,20 @@ Transfer stages the runtime and exact capsule together. The source remains froze
 until the signed decision settles; duplicate acceptance is idempotent and stale
 source execution is rejected. Signed controller succession lets a moved controller
 continue controlling already-moved work without transferring ownership twice.
+Freezing now retains the exact archive manifest and its object closure in the
+same source transaction. Later local sibling progress cannot change the offered
+cut. Snapshot records stay in native storage and have no portable archive kind.
+Compatibility reads admitted artifact metadata without creating a resident.
+Native JSON projections own their nested text after decoded records are released.
+
+Executor succession extends an immutable signed control with verified bilateral
+transfer proofs. A prior executor's retained report is accepted as that operation's
+receipt, while fresh cleanup observations must come from the current executor.
+Every launch rechecks disclosure; a cached signature cannot authorize a new
+transmission. Cancellation scheduling derives from retained ownership and current
+custody, including terminal parents. Controller cancellation event revisions and
+signed executor park observations preserve the ordering of fresh cancellation and
+later explicit parking without comparing clocks between namespaces.
 
 The deterministic native demonstration includes ordinary investigation, one
 specialization reused on changed inputs, leaving a runtime investigation for source
@@ -175,10 +189,10 @@ do not establish these host laws.
 | Kosmos native and optional platforms | On `f7d36c9`, macOS native checks pass. The complete optional-platform suite passes 64/64 steps, including 47 independent-source fixtures, 9,570 observations, 235 ABI boundaries and 23 transfers. Canonical analysis admission agrees with independent Horos checks over the tested schema/value domain; 270 text-slice cases match the frozen native oracle at every guest cut. A final 38-step package rerun covers actual default API prepare/invoke and CLI execution alongside retained capacity failures. Linux qualification is recorded on [Kosmos #71](https://github.com/tkersey/kosmos/pull/71). |
 | Kosmos committed source package | Clean extraction and public native consumption pass 9/9 steps on `f7d36c9`, after the 28-step native aggregate passed. The changed semantic artifact includes the empty-text-slice correction. [Current Linux qualification](https://github.com/tkersey/kosmos/actions/runs/39047337506) is tracked on [Kosmos #71](https://github.com/tkersey/kosmos/pull/71). |
 | Specialization economy | The current Horos `a58967d` and semantic-source `81c7c457` measurement contains 421 records across eleven families, all matching independent direct-native traces, canonical states and outcomes. Dynamic loops and repeated calls show positive mean start-plus-execution savings. The complete construction, validation, recovery, switching, retention and amortization costs, including unfavorable cases, are in Kosmos `docs/semantic-economy.md`. |
-| Protean owners, workspace and source correspondence | With the current authenticated dependencies, safe `check-protean` passes 39/39 steps (previously executed unchanged authoring tests are cached); product/peer build plus `check-native-owner check-native-https check-workspace-programs check-workspace-semantics` passes 54/54 steps and 172/172 tests. Crash recovery verifies 16 crashes / 32 reopens without original reinvocation or automatic lookup. Native HTTPS verifies nine calls with no redirects/retries, exact bodies, TLS rejection, bounded responses and deadlines. |
-| Current native delivery | The authenticated macOS executable `44216658` passes adaptive execution, authenticated process placement and all six runtime scenarios, including both outer-capsule and canonical guest-cut mobility. Independent downstream acquisition/build/install passes in 321.707 seconds with matching program, assets, dependencies, compiler and target. Existing executable-boundary and source-tamper assertions remain intact. Exact-head Linux qualification is recorded on the pull request. |
+| Protean owners, workspace and source correspondence | With the current authenticated dependencies, the combined safe authoring, product/peer, native-owner, HTTPS, workspace and source-correspondence aggregate passes 86/86 steps and 208/208 tests; previously executed unchanged authoring roots remain cached. The six runtime contracts include frozen controller snapshots, onward executor routing and cancellation after abort/refusal. Native owner tasks pass 68/68 tests. Crash recovery verifies 16 crashes / 32 reopens without original reinvocation or automatic lookup. Native HTTPS verifies nine calls with no redirects/retries, exact bodies, TLS rejection, bounded responses and deadlines. |
+| Current native delivery | The authenticated macOS executable is `72e14c2a`. Current adaptive, authenticated process-placement, six-scenario runtime and independent downstream acquisition/build/install results are recorded on the pull request. Both outer-capsule and canonical guest-cut mobility, executable-boundary checks and source-tamper assertions remain required. Predecessor passes do not qualify this executable. |
 | Linux timing | On the predecessor Protean `0e9bf89`, [run 39029109805, attempt 2](https://github.com/tkersey/protean/actions/runs/39029109805) passes all thirteen qualification lanes and aggregate identity checks in 530 seconds from workflow start through the last job's completion. Exact compiled inputs were cached; every test and deployment scenario ran again. Rebuilding attempt 1 failed four ten-minute jobs. This establishes no cold-build timing pass and does not qualify the current successor. The workflow retains the same ten-minute ceiling. |
-| Current old-task compatibility | The retention fixture runs the public Protean 5.0.0 executable after selecting the current product, checking continuation of its original question in a separate namespace. Baseline SHA-256: `53471a265a095481ab9eaccf3cfc685cfa85ed243a6104db1d0e2ac166a4f935`. The current macOS witness passes: the old task continues with its original question and separate namespaces. |
+| Current old-task compatibility | The retention fixture runs the public Protean 5.0.0 executable after selecting the current product, checking continuation of its original question in a separate namespace. Baseline SHA-256: `53471a265a095481ab9eaccf3cfc685cfa85ed243a6104db1d0e2ac166a4f935`. The fixture requires continuation with the original question and separate namespaces; the current-executable result is recorded on the pull request. |
 | Current source/native/WASM correspondence | All nine generated cases and 328 boundaries pass independent Horos source comparison, native/WASM byte equality and alternating checkpoint producers with the current packaged kernel. Exact outer restore and duplicate-custody rejection pass. Outer packet SHA-256 is `ad9601099ec5d2a7c65a22d3ca5ec4913d1467480f23a21c0315ca1a775fcd01`; guest cut SHA-256 is `da41bbae343a1679a4fc31e10ada97e2cb7b27eeff44b3ad86a97005523c2ec8`. |
 | Current Linux and serial reviews | Exact-head results and review dispositions are recorded on the pull request. This report does not substitute predecessor results or raw clean labels for those obligations. |
 
