@@ -352,8 +352,10 @@ invoke an adapter. A captured response still needs its original interpretation
 before reply settlement; an unknown attempt still needs explicit reconciliation.
 Export refuses an occurrence with an active environmental dispatch.
 
-Distributed adaptive mobility is not delivered. Copying an archive does not
-transfer exclusive custody, credentials, or authority over ambiguous effects.
+Authenticated placement transfers work and controller custody through signed
+offers and decisions. Runtime selection, canonical guest cuts and exact outer
+capsules travel through that owner. Copying an archive alone does not transfer
+exclusive custody, credentials, or authority over ambiguous effects.
 
 ## Verification boundaries
 
@@ -362,14 +364,21 @@ wire fixtures. `check-native` checks native owners plus the adaptive and HTTPS
 peers. The peers run copied binaries under OS execution/file boundaries, using
 controlled provider replies, real transport, kills/restarts, cancellation, tool
 construction/reuse, and independently altered archives. No paid model calls run.
-The complete aggregate remains `check-native`. CI distributes its existing checks
-across four runners: authoring also runs `check-native-owner` and `check-native-https`;
-workspace runs the program/semantics checks; native runs `check-native-executable`;
-downstream keeps its independent build. Source accounting starts independently; the terminal
-gate requires it and all qualification lanes and retains the 360-second maximum.
+The complete aggregate remains `check-native`. CI separates authoring/HTTPS,
+owner/recovery, general workspace, runtime/custody workspace, correspondence,
+native deployment, three runtime scenario groups and an independent downstream
+build. All 17 workspace tests remain in `check-workspace-programs`. The terminal
+gate requires source accounting and every qualification lane within 600 seconds.
+Compiler caches contain complete outputs for exact dependency locks and are
+checked by Zig on reuse. Deployment lanes save completed compiler work before
+running scenarios, so a scenario timeout does not discard the build cache.
+A cache-assisted pass does not establish the cold-build latency.
 The packaged adaptive peer runs its independent controller/recovery and workspace
 groups concurrently, with separate state, snapshot, and HTTPS fixtures. Both
 groups must finish, and their original assertions and command deadlines remain.
+The additional runtime suite allows a result poll to wait up to 120 seconds behind
+synchronous specialization or placement; other RPCs keep their existing limits.
+This does not extend the ten-minute job or workflow limits.
 
 `check-native-recovery-crash`, included in `check-native`, kills the owner process
 at 16 original-acquisition and receipt-lookup boundaries. Two fresh processes

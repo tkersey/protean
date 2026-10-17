@@ -55,6 +55,7 @@ jobs:
           key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
+            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-runtime-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
             zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ (matrix.lane == 'runtime-outer' || matrix.lane == 'runtime-guest') && 'correspondence' || 'authoring' }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
       - name: Prepare compiler scratch and native isolation tools
         run: |
@@ -96,6 +97,40 @@ jobs:
             conformance/protean/dependencies.lock.json \
             conformance/protean/native-dependencies.lock.json \
             .protean-native/inputs "$(command -v zig)"
+      - name: Build deployment inputs
+        if: matrix.lane == 'native' || startsWith(matrix.lane, 'runtime')
+        run: |
+          set -o pipefail
+          targets=(protean)
+          lane="${{ matrix.lane }}"
+          if [ "$lane" = runtime-outer ] || [ "$lane" = runtime-guest ]; then
+            targets+=(build-workspace-peer)
+          fi
+          zig build "${targets[@]}" -Doptimize=safe --summary all \
+            --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
+            2>&1 | tee "$RUNNER_TEMP/$lane-check.log"
+      - name: Retain completed compiler work before deployment
+        id: build_cache_size
+        if: matrix.lane == 'native' || startsWith(matrix.lane, 'runtime')
+        continue-on-error: true
+        run: |
+          echo 'save=false' >> "$GITHUB_OUTPUT"
+          test -d .zig-cache/o || exit 0
+          test -z "$(find .zig-cache ! -type d ! -type f -print -quit)" || exit 0
+          test -n "$(find .zig-cache/o -type f -size +0c -print -quit)" || exit 0
+          bytes=$(find .zig-cache -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
+          echo "Compiler cache before deployment: $bytes bytes (4 GiB upload maximum)"
+          test "$bytes" -le 4294967296 || exit 0
+          test ! -e .zig-cache-upload
+          cp -al .zig-cache .zig-cache-upload
+          echo 'save=true' >> "$GITHUB_OUTPUT"
+      - name: Save completed compiler work before deployment
+        if: steps.build_cache_size.outputs.save == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: .zig-cache-upload
+          key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Run retained qualification
         run: |
           set -o pipefail
@@ -124,9 +159,6 @@ jobs:
             if [ "$lane" = native ]; then
               # This target retains both the adaptive CLI and process-placement
               # fixtures. The independent runtime lane runs the third fixture.
-              zig build protean -Doptimize=safe --summary all \
-                --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
-                2>&1 | tee "$RUNNER_TEMP/$lane-check.log" || result=$?
               if [ "$result" -eq 0 ]; then
                 node test/protean/native_adaptive.mjs \
                   "$RUNNER_TEMP/protean-qualification/executables/protean" \
@@ -140,16 +172,11 @@ jobs:
                   2>&1 | tee -a "$RUNNER_TEMP/$lane-check.log" || result=$?
               fi
             else
-              targets=(protean)
               scenarios='tools-runtime-ordinary,tools-runtime-specialized,tools-runtime-reframe,tools-runtime-placement'
               if [ "$lane" = runtime-outer ] || [ "$lane" = runtime-guest ]; then
-                targets+=(build-workspace-peer)
                 scenarios=tools-runtime-mobility
                 if [ "$lane" = runtime-guest ]; then scenarios=tools-runtime-guest-mobility; fi
               fi
-              zig build "${targets[@]}" -Doptimize=safe --summary all \
-                --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
-                2>&1 | tee "$RUNNER_TEMP/$lane-check.log" || result=$?
               if [ "$result" -eq 0 ]; then
                 node test/protean/native_runtime.mjs \
                   "$RUNNER_TEMP/protean-qualification/executables/protean" \

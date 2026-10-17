@@ -867,9 +867,11 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
             await client.call('task.resume', {client_operation_id: 'resume-moved-controller', task_id: task.task_id, expected_revision: cut.control});
           }
         }
-        // Placement executes on the owner thread and already has a 120-second
-        // transport allowance. A concurrent status read waits behind that move.
-        return client.call('task.result', {task_id: task.task_id}, placement ? 120_000 : 30_000);
+        // Runtime construction and placement execute on the owner thread.
+        // A result read can wait behind independent compiler validation as well
+        // as a move; it uses the existing long-operation transport allowance.
+        // The CI job and whole-workflow deadlines still bound the entire run.
+        return client.call('task.result', {task_id: task.task_id}, suite === 'runtime' ? 120_000 : 30_000);
       }, value => value.ready, suite === 'runtime' ? 20_000 : 2000);
       if (providerFailure) throw providerFailure;
       if (result.outcome.value_ref) {
