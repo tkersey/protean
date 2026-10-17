@@ -281,12 +281,12 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
   const assetBytes = await readFile(applicationPath), asset = JSON.parse(assetBytes);
   const fixture = JSON.parse(Buffer.from(asset.resources.find(row => row.id === 'adaptive-agent.offline-responses').base64url, 'base64url'));
   const root = join(app.data, 'controlled snapshot'), state = join(app.data, 'controlled state'), configPath = join(app.data, 'adaptive.json');
-  const placementArgs = [];
+  const emptyPlacement = suite === 'runtime' ? join(app.data, 'fixture-placement.json') : null;
+  let placementArgs = emptyPlacement ? ['--placement-config', emptyPlacement] : [];
   if (suite === 'runtime') {
-    const key = join(app.data, 'fixture-placement.key'), placement = join(app.data, 'fixture-placement.json');
+    const key = join(app.data, 'fixture-placement.key');
     await writeFile(key, '2a'.repeat(32), {mode: 0o600});
-    await writeFile(placement, JSON.stringify({signing_key_file: key, peers: []}), {mode: 0o600});
-    placementArgs.push('--placement-config', placement);
+    await writeFile(emptyPlacement, JSON.stringify({signing_key_file: key, peers: []}), {mode: 0o600});
   }
   await mkdir(join(root, 'src'), {recursive: true});
   const source = 'pub fn main() void {\n    // The offline fixture has no external effects.\n}\n';
@@ -795,7 +795,9 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
       ] : inputs;
       await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: name === 'tools-reuse' ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, inputs: selectedInputs}}));
       const placement = ['tools-runtime-placement', 'tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name) ? await runtimePlacementFixture(app, selectedConfig, trust, selectedState) : null;
-      if (placement) placementArgs[1] = placement.source.config;
+      // Each scenario selects its own initial directory. A prior controller
+      // transfer can change this scenario's arguments, never the next one's.
+      placementArgs = emptyPlacement ? ['--placement-config', placement?.source.config ?? emptyPlacement] : [];
       await launch(['--config', selectedConfig], selectedState);
       const description = await client.call('describe');
       const task = await client.call('task.submit', {client_operation_id: name, application_id: 'adaptive-agent', profile_id: description.profile.id,
