@@ -184,7 +184,7 @@ test "adaptive unload capture recovers under its original plan without another a
     try adaptiveRecovery(false, .none);
 }
 
-test "adaptive imported capture warms context validation without reopening its service" {
+test "adaptive copied capture stays parked while its original owner resumes and warms context" {
     try adaptiveRecovery(false, .imported);
 }
 
@@ -361,7 +361,7 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void
     var grants: [environment.handlers.len]native.registry.Grant = undefined;
     const profile: native.tasks.Profile = .{ .id = configured.id, .runtime_identity = @splat(73), .bytes = configured.bytes, .environment = configured.environment, .resources = configured.resources, .authority = .{ .grants = &grants, .principal = "adaptive-unit", .tenant = "local", .inference = true } };
     for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
-    var path = try std.fmt.allocPrint(permanent, "{s}/workspace", .{directory});
+    const path = try std.fmt.allocPrint(permanent, "{s}/workspace", .{directory});
     var namespace = try native.Namespace.open(a, io, path);
     defer namespace.close() catch unreachable;
     var service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
@@ -432,10 +432,18 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void
                 if (!interrupted) _ = try service.exportCheckpoint(frame, task, archive_path);
                 try service.close(frame);
                 try namespace.close();
-                if (!interrupted) path = try std.fmt.allocPrint(permanent, "{s}/imported", .{directory});
+                if (!interrupted) {
+                    const copied_path = try std.fmt.allocPrint(permanent, "{s}/imported", .{directory});
+                    var copied_namespace = try native.Namespace.open(a, io, copied_path);
+                    defer copied_namespace.close() catch unreachable;
+                    var copied = try native.tasks.Service(t).init(a, io, &copied_namespace, assets, &application, handlers, profile);
+                    defer copied.close(frame) catch unreachable;
+                    _ = try copied.importCheckpoint(frame, "import-build", archive_path);
+                    try std.testing.expectError(error.CustodyNotLocal, copied.resumeTask(frame, "copy-build-resume", task, 1));
+                    try std.testing.expectEqual(.idle, try copied.pump(frame));
+                }
                 namespace = try native.Namespace.open(a, io, path);
                 service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
-                if (!interrupted) _ = try service.importCheckpoint(frame, "import-build", archive_path);
                 try std.testing.expectEqual(.idle, try service.pump(frame));
                 var recovered = try service.task(frame, task);
                 defer recovered.deinit();
@@ -531,7 +539,7 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
     var grants: [environment.handlers.len]native.registry.Grant = undefined;
     const profile: native.tasks.Profile = .{ .id = configured.id, .runtime_identity = @splat(73), .bytes = configured.bytes, .environment = configured.environment, .resources = configured.resources, .authority = .{ .grants = &grants, .principal = "adaptive-unit", .tenant = "local", .inference = true } };
     for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
-    var path = try std.fmt.allocPrint(permanent, "{s}/adaptive", .{buffer[0..length]});
+    const path = try std.fmt.allocPrint(permanent, "{s}/adaptive", .{buffer[0..length]});
     var namespace = try native.Namespace.open(a, io, path);
     var namespace_live = true;
     defer if (namespace_live) namespace.close() catch unreachable;
@@ -727,7 +735,14 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                 try std.testing.expect((try imported.pump(frame)) == .idle);
                 var copied_task = try imported.task(frame, task);
                 defer copied_task.deinit();
-                _ = try imported.resumeTask(frame, "interpret-malformed", task, copied_task.value.revision);
+                try std.testing.expectError(error.CustodyNotLocal, imported.resumeTask(frame, "copy-cannot-interpret", task, copied_task.value.revision));
+                try imported.close(frame);
+                try destination.close();
+                destination = try native.Namespace.open(a, io, path);
+                imported = try native.tasks.Service(t).init(a, io, &destination, assets, &application, handlers, profile);
+                var owned_task = try imported.task(frame, task);
+                defer owned_task.deinit();
+                _ = try imported.resumeTask(frame, "interpret-malformed", task, owned_task.value.revision);
                 _ = try imported.pump(frame);
                 var still_blocked = try imported.task(frame, task);
                 defer still_blocked.deinit();
@@ -850,9 +865,8 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                     defer copy.close(frame) catch unreachable;
                     _ = try copy.importCheckpoint(frame, "import-unsettled", unresolved_archive);
                     try std.testing.expect((try copy.pump(frame)) == .idle);
-                    const replay = try copy.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive);
-                    try std.testing.expect(replay.replayed);
-                    try std.testing.expectEqualDeep(admitted.receipt, replay.receipt);
+                    try std.testing.expectError(error.CustodyNotLocal, copy.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive));
+                    try @import("native_test_support.zig").expectRetainedReceipt(frame, &copy_namespace, admitted.receipt);
                     var copied = try copy.task(frame, task);
                     defer copied.deinit();
                     try std.testing.expect(copied.value.schedule == .parked);
@@ -865,17 +879,16 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                     try std.testing.expectError(error.ArtifactUnavailable, copy.projectedArtifact(frame, task, recorded.value.original_attempt.digest));
                     if (recorded.value.prepared) |prepared| try std.testing.expectError(error.ArtifactUnavailable, copy.projectedArtifact(frame, task, prepared.digest));
                     if (recovery_probe == .provider) {
-                        try std.testing.expectError(error.UnsettledOccurrence, copy.resumeTask(frame, "cannot-retry-import", task, copied.value.revision));
+                        try std.testing.expectError(error.CustodyNotLocal, copy.resumeTask(frame, "cannot-retry-import", task, copied.value.revision));
                     } else {
                         const capture = recorded.value.outcome.capture_admitted;
                         try std.testing.expectError(error.ArtifactUnavailable, copy.projectedArtifact(frame, task, capture.digest));
                         try std.testing.expectEqualSlices(u8, reply, try copy_namespace.store.object(frame, capture, null));
-                        _ = try copy.resumeTask(frame, "interpret-import", task, copied.value.revision);
-                        try std.testing.expect((try copy.pump(frame)) == .progressed);
+                        try std.testing.expectError(error.CustodyNotLocal, copy.resumeTask(frame, "interpret-import", task, copied.value.revision));
+                        try std.testing.expectEqual(.idle, try copy.pump(frame));
                         var interpreted = try copy.reconciliation(frame, task, reconciliation_id);
                         defer interpreted.deinit();
-                        try std.testing.expect(interpreted.value.outcome == .reply_settled);
-                        try std.testing.expect(interpreted.value.previous != null);
+                        try std.testing.expectEqualDeep(recorded.value, interpreted.value);
                     }
                 }
                 namespace = try native.Namespace.open(a, io, path);
@@ -910,7 +923,8 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                     var imported = try native.tasks.Service(t).init(a, io, &destination, assets, &application, handlers, profile);
                     defer imported.close(frame) catch unreachable;
                     _ = try imported.importCheckpoint(frame, "import-rederived", archive_path);
-                    try std.testing.expect((try imported.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive)).replayed);
+                    try std.testing.expectError(error.CustodyNotLocal, imported.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive));
+                    try @import("native_test_support.zig").expectRetainedReceipt(frame, &destination, admitted.receipt);
                     var imported_task = try imported.task(frame, task);
                     defer imported_task.deinit();
                     try std.testing.expectEqual(unchanged.value.inference_attempts, imported_task.value.inference_attempts);
@@ -957,12 +971,23 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                 service_live = false;
                 try namespace.close();
                 namespace_live = false;
-                if (imported_archive != null) path = try std.fmt.allocPrint(permanent, "{s}/imported", .{buffer[0..length]});
+                if (imported_archive) |archive_path| {
+                    const copied_path = try std.fmt.allocPrint(permanent, "{s}/imported", .{buffer[0..length]});
+                    var copied_namespace = try native.Namespace.open(a, io, copied_path);
+                    defer copied_namespace.close() catch unreachable;
+                    var copied = try native.tasks.Service(t).init(a, io, &copied_namespace, assets, &application, handlers, profile);
+                    defer copied.close(frame) catch unreachable;
+                    _ = try copied.importCheckpoint(frame, "adaptive-capture-import", archive_path);
+                    var copied_capture = try protean.contracts.decodeOwned(CaptureRecord, frame, (try copied_namespace.store.recordBytes(frame, "capture", work.attempt, task)).?);
+                    defer copied_capture.deinit();
+                    try std.testing.expectEqualDeep(capture.value, copied_capture.value);
+                    try std.testing.expectError(error.CustodyNotLocal, copied.resumeTask(frame, "copy-capture-resume", task, 1));
+                    try std.testing.expectEqual(.idle, try copied.pump(frame));
+                }
                 namespace = try native.Namespace.open(a, io, path);
                 namespace_live = true;
                 service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
                 service_live = true;
-                if (imported_archive) |archive_path| _ = try service.importCheckpoint(frame, "adaptive-capture-import", archive_path);
                 var current = try service.task(frame, task);
                 defer current.deinit();
                 _ = try service.resumeTask(frame, "adaptive-capture-resume", task, current.value.revision);

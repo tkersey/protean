@@ -117,6 +117,10 @@ constant-memory guarantee for all retained state.
 ### Optional runtime inspection
 
 `program.specialize` derives a checked runtime for an admitted guest program.
+Its `origin_program` names the first source artifact used to admit that runtime;
+`guest` identifies the exact compiled guest image. Distinct task-owned sources
+with that same image can share the runtime, while each work item retains its own
+source, exposed ports and authority. Copying runtime bytes grants no task custody.
 `work.start.runtime` selects that runtime or the packaged generic evaluator.
 `work.realize` switches at the exact execution, control and realization revision;
 the guest checkpoint and execution revision stay fixed. `work.request_cut`
@@ -196,7 +200,12 @@ unsent transfer locally or asks the destination for its signed decision. A lost
 reply or a disconnected process never releases frozen source custody. If the
 destination already accepted, withdrawal returns that acceptance. Reusing the
 same operation with changed parameters rejects. Imported copies cannot activate
-serialized local-custody tags.
+serialized local or frozen custody, even if the tags name the receiving site.
+Omitting those tags or disabling placement configuration grants no execution:
+fresh local admission belongs to the namespace and is never exported. Only the
+subject verified by bilateral acceptance becomes local. Other copied subjects
+remain remote, including a child frozen before its controller moved; signed
+executor succession resolves its eventual destination.
 Freezing retains the complete archive manifest in the source transaction.
 Other locally owned work may progress afterward without changing that export.
 The retained export is a source obligation and is excluded from transferred
@@ -279,9 +288,8 @@ is distinguished from concrete execution where it supplies the argument.
 Historical independent byte fixtures are retained. Replaced old tool-action tests
 now exercise the new canonical actions, with the same large catalog, reuse,
 authorization and recovery obligations. Current generated sources additionally
-recompile to identical BPI3 before execution. The two workspace test/emitter roots
-use Debug because Zig 0.17's Safe optimizer crashes compiling those roots;
-imported product modules and the shipped native executable retain Safe mode.
+recompile to identical BPI3 before execution. Qualification runs the workspace
+test roots, imported product modules and shipped native executable in Safe mode.
 
 ## Qualification and measurements
 

@@ -27,6 +27,9 @@ ordinary arm; the pure arm asks the controller to use only completed pure work.
 It is not a separate runtime or a hard capability sandbox. Review recorded
 actions and `arm_violations` before admitting a comparison. An arm violation is
 an invalid comparison, not an improvement attributable to retained interaction.
+Pure work permits terminal, owner-scheduled starts, waits and collection; pumping,
+cut requests, realization changes and guest views violate that arm. Classification
+and runtime-switch counts also interpret work commands inside `placement.control`.
 
 After separately authorizing paid inference:
 

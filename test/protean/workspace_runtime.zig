@@ -72,6 +72,29 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     const duplicate = try service.workspaceSpecializeWithHooks(scratch, "specialize", parent.receipt.task, program.receipt.workspace.?, .{ .control = true, .storage = true });
     try std.testing.expect(duplicate.replayed);
     try std.testing.expectEqualDeep(specialized.receipt.workspace, duplicate.receipt.workspace);
+    const alias_document = try std.fmt.allocPrint(scratch, "\n{s}\n", .{document});
+    const alias_program = try service.workspaceBuild(scratch, "build-alias", parent.receipt.task, alias_document, &diagnostic);
+    try std.testing.expect(!std.meta.eql(program.receipt.workspace.?, alias_program.receipt.workspace.?));
+    const alias_specialized = try service.workspaceSpecializeWithHooks(scratch, "specialize-alias", parent.receipt.task, alias_program.receipt.workspace.?, .{ .control = true, .storage = true });
+    try std.testing.expectEqualDeep(specialized.receipt.workspace, alias_specialized.receipt.workspace);
+    var alias_observation = try contracts.decodeOwned(native.workspace.Runtime, scratch, try namespace.store.object(scratch, alias_specialized.receipt.workspace_observation.?, null));
+    defer alias_observation.deinit();
+    try std.testing.expectEqualDeep(program.receipt.workspace.?, alias_observation.value.program);
+    const alias_command: contracts.workspace.Command = .{ .program = .{ .specialize = .{ .program = try workspaceRef(scratch, .program, alias_program.receipt.workspace.?), .hooks = .{ .control = true, .storage = true } } } };
+    const alias_reply = try service.workspaceCommand(scratch, "specialize-alias", parent.receipt.task, alias_command);
+    const alias_json = (try native.json.parseAsset(scratch, alias_reply.observation_json.bytes, alias_reply.observation_json.bytes.len)).value;
+    try std.testing.expectEqualDeep(program.receipt.workspace.?, try nativeIdentity(try native.values.fromJson(contracts.workspace.Ref, scratch, alias_json.object.get("origin_program").?)));
+    {
+        try namespace.store.begin();
+        defer namespace.store.rollback();
+        var false_origin = alias_observation.value;
+        false_origin.program = alias_program.receipt.workspace.?;
+        var false_receipt = alias_specialized.receipt;
+        false_receipt.workspace_observation = try namespace.store.putObject(try contracts.encodeOwned(native.workspace.Runtime, scratch, false_origin));
+        const false_body = try namespace.store.putObject(try contracts.encodeOwned(native.testing.state.Receipt, scratch, false_receipt));
+        try namespace.store.database.run("UPDATE operations SET receipt=? WHERE request=? AND task=?", &.{ .{ .blob = &false_body.digest }, .{ .blob = &false_receipt.request_digest }, .{ .blob = &false_receipt.task } });
+        try std.testing.expectError(error.InvalidRuntime, service.workspaceCommand(scratch, "specialize-alias", parent.receipt.task, alias_command));
+    }
     var previous_runtime = try service.runtime_cache.?.artifact.clone();
     defer previous_runtime.deinit();
     const previous_epoch = namespace.store.integrity_epoch;
@@ -86,10 +109,11 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
         try writer.fixed(u64, @intCast(i));
     }
     try writer.natural(0);
-    const started = try service.workspaceStart(scratch, "start", parent.receipt.task, program.receipt.workspace.?, input, .{});
+    const started = try service.workspaceStart(scratch, "start", parent.receipt.task, alias_program.receipt.workspace.?, input, .{});
     const id = started.receipt.workspace.?;
     var before = try service.workspaceWork(a, parent.receipt.task, id);
     defer before.deinit();
+    try std.testing.expectEqualDeep(alias_program.receipt.workspace.?, before.value.program);
     try std.testing.expect(!before.value.terminal());
     const expected: contracts.workspace.Expected = .{ .work = try workspaceRef(scratch, .work, id), .execution_revision = before.value.execution_revision, .control_revision = before.value.control_revision };
     const selection: @FieldType(contracts.workspace.Work, "realize") = .{ .expected = expected, .realization_revision = 0, .runtime = .{ .selected = runtime } };
@@ -112,6 +136,19 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     try std.testing.expectEqual(before.value.execution_revision, selected.value.execution_revision);
     try std.testing.expectEqual(@as(u64, 1), selected.value.realization_revision);
     try std.testing.expect(selected.value.runtime != null and selected.value.runtime_capsule != null);
+    {
+        var different_builder = source.Builder.init(a);
+        defer different_builder.deinit();
+        const different_document = try native.source_records.encode(scratch, try @import("workspace_sources.zig").listLengthWithYields(&different_builder, false));
+        const different = try service.workspaceBuild(scratch, "build-different-image", parent.receipt.task, different_document, &diagnostic);
+        const denied = try service.workspaceCommand(scratch, "mismatched-runtime", parent.receipt.task, .{ .work = .{ .start = .{
+            .program = try workspaceRef(scratch, .program, different.receipt.workspace.?),
+            .input = .{ .reference = try workspaceRef(scratch, .value, before.value.input_value.?.digest) },
+            .policy = .{},
+            .runtime = .{ .selected = runtime },
+        } } });
+        try std.testing.expectEqual(.rejected, denied.disposition);
+    }
     const view_command: contracts.workspace.Command = .{ .context = .{ .materialize = .{
         .input = .{ .guest_view = .{ .expected = .{ .work = expected.work, .execution_revision = selected.value.execution_revision, .control_revision = selected.value.control_revision }, .realization_revision = selected.value.realization_revision, .nodes = .{ .all = .{} } } },
         .sources = .{ .items = &.{} },
@@ -166,6 +203,16 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
         const other_parent = try service.submit(scratch, "other-view-task", .{ 25, 5 });
         const denied = try service.workspaceCommand(scratch, "foreign-view", other_parent.receipt.task, view_command);
         try std.testing.expectEqual(.rejected, denied.disposition);
+        const other_program = try service.workspaceBuild(scratch, "other-build", other_parent.receipt.task, document, &diagnostic);
+        const other_start = try service.workspaceStart(scratch, "other-start", other_parent.receipt.task, other_program.receipt.workspace.?, input, .{});
+        var other_work = try service.workspaceWork(scratch, other_parent.receipt.task, other_start.receipt.workspace.?);
+        defer other_work.deinit();
+        const foreign_runtime = try service.workspaceCommand(scratch, "foreign-runtime", other_parent.receipt.task, .{ .work = .{ .realize = .{
+            .expected = .{ .work = try workspaceRef(scratch, .work, other_work.value.id), .execution_revision = other_work.value.execution_revision, .control_revision = other_work.value.control_revision },
+            .realization_revision = other_work.value.realization_revision,
+            .runtime = .{ .selected = runtime },
+        } } });
+        try std.testing.expectEqual(.rejected, foreign_runtime.disposition);
     }
     {
         // Feed the acquired view to an ordinary generated query. The input
@@ -213,7 +260,7 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
         var request_arena = std.heap.ArenaAllocator.init(a);
         defer request_arena.deinit();
         const selected_start = try service.workspaceCommand(request_arena.allocator(), "selected-start", parent.receipt.task, .{ .work = .{ .start = .{
-            .program = try workspaceRef(scratch, .program, program.receipt.workspace.?),
+            .program = try workspaceRef(scratch, .program, alias_program.receipt.workspace.?),
             .input = .{ .reference = try workspaceRef(scratch, .value, before.value.input_value.?.digest) },
             .policy = .{},
             .runtime = .{ .selected = runtime },
@@ -313,6 +360,33 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     try std.testing.expect(restored_trace.value.runtime_trace != null);
     try std.testing.expect(restored_trace.value.outer_operation != null);
     try std.testing.expectEqualDeep(suspended.value.outer_operation.?.capsule, restored_trace.value.outer_operation.?.capsule);
+    try std.testing.expectError(error.CustodyNotLocal, imported.workspacePump(scratch, "copy-cannot-pump", parent.receipt.task, .{ .expected = .{ .work = pump_command.expected.work, .execution_revision = restored_trace.value.execution_revision, .control_revision = restored_trace.value.control_revision }, .base_quantum = 1 }));
+    try imported.close(a);
+    {
+        _ = try imported_namespace.store.auditRetention(handlers, application.image_identity);
+        var rows = try imported_namespace.store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq", &.{.{ .blob = &parent.receipt.task }});
+        defer rows.deinit();
+        var source_capsule: ?native.testing.state.Reference = null;
+        while (try rows.step() == .row) {
+            var event = try contracts.decodeOwned(native.testing.state.Event, scratch, try rows.bytes(0));
+            defer event.deinit();
+            const command_ref = event.value.workspace_command orelse continue;
+            var command = try contracts.decodeOwned(native.workspace.PublicationCommand, scratch, try imported_namespace.store.object(scratch, command_ref, null));
+            defer command.deinit();
+            if (command.value == .realize) {
+                source_capsule = command.value.realize.source;
+                break;
+            }
+        }
+        const removed = source_capsule orelse return error.TestUnexpectedResult;
+        try imported_namespace.store.database.run("DELETE FROM dependencies WHERE child=? OR parent=?", &.{ .{ .blob = &removed.digest }, .{ .blob = &removed.digest } });
+        try imported_namespace.store.database.run("DELETE FROM objects WHERE digest=?", &.{.{ .blob = &removed.digest }});
+        imported_namespace.store.invalidateIntegrity();
+        try std.testing.expectError(error.CorruptState, imported_namespace.store.auditRetention(handlers, application.image_identity));
+    }
+    try imported_namespace.close();
+    imported_namespace = try native.Namespace.open(a, io, path);
+    imported = try native.tasks.Service(OwnerTypes).init(a, io, &imported_namespace, assets, &application, handlers, profile);
     _ = try imported.workspacePump(scratch, "resume-outer-one", parent.receipt.task, .{ .expected = .{ .work = pump_command.expected.work, .execution_revision = restored_trace.value.execution_revision, .control_revision = restored_trace.value.control_revision }, .base_quantum = 1 });
     var continued = try imported.workspaceWork(a, parent.receipt.task, traced_id);
     defer continued.deinit();
@@ -361,6 +435,10 @@ test "frozen controller retains its exact cut while local work advances" {
     try placementCase(.root);
 }
 
+test "controller succession precedes a frozen child's offer and follows its eventual executor" {
+    try placementCase(.preoffer);
+}
+
 test "delayed controls follow executor succession and retain prior exact reports" {
     try placementCase(.onward);
 }
@@ -373,7 +451,10 @@ test "terminal parent cancellation resumes after a signed refusal" {
     try placementCase(.cancel_refused);
 }
 
-fn placementCase(comptime scenario: enum { work, root, onward, cancel_abort, cancel_refused }) !void {
+fn placementCase(comptime scenario: enum { work, root, preoffer, onward, cancel_abort, cancel_refused }) !void {
+    var phase: []const u8 = "setup";
+    var attack_index: usize = 0;
+    errdefer std.debug.print("placement {s}: {s} ({d})\n", .{ @tagName(scenario), phase, attack_index });
     const a = std.testing.allocator;
     const io = std.testing.io;
     const p = native.placement;
@@ -382,6 +463,14 @@ fn placementCase(comptime scenario: enum { work, root, onward, cancel_abort, can
     const root_module = try gcd(&root_builder);
     const root_body = root_builder.functions.items[@intCast(root_module.entry)].body.?;
     root_builder.functions.items[@intCast(root_module.entry)].body = try root_builder.term(.{ .yield_then = try root_builder.term(.{ .yield_then = root_body }) });
+    if (scenario == .work) {
+        var unpack = root_builder.terms.items[@intCast(root_body)].unpack_product;
+        const number = try root_builder.scalar(u64);
+        var delayed = try root_builder.reference(unpack.variables[0]);
+        for (0..256) |_| delayed = try root_builder.primitive(number, .integer_bit_xor, &.{ delayed, try root_builder.constant(u64, 1) }, 0);
+        unpack.body = try root_builder.bind(try root_builder.variable(number), try root_builder.pure(delayed), try root_builder.term(.{ .yield_then = try root_builder.term(.{ .yield_then = unpack.body }) }));
+        root_builder.functions.items[@intCast(root_module.entry)].body = try root_builder.term(.{ .unpack_product = unpack });
+    }
     var root = try compile(a, &root_builder, root_builder.module(root_module.entry, root_module.failure));
     defer root.deinit();
     const admitted = try data.program_image.Admitted.decode(a, root.image);
@@ -406,6 +495,12 @@ fn placementCase(comptime scenario: enum { work, root, onward, cancel_abort, can
     const source_path = try std.fmt.allocPrint(scratch, "{s}/source", .{path_buffer[0..length]});
     const destination_path = try std.fmt.allocPrint(scratch, "{s}/destination", .{path_buffer[0..length]});
     const successor_path = try std.fmt.allocPrint(scratch, "{s}/successor", .{path_buffer[0..length]});
+    var untrusted_namespaces: [3]@FieldType(p.Site, "namespace") = undefined;
+    if (scenario == .work) for (&untrusted_namespaces, 0..) |*identity, attack| {
+        var empty = try native.Namespace.open(a, io, try std.fmt.allocPrint(scratch, "{s}/untrusted-{d}", .{ path_buffer[0..length], attack }));
+        identity.* = empty.identity;
+        try empty.close();
+    };
     var successor_namespace = try native.Namespace.open(a, io, successor_path);
     const successor_identity = successor_namespace.identity;
     try successor_namespace.close();
@@ -490,6 +585,45 @@ fn placementCase(comptime scenario: enum { work, root, onward, cancel_abort, can
     const destination_config: p.Configuration = .{ .signing_key = destination_key, .peers = &destination_peers };
     const successor_config: p.Configuration = .{ .signing_key = successor_key, .peers = &successor_peers };
     sender.profile.placement = &source_config;
+    if (scenario == .cancel_abort or scenario == .cancel_refused) {
+        for (0..2) |parked| {
+            const operation = try std.fmt.allocPrint(scratch, "root-cleanup-{d}", .{parked});
+            const cancelled_root = try sender.submit(scratch, operation, .{ 25, 5 });
+            const root_subject: p.Subject = .{ .task = cancelled_root.receipt.task };
+            _ = try sender.requestCancel(scratch, try std.fmt.allocPrint(scratch, "{s}-cancel", .{operation}), root_subject.task, "stop");
+            const root_cut = try sender.placementCut(scratch, root_subject);
+            const transfer: [32]u8 = @splat(@intCast(80 + parked));
+            _ = try sender.placementFreeze(scratch, root_subject, "destination", root_cut, transfer);
+            var refusal: ?p.Signed(p.Decision) = null;
+            if (scenario == .cancel_refused) {
+                const root_archive = try std.fmt.allocPrint(scratch, "{s}/{s}.par", .{ path_buffer[0..length], operation });
+                const root_offer = try sender.placementOffer(scratch, root_subject, "destination", root_archive);
+                refusal = try p.sign(p.Decision, scratch, destination_key, .{ .transfer = transfer, .offer_digest = try p.digest(p.Offer, scratch, root_offer.value), .source = source_site, .destination = destination_site, .epoch = root_offer.value.intent.epoch + 1, .verdict = .{ .refused = .withdrawn } });
+            }
+            if (parked == 1) try sender.park(scratch);
+            if (refusal) |decision| try sender.placementApplyDecision(scratch, root_subject, decision) else try sender.placementAbortUnsent(scratch, root_subject, transfer);
+            if (parked == 1) {
+                for (0..4) |_| _ = try sender.pump(scratch);
+                var still = try sender.task(scratch, root_subject.task);
+                defer still.deinit();
+                try std.testing.expect(!still.value.terminal());
+                try std.testing.expectEqual(.parked, still.value.schedule);
+                _ = try sender.requestCancel(scratch, try std.fmt.allocPrint(scratch, "{s}-recancel", .{operation}), root_subject.task, "stop");
+            }
+            var root_disposed = false;
+            for (0..512) |_| {
+                _ = try sender.pump(scratch);
+                var current = try sender.task(scratch, root_subject.task);
+                defer current.deinit();
+                if (current.value.terminal()) {
+                    try std.testing.expectEqual(.cancelled, current.value.outcome_kind);
+                    root_disposed = true;
+                    break;
+                }
+            }
+            try std.testing.expect(root_disposed);
+        }
+    }
     const identified = try sender.placementRequest(scratch, .{ .identify = .{} });
     try std.testing.expect(identified == .object);
     const sites = try sender.workspaceCommand(scratch, "placement-sites", subject.task, .{ .placement = .{ .sites = .{} } });
@@ -513,14 +647,15 @@ fn placementCase(comptime scenario: enum { work, root, onward, cancel_abort, can
     const retry_withdrawn = try sender.workspaceCommand(scratch, "placement-retry-withdrawn", subject.task, .{ .placement = .{ .retry = .{ .operation = .{ .bytes = "withdraw-before-send" } } } });
     try std.testing.expectEqual(.observed, retry_withdrawn.disposition);
     source_peers[0].channel = null;
-    if (scenario == .root) {
+    if (scenario == .root or scenario == .preoffer) {
+        if (scenario == .preoffer) _ = try sender.placementFreeze(scratch, subject, "destination", cut, @splat(14));
         const controller: p.Subject = .{ .task = subject.task };
         const controller_cut = try sender.placementCut(scratch, controller);
         _ = try sender.placementFreeze(scratch, controller, "successor", controller_cut, @splat(98));
-        _ = try sender.workspacePump(scratch, "independent-local-progress", subject.task, .{ .expected = .{ .work = work_ref, .execution_revision = cut.execution, .control_revision = cut.control }, .base_quantum = 1 });
+        if (scenario == .root) _ = try sender.workspacePump(scratch, "independent-local-progress", subject.task, .{ .expected = .{ .work = work_ref, .execution_revision = cut.execution, .control_revision = cut.control }, .base_quantum = 1 });
         var progressed_parent = try sender.task(scratch, subject.task);
         defer progressed_parent.deinit();
-        try std.testing.expect(progressed_parent.value.revision > controller_cut.control);
+        if (scenario == .root) try std.testing.expect(progressed_parent.value.revision > controller_cut.control);
         const snapshot_path = try std.fmt.allocPrint(scratch, "{s}/frozen-controller.par", .{path_buffer[0..length]});
         const snapshot_offer = try sender.placementOffer(scratch, controller, "successor", snapshot_path);
         try std.testing.expectEqualDeep(controller_cut, snapshot_offer.value.intent.cut);
@@ -557,10 +692,90 @@ fn placementCase(comptime scenario: enum { work, root, onward, cancel_abort, can
         sender = try native.tasks.Service(OwnerTypes).init(a, io, &source_namespace, assets, &application, handlers, source_profile);
         sender_open = true;
         try sender.placementApplyDecision(scratch, controller, decision);
-        try std.testing.expectEqual(.local, (try sender.placementStatus(scratch, subject)).?.phase);
+        try std.testing.expectEqual(@as(@FieldType(p.Custody, "phase"), if (scenario == .root) .local else .frozen), (try sender.placementStatus(scratch, subject)).?.phase);
+        if (scenario == .preoffer) {
+            const child_path = try std.fmt.allocPrint(scratch, "{s}/child-after-controller.par", .{path_buffer[0..length]});
+            const child_offer = try sender.placementOffer(scratch, subject, "destination", child_path);
+            try sender.close(a);
+            sender_open = false;
+            try source_namespace.close();
+            source_open = false;
+            var child_decision: p.Signed(p.Decision) = undefined;
+            {
+                destination_namespace = try native.Namespace.open(a, io, destination_path);
+                defer destination_namespace.close() catch unreachable;
+                var child_profile = profile;
+                child_profile.placement = &destination_config;
+                var child_owner = try native.tasks.Service(OwnerTypes).init(a, io, &destination_namespace, assets, &application, handlers, child_profile);
+                defer child_owner.close(a) catch unreachable;
+                child_decision = try child_owner.placementAccept(scratch, "accept-child-after-controller", "source", child_offer, child_path);
+            }
+            source_namespace = try native.Namespace.open(a, io, source_path);
+            source_open = true;
+            sender = try native.tasks.Service(OwnerTypes).init(a, io, &source_namespace, assets, &application, handlers, source_profile);
+            sender_open = true;
+            try sender.placementApplyDecision(scratch, subject, child_decision);
+            try sender.close(a);
+            sender_open = false;
+            try source_namespace.close();
+            source_open = false;
+            var signed_control: p.Signed(p.Control) = undefined;
+            {
+                snapshot_namespace = try native.Namespace.open(a, io, successor_path);
+                defer snapshot_namespace.close() catch unreachable;
+                snapshot_receiver = try native.tasks.Service(OwnerTypes).init(a, io, &snapshot_namespace, assets, &application, handlers, snapshot_profile);
+                defer snapshot_receiver.close(a) catch unreachable;
+                const saved_control = try contracts.decodeOwned(p.Signed(p.Control), scratch, try snapshot_receiver.placementControl(scratch, "inspect-late-child", subject.task, .{ .inspect = .{ .work = work_ref } }));
+                signed_control = saved_control.value;
+            }
+            source_namespace = try native.Namespace.open(a, io, source_path);
+            source_open = true;
+            sender = try native.tasks.Service(OwnerTypes).init(a, io, &source_namespace, assets, &application, handlers, source_profile);
+            sender_open = true;
+            var next = try contracts.decodeOwned(p.ControlResolution, scratch, try sender.placementResolveControl(scratch, "successor", signed_control, &.{}));
+            defer next.deinit();
+            try std.testing.expect(next.value == .next);
+            const route = [_]p.Succession{next.value.next};
+            try sender.close(a);
+            sender_open = false;
+            try source_namespace.close();
+            source_open = false;
+            var result: p.Signed(p.Report) = undefined;
+            {
+                destination_namespace = try native.Namespace.open(a, io, destination_path);
+                defer destination_namespace.close() catch unreachable;
+                var child_profile = profile;
+                child_profile.placement = &destination_config;
+                var child_owner = try native.tasks.Service(OwnerTypes).init(a, io, &destination_namespace, assets, &application, handlers, child_profile);
+                defer child_owner.close(a) catch unreachable;
+                try child_owner.placementFollowController(scratch, "source", "successor", snapshot_offer, decision);
+                const resolved = try contracts.decodeOwned(p.ControlResolution, scratch, try child_owner.placementResolveControl(scratch, "successor", signed_control, &route));
+                result = resolved.value.report;
+                try std.testing.expectEqual(.observed, result.value.reply.disposition);
+            }
+            snapshot_namespace = try native.Namespace.open(a, io, successor_path);
+            defer snapshot_namespace.close() catch unreachable;
+            snapshot_receiver = try native.tasks.Service(OwnerTypes).init(a, io, &snapshot_namespace, assets, &application, handlers, snapshot_profile);
+            defer snapshot_receiver.close(a) catch unreachable;
+            try snapshot_receiver.placementFollowExecutor(scratch, subject.task, p.controlId(signed_control.value), route[0]);
+            try snapshot_receiver.placementApplyReport(scratch, subject.task, p.controlId(signed_control.value), result);
+            try std.testing.expectEqualDeep(destination_site, (try snapshot_receiver.placementStatus(scratch, subject)).?.owner);
+        }
         return;
     }
+    if (scenario == .work) {
+        phase = "suspend controller before child freeze";
+        try std.testing.expectEqual(.progressed, try sender.pump(scratch));
+        try std.testing.expect(sender.active != null);
+        try std.testing.expect(sender.active.?.work == null);
+        try std.testing.expect(sender.active.?.root_control != null);
+    }
     _ = try sender.placementFreeze(scratch, subject, "destination", cut, @splat(14));
+    if (scenario == .work) {
+        try std.testing.expect(sender.active != null);
+        try std.testing.expect(sender.active.?.work == null);
+        try std.testing.expect(sender.active.?.root_control != null);
+    }
     if (scenario == .cancel_abort or scenario == .cancel_refused) {
         var refused: ?p.Signed(p.Decision) = null;
         if (scenario == .cancel_refused) {
@@ -626,10 +841,62 @@ fn placementCase(comptime scenario: enum { work, root, onward, cancel_abort, can
     try std.testing.expectError(error.Denied, sender.placementOffer(scratch, subject, "destination", archive_path));
     sender.profile.authority.disclosure = true;
     try std.testing.expectError(error.InvalidTransfer, sender.placementAbortUnsent(scratch, subject, @splat(14)));
+    if (scenario == .work) {
+        phase = "untrusted copied custody";
+        try sender.park(scratch);
+        const controller: p.Subject = .{ .task = subject.task };
+        const controller_cut = try sender.placementCut(scratch, controller);
+        for (0..3) |attack| {
+            phase = "untrusted custody preparation";
+            attack_index = attack;
+            const attacked_archive = try std.fmt.allocPrint(scratch, "{s}/untrusted-{d}.par", .{ path_buffer[0..length], attack });
+            const copied_site: p.Site = .{ .key = destination_key.public_key.toBytes(), .namespace = untrusted_namespaces[attack] };
+            {
+                try source_namespace.store.begin();
+                defer source_namespace.store.rollback();
+                if (attack < 2) {
+                    try source_namespace.store.database.run("DELETE FROM records WHERE kind='placement_custody' AND task=?", &.{.{ .blob = &subject.task }});
+                } else {
+                    const forged = try p.Custody.initial(controller, copied_site).freeze(copied_site, .{ .transfer = @splat(71), .subject = controller, .source = copied_site, .destination = source_site, .source_native = profile.runtime_identity, .destination_native = profile.runtime_identity, .epoch = 0, .cut = controller_cut, .compatibility = compatibility, .resources = resources, .disclosure = @splat(13) });
+                    try source_namespace.store.putRecord(p.Custody, "placement_custody", forged.id, forged.task, forged);
+                }
+                _ = sender.exportCheckpoint(scratch, subject.task, attacked_archive) catch |err| {
+                    std.debug.print("untrusted archive export {d}: {s}\n", .{ attack, @errorName(err) });
+                    return err;
+                };
+            }
+        }
+    }
     try sender.close(a);
     sender_open = false;
     try source_namespace.close();
     source_open = false;
+    if (scenario == .work) {
+        const controller: p.Subject = .{ .task = subject.task };
+        for (0..3) |attack| {
+            phase = "untrusted custody import";
+            attack_index = attack;
+            const attacked_path = try std.fmt.allocPrint(scratch, "{s}/untrusted-{d}", .{ path_buffer[0..length], attack });
+            const attacked_archive = try std.fmt.allocPrint(scratch, "{s}/untrusted-{d}.par", .{ path_buffer[0..length], attack });
+            var copied_namespace = try native.Namespace.open(a, io, attacked_path);
+            defer copied_namespace.close() catch unreachable;
+            const copied_config: p.Configuration = .{ .signing_key = destination_key, .peers = &.{} };
+            var copied_profile = profile;
+            if (attack != 0) copied_profile.placement = &copied_config;
+            var copied = try native.tasks.Service(OwnerTypes).init(a, io, &copied_namespace, assets, &application, handlers, copied_profile);
+            defer copied.close(a) catch unreachable;
+            _ = copied.importCheckpoint(scratch, "untrusted-copy", attacked_archive) catch |err| {
+                std.debug.print("untrusted archive import {d}: {s}\n", .{ attack, @errorName(err) });
+                return err;
+            };
+            if (attack == 2) {
+                try std.testing.expectEqual(.away, (try copied.placementStatus(scratch, controller)).?.phase);
+                try std.testing.expectError(error.InvalidTransfer, copied.placementAbortUnsent(scratch, controller, @splat(71)));
+            }
+            try std.testing.expectError(error.CustodyNotLocal, copied.resumeTask(scratch, "untrusted-resume", subject.task, 1));
+            try std.testing.expectError(error.CustodyNotLocal, copied.requestCancel(scratch, "untrusted-cancel", subject.task, "stop"));
+        }
+    }
     {
         // Ordinary archive import is a data copy. Even a configured native
         // service cannot acquire this task or work merely by possessing it.
@@ -643,6 +910,7 @@ fn placementCase(comptime scenario: enum { work, root, onward, cancel_abort, can
         try std.testing.expectError(error.CustodyNotLocal, copied.resumeTask(scratch, "copy-cannot-control", subject.task, 1));
     }
     destination_namespace = try native.Namespace.open(a, io, destination_path);
+    phase = "accept child";
     destination_open = true;
     var resumed_profile = profile;
     resumed_profile.placement = &destination_config;

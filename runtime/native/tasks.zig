@@ -205,7 +205,7 @@ pub fn Service(comptime Types: type) type {
                 defer current.deinit();
                 if (self.profile.placement == null) return error.CustodyNotLocal;
                 try current.value.requireLocal(try self.placementSite());
-            } else if (self.profile.placement != null and !try self.store().locallyAdmitted(task_id)) {
+            } else if (!try self.store().locallyAdmitted(task_id)) {
                 return error.CustodyNotLocal;
             }
         }
@@ -1130,6 +1130,7 @@ pub fn Service(comptime Types: type) type {
             var value = decoded.value;
             const previous = value.revision;
             const needs_cancellation = !value.terminal() or !try self.associatedWorkDisposed(a, task_id);
+            const queue_root = self.work == null or self.work.?.subject_work != null or !same(&self.work.?.task, &task_id);
             const executable = compatible: {
                 self.compatible(value) catch |err| switch (err) {
                     error.IncompatibleProfile => break :compatible false,
@@ -1161,7 +1162,10 @@ pub fn Service(comptime Types: type) type {
             if (needs_cancellation and !executable) {
                 value.blocker = .incompatible_profile;
                 value.schedule = .parked;
-            } else if (executable and value.blocker == .incompatible_profile) value.blocker = null;
+            } else if (executable) {
+                if (value.blocker == .incompatible_profile) value.blocker = null;
+                if (!value.terminal() and queue_root) value.schedule = .queued;
+            }
             try self.store().begin();
             defer self.store().rollback();
             try self.event(&value, .cancellation_requested, "{}");
@@ -1199,7 +1203,7 @@ pub fn Service(comptime Types: type) type {
                 }
             }
             if (needs_cancellation) {
-                if (self.work == null or self.work.?.subject_work != null or !same(&self.work.?.task, &task_id)) try self.runnableAdd(task_id);
+                if (queue_root) try self.runnableAdd(task_id);
                 self.claim(task_id);
             }
             return admitted;
@@ -1720,6 +1724,7 @@ pub fn Service(comptime Types: type) type {
                 if (parent.value.cancellation == null) continue;
                 self.compatible(parent.value) catch continue;
                 if (try self.cancelWorkspaceOne(a, parent.value)) return true;
+                if (!parent.value.terminal() and parent.value.schedule != .parked) try self.runnableAdd(id);
                 if (parent.value.terminal() and try self.taskCleanupComplete(a, parent.value)) self.unclaim(id);
             }
             return false;
@@ -2304,6 +2309,7 @@ pub fn Service(comptime Types: type) type {
 
         /// All front ends publish a joined worker through this same owner.
         pub fn completeWork(self: *Self, a: std.mem.Allocator, work: Work, result: WorkResult) !void {
+            try self.currentWork(work);
             try self.requireCustody(a, work.task, work.subject_work);
             switch (result) {
                 .acquired => |bytes| return self.acquire(a, work, bytes),
@@ -2339,8 +2345,8 @@ pub fn Service(comptime Types: type) type {
         /// A worker has returned and will no longer access this work item.
         /// Acquisition is published before any subsequent Kosmos consumption.
         pub fn acquire(self: *Self, a: std.mem.Allocator, work: Work, reply: []const u8) !void {
-            try self.requireCustody(a, work.task, work.subject_work);
             try self.currentWork(work);
+            try self.requireCustody(a, work.task, work.subject_work);
             if (work.recovery != null) return self.completeRecoveryWork(a, work, .{ .evidence = reply });
             if (work.operation == .workspace_build or work.entry.declaration.capture != null) return self.capture(a, work, reply);
             defer self.releaseWork();
@@ -2369,8 +2375,8 @@ pub fn Service(comptime Types: type) type {
             try self.wakeOccurrence(a, value, saved.value);
         }
         pub fn unknown(self: *Self, a: std.mem.Allocator, work: Work) !void {
-            try self.requireCustody(a, work.task, work.subject_work);
             try self.currentWork(work);
+            try self.requireCustody(a, work.task, work.subject_work);
             if (work.recovery != null) return self.completeRecoveryWork(a, work, null);
             defer self.releaseWork();
             errdefer self.store().fence();
@@ -2398,8 +2404,8 @@ pub fn Service(comptime Types: type) type {
         }
 
         pub fn notSent(self: *Self, a: std.mem.Allocator, work: Work) !void {
-            try self.requireCustody(a, work.task, work.subject_work);
             try self.currentWork(work);
+            try self.requireCustody(a, work.task, work.subject_work);
             if (work.recovery != null) return self.completeRecoveryWork(a, work, null);
             defer self.releaseWork();
             errdefer self.store().fence();
@@ -4094,12 +4100,20 @@ pub fn Service(comptime Types: type) type {
             // rollback failures retain their own fencing behavior.
             _ = try @import("retention.zig").verify(self.store(), self.handlers);
             try self.validateImportedState(a, value, inspected.current);
-            // A serialized local tag is data, never native execution custody.
-            // Only the bilateral acceptance below activates one subject.
+            const accepted_custody = if (placement) |transfer| accepted: {
+                const p = @import("placement.zig");
+                const intent = transfer.offer.value.intent;
+                if (!std.meta.eql(value.id, intent.subject.task) or !std.meta.eql(original_runtime, intent.source_native) or
+                    !std.meta.eql(try self.placementCut(a, intent.subject), intent.cut) or
+                    !std.meta.eql(try self.placementCompatibility(a, intent.subject), intent.compatibility)) return error.InvalidTransfer;
+                var frozen = try @import("placement_journal.zig").custody(self.store(), a, intent.subject) orelse return error.InvalidTransfer;
+                defer frozen.deinit();
+                break :accepted try p.accept(a, try self.placementSite(), frozen.value, transfer.offer, transfer.decision);
+            } else null;
             for (reader.manifest.value.records.items) |row| if (row.kind == .placement_custody) {
                 var copied = try self.record(@import("placement.zig").Custody, a, "placement_custody", row.id, value.id);
                 defer copied.deinit();
-                if (copied.value.phase == .local) {
+                if (copied.value.phase != .away) {
                     copied.value.phase = .away;
                     try @import("placement_journal.zig").putCustody(self.store(), a, copied.value);
                 }
@@ -4108,12 +4122,6 @@ pub fn Service(comptime Types: type) type {
                 const p = @import("placement.zig");
                 const journal = @import("placement_journal.zig");
                 const intent = transfer.offer.value.intent;
-                if (!std.meta.eql(value.id, intent.subject.task) or !std.meta.eql(original_runtime, intent.source_native) or
-                    !std.meta.eql(try self.placementCut(a, intent.subject), intent.cut) or
-                    !std.meta.eql(try self.placementCompatibility(a, intent.subject), intent.compatibility)) return error.InvalidTransfer;
-                var frozen = try journal.custody(self.store(), a, intent.subject) orelse return error.InvalidTransfer;
-                defer frozen.deinit();
-                const candidate = try p.accept(a, try self.placementSite(), frozen.value, transfer.offer, transfer.decision);
                 // Copied controller/work data grants no custody over another
                 // subject. Legacy unregistered subjects stay at the source.
                 const others = try self.workspaceIds(a, value.id);
@@ -4129,7 +4137,7 @@ pub fn Service(comptime Types: type) type {
                     if (prior == null) try journal.putCustody(self.store(), a, p.Custody.initial(.{ .task = value.id }, intent.source));
                 }
                 try self.retire(a);
-                try journal.putCustody(self.store(), a, candidate);
+                try journal.putCustody(self.store(), a, accepted_custody.?);
                 try journal.putDecision(self.store(), a, try self.placementSite(), transfer.offer.value, transfer.decision);
             }
             const previous = value.revision;
@@ -6490,9 +6498,13 @@ pub fn Service(comptime Types: type) type {
             var saved = try self.record(workspace.Runtime, a, "workspace_runtime", id, task_id);
             errdefer saved.deinit();
             if (!std.meta.eql(saved.value.id, id) or !std.meta.eql(saved.value.task, task_id) or !std.meta.eql(saved.value.artifact.digest, digest)) return error.InvalidRuntime;
-            if (program_id) |required| if (!std.meta.eql(required, saved.value.program)) return error.InvalidRuntime;
             var program = try self.workspaceProgram(a, task_id, saved.value.program);
             defer program.deinit();
+            if (program_id) |required| if (!std.meta.eql(required, saved.value.program)) {
+                var requested = try self.workspaceProgram(a, task_id, required);
+                defer requested.deinit();
+                if (!std.meta.eql(requested.value.description.image, program.value.description.image)) return error.InvalidRuntime;
+            };
             const image = try self.store().object(a, program.value.description.image, null);
             defer a.free(image);
             const guest = try data.program_image.Admitted.decode(a, image);
@@ -6520,10 +6532,12 @@ pub fn Service(comptime Types: type) type {
         fn workspaceRuntimeObservation(self: *Self, a: std.mem.Allocator, saved: workspace.Runtime) !json.Value {
             var selected = try self.workspaceRuntime(a, saved.task, saved.artifact.digest, saved.program);
             defer selected.deinit();
+            if (!std.meta.eql(saved, selected.record.value)) return error.InvalidRuntime;
             const bundle = selected.admitted.content.value;
             var result = json.object();
             try json.put(a, &result, "runtime", try values.toJson(wc.Ref, a, try wp.reference(a, .runtime, saved.artifact.digest)));
-            try json.put(a, &result, "program", try values.toJson(wc.Ref, a, try wp.reference(a, .program, saved.program)));
+            try json.put(a, &result, "origin_program", try values.toJson(wc.Ref, a, try wp.reference(a, .program, saved.program)));
+            try json.put(a, &result, "guest", json.string(try a.dupe(u8, &std.fmt.bytesToHex(bundle.guest.?, .lower))));
             try json.put(a, &result, "source", json.string(try a.dupe(u8, &std.fmt.bytesToHex(bundle.manifest.source, .lower))));
             try json.put(a, &result, "base", json.string(try a.dupe(u8, bundle.manifest.requirements.base)));
             try json.put(a, &result, "admission", json.string(try a.dupe(u8, bundle.manifest.requirements.admission)));
@@ -6567,13 +6581,15 @@ pub fn Service(comptime Types: type) type {
             defer self.store().rollback();
             const artifact = try self.store().putObject(bytes);
             const id = try workspaceContentCustody(a, task_id, artifact.digest);
-            const saved: workspace.Runtime = .{ .id = id, .task = task_id, .program = program_id, .artifact = artifact };
-            const record_bytes = try contracts.encodeOwned(workspace.Runtime, a, saved);
-            defer a.free(record_bytes);
+            var saved: workspace.Runtime = .{ .id = id, .task = task_id, .program = program_id, .artifact = artifact };
             if (try self.store().recordBytes(a, "workspace_runtime", id, task_id)) |prior| {
                 defer a.free(prior);
-                if (!same(prior, record_bytes)) return error.InvalidRuntime;
+                var existing = try self.workspaceRuntime(a, task_id, artifact.digest, program_id);
+                defer existing.deinit();
+                saved = existing.record.value;
             } else try self.store().createRecord(workspace.Runtime, "workspace_runtime", id, task_id, saved);
+            const record_bytes = try contracts.encodeOwned(workspace.Runtime, a, saved);
+            defer a.free(record_bytes);
             const observation = try self.store().putObject(record_bytes);
             return self.workspaceCommit(a, parent.value, operation_id, request, artifact.digest, .runtime, observation, .{ .specialize = .{ .program = program_id, .hooks = hooks } });
         }
@@ -6637,9 +6653,13 @@ pub fn Service(comptime Types: type) type {
             defer work.deinit();
             if (work.value.outer_operation != null) return error.GuestCutUnavailable;
             if (work.value.realization_revision != command.realization_revision) return error.StaleRevision;
-            if (selected) |item| if (!std.meta.eql(item.record.value.program, work.value.program)) return error.InvalidRuntime;
             var program = try self.workspaceProgram(a, task_id, work.value.program);
             defer program.deinit();
+            if (selected) |item| if (!std.meta.eql(item.record.value.program, work.value.program)) {
+                var origin = try self.workspaceProgram(a, task_id, item.record.value.program);
+                defer origin.deinit();
+                if (!std.meta.eql(origin.value.description.image, program.value.description.image)) return error.InvalidRuntime;
+            };
             const image = try self.store().object(a, program.value.description.image, null);
             defer a.free(image);
             var generic: ?kosmos.Prepared = if (selected == null) try self.program.prepare(self.allocator, image) else null;
@@ -7250,14 +7270,17 @@ pub fn Service(comptime Types: type) type {
             const input = try self.workspaceValueReference(a, parent.id, try wp.reference(a, .value, (value.input_value orelse return error.InvalidArchive).digest));
             if (!std.meta.eql(input.value, value.input) or !std.meta.eql(input.schema, program.value.description.input_schema)) return error.InvalidArchive;
             for (value.inputs.items) |ref| _ = try self.workspaceValueReference(a, parent.id, try wp.reference(a, .value, ref.digest));
-            // The pending outer capsule was checked above. Outcome and PST3
-            // still describe the last published guest cut, so validate that
-            // cut independently without trying to observe an unfinished command.
-            var guest_cut = value;
-            guest_cut.outer_operation = null;
-            const driver = try self.workspaceResident(a, guest_cut);
-            defer self.retire(a) catch self.store().fence();
-            const publication = try driver.drive(a, .none, 0);
+            var prepared = try self.inspectionRuntime(self.allocator, value);
+            defer prepared.deinit();
+            const checkpoint = try self.store().object(a, value.checkpoint, null);
+            defer a.free(checkpoint);
+            var candidate = try kosmos.Session.restore(self.allocator, &prepared, checkpoint);
+            defer candidate.deinit();
+            var finished = try kosmos.invocation.finishPublication(a, &candidate, .receipt, null);
+            defer finished.outcome.deinit();
+            defer self.allocator.free(finished.checkpoint.?);
+            const publication = .{ .outcome = try data.invocation.encodeOwned(data.invocation.Outcome, a, finished.outcome.record), .checkpoint = finished.checkpoint.? };
+            defer a.free(publication.outcome);
             if (!std.meta.eql(storage.digest(publication.outcome), value.outcome.digest) or publication.outcome.len != value.outcome.bytes or
                 !std.meta.eql(storage.digest(publication.checkpoint), value.checkpoint.digest) or publication.checkpoint.len != value.checkpoint.bytes) return error.InvalidArchive;
             var observed = try data.invocation.decode(data.invocation.Outcome, a, publication.outcome);
@@ -8178,16 +8201,15 @@ pub fn Service(comptime Types: type) type {
                 self.placement_job = null;
             }
             self.placement_pending.clearRetainingCapacity();
-            for (0..self.runnable.items.len) |offset| {
-                const id = self.runnable.items[(self.runnable_cursor + offset) % self.runnable.items.len];
+            for (self.owned.items) |id| {
                 // Host suspension drops volatile ownership, not the child's
                 // admitted scheduling intent. Explicit task resume restores
                 // eligible children; a controller work.park remains durable.
-                if (id.work != null) continue;
-                var decoded = try self.task(a, id.task);
+                if (!try self.hasLocalCustody(a, id, null) and !try self.hasFrozenCustody(a, id, null)) continue;
+                var decoded = try self.task(a, id);
                 defer decoded.deinit();
                 var value = decoded.value;
-                if (value.terminal()) continue;
+                if (value.terminal() or value.schedule == .parked) continue;
                 const previous = value.revision;
                 value.revision = try std.math.add(u64, previous, 1);
                 value.schedule = .parked;

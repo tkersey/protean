@@ -18,7 +18,7 @@ import {workspaceMetrics, armViolations, evaluateCase} from '../../tools/evaluat
 // Evaluation arms must reject retained-work control even without a live model.
 {
   const work = tag => ({name: 'work', arguments: {command: {tag}}});
-  const retained = ['inspect', 'park', 'cancel', 'advance', 'interact', 'delegate'].map(work);
+  const retained = ['inspect', 'park', 'cancel', 'advance', 'interact', 'delegate', 'pump', 'request_cut', 'realize'].map(work);
   const completed = [work('wait'), work('collect'), {name: 'work', arguments: {command: {tag: 'start', value: {policy: {stop: 'terminal', continuation: 'owner_scheduled'}}}}}];
   assert.deepEqual(armViolations('pure', [...retained, ...completed]), retained);
   assert.deepEqual(armViolations('retained', retained), []);
@@ -28,6 +28,13 @@ import {workspaceMetrics, armViolations, evaluateCase} from '../../tools/evaluat
     {name: 'context', arguments: {command: {tag: 'materialize', value: {input: {tag: 'guest_view'}}}}}];
   assert.deepEqual(armViolations('generic', [...runtime, ...completed]), runtime);
   assert.deepEqual(armViolations('runtime', runtime), []);
+  const remote = action => ({name: 'placement', arguments: {command: {tag: 'control', value: {command: action.arguments.command}}}});
+  assert.deepEqual(armViolations('pure', [...retained.map(remote), ...completed.map(remote)]), retained.map(remote));
+  assert.deepEqual(armViolations('generic', [remote(work('realize')), remote(work('pump'))]), [remote(work('realize'))]);
+  assert.deepEqual(armViolations('pure', [runtime.at(-1)]), [runtime.at(-1)]);
+  assert.deepEqual(armViolations('retained', [...retained.map(remote), runtime.at(-1)]), []);
+  assert.equal(armViolations('ordinary', completed.map(remote)).length, completed.length);
+  assert.deepEqual(armViolations('pure', [work('start')]), [work('start')]);
 }
 import {contract, assertAdaptiveCaptures} from './adaptive_capture_checks.mjs';
 import {runtimeTrace} from './runtime_trace.mjs';
@@ -865,11 +872,12 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         await app.signal(client.child, 'SIGKILL'); await client.closed; client = null;
         const bundle = join(app.data, 'constructed-tool.bundle');
         await invoke('export-checkpoint', '--state-dir', selectedState, '--task-id', task.task_id, '--output', bundle);
-        selectedState = join(app.data, 'constructed tool imported');
-        assert.equal((await invoke('import-checkpoint', '--state-dir', selectedState, '--input', bundle, '--operation-id', 'constructed-import')).task_id, task.task_id);
-        await launch(['--profile-task', task.task_id], selectedState);
-        const reopened = await client.call('task.status', {task_id: task.task_id});
-        assert.deepEqual(reopened.question, waiting.question); assert.equal(alternateIndex, toolSubject.heldIndex);
+        const copiedState = join(app.data, 'constructed tool imported');
+        assert.equal((await invoke('import-checkpoint', '--state-dir', copiedState, '--input', bundle, '--operation-id', 'constructed-import')).task_id, task.task_id);
+        await launch(['--profile-task', task.task_id], copiedState);
+        const copiedStatus = await client.call('task.status', {task_id: task.task_id});
+        assert.deepEqual(copiedStatus.question, waiting.question); assert.equal(alternateIndex, toolSubject.heldIndex);
+        await assert.rejects(client.call('task.resume', {client_operation_id: 'copy-cannot-resume', task_id: task.task_id, expected_revision: copiedStatus.revision}), error => error.data?.kind === 'StateConflict');
         const exported = readArchive(await readFile(bundle));
         const savedProgram = exported.manifest[6].filter(([kind]) => kind === 8).map(([, , ref]) => decodeValue(exported.schemas.get('workspace_program'), exported.object(ref))).find(record => Buffer.from(record[2][0]).toString('hex') === toolSubject.program.id);
         assert(savedProgram, 'the exact task-owned program survives export');
@@ -892,6 +900,10 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           break;
         }
         assert(privateChecks >= 2, 'raw capture and private projection remain unreadable');
+        assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
+        await launch(['--profile-task', task.task_id], selectedState);
+        const reopened = await client.call('task.status', {task_id: task.task_id});
+        assert.deepEqual(reopened.question, waiting.question);
         await client.call('task.resume', {client_operation_id: 'constructed-resume', task_id: task.task_id, expected_revision: reopened.revision});
         await client.call('task.respond', {client_operation_id: 'constructed-answer', task_id: task.task_id, question_id: waiting.question.question_id,
           question_revision: waiting.question.question_revision, request_digest: waiting.question.request_digest,
@@ -1009,7 +1021,13 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         }
         const metrics = workspaceMetrics(readArchive(archiveBytes), JSON.parse(await readFile(applicationPath, 'utf8')));
         assert.equal(metrics.runtime_specializations_requested, toolSubject.actions.filter(action => action.name === 'program' && action.arguments.command.tag === 'specialize').length);
-        assert.equal(metrics.runtime_switches_requested, toolSubject.actions.filter(action => action.name === 'work' && action.arguments.command.tag === 'realize').length);
+        assert.equal(metrics.runtime_switches_requested, toolSubject.actions.filter(action => (action.name === 'work' && action.arguments.command.tag === 'realize') || (action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize')).length);
+        if (name === 'tools-runtime-guest-mobility') {
+          const transported = metrics.actions.filter(action => action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize');
+          assert(transported.length > 0);
+          assert.equal(armViolations('generic', transported).length, transported.length);
+          assert.equal(armViolations('pure', transported).length, transported.length);
+        }
         assert.equal(metrics.runtime_specialization_nanoseconds, null);
         assert.equal(metrics.runtime_validation_nanoseconds, null);
         if (metrics.runtime_specializations_requested > 0) {

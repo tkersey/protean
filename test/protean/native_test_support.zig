@@ -1,6 +1,16 @@
 //! Shared manifest construction for native test fixtures.
 const std = @import("std");
 
+pub fn expectRetainedReceipt(a: std.mem.Allocator, namespace: anytype, expected: anytype) !void {
+    var rows = try namespace.store.database.prepare("SELECT o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=? AND p.request=?", &.{ .{ .blob = &expected.task }, .{ .blob = &expected.request_digest } });
+    defer rows.deinit();
+    try std.testing.expectEqual(.row, try rows.step());
+    const encoded = try @import("protean").contracts.encodeOwned(@TypeOf(expected), a, expected);
+    defer a.free(encoded);
+    try std.testing.expectEqualSlices(u8, encoded, try rows.bytes(0));
+    try std.testing.expectEqual(.done, try rows.step());
+}
+
 pub fn ownerManifest(a: std.mem.Allocator, image: []const u8, identity: [32]u8, application: []const u8) ![]u8 {
     var image_digest: [32]u8 = undefined;
     var assets_digest: [32]u8 = undefined;

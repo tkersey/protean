@@ -350,14 +350,8 @@ fn checkCaptureImport(a: std.mem.Allocator, frame: std.mem.Allocator, io: std.Io
         const admitted = try imported.importCheckpoint(frame, "import", valid);
         var task = try imported.task(frame, admitted.receipt.task);
         defer task.deinit();
-        _ = try imported.resumeTask(frame, "resume-copied-capture", task.value.id, task.value.revision);
-        for (0..32) |_| {
-            const step = try imported.pump(frame);
-            try std.testing.expect(step != .work);
-            if (step == .waiting or step == .idle) break;
-        }
-        var question = (try imported.pendingQuestion(frame, task_id)) orelse return error.ExpectedQuestion;
-        defer question.deinit();
+        try std.testing.expectError(error.CustodyNotLocal, imported.resumeTask(frame, "resume-copied-capture", task.value.id, task.value.revision));
+        try std.testing.expectEqual(.idle, try imported.pump(frame));
     }
     namespace.* = try native.Namespace.open(a, io, source_path);
     namespace_live.* = true;
@@ -599,23 +593,11 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
                     var saved = try imported_service.task(frame, imported.receipt.task);
                     defer saved.deinit();
                     phase = "resume acquired inbox";
-                    _ = try imported_service.resumeTask(frame, "resume-imported", imported.receipt.task, saved.value.revision);
-                    for (0..32) |_| {
-                        const imported_step = try imported_service.pump(frame);
-                        try std.testing.expect(imported_step != .work);
-                        if (imported_step == .idle) break;
-                    }
-                    var finished = try imported_service.task(frame, imported.receipt.task);
-                    defer finished.deinit();
-                    try std.testing.expect(finished.value.terminal());
-                    const imported_bytes = try imported_namespace.store.object(frame, finished.value.result.?, 128 * 1024);
-                    var imported_output = try protean.contracts.decodeOwned(T.Output, frame, imported_bytes);
-                    defer imported_output.deinit();
-                    phase = "check imported inbox result";
-                    try std.testing.expectEqual(7, imported_output.value.answer);
-                    try std.testing.expect(imported_output.value.inbox == .message);
-                    try std.testing.expectEqual(9, imported_output.value.inbox.message.value);
-                    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(queued_message.receipt.message.?, .lower), imported_output.value.inbox.message.id.bytes);
+                    try std.testing.expectError(error.CustodyNotLocal, imported_service.resumeTask(frame, "resume-imported", imported.receipt.task, saved.value.revision));
+                    try std.testing.expectEqual(.idle, try imported_service.pump(frame));
+                    var copied_message = try protean.contracts.decodeOwned(native.testing.state.Message, frame, (try imported_namespace.store.recordBytes(frame, "message", queued_message.receipt.message.?, imported.receipt.task)).?);
+                    defer copied_message.deinit();
+                    try std.testing.expectEqual(.acquired, copied_message.value.disposition);
                 }
                 phase = "reopen original owner";
                 namespace = try native.Namespace.open(a, io, path);
@@ -1446,19 +1428,10 @@ fn checkCleanupArchiveFact(a: std.mem.Allocator, frame: std.mem.Allocator, io: s
         if (pending) {
             try std.testing.expect(!restored.value.cancellation_applied);
             try std.testing.expectEqualStrings("test cancellation", restored.value.cancellation.?.bytes);
-            const replay = try imported.requestCancel(frame, "cancel-0", id, "test cancellation");
-            try std.testing.expect(replay.replayed);
-            const later = try imported.requestCancel(frame, "later-cancel", id, "different later reason");
-            try std.testing.expect(later.replayed);
-            _ = try imported.resumeTask(frame, "resume-control", id, restored.value.revision);
-            for (0..8) |_| {
-                const step = try imported.pump(frame);
-                try std.testing.expect(step != .work);
-                if (step == .idle) break;
-            }
-            var terminal = try imported.task(frame, id);
-            defer terminal.deinit();
-            try std.testing.expectEqual(.cancelled, terminal.value.outcome_kind);
+            try std.testing.expectError(error.CustodyNotLocal, imported.requestCancel(frame, "cancel-0", id, "test cancellation"));
+            try std.testing.expectError(error.CustodyNotLocal, imported.requestCancel(frame, "later-cancel", id, "different later reason"));
+            try std.testing.expectError(error.CustodyNotLocal, imported.resumeTask(frame, "resume-control", id, restored.value.revision));
+            try std.testing.expectEqual(.idle, try imported.pump(frame));
         } else {
             try std.testing.expectEqual(task.value.outcome_kind, restored.value.outcome_kind);
             var client: native.client.Client(CleanupTypes) = .{ .service = &imported };
@@ -1475,6 +1448,8 @@ fn checkCleanupArchiveFact(a: std.mem.Allocator, frame: std.mem.Allocator, io: s
     service.* = try native.tasks.Service(CleanupTypes).init(a, io, namespace, assets, application, handlers, profile);
     service_live.* = true;
     if (pending) {
+        try std.testing.expect((try service.requestCancel(frame, "cancel-0", id, "test cancellation")).replayed);
+        try std.testing.expect((try service.requestCancel(frame, "later-cancel", id, "different later reason")).replayed);
         var current = try service.task(frame, id);
         defer current.deinit();
         _ = try service.resumeTask(frame, "resume-pending-original", id, current.value.revision);
@@ -1563,12 +1538,9 @@ test "terminal cleanup failures retain allocator-governed shutdown ownership wit
                 var imported_task = try imported_service.task(frame, admitted.receipt.task);
                 defer imported_task.deinit();
                 try std.testing.expect(imported_task.value.cancellation_applied);
-                _ = try imported_service.resumeTask(frame, "resume-cleanup", admitted.receipt.task, imported_task.value.revision);
-                try std.testing.expect(try imported_service.pump(frame) == .progressed);
-                var finished = try imported_service.task(frame, admitted.receipt.task);
-                defer finished.deinit();
-                try std.testing.expectEqual(.cancelled, finished.value.outcome_kind);
-                try std.testing.expect(try imported_service.taskCleanupComplete(frame, finished.value));
+                try std.testing.expectError(error.CustodyNotLocal, imported_service.resumeTask(frame, "resume-cleanup", admitted.receipt.task, imported_task.value.revision));
+                try std.testing.expectEqual(.idle, try imported_service.pump(frame));
+                try std.testing.expect(!try imported_service.taskCleanupComplete(frame, imported_task.value));
             }
             namespace = try native.Namespace.open(a, io, path);
             namespace_live = true;
@@ -2655,12 +2627,13 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
         defer recovery.deinit();
         if (index == 0) {
             try std.testing.expect(recovery.value.outcome == .unresolved and recovery.value.outcome.unresolved == .interrupted);
-            try std.testing.expect((try copied.reconcile(frame, "interrupted-lookup", task_id, interrupt_task.value.revision, interrupted.occurrence, interrupted.attempt, .lookup)).replayed);
+            try std.testing.expectError(error.CustodyNotLocal, copied.reconcile(frame, "interrupted-lookup", task_id, interrupt_task.value.revision, interrupted.occurrence, interrupted.attempt, .lookup));
         } else {
             try std.testing.expect(recovery.value.outcome == .reply_settled and recovery.value.provenance == .authentic);
             try std.testing.expectError(error.ArtifactUnavailable, copied.projectedArtifact(frame, task_id, recovery.value.evidence.?.digest));
-            try std.testing.expect((try copied.reconcile(frame, "lookup", task_id, revision, original.occurrence, original.attempt, .lookup)).replayed);
+            try std.testing.expectError(error.CustodyNotLocal, copied.reconcile(frame, "lookup", task_id, revision, original.occurrence, original.attempt, .lookup));
         }
+        try @import("native_test_support.zig").expectRetainedReceipt(frame, &copied_namespace, if (index == 0) admitted.receipt else admission.receipt);
         try std.testing.expectError(error.ArtifactUnavailable, copied.projectedArtifact(frame, task_id, recovery.value.original_occurrence.digest));
         _ = try copied_namespace.store.auditRetention(handlers, application.image_identity);
         try std.testing.expectEqual(1, fixture.calls.load(.acquire));
@@ -3108,7 +3081,14 @@ fn controllerMicroprogress(comptime moving: bool) !void {
         // Admission records its native receipt without advancing the guest.
         accepted_cut.control += 1;
         try std.testing.expectEqualDeep(accepted_cut, try imported.placementCut(frame, subject));
-    } else _ = try imported.importCheckpoint(frame, "outer-import", bundle);
+    } else {
+        _ = try imported.importCheckpoint(frame, "outer-import", bundle);
+        try std.testing.expectError(error.CustodyNotLocal, imported.requestCancel(frame, "copy-cannot-cancel", submitted.receipt.task, "interrupted"));
+        try imported.close(frame);
+        try destination.close();
+        destination = try native.Namespace.open(a, io, path);
+        imported = try native.tasks.Service(FairTypes).init(failing.allocator(), io, &destination, assets, &application, handlers, destination_profile);
+    }
     var restored = try imported.task(frame, submitted.receipt.task);
     defer restored.deinit();
     try std.testing.expectEqualDeep(original.value.checkpoint, restored.value.checkpoint);

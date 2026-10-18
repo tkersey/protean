@@ -285,6 +285,13 @@ function* mobilityTrace(subject, guestCut = false) {
   work = yield* atPort(work, 4);
   subject.branchValues.push(JSON.parse(work.port.preview.text));
   assert.equal(subject.branchValues[1], '376', 'the second branch starts from the saved cell, not the first branch mutation');
+  if (guestCut) {
+    const beforeSwitch = work.execution_revision;
+    work = yield* command('realize', {expected: expected(work), realization_revision: work.realization_revision, runtime: {tag: 'packaged', value: {}}});
+    assert.equal(work.execution_revision, beforeSwitch);
+    assert.equal(work.runtime, 'packaged-generic');
+    assert.equal(JSON.parse(work.port.preview.text), '376');
+  }
   work = yield* command('cancel', {expected: expected(work), reason: 'Both alternatives are acquired; close the retained parent scope.'});
   work = yield* atPort(work, 5);
   assert.equal(work.port.class, 'observation');

@@ -152,6 +152,7 @@ const Audit = struct {
                 const event = decoded.value;
                 if (!same(&event.task, &task) or event.seq != try rows.integer(1) or event.revision != try rows.integer(2) or event.revision > owner.revision) return error.CorruptState;
                 try self.value(state.Event, ref, event);
+                try state.visitWorkspaceCommand(self.a, self.store, event, self);
             }
         }
         {

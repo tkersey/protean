@@ -371,7 +371,7 @@ pub fn build(b: *std.Build) void {
         const workspace_runtime_tests = native_graph.testModuleFiltered(workspace_runtime_checks, workspace_runtime_module, if (runtime_workspace_group) |group| switch (group) {
             .selection => &.{ "runtime selection", "terminal parent cancellation" },
             .custody => &.{ "native placement carries", "frozen controller" },
-            .succession => &.{"delayed controls"},
+            .succession => &.{ "delayed controls", "controller succession precedes" },
         } else &.{});
         b.step("build-workspace-runtime-check", "Build the retained runtime workspace test executable")
             .dependOn(&b.addInstallArtifact(workspace_runtime_tests, .{

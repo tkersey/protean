@@ -13,7 +13,7 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const json = value => JSON.stringify(value, (_key, v) => typeof v === 'bigint' ? v.toString() : v, 2);
 const arms = {
   ordinary: 'Use ordinary source listing, reading, inspection and reporting. Do not construct programs or use program, work or context actions.',
-  pure: 'You may construct general pure programs and use their completed results as tools. Build with no exposed ports, start with terminal/owner_scheduled policy, wait for completion and collect the results. Do not use work.inspect, work.park, work.cancel, work.advance, work.interact or work.delegate, retained intermediate observations, or branching. Ordinary tools remain available.',
+  pure: 'You may construct general pure programs and use their completed results as tools. Build with no exposed ports, start with terminal/owner_scheduled policy, wait for completion and collect the results. Work actions are limited to start, wait and collect, including when sent through placement.control. Do not materialize guest_view, use retained intermediate observations, or branch. Ordinary tools remain available.',
   retained: 'You may use ordinary tools and the full computational workspace. Whether to construct, retain, expose ports, branch or delegate is your choice.',
 };
 const runtimeArms = {
@@ -28,17 +28,24 @@ if (import.meta.main && !['prepare', 'run'].includes(mode)) {
   process.exit(mode === '--help' || !mode ? 0 : 2);
 }
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+function workspaceAction(action) {
+  const command = action.arguments?.command;
+  return action.name === 'placement' && command?.tag === 'control'
+    ? {name: 'work', command: command.value?.command}
+    : {name: action.name, command};
+}
 export function armViolations(arm, actions) {
   return actions.filter(action => {
     if (arm === 'ordinary') return ['program', 'work', 'context', 'placement'].includes(action.name);
-    const command = action.arguments?.command;
-    if (arm === 'generic') return (action.name === 'program' && command?.tag === 'specialize') ||
-      (action.name === 'work' && (command?.tag === 'realize' || (command?.tag === 'start' && command.value?.runtime?.tag === 'selected'))) ||
-      (action.name === 'context' && command?.tag === 'materialize' && command.value?.input?.tag === 'guest_view');
+    const {name, command} = workspaceAction(action);
+    const guestView = name === 'context' && command?.tag === 'materialize' && command.value?.input?.tag === 'guest_view';
+    if (arm === 'generic') return (name === 'program' && command?.tag === 'specialize') ||
+      (name === 'work' && (command?.tag === 'realize' || (command?.tag === 'start' && command.value?.runtime?.tag === 'selected'))) || guestView;
     if (arm !== 'pure') return false;
-    if (action.name === 'program') return command?.tag === 'build' && command.value?.exposures?.length;
-    if (action.name !== 'work') return false;
-    return ['inspect', 'park', 'cancel', 'advance', 'interact', 'delegate'].includes(command?.tag) ||
+    if (guestView) return true;
+    if (name === 'program') return command?.tag === 'build' && command.value?.exposures?.length;
+    if (name !== 'work') return false;
+    return !['start', 'wait', 'collect'].includes(command?.tag) ||
       (command?.tag === 'start' && (command.value?.policy?.stop !== 'terminal' || command.value?.policy?.continuation !== 'owner_scheduled'));
   });
 }
@@ -128,10 +135,10 @@ export function workspaceMetrics(archive, application) {
   // controller request carries the causal model-call watermark across restart.
   stats.actions = actions.sort((a, b) => a.watermark < b.watermark ? -1 : a.watermark > b.watermark ? 1 : 0).map(item => item.action);
   for (const action of stats.actions) {
-    const command = action.arguments?.command;
-    if (action.name === 'program' && command?.tag === 'specialize') stats.runtime_specializations_requested++;
-    if (action.name === 'work' && command?.tag === 'realize') stats.runtime_switches_requested++;
-    if (action.name === 'context' && command?.tag === 'materialize' && command.value?.input?.tag === 'guest_view') stats.guest_views_requested++;
+    const {name, command} = workspaceAction(action);
+    if (name === 'program' && command?.tag === 'specialize') stats.runtime_specializations_requested++;
+    if (name === 'work' && command?.tag === 'realize') stats.runtime_switches_requested++;
+    if (name === 'context' && command?.tag === 'materialize' && command.value?.input?.tag === 'guest_view') stats.guest_views_requested++;
   }
   for (const [kind, id, reference] of archive.manifest[6]) {
     if (kind === 18) {

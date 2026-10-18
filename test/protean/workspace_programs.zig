@@ -1729,6 +1729,17 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
             service = try native.tasks.Service(WaitTypes).init(a, io, &namespace, assets, &application, handlers, profile);
             service_open = true;
             _ = try service.importCheckpoint(scratch, "import-wait", archive_path);
+            try std.testing.expectError(error.CustodyNotLocal, service.message(scratch, "copy-wait-amendment", parent.receipt.task, selection));
+            try std.testing.expectError(error.CustodyNotLocal, service.resumeTask(scratch, "copy-wait-resume", parent.receipt.task, 1));
+            try std.testing.expectEqual(.idle, std.meta.activeTag(try service.pump(scratch)));
+            try service.close(scratch);
+            service_open = false;
+            try namespace.close();
+            namespace_open = false;
+            namespace = try native.Namespace.open(a, io, path);
+            namespace_open = true;
+            service = try native.tasks.Service(WaitTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+            service_open = true;
             _ = try service.message(scratch, "wait-amendment", parent.receipt.task, selection);
             // Opening the namespace and appending input do not implicitly
             // resume old ownership; the explicit resume restores the wait.
