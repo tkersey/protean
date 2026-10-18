@@ -1,4 +1,4 @@
-name: Targeted native product handoff diagnostic
+name: Native compiled cache diagnostic
 on:
   pull_request:
   push:
@@ -21,11 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [native, native-placement, native-workspace]
+        lane: [native-placement]
         include:
-          - {lane: native, compiled_profile: product}
-          - {lane: native-placement, compiled_profile: product}
-          - {lane: native-workspace, product_consumer: true}
+          - {lane: native-placement, compiled_profile: product, product_consumer: false}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -107,30 +105,12 @@ jobs:
         id: deployment_inputs
         if: matrix.compiled_profile
         run: |
-          # Keep all committed inputs except the audited top-level prose that
-          # no build reads. Embedded Markdown under examples remains an input.
-          # Compiler metadata is normalized; names, modes and bytes are retained.
           compiler_root="$(dirname "$(realpath "$(command -v zig)")")"
           compiler=$(tar -C "$compiler_root" --sort=name --mtime=@0 \
             --owner=0 --group=0 --numeric-owner --dereference -cf - zig lib LICENSE \
             | sha256sum | cut -d' ' -f1)
-          profile="${{ matrix.compiled_profile }}"
-          inputs=$(node --input-type=module <<'JS'
-          import {execFileSync} from 'node:child_process';
-          import {createHash} from 'node:crypto';
-          const tree = execFileSync('git', ['ls-tree', '-r', '-z', 'HEAD']);
-          const hash = createHash('sha256');
-          const prose = ['README.md', 'AGENTS.md'].map(value => Buffer.from(value));
-          for (let start = 0, end; (end = tree.indexOf(0, start)) >= 0; start = end + 1) {
-            const record = tree.subarray(start, end);
-            const path = record.subarray(record.indexOf(9) + 1);
-            if (path.subarray(0, 5).equals(Buffer.from('docs/')) || prose.some(value => path.equals(value))) continue;
-            hash.update(record).update(Buffer.from([0]));
-          }
-          console.log(hash.digest('hex'));
-          JS
-          )
-          echo "key=protean-compiled-v2-$RUNNER_OS-$RUNNER_ARCH-safe-$profile-$inputs-$compiler" >> "$GITHUB_OUTPUT"
+          key=$(node tools/native/qualification_build.mjs key "${{ matrix.compiled_profile }}" "$compiler")
+          echo "key=$key" >> "$GITHUB_OUTPUT"
       - name: Restore exact compiled qualification inputs
         id: deployment_cache
         if: matrix.compiled_profile && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache)
@@ -139,27 +119,32 @@ jobs:
         with:
           path: ${{ runner.temp }}/protean-qualification
           key: ${{ steps.deployment_inputs.outputs.key }}
+      - name: Validate restored compiled qualification inputs
+        id: compiled
+        if: matrix.compiled_profile
+        run: |
+          valid=false
+          if [ "${{ steps.deployment_cache.outputs.cache-hit }}" = true ]; then
+            if node tools/native/qualification_build.mjs verify "${{ matrix.compiled_profile }}" \
+                "$RUNNER_TEMP/protean-qualification" "${{ steps.deployment_inputs.outputs.key }}"; then
+              valid=true
+              echo 'Exact compiled-artifact cache hit; selected checks still execute.'
+            else
+              echo '::warning::Rejected unusable compiled cache; rebuilding the selected artifact.'
+            fi
+          else
+            echo 'Exact compiled-artifact cache miss; selected artifact will build.'
+          fi
+          if [ "$valid" != true ]; then rm -rf "$RUNNER_TEMP/protean-qualification"; fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Build compiled qualification inputs
-        if: matrix.compiled_profile && steps.deployment_cache.outputs.cache-hit != 'true'
+        if: matrix.compiled_profile && steps.compiled.outputs.valid != 'true'
         run: |
           set -o pipefail
-          targets=(protean)
-          selection=()
-          lane="${{ matrix.lane }}"
-          case "$lane" in
-            owners) targets=(build-native-owner-tasks-check) ;;
-            owner-adaptive) targets=(build-native-owner-adaptive-check); selection=(-Dadaptive-owner-group=capture) ;;
-            owner-adaptive-control) targets=(build-native-owner-adaptive-check); selection=(-Dadaptive-owner-group=control) ;;
-            workspace) targets=(build-workspace-general-check); selection=(-Dworkspace-group=execution) ;;
-            workspace-retention) targets=(build-workspace-general-check); selection=(-Dworkspace-group=retention) ;;
-            workspace-history) targets=(build-workspace-general-check); selection=(-Dworkspace-group=history) ;;
-            workspace-runtime) targets=(build-workspace-runtime-check); selection=(-Druntime-workspace-group=selection) ;;
-            workspace-custody) targets=(build-workspace-runtime-check); selection=(-Druntime-workspace-group=custody) ;;
-            workspace-succession) targets=(build-workspace-runtime-check); selection=(-Druntime-workspace-group=succession) ;;
-          esac
-          zig build "${targets[@]}" "${selection[@]}" -Doptimize=safe --summary all \
-            --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
-            2>&1 | tee "$RUNNER_TEMP/$lane-check.log"
+          node tools/native/qualification_build.mjs build "${{ matrix.compiled_profile }}" \
+            "$RUNNER_TEMP/protean-qualification" 2>&1 | tee "$RUNNER_TEMP/${{ matrix.lane }}-check.log"
+          node tools/native/qualification_build.mjs seal "${{ matrix.compiled_profile }}" \
+            "$RUNNER_TEMP/protean-qualification" "${{ steps.deployment_inputs.outputs.key }}"
       - name: Package completed native product
         if: matrix.compiled_profile == 'product'
         run: node tools/native/qualification_product.mjs pack "$RUNNER_TEMP/protean-qualification"
@@ -180,15 +165,30 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Save completed compiled qualification inputs
-        if: matrix.compiled_profile && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.deployment_cache.outputs.cache-hit != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache)
+        if: matrix.compiled_profile && steps.compiled.outputs.valid != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache)
         continue-on-error: true
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ runner.temp }}/protean-qualification
           key: ${{ steps.deployment_inputs.outputs.key }}
+      - name: Remove local compiled outputs before independent cache restoration
+        run: rm -rf "$RUNNER_TEMP/protean-qualification"
+      - name: Restore published compiled outputs
+        id: restored_probe
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: ${{ runner.temp }}/protean-qualification
+          key: ${{ steps.deployment_inputs.outputs.key }}
+          fail-on-cache-miss: true
+      - name: Verify actual restored product before executing its fixture
+        run: |
+          test "${{ steps.restored_probe.outputs.cache-hit }}" = true
+          node tools/native/qualification_build.mjs verify "${{ matrix.compiled_profile }}" \
+            "$RUNNER_TEMP/protean-qualification" "${{ steps.deployment_inputs.outputs.key }}"
+          echo 'Exact compiled-artifact cache restored after deleting the local output directory.'
       - name: Retain completed compiler work before deployment
         id: build_cache_size
-        if: matrix.compiled_profile && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.deployment_cache.outputs.cache-hit != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache)
+        if: matrix.compiled_profile && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.compiled.outputs.valid != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache)
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
@@ -377,7 +377,7 @@ jobs:
           retention-days: 14
       - name: Admit a complete bounded cache snapshot
         id: cache_size
-        if: ${{ !cancelled() && !matrix.product_consumer && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.deployment_cache.outputs.cache-hit != 'true' && steps.build_cache_size.outputs.save != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache) }}
+        if: ${{ !cancelled() && !matrix.product_consumer && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.compiled.outputs.valid != 'true' && steps.build_cache_size.outputs.save != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache) }}
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
