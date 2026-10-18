@@ -180,10 +180,6 @@ const CaptureRecord = struct {
     reconciliation: ?[32]u8,
 };
 
-test "adaptive unload capture recovers under its original plan without another acquisition" {
-    try adaptiveRecovery(false, .none);
-}
-
 test "adaptive copied capture stays parked while its original owner resumes and warms context" {
     try adaptiveRecovery(false, .imported);
 }

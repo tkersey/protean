@@ -388,7 +388,7 @@ three history/cancellation cases;
 the seven runtime cases into three selection/cancellation, two custody and two
 succession cases. These are disjoint filters over the same test roots, with exact
 executed counts checked in CI. The ordinary build targets still run the full roots.
-The 14 adaptive-owner cases similarly divide into three capture-recovery and
+The remaining 13 adaptive-owner cases divide into two capture-recovery and
 eleven control/reconciliation cases; their previous combined job took 589 seconds.
 
 The scripted provider waits for real transfer completion through the public
@@ -685,6 +685,31 @@ These are single-run diagnostics, not variance estimates or deployment-isolation
 qualification. The complete workflow now has nineteen qualification jobs and its
 terminal identity/time gate; final cold and cache-assisted results are recorded
 on the pull request for the exact successor.
+
+The first complete reduced candidate, `2eb7c51`, passed cache-assisted Linux in
+521 seconds (longest job 512) and cold Linux in 598 seconds (longest job 584).
+Cold mobility qualification fell to 109 seconds for the outer case and 169 seconds
+for the guest case. The critical path shifted to adaptive capture recovery:
+296 seconds compiling and 197 seconds executing, plus about 90 seconds of setup
+and other job overhead.
+Two seconds of whole-workflow headroom is insufficient evidence of stable timing.
+
+The plain unload-capture scenario is removed because the copied-capture scenario
+executes the same fourteen-acquisition original-owner trace and all its assertions,
+including continuation under the retained plan, no second acquisition, exact
+control/receipt counts, long transcript retention, bounded archive validation and
+the eighteen-attempt accounting witness. It additionally rejects activation of
+the copied capture and checks warm projection agreement. The report-correction
+scenario independently exercises the ordinary preparation path through the same
+restart before its distinct rejected/large report. The bodies, inputs, expectations
+and limits of both retained cases are unchanged. Their actual Linux runs passed
+in both `2eb7c51` workflows; the duplicate wrapper alone is deleted, and the build
+selection and CI expected count change from three to two. This removes one complete
+recovery trace and its repeated continued-attempt test. The focused safe macOS
+check passed 20/20 steps and both retained tests in 49 seconds of execution.
+The remaining cold authoring job took 544 seconds, so this
+reduction predicts about forty seconds of whole-workflow headroom under the latest
+observed conditions; runner/compiler variation remains a limitation.
 
 `tools/evaluation/workspace.mjs prepare --suite runtime` prepares matched ordinary,
 generic and runtime-optional arms for repetitive work, adaptive exploration and a

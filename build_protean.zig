@@ -521,7 +521,7 @@ pub fn build(b: *std.Build) void {
             suite.root_source_file = b.path(group[1]);
             const checks = b.step("check-native-owner-" ++ group[0], "Qualify native " ++ group[0] ++ " contracts");
             const filters: []const []const u8 = if (comptime std.mem.eql(u8, group[0], "adaptive")) if (adaptive_group) |selected| switch (selected) {
-                .capture => &.{ "adaptive unload capture", "adaptive copied capture", "adaptive report correction" },
+                .capture => &.{ "adaptive copied capture", "adaptive report correction" },
                 .control => &.{ "authored inference", "authored skill", "authored report", "report model arguments", "compiled catalog", "adaptive snapshot", "adaptive provider", "adaptive malformed", "adaptive workspace" },
             } else &.{} else &.{};
             const tests = native_graph.testModuleFiltered(checks, suite, filters);
