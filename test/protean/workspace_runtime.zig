@@ -872,6 +872,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
                     prior_report = result.value;
                     prior_command = selected_command;
                     if (selected_command.value.command == .park) {
+                        try std.testing.expect(result.value.value.work_state.?.park_complete);
                         var parked_child = try closing_executor.workspaceWork(scratch, subject.task, work_id);
                         defer parked_child.deinit();
                         try std.testing.expectEqual(.parked, parked_child.value.schedule);

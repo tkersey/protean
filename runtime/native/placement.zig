@@ -112,6 +112,11 @@ pub const WorkState = struct {
     cleanup_complete: bool,
     cancellation: ?state.Reason,
     explicitly_parked: bool = false,
+    park_complete: bool = false,
+
+    pub fn parkSettled(self: WorkState) bool {
+        return self.cancellation == null and self.explicitly_parked and self.park_complete;
+    }
 };
 pub const Report = struct {
     control: Digest,
@@ -370,6 +375,14 @@ pub fn accept(a: std.mem.Allocator, site: Site, imported: Custody, offer: Signed
 
 test "bilateral placement freezes across lost acceptance and binds namespace, cut and disposition" {
     const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |cancelled| {
+        for ([_]bool{ false, true }) |parked| {
+            for ([_]bool{ false, true }) |settled| {
+                const observed: WorkState = .{ .observed_at = 1, .execution_revision = 1, .control_revision = 1, .outcome = .requested, .cleanup_complete = false, .cancellation = if (cancelled) .{ .bytes = "stop" } else null, .explicitly_parked = parked, .park_complete = settled };
+                try std.testing.expectEqual(!cancelled and parked and settled, observed.parkSettled());
+            }
+        }
+    }
     const source_key = try Ed25519.KeyPair.generateDeterministic(@splat(1));
     const destination_key = try Ed25519.KeyPair.generateDeterministic(@splat(2));
     const source: Site = .{ .key = source_key.public_key.toBytes(), .namespace = @splat(3) };

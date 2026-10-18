@@ -350,28 +350,32 @@ pub fn Service(comptime Types: type) type {
                         if (!remoteDisposed(observed)) return false;
                     } else if (require_park) {
                         const observed = if (remote.latest) |saved| saved.value.report.?.value.work_state.? else return false;
-                        if (!remoteDisposed(observed) and !(observed.cancellation == null and observed.explicitly_parked)) return false;
+                        if (!remoteDisposed(observed) and !observed.parkSettled()) return false;
                     }
                     continue;
                 }
                 var child = try self.retainedWorkspaceWork(temporary, task_id, id);
                 defer child.deinit();
-                if (child.value.terminal()) {
-                    const outcome_bytes = try self.store().object(temporary, child.value.outcome, null);
-                    defer temporary.free(outcome_bytes);
-                    var outcome = try data.invocation.decode(data.invocation.Outcome, temporary, outcome_bytes);
-                    defer outcome.deinit();
-                    if (!cleanupComplete(outcome.value)) return false;
-                } else {
-                    if (require_disposal or child.value.cancellation != null or (require_park and child.value.schedule != .parked)) return false;
-                    if (child.value.current_occurrence) |current| {
-                        var pending = try self.record(occurrence.Occurrence, temporary, "occurrence", current, task_id);
-                        defer pending.deinit();
-                        switch (pending.value.state) {
-                            .dispatching, .unknown, .captured, .settled_reply => return false,
-                            else => {},
-                        }
-                    }
+                if (!try self.workspaceWorkSettled(temporary, child.value, require_disposal, require_park)) return false;
+            }
+            return true;
+        }
+
+        fn workspaceWorkSettled(self: *Self, a: std.mem.Allocator, child: workspace.Work, require_disposal: bool, require_park: bool) !bool {
+            if (child.terminal()) {
+                const outcome_bytes = try self.store().object(a, child.outcome, null);
+                defer a.free(outcome_bytes);
+                var outcome = try data.invocation.decode(data.invocation.Outcome, a, outcome_bytes);
+                defer outcome.deinit();
+                return cleanupComplete(outcome.value);
+            }
+            if (require_disposal or child.cancellation != null or (require_park and child.schedule != .parked)) return false;
+            if (child.current_occurrence) |current| {
+                var pending = try self.record(occurrence.Occurrence, a, "occurrence", current, child.task);
+                defer pending.deinit();
+                switch (pending.value.state) {
+                    .dispatching, .unknown, .captured, .settled_reply => return false,
+                    else => {},
                 }
             }
             return true;
@@ -3611,7 +3615,7 @@ pub fn Service(comptime Types: type) type {
             const outcome_bytes = try self.store().object(scratch.allocator(), observed_work.value.outcome, null);
             var outcome = try data.invocation.decode(data.invocation.Outcome, scratch.allocator(), outcome_bytes);
             defer outcome.deinit();
-            const observed: p.WorkState = .{ .observed_at = observed_parent.value.event_high, .execution_revision = observed_work.value.execution_revision, .control_revision = observed_work.value.control_revision, .outcome = observed_work.value.outcome_kind, .cleanup_complete = cleanupComplete(outcome.value), .cancellation = observed_work.value.cancellation, .explicitly_parked = try self.workspaceExplicitlyParked(a, observed_work.value) };
+            const observed: p.WorkState = .{ .observed_at = observed_parent.value.event_high, .execution_revision = observed_work.value.execution_revision, .control_revision = observed_work.value.control_revision, .outcome = observed_work.value.outcome_kind, .cleanup_complete = cleanupComplete(outcome.value), .cancellation = observed_work.value.cancellation, .explicitly_parked = try self.workspaceExplicitlyParked(a, observed_work.value), .park_complete = try self.workspaceWorkSettled(a, observed_work.value, false, true) };
             const report = try p.sign(p.Report, a, self.profile.placement.?.signing_key, .{ .control = try p.digest(p.Control, a, value), .executor = site, .custody_epoch = head.epoch, .reply = reply, .work_state = observed });
             const result = try contracts.encodeOwned(p.Signed(p.Report), a, report);
             errdefer a.free(result);
