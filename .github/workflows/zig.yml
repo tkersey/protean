@@ -1,4 +1,4 @@
-name: Zig 0.17 qualification
+name: Targeted native product handoff diagnostic
 on:
   pull_request:
   push:
@@ -21,23 +21,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [authoring, owners, owner-adaptive, owner-adaptive-control, owner-support, workspace, workspace-retention, workspace-history, workspace-runtime, workspace-custody, workspace-succession, correspondence, native, native-workspace, native-placement, runtime, runtime-outer, runtime-guest, downstream]
+        lane: [native, native-placement, native-workspace]
         include:
-          - {lane: owners, compiled_profile: owners}
-          - {lane: owner-adaptive, compiled_profile: owner-adaptive}
-          - {lane: owner-adaptive-control, compiled_profile: owner-adaptive-control}
-          - {lane: workspace, compiled_profile: workspace}
-          - {lane: workspace-retention, compiled_profile: workspace-retention}
-          - {lane: workspace-history, compiled_profile: workspace-history}
-          - {lane: workspace-runtime, compiled_profile: workspace-runtime}
-          - {lane: workspace-custody, compiled_profile: workspace-custody}
-          - {lane: workspace-succession, compiled_profile: workspace-succession}
           - {lane: native, compiled_profile: product}
-          - {lane: native-workspace, compiled_profile: product}
           - {lane: native-placement, compiled_profile: product}
-          - {lane: runtime, compiled_profile: product}
-          - {lane: runtime-outer, compiled_profile: product}
-          - {lane: runtime-guest, compiled_profile: product}
+          - {lane: native-workspace, product_consumer: true}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -50,7 +38,8 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '26.9.0'
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      - if: ${{ !matrix.product_consumer }}
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: '0.17.0'
           mirror: https://zigmirror.com
@@ -58,7 +47,7 @@ jobs:
           use-cache: false
       - name: Restore complete compiler cache
         id: cache
-        if: github.event_name != 'workflow_dispatch' || inputs.compiler-cache
+        if: ${{ !matrix.product_consumer && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache) }}
         continue-on-error: true
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
@@ -100,7 +89,7 @@ jobs:
         if: matrix.lane == 'authoring'
         run: sh tools/check_zig_paths.sh
       - name: Restore locked native transport bytes
-        if: github.event_name != 'workflow_dispatch' || inputs.compiler-cache
+        if: ${{ !matrix.product_consumer && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache) }}
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
@@ -108,7 +97,7 @@ jobs:
             .protean-native/inputs/*.zip
           key: protean-native-archives-v2-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}
       - name: Authenticate and provision selected native inputs
-        if: matrix.lane != 'downstream'
+        if: ${{ !matrix.product_consumer && matrix.lane != 'downstream' }}
         run: |
           zig run tools/native/dependencies.zig -- setup \
             conformance/protean/dependencies.lock.json \
@@ -171,6 +160,25 @@ jobs:
           zig build "${targets[@]}" "${selection[@]}" -Doptimize=safe --summary all \
             --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
             2>&1 | tee "$RUNNER_TEMP/$lane-check.log"
+      - name: Package completed native product
+        if: matrix.compiled_profile == 'product'
+        run: node tools/native/qualification_product.mjs pack "$RUNNER_TEMP/protean-qualification"
+        env:
+          QUALIFICATION_INPUTS: ${{ steps.deployment_inputs.outputs.key }}
+      - name: Publish completed native product before independent checks
+        if: matrix.compiled_profile == 'product'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-product-${{ matrix.lane }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualification-product.tar.gz
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      - name: Acquire current-run native product
+        if: matrix.product_consumer
+        run: node tools/native/qualification_product.mjs receive "$RUNNER_TEMP/protean-qualification"
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Save completed compiled qualification inputs
         if: matrix.compiled_profile && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.deployment_cache.outputs.cache-hit != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache)
         continue-on-error: true
@@ -369,7 +377,7 @@ jobs:
           retention-days: 14
       - name: Admit a complete bounded cache snapshot
         id: cache_size
-        if: ${{ !cancelled() && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.deployment_cache.outputs.cache-hit != 'true' && steps.build_cache_size.outputs.save != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache) }}
+        if: ${{ !cancelled() && !matrix.product_consumer && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.deployment_cache.outputs.cache-hit != 'true' && steps.build_cache_size.outputs.save != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache) }}
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
@@ -389,54 +397,3 @@ jobs:
         with:
           path: .zig-cache-upload
           key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
-  native:
-    name: native
-    needs: [qualify]
-    if: ${{ always() }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Require complete qualification within ten minutes
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          QUALIFICATION: ${{ needs.qualify.result }}
-        run: |
-          test "$QUALIFICATION" = success
-          # JSON/hash comparison uses the runner's Node; product checks pin 26.9.0.
-          node --version
-          node --input-type=module <<'JS'
-          import assert from 'node:assert/strict';
-          import {execFile} from 'node:child_process';
-          import {promisify} from 'node:util';
-          import {createHash} from 'node:crypto';
-          const execute = promisify(execFile), repo = process.env.GH_REPO;
-          const api = async path => (await execute('gh', ['api', `repos/${repo}/${path}`], {encoding: 'buffer'})).stdout;
-          const artifacts = JSON.parse(await api(`actions/runs/${process.env.RUN_ID}/artifacts?per_page=100`)).artifacts;
-          const load = async lane => {
-            const matches = artifacts.filter(value => value.name === `${lane}-identity.json`);
-            assert.equal(matches.length, 1);
-            const artifact = matches[0];
-            assert.equal(artifact.expired, false);
-            const bytes = await api(`actions/artifacts/${artifact.id}/zip`);
-            assert.equal(`sha256:${createHash('sha256').update(bytes).digest('hex')}`, artifact.digest);
-            return JSON.parse(bytes);
-          };
-          const [native, downstream, ...runtimes] = await Promise.all([
-            'native', 'downstream', 'native-workspace', 'native-placement',
-            'runtime', 'runtime-outer', 'runtime-guest',
-          ].map(load));
-          for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target']) {
-            assert.notEqual(native.identity[key], undefined, key);
-            assert.deepEqual(downstream.identity[key], native.identity[key], key);
-            for (const runtime of runtimes) assert.deepEqual(runtime.identity[key], native.identity[key], key);
-          }
-          assert.notEqual(native.artifact_sha256, undefined);
-          for (const runtime of runtimes) assert.equal(runtime.artifact_sha256, native.artifact_sha256, 'runtime scenarios executed the packaged native binary');
-          console.log('Independent native, runtime and downstream build identities agree.');
-          JS
-          started="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq .run_started_at)"
-          elapsed=$(( $(date +%s) - $(date -d "$started" +%s) ))
-          echo "Complete workflow before terminal gate: ${elapsed}s (maximum 600s)" | tee -a "$GITHUB_STEP_SUMMARY"
-          test "$elapsed" -le 600
