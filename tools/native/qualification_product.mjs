@@ -15,11 +15,12 @@ const context = {source, run: process.env.GITHUB_RUN_ID, attempt: process.env.GI
 assert(directory && /^[0-9]+$/.test(context.run) && /^[0-9]+$/.test(context.attempt));
 
 if (operation === 'pack') {
-  const inputs = process.env.QUALIFICATION_INPUTS;
+  const inputs = process.env.QUALIFICATION_INPUTS, lane = process.env.QUALIFICATION_LANE;
+  assert(['native', 'native-placement'].includes(lane));
   assert(inputs?.startsWith('protean-compiled-v2-') && inputs.includes('-safe-product-'));
   const hashes = Object.fromEntries(await Promise.all(files.map(async file => [file, sha256(await readFile(join(directory, file)))])));
   await writeFile(join(directory, metadata), JSON.stringify({format: 'protean-qualification-product/v1', context, inputs, hashes}));
-  await execute('tar', ['-czf', join(process.env.RUNNER_TEMP, 'qualification-product.tar.gz'), '-C', directory, ...members]);
+  await execute('tar', ['-czf', join(process.env.RUNNER_TEMP, `native-product-${lane}-${context.attempt}.tar.gz`), '-C', directory, ...members]);
 } else {
   assert.equal(operation, 'receive');
   const repo = process.env.GITHUB_REPOSITORY;
@@ -28,7 +29,7 @@ if (operation === 'pack') {
   assert.equal(String(run.id), context.run);
   assert.equal(String(run.run_attempt), context.attempt);
   const deadline = Date.parse(run.created_at) + 600_000;
-  const names = ['native', 'native-placement'].map(lane => `native-product-${lane}-${context.attempt}`);
+  const names = ['native', 'native-placement'].map(lane => `native-product-${lane}-${context.attempt}.tar.gz`);
   let artifact;
   while (Date.now() < deadline) {
     const inventory = JSON.parse(await api(`actions/runs/${context.run}/artifacts?per_page=100`, Math.max(1, deadline - Date.now())));

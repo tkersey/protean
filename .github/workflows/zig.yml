@@ -165,12 +165,12 @@ jobs:
         run: node tools/native/qualification_product.mjs pack "$RUNNER_TEMP/protean-qualification"
         env:
           QUALIFICATION_INPUTS: ${{ steps.deployment_inputs.outputs.key }}
+          QUALIFICATION_LANE: ${{ matrix.lane }}
       - name: Publish completed native product before independent checks
         if: matrix.compiled_profile == 'product'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: native-product-${{ matrix.lane }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/qualification-product.tar.gz
+          path: ${{ runner.temp }}/native-product-${{ matrix.lane }}-${{ github.run_attempt }}.tar.gz
           archive: false
           if-no-files-found: error
           retention-days: 14
