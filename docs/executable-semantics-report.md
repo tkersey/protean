@@ -356,7 +356,7 @@ or undisclosed authority, another principal, and fresh-operation denial. An
 ordinary imported copy returns its retained build receipt while denying a new
 build. Existing cancellation and recovery fixtures also check imported receipts
 without granting execution or recovery-worker authority. The expanded Safe-mode
-run passes all 78 tests across the full runtime, native task owner and adaptive
+run at `8a4b33b` passed all 78 tests across the full runtime, native task owner and adaptive
 capture/recovery roots; the frozen-controller fixture also passes on Linux.
 
 Six earlier assertions expected custody rejection for exact, already admitted
@@ -366,6 +366,33 @@ require retained receipt replay, alongside added fresh-operation rejection and
 unchanged-store checks. Existing recovery acquisition counts, retained evidence,
 private-artifact denials and idle-copy checks remain. Full current qualification
 and serial-review results are recorded on the pull request.
+
+### Frozen controller recovery and current placement authority
+
+Frozen custody suspends execution while retaining the controller's recovery
+obligation. Settling the last local child now releases launch ownership only
+after the frozen or local controller is terminal and its associated cleanup is
+complete. A remote controller still permits release when this launch's local
+work is disposed. If cancel-mode shutdown starts while the controller is frozen,
+subsequent restoration cannot turn an uncancelled, nonterminal root into a
+successful shutdown. Parking preserves that root and reports incomplete cleanup;
+it does not silently select another controller action.
+
+Private placement archives, outbound controls and cached reports now obtain the
+existing current task grant before private closure access, publication or return.
+Physical signatures, custody epochs and peer disclosure checks remain independent
+requirements. Exact historical receipts remain readable by an authorized caller
+after custody changes, without granting new execution authority. The frozen
+snapshot remains the exported snapshot even when independent local work advances.
+
+The expanded runtime fixtures failed on unchanged production code: both abort
+and refusal cases lost frozen controller ownership when the last child settled,
+and foreign-authority placement calls exported an archive. With the corrections,
+all 10 runtime tests and 18 build steps pass in Safe mode. The assertions cover
+both restoration outcomes, actual cancellation completion, truthful incomplete
+shutdown, principal and tenant denial for new and retained offers/controls/reports,
+unchanged durable state on denial, and legitimate exact replay after succession.
+The existing explicit-park and retained-receipt assertions remain in place.
 
 ## Qualification latency measurements
 
@@ -802,8 +829,9 @@ about 526 seconds after workflow creation in both runs.
 
 Two existing jobs, native controls and native placement, now publish the completed
 native executable and generated adaptive application before their independent
-checks and cache uploads. Four consumers use the first authenticated product
-available from the same run and attempt instead of independently compiling it.
+checks and cache uploads. Four consumers use an authenticated product available
+from the same run instead of independently compiling it. Selection prefers the
+newest available producer attempt no later than the current consumer attempt.
 The bundle binds the actual checkout and complete compiled-input identity;
 archive and file digests are checked before the consumer directory is published.
 Only immutable preparation is shared. Every consumer still creates and cleans its
@@ -818,7 +846,7 @@ producer/attempt filename was then authenticated and retrieved while its produce
 continued testing and the second producer was still compiling. The corrected
 cache-assisted diagnostic passed all three jobs in 320 seconds; workspace executed
 its complete 43-call reuse trace. Local checks reject a changed archive digest,
-run attempt, checkout or file body without publishing consumer output. These are
+current consumer attempt, checkout or file body without publishing consumer output. These are
 mechanism checks, not complete qualification or a cold-timing claim. Applicable
 macOS proof is retained because production and fixture inputs are unchanged;
 final qualification results for the complete successor are recorded on the pull
@@ -829,6 +857,19 @@ The product consumer uses the current attempt's `run_started_at` for its existin
 across GitHub reruns and could reject a fresh attempt immediately. A targeted Linux
 check reproduces that rejection and verifies that the correction admits the fresh
 attempt while rejecting an expired attempt; all digest and context checks remain.
+
+Partial failed-job reruns can retain successful producer jobs from an earlier
+attempt. The consumer now authenticates the producer attempt in both the artifact
+name and embedded manifest, while separately requiring its own attempt to match
+the current provider run. This permits reuse without waiting for an unscheduled
+producer. A local before/after probe reproduced the former rejection and then
+passed 14 cases using the real packaging and receiving helper with mocked provider
+responses: both producer lanes work on current and earlier attempts; stale
+consumers, future products, mismatched source/run/head/embedded attempt, corrupted
+archive or file hashes, expired artifacts and expired deadlines reject without
+publishing consumer output. This is transport-mechanism evidence, not a claim that
+a hosted partial rerun was executed. The ordinary complete workflow remains the
+platform and resource qualification gate.
 
 The normal cache path keys compiled outputs by the selected build recipe, compiler
 contents, native target/environment, dependency locks, build configuration, shared

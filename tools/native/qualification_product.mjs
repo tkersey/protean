@@ -29,15 +29,19 @@ if (operation === 'pack') {
   assert.equal(String(run.id), context.run);
   assert.equal(String(run.run_attempt), context.attempt);
   const deadline = Date.parse(run.run_started_at) + 600_000;
-  const names = ['native', 'native-placement'].map(lane => `native-product-${lane}-${context.attempt}.tar.gz`);
-  let artifact;
+  let artifact, producerAttempt;
   while (Date.now() < deadline) {
     const inventory = JSON.parse(await api(`actions/runs/${context.run}/artifacts?per_page=100`, Math.max(1, deadline - Date.now())));
     assert(inventory.total_count <= 100);
-    const matches = inventory.artifacts.filter(value => names.includes(value.name));
-    assert.equal(new Set(matches.map(value => value.name)).size, matches.length);
+    const matches = inventory.artifacts.flatMap(value => {
+      const attempt = /^native-product-(?:native|native-placement)-([1-9][0-9]*)\.tar\.gz$/.exec(value.name)?.[1];
+      return attempt && BigInt(attempt) <= BigInt(context.attempt) ? [{value, attempt}] : [];
+    });
+    assert.equal(new Set(matches.map(item => item.value.name)).size, matches.length);
     if (matches.length) {
-      artifact = matches.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id)[0];
+      const selected = matches.sort((a, b) => BigInt(a.attempt) > BigInt(b.attempt) ? -1 : BigInt(a.attempt) < BigInt(b.attempt) ? 1 : a.value.created_at.localeCompare(b.value.created_at) || a.value.id - b.value.id)[0];
+      artifact = selected.value;
+      producerAttempt = selected.attempt;
       break;
     }
     await delay(Math.min(2000, Math.max(1, deadline - Date.now())));
@@ -57,10 +61,10 @@ if (operation === 'pack') {
   await execute('tar', ['-xzf', archive, '-C', incoming]);
   const saved = JSON.parse(await readFile(join(incoming, metadata), 'utf8'));
   assert.equal(saved.format, 'protean-qualification-product/v1');
-  assert.deepEqual(saved.context, context);
+  assert.deepEqual(saved.context, {...context, attempt: producerAttempt});
   assert(saved.inputs.startsWith('protean-compiled-v3-') && saved.inputs.includes('-safe-product-'));
   assert.deepEqual(Object.keys(saved.hashes).sort(), [...files].sort());
   for (const file of files) assert.equal(sha256(await readFile(join(incoming, file))), saved.hashes[file]);
   await rename(incoming, directory);
-  console.log(JSON.stringify({qualification_product: artifact.name, artifact_digest: artifact.digest, artifact_id: artifact.id, source, received_at: new Date().toISOString()}));
+  console.log(JSON.stringify({qualification_product: artifact.name, artifact_digest: artifact.digest, artifact_id: artifact.id, source, producer_attempt: producerAttempt, consumer_attempt: context.attempt, received_at: new Date().toISOString()}));
 }

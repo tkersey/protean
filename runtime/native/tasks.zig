@@ -394,7 +394,7 @@ pub fn Service(comptime Types: type) type {
                         var outcome = try data.invocation.decode(data.invocation.Outcome, a, bytes);
                         defer outcome.deinit();
                         if (!cleanupComplete(outcome.value)) return true;
-                    } else if (try self.status(a, value) == .unknown or value.cancellation != null) return true;
+                    } else if (self.shutdown_cancel_requested or try self.status(a, value) == .unknown or value.cancellation != null) return true;
                 }
                 if (!try self.workspaceSettled(a, id, self.shutdown_cancel_requested or (controller and value.cancellation != null), controller, controller and value.terminal())) return true;
             }
@@ -3438,7 +3438,8 @@ pub fn Service(comptime Types: type) type {
         /// needs the launch's current policy. The temporary object lets the
         /// policy inspect the exact bytes, without publishing a new operation.
         fn placementAuthorizeMessage(self: *Self, a: std.mem.Allocator, peer: @import("placement.zig").Peer, subject: @import("placement.zig").Subject, message_bytes: []const u8) !void {
-            try self.allowed();
+            var parent = try self.task(a, subject.task);
+            defer parent.deinit();
             var scratch = std.heap.ArenaAllocator.init(a);
             defer scratch.deinit();
             const closure = try archive_api.disclosureClosure(scratch.allocator(), self.store(), subject.task);
@@ -3453,6 +3454,8 @@ pub fn Service(comptime Types: type) type {
         // The message's exact bytes join the current private task closure.
         // Disclosure admission happens before publication and transport.
         fn placementPutControl(self: *Self, a: std.mem.Allocator, peer: @import("placement.zig").Peer, record_value: @import("placement.zig").ControlRecord, message_bytes: []const u8, label: []const u8) !void {
+            var parent = try self.task(a, record_value.task);
+            defer parent.deinit();
             var scratch = std.heap.ArenaAllocator.init(a);
             defer scratch.deinit();
             const closure = try archive_api.disclosureClosure(scratch.allocator(), self.store(), record_value.task);
@@ -3935,7 +3938,8 @@ pub fn Service(comptime Types: type) type {
         pub fn placementOffer(self: *Self, a: std.mem.Allocator, subject: @import("placement.zig").Subject, peer_name: []const u8, path: []const u8) !@import("placement.zig").Signed(@import("placement.zig").Offer) {
             const p = @import("placement.zig");
             const journal = @import("placement_journal.zig");
-            try self.allowed();
+            var parent = try self.task(a, subject.task);
+            defer parent.deinit();
             const peer = try self.placementPeer(peer_name);
             var saved = try journal.custody(self.store(), a, subject) orelse return error.InvalidTransfer;
             defer saved.deinit();
@@ -7534,7 +7538,7 @@ pub fn Service(comptime Types: type) type {
                 try self.store().putReceipt(&key, request, bytes);
             }
             try self.runnable.ensureUnusedCapacity(self.allocator, 2);
-            const disposed = if (try self.hasLocalCustody(a, parent.id, null))
+            const disposed = if (try self.hasLocalCustody(a, parent.id, null) or try self.hasFrozenCustody(a, parent.id, null))
                 parent.terminal() and try self.taskCleanupComplete(a, parent)
             else
                 try self.workspaceSettled(a, parent.id, true, false, false);

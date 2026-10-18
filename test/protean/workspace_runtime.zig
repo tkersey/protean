@@ -484,6 +484,14 @@ test "frozen controller retains its exact cut while local work advances" {
     try placementCase(.root);
 }
 
+test "frozen controller retains cancellation and shutdown obligations after abort" {
+    try placementCase(.root_cancel_abort);
+}
+
+test "frozen controller retains cancellation and shutdown obligations after refusal" {
+    try placementCase(.root_cancel_refused);
+}
+
 test "controller succession precedes a frozen child's offer and follows its eventual executor" {
     try placementCase(.preoffer);
 }
@@ -500,7 +508,7 @@ test "terminal parent cancellation resumes after a signed refusal" {
     try placementCase(.cancel_refused);
 }
 
-fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward, cancel_abort, cancel_refused }) !void {
+fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward, cancel_abort, cancel_refused, root_cancel_abort, root_cancel_refused }) !void {
     var phase: []const u8 = "setup";
     var attack_index: usize = 0;
     errdefer std.debug.print("placement {s}: {s} ({d})\n", .{ @tagName(scenario), phase, attack_index });
@@ -635,6 +643,69 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     const destination_config: p.Configuration = .{ .signing_key = destination_key, .peers = &destination_peers };
     const successor_config: p.Configuration = .{ .signing_key = successor_key, .peers = &successor_peers };
     sender.profile.placement = &source_config;
+    if (scenario == .root_cancel_abort or scenario == .root_cancel_refused) {
+        phase = "settle local child while cancelling controller is frozen";
+        const controller: p.Subject = .{ .task = subject.task };
+        _ = try sender.requestCancel(scratch, "cancel-controller", subject.task, "stop");
+        _ = try sender.placementFreeze(scratch, controller, "destination", try sender.placementCut(scratch, controller), @splat(71));
+        var refusal: ?p.Signed(p.Decision) = null;
+        if (scenario == .root_cancel_refused) {
+            const frozen_path = try std.fmt.allocPrint(scratch, "{s}/cancelled-controller.par", .{path_buffer[0..length]});
+            const frozen_offer = try sender.placementOffer(scratch, controller, "destination", frozen_path);
+            refusal = try p.sign(p.Decision, scratch, destination_key, .{ .transfer = frozen_offer.value.intent.transfer, .offer_digest = try p.digest(p.Offer, scratch, frozen_offer.value), .source = source_site, .destination = destination_site, .epoch = frozen_offer.value.intent.epoch + 1, .verdict = .{ .refused = .withdrawn } });
+        }
+        _ = try sender.workspaceControl(scratch, "settle-controller-child", subject.task, work_id, cut.execution, cut.control, .{ .cancel = .{ .bytes = "stop" } });
+        var child_disposed = false;
+        for (0..512) |_| {
+            _ = try sender.pump(scratch);
+            var current = try sender.workspaceWork(scratch, subject.task, work_id);
+            defer current.deinit();
+            if (current.value.terminal()) {
+                try std.testing.expectEqual(.cancelled, current.value.outcome_kind);
+                child_disposed = true;
+                break;
+            }
+        }
+        try std.testing.expect(child_disposed);
+        try std.testing.expectEqual(.frozen, (try sender.placementStatus(scratch, controller)).?.phase);
+        try std.testing.expectEqual(@as(usize, 1), sender.owned.items.len);
+        try std.testing.expect(try sender.shutdownIncomplete(scratch));
+        if (refusal) |decision| try sender.placementApplyDecision(scratch, controller, decision) else try sender.placementAbortUnsent(scratch, controller, @splat(71));
+        var root_disposed = false;
+        for (0..512) |_| {
+            _ = try sender.pump(scratch);
+            var current = try sender.task(scratch, subject.task);
+            defer current.deinit();
+            if (try sender.taskCleanupComplete(scratch, current.value)) {
+                try std.testing.expectEqual(.cancelled, current.value.outcome_kind);
+                root_disposed = true;
+                break;
+            }
+        }
+        try std.testing.expect(root_disposed);
+        try std.testing.expect(!try sender.shutdownIncomplete(scratch));
+        phase = "cancel shutdown observes a restored uncancelled controller";
+        const shutdown_root = try sender.submit(scratch, "shutdown-controller", .{ 25, 5 });
+        const shutdown_subject: p.Subject = .{ .task = shutdown_root.receipt.task };
+        _ = try sender.placementFreeze(scratch, shutdown_subject, "destination", try sender.placementCut(scratch, shutdown_subject), @splat(72));
+        refusal = null;
+        if (scenario == .root_cancel_refused) {
+            const frozen_path = try std.fmt.allocPrint(scratch, "{s}/shutdown-controller.par", .{path_buffer[0..length]});
+            const frozen_offer = try sender.placementOffer(scratch, shutdown_subject, "destination", frozen_path);
+            refusal = try p.sign(p.Decision, scratch, destination_key, .{ .transfer = frozen_offer.value.intent.transfer, .offer_digest = try p.digest(p.Offer, scratch, frozen_offer.value), .source = source_site, .destination = destination_site, .epoch = frozen_offer.value.intent.epoch + 1, .verdict = .{ .refused = .withdrawn } });
+        }
+        try sender.cancelOwned(scratch, "shutdown-probe", "stop");
+        try std.testing.expect(try sender.shutdownIncomplete(scratch));
+        if (refusal) |decision| try sender.placementApplyDecision(scratch, shutdown_subject, decision) else try sender.placementAbortUnsent(scratch, shutdown_subject, @splat(72));
+        try sender.park(scratch);
+        var parked = try sender.task(scratch, shutdown_subject.task);
+        defer parked.deinit();
+        try std.testing.expect(!parked.value.terminal());
+        try std.testing.expect(parked.value.cancellation == null);
+        try std.testing.expectEqual(.parked, parked.value.schedule);
+        try std.testing.expect(try sender.shutdownIncomplete(scratch));
+        return;
+    }
     if (scenario == .queued) {
         source_peers[0].channel = .{ .argv = &.{"/usr/bin/false"}, .remote_name = "source" };
         const queued_move = try sender.workspaceCommand(scratch, "queue-before-progress", subject.task, .{ .placement = .{ .move = .{ .operation = .{ .bytes = "queued-work" }, .subject = .{ .work = work_ref }, .site = .{ .bytes = "destination" }, .custody_epoch = 0 } } });
@@ -1129,6 +1200,14 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     }
     try std.testing.expectError(error.CustodyNotLocal, sender.workspaceControl(scratch, "source-must-stop", subject.task, work_id, cut.execution, cut.control, .advance));
     const archive_path = try std.fmt.allocPrint(scratch, "{s}/transfer.par", .{path_buffer[0..length]});
+    inline for (.{ "principal", "tenant" }) |field| {
+        const authority = sender.profile.authority;
+        defer sender.profile.authority = authority;
+        const before = source_namespace.store.head;
+        @field(sender.profile.authority, field) = "foreign";
+        try std.testing.expectError(error.Denied, sender.placementOffer(scratch, subject, "destination", archive_path));
+        try std.testing.expectEqualDeep(before, source_namespace.store.head);
+    }
     // Leave the complete file without a published offer, as an interrupted
     // writer can. The retry must validate and durably reuse that exact file.
     disclosure.deny_runtime = true;
@@ -1136,6 +1215,14 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     try std.testing.expect((try sender.placementStatus(scratch, subject)).?.offer == null);
     disclosure.deny_runtime = false;
     const offer = try sender.placementOffer(scratch, subject, "destination", archive_path);
+    inline for (.{ "principal", "tenant" }) |field| {
+        const authority = sender.profile.authority;
+        defer sender.profile.authority = authority;
+        const before = source_namespace.store.head;
+        @field(sender.profile.authority, field) = "foreign";
+        try std.testing.expectError(error.Denied, sender.placementOffer(scratch, subject, "destination", archive_path));
+        try std.testing.expectEqualDeep(before, source_namespace.store.head);
+    }
     try std.testing.expect(disclosure.saw_runtime);
     disclosure.deny_runtime = true;
     try std.testing.expectError(error.DisclosureDenied, sender.placementOffer(scratch, subject, "destination", archive_path));
@@ -1282,10 +1369,26 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     try sender.placementApplyDecision(scratch, subject, accepted);
     try std.testing.expectEqual(.away, (try sender.placementStatus(scratch, subject)).?.phase);
     try std.testing.expectError(error.CustodyNotLocal, sender.workspaceControl(scratch, "departed", subject.task, work_id, cut.execution, cut.control, .advance));
+    inline for (.{ "principal", "tenant" }) |field| {
+        const authority = sender.profile.authority;
+        defer sender.profile.authority = authority;
+        const before = source_namespace.store.head;
+        @field(sender.profile.authority, field) = "foreign";
+        try std.testing.expectError(error.Denied, sender.placementControl(scratch, "remote-inspect", subject.task, .{ .inspect = .{ .work = work_ref } }));
+        try std.testing.expectEqualDeep(before, source_namespace.store.head);
+    }
     const control_bytes = try sender.placementControl(scratch, "remote-inspect", subject.task, .{ .inspect = .{ .work = work_ref } });
     var control = try contracts.decodeOwned(p.Signed(p.Control), scratch, control_bytes);
     defer control.deinit();
     try std.testing.expectEqualSlices(u8, control_bytes, try sender.placementControl(scratch, "remote-inspect", subject.task, .{ .inspect = .{ .work = work_ref } }));
+    inline for (.{ "principal", "tenant" }) |field| {
+        const authority = sender.profile.authority;
+        defer sender.profile.authority = authority;
+        const before = source_namespace.store.head;
+        @field(sender.profile.authority, field) = "foreign";
+        try std.testing.expectError(error.Denied, sender.placementControl(scratch, "remote-inspect", subject.task, .{ .inspect = .{ .work = work_ref } }));
+        try std.testing.expectEqualDeep(before, source_namespace.store.head);
+    }
     try std.testing.expectError(error.OperationConflict, sender.placementControl(scratch, "remote-inspect", subject.task, .{ .park = .{ .work = work_ref, .execution_revision = cut.execution, .control_revision = cut.control } }));
     const controller_subject: p.Subject = .{ .task = subject.task };
     const controller_cut = try sender.placementCut(scratch, controller_subject);
@@ -1300,6 +1403,15 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     receiver_open = true;
     const report_bytes = try receiver.placementExecuteControl(scratch, "source", control.value);
     try std.testing.expectEqualSlices(u8, report_bytes, try receiver.placementExecuteControl(scratch, "source", control.value));
+    inline for (.{ "principal", "tenant" }) |field| {
+        const authority = receiver.profile.authority;
+        defer receiver.profile.authority = authority;
+        const before = destination_namespace.store.head;
+        @field(receiver.profile.authority, field) = "foreign";
+        try std.testing.expectError(error.Denied, receiver.placementExecuteControl(scratch, "source", control.value));
+        try std.testing.expectError(error.Denied, receiver.placementResolveControl(scratch, "source", control.value, &.{}));
+        try std.testing.expectEqualDeep(before, destination_namespace.store.head);
+    }
     var report = try contracts.decodeOwned(p.Signed(p.Report), scratch, report_bytes);
     defer report.deinit();
     try std.testing.expectEqual(.observed, report.value.value.reply.disposition);
@@ -1385,6 +1497,13 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             try std.testing.expect(old_receipt.value == .report);
             try std.testing.expectEqualSlices(u8, report_bytes, try contracts.encodeOwned(p.Signed(p.Report), scratch, old_receipt.value.report));
             try std.testing.expectEqualDeep(before, successor_namespace.store.head);
+            inline for (.{ "principal", "tenant" }) |field| {
+                const authority = successor.profile.authority;
+                defer successor.profile.authority = authority;
+                @field(successor.profile.authority, field) = "foreign";
+                try std.testing.expectError(error.Denied, successor.placementResolveControl(scratch, "source", control.value, &route));
+                try std.testing.expectEqualDeep(before, successor_namespace.store.head);
+            }
             disclosure.deny_runtime = true;
             try std.testing.expectError(error.DisclosureDenied, successor.placementResolveControl(scratch, "source", control.value, &route));
             disclosure.deny_runtime = false;
