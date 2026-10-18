@@ -432,6 +432,15 @@ The factored workspace and control groups passed locally in 86.8 and 41.4 second
 respectively; the former still executed all 55 provider calls, while the latter
 executed the unchanged foreign-reference rejection after the reverse trace.
 
+On `a137967`, [Linux run 39098548717](https://github.com/tkersey/protean/actions/runs/39098548717)
+passed all twenty qualification jobs, with a maximum job duration of 592 seconds.
+The complete workflow still failed at 605 seconds. The terminal identity gate
+spent six seconds reading independent artifacts serially. Those eight reads now
+run concurrently, with every artifact digest and native/runtime/downstream
+identity comparison preserved. Against the same completed run's immutable
+artifacts, the complete gate script passed locally in 1.28 seconds versus 7.72
+seconds for its serial form. Final workflow timing still requires qualification.
+
 An isolated attempt to move C compilation into the final Zig compile was not
 retained: local cold cross-build time changed from 189.0 to 206.3 seconds, and a
 comparison using the same already emitted assets changed from 118.4 to 124.5

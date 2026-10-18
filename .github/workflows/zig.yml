@@ -366,22 +366,25 @@ jobs:
           node --version
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
-          import {execFileSync} from 'node:child_process';
+          import {execFile} from 'node:child_process';
+          import {promisify} from 'node:util';
           import {createHash} from 'node:crypto';
-          const repo = process.env.GH_REPO;
-          const api = path => execFileSync('gh', ['api', `repos/${repo}/${path}`]);
-          const artifacts = JSON.parse(api(`actions/runs/${process.env.RUN_ID}/artifacts?per_page=100`)).artifacts;
-          const load = lane => {
+          const execute = promisify(execFile), repo = process.env.GH_REPO;
+          const api = async path => (await execute('gh', ['api', `repos/${repo}/${path}`], {encoding: 'buffer'})).stdout;
+          const artifacts = JSON.parse(await api(`actions/runs/${process.env.RUN_ID}/artifacts?per_page=100`)).artifacts;
+          const load = async lane => {
             const matches = artifacts.filter(value => value.name === `${lane}-identity.json`);
             assert.equal(matches.length, 1);
             const artifact = matches[0];
             assert.equal(artifact.expired, false);
-            const bytes = api(`actions/artifacts/${artifact.id}/zip`);
+            const bytes = await api(`actions/artifacts/${artifact.id}/zip`);
             assert.equal(`sha256:${createHash('sha256').update(bytes).digest('hex')}`, artifact.digest);
             return JSON.parse(bytes);
           };
-          const native = load('native'), downstream = load('downstream');
-          const runtimes = ['native-workspace', 'native-placement', 'runtime', 'runtime-placement', 'runtime-outer', 'runtime-guest'].map(load);
+          const [native, downstream, ...runtimes] = await Promise.all([
+            'native', 'downstream', 'native-workspace', 'native-placement',
+            'runtime', 'runtime-placement', 'runtime-outer', 'runtime-guest',
+          ].map(load));
           for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target']) {
             assert.notEqual(native.identity[key], undefined, key);
             assert.deepEqual(downstream.identity[key], native.identity[key], key);
