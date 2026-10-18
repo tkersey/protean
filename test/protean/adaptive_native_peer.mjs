@@ -372,7 +372,15 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
             let settled = false;
             const deadline = performance.now() + 120_000;
             while (performance.now() < deadline) {
-              const row = query.get(id, task);
+              let row;
+              try { row = query.get(id, task); }
+              catch (error) {
+                // The independent native owner may be committing its report.
+                // SQLITE_BUSY is not evidence that the control has settled.
+                if (error.errcode !== 5) throw error;
+                await delay(25);
+                continue;
+              }
               assert(row, 'the queued control must already be retained');
               assert.equal(hash(row.body), Buffer.from(row.digest).toString('hex'));
               const record = decodeValue(subject.controlSchema, row.body);

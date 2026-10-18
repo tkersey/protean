@@ -187,6 +187,14 @@ test "client mapping preserves full-width values and rejects coercion and unknow
     try parsed.value.object.put(a, "count", .{ .string = "1" });
     try parsed.value.object.put(a, "extra", .null);
     try std.testing.expectError(error.InvalidParams, fromJson(Record, a, parsed.value));
+    const runtime_schema = try schemas.ClientSchema(Record).alloc(std.testing.allocator);
+    defer std.testing.allocator.free(runtime_schema);
+    try std.testing.expectEqualSlices(u8, &schemas.ClientSchema(Record).value, runtime_schema);
+    try std.testing.expectError(error.OutOfMemory, schemas.ClientSchema(Record).alloc(std.testing.failing_allocator));
+    const Escaped = struct { @"quote\"slash\\雪": union(enum) { signed: i64, nested: ??bool } };
+    const escaped_schema = try schemas.ClientSchema(Escaped).alloc(std.testing.allocator);
+    defer std.testing.allocator.free(escaped_schema);
+    try std.testing.expectEqualSlices(u8, &schemas.ClientSchema(Escaped).value, escaped_schema);
     var schema = try json.parse(a, &schemas.ClientSchema(Record).value, .{});
     defer schema.deinit();
     try std.testing.expectEqualStrings("string", schema.value.object.get("properties").?.object.get("count").?.object.get("type").?.string);

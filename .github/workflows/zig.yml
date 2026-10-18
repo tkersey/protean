@@ -33,13 +33,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [authoring, owners, owner-adaptive, owner-adaptive-control, owner-support, workspace, workspace-retention, workspace-runtime, workspace-custody, workspace-succession, correspondence, native, native-placement, runtime, runtime-placement, runtime-outer, runtime-guest, downstream]
+        lane: [authoring, owners, owner-adaptive, owner-adaptive-control, owner-support, workspace, workspace-retention, workspace-history, workspace-runtime, workspace-custody, workspace-succession, correspondence, native, native-placement, runtime, runtime-placement, runtime-outer, runtime-guest, downstream]
         include:
           - {lane: owners, compiled_profile: owners}
           - {lane: owner-adaptive, compiled_profile: owner-adaptive}
           - {lane: owner-adaptive-control, compiled_profile: owner-adaptive-control}
           - {lane: workspace, compiled_profile: workspace}
           - {lane: workspace-retention, compiled_profile: workspace-retention}
+          - {lane: workspace-history, compiled_profile: workspace-history}
           - {lane: workspace-runtime, compiled_profile: workspace-runtime}
           - {lane: workspace-custody, compiled_profile: workspace-custody}
           - {lane: workspace-succession, compiled_profile: workspace-succession}
@@ -170,6 +171,7 @@ jobs:
             owner-adaptive-control) targets=(build-native-owner-adaptive-check); selection=(-Dadaptive-owner-group=control) ;;
             workspace) targets=(build-workspace-general-check); selection=(-Dworkspace-group=execution) ;;
             workspace-retention) targets=(build-workspace-general-check); selection=(-Dworkspace-group=retention) ;;
+            workspace-history) targets=(build-workspace-general-check); selection=(-Dworkspace-group=history) ;;
             workspace-runtime) targets=(build-workspace-runtime-check); selection=(-Druntime-workspace-group=selection) ;;
             workspace-custody) targets=(build-workspace-runtime-check); selection=(-Druntime-workspace-group=custody) ;;
             workspace-succession) targets=(build-workspace-runtime-check); selection=(-Druntime-workspace-group=succession) ;;
@@ -229,7 +231,9 @@ jobs:
           elif [ "${{ matrix.lane }}" = workspace ]; then
             run_compiled_tests workspace-general 9
           elif [ "${{ matrix.lane }}" = workspace-retention ]; then
-            run_compiled_tests workspace-general 6
+            run_compiled_tests workspace-general 3
+          elif [ "${{ matrix.lane }}" = workspace-history ]; then
+            run_compiled_tests workspace-general 3
           elif [ "${{ matrix.lane }}" = workspace-runtime ]; then
             run_compiled_tests workspace-runtime 3
           elif [ "${{ matrix.lane }}" = workspace-custody ]; then

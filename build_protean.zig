@@ -347,10 +347,11 @@ pub fn build(b: *std.Build) void {
         workspace_programs.addImport("protean_native", checked_environment);
         const workspace_checks = b.step("check-workspace-programs", "Execute general source-record programs through native Kosmos");
         const workspace_general = b.step("check-workspace-general", "Qualify workspace execution, inputs and provenance");
-        const workspace_group = b.option(enum { execution, retention }, "workspace-group", "Select independent workspace qualification cases (default: all)");
+        const workspace_group = b.option(enum { execution, retention, history }, "workspace-group", "Select independent workspace qualification cases (default: all)");
         const workspace_general_tests = native_graph.testModuleFiltered(workspace_general, workspace_programs, if (workspace_group) |group| switch (group) {
             .execution => &.{ "BUILD-", "WORK-06", "WORK-08", "exposure carries", "workspace commands", "CTX-01", "deep recursive workspace" },
-            .retention => &.{ "WORK-01", "AUT-07", "OWN-02", "collected history", "WORK-14", "delegated model interpretation" },
+            .retention => &.{ "WORK-01", "AUT-07", "OWN-02" },
+            .history => &.{ "collected history", "WORK-14", "delegated model interpretation" },
         } else &.{});
         b.step("build-workspace-general-check", "Build the retained workspace test executable")
             .dependOn(&b.addInstallArtifact(workspace_general_tests, .{

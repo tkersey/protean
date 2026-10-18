@@ -366,26 +366,28 @@ controlled provider replies, real transport, kills/restarts, cancellation, tool
 construction/reuse, and independently altered archives. No paid model calls run.
 The complete aggregate remains `check-native`. CI separates authoring/HTTPS,
 owner/recovery, general workspace, runtime/custody workspace, correspondence,
-native deployment, three runtime scenario groups and an independent downstream
-build. All 17 workspace tests remain in `check-workspace-programs`. The 155 owner
-tests and crash/reopen checks remain in `check-native-owner`, with separate
+native deployment, four runtime scenario groups and an independent downstream
+build. All 21 workspace tests remain in `check-workspace-programs`. Owner tests
+and crash/reopen checks remain in `check-native-owner`, with separate
 adaptive-controller, task-ownership and support targets for CI scheduling. The terminal
 gate requires source accounting and every qualification lane within 600 seconds.
 Compiler caches contain complete outputs for exact dependency locks and are
 checked by Zig on reuse. Deployment lanes save completed compiler work before
 running scenarios, so a scenario timeout does not discard the build cache.
-Completed deployment inputs also use an exact-match cache for the entire Git tree,
+Completed deployment inputs also use an exact-match cache for the Git build inputs
+(excluding audited top-level prose, while retaining embedded skill Markdown),
 installed compiler executable/library/license bytes and modes, OS/architecture,
 safe mode and product/peer profile. Every deployment fixture, dependency
 authentication and independent downstream build still runs. This artifact cache
-contains deployment inputs only; Zig's normal input-checked test caching remains
-separate and is reported as cached when used.
+contains compiled inputs only; every selected test and deployment scenario
+executes before receiving qualification credit.
 Rerunning all jobs replaces that run's prior named result artifacts with the new
 results. A partial job rerun does not establish full workflow timing.
 A cache-assisted pass does not establish the cold-build latency.
 The packaged adaptive peer runs its independent controller/recovery and workspace
-groups concurrently, with separate state, snapshot, and HTTPS fixtures. Both
-groups must finish, and their original assertions and command deadlines remain.
+groups concurrently with the offline demo, using separate state, snapshot and
+HTTPS fixtures. Every group must finish, and their original assertions and
+command deadlines remain.
 The additional runtime suite allows a result poll to wait up to 120 seconds behind
 synchronous specialization or placement; other RPCs keep their existing limits.
 This does not extend the ten-minute job or workflow limits.

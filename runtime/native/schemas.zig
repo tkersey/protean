@@ -119,7 +119,10 @@ fn typed(a: std.mem.Allocator, application: json.Value, name: []const u8) !json.
 }
 fn parameter(a: std.mem.Allocator, method: protocol.Method, key: []const u8, application: json.Value, limits: protocol.Limits) !json.Value {
     if (method == .placement and std.mem.eql(u8, key, "request")) {
-        const bytes = &@import("values.zig").schemas.ClientSchema(@import("placement.zig").Request).value;
+        // Emit this large immutable schema once during discovery construction.
+        // Parsing owns its strings, so the temporary bytes can be released.
+        const bytes = try @import("values.zig").schemas.ClientSchema(@import("placement.zig").Request).alloc(a);
+        defer a.free(bytes);
         return (try json.parseAsset(a, bytes, bytes.len)).value;
     }
     if (std.mem.eql(u8, key, "task_id") or std.mem.eql(u8, key, "subscription_id")) return reference(a, "id128");

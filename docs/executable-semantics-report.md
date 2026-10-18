@@ -266,7 +266,8 @@ retain all original assertions. General runtime choices, placement, mid-clone
 transfer and canonical guest-cut transfer run in four lanes; all deployment
 executable hashes must match the independently packaged product.
 The native adaptive CLI and native placement fixtures run independently. The
-15 workspace cases are partitioned into nine execution and six retention cases;
+15 workspace cases are partitioned into nine execution, three retention and
+three history/cancellation cases;
 the six runtime cases into three selection/cancellation, two custody and one
 succession case. These are disjoint filters over the same test roots, with exact
 executed counts checked in CI. The ordinary build targets still run the full roots.
@@ -277,9 +278,20 @@ The scripted provider waits for real transfer completion through the public
 status API. After observing a queued remote control, it waits for the native
 owner's retained report using a read-only database connection and the schema
 from the actual transferred archive. These observations only schedule the next
-model reply: the unchanged model action still obtains and checks custody and
+model reply. A transient SQLite busy result waits within that same bounded
+observation loop; it does not count as a completed control. The unchanged model
+action still obtains and checks custody and
 the signed remote result. No fixture supplies an acknowledgement or advances
 the transferred work outside the prescribed model actions.
+
+The large placement schema uses the same typed JSON writer at discovery startup,
+with an exact-size host allocation, instead of materializing its 180,672 bytes
+inside the compiler. Native contract and source-string validation remain at
+compile time. The public schema bytes and descriptions are unchanged. A focused
+seven-schema build measured 51.7 seconds with compile-time output and 6.2 seconds
+with runtime output; the complete product build and Linux job timings are separate
+measurements. Allocation failure remains explicit, and the parser owns its copied
+strings before the schema buffer is released through the owning allocator.
 
 Completed compilation can be reused only through an exact cache key containing
 the Git build inputs, compiler executable/library/license contents and modes,
@@ -300,7 +312,9 @@ ten-minute workflow ceiling. Independent downstream subprocesses share a
 nine-minute Linux deadline. The offline demo now runs under the enclosing
 workflow deadline; its former sixty-second Linux and 120-second macOS subprocess
 limits were incidental fixture limits, not accepted performance requirements.
-All demo assertions remain unchanged. Linux qualification must still complete
+The offline demo and independent provider fixtures use separate state directories
+and run concurrently; every operation and cleanup must finish. All demo assertions
+remain unchanged. Linux qualification must still complete
 the entire workflow within ten minutes.
 
 `tools/evaluation/workspace.mjs prepare --suite runtime` prepares matched ordinary,
