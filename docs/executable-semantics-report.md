@@ -454,6 +454,19 @@ passed in 594 seconds for the whole workflow, with a maximum job duration of
 585 seconds. It executed every selected test and retained lifecycle fixture.
 This run precedes the final Kosmos dependency refresh; it is not a cold result.
 
+On `5f43afa`, [Linux run 39100578965](https://github.com/tkersey/protean/actions/runs/39100578965)
+passed all twenty qualification jobs but failed the whole-workflow gate at
+602 seconds. The longest job was outer mobility at 595 seconds, including
+275 seconds of compilation, 251 seconds of actual fixture execution and an
+eight-second optional compiler-cache upload. Both mobility jobs build the same
+product and verification peer. Guest mobility now publishes their shared build
+caches; outer mobility restores those same inputs and executes its own complete
+fixture without publishing a duplicate cache. Cold qualification skips optional
+compiler-cache publication as well as restoration. Test commands, fixture inputs,
+assertions, safety settings, admission and the 600-second gates are unchanged.
+The removed upload is measured work; final end-to-end timing still requires the
+successor's complete cold and cache-assisted runs.
+
 An isolated attempt to move C compilation into the final Zig compile was not
 retained: local cold cross-build time changed from 189.0 to 206.3 seconds, and a
 comparison using the same already emitted assets changed from 118.4 to 124.5
