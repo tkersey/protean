@@ -293,19 +293,24 @@ jobs:
           import {mkdir, writeFile} from 'node:fs/promises';
           import {setTimeout as delay} from 'node:timers/promises';
           const execute = promisify(execFile), repo = process.env.GITHUB_REPOSITORY;
-          const api = async path => (await execute('gh', ['api', `repos/${repo}/${path}`], {encoding: 'buffer', maxBuffer: 64 * 1024 * 1024})).stdout;
+          const api = async (path, timeout = 30_000) => (await execute('gh', ['api', `repos/${repo}/${path}`], {encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, timeout})).stdout;
+          const run = JSON.parse(await api(`actions/runs/${process.env.GITHUB_RUN_ID}`));
+          assert.equal(String(run.id), process.env.GITHUB_RUN_ID);
+          assert.equal(String(run.run_attempt), process.env.GITHUB_RUN_ATTEMPT);
+          const deadline = Date.parse(run.run_started_at) + 600_000;
           let artifact;
-          for (let attempt = 0; attempt < 60; attempt++) {
-            const artifacts = JSON.parse(await api(`actions/runs/${process.env.GITHUB_RUN_ID}/artifacts?per_page=100`)).artifacts;
+          while (Date.now() < deadline) {
+            const artifacts = JSON.parse(await api(`actions/runs/${process.env.GITHUB_RUN_ID}/artifacts?per_page=100`, Math.max(1, deadline - Date.now()))).artifacts;
             const matches = artifacts.filter(value => value.name === 'runtime-mobility-peer');
             assert(matches.length <= 1);
             if (matches.length === 1) { artifact = matches[0]; break; }
-            await delay(1000);
+            await delay(Math.min(1000, Math.max(1, deadline - Date.now())));
           }
           assert(artifact, 'the current authoring job must publish its verification helper');
           assert.equal(artifact.expired, false);
           assert.equal(String(artifact.workflow_run.id), process.env.GITHUB_RUN_ID);
-          const bytes = await api(`actions/artifacts/${artifact.id}/zip`);
+          assert.equal(artifact.workflow_run.head_sha, run.head_sha);
+          const bytes = await api(`actions/artifacts/${artifact.id}/zip`, Math.max(1, deadline - Date.now()));
           assert.equal(`sha256:${createHash('sha256').update(bytes).digest('hex')}`, artifact.digest);
           const directory = `${process.env.RUNNER_TEMP}/protean-qualification/verification`;
           await mkdir(directory, {recursive: true});

@@ -871,6 +871,19 @@ publishing consumer output. This is transport-mechanism evidence, not a claim th
 a hosted partial rerun was executed. The ordinary complete workflow remains the
 platform and resource qualification gate.
 
+Exact compiled-output reuse exposed a separate ordering defect: the two mobility
+consumers exhausted sixty polling attempts before the independently built authoring
+helper was published. Their wait now uses the current workflow attempt's existing
+600-second deadline, including bounded API requests, while retaining name, run,
+expiry and digest checks and checking the artifact's head against the run. Eleven
+virtual-clock/provider cases exercise the exact workflow JavaScript: immediate
+and delayed valid arrival, absence through the deadline, an expired deadline,
+wrong run or attempt, wrong artifact run or head, expiry, digest mismatch and
+duplicate artifacts. These are mechanism checks; actual Linux consumers must
+still execute successfully in the complete current workflow. The custody lane
+also requires the five tests now present, after its former three-test summary
+assertion rejected an actual successful five-test Linux execution.
+
 The normal cache path keys compiled outputs by the selected build recipe, compiler
 contents, native target/environment, dependency locks, build configuration, shared
 source modules, required adaptive assets, and the selected test root's transitive
