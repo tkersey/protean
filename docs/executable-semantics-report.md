@@ -29,7 +29,7 @@ source archive, a Zig package and a final executable have distinct identities.
 | Compiler policy | `kosmos.source-lower/2` |
 | Authored semantic source | `cd73df16c3b9d3b0f3920fffa9c3d4a5ee71525cae6782f672e021d66da6ccb7` |
 | Generic artifact SHA-256 | `c3be797414210c55c2ea639a8c5cf8494c5b118a82ffc7b5836832eeb86e940b` (231,838 bytes; terminal service state remains live through the final bounded finish cut) |
-| macOS executable SHA-256 | `ee5d703fa5642a6530803f5683912bb7e6c630fd8dfd6cac296f748f88b397ee` (10,442,296 bytes; production sources at `c3e8d75`, including the delegation custody correction, with Kosmos `ded2507`; current integration qualification is recorded on the pull request) |
+| macOS executable SHA-256 | `3803c73531e0d8edb1ce2ff94f3ff55267ca288459e7cbc0a0cb65e94a62a675` (10,442,296 bytes; production sources at `8a4b33b`, including delegation custody and retained-receipt corrections, with Kosmos `ded2507`; current integration qualification is recorded on the pull request) |
 | WASM kernel SHA-256 | `9cda4b3d473d2badbc38645f57a0ece6c9e933aa67a08feb2d2a4f4b121f1d19` (Kosmos `ded2507` packaged kernel; source/native/WASM, ABI, capacity and real-browser qualification pass) |
 
 These are built artifacts, not published release assets. The native manifest
@@ -355,7 +355,9 @@ store head, runnable subjects and controller cut, conflicting payloads, revoked
 or undisclosed authority, another principal, and fresh-operation denial. An
 ordinary imported copy returns its retained build receipt while denying a new
 build. Existing cancellation and recovery fixtures also check imported receipts
-without granting execution or recovery-worker authority.
+without granting execution or recovery-worker authority. The expanded Safe-mode
+run passes all 78 tests across the full runtime, native task owner and adaptive
+capture/recovery roots; the frozen-controller fixture also passes on Linux.
 
 Six earlier assertions expected custody rejection for exact, already admitted
 cancellation or recovery retries on imported copies. Those expectations conflicted
