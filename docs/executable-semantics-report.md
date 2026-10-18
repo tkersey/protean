@@ -16,7 +16,7 @@ model evaluation is claimed.
 
 The integrated runtime inputs are Horos
 `592eb0839326f2d8a423b59ce2746ab18ef5136a` and Kosmos
-`fd21a136473cd350bfb9d1717da832d2c7119a42`. The dependency lock authenticates the
+`ded2507d443708893496a17c3fec4cf4bcb1b625`. The dependency lock authenticates the
 selected source archives, Git trees and inventories. A repository checkout, a
 source archive, a Zig package and a final executable have distinct identities.
 
@@ -27,10 +27,10 @@ source archive, a Zig package and a final executable have distinct identities.
 | Private linear bridge | `kosmos.semantic-service/2` |
 | Artifact envelope | `kosmos.semantic-artifact/2` |
 | Compiler policy | `kosmos.source-lower/2` |
-| Authored semantic source | `1897ed209557817c475bd14d10614024ea5f327823aec7a143d0e0337eb3bbfc` |
-| Generic artifact SHA-256 | `a56f43b35c83e8271aa8bd09dd293d27f45ad9e1c72a4081a574c7dd6de0512a` (231,839 bytes; all payload bytes match the predecessor after replacing the Horos package identity) |
-| macOS executable SHA-256 | `5cf4e8e5bf55b250dc2a7458611707aab64ccb55960c17d735523ebf3db21a52` (10,425,880 bytes; authenticated build with the final Kosmos pin; exact-head qualification is recorded on the pull request) |
-| WASM kernel SHA-256 | `00e1ccb31028d791058d2da91e2bb6a187e108a7c266a4df6f91394aad0c7889` (Kosmos `200e06c` packaged kernel; current integration qualification is recorded below and on the pull request) |
+| Authored semantic source | `cd73df16c3b9d3b0f3920fffa9c3d4a5ee71525cae6782f672e021d66da6ccb7` |
+| Generic artifact SHA-256 | `c3be797414210c55c2ea639a8c5cf8494c5b118a82ffc7b5836832eeb86e940b` (231,838 bytes; terminal service state remains live through the final bounded finish cut) |
+| macOS executable SHA-256 | `6dd0e42b5c8fc0a47ad69bdb73dbbe6200b0d21dee4e3215882e2dbc0f2876dd` (10,425,880 bytes; authenticated build with Kosmos `ded2507`; exact-head integration qualification is recorded on the pull request) |
+| WASM kernel SHA-256 | `9cda4b3d473d2badbc38645f57a0ece6c9e933aa67a08feb2d2a4f4b121f1d19` (Kosmos `ded2507` packaged kernel; source/native/WASM, ABI, capacity and real-browser qualification pass) |
 
 These are built artifacts, not published release assets. The native manifest
 reports the authenticated inputs and compiler separately from the externally
@@ -237,6 +237,21 @@ fetch restored the immutable baseline and executed all 68 semantic tests with th
 local compiler cache retained. A fresh committed source package and independent
 native consumer passed 9/9 steps in 32.550 seconds. Final integrated successor
 qualification is recorded on the pull request, separately from the preceding rows.
+
+Kosmos successor `ded2507` retains the actual service state through its final
+ordinary base return. Every bounded finish cut remains transferable until the
+service closes, while guest cuts remain unavailable during the operation. The
+owning regression failed with `MissingRecoveryAnchor` before the change and passes
+for completed, failed and cancelled guests under generic and specialized cores,
+retiring the source before each exact-custody restore. The complete local source
+check passes 309 tests, 47 source fixtures / 9,570 observations, ABI, browser,
+capacity and package checks in 367.786 seconds. A fresh committed package consumer
+passes 9/9 steps in 29.678 seconds. The refreshed cost run has 421 records across
+all eleven families; mean start-plus-execution savings remain positive only for
+dynamic loops and repeated calls, with estimated construction amortization at
+1,284 and 928 new sessions respectively under the report's stated assumptions.
+These are new-core observations; the preceding rows retain their historical scope.
+Current integrated deployment and Linux qualification are recorded on the pull request.
 
 ## Qualification latency measurements
 
@@ -478,6 +493,20 @@ still authenticates its inputs, builds on a cache miss, and executes its complet
 fixture. Cache publication has one producer per shared build profile; the same
 commands, assertions, safety settings and time limits remain. Final cold and
 cache-assisted timings remain unproved until their complete successor runs.
+
+On `6fe8f6e`, [cache-assisted run 39102354869](https://github.com/tkersey/protean/actions/runs/39102354869)
+passed in 599 seconds, with a 589-second longest job. The subsequent
+[cold run 39102988826](https://github.com/tkersey/protean/actions/runs/39102988826)
+failed after 626 seconds including deadline cancellation; outer mobility was
+cancelled, while the other nineteen qualification jobs passed. Compiler and
+transport cache restoration and optional compiler-cache publication were skipped.
+Outer mobility spent 73 seconds setting up Zig, including a 61.751-second download
+from a randomly selected mirror. Four jobs downloading from `zigmirror.com` took
+2.417, 3.430, 3.896 and 2.341 seconds. The workflow now selects that mirror through
+the pinned setup action's supported input. The action retains upstream minisign
+and trusted archive-name verification. The override removes automatic mirror
+fallback; these samples do not guarantee future availability or download time.
+The cold deadline remains unqualified until a complete successor run passes.
 
 An isolated attempt to move C compilation into the final Zig compile was not
 retained: local cold cross-build time changed from 189.0 to 206.3 seconds, and a
