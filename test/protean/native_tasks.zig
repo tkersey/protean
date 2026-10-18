@@ -1238,16 +1238,14 @@ fn largeResultWitness(comptime Types: type) !void {
         } else artifact.* = terminal.value.result_artifact.?;
     }
     var client: native.client.Client(Types) = .{ .service = &service, .batch = true };
-    // Completed-only, failed-only and mixed batches all use the real authored
-    // outcomes. The mixed batch also exposes aliases to recycled call storage.
-    for (0..3) |batch| {
+    {
         var responses_arena = std.heap.ArenaAllocator.init(a);
         defer responses_arena.deinit();
         const frame = responses_arena.allocator();
         const baseline = budget.live;
         var responses: std.array_list.Managed(native.json.Value) = .init(frame);
-        for (0..16) |i| {
-            const index = if (batch == 2) i % 2 else batch;
+        for (0..32) |i| {
+            const index = i % 2;
             var params = native.json.object();
             try native.json.put(frame, &params, "task_id", native.json.string(try frame.dupe(u8, &std.fmt.bytesToHex(ids[index], .lower))));
             const result = try client.call(frame, .@"task.result", params);
@@ -1257,7 +1255,7 @@ fn largeResultWitness(comptime Types: type) !void {
         // Check every retained response after subsequent calls have reclaimed
         // and reused temporary storage, including both failure and success.
         for (responses.items, 0..) |response, i| {
-            const index = if (batch == 2) i % 2 else batch;
+            const index = i % 2;
             const result = response.object.get("result").?;
             try std.testing.expect(result.object.get("ready").?.bool);
             try std.testing.expectEqualStrings(&std.fmt.bytesToHex(ids[index], .lower), result.object.get("task_id").?.string);

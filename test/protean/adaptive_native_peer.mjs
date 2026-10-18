@@ -233,7 +233,7 @@ export async function verifyAdaptiveRuntime({app, applicationPath, scenarios, so
   // not all compete for the same runner's memory. Await both cleanup paths.
   const groups = [
     ['tools-runtime-mobility'],
-    ['tools-runtime-guest-mobility', 'tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe', 'tools-runtime-placement'],
+    ['tools-runtime-guest-mobility', 'tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe'],
   ];
   const results = await Promise.allSettled(groups.map(async (runtimeScenarios, index) => {
     const data = join(app.data, `runtime-${index}`), controller = join(app.controller, `runtime-${index}`);
@@ -352,8 +352,15 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
               assert.equal(hash(bytes), Buffer.from(digest).toString('hex'));
               return bytes;
             };
-            await writeFile(runtimePath, object(Buffer.from(subject.runtime.id, 'hex')));
             await writeFile(capsulePath, object(capsule.digest));
+            if (!subject.phaseArtifact) {
+              const described = await execute(sourcePeer, ['capsule-artifact', capsulePath], {encoding: 'utf8', maxBuffer: 4096});
+              assert.equal(described.status, 0, described.stderr);
+              subject.phaseArtifact = JSON.parse(described.stdout);
+            }
+            const runtimeBytes = object(Buffer.from(subject.phaseArtifact.digest, 'hex'));
+            assert.equal(runtimeBytes.length, subject.phaseArtifact.bytes);
+            await writeFile(runtimePath, runtimeBytes);
           } finally { database.close(); }
           const phase = await execute(sourcePeer, ['capsule-phase', runtimePath, capsulePath], {encoding: 'utf8', maxBuffer: 1 << 20});
           assert.equal(phase.status, 0, phase.stderr);
@@ -837,8 +844,9 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
     const reverseRecipe = linkRecipe([['filter', 'selected'], ['swap'], ['map', 'join'], ['filter', 'orphan'], ['group']]);
     let retainedProgram, retainedState;
     const toolRuns = [];
-    const scenarios = suite === 'runtime' ? (runtimeScenarios ?? ['tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe', 'tools-runtime-placement', 'tools-runtime-mobility', 'tools-runtime-guest-mobility']) : workspaceScenarios;
+    const scenarios = suite === 'runtime' ? (runtimeScenarios ?? ['tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe', 'tools-runtime-mobility', 'tools-runtime-guest-mobility']) : workspaceScenarios;
     for (const name of scenarios) {
+      const scenarioStarted = performance.now();
       if (suite === 'runtime') console.error(JSON.stringify({runtime_fixture: name, stage: 'launch'}));
       scenario = name; alternateIndex = 0;
       toolSubject = {recipe: name === 'tools-reverse' ? reverseRecipe : coverageRecipe, foreign: retainedProgram};
@@ -856,7 +864,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         ...inputs, {...inputs[0], id: 'batch', description: 'Sixteen source records retain exact batch cardinality and order.', rows: Array.from({length: 16}, (_, i) => row(2000 + i, 10, 100, 1))},
       ] : inputs;
       await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: ['tools-reuse', 'tools-reverse'].includes(name) ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, inputs: selectedInputs}}));
-      const placement = ['tools-runtime-placement', 'tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name) ? await runtimePlacementFixture(app, selectedConfig, trust, selectedState) : null;
+      const placement = ['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name) ? await runtimePlacementFixture(app, selectedConfig, trust, selectedState) : null;
       toolSubject.placement = placement;
       // Each scenario selects its own initial directory. A prior controller
       // transfer can change this scenario's arguments, never the next one's.
@@ -966,19 +974,14 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         assert.equal(result.outcome.value.programs.length, name === 'tools-runtime-ordinary' ? 0 : name === 'tools-runtime-guest-mobility' ? 2 : 1);
         if (name === 'tools-runtime-ordinary') assert(!toolSubject.actions.some(action => ['program', 'work', 'context', 'placement'].includes(action.name)));
         if (name === 'tools-runtime-specialized') {
-          assert.equal(toolSubject.results.length, 4);
+          assert.equal(toolSubject.results.length, 3);
           assert.equal(toolSubject.actions.filter(action => action.name === 'program' && action.arguments.command.tag === 'specialize').length, 1);
-        }
-        if (name === 'tools-runtime-placement') {
-          assert(toolSubject.outer && toolSubject.controllerMoved);
-          assert.equal(toolSubject.results.length, 1);
-          assert.equal(hash(await readFile(app.executable)), placement.binary);
         }
         if (['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name)) {
           assert(name === 'tools-runtime-mobility' ? toolSubject.outer && toolSubject.controllerMoved : toolSubject.guestCut);
           assert(toolSubject.cleanupComplete);
           if (name === 'tools-runtime-guest-mobility') assert(toolSubject.retention?.path.length > 0);
-          assert.deepEqual(toolSubject.branchValues, ['366', '376']);
+          assert.deepEqual(toolSubject.branchValues, name === 'tools-runtime-guest-mobility' ? ['126', '136'] : ['376']);
           assert.equal(hash(await readFile(app.executable)), placement.binary);
         }
         if (name === 'tools-runtime-reframe') {
@@ -1006,7 +1009,8 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         assert.equal(result.outcome.value.control.selection.control_revision, '18');
         assert.equal(result.outcome.value.control.skills.length, 0);
       }
-      toolRuns.push({scenario: name, provider_calls: alternateIndex, disposition: result.outcome.value.result.tag});
+      toolRuns.push({scenario: name, provider_calls: alternateIndex, disposition: result.outcome.value.result.tag, elapsed_ms: performance.now() - scenarioStarted});
+      if (name === 'tools-runtime-mobility') toolRuns.at(-1).clone_phase = {...toolSubject.clonePhase, artifact: toolSubject.phaseArtifact};
       if (name === 'tools-runtime-guest-mobility') toolRuns.at(-1).retention = {
         target: toolSubject.retention.target, path_edges: toolSubject.retention.path.length,
         result: toolSubject.retention.result,

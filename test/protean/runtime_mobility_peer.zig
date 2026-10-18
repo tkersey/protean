@@ -20,6 +20,13 @@ pub fn main(init: std.process.Init) !void {
         const module = try @import("runtime_mobility_source.zig").build(&builder);
         const transport = try native.source_records.encode(a, module);
         try output.interface.writeAll(try std.json.Stringify.valueAlloc(a, .{ .transport = transport }, .{}));
+    } else if (std.mem.eql(u8, mode, "capsule-artifact")) {
+        const capsule_path = args.next() orelse return error.MissingCapsule;
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, capsule_path, a, .unlimited);
+        var envelope = try kosmos.RuntimeCapsule.read(a, bytes);
+        defer envelope.deinit();
+        const artifact = envelope.value.record.artifact;
+        try output.interface.print("{{\"digest\":\"{s}\",\"bytes\":{d}}}", .{ std.fmt.bytesToHex(artifact.digest, .lower), artifact.bytes });
     } else if (std.mem.eql(u8, mode, "capsule-phase")) {
         const runtime_path = args.next() orelse return error.MissingRuntime;
         const capsule_path = args.next() orelse return error.MissingCapsule;

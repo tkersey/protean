@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [authoring, owners, owner-adaptive, owner-adaptive-control, owner-support, workspace, workspace-retention, workspace-history, workspace-runtime, workspace-custody, workspace-succession, correspondence, native, native-workspace, native-placement, runtime, runtime-placement, runtime-outer, runtime-guest, downstream]
+        lane: [authoring, owners, owner-adaptive, owner-adaptive-control, owner-support, workspace, workspace-retention, workspace-history, workspace-runtime, workspace-custody, workspace-succession, correspondence, native, native-workspace, native-placement, runtime, runtime-outer, runtime-guest, downstream]
         include:
           - {lane: owners, compiled_profile: owners}
           - {lane: owner-adaptive, compiled_profile: owner-adaptive}
@@ -36,7 +36,6 @@ jobs:
           - {lane: native-workspace, compiled_profile: product}
           - {lane: native-placement, compiled_profile: product}
           - {lane: runtime, compiled_profile: product}
-          - {lane: runtime-placement, compiled_profile: product}
           - {lane: runtime-outer, compiled_profile: product}
           - {lane: runtime-guest, compiled_profile: product}
     runs-on: ubuntu-22.04
@@ -276,7 +275,6 @@ jobs:
               fi
             else
               scenarios='tools-runtime-ordinary,tools-runtime-specialized,tools-runtime-reframe'
-              if [ "$lane" = runtime-placement ]; then scenarios=tools-runtime-placement; fi
               if [ "$lane" = runtime-outer ] || [ "$lane" = runtime-guest ]; then
                 scenarios=tools-runtime-mobility
                 if [ "$lane" = runtime-guest ]; then scenarios=tools-runtime-guest-mobility; fi
@@ -427,7 +425,7 @@ jobs:
           };
           const [native, downstream, ...runtimes] = await Promise.all([
             'native', 'downstream', 'native-workspace', 'native-placement',
-            'runtime', 'runtime-placement', 'runtime-outer', 'runtime-guest',
+            'runtime', 'runtime-outer', 'runtime-guest',
           ].map(load));
           for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target']) {
             assert.notEqual(native.identity[key], undefined, key);

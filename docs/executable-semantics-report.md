@@ -190,24 +190,31 @@ does not override a later explicit park; a fresh cancellation can select cleanup
 again. Regression fixtures exercise both transfer outcomes and both scheduling
 orders.
 
-The deterministic native demonstration includes ordinary investigation, one
-specialization reused on changed inputs, leaving a runtime investigation for source
-evidence, and separate work/controller movement. The first real branch supplies a guest view
-to an ordinary retention-query program; its nonempty path is checked against the
-view, and the original work revisions and port remain unchanged. The hardest scenario suspends
-inside an actual progressed multi-shot clone, moves its selected instrumented
-runtime, resumes both alternatives (366 and 376), then completes the real outer
-cleanup. A second version requests a canonical guest cut after specialization,
-moves it to a fresh native executor, checks the identical selected runtime,
-capsule and execution revision, and only then supplies the second branch input.
-Its first prefix and response are not replayed. Local capsule-verifier tests alone
-do not establish these host laws.
-The outer-capsule version additionally switches back to the packaged generic runtime
-through signed remote control, preserving the exact execution revision and second
-branch value. It then moves its controller; that signed transfer archive retains
-all three requested switches for accounting. Evaluation
-arm checks normalize these remote wrappers; pure-tool comparisons permit only
-terminal owner-scheduled start, wait and collect, and reject guest views.
+The five deterministic native demonstrations cover ordinary investigation, one
+specialization reused on three distinct inputs, leaving a runtime investigation
+for source evidence, canonical guest-cut mobility, and unfinished-clone mobility.
+The guest-cut case supplies its first real branch's guest view to an ordinary
+retention-query program. Its nonempty path is checked against the view; the
+original work revisions and port remain unchanged. Eight non-tail retained frames
+and aliased state produce a measured prefix of 108 and independent alternatives
+126 and 136. After specialization it moves the canonical guest cut to a fresh
+native executor, checks the selected runtime, exact capsule and execution revision,
+and supplies the second branch input there. Cancellation completes actual cleanup.
+
+The outer-capsule case retains 128 frames and suspends during the first actual
+multi-shot clone, with a live clone frame and binding independently decoded from
+the exact admitted runtime and capsule. The packaged generic evaluator travels
+with that unfinished operation. Assessment and destination inspection preserve
+the exact outer cut and execution revision; requesting a guest cut is rejected.
+After obtaining the branch value 376, signed remote realization preserves the
+port and execution revision while advancing realization revision. The controller
+moves separately and cancellation completes cleanup through its successor.
+The actual controller-transfer archive contains both remote realization requests
+for accounting. Evaluation arm checks normalize these wrappers; pure-tool
+comparisons permit only terminal owner-scheduled start, wait and collect, and
+reject guest views. Local capsule-verifier tests alone do not establish these host
+laws. Native workspace checks separately retain actual selected-specialized outer
+transport and selected-to-generic switching after import.
 
 ## Qualification evidence
 
@@ -639,6 +646,45 @@ seconds. Both produced identical C objects, but neither measured a useful gain.
 Production compiler flags, backend, safety checks and runtime code remain unchanged
 by this fixture factoring. Final cold and cache-assisted workflow results are
 recorded on the pull request for their exact revisions.
+
+### Fixture reduction after the cold-run deadline
+
+The `2c9b55d` cache-assisted run passed in 548 seconds, while its cold run reached
+626 seconds. Both mobility jobs spent 305 seconds compiling; guest-cut execution
+took 239 seconds and outer execution reached 256 seconds. Their assertions
+finished, but deadline cancellation prevented complete qualification.
+
+The subsequent reduction audits fixtures by their distinct required observations:
+
+| Removed repetition | Retained deciding evidence |
+|---|---|
+| Entire runtime-placement scenario and CI lane | Outer mobility retains separately placed work, exact assessed/imported outer cut and execution revision, signed controller succession, stale-source exclusion and cleanup. Native workspace checks retain selected-specialized outer transport, disclosure and custody. Specialization retains all four result classifications and exact sixteen-row cardinality/order. |
+| Fourth specialization run repeating an identical input | One derivation serves three distinct inputs, including changed results and the sixteen-row batch. |
+| Optional tool-construction skill loads and immediate inspections after wait | The initial offered-tool check proves availability; skill control has its own native cases. Wait returns the full work observation, checked for one noninterrupted result. |
+| Specialized/instrumented outer-clone cross-product and completed first branch | The generic 128-frame case proves real partial-clone transfer. The guest-cut case proves specialization, two isolated alternatives and no replay; independent driver tests retain instrumentation equivalence and rejection checks. |
+| 128-frame duplication in the guest-cut case | Eight actual retained non-tail frames retain dynamic input, aliasing, retention analysis, both alternatives, hydration, exact transfer and cleanup. The large clone remains independently exercised. |
+| Repeated descriptor-width setup in lexical scope composition | Two permissions retain intersection/no-regrant and lexical memory/instruction checks; independent descriptor tests retain indexes 31, 32, 63 and rejection of 64. |
+| Five identical exact-bound normalization inputs per configuration | All five invalid fields, tighter bounds and four responder configurations remain; each distinct exact-bound input runs once. |
+| Three repeated large-result batches | One mixed batch retains sixteen success and sixteen failure responses simultaneously under the same 512 KiB retention bound, with every reference checked after storage reuse. All three payload classes, restart/import, chunk reads and cleanup remain. |
+
+No production semantics, compiler safety setting or resource limit changed.
+Kosmos's remaining source oracle, authored-step, public facade and lifecycle
+fixtures establish distinct boundaries; this pass selected no further Kosmos
+removal. Reducing the outer clone to 32 frames failed the required actual-phase
+assertion and was discarded before CI.
+
+On the same macOS product, the native owner suite retained all 68 tests and fell
+from 38.84 to 27.87 seconds. The reduced mobility pair passed in 110.31 seconds
+versus 167.17 seconds; a subsequent signed remote rebind adds two calls, and the
+final outer fixture passed in 45.36 seconds. The final ordinary/specialized/reframe
+cases also passed, in 2.59/24.05/10.40 seconds. A Linux fixture-only comparison
+using the actual CI product fell from 356.86 to 224.64 seconds before that rebind.
+The final Linux outer fixture, including signed remote rebind, passed in 91.40
+seconds (90.67 seconds inside the scenario).
+These are single-run diagnostics, not variance estimates or deployment-isolation
+qualification. The complete workflow now has nineteen qualification jobs and its
+terminal identity/time gate; final cold and cache-assisted results are recorded
+on the pull request for the exact successor.
 
 `tools/evaluation/workspace.mjs prepare --suite runtime` prepares matched ordinary,
 generic and runtime-optional arms for repetitive work, adaptive exploration and a
