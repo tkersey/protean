@@ -204,7 +204,8 @@ Its first prefix and response are not replayed. Local capsule-verifier tests alo
 do not establish these host laws.
 The outer-capsule version additionally switches back to the packaged generic runtime
 through signed remote control, preserving the exact execution revision and second
-branch value. Its archive accounting records three requested switches. Evaluation
+branch value. It then moves its controller; that signed transfer archive retains
+all three requested switches for accounting. Evaluation
 arm checks normalize these remote wrappers; pure-tool comparisons permit only
 terminal owner-scheduled start, wait and collect, and reject guest views.
 
@@ -420,7 +421,8 @@ from control/recovery, reverse/disabled cases and the offline demo. The unchange
 fixtures passed locally in 96.0 and 42.9 seconds respectively. Moving source
 accounting into the authoring job keeps the total at twenty parallel jobs.
 Guest-cut mobility selects owner scheduling between exposed ports, retaining all
-its assertions; the outer-clone scenario keeps explicit scheduling. On the same
+its assertions; the outer-clone scenario selects explicit scheduling before the
+clone operation. On the same
 local production executable, the guest-cut fixture passed in 130.9 seconds versus
 150.6 seconds with explicit scheduling. The narrowed peer also passed all 50 outer-capsule
 mobility actions, including live clone inspection, controller succession and
@@ -539,12 +541,25 @@ On `528012b`, [Linux run 39116449188](https://github.com/tkersey/protean/actions
 passed all twenty qualification jobs but failed the complete-workflow limit at
 605 seconds. Guest mobility took 595 seconds, including 279 seconds compiling
 and 246 seconds executing. The separate remote-runtime-switch assertion and its
-terminal accounting export now run after the second branch in the shorter
+terminal accounting export were moved after the second branch in the shorter
 outer-capsule scenario. Guest mobility retains the complete required retention
 query and uses its authenticated work-transfer archive for accounting. Both
 scenarios retain their migration, branch and cleanup assertions. On the unchanged
 macOS executable, the redistributed scenarios passed in 80.3 and 97.6 seconds;
 these local observations do not establish the final Linux timing result.
+
+On `4721583`, cache-assisted qualification passed in 599 seconds, with a
+589-second longest job. Cold qualification reached 623 seconds after cancelling
+outer mobility: its compile step took 290 seconds, and all 43 prescribed actions
+finished before the final accounting export reached the deadline. The fixture
+now moves its controller after the remote switch and accounts the actual signed
+transfer archive, avoiding that extra export. Its ordinary prefix uses owner
+scheduling; at the first branch it explicitly selects manual scheduling before
+the clone. Added assertions preserve the execution revision, runtime revision
+and exposed port across that policy change. The same executable passed this
+39-action trace in 86.4 seconds locally, including the original clone, branch,
+transfer, remote-switch and cleanup checks. Final cold and warm results remain
+separate observations recorded on the pull request.
 
 An isolated attempt to move C compilation into the final Zig compile was not
 retained: local cold cross-build time changed from 189.0 to 206.3 seconds, and a

@@ -150,10 +150,7 @@ function* mobilityTrace(subject, guestCut = false) {
   }
   let work = yield* command('start', {program: subject.program,
     input: {tag: 'inline_json', value: {schema: description.input_schema, json_text: '["128","100"]'}},
-    // Guest-cut transfer observes complete exposed ports; the native owner may
-    // schedule the intervening slices. The outer-clone trace retains explicit
-    // scheduling so it can capture and inspect an unfinished clone operation.
-    policy: {stop: 'next_exposed_event', continuation: guestCut ? 'owner_scheduled' : 'explicit_only'}, runtime: {tag: 'packaged', value: {}}});
+    policy: {stop: 'next_exposed_event', continuation: 'owner_scheduled'}, runtime: {tag: 'packaged', value: {}}});
   work = yield* atPort(work, 1);
   assert.equal(JSON.parse(work.port.preview.text), '228');
   work = yield* answer(work, {});
@@ -163,6 +160,13 @@ function* mobilityTrace(subject, guestCut = false) {
   work = yield* atPort(work, 3);
   subject.branchValues = [JSON.parse(work.port.preview.text)];
   assert.equal(subject.branchValues[0], '366');
+  if (!guestCut) {
+    const before = work;
+    work = yield* command('delegate', {expected: expected(work), policy: {stop: 'next_exposed_event', continuation: 'explicit_only'}, interpretation: {tag: 'none', value: {}}});
+    assert.equal(work.execution_revision, before.execution_revision);
+    assert.equal(work.realization_revision, before.realization_revision);
+    assert.deepEqual(work.port, before.port);
+  }
   // The guest-cut demonstration owns the complete retention-query sequence.
   // The outer-capsule demonstration independently owns the unfinished clone,
   // exact micro-progress, controller succession and remote cleanup assertions.
@@ -268,13 +272,8 @@ function* mobilityTrace(subject, guestCut = false) {
     if (placement.custody?.phase === 'away') { moved = true; break; }
   }
   assert(moved, JSON.stringify(latestPlacement));
-  if (!guestCut) {
-    subject.controllerMove = true;
-    observed(yield call('placement', 'move', {operation: 'move-mobility-controller', subject: {tag: 'controller', value: {}}, site: 'successor', custody_epoch: 0}));
-  }
   remote = true;
   work = yield* command('inspect', {work: work.work});
-  if (!guestCut) assert(subject.controllerMoved);
   assert.deepEqual(work.runtime, subject.runtime);
   if (guestCut) {
     assert(!work.outer_operation);
@@ -291,6 +290,9 @@ function* mobilityTrace(subject, guestCut = false) {
     assert.equal(work.execution_revision, beforeSwitch);
     assert.equal(work.runtime, 'packaged-generic');
     assert.equal(JSON.parse(work.port.preview.text), '376');
+    subject.controllerMove = true;
+    observed(yield call('placement', 'move', {operation: 'move-mobility-controller', subject: {tag: 'controller', value: {}}, site: 'successor', custody_epoch: 0}));
+    assert(subject.controllerMoved);
   }
   work = yield* command('cancel', {expected: expected(work), reason: 'Both alternatives are acquired; close the retained parent scope.'});
   work = yield* atPort(work, 5);

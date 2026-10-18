@@ -1013,7 +1013,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         // transfer cut without performing another full export for measurement.
         // Terminal cleanup remains checked above through the successor owner.
         let archiveBytes;
-        if (placement && name !== 'tools-runtime-mobility') {
+        if (placement) {
           const transfer = toolSubject.transferArchive;
           assert(transfer);
           archiveBytes = await readFile(transfer.path);
@@ -1040,7 +1040,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           assert(metrics.distinct_runtime_artifact_bytes > 0);
         }
         toolRuns.at(-1).runtime_accounting = {
-          stage: placement && name !== 'tools-runtime-mobility' ? name === 'tools-runtime-guest-mobility' ? 'work-transfer' : 'controller-transfer' : 'terminal',
+          stage: placement ? name === 'tools-runtime-guest-mobility' ? 'work-transfer' : 'controller-transfer' : 'terminal',
           admitted_runtimes: metrics.admitted_runtimes,
           artifact_bytes: metrics.distinct_runtime_artifact_bytes,
           current_capsule_bytes: metrics.distinct_current_runtime_capsule_bytes,
