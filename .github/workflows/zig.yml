@@ -250,7 +250,7 @@ jobs:
           elif [ "${{ matrix.lane }}" = workspace-runtime ]; then
             run_compiled_tests workspace-runtime 3
           elif [ "${{ matrix.lane }}" = workspace-custody ]; then
-            run_compiled_tests workspace-runtime 3
+            run_compiled_tests workspace-runtime 5
           elif [ "${{ matrix.lane }}" = workspace-succession ]; then
             run_compiled_tests workspace-runtime 2
           elif [ "${{ matrix.lane }}" = correspondence ]; then
