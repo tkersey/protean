@@ -150,7 +150,10 @@ function* mobilityTrace(subject, guestCut = false) {
   }
   let work = yield* command('start', {program: subject.program,
     input: {tag: 'inline_json', value: {schema: description.input_schema, json_text: '["128","100"]'}},
-    policy: {stop: 'next_exposed_event', continuation: 'explicit_only'}, runtime: {tag: 'packaged', value: {}}});
+    // Guest-cut transfer observes complete exposed ports; the native owner may
+    // schedule the intervening slices. The outer-clone trace retains explicit
+    // scheduling so it can capture and inspect an unfinished clone operation.
+    policy: {stop: 'next_exposed_event', continuation: guestCut ? 'owner_scheduled' : 'explicit_only'}, runtime: {tag: 'packaged', value: {}}});
   work = yield* atPort(work, 1);
   assert.equal(JSON.parse(work.port.preview.text), '228');
   work = yield* answer(work, {});

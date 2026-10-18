@@ -88,45 +88,9 @@ pub fn main(init: std.process.Init) !void {
         if (completed != .event or completed.event.value != .cut) return error.InvalidPhase;
         try output.interface.writeAll(try restored.checkpoint(a));
     } else if (std.mem.eql(u8, mode, "capsule-phase")) {
-        // Fixture-only observation of immutable, already published objects.
-        // No restore verifier or execution authority is supplied here.
         const runtime_path = args.next() orelse return error.MissingRuntime;
         const capsule_path = args.next() orelse return error.MissingCapsule;
-        const runtime_bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, runtime_path, a, .unlimited);
-        const capsule_bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, capsule_path, a, .unlimited);
-        var selected = try kosmos.RuntimeArtifact.init(a, runtime_bytes, kosmos.RuntimeCapsule.reference(runtime_bytes).digest);
-        defer selected.deinit();
-        var envelope = try kosmos.RuntimeCapsule.read(a, capsule_bytes);
-        defer envelope.deinit();
-        if (envelope.value.record.kind != .outer_execution or envelope.value.record.operation == null or
-            !std.meta.eql(envelope.value.record.artifact, kosmos.RuntimeCapsule.reference(runtime_bytes))) return error.InvalidPhase;
-        var state = try horos.data.state_image.decodeGraph(a, envelope.value.checkpoint);
-        defer state.deinit();
-        try horos.data.state_admission.validateAdmitted(a, selected.program, state.state);
-        var clone_frames: usize = 0;
-        var clone_bindings: usize = 0;
-        var active_clone_frames: usize = 0;
-        for (state.state.nodes) |node| {
-            const block = switch (node.record) {
-                .control => |control| control.block,
-                .continuation => |continuation| continuation.source_block,
-                else => continue,
-            };
-            const function = selected.program.program().blocks[@intCast(block)].function;
-            for (selected.content.value.recovery.anchors) |anchor| {
-                if ((anchor.role != .clone_rebase and anchor.role != .clone_context) or anchor.function != function) continue;
-                active_clone_frames += 1;
-                const frame = node.activation orelse return error.MissingActivation;
-                // Lowering can retire entry parameters after their last use.
-                // The live continuation locals carry the updated cursor/map.
-                // Require execution beyond entry and actual retained locals;
-                // a matching declaration alone is not a mid-operation witness.
-                if (frame.position == 0 or frame.bindings.len == 0) continue;
-                clone_frames += 1;
-                clone_bindings += frame.bindings.len;
-            }
-        }
-        try output.interface.print("{{\"clone_frames\":{d},\"clone_bindings\":{d},\"active_clone_frames\":{d},\"outer_revision\":\"{d}\"}}", .{ clone_frames, clone_bindings, active_clone_frames, envelope.value.record.outer_revision });
+        try @import("runtime_mobility_peer.zig").capsulePhase(a, init.io, runtime_path, capsule_path, &output.interface);
     } else {
         var builder = horos.source.Builder.init(a);
         defer builder.deinit();

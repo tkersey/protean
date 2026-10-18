@@ -293,6 +293,31 @@ with runtime output; the complete product build and Linux job timings are separa
 measurements. Allocation failure remains explicit, and the parser owns its copied
 strings before the schema buffer is released through the owning allocator.
 
+On `5137efa`, [Linux run 39083493949](https://github.com/tkersey/protean/actions/runs/39083493949)
+passed eighteen of twenty initial jobs, but native adaptive and guest-cut mobility
+hit the ten-minute deadline. Their build steps took 269 and 262 seconds, leaving
+about 290 seconds for execution. Guest mobility also built the full verification
+peer (reported as two minutes), although it used only source emission. That peer
+compilation competed with the product's three-minute compile on the same runner.
+The mobility lanes now build a smaller source/inspection peer; the full independent
+correspondence peer remains in its owning job. The smaller peer compiled locally
+in 11 seconds (15 seconds for the build step with cached prerequisites), versus
+57 seconds for the full peer (58.3 seconds for its build step). Its
+10,243-byte source transport exactly matched the full peer. This local result is
+not a cold Linux workflow measurement.
+
+Native adaptive qualification now separates retained reuse/foreign-program checks
+from control/recovery, reverse/disabled cases and the offline demo. The unchanged
+fixtures passed locally in 96.0 and 42.9 seconds respectively. Moving source
+accounting into the authoring job keeps the total at twenty parallel jobs.
+Guest-cut mobility selects owner scheduling between exposed ports, retaining all
+its assertions; the outer-clone scenario keeps explicit scheduling. On the same
+local production executable, the guest-cut fixture passed in 130.9 seconds versus
+150.6 seconds with explicit scheduling. The narrowed peer also passed all 50 outer-capsule
+mobility actions, including live clone inspection, controller succession and
+cleanup, in 169.9 seconds locally. Complete cold and warm Linux qualification
+of these changes remains required; no timing pass is inferred from local results.
+
 Completed compilation can be reused only through an exact cache key containing
 the Git build inputs, compiler executable/library/license contents and modes,
 runner OS/architecture, safe mode and compilation profile. There is no prefix

@@ -15,6 +15,8 @@ assert.equal(image.subarray(0, 8).toString(), 'ABL_BPI3');
 assert.equal(createHash('sha256').update(image).digest('hex'), application.program_sha256);
 
 const app = deployment(process.argv[2], 'protean');
+const group = process.argv[5] ?? 'all';
+assert(['all', 'controls', 'workspace'].includes(group));
 let passed = false;
 try {
   const invoke = (...args) => {
@@ -78,9 +80,12 @@ try {
     assert.equal(BigInt(result.output.control.eviction_generation), 2n);
     console.log(JSON.stringify({adaptive: 'authored control scenario', model_calls: result.output.model_calls, controls: result.output.receipts.length, live_provider: false}));
   };
-  // Independent state directories allow the offline demo and both provider
-  // fixtures to progress together. Await every cleanup before closing deployment.
-  const outcomes = await Promise.allSettled([demo(), verifyAdaptiveNative({app, applicationPath: process.argv[3]})]);
+  // Independent state directories let the selected provider fixtures and demo
+  // progress together. Await every cleanup before closing deployment.
+  const outcomes = await Promise.allSettled([
+    ...(group === 'workspace' ? [] : [demo()]),
+    verifyAdaptiveNative({app, applicationPath: process.argv[3], group}),
+  ]);
   const failures = outcomes.filter(value => value.status === 'rejected').map(value => value.reason);
   if (failures.length) throw new AggregateError(failures, 'native adaptive qualification failed');
   passed = true;

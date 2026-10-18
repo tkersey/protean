@@ -366,7 +366,7 @@ controlled provider replies, real transport, kills/restarts, cancellation, tool
 construction/reuse, and independently altered archives. No paid model calls run.
 The complete aggregate remains `check-native`. CI separates authoring/HTTPS,
 owner/recovery, general workspace, runtime/custody workspace, correspondence,
-native deployment, four runtime scenario groups and an independent downstream
+native control/workspace deployment, four runtime scenario groups and an independent downstream
 build. All 21 workspace tests remain in `check-workspace-programs`. Owner tests
 and crash/reopen checks remain in `check-native-owner`, with separate
 adaptive-controller, task-ownership and support targets for CI scheduling. The terminal
@@ -384,10 +384,16 @@ executes before receiving qualification credit.
 Rerunning all jobs replaces that run's prior named result artifacts with the new
 results. A partial job rerun does not establish full workflow timing.
 A cache-assisted pass does not establish the cold-build latency.
-The packaged adaptive peer runs its independent controller/recovery and workspace
-groups concurrently with the offline demo, using separate state, snapshot and
-HTTPS fixtures. Every group must finish, and their original assertions and
-command deadlines remain.
+The packaged adaptive peer runs its independent controller/recovery, retained
+workspace and remaining workspace scenarios in separate state, snapshot and HTTPS
+fixtures. CI separates retained-program reuse/foreign rejection into
+`native-workspace`; `native` retains control/recovery, reverse/disabled workspace
+cases and the offline demo. Every group must finish with its original assertions.
+Source accounting runs in the authoring lane, keeping the matrix at twenty
+concurrent jobs. Both native lanes enter the final executable-identity gate.
+The guest-cut mobility trace permits ordinary owner scheduling between exposed
+ports; the outer-clone trace keeps explicit scheduling for its unfinished-state
+witness. All retention, branch, transfer, response and cleanup checks remain.
 The additional runtime suite allows a result poll to wait up to 120 seconds behind
 synchronous specialization or placement; other RPCs keep their existing limits.
 This does not extend the ten-minute job or workflow limits.
@@ -408,6 +414,12 @@ source through Horos's independent source oracle and native Kosmos. Passing
 `-Dworkspace-wasm=/absolute/path/to/kosmos-kernel.wasm` additionally compares exact
 native/WASM outcomes and alternates checkpoint producers. The oracle and embedding
 are the authenticated dependency implementations, not production dependencies.
+The deployment mobility lanes use `build-runtime-mobility-peer`, which only emits
+the same authored source and inspects published clone-phase objects. Its source
+transport is byte-identical to the full peer. Its capsule inspector is shared
+with the full peer and neither restores nor advances execution. The full peer
+remains in correspondence qualification, including native invocation, independent
+source comparison and capsule export/import.
 The same check exports a synthetic capsule during an actual clone operation,
 restores its exact outer state, and rejects a second custody claim. For native
 platform comparison, build `build-workspace-peer -Doptimize=safe` on each host.

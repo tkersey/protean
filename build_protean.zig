@@ -384,6 +384,13 @@ pub fn build(b: *std.Build) void {
         const workspace_peer = native_graph.emitter("workspace-semantics", workspace_semantics_module);
         b.step("build-workspace-peer", "Build the verification-only source and capsule byte peer")
             .dependOn(&b.addInstallArtifact(workspace_peer, .{ .dest_dir = .{ .override = .{ .custom = "verification" } } }).step);
+        const mobility_peer_module = native_graph.module("test/protean/runtime_mobility_peer.zig");
+        mobility_peer_module.strip = optimize != .debug;
+        mobility_peer_module.addImport("kosmos", checked_kosmos);
+        mobility_peer_module.addImport("protean_native", checked_environment);
+        const mobility_peer = native_graph.emitter("runtime-mobility-peer", mobility_peer_module);
+        b.step("build-runtime-mobility-peer", "Build the source-emission and read-only mobility fixture peer")
+            .dependOn(&b.addInstallArtifact(mobility_peer, .{ .dest_dir = .{ .override = .{ .custom = "verification" } } }).step);
         const workspace_semantics_run = b.addSystemCommand(&.{"node"});
         workspace_semantics_run.addFileArg2(b.path("test/protean/workspace_semantics.mjs"), .{});
         workspace_semantics_run.addArtifactArg(workspace_peer);
@@ -445,7 +452,7 @@ pub fn build(b: *std.Build) void {
             runtime_peer.addFileArg2(adaptive_product.executable.getEmittedBin(), .{ .make_absolute = true });
             runtime_peer.addFileArg2(adaptive_application, .{ .make_absolute = true });
             runtime_peer.addArg("");
-            runtime_peer.addArtifactArg(workspace_peer);
+            runtime_peer.addArtifactArg(mobility_peer);
             runtime_peer.step.dependOn(&placement_peer.step);
             b.step("check-native-runtime", "Qualify scripted optional runtime choices through native inference and workspace boundaries").dependOn(&runtime_peer.step);
             native_executable.dependOn(&runtime_peer.step);

@@ -195,17 +195,25 @@ function* workspaceTrace(subject, scenario) {
     {kind: 'hypothesis', statement: 'Other inputs may reveal discrepancies.', reasoning: 'Only the admitted inputs were exercised.', evidence_indices: []}], limitations: ['No universal correctness claim.']}];
 }
 
-// Separate provider and task state let both independent groups make progress.
-// Await both cleanups even when one group fails; no qualification is skipped.
-export async function verifyAdaptiveNative({app, applicationPath}) {
-  const results = await Promise.allSettled(['controls', 'workspace'].map(async suite => {
-    const data = join(app.data, suite), controller = join(app.controller, suite);
+// Separate provider and task state let independent groups make progress.
+// Await every cleanup even when one group fails; no qualification is skipped.
+export async function verifyAdaptiveNative({app, applicationPath, group = 'all'}) {
+  assert(['all', 'controls', 'workspace'].includes(group));
+  const groups = group === 'workspace' ? ['workspace'] : group === 'controls' ? ['controls', 'workspace-extra'] : ['controls', 'workspace', 'workspace-extra'];
+  const results = await Promise.allSettled(groups.map(async name => {
+    const suite = name === 'controls' ? 'controls' : 'workspace';
+    const workspaceScenarios = name === 'workspace' ? ['tools-reuse', 'tools-foreign'] : ['tools-reverse', 'tools-disabled'];
+    const data = join(app.data, name), controller = join(app.controller, name);
     await Promise.all([mkdir(data), mkdir(controller)]);
-    return verifyAdaptiveNativeSuite({app: {...app, data, controller}, applicationPath, suite});
+    const started = performance.now();
+    const result = await verifyAdaptiveNativeSuite({app: {...app, data, controller}, applicationPath, suite, workspaceScenarios});
+    console.error(JSON.stringify({native_fixture: name, elapsed_ms: performance.now() - started}));
+    return result;
   }));
   const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
   if (failures.length) throw new AggregateError(failures, 'native adaptive qualification failed');
-  console.log(JSON.stringify({...results[0].value, ...results[1].value}));
+  console.log(JSON.stringify({...(results.find(result => result.value.adaptive_native)?.value ?? {}),
+    tool_construction: results.flatMap(result => result.value.tool_construction ?? [])}));
 }
 
 export async function verifyAdaptiveRuntime({app, applicationPath, scenarios, sourcePeer}) {
@@ -277,7 +285,7 @@ export async function verifyEvaluationPreparation({configPath, directory}) {
   assert.equal(new Set(repeatedConfig.tools.inputs.map(item => JSON.stringify(item.rows))).size, 8);
 }
 
-async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeScenarios, sourcePeer}) {
+async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspaceScenarios, runtimeScenarios, sourcePeer}) {
   const assetBytes = await readFile(applicationPath), asset = JSON.parse(assetBytes);
   const fixture = JSON.parse(Buffer.from(asset.resources.find(row => row.id === 'adaptive-agent.offline-responses').base64url, 'base64url'));
   const root = join(app.data, 'controlled snapshot'), state = join(app.data, 'controlled state'), configPath = join(app.data, 'adaptive.json');
@@ -814,7 +822,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, runtimeSc
     const reverseRecipe = linkRecipe([['filter', 'selected'], ['swap'], ['map', 'join'], ['filter', 'orphan'], ['group']]);
     let retainedProgram, retainedState;
     const toolRuns = [];
-    const scenarios = suite === 'runtime' ? (runtimeScenarios ?? ['tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe', 'tools-runtime-placement', 'tools-runtime-mobility', 'tools-runtime-guest-mobility']) : ['tools-reuse', 'tools-reverse', 'tools-disabled', 'tools-foreign'];
+    const scenarios = suite === 'runtime' ? (runtimeScenarios ?? ['tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe', 'tools-runtime-placement', 'tools-runtime-mobility', 'tools-runtime-guest-mobility']) : workspaceScenarios;
     for (const name of scenarios) {
       if (suite === 'runtime') console.error(JSON.stringify({runtime_fixture: name, stage: 'launch'}));
       scenario = name; alternateIndex = 0;

@@ -136,6 +136,7 @@ test/protean/observation.zig
 test/protean/participant.zig
 test/protean/prompt_unknown_field.zig
 test/protean/recursive_participant.zig
+test/protean/runtime_mobility_peer.zig
 test/protean/runtime_mobility_source.zig
 test/protean/selection.zig
 test/protean/skill_unknown_field.zig
