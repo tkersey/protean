@@ -36,7 +36,9 @@ const Graph = struct {
             .use_llvm = if (g.b.graph.host.result.os.tag == .linux and g.b.graph.host.result.cpu.arch == .x86_64) g.optimize != .debug else null,
         });
         tests.step.dependOn(g.gate);
-        step.dependOn(&g.b.addRunArtifact(tests).step);
+        const run = g.b.addRunArtifact(tests);
+        run.has_side_effects = true;
+        step.dependOn(&run.step);
         return tests;
     }
     fn emitter(g: Graph, name: []const u8, module_value: *std.Build.Module) *std.Build.Step.Compile {
@@ -228,7 +230,9 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&rejected.step);
     }
     const helper_tests = b.addTest(.{ .root_module = host_tool.root_module });
-    check.dependOn(&b.addRunArtifact(helper_tests).step);
+    const helper_tests_run = b.addRunArtifact(helper_tests);
+    helper_tests_run.has_side_effects = true;
+    check.dependOn(&helper_tests_run.step);
     const native_checks = b.step("check-native", "Check native and custody contracts against the selected Kosmos");
     const native_product = b.step("check-native-product", "Qualify the native adaptive application on the selected supported platform");
     const native_owner = b.step("check-native-owner", "Qualify native owner, context, and recovery contracts");
@@ -535,6 +539,7 @@ pub fn build(b: *std.Build) void {
         });
         workspace_recovery_tests.step.dependOn(native_graph.gate);
         const workspace_recovery_run = b.addRunArtifact(workspace_recovery_tests);
+        workspace_recovery_run.has_side_effects = true;
         b.step("check-workspace-recovery", "Qualify workspace construction recovery through the adaptive controller").dependOn(&workspace_recovery_run.step);
         // Reuse the fixture's complete import graph; keep the measured root in
         // the requested optimization mode.
@@ -561,6 +566,7 @@ pub fn build(b: *std.Build) void {
         });
         adaptive_response_tests.step.dependOn(native_graph.gate);
         const adaptive_response_run = b.addRunArtifact(adaptive_response_tests);
+        adaptive_response_run.has_side_effects = true;
         native_owner_support.dependOn(&adaptive_response_run.step);
         b.step("check-adaptive-context", "Qualify retained adaptive context projection and explicit view selection").dependOn(&adaptive_response_run.step);
         // Zig does not collect test declarations from named dependency modules.
