@@ -29,7 +29,7 @@ source archive, a Zig package and a final executable have distinct identities.
 | Compiler policy | `kosmos.source-lower/2` |
 | Authored semantic source | `cd73df16c3b9d3b0f3920fffa9c3d4a5ee71525cae6782f672e021d66da6ccb7` |
 | Generic artifact SHA-256 | `c3be797414210c55c2ea639a8c5cf8494c5b118a82ffc7b5836832eeb86e940b` (231,838 bytes; terminal service state remains live through the final bounded finish cut) |
-| macOS executable SHA-256 | `6dd0e42b5c8fc0a47ad69bdb73dbbe6200b0d21dee4e3215882e2dbc0f2876dd` (10,425,880 bytes; authenticated build with Kosmos `ded2507`; exact-head integration qualification is recorded on the pull request) |
+| macOS executable SHA-256 | `345c786a832b731f055b15c64b629472a41e16a3e10578d55bb42e1263a8eade` (10,442,296 bytes; authenticated build after the custody/runtime corrections with Kosmos `ded2507`; exact-head integration qualification is recorded on the pull request) |
 | WASM kernel SHA-256 | `9cda4b3d473d2badbc38645f57a0ece6c9e933aa67a08feb2d2a4f4b121f1d19` (Kosmos `ded2507` packaged kernel; source/native/WASM, ABI, capacity and real-browser qualification pass) |
 
 These are built artifacts, not published release assets. The native manifest
@@ -159,6 +159,23 @@ cut. Snapshot records stay in native storage and have no portable archive kind.
 Compatibility reads admitted artifact metadata without creating a resident.
 Native JSON projections own their nested text after decoded records are released.
 
+Snapshot validation restores a private session and compares its canonical
+publication without replacing the controller's live resident or writing another
+Store publication. Runtime identity follows the exact compiled guest image;
+distinct source artifacts with that image can share a runtime. Its immutable
+`origin_program` records the first admitted source, while each work item retains
+its own program and exposed ports. Runtime observations must match the actual
+task-owned record, including provenance.
+
+Ordinary archive import grants no execution, whether copied custody is local,
+frozen or omitted, and whether placement is configured or disabled. Native local
+admission stays in the original namespace. Import verifies bilateral acceptance
+against the original frozen record, converts copied custody to remote data, and
+activates only the accepted subject in the same transaction. A moved controller
+can follow authenticated executor succession for a child whose offer was created
+after controller transfer. Cold retention audit independently traverses each
+typed workspace publication command, including source capsules used by switching.
+
 Executor succession extends an immutable signed control with verified bilateral
 transfer proofs. A prior executor's retained report is accepted as that operation's
 receipt, while fresh cleanup observations must come from the current executor.
@@ -167,6 +184,11 @@ transmission. Cancellation scheduling derives from retained ownership and curren
 custody, including terminal parents. Controller cancellation event revisions and
 signed executor park observations preserve the ordering of fresh cancellation and
 later explicit parking without comparing clocks between namespaces.
+Root cancellation retains queued scheduling intent across freeze and refusal or
+abort. Host parking also covers owned frozen roots, so restoring local custody
+does not override a later explicit park; a fresh cancellation can select cleanup
+again. Regression fixtures exercise both transfer outcomes and both scheduling
+orders.
 
 The deterministic native demonstration includes ordinary investigation, one
 specialization reused on changed inputs, leaving a runtime investigation for source
@@ -180,6 +202,11 @@ moves it to a fresh native executor, checks the identical selected runtime,
 capsule and execution revision, and only then supplies the second branch input.
 Its first prefix and response are not replayed. Local capsule-verifier tests alone
 do not establish these host laws.
+The guest-cut version additionally switches back to the packaged generic runtime
+through signed remote control, preserving the exact execution revision and second
+branch value. Its archive accounting records three requested switches. Evaluation
+arm checks normalize these remote wrappers; pure-tool comparisons permit only
+terminal owner-scheduled start, wait and collect, and reject guest views.
 
 ## Qualification evidence
 
@@ -350,8 +377,8 @@ executable hashes must match the independently packaged product.
 The native adaptive CLI and native placement fixtures run independently. The
 15 workspace cases are partitioned into nine execution, three retention and
 three history/cancellation cases;
-the six runtime cases into three selection/cancellation, two custody and one
-succession case. These are disjoint filters over the same test roots, with exact
+the seven runtime cases into three selection/cancellation, two custody and two
+succession cases. These are disjoint filters over the same test roots, with exact
 executed counts checked in CI. The ordinary build targets still run the full roots.
 The 14 adaptive-owner cases similarly divide into three capture-recovery and
 eleven control/reconciliation cases; their previous combined job took 589 seconds.
