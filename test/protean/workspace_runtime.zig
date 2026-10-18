@@ -66,9 +66,18 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     defer a.free(specialization_request_memory);
     var specialization_request = std.heap.FixedBufferAllocator.init(specialization_request_memory);
     const specialized = try service.workspaceSpecializeWithHooks(specialization_request.allocator(), "specialize", parent.receipt.task, program.receipt.workspace.?, .{ .control = true, .storage = true });
+    try std.testing.expectEqual(namespace.store.integrity_epoch, service.checked_workspace_runtimes.get(specialized.receipt.workspace.?).?);
+    try std.testing.expectEqualDeep(specialized.receipt.workspace.?, service.runtime_cache.?.artifact.identity);
+    try std.testing.expectEqual(namespace.store.integrity_epoch, service.runtime_cache.?.epoch);
     const duplicate = try service.workspaceSpecializeWithHooks(scratch, "specialize", parent.receipt.task, program.receipt.workspace.?, .{ .control = true, .storage = true });
     try std.testing.expect(duplicate.replayed);
     try std.testing.expectEqualDeep(specialized.receipt.workspace, duplicate.receipt.workspace);
+    var previous_runtime = try service.runtime_cache.?.artifact.clone();
+    defer previous_runtime.deinit();
+    const previous_epoch = namespace.store.integrity_epoch;
+    namespace.store.invalidateIntegrity();
+    try std.testing.expectEqual(previous_epoch, service.runtime_cache.?.epoch);
+    try std.testing.expectEqual(previous_epoch + 1, namespace.store.integrity_epoch);
     const runtime = try workspaceRef(scratch, .runtime, specialized.receipt.workspace.?);
     const input = try scratch.alloc(u8, 300 * 9 + 1);
     var writer: data.wire.Writer = .{ .output = input };
@@ -91,6 +100,9 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
         _ = try service.workspaceRealize(commit_guard.allocator(), "select", parent.receipt.task, selection);
         try std.testing.expectEqual(@as(usize, 0), commit_guard.rejected);
     }
+    try std.testing.expectEqual(namespace.store.integrity_epoch, service.checked_workspace_runtimes.get(specialized.receipt.workspace.?).?);
+    try std.testing.expectEqual(namespace.store.integrity_epoch, service.runtime_cache.?.epoch);
+    try std.testing.expect(previous_runtime.core != service.runtime_cache.?.artifact.core);
     const replay = try service.workspaceRealize(scratch, "select", parent.receipt.task, selection);
     try std.testing.expect(replay.replayed);
     try std.testing.expectError(error.StaleRevision, service.workspaceRealize(scratch, "stale-select", parent.receipt.task, selection));

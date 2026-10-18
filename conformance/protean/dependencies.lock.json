@@ -3,39 +3,39 @@
   "status": "development-integration",
   "boundary": {
     "repository": "tkersey/horos",
-    "commit": "a58967d541402b3661c05b4d599926114df75123",
-    "gitTree": "da1295b8b92dda92d7ea4ae4121f815e4fa400df",
+    "commit": "592eb0839326f2d8a423b59ce2746ab18ef5136a",
+    "gitTree": "ce1fec549d6eb79f859fc73d1b66b8feb11fa479",
     "version": "6.0.0",
     "source": {
-      "inventorySha256": "cbeda8b6d08ca2ff376d4104919d0d9a8fbf3a376d8abd070eacc0d43fa7d9ad",
+      "inventorySha256": "2dab0aed8e2ec7409477764fc5535ad8342d4dd8e677b02e9389bfdb6df945d3",
       "entries": 418,
-      "bytes": 8937144
+      "bytes": 8939498
     },
     "archive": {
-      "url": "https://github.com/tkersey/horos/archive/a58967d541402b3661c05b4d599926114df75123.tar.gz",
-      "sha256": "d05d63dc787d99ff661fef35ed9d009920215821d76553bee46b583c5a61b05f",
-      "bytes": 1647933,
+      "url": "https://github.com/tkersey/horos/archive/592eb0839326f2d8a423b59ce2746ab18ef5136a.tar.gz",
+      "sha256": "f552f214d5d5e0d83d11e9bbd35b08d0e613413bd91d7358f49476f23c05b18f",
+      "bytes": 1648359,
       "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
     "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree.",
     "package": {
-      "zigHash": "horos-6.0.0-flclaAXSQAD9argqy5ySN6anKQTKtjk1TPqkF61O1Adh",
+      "zigHash": "horos-6.0.0-flclaDfbQAD6K8zS9U8ts9xpziBg_1zaU23OvgqKePKb",
       "defaultProfile": "zig-managed",
       "profiles": {
         "zig-managed": {
-          "inventorySha256": "33c14f04c5534abff3ce6023a557dc2fafd1f97aa36b458c17d554a4cabb5218",
+          "inventorySha256": "da62cc22217ec75acf1e13ee898073ff18562b0c3b7cf367432df6b7148efbc3",
           "entries": 398,
-          "bytes": 4248069
+          "bytes": 4250423
         },
         "archive-extracted": {
-          "inventorySha256": "33c14f04c5534abff3ce6023a557dc2fafd1f97aa36b458c17d554a4cabb5218",
+          "inventorySha256": "da62cc22217ec75acf1e13ee898073ff18562b0c3b7cf367432df6b7148efbc3",
           "entries": 398,
-          "bytes": 4248069
+          "bytes": 4250423
         }
       },
       "archive": {
-        "sha256": "a0ac057e25e1974845bcaab9083eb52a026a68efd44acb3a32412e4d06c630ee",
-        "bytes": 857450
+        "sha256": "58086aff4e7778c744a3776d703c30973a720934c7ffdd15fad22b6793c6e868",
+        "bytes": 857926
       }
     },
     "api": {
@@ -97,18 +97,18 @@
   },
   "world": {
     "repository": "tkersey/kosmos",
-    "commit": "0cb83a6255850851df24ec86ca90218c3db3ade0",
-    "gitTree": "df86cf92154295930ec401843d27415b10c4c1a4",
+    "commit": "200e06c42d9d9975f3736c18bc2e953686271191",
+    "gitTree": "4a3fcae1c038453f6fa7f605fda4f941d44b082c",
     "version": "9.0.0",
     "source": {
-      "inventorySha256": "fa2c4af1b9c41bf336619eb7f4e87ed5ef74e4bfc54cc3661bd022aa9b107a71",
+      "inventorySha256": "090f75e4b76d0682ea51f00c994e242d156b10807875494ade2497f6d82b5e09",
       "entries": 201,
-      "bytes": 2638106
+      "bytes": 2648770
     },
     "archive": {
-      "url": "https://github.com/tkersey/kosmos/archive/0cb83a6255850851df24ec86ca90218c3db3ade0.tar.gz",
-      "sha256": "cc772d1e485c38bf09388a4f71aa4d8dc413c8ae0902e8fa83c4aabd76cb28b3",
-      "bytes": 605966,
+      "url": "https://github.com/tkersey/kosmos/archive/200e06c42d9d9975f3736c18bc2e953686271191.tar.gz",
+      "sha256": "c0b7cd51c64dfee21dfbc52eff6472f37cd9b4c4a570550a0ce6d3fad9557288",
+      "bytes": 607733,
       "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
     "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree."

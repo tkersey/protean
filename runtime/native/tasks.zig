@@ -6477,6 +6477,14 @@ pub fn Service(comptime Types: type) type {
             }
         };
 
+        fn retainValidatedRuntime(self: *Self, admitted: *const kosmos.RuntimeArtifact) !void {
+            var retained = try admitted.clone();
+            errdefer retained.deinit();
+            try self.checked_workspace_runtimes.put(self.allocator, admitted.identity, self.store().integrity_epoch);
+            if (self.runtime_cache) |*cached| cached.artifact.deinit();
+            self.runtime_cache = .{ .epoch = self.store().integrity_epoch, .artifact = retained };
+        }
+
         fn workspaceRuntime(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, digest: state.Digest, program_id: ?state.Digest) !SelectedRuntime {
             const id = try workspaceContentCustody(a, task_id, digest);
             var saved = try self.record(workspace.Runtime, a, "workspace_runtime", id, task_id);
@@ -6504,11 +6512,8 @@ pub fn Service(comptime Types: type) type {
                 // Validation owns and releases its large temporary arenas.
                 // A caller's response arena may intentionally ignore free.
                 try kosmos.RuntimeCompiler.validate(self.allocator, &admitted);
-                try self.checked_workspace_runtimes.put(self.allocator, digest, self.store().integrity_epoch);
             }
-            const retained = try admitted.clone();
-            if (self.runtime_cache) |*cached| cached.artifact.deinit();
-            self.runtime_cache = .{ .epoch = self.store().integrity_epoch, .artifact = retained };
+            try self.retainValidatedRuntime(&admitted);
             return .{ .record = saved, .admitted = admitted };
         }
 
@@ -6557,6 +6562,7 @@ pub fn Service(comptime Types: type) type {
             var admitted = try kosmos.RuntimeArtifact.init(self.allocator, bytes, storage.digest(bytes));
             defer admitted.deinit();
             try kosmos.RuntimeCompiler.validate(self.allocator, &admitted);
+            try self.retainValidatedRuntime(&admitted);
             try self.store().begin();
             defer self.store().rollback();
             const artifact = try self.store().putObject(bytes);
