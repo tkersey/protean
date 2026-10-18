@@ -28,14 +28,7 @@ pub fn putCustody(store: *storage.Store, a: std.mem.Allocator, value: p.Custody)
             defer decided.deinit();
             return error.OperationConflict;
         }
-        var rows = try store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.kind='placement_custody' AND r.id<>?", &.{.{ .blob = &value.id }});
-        defer rows.deinit();
-        while (try rows.step() == .row) {
-            var other = try contracts.decodeOwned(p.Custody, a, try rows.bytes(0));
-            defer other.deinit();
-            if (other.value.phase == .frozen and other.value.intent != null and
-                std.meta.eql(other.value.intent.?.transfer, intent.transfer)) return error.OperationConflict;
-        }
+        try requireCompatibleIntent(store, a, intent);
     }
     // Snapshot retirement is part of the same native custody transition.
     if (value.phase != .frozen) {
@@ -69,6 +62,18 @@ fn retainCustodyDecision(store: *storage.Store, a: std.mem.Allocator, value: p.C
     const offer = value.offer orelse return error.InvalidTransfer;
     try p.verify(p.Offer, a, offer, offer.value.intent.source);
     try retainDecision(store, a, offer.value, signed);
+}
+
+fn requireCompatibleIntent(store: *storage.Store, a: std.mem.Allocator, intent: p.Intent) !void {
+    var rows = try store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.kind='placement_custody'", &.{});
+    defer rows.deinit();
+    while (try rows.step() == .row) {
+        var other = try contracts.decodeOwned(p.Custody, a, try rows.bytes(0));
+        defer other.deinit();
+        if (other.value.phase != .frozen) continue;
+        const retained = other.value.intent orelse return error.InvalidTransfer;
+        if (std.meta.eql(retained.transfer, intent.transfer) and !std.meta.eql(retained, intent)) return error.OperationConflict;
+    }
 }
 
 pub fn controllerLineage(store: *storage.Store, a: std.mem.Allocator, task: state.TaskId) ![]p.Succession {
@@ -171,6 +176,7 @@ pub fn putDecision(store: *storage.Store, a: std.mem.Allocator, site: p.Site, of
 fn retainDecision(store: *storage.Store, a: std.mem.Allocator, offer: p.Offer, signed: p.Signed(p.Decision)) !void {
     if (!store.transaction or store.projecting or store.fenced) return error.InvalidState;
     try p.matchDecision(a, offer, signed);
+    try requireCompatibleIntent(store, a, offer.intent);
     if (try decision(store, a, signed.value.transfer)) |saved| {
         var prior = saved;
         defer prior.deinit();

@@ -195,7 +195,9 @@ existing immutable decision journal, in the same transaction as custody release.
 It preserves a prior receipt before replacing the current intent and rejects a
 new frozen publication whose transfer ID already has a retained decision or is
 frozen by another local subject. The latter check uses the existing custody
-records, with no additional table or protocol. This covers later transfers,
+records, with no additional table or protocol. Decision retention applies the
+same intent agreement, including when one namespace handles both source and
+destination roles. This covers later transfers,
 other local subjects and restart without relying on the
 latest custody record alone. Destination issuance still requires the actual local
 destination; retained knowledge grants no execution authority. Exact frozen

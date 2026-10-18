@@ -1050,6 +1050,13 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             try std.testing.expectError(error.OperationConflict, sender.placementFreeze(scratch, other_subject, "destination", other_cut, @splat(17)));
             try std.testing.expectEqual(.local, (try sender.placementStatus(scratch, other_subject)).?.phase);
             try std.testing.expectEqual(.frozen, (try sender.placementStatus(scratch, subject)).?.phase);
+            var conflicting_intent = fresh_intent;
+            conflicting_intent.source = destination_site;
+            conflicting_intent.destination = source_site;
+            const conflicting_offer = try p.sign(p.Offer, scratch, destination_key, .{ .intent = conflicting_intent, .archive_digest = @splat(94), .archive_bytes = 0 });
+            const frozen_head = source_namespace.store.head;
+            try std.testing.expectError(error.OperationConflict, sender.placementRefuse(scratch, "destination", conflicting_offer, .withdrawn));
+            try std.testing.expectEqualDeep(frozen_head, source_namespace.store.head);
             try sender.placementAbortUnsent(scratch, subject, @splat(17));
             try std.testing.expectEqualDeep(fresh_intent, try sender.placementFreeze(scratch, subject, "destination", changed_cut, @splat(17)));
             const fresh_path = try std.fmt.allocPrint(scratch, "{s}/refused-again.par", .{path_buffer[0..length]});
