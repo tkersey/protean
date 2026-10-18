@@ -314,6 +314,28 @@ dynamic loops and repeated calls, with estimated construction amortization at
 These are new-core observations; the preceding rows retain their historical scope.
 Current integrated deployment and Linux qualification are recorded on the pull request.
 
+### Source-bound delegation and work movement
+
+A current interpretation delegation binds an instrument to a target port under
+local custody. Moving either endpoint alone used to succeed and strand that
+relationship: the source lost custody of an endpoint, while the destination
+could neither dispatch the instrument nor deliver its answer. The shared freeze
+operation now rejects that split before changing custody or scheduling. It uses
+the same delegation-validity rule as dispatch and answer delivery. An unfinished
+instrument or a completed answer awaiting delivery retains the binding; revoked
+delegations, completed instruments without answers, and settled delivery do not.
+Controller movement remains independent, and ordinary pending inputs can move.
+This preserves the existing source-bound mobility boundary; it does not introduce
+distributed delegation or grant custody through copied workspace records.
+
+The owning fixture first reproduced target freezing on the unchanged production
+code. With the correction, all three Safe-mode retention tests pass. They check
+both endpoints for model and snapshot delegations before dispatch and before
+answer delivery, unchanged durable state after rejection, normal delivery after
+restart/resumption, and available movement before delegation, after revocation,
+after an unavailable answer, and after successful delivery. Full current native,
+Linux and serial-review qualification is recorded on the pull request.
+
 ## Qualification latency measurements
 
 The first Linux Kosmos qualification spent 40 minutes 42 seconds in native

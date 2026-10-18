@@ -2119,6 +2119,28 @@ fn inputPort(b: *source.Builder, text: bool) !source.Module {
     return b.module(entry, unit);
 }
 
+fn expectDelegationMoveBlocked(service: anytype, a: std.mem.Allocator, task: native.testing.state.TaskId, target: [32]u8, instrument: [32]u8) !void {
+    for ([_][32]u8{ target, instrument }) |id| {
+        const subject: native.placement.Subject = .{ .task = task, .work = id };
+        const head = service.namespace.store.head;
+        const cut = try service.placementCut(a, subject);
+        try std.testing.expectError(error.UnsettledOccurrence, service.placementFreeze(a, subject, "destination", cut, @splat(75)));
+        try std.testing.expectEqualDeep(head, service.namespace.store.head);
+        try std.testing.expectEqualDeep(cut, try service.placementCut(a, subject));
+    }
+}
+
+fn expectDelegationMoveAvailable(service: anytype, a: std.mem.Allocator, subject: native.placement.Subject) !void {
+    const cut = try service.placementCut(a, subject);
+    var transfer: [32]u8 = undefined;
+    try service.io.randomSecure(&transfer);
+    _ = try service.placementFreeze(a, subject, "destination", cut, transfer);
+    try std.testing.expectEqual(.frozen, (try service.placementStatus(a, subject)).?.phase);
+    try service.placementAbortUnsent(a, subject, transfer);
+    try std.testing.expectEqual(.local, (try service.placementStatus(a, subject)).?.phase);
+    try std.testing.expectEqualDeep(cut, try service.placementCut(a, subject));
+}
+
 test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences while root messages remain independent" {
     const a = std.testing.allocator;
     const io = std.testing.io;
@@ -2144,7 +2166,7 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
     const snapshot = try contracts.encodeOwned(contracts.RepositorySnapshot, a, .{ .version = 2, .excluded_entries = 0, .files = .{ .items = &.{.{ .path = .{ .bytes = "source.txt" }, .sha256 = digest, .contents = .{ .bytes = text } }} } });
     defer a.free(snapshot);
     var grants: [declarations.len]native.registry.Grant = undefined;
-    const profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "delegation-test", .resources = &.{snapshot}, .authority = .{ .grants = &grants, .principal = "test", .tenant = "test", .inference = true } };
+    var profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "delegation-test", .resources = &.{snapshot}, .authority = .{ .grants = &grants, .principal = "test", .tenant = "test", .inference = true } };
     for (declarations, &grants) |declaration, *grant| grant.* = .{ .identity = declaration.identity, .resource_role = declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
@@ -2162,6 +2184,16 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
     defer arena.deinit();
     const scratch = arena.allocator();
     const Scenario = enum { model, snapshot, snapshot_empty, model_unavailable, revoked, unknown, unknown_wait, not_sent_wait, cancel_capture, cancel_not_sent, cancel_park_not_sent, park_cancel_not_sent, invalid_capture, response_failed, response_incomplete, response_error };
+    const source_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(73));
+    const destination_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(74));
+    const Disclosure = struct {
+        fn check(_: *anyopaque, _: native.placement.Subject, _: []const native.testing.state.Reference) !void {}
+    };
+    var disclosure: u8 = 0;
+    var peers = [_]native.placement.Peer{.{ .name = "destination", .site = .{ .key = destination_key.public_key.toBytes(), .namespace = @splat(74) }, .native_build = profile.runtime_identity, .compatibility = .{ .base = @splat(0), .admission = @splat(0), .bridge = @splat(0), .semantics = @splat(0), .private_state = @splat(0) }, .resource_binding = try profile.resourceIdentity(scratch, application.image_identity), .disclosure_policy = @splat(74), .context = &disclosure, .disclose = Disclosure.check }};
+    const placement: native.placement.Configuration = .{ .signing_key = source_key, .peers = &peers };
+    profile.placement = &placement;
+    service.profile.placement = &placement;
     for (std.enums.values(Scenario)) |scenario| {
         const snapshot_mode = scenario == .snapshot or scenario == .snapshot_empty;
         const successful = scenario == .model or snapshot_mode;
@@ -2175,6 +2207,8 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
         try std.testing.expect(built_reply.program != null);
         const target_start = try service.workspaceStart(scratch, try std.fmt.allocPrint(scratch, "start-{s}", .{suffix}), parent.receipt.task, try nativeIdentity(built_reply.program.?), &.{}, .{});
         const target_id = target_start.receipt.workspace.?;
+        peers[0].compatibility = try service.placementCompatibility(scratch, .{ .task = parent.receipt.task, .work = target_id });
+        if (scenario == .model) try expectDelegationMoveAvailable(&service, scratch, .{ .task = parent.receipt.task, .work = target_id });
         var target = try service.workspaceWork(scratch, parent.receipt.task, target_id);
         defer target.deinit();
         var port = try contracts.decodeOwned(native.workspace.Port, scratch, try namespace.store.object(scratch, target.value.current_port.?, null));
@@ -2196,6 +2230,7 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                     defer candidate.deinit();
                     if (candidate.value.delegation != null) instrument_id = candidate.value.id;
                 }
+                if (successful and instrument_id != null) try expectDelegationMoveBlocked(&service, scratch, parent.receipt.task, target_id, instrument_id.?);
                 if (scenario == .model and instrument_id != null) {
                     // Keep the admitted instrument but omit the other half of
                     // the same delegation, restoring its prior valid target.
@@ -2353,6 +2388,7 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                 if (completed.value.answer_value != null) {
                     try std.testing.expectEqual(.completed, completed.value.outcome_kind);
                     try std.testing.expectEqual(.requested, result.value.outcome_kind);
+                    try expectDelegationMoveBlocked(&service, scratch, parent.receipt.task, target_id, instrument_id.?);
                     if (scenario == .model) try expectModelRequestBudget(&service, scratch, completed.value);
                     try expectInstrumentAnswerBound(&service, scratch, completed.value);
                     try service.close(scratch);
@@ -2493,6 +2529,9 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
             try std.testing.expectEqual(@as(u64, 1), root.value.inference_attempts);
         }
         if (scenario == .model) try expectProgramProgressIsDerived(&service, scratch, parent.receipt.task);
+        if (successful or scenario == .revoked or scenario == .model_unavailable) {
+            for ([_][32]u8{ target_id, instrument_id.? }) |id| try expectDelegationMoveAvailable(&service, scratch, .{ .task = parent.receipt.task, .work = id });
+        }
         const archive_path = try std.fmt.allocPrint(scratch, "{s}/{s}.par", .{ path_buffer[0..length], suffix });
         _ = try service.exportCheckpoint(scratch, parent.receipt.task, archive_path);
         const import_path = try std.fmt.allocPrint(scratch, "{s}/import-{s}", .{ path_buffer[0..length], suffix });

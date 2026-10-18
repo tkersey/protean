@@ -3863,6 +3863,20 @@ pub fn Service(comptime Types: type) type {
             try self.compatible(parent.value);
             if (!std.meta.eql(expected, try self.placementCut(a, subject))) return error.StaleRevision;
             if (self.work) |running| if (std.meta.eql(running.task, subject.task) and std.meta.eql(running.subject_work, subject.work)) return error.UnsettledOccurrence;
+            if (subject.work) |work_id| {
+                const ids = try self.workspaceIds(a, subject.task);
+                defer a.free(ids);
+                for (ids) |id| {
+                    var child = try self.workspaceWork(a, subject.task, id);
+                    defer child.deinit();
+                    const ref = child.value.delegation orelse continue;
+                    if (child.value.terminal() and child.value.answer_value == null) continue;
+                    var delegation = try contracts.decodeOwned(workspace.Delegation, a, try self.store().object(a, ref, null));
+                    defer delegation.deinit();
+                    if (!std.meta.eql(work_id, child.value.id) and !std.meta.eql(work_id, delegation.value.work)) continue;
+                    if (try self.delegationCurrent(a, parent.value, child.value)) return error.UnsettledOccurrence;
+                }
+            }
             var pending_rows = try self.store().database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.kind='occurrence' AND r.task=?", &.{.{ .blob = &subject.task }});
             defer pending_rows.deinit();
             while (try pending_rows.step() == .row) {
