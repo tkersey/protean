@@ -755,7 +755,7 @@ The bundle binds the actual checkout and complete compiled-input identity;
 archive and file digests are checked before the consumer directory is published.
 Only immutable preparation is shared. Every consumer still creates and cleans its
 own isolated deployment and mutable task state. The independent downstream source
-acquisition/build remains, as do both producer builds and their distinct checks.
+acquisition/build remains, as do both producer paths and their distinct checks.
 All nineteen qualification lanes, fixture commands/assertions, safety settings,
 resource limits and the final identity/time gate are unchanged.
 
@@ -768,14 +768,30 @@ its complete 43-call reuse trace. Local checks reject a changed archive digest,
 run attempt, checkout or file body without publishing consumer output. These are
 mechanism checks, not complete qualification or a cold-timing claim. Applicable
 macOS proof is retained because production and fixture inputs are unchanged;
-final cold and cache-assisted results for the complete successor are recorded on
-the pull request.
+final qualification results for the complete successor are recorded on the pull
+request.
 
 The product consumer uses the current attempt's `run_started_at` for its existing
 600-second deadline, matching the terminal gate. The original `created_at` persists
 across GitHub reruns and could reject a fresh attempt immediately. A targeted Linux
 check reproduces that rejection and verifies that the correction admits the fresh
 attempt while rejecting an expired attempt; all digest and context checks remain.
+
+The normal cache path keys compiled outputs by the selected build recipe, compiler
+contents, native target/environment, dependency locks, build configuration, shared
+source modules, required adaptive assets, and the selected test root's transitive
+file inputs. The recipe supplying the key also launches the build. Unrecognized
+source-reference syntax conservatively includes the checkout. Workflow scheduling,
+transport, prose and JavaScript execution fixtures do not change compiled identity;
+those fixtures still execute. New build roots require corresponding input coverage.
+Restored outputs must match the key, required file hashes and modes; an unusable
+entry is reported, discarded and rebuilt. Run/attempt/checkout authentication
+remains a separate publication step. Independent downstream acquisition and build
+are retained. The `4d9d7b8` baseline completed in 538 seconds with eleven exact
+compiled-artifact misses and fifteen intermediate compiler-cache restores. It was
+a cache-assisted rebuild, not an exact-output hit or a fully cold build. The revised
+acceptance requirement uses one complete normal-selection run plus targeted cache
+evidence when needed, without a mandatory forced-cold/warm pair.
 
 `tools/evaluation/workspace.mjs prepare --suite runtime` prepares matched ordinary,
 generic and runtime-optional arms for repetitive work, adaptive exploration and a

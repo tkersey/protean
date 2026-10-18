@@ -17,7 +17,7 @@ assert(directory && /^[0-9]+$/.test(context.run) && /^[0-9]+$/.test(context.atte
 if (operation === 'pack') {
   const inputs = process.env.QUALIFICATION_INPUTS, lane = process.env.QUALIFICATION_LANE;
   assert(['native', 'native-placement'].includes(lane));
-  assert(inputs?.startsWith('protean-compiled-v2-') && inputs.includes('-safe-product-'));
+  assert(inputs?.startsWith('protean-compiled-v3-') && inputs.includes('-safe-product-'));
   const hashes = Object.fromEntries(await Promise.all(files.map(async file => [file, sha256(await readFile(join(directory, file)))])));
   await writeFile(join(directory, metadata), JSON.stringify({format: 'protean-qualification-product/v1', context, inputs, hashes}));
   await execute('tar', ['-czf', join(process.env.RUNNER_TEMP, `native-product-${lane}-${context.attempt}.tar.gz`), '-C', directory, ...members]);
@@ -58,7 +58,7 @@ if (operation === 'pack') {
   const saved = JSON.parse(await readFile(join(incoming, metadata), 'utf8'));
   assert.equal(saved.format, 'protean-qualification-product/v1');
   assert.deepEqual(saved.context, context);
-  assert(saved.inputs.startsWith('protean-compiled-v2-') && saved.inputs.includes('-safe-product-'));
+  assert(saved.inputs.startsWith('protean-compiled-v3-') && saved.inputs.includes('-safe-product-'));
   assert.deepEqual(Object.keys(saved.hashes).sort(), [...files].sort());
   for (const file of files) assert.equal(sha256(await readFile(join(incoming, file))), saved.hashes[file]);
   await rename(incoming, directory);
