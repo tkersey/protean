@@ -63,12 +63,12 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .zig-cache-upload
-          key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane == 'runtime-outer' && 'runtime-guest' || matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.compiled_profile == 'product' && 'native' || (matrix.lane == 'runtime-outer' && 'runtime-guest' || matrix.lane) }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane == 'runtime-outer' && 'runtime-guest' || matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
+            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.compiled_profile == 'product' && 'native' || (matrix.lane == 'runtime-outer' && 'runtime-guest' || matrix.lane) }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
             zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-runtime-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
             zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ (matrix.lane == 'runtime-outer' || matrix.lane == 'runtime-guest') && 'correspondence' || 'authoring' }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
-            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane == 'runtime-outer' && 'runtime-guest' || matrix.lane }}-
+            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.compiled_profile == 'product' && 'native' || (matrix.lane == 'runtime-outer' && 'runtime-guest' || matrix.lane) }}-
             zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-
       - name: Prepare compiler scratch and native isolation tools
         run: |
@@ -173,7 +173,7 @@ jobs:
             --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
             2>&1 | tee "$RUNNER_TEMP/$lane-check.log"
       - name: Save completed compiled qualification inputs
-        if: matrix.compiled_profile && matrix.lane != 'runtime-outer' && steps.deployment_cache.outputs.cache-hit != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache)
+        if: matrix.compiled_profile && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.deployment_cache.outputs.cache-hit != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache)
         continue-on-error: true
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
@@ -181,7 +181,7 @@ jobs:
           key: ${{ steps.deployment_inputs.outputs.key }}
       - name: Retain completed compiler work before deployment
         id: build_cache_size
-        if: matrix.compiled_profile && matrix.lane != 'runtime-outer' && steps.deployment_cache.outputs.cache-hit != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache)
+        if: matrix.compiled_profile && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.deployment_cache.outputs.cache-hit != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache)
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
@@ -327,7 +327,7 @@ jobs:
           retention-days: 14
       - name: Admit a complete bounded cache snapshot
         id: cache_size
-        if: ${{ !cancelled() && matrix.lane != 'runtime-outer' && steps.deployment_cache.outputs.cache-hit != 'true' && steps.build_cache_size.outputs.save != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache) }}
+        if: ${{ !cancelled() && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.deployment_cache.outputs.cache-hit != 'true' && steps.build_cache_size.outputs.save != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache) }}
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"

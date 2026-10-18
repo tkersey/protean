@@ -467,6 +467,18 @@ assertions, safety settings, admission and the 600-second gates are unchanged.
 The removed upload is measured work; final end-to-end timing still requires the
 successor's complete cold and cache-assisted runs.
 
+On `1b241d2`, [Linux run 39101619804](https://github.com/tkersey/protean/actions/runs/39101619804)
+again passed all twenty qualification jobs, but the full workflow took 606 seconds.
+Outer mobility finished in 548 seconds with both duplicate uploads skipped.
+Runtime placement became the longest job at 595 seconds: 269 seconds compiling,
+228 seconds executing, and eight seconds uploading duplicate compiler artifacts;
+native workspace took 587 seconds with a six-second duplicate upload. The native
+job now publishes the shared product caches for these consumers. Each consumer
+still authenticates its inputs, builds on a cache miss, and executes its complete
+fixture. Cache publication has one producer per shared build profile; the same
+commands, assertions, safety settings and time limits remain. Final cold and
+cache-assisted timings remain unproved until their complete successor runs.
+
 An isolated attempt to move C compilation into the final Zig compile was not
 retained: local cold cross-build time changed from 189.0 to 206.3 seconds, and a
 comparison using the same already emitted assets changed from 118.4 to 124.5
