@@ -37,8 +37,8 @@ jobs:
           - {lane: native-placement, compiled_profile: product}
           - {lane: runtime, compiled_profile: product}
           - {lane: runtime-placement, compiled_profile: product}
-          - {lane: runtime-outer, compiled_profile: peer}
-          - {lane: runtime-guest, compiled_profile: peer}
+          - {lane: runtime-outer, compiled_profile: product}
+          - {lane: runtime-guest, compiled_profile: product}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -168,7 +168,6 @@ jobs:
             workspace-runtime) targets=(build-workspace-runtime-check); selection=(-Druntime-workspace-group=selection) ;;
             workspace-custody) targets=(build-workspace-runtime-check); selection=(-Druntime-workspace-group=custody) ;;
             workspace-succession) targets=(build-workspace-runtime-check); selection=(-Druntime-workspace-group=succession) ;;
-            runtime-outer|runtime-guest) targets+=(build-runtime-mobility-peer) ;;
           esac
           zig build "${targets[@]}" "${selection[@]}" -Doptimize=safe --summary all \
             --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
@@ -211,8 +210,9 @@ jobs:
             rg -Fxq "All $2 tests passed." "$log"
           }
           if [ "${{ matrix.lane }}" = authoring ]; then
-            zig build check-protean check-native-https \
-              -Doptimize=safe --summary all
+            zig build check-protean check-native-https build-runtime-mobility-peer \
+              -Doptimize=safe --summary all \
+              --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables
           elif [ "${{ matrix.lane }}" = owners ]; then
             run_compiled_tests native-owner-tasks 68
           elif [ "${{ matrix.lane }}" = owner-adaptive ]; then
@@ -266,6 +266,33 @@ jobs:
               if [ "$lane" = runtime-outer ] || [ "$lane" = runtime-guest ]; then
                 scenarios=tools-runtime-mobility
                 if [ "$lane" = runtime-guest ]; then scenarios=tools-runtime-guest-mobility; fi
+                node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {execFile} from 'node:child_process';
+          import {promisify} from 'node:util';
+          import {createHash} from 'node:crypto';
+          import {mkdir, writeFile} from 'node:fs/promises';
+          import {setTimeout as delay} from 'node:timers/promises';
+          const execute = promisify(execFile), repo = process.env.GITHUB_REPOSITORY;
+          const api = async path => (await execute('gh', ['api', `repos/${repo}/${path}`], {encoding: 'buffer', maxBuffer: 64 * 1024 * 1024})).stdout;
+          let artifact;
+          for (let attempt = 0; attempt < 60; attempt++) {
+            const artifacts = JSON.parse(await api(`actions/runs/${process.env.GITHUB_RUN_ID}/artifacts?per_page=100`)).artifacts;
+            const matches = artifacts.filter(value => value.name === 'runtime-mobility-peer');
+            assert(matches.length <= 1);
+            if (matches.length === 1) { artifact = matches[0]; break; }
+            await delay(1000);
+          }
+          assert(artifact, 'the current authoring job must publish its verification helper');
+          assert.equal(artifact.expired, false);
+          assert.equal(String(artifact.workflow_run.id), process.env.GITHUB_RUN_ID);
+          const bytes = await api(`actions/artifacts/${artifact.id}/zip`);
+          assert.equal(`sha256:${createHash('sha256').update(bytes).digest('hex')}`, artifact.digest);
+          const directory = `${process.env.RUNNER_TEMP}/protean-qualification/verification`;
+          await mkdir(directory, {recursive: true});
+          await writeFile(`${directory}/runtime-mobility-peer`, bytes, {mode: 0o755});
+          console.log(`Authenticated current-run mobility helper: ${artifact.digest}`);
+          JS
               fi
               if [ "$result" -eq 0 ]; then
                 node test/protean/native_runtime.mjs \
@@ -294,6 +321,18 @@ jobs:
           writeFileSync(output, JSON.stringify({identity, artifact_sha256: manifest.artifact_sha256}));
           JS
           fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Retain independently compiled mobility helper
+        if: matrix.lane == 'authoring'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-mobility-peer
+          path: ${{ runner.temp }}/protean-qualification/verification/runtime-mobility-peer
+          archive: false
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 14
       - name: Retain independently qualified build identity
         if: startsWith(matrix.lane, 'native') || startsWith(matrix.lane, 'runtime') || matrix.lane == 'downstream'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -603,6 +603,25 @@ in 51.4 seconds versus 89.7 seconds before; the ordinary/specialized/reframe gro
 passed in 52.7 seconds versus 46.1 seconds before. These are targeted observations;
 complete successor cold and cache-assisted qualification remains required.
 
+On `6c77576`, [cache-assisted qualification](https://github.com/tkersey/protean/actions/runs/39131534921)
+reached 625 seconds after outer mobility hit its deadline; the other nineteen
+qualification jobs passed. Placement's fixture fell from 245 to 137 seconds.
+Outer mobility spent 296 seconds compiling and was cancelled after 250 seconds
+executing. Its verification-only helper took 57 seconds to compile alongside the
+product; product-only jobs compiled in 255–277 seconds, while authoring checks
+took 72 seconds. These separate-run timings identify an opportunity, not an
+isolated speedup measurement.
+
+The authoring job now builds and publishes that same helper while mobility jobs
+build the product independently. Both mobility fixtures authenticate its current
+workflow-run identity and byte digest before execution. They retain every action,
+assertion, resource limit and safety setting. The revised local authoring command
+passed 160 tests / 55 steps and produced the identical helper bytes. Complete
+successor cold and cache-assisted timing remains required. Two fixture experiments
+were discarded: omitting optional skill loading changed a local outer run from
+86.8 to 84.0 seconds; selecting fresh context changed it to 87.5 seconds. Each was
+one observation on the same executable and provided no useful deadline margin.
+
 An isolated attempt to move C compilation into the final Zig compile was not
 retained: local cold cross-build time changed from 189.0 to 206.3 seconds, and a
 comparison using the same already emitted assets changed from 118.4 to 124.5
