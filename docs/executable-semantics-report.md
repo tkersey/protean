@@ -622,6 +622,16 @@ were discarded: omitting optional skill loading changed a local outer run from
 86.8 to 84.0 seconds; selecting fresh context changed it to 87.5 seconds. Each was
 one observation on the same executable and provided no useful deadline margin.
 
+The first shared-helper run, `4762f3f`, exposed an unnecessary publication
+dependency: the helper compiled in 40 seconds but was not uploaded until the
+combined authoring command finished after 352 seconds. Both mobility consumers
+failed their existing artifact wait before it appeared; the superseded run was
+cancelled after those logs were collected. The helper now builds and publishes
+before the independent authoring checks. Sequential local commands passed the
+18-step helper build and all 160 authoring tests / 52 steps. The exact consumer
+script successfully authenticated and downloaded the real Linux helper artifact.
+No timeout was increased; complete successor timing remains required.
+
 An isolated attempt to move C compilation into the final Zig compile was not
 retained: local cold cross-build time changed from 189.0 to 206.3 seconds, and a
 comparison using the same already emitted assets changed from 118.4 to 124.5
