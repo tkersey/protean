@@ -19,6 +19,8 @@ const gcd = @import("workspace_sources.zig").gcd;
 const listLength = @import("workspace_sources.zig").listLength;
 
 test "runtime selection switches exact guest cuts and retains carried artifacts through archive import" {
+    var phase: []const u8 = "runtime selection and import";
+    errdefer std.debug.print("runtime selection: {s}\n", .{phase});
     const a = std.testing.allocator;
     const io = std.testing.io;
     var root_builder = source.Builder.init(a);
@@ -425,10 +427,57 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     try std.testing.expectEqual(@as(u64, 2), generic.value.realization_revision);
     try std.testing.expect(generic.value.runtime == null);
     _ = try imported.workspaceControl(scratch, "advance-generic", parent.receipt.task, id, generic.value.execution_revision, generic.value.control_revision, .advance);
+    phase = "build yielding input request";
+    var question_builder = source.Builder.init(a);
+    defer question_builder.deinit();
+    const question_module = try @import("workspace_sources.zig").binaryQuestion(&question_builder);
+    question_builder.functions.items[@intCast(question_module.entry)].body = try question_builder.term(.{ .yield_then = question_builder.functions.items[@intCast(question_module.entry)].body.? });
+    const question_document = try native.source_records.encode(scratch, question_builder.module(question_module.entry, question_module.failure));
+    const question_program = try imported.workspaceCommand(scratch, "pending-cancel-program", parent.receipt.task, .{ .program = .{ .build = .{ .source = .{ .json_text = .{ .bytes = question_document } }, .source_kind = .source_records, .exposures = .{ .items = &.{.{ .effect = 0, .class = .input }} } } } });
+    try std.testing.expectEqual(.observed, question_program.disposition);
+    phase = "start yielding input request";
+    const question_started = try imported.workspaceStart(scratch, "pending-cancel-start", parent.receipt.task, try nativeIdentity(question_program.program.?), &.{}, .{});
+    const question_id = question_started.receipt.workspace.?;
+    const question_ref = try workspaceRef(scratch, .work, question_id);
+    var yielded_question = try imported.workspaceWork(scratch, parent.receipt.task, question_id);
+    defer yielded_question.deinit();
+    try std.testing.expectEqual(.yielded, yielded_question.value.outcome_kind);
+    phase = "suspend input request advance";
+    _ = try imported.workspacePump(scratch, "pending-cancel-begin", parent.receipt.task, .{ .expected = .{ .work = question_ref, .execution_revision = yielded_question.value.execution_revision, .control_revision = yielded_question.value.control_revision }, .base_quantum = 1 });
+    var pending_question = try imported.workspaceWork(scratch, parent.receipt.task, question_id);
+    defer pending_question.deinit();
+    try std.testing.expect(pending_question.value.outer_operation != null);
+    phase = "cancel suspended input request advance";
+    _ = try imported.workspaceControl(scratch, "pending-cancel-request", parent.receipt.task, question_id, pending_question.value.execution_revision, pending_question.value.control_revision, .{ .cancel = .{ .bytes = "stop before question" } });
+    var question_cancelled = false;
+    var saw_pending_question = false;
+    phase = "apply pending cancellation at the requested cut";
+    for (0..512) |_| {
+        var current = try imported.workspaceWork(scratch, parent.receipt.task, question_id);
+        defer current.deinit();
+        if (current.value.terminal()) {
+            try std.testing.expectEqual(.cancelled, current.value.outcome_kind);
+            question_cancelled = true;
+            break;
+        }
+        if (current.value.outcome_kind == .requested and !current.value.cancellation_applied) {
+            saw_pending_question = true;
+            try std.testing.expect(current.value.current_port != null);
+            try std.testing.expectEqual(.queued, current.value.schedule);
+        }
+        _ = try imported.pump(scratch);
+    }
+    try std.testing.expect(saw_pending_question and question_cancelled);
+    phase = "export completed cancellation history";
+    _ = try imported.exportCheckpoint(scratch, parent.receipt.task, try std.fmt.allocPrint(scratch, "{s}/pending-cancellation.par", .{path_buffer[0..length]}));
 }
 
 test "native placement carries a suspended evaluator with exclusive per-work custody" {
     try placementCase(.work);
+}
+
+test "native placement carries the current cut of a queued work move" {
+    try placementCase(.queued);
 }
 
 test "frozen controller retains its exact cut while local work advances" {
@@ -451,7 +500,7 @@ test "terminal parent cancellation resumes after a signed refusal" {
     try placementCase(.cancel_refused);
 }
 
-fn placementCase(comptime scenario: enum { work, root, preoffer, onward, cancel_abort, cancel_refused }) !void {
+fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward, cancel_abort, cancel_refused }) !void {
     var phase: []const u8 = "setup";
     var attack_index: usize = 0;
     errdefer std.debug.print("placement {s}: {s} ({d})\n", .{ @tagName(scenario), phase, attack_index });
@@ -542,7 +591,7 @@ fn placementCase(comptime scenario: enum { work, root, preoffer, onward, cancel_
     const started = try sender.workspaceCommand(scratch, "start", parent.receipt.task, .{ .work = .{ .start = .{
         .program = try workspaceRef(scratch, .program, program.receipt.workspace.?),
         .input = .{ .inline_json = .{ .schema = try workspaceRef(scratch, .schema, input_schema.digest), .json_text = .{ .bytes = try native.json.canonical(scratch, input_value.value) } } },
-        .policy = .{},
+        .policy = if (scenario == .root) .{ .stop = .terminal, .continuation = .owner_scheduled } else .{},
         .runtime = .{ .selected = runtime },
     } } });
     try std.testing.expectEqual(.observed, started.disposition);
@@ -585,7 +634,71 @@ fn placementCase(comptime scenario: enum { work, root, preoffer, onward, cancel_
     const destination_config: p.Configuration = .{ .signing_key = destination_key, .peers = &destination_peers };
     const successor_config: p.Configuration = .{ .signing_key = successor_key, .peers = &successor_peers };
     sender.profile.placement = &source_config;
+    if (scenario == .queued) {
+        source_peers[0].channel = .{ .argv = &.{"/usr/bin/false"}, .remote_name = "source" };
+        const queued_move = try sender.workspaceCommand(scratch, "queue-before-progress", subject.task, .{ .placement = .{ .move = .{ .operation = .{ .bytes = "queued-work" }, .subject = .{ .work = work_ref }, .site = .{ .bytes = "destination" }, .custody_epoch = 0 } } });
+        try std.testing.expectEqual(.observed, queued_move.disposition);
+        _ = try sender.workspacePump(scratch, "queued-work-progress", subject.task, .{ .expected = .{ .work = work_ref, .execution_revision = cut.execution, .control_revision = cut.control }, .base_quantum = 1 });
+        const progressed_cut = try sender.placementCut(scratch, subject);
+        try std.testing.expect(!std.meta.eql(cut, progressed_cut));
+        try std.testing.expectEqual(.progressed, try sender.pump(scratch));
+        const frozen = (try sender.placementStatus(scratch, subject)).?;
+        try std.testing.expectEqual(.frozen, frozen.phase);
+        try std.testing.expectEqualDeep(progressed_cut, frozen.intent.?.cut);
+        try std.testing.expect(sender.placementActive());
+        return;
+    }
     if (scenario == .cancel_abort or scenario == .cancel_refused) {
+        var cleanup_builder = source.Builder.init(a);
+        defer cleanup_builder.deinit();
+        const cleanup_document = try native.source_records.encode(scratch, try @import("workspace_sources.zig").yieldingCancellation(&cleanup_builder));
+        const cleanup_program = try sender.workspaceBuild(scratch, "restored-cleanup-program", subject.task, cleanup_document, &diagnostic);
+        try sender.park(scratch);
+        for (0..2) |parked| {
+            phase = "admit child cancellation before freeze";
+            const operation = try std.fmt.allocPrint(scratch, "child-cleanup-{d}", .{parked});
+            const child = try sender.workspaceStart(scratch, operation, subject.task, cleanup_program.receipt.workspace.?, &.{}, .{});
+            const child_id = child.receipt.workspace.?;
+            var initial = try sender.workspaceWork(scratch, subject.task, child_id);
+            defer initial.deinit();
+            _ = try sender.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "{s}-cancel", .{operation}), subject.task, child_id, initial.value.execution_revision, initial.value.control_revision, .{ .cancel = .{ .bytes = "stop" } });
+            var cancelling = try sender.workspaceWork(scratch, subject.task, child_id);
+            defer cancelling.deinit();
+            try std.testing.expect(!cancelling.value.terminal());
+            try std.testing.expectEqual(.queued, cancelling.value.schedule);
+            if (parked == 1) _ = try sender.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "{s}-park", .{operation}), subject.task, child_id, cancelling.value.execution_revision, cancelling.value.control_revision, .park);
+            const child_subject: p.Subject = .{ .task = subject.task, .work = child_id };
+            const transfer: [32]u8 = @splat(@intCast(90 + parked));
+            _ = try sender.placementFreeze(scratch, child_subject, "destination", try sender.placementCut(scratch, child_subject), transfer);
+            var refusal: ?p.Signed(p.Decision) = null;
+            if (scenario == .cancel_refused) {
+                const child_archive = try std.fmt.allocPrint(scratch, "{s}/{s}.par", .{ path_buffer[0..length], operation });
+                const child_offer = try sender.placementOffer(scratch, child_subject, "destination", child_archive);
+                refusal = try p.sign(p.Decision, scratch, destination_key, .{ .transfer = transfer, .offer_digest = try p.digest(p.Offer, scratch, child_offer.value), .source = source_site, .destination = destination_site, .epoch = child_offer.value.intent.epoch + 1, .verdict = .{ .refused = .withdrawn } });
+            }
+            if (refusal) |decision| try sender.placementApplyDecision(scratch, child_subject, decision) else try sender.placementAbortUnsent(scratch, child_subject, transfer);
+            if (parked == 1) {
+                for (0..4) |_| _ = try sender.pump(scratch);
+                var still = try sender.workspaceWork(scratch, subject.task, child_id);
+                defer still.deinit();
+                try std.testing.expect(!still.value.terminal());
+                try std.testing.expectEqual(.parked, still.value.schedule);
+                _ = try sender.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "{s}-resume", .{operation}), subject.task, child_id, still.value.execution_revision, still.value.control_revision, .{ .delegate = .{ .stop = .terminal, .continuation = .owner_scheduled } });
+            }
+            var child_disposed = false;
+            for (0..512) |_| {
+                _ = try sender.pump(scratch);
+                var current = try sender.workspaceWork(scratch, subject.task, child_id);
+                defer current.deinit();
+                if (current.value.terminal()) {
+                    try std.testing.expectEqual(.cancelled, current.value.outcome_kind);
+                    child_disposed = true;
+                    break;
+                }
+            }
+            phase = "cancelled child restored to local custody";
+            try std.testing.expect(child_disposed);
+        }
         for (0..2) |parked| {
             const operation = try std.fmt.allocPrint(scratch, "root-cleanup-{d}", .{parked});
             const cancelled_root = try sender.submit(scratch, operation, .{ 25, 5 });
@@ -693,6 +806,82 @@ fn placementCase(comptime scenario: enum { work, root, preoffer, onward, cancel_
         sender_open = true;
         try sender.placementApplyDecision(scratch, controller, decision);
         try std.testing.expectEqual(@as(@FieldType(p.Custody, "phase"), if (scenario == .root) .local else .frozen), (try sender.placementStatus(scratch, subject)).?.phase);
+        if (scenario == .root) {
+            phase = "normal controller completion parks the retained executor";
+            var running_child = try sender.workspaceWork(scratch, subject.task, work_id);
+            defer running_child.deinit();
+            try std.testing.expectEqual(.queued, running_child.value.schedule);
+            try sender.close(a);
+            sender_open = false;
+            try source_namespace.close();
+            source_open = false;
+            successor_peers[1].channel = .{ .argv = &.{"/usr/bin/false"}, .remote_name = "successor" };
+            var completed = false;
+            var parked = false;
+            var prior_command: ?p.Signed(p.Control) = null;
+            var prior_report: ?p.Signed(p.Report) = null;
+            for (0..8) |_| {
+                var selected_command: p.Signed(p.Control) = undefined;
+                {
+                    var closing_namespace = try native.Namespace.open(a, io, successor_path);
+                    defer closing_namespace.close() catch unreachable;
+                    var closing_controller = try native.tasks.Service(OwnerTypes).init(a, io, &closing_namespace, assets, &application, handlers, snapshot_profile);
+                    defer closing_controller.close(a) catch unreachable;
+                    if (prior_report) |reported| try closing_controller.placementApplyReport(scratch, subject.task, p.controlId(prior_command.?.value), reported);
+                    if (!completed) {
+                        for (0..512) |turn| {
+                            var current = try closing_controller.task(scratch, subject.task);
+                            defer current.deinit();
+                            if (current.value.terminal()) {
+                                try std.testing.expectEqual(.completed, current.value.outcome_kind);
+                                try std.testing.expect(current.value.cancellation == null);
+                                completed = true;
+                                break;
+                            }
+                            if (current.value.schedule == .parked) _ = try closing_controller.resumeTask(scratch, try std.fmt.allocPrint(scratch, "complete-controller-{d}", .{turn}), subject.task, current.value.revision);
+                            _ = try closing_controller.pump(scratch);
+                        }
+                        try std.testing.expect(completed);
+                        try std.testing.expect(try closing_controller.shutdownIncomplete(scratch));
+                    }
+                    if (parked) {
+                        try std.testing.expect(!try closing_controller.shutdownIncomplete(scratch));
+                        break;
+                    }
+                    _ = try closing_controller.pump(scratch);
+                    var query = try closing_namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='placement_control'", &.{.{ .blob = &subject.task }});
+                    defer query.deinit();
+                    var found = false;
+                    while (try query.step() == .row) {
+                        const saved = try contracts.decodeOwned(p.ControlRecord, scratch, try query.bytes(0));
+                        if (saved.value.report == null) {
+                            selected_command = saved.value.control;
+                            found = true;
+                            break;
+                        }
+                    }
+                    try std.testing.expect(found);
+                }
+                {
+                    var executor_namespace = try native.Namespace.open(a, io, source_path);
+                    defer executor_namespace.close() catch unreachable;
+                    var closing_executor = try native.tasks.Service(OwnerTypes).init(a, io, &executor_namespace, assets, &application, handlers, source_profile);
+                    defer closing_executor.close(a) catch unreachable;
+                    const result = try contracts.decodeOwned(p.Signed(p.Report), scratch, try closing_executor.placementExecuteControl(scratch, "successor", selected_command));
+                    try std.testing.expectEqual(.observed, result.value.value.reply.disposition);
+                    prior_report = result.value;
+                    prior_command = selected_command;
+                    if (selected_command.value.command == .park) {
+                        var parked_child = try closing_executor.workspaceWork(scratch, subject.task, work_id);
+                        defer parked_child.deinit();
+                        try std.testing.expectEqual(.parked, parked_child.value.schedule);
+                        try std.testing.expect(parked_child.value.cancellation == null);
+                        parked = true;
+                    }
+                }
+            }
+            try std.testing.expect(completed and parked);
+        }
         if (scenario == .preoffer) {
             const child_path = try std.fmt.allocPrint(scratch, "{s}/child-after-controller.par", .{path_buffer[0..length]});
             const child_offer = try sender.placementOffer(scratch, subject, "destination", child_path);

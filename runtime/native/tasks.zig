@@ -322,9 +322,9 @@ pub fn Service(comptime Types: type) type {
             return cleanupComplete(outcome.value) and try self.associatedWorkDisposed(a, value.id);
         }
         pub fn associatedWorkDisposed(self: *Self, a: std.mem.Allocator, task_id: state.TaskId) !bool {
-            return self.workspaceSettled(a, task_id, true, true);
+            return self.workspaceSettled(a, task_id, true, true, false);
         }
-        fn workspaceSettled(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, require_disposal: bool, include_remote: bool) !bool {
+        fn workspaceSettled(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, require_disposal: bool, include_remote: bool, require_park: bool) !bool {
             var query = try self.store().database.prepare("SELECT id FROM records WHERE task=? AND kind='workspace_work' ORDER BY id", &.{.{ .blob = &task_id }});
             defer query.deinit();
             var arena = std.heap.ArenaAllocator.init(a);
@@ -339,7 +339,7 @@ pub fn Service(comptime Types: type) type {
                     if (try self.hasFrozenCustody(temporary, task_id, id)) {
                         var frozen = try self.retainedWorkspaceWork(temporary, task_id, id);
                         defer frozen.deinit();
-                        if (require_disposal or frozen.value.cancellation != null) return false;
+                        if (require_disposal or require_park or frozen.value.cancellation != null) return false;
                     }
                     if (!include_remote) continue;
                     var remote = try self.remoteWorkState(temporary, task_id, id);
@@ -348,6 +348,9 @@ pub fn Service(comptime Types: type) type {
                     if (require_disposal) {
                         const observed = if (remote.latest) |saved| saved.value.report.?.value.work_state.? else return false;
                         if (!remoteDisposed(observed)) return false;
+                    } else if (require_park) {
+                        const observed = if (remote.latest) |saved| saved.value.report.?.value.work_state.? else return false;
+                        if (!remoteDisposed(observed) and !(observed.cancellation == null and observed.explicitly_parked)) return false;
                     }
                     continue;
                 }
@@ -360,7 +363,7 @@ pub fn Service(comptime Types: type) type {
                     defer outcome.deinit();
                     if (!cleanupComplete(outcome.value)) return false;
                 } else {
-                    if (require_disposal or child.value.cancellation != null) return false;
+                    if (require_disposal or child.value.cancellation != null or (require_park and child.value.schedule != .parked)) return false;
                     if (child.value.current_occurrence) |current| {
                         var pending = try self.record(occurrence.Occurrence, temporary, "occurrence", current, task_id);
                         defer pending.deinit();
@@ -389,7 +392,7 @@ pub fn Service(comptime Types: type) type {
                         if (!cleanupComplete(outcome.value)) return true;
                     } else if (try self.status(a, value) == .unknown or value.cancellation != null) return true;
                 }
-                if (!try self.workspaceSettled(a, id, self.shutdown_cancel_requested or (controller and value.cancellation != null), controller)) return true;
+                if (!try self.workspaceSettled(a, id, self.shutdown_cancel_requested or (controller and value.cancellation != null), controller, controller and value.terminal())) return true;
             }
             return false;
         }
@@ -526,9 +529,9 @@ pub fn Service(comptime Types: type) type {
             }
             return result;
         }
-        fn cancelRemoteWork(self: *Self, a: std.mem.Allocator, parent: state.Task, work_id: state.Digest) !bool {
+        fn settleRemoteWork(self: *Self, a: std.mem.Allocator, parent: state.Task, work_id: state.Digest) !bool {
             const p = @import("placement.zig");
-            const cancellation_revision = try self.parentCancellationRevision(a, parent.id);
+            const cancellation_revision: ?u64 = if (parent.cancellation != null) try self.parentCancellationRevision(a, parent.id) else null;
             var observed = try self.remoteWorkState(a, parent.id, work_id);
             defer observed.deinit();
             if (observed.pending) {
@@ -553,16 +556,26 @@ pub fn Service(comptime Types: type) type {
                     const prior = switch (saved.value.control.value.command) {
                         .cancel => |v| v.expected,
                         .pump => |v| v.expected,
+                        .park => |v| v,
                         else => null,
                     };
+                    if (prior == null) return false;
                     if (prior) |revision| if (revision.execution_revision == expected.execution_revision and revision.control_revision == expected.control_revision) return false;
                 }
-                const acknowledged = try self.remoteCancellationAcknowledged(a, parent.id, work_id, cancellation_revision);
-                if (acknowledged and current.explicitly_parked) return false;
-                command = if (current.cancellation == null or !acknowledged) .{ .cancel = .{ .expected = expected, .reason = parent.cancellation.? } } else .{ .pump = .{ .expected = expected, .base_quantum = 65536 } };
+                if (cancellation_revision) |revision| {
+                    const acknowledged = try self.remoteCancellationAcknowledged(a, parent.id, work_id, revision);
+                    if (acknowledged and current.explicitly_parked) return false;
+                    command = if (current.cancellation == null or !acknowledged) .{ .cancel = .{ .expected = expected, .reason = parent.cancellation.? } } else .{ .pump = .{ .expected = expected, .base_quantum = 65536 } };
+                } else {
+                    if (current.explicitly_parked) return false;
+                    command = if (current.cancellation == null) .{ .park = expected } else .{ .pump = .{ .expected = expected, .base_quantum = 65536 } };
+                }
             }
-            const identity = try operation(struct { work: state.Digest, cancellation: state.Reason, request_revision: u64, predecessor: state.Digest }, a, .{ .work = work_id, .cancellation = parent.cancellation.?, .request_revision = cancellation_revision, .predecessor = predecessor });
-            const operation_name = try std.fmt.allocPrint(a, "cleanup-{s}", .{std.fmt.bytesToHex(identity, .lower)});
+            const identity = if (cancellation_revision) |revision|
+                try operation(struct { work: state.Digest, cancellation: state.Reason, request_revision: u64, predecessor: state.Digest }, a, .{ .work = work_id, .cancellation = parent.cancellation.?, .request_revision = revision, .predecessor = predecessor })
+            else
+                try operation(struct { work: state.Digest, completion_revision: u64, predecessor: state.Digest }, a, .{ .work = work_id, .completion_revision = parent.execution_revision, .predecessor = predecessor });
+            const operation_name = try std.fmt.allocPrint(a, "{s}-{s}", .{ if (cancellation_revision != null) "cleanup" else "close", std.fmt.bytesToHex(identity, .lower) });
             defer a.free(operation_name);
             try self.placement_pending.ensureUnusedCapacity(self.allocator, 1);
             const bytes = self.placementControlExpanded(a, operation_name, parent.id, command, null, true, cancellation_revision) catch |err| switch (err) {
@@ -572,7 +585,11 @@ pub fn Service(comptime Types: type) type {
             defer a.free(bytes);
             var signed = try contracts.decodeOwned(p.Signed(p.Control), a, bytes);
             defer signed.deinit();
-            self.placementQueue(parent.id, p.controlId(signed.value.value), .control);
+            const id = p.controlId(signed.value.value);
+            var saved = try self.record(p.ControlRecord, a, "placement_control", id, parent.id);
+            defer saved.deinit();
+            if (saved.value.report != null) return false;
+            self.placementQueue(parent.id, id, .control);
             return true;
         }
 
@@ -628,19 +645,32 @@ pub fn Service(comptime Types: type) type {
             return false;
         }
 
-        fn cancelWorkspaceOne(self: *Self, a: std.mem.Allocator, parent: state.Task) !bool {
+        fn settleWorkspaceOne(self: *Self, a: std.mem.Allocator, parent: state.Task, controller: bool) !bool {
             const ids = try self.workspaceIds(a, parent.id);
             defer a.free(ids);
             for (ids) |id| {
                 if (!try self.hasLocalCustody(a, parent.id, id)) {
-                    if (try self.cancelRemoteWork(a, parent, id)) return true;
+                    if (controller and (parent.cancellation != null or parent.terminal()) and try self.settleRemoteWork(a, parent, id)) return true;
                     continue;
                 }
                 var child = try self.workspaceWork(a, parent.id, id);
                 defer child.deinit();
                 if (child.value.terminal()) continue;
+                if (!controller or parent.cancellation == null) {
+                    if (child.value.cancellation != null and child.value.schedule != .parked) try self.subjectAdd(.{ .task = parent.id, .work = id });
+                    if (controller and parent.terminal() and child.value.cancellation == null and child.value.schedule != .parked) {
+                        try self.parkWorkspaceOnClose(a, parent.id, id);
+                        self.subjectRemove(.{ .task = parent.id, .work = id });
+                        return true;
+                    }
+                    continue;
+                }
                 if (child.value.cancellation != null and
-                    (child.value.schedule != .parked or !try self.workspaceCancellationPending(a, parent.id, id))) continue;
+                    (child.value.schedule != .parked or !try self.workspaceCancellationPending(a, parent.id, id)))
+                {
+                    if (child.value.schedule != .parked) try self.subjectAdd(.{ .task = parent.id, .work = id });
+                    continue;
+                }
                 const operation_id = try std.fmt.allocPrint(a, "task-cancel-{s}-{d}", .{ std.fmt.bytesToHex(id, .lower), child.value.control_revision });
                 defer a.free(operation_id);
                 _ = try self.workspaceControl(a, operation_id, parent.id, id, child.value.execution_revision, child.value.control_revision, .{ .cancel = parent.cancellation.? });
@@ -1718,13 +1748,13 @@ pub fn Service(comptime Types: type) type {
                 if (self.owned.items.len == 0) break;
                 const id = self.owned.items[self.cleanup_cursor];
                 self.cleanup_cursor = (self.cleanup_cursor + 1) % self.owned.items.len;
-                if (!try self.hasLocalCustody(a, id, null)) continue;
+                const controller = try self.hasLocalCustody(a, id, null);
                 var parent = try self.task(a, id);
                 defer parent.deinit();
-                if (parent.value.cancellation == null) continue;
                 self.compatible(parent.value) catch continue;
-                if (try self.cancelWorkspaceOne(a, parent.value)) return true;
-                if (!parent.value.terminal() and parent.value.schedule != .parked) try self.runnableAdd(id);
+                if (try self.settleWorkspaceOne(a, parent.value, controller)) return true;
+                if (!controller) continue;
+                if (parent.value.cancellation != null and !parent.value.terminal() and parent.value.schedule != .parked) try self.runnableAdd(id);
                 if (parent.value.terminal() and try self.taskCleanupComplete(a, parent.value)) self.unclaim(id);
             }
             return false;
@@ -3185,8 +3215,8 @@ pub fn Service(comptime Types: type) type {
                     const expected = if (prior) |custody| expected: {
                         if (custody.intent) |intent| if (std.meta.eql(intent.transfer, id)) break :expected intent.cut;
                         if (custody.epoch != saved.value.request.custody_epoch) return error.StaleCustody;
-                        break :expected saved.value.expected orelse try self.placementCut(a, subject);
-                    } else saved.value.expected orelse try self.placementCut(a, subject);
+                        break :expected try self.placementCut(a, subject);
+                    } else try self.placementCut(a, subject);
                     _ = try self.placementFreeze(a, subject, saved.value.request.site.bytes, expected, id);
                     const path = try std.fmt.allocPrint(a, "{s}/outgoing-{s}.par", .{ try self.placementDirectory(a), std.fmt.bytesToHex(id, .lower) });
                     defer a.free(path);
@@ -3340,7 +3370,7 @@ pub fn Service(comptime Types: type) type {
                         const custody_value = (try self.placementStatus(a, subject)) orelse p.Custody.initial(subject, site);
                         try custody_value.requireLocal(site);
                         if (custody_value.epoch != selected.custody_epoch) return error.StaleCustody;
-                        new_move = .{ .id = move_id, .task = task_id, .owner = site, .action = undefined, .request = selected, .subject = subject, .expected = if (subject.work != null) try self.placementCut(a, subject) else null };
+                        new_move = .{ .id = move_id, .task = task_id, .owner = site, .action = undefined, .request = selected, .subject = subject, .expected = null };
                         try json.put(a, &observation, "transfer", json.string(try a.dupe(u8, &std.fmt.bytesToHex(move_id, .lower))));
                         try json.put(a, &observation, "status", json.string("queued"));
                         queued = .{ .id = move_id, .kind = .move };
@@ -3647,7 +3677,7 @@ pub fn Service(comptime Types: type) type {
             saved.value.last_error = null;
             var parent = try self.task(a, task_id);
             defer parent.deinit();
-            const wake = parent.value.cancellation != null and try self.hasLocalCustody(a, task_id, null);
+            const wake = (parent.value.cancellation != null or parent.value.terminal()) and try self.hasLocalCustody(a, task_id, null);
             if (wake) {
                 try self.ensureOwnershipCapacity(task_id);
                 try self.runnable.ensureUnusedCapacity(self.allocator, 1);
@@ -3658,7 +3688,7 @@ pub fn Service(comptime Types: type) type {
             try self.namespace.commit("placement.acknowledge-control");
             if (wake) {
                 self.claim(task_id);
-                self.subjectAddAssumeCapacity(.{ .task = task_id });
+                if (parent.value.cancellation != null) self.subjectAddAssumeCapacity(.{ .task = task_id });
             }
         }
 
@@ -5489,7 +5519,7 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn publicationSchedule(value: workspace.ControlObservation) state.Schedule {
-            if (value.outcome == .requested) return if (value.instrument and !value.port and value.policy.continuation == .owner_scheduled) .queued else .parked;
+            if (value.outcome == .requested) return if ((value.cancellation != null and !value.cancellation_applied) or (value.instrument and !value.port and value.policy.continuation == .owner_scheduled)) .queued else .parked;
             if (value.outcome == .completed or value.outcome == .failed or value.outcome == .cancelled) return .parked;
             return if (value.cancellation != null or (value.policy.continuation == .owner_scheduled and value.policy.stop != .next_slice and (value.outcome != .yielded or value.policy.stop == .terminal))) .queued else .parked;
         }
@@ -7488,7 +7518,7 @@ pub fn Service(comptime Types: type) type {
             const disposed = if (try self.hasLocalCustody(a, parent.id, null))
                 parent.terminal() and try self.taskCleanupComplete(a, parent)
             else
-                try self.workspaceSettled(a, parent.id, true, false);
+                try self.workspaceSettled(a, parent.id, true, false, false);
             try self.persist(a, parent, initial.revision, "workspace.publish", .acquire);
             if (disposed) self.unclaim(parent.id);
             return .{ .receipt = saved, .replayed = false };
@@ -7722,8 +7752,7 @@ pub fn Service(comptime Types: type) type {
             }
             // No unbound external request is dispatched. A run policy grants
             // continued computation, never the authority to invent an answer.
-            if (value.outcome_kind == .requested and value.delegation != null and value.current_port == null and value.policy.continuation == .owner_scheduled) value.schedule = .queued;
-            if (!value.terminal() and value.outcome_kind != .requested and (value.cancellation != null or (value.policy.continuation == .owner_scheduled and value.policy.stop != .next_slice and (value.outcome_kind != .yielded or value.policy.stop == .terminal)))) value.schedule = .queued;
+            value.schedule = publicationSchedule(workspace.ControlObservation.from(.{ .work = value.*, .occurrence = null }));
         }
 
         fn workspaceResident(self: *Self, a: std.mem.Allocator, value: workspace.Work) !*evaluator.Driver {

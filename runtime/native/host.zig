@@ -585,7 +585,7 @@ fn driveHuman(comptime Types: type, a: std.mem.Allocator, service: *tasks.Servic
             .work => |work| slot.start(work, service.profile.authority, service.profile.environment) catch try service.notSent(frame, work),
             .progressed => {},
             .waiting, .idle => {
-                if (slot.future != null or service.runnable.items.len != 0) {
+                if (!humanCanPark(slot.future != null, service.runnable.items.len != 0, service.placementActive())) {
                     if (step == .idle) _ = c.poll(null, 0, 20);
                     continue;
                 }
@@ -654,12 +654,19 @@ fn shutdownCanPark(mode: Shutdown, code: u8, pump_idle: bool, placement_active: 
     return mode == .park or code != 0 or (pump_idle and !placement_active);
 }
 
+fn humanCanPark(worker_live: bool, runnable: bool, placement_active: bool) bool {
+    return !worker_live and !runnable and !placement_active;
+}
+
 test "cancel shutdown retains placement activity until quiescence or failure" {
     for ([_]bool{ false, true }) |idle| {
         for ([_]bool{ false, true }) |placement_active| {
             try std.testing.expectEqual(idle and !placement_active, shutdownCanPark(.cancel, 0, idle, placement_active));
             try std.testing.expect(shutdownCanPark(.park, 0, idle, placement_active));
             try std.testing.expect(shutdownCanPark(.cancel, 74, idle, placement_active));
+            for ([_]bool{ false, true }) |worker_live| {
+                try std.testing.expectEqual(!worker_live and idle and !placement_active, humanCanPark(worker_live, !idle, placement_active));
+            }
         }
     }
 }

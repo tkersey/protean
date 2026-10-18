@@ -13,6 +13,14 @@ pub fn retainedHandlers(b: *source.Builder, shallow: bool) !source.Module {
 }
 
 pub fn yieldingDisposal(b: *source.Builder) !source.Module {
+    return disposal(b, true);
+}
+
+pub fn yieldingCancellation(b: *source.Builder) !source.Module {
+    return disposal(b, false);
+}
+
+fn disposal(b: *source.Builder, request: bool) !source.Module {
     const unit = try b.scalar(void);
     const u = try b.scalar(u64);
     const info = try @import("horos").library.cleanup.exitInfo(b, unit);
@@ -22,7 +30,7 @@ pub fn yieldingDisposal(b: *source.Builder) !source.Module {
     const cleanup = try b.declare(&.{info}, unit, &.{observed}, &.{});
     const requested = try b.term(.{ .perform = .{ .effect = observed, .payload = try b.reference(b.parameter(cleanup, 0)) } });
     const finished = try b.term(.{ .yield_then = try b.pure(try b.constant(void, {})) });
-    try b.define(cleanup, try b.term(.{ .yield_then = try b.bind(try b.variable(unit), requested, finished) }));
+    try b.define(cleanup, try b.term(.{ .yield_then = if (request) try b.bind(try b.variable(unit), requested, finished) else try b.pure(try b.constant(void, {})) }));
     const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{}, .result = u } } });
     const cleanup_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{info}, .result = unit, .effects = &.{observed} } } });
     const entry = try b.declare(&.{unit}, u, &.{observed}, &.{});
