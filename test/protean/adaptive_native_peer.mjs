@@ -159,6 +159,11 @@ function* workspaceTrace(subject, scenario) {
   const firstInput = yield* materialize(subject.inputs[0].id);
   const first = yield* run(firstInput, scenario === 'tools-reverse' ? [['3','2'],['4','1']] : [['1','1'],['2','2'],['3','3'],['4','4']]);
   if (scenario === 'tools-reverse') {
+    yield skill('unload', 1);
+    for (let n = 0; n < 16; n++) {
+      assert(subject.offered.has('skill_set'), 'control revisions remain available beyond sixteen');
+      yield skill(n % 2 ? 'unload' : 'load', 2 + n, 'repository-orientation');
+    }
     yield ['report', {summary: 'Three unsupported source records, grouped into counts two and one.', claims: [{kind: 'observation', statement: 'Three unsupported source records, grouped into counts two and one.', reasoning: '', evidence_indices: [first.evidence_index]}], limitations: []}];
     return;
   }
@@ -192,10 +197,6 @@ function* workspaceTrace(subject, scenario) {
   assert(strings(subject.body.input).some(text => text.includes('Retained workspace program references') && text.includes(subject.program.id)));
   const secondInput = yield* materialize(subject.inputs[1].id);
   for (let n = 0; n < 11; n++) yield* run(n % 2 ? firstInput : secondInput, n % 2 ? [['1','1'],['2','2'],['3','3'],['4','4']] : [['80','1']]);
-  for (let n = 0; n < 12; n++) {
-    assert(subject.offered.has('skill_set'), 'control revisions remain available beyond sixteen');
-    yield skill(n % 2 ? 'unload' : 'load', 6 + n, 'repository-orientation');
-  }
   yield ['report', {summary: 'The same admitted program continued auditing both inputs after restart.', claims: [
     {kind: 'observation', statement: 'The source range and second computed audit are acquired.', reasoning: '', evidence_indices: [subject.sourceIndex, subject.resultIndices.at(-1)]},
     {kind: 'inference', statement: 'The retained program supports comparing both audit results.', reasoning: 'The first and last computed values retain that program as provenance.', evidence_indices: [subject.resultIndices[0], subject.resultIndices.at(-1)]},
@@ -854,7 +855,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       const selectedInputs = name === 'tools-runtime-placement' ? [
         {...inputs[0], rows: Array.from({length: 16}, (_, i) => row(2000 + i, 10, 100, 1))}, inputs[1],
       ] : inputs;
-      await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: name === 'tools-reuse' ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, inputs: selectedInputs}}));
+      await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: ['tools-reuse', 'tools-reverse'].includes(name) ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, inputs: selectedInputs}}));
       const placement = ['tools-runtime-placement', 'tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name) ? await runtimePlacementFixture(app, selectedConfig, trust, selectedState) : null;
       toolSubject.placement = placement;
       // Each scenario selects its own initial directory. A prior controller
@@ -993,11 +994,15 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         retainedProgram = toolSubject.program; retainedState = selectedState;
       }
       if (name === 'tools-reuse') {
-        assert(alternateIndex > 38, 'materialization, retained work and the original long control trace all ran');
+        assert(alternateIndex > 38, 'materialization, retained work and restart all ran');
         assert.equal(result.outcome.value.model_calls, String(alternateIndex));
         assert.equal(result.outcome.value.evidence.length, 15, 'twelve results, two inputs, and the source remain retained');
         assert.deepEqual(result.outcome.value.result.value.claims[0].evidence_indices, [String(toolSubject.sourceIndex), String(toolSubject.resultIndices.at(-1))]);
         assert.equal(result.outcome.value.evidence[toolSubject.sourceIndex].tag, 'source');
+        assert.equal(result.outcome.value.control.selection.control_revision, '6');
+        assert.equal(result.outcome.value.control.skills.length, 0);
+      }
+      if (name === 'tools-reverse') {
         assert.equal(result.outcome.value.control.selection.control_revision, '18');
         assert.equal(result.outcome.value.control.skills.length, 0);
       }

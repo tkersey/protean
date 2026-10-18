@@ -561,6 +561,25 @@ and exposed port across that policy change. The same executable passed this
 transfer, remote-switch and cleanup checks. Final cold and warm results remain
 separate observations recorded on the pull request.
 
+On `6ce582a`, [cache-assisted qualification](https://github.com/tkersey/protean/actions/runs/39119523697)
+passed in 567 seconds, with a 559-second longest job. The [cold run](https://github.com/tkersey/protean/actions/runs/39120167373)
+passed all twenty qualification jobs but failed the whole-workflow limit at
+609 seconds. Native workspace became the longest job at 597 seconds: 290 seconds
+compiling and 244 seconds executing. Outer mobility passed in 440 seconds.
+The workspace reuse scenario retains all twelve computations, restart, copied-state
+rejection and fifteen evidence items. Its independent long control-revision trace
+now runs in the shorter reverse-workspace scenario, which unloads construction
+and performs sixteen alternating skill operations to reach the same revision 18
+with no retained skills. The reused-work scenario still checks its six actual
+control transitions. The authored control transition depends on current control
+state and the admitted skill catalog; it does not depend on the workspace recipe
+or the number of prior computed results. Both scenarios still execute through
+the native product and HTTPS provider. On the same macOS executable, the complete
+adaptive suite passed in 67.5 seconds versus 93.7 seconds before redistribution;
+the reuse group changed from 92.8 to 66.5 seconds and the reverse/foreign/disabled
+group from 23.0 to 47.8 seconds. Final-head qualification is recorded on the pull
+request.
+
 An isolated attempt to move C compilation into the final Zig compile was not
 retained: local cold cross-build time changed from 189.0 to 206.3 seconds, and a
 comparison using the same already emitted assets changed from 118.4 to 124.5
