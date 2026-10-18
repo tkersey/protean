@@ -31,7 +31,7 @@ export function* runtimeTrace(subject, scenario) {
     assert.equal(runtime.approval, 'exact-source-and-independent-derivation');
     subject.runtime = runtime.runtime;
     subject.results = [];
-    for (const index of [0, 1, 0]) {
+    for (const index of [0, 1, 0, 2]) {
       const input = observed(yield call('context', 'materialize', {input: {tag: 'authorized_input', value: subject.inputs[index].id}, sources: []})).value;
       let work = observed(yield call('work', 'start', {program: subject.program, input: {tag: 'reference', value: input}, policy: {stop: 'terminal', continuation: 'owner_scheduled'}, runtime: {tag: 'selected', value: subject.runtime}}));
       if (work.outcome !== 'completed') {
@@ -41,10 +41,10 @@ export function* runtimeTrace(subject, scenario) {
       assert.equal(work.outcome, 'completed');
       assert.deepEqual(work.runtime, subject.runtime);
       const rows = JSON.parse(work.result_preview.text);
-      assert.deepEqual(rows[0].map(row => [row[0], row[7]]), index === 0 ? [['1','1'],['2','2'],['3','3'],['4','4']] : [['80','1']]);
+      assert.deepEqual(rows[0].map(row => [row[0], row[7]]), index === 0 ? [['1','1'],['2','2'],['3','3'],['4','4']] : index === 1 ? [['80','1']] : Array.from({length: 16}, (_, i) => [String(2000 + i), '1']));
       subject.results.push(work.result);
     }
-    yield ['stop', {reason: 'One admitted specialization served three runs with changing inputs; the results remain acquired evidence.'}];
+    yield ['stop', {reason: 'One admitted specialization served four runs with changing inputs, including the sixteen-row batch; the results remain acquired evidence.'}];
     return;
   }
   assert.equal(scenario, 'tools-runtime-reframe');
@@ -119,7 +119,7 @@ function* placementTrace(subject) {
   }
   assert.equal(work.outcome, 'completed');
   const rows = JSON.parse(work.result_preview.text);
-  assert.deepEqual(rows[0].map(row => [row[0], row[7]]), Array.from({length: 16}, (_, i) => [String(2000 + i), '1']));
+  assert.deepEqual(rows[0].map(row => [row[0], row[7]]), [['1','1'],['2','2'],['3','3'],['4','4']]);
   subject.results = [work.result];
   yield ['stop', {reason: 'The selected runtime and suspended work moved to a native executor. The controller moved separately, resumed, and collected the exact result through signed control reports.'}];
 }

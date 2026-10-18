@@ -334,7 +334,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         if (index === 0) {
           const marker = 'Authorized typed Table inputs: ', text = strings(body.input).find(text => text.includes(marker));
           assert(text); subject.inputs = JSON.parse(text.slice(text.indexOf(marker) + marker.length));
-          assert.equal(subject.inputs.length, 2);
+          assert.equal(subject.inputs.length, scenario === 'tools-runtime-specialized' ? 3 : 2);
           subject.trace = scenario.startsWith('tools-runtime-') ? runtimeTrace(subject, scenario) : workspaceTrace(subject, scenario);
         } else {
           const result = body.input.find(item => item.type === 'function_call_output' && item.call_id === `tools-${index - 1}`);
@@ -852,8 +852,8 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       let selectedState = name === 'tools-foreign' ? retainedState : join(app.data, name);
       toolSubject.state = selectedState;
       const selectedConfig = join(app.data, `${name}.json`);
-      const selectedInputs = name === 'tools-runtime-placement' ? [
-        {...inputs[0], rows: Array.from({length: 16}, (_, i) => row(2000 + i, 10, 100, 1))}, inputs[1],
+      const selectedInputs = name === 'tools-runtime-specialized' ? [
+        ...inputs, {...inputs[0], id: 'batch', description: 'Sixteen source records retain exact batch cardinality and order.', rows: Array.from({length: 16}, (_, i) => row(2000 + i, 10, 100, 1))},
       ] : inputs;
       await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: ['tools-reuse', 'tools-reverse'].includes(name) ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, inputs: selectedInputs}}));
       const placement = ['tools-runtime-placement', 'tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name) ? await runtimePlacementFixture(app, selectedConfig, trust, selectedState) : null;
@@ -966,7 +966,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         assert.equal(result.outcome.value.programs.length, name === 'tools-runtime-ordinary' ? 0 : name === 'tools-runtime-guest-mobility' ? 2 : 1);
         if (name === 'tools-runtime-ordinary') assert(!toolSubject.actions.some(action => ['program', 'work', 'context', 'placement'].includes(action.name)));
         if (name === 'tools-runtime-specialized') {
-          assert.equal(toolSubject.results.length, 3);
+          assert.equal(toolSubject.results.length, 4);
           assert.equal(toolSubject.actions.filter(action => action.name === 'program' && action.arguments.command.tag === 'specialize').length, 1);
         }
         if (name === 'tools-runtime-placement') {

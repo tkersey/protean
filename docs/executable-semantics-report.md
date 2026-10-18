@@ -580,6 +580,29 @@ the reuse group changed from 92.8 to 66.5 seconds and the reverse/foreign/disabl
 group from 23.0 to 47.8 seconds. Final-head qualification is recorded on the pull
 request.
 
+On `df9b758`, cache-assisted qualification passed in 599 seconds with a 589-second
+longest job. The [cold run](https://github.com/tkersey/protean/actions/runs/39130178427)
+failed in 648 seconds. Runtime placement completed its assertions after 294
+seconds compiling and 241 seconds executing, but its job reached the deadline.
+The workspace-runtime runner was also slow across unrelated stages: Node setup
+took 53 seconds, Zig setup 111 seconds, scratch preparation 56 seconds, and native
+input provisioning 209 seconds. It timed out during compilation; its tests did
+not run. Those measurements establish the delayed stages, not their underlying
+host or network cause.
+
+The sixteen-row batch assertion now runs as a fourth input to the existing
+specialization scenario, retaining its original three runs. Its exact cardinality,
+order and result values remain checked against the same admitted program and
+selected runtime. The placement scenario instead uses the existing mixed input,
+checking agreement, mismatch, missing and ambiguous results after actual transfer.
+It retains specialized outer microprogress, the exact suspended cut and runtime,
+work transfer, separate controller succession, signed remote controls and final
+result collection. Batch cardinality no longer requires repeated explicit remote
+pumps through the model boundary. On the same macOS executable, placement passed
+in 51.4 seconds versus 89.7 seconds before; the ordinary/specialized/reframe group
+passed in 52.7 seconds versus 46.1 seconds before. These are targeted observations;
+complete successor cold and cache-assisted qualification remains required.
+
 An isolated attempt to move C compilation into the final Zig compile was not
 retained: local cold cross-build time changed from 189.0 to 206.3 seconds, and a
 comparison using the same already emitted assets changed from 118.4 to 124.5
