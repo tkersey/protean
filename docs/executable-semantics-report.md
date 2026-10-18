@@ -202,7 +202,7 @@ moves it to a fresh native executor, checks the identical selected runtime,
 capsule and execution revision, and only then supplies the second branch input.
 Its first prefix and response are not replayed. Local capsule-verifier tests alone
 do not establish these host laws.
-The guest-cut version additionally switches back to the packaged generic runtime
+The outer-capsule version additionally switches back to the packaged generic runtime
 through signed remote control, preserving the exact execution revision and second
 branch value. Its archive accounting records three requested switches. Evaluation
 arm checks normalize these remote wrappers; pure-tool comparisons permit only
@@ -534,6 +534,17 @@ the pinned setup action's supported input. The action retains upstream minisign
 and trusted archive-name verification. The override removes automatic mirror
 fallback; these samples do not guarantee future availability or download time.
 The cold deadline remains unqualified until a complete successor run passes.
+
+On `528012b`, [Linux run 39116449188](https://github.com/tkersey/protean/actions/runs/39116449188)
+passed all twenty qualification jobs but failed the complete-workflow limit at
+605 seconds. Guest mobility took 595 seconds, including 279 seconds compiling
+and 246 seconds executing. The separate remote-runtime-switch assertion and its
+terminal accounting export now run after the second branch in the shorter
+outer-capsule scenario. Guest mobility retains the complete required retention
+query and uses its authenticated work-transfer archive for accounting. Both
+scenarios retain their migration, branch and cleanup assertions. On the unchanged
+macOS executable, the redistributed scenarios passed in 80.3 and 97.6 seconds;
+these local observations do not establish the final Linux timing result.
 
 An isolated attempt to move C compilation into the final Zig compile was not
 retained: local cold cross-build time changed from 189.0 to 206.3 seconds, and a

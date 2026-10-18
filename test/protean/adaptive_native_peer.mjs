@@ -373,6 +373,11 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           const custody = await within(until(async () => (await placementRequest(client, 'status', transferSubject)) ?? {}, custody => custody.phase === 'away', 12_000),
             120_000, 'runtime fixture work transfer did not settle');
           const archive = join(subject.placement.source.spool, `outgoing-${Buffer.from(custody.intent.transfer).toString('hex')}.par`);
+          subject.transferArchive = {
+            path: archive,
+            sha256: Buffer.from(custody.offer.value.archive_digest).toString('hex'),
+            bytes: Number(custody.offer.value.archive_bytes),
+          };
           subject.controlSchema = readArchive(await readFile(archive)).schemas.get('placement_control');
         }
         // Wait for the native owner to retain the real report. This read-only
@@ -1008,7 +1013,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         // transfer cut without performing another full export for measurement.
         // Terminal cleanup remains checked above through the successor owner.
         let archiveBytes;
-        if (placement && name !== 'tools-runtime-guest-mobility') {
+        if (placement && name !== 'tools-runtime-mobility') {
           const transfer = toolSubject.transferArchive;
           assert(transfer);
           archiveBytes = await readFile(transfer.path);
@@ -1022,7 +1027,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         const metrics = workspaceMetrics(readArchive(archiveBytes), JSON.parse(await readFile(applicationPath, 'utf8')));
         assert.equal(metrics.runtime_specializations_requested, toolSubject.actions.filter(action => action.name === 'program' && action.arguments.command.tag === 'specialize').length);
         assert.equal(metrics.runtime_switches_requested, toolSubject.actions.filter(action => (action.name === 'work' && action.arguments.command.tag === 'realize') || (action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize')).length);
-        if (name === 'tools-runtime-guest-mobility') {
+        if (name === 'tools-runtime-mobility') {
           const transported = metrics.actions.filter(action => action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize');
           assert(transported.length > 0);
           assert.equal(armViolations('generic', transported).length, transported.length);
@@ -1035,7 +1040,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           assert(metrics.distinct_runtime_artifact_bytes > 0);
         }
         toolRuns.at(-1).runtime_accounting = {
-          stage: placement && name !== 'tools-runtime-guest-mobility' ? 'controller-transfer' : 'terminal',
+          stage: placement && name !== 'tools-runtime-mobility' ? name === 'tools-runtime-guest-mobility' ? 'work-transfer' : 'controller-transfer' : 'terminal',
           admitted_runtimes: metrics.admitted_runtimes,
           artifact_bytes: metrics.distinct_runtime_artifact_bytes,
           current_capsule_bytes: metrics.distinct_current_runtime_capsule_bytes,
