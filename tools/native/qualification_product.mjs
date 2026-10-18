@@ -28,7 +28,7 @@ if (operation === 'pack') {
   const run = JSON.parse(await api(`actions/runs/${context.run}`));
   assert.equal(String(run.id), context.run);
   assert.equal(String(run.run_attempt), context.attempt);
-  const deadline = Date.parse(run.created_at) + 600_000;
+  const deadline = Date.parse(run.run_started_at) + 600_000;
   const names = ['native', 'native-placement'].map(lane => `native-product-${lane}-${context.attempt}.tar.gz`);
   let artifact;
   while (Date.now() < deadline) {

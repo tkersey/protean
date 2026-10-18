@@ -771,6 +771,12 @@ macOS proof is retained because production and fixture inputs are unchanged;
 final cold and cache-assisted results for the complete successor are recorded on
 the pull request.
 
+The product consumer uses the current attempt's `run_started_at` for its existing
+600-second deadline, matching the terminal gate. The original `created_at` persists
+across GitHub reruns and could reject a fresh attempt immediately. A targeted Linux
+check reproduces that rejection and verifies that the correction admits the fresh
+attempt while rejecting an expired attempt; all digest and context checks remain.
+
 `tools/evaluation/workspace.mjs prepare --suite runtime` prepares matched ordinary,
 generic and runtime-optional arms for repetitive work, adaptive exploration and a
 small investigation. It retains input/expected-output hashes and counts actual
