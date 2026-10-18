@@ -571,8 +571,9 @@ pub fn Service(comptime Types: type) type {
                     if (acknowledged and current.explicitly_parked) return false;
                     command = if (current.cancellation == null or !acknowledged) .{ .cancel = .{ .expected = expected, .reason = parent.cancellation.? } } else .{ .pump = .{ .expected = expected, .base_quantum = 65536 } };
                 } else {
-                    if (current.explicitly_parked) return false;
-                    command = if (current.cancellation == null) .{ .park = expected } else .{ .pump = .{ .expected = expected, .base_quantum = 65536 } };
+                    if (current.explicitly_parked) {
+                        if (current.parkSettled()) return false;
+                    } else command = if (current.cancellation == null) .{ .park = expected } else .{ .pump = .{ .expected = expected, .base_quantum = 65536 } };
                 }
             }
             const identity = if (cancellation_revision) |revision|

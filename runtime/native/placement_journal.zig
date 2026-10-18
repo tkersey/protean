@@ -17,6 +17,26 @@ pub fn custody(store: *storage.Store, a: std.mem.Allocator, subject: p.Subject) 
 }
 
 pub fn putCustody(store: *storage.Store, a: std.mem.Allocator, value: p.Custody) !void {
+    var prior = try custody(store, a, .{ .task = value.task, .work = value.work });
+    defer if (prior) |*record| record.deinit();
+    if (prior) |record| try retainCustodyDecision(store, a, record.value);
+    try retainCustodyDecision(store, a, value);
+    if (value.phase == .frozen) {
+        const intent = value.intent orelse return error.InvalidTransfer;
+        if (try decision(store, a, intent.transfer)) |record| {
+            var decided = record;
+            defer decided.deinit();
+            return error.OperationConflict;
+        }
+        var rows = try store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.kind='placement_custody' AND r.id<>?", &.{.{ .blob = &value.id }});
+        defer rows.deinit();
+        while (try rows.step() == .row) {
+            var other = try contracts.decodeOwned(p.Custody, a, try rows.bytes(0));
+            defer other.deinit();
+            if (other.value.phase == .frozen and other.value.intent != null and
+                std.meta.eql(other.value.intent.?.transfer, intent.transfer)) return error.OperationConflict;
+        }
+    }
     // Snapshot retirement is part of the same native custody transition.
     if (value.phase != .frozen) {
         if (try store.recordBytes(a, "placement_snapshot", value.id, value.task)) |bytes| {
@@ -31,8 +51,6 @@ pub fn putCustody(store: *storage.Store, a: std.mem.Allocator, value: p.Custody)
     }
     if (value.decision) |signed| if (signed.value.verdict == .accepted) {
         const offer = value.offer orelse return error.InvalidTransfer;
-        try p.verify(p.Offer, a, offer, offer.value.intent.source);
-        try p.matchDecision(a, offer.value, signed);
         const succession: p.Succession = .{ .id = signed.value.transfer, .task = value.task, .offer = offer, .decision = signed };
         if (try store.recordBytes(a, "placement_succession", succession.id, succession.task)) |bytes| {
             defer a.free(bytes);
@@ -41,11 +59,16 @@ pub fn putCustody(store: *storage.Store, a: std.mem.Allocator, value: p.Custody)
             if (!std.meta.eql(prior_proof.value, succession)) return error.OperationConflict;
         } else try store.createRecord(p.Succession, "placement_succession", succession.id, succession.task, succession);
     };
-    var prior = try custody(store, a, .{ .task = value.task, .work = value.work });
-    defer if (prior) |*record| record.deinit();
     if (prior != null) {
         try store.putRecord(p.Custody, "placement_custody", value.id, value.task, value);
     } else try store.createRecord(p.Custody, "placement_custody", value.id, value.task, value);
+}
+
+fn retainCustodyDecision(store: *storage.Store, a: std.mem.Allocator, value: p.Custody) !void {
+    const signed = value.decision orelse return;
+    const offer = value.offer orelse return error.InvalidTransfer;
+    try p.verify(p.Offer, a, offer, offer.value.intent.source);
+    try retainDecision(store, a, offer.value, signed);
 }
 
 pub fn controllerLineage(store: *storage.Store, a: std.mem.Allocator, task: state.TaskId) ![]p.Succession {
@@ -141,8 +164,12 @@ pub fn decision(store: *storage.Store, a: std.mem.Allocator, transfer: p.Digest)
 /// and refusal mutually exclusive, including after restart or a lost reply.
 /// A refusal remains durable even when no task was admitted at this site.
 pub fn putDecision(store: *storage.Store, a: std.mem.Allocator, site: p.Site, offer: p.Offer, signed: p.Signed(p.Decision)) !void {
-    if (!store.transaction or store.projecting or store.fenced) return error.InvalidState;
     if (!std.meta.eql(site, signed.value.destination)) return error.InvalidTransfer;
+    try retainDecision(store, a, offer, signed);
+}
+
+fn retainDecision(store: *storage.Store, a: std.mem.Allocator, offer: p.Offer, signed: p.Signed(p.Decision)) !void {
+    if (!store.transaction or store.projecting or store.fenced) return error.InvalidState;
     try p.matchDecision(a, offer, signed);
     if (try decision(store, a, signed.value.transfer)) |saved| {
         var prior = saved;

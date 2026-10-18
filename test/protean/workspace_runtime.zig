@@ -818,6 +818,8 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             successor_peers[1].channel = .{ .argv = &.{"/usr/bin/false"}, .remote_name = "successor" };
             var completed = false;
             var parked = false;
+            var incomplete_park = false;
+            var refreshed_park = false;
             var prior_command: ?p.Signed(p.Control) = null;
             var prior_report: ?p.Signed(p.Report) = null;
             for (0..8) |_| {
@@ -827,6 +829,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
                     defer closing_namespace.close() catch unreachable;
                     var closing_controller = try native.tasks.Service(OwnerTypes).init(a, io, &closing_namespace, assets, &application, handlers, snapshot_profile);
                     defer closing_controller.close(a) catch unreachable;
+                    phase = "apply remote close report";
                     if (prior_report) |reported| try closing_controller.placementApplyReport(scratch, subject.task, p.controlId(prior_command.?.value), reported);
                     if (!completed) {
                         for (0..512) |turn| {
@@ -845,9 +848,20 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
                         try std.testing.expect(try closing_controller.shutdownIncomplete(scratch));
                     }
                     if (parked) {
+                        phase = "settled remote park is quiescent";
                         try std.testing.expect(!try closing_controller.shutdownIncomplete(scratch));
+                        _ = try closing_controller.pump(scratch);
+                        var pending = try closing_namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='placement_control'", &.{.{ .blob = &subject.task }});
+                        defer pending.deinit();
+                        while (try pending.step() == .row) {
+                            var saved = try contracts.decodeOwned(p.ControlRecord, scratch, try pending.bytes(0));
+                            defer saved.deinit();
+                            try std.testing.expect(saved.value.report != null);
+                        }
                         break;
                     }
+                    phase = "refresh incomplete remote park";
+                    if (incomplete_park) try std.testing.expect(try closing_controller.shutdownIncomplete(scratch));
                     _ = try closing_controller.pump(scratch);
                     var query = try closing_namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='placement_control'", &.{.{ .blob = &subject.task }});
                     defer query.deinit();
@@ -861,12 +875,14 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
                         }
                     }
                     try std.testing.expect(found);
+                    if (incomplete_park) try std.testing.expectEqual(.inspect, std.meta.activeTag(selected_command.value.command));
                 }
                 {
                     var executor_namespace = try native.Namespace.open(a, io, source_path);
                     defer executor_namespace.close() catch unreachable;
                     var closing_executor = try native.tasks.Service(OwnerTypes).init(a, io, &executor_namespace, assets, &application, handlers, source_profile);
                     defer closing_executor.close(a) catch unreachable;
+                    phase = "execute remote close observation";
                     const result = try contracts.decodeOwned(p.Signed(p.Report), scratch, try closing_executor.placementExecuteControl(scratch, "successor", selected_command));
                     try std.testing.expectEqual(.observed, result.value.value.reply.disposition);
                     prior_report = result.value;
@@ -877,11 +893,23 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
                         defer parked_child.deinit();
                         try std.testing.expectEqual(.parked, parked_child.value.schedule);
                         try std.testing.expect(parked_child.value.cancellation == null);
+                        var incomplete = result.value.value;
+                        incomplete.work_state.?.park_complete = false;
+                        prior_report = try p.sign(p.Report, scratch, source_key, incomplete);
+                        _ = try closing_executor.workspaceControl(scratch, "later-explicit-park", subject.task, work_id, parked_child.value.execution_revision, parked_child.value.control_revision, .park);
+                        const later = try closing_executor.placementCut(scratch, subject);
+                        try std.testing.expectEqual(parked_child.value.execution_revision, later.execution);
+                        try std.testing.expectEqual(parked_child.value.control_revision + 1, later.control);
+                        incomplete_park = true;
+                    } else if (incomplete_park) {
+                        try std.testing.expect(result.value.value.work_state.?.parkSettled());
+                        try std.testing.expectEqualDeep(work_ref, prior_command.?.value.command.inspect.work);
                         parked = true;
+                        refreshed_park = true;
                     }
                 }
             }
-            try std.testing.expect(completed and parked);
+            try std.testing.expect(completed and parked and incomplete_park and refreshed_park);
         }
         if (scenario == .preoffer) {
             const child_path = try std.fmt.allocPrint(scratch, "{s}/child-after-controller.par", .{path_buffer[0..length]});
@@ -991,6 +1019,8 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         try std.testing.expect(sender.owned.items.len != 0);
         try std.testing.expect(try sender.shutdownIncomplete(scratch));
         if (refused) |decision| {
+            phase = "release refused transfer before identity retry";
+            try sender.placementApplyDecision(scratch, subject, decision);
             try sender.placementApplyDecision(scratch, subject, decision);
         } else try sender.placementAbortUnsent(scratch, subject, @splat(14));
         var disposed = false;
@@ -1005,6 +1035,46 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         }
         try std.testing.expect(disposed);
         try std.testing.expect(!try sender.shutdownIncomplete(scratch));
+        if (refused != null) {
+            const changed_cut = try sender.placementCut(scratch, subject);
+            try std.testing.expect(!std.meta.eql(cut, changed_cut));
+            const released_head = source_namespace.store.head;
+            try std.testing.expectError(error.OperationConflict, sender.placementFreeze(scratch, subject, "destination", changed_cut, @splat(14)));
+            try std.testing.expectEqualDeep(released_head, source_namespace.store.head);
+            try std.testing.expectEqual(.local, (try sender.placementStatus(scratch, subject)).?.phase);
+            phase = "fresh transfer after rejected identity reuse";
+            const fresh_intent = try sender.placementFreeze(scratch, subject, "destination", changed_cut, @splat(17));
+            try std.testing.expectEqualDeep(fresh_intent, try sender.placementFreeze(scratch, subject, "destination", changed_cut, @splat(17)));
+            const other_subject: p.Subject = .{ .task = subject.task };
+            const other_cut = try sender.placementCut(scratch, other_subject);
+            try std.testing.expectError(error.OperationConflict, sender.placementFreeze(scratch, other_subject, "destination", other_cut, @splat(17)));
+            try std.testing.expectEqual(.local, (try sender.placementStatus(scratch, other_subject)).?.phase);
+            try std.testing.expectEqual(.frozen, (try sender.placementStatus(scratch, subject)).?.phase);
+            try sender.placementAbortUnsent(scratch, subject, @splat(17));
+            try std.testing.expectEqualDeep(fresh_intent, try sender.placementFreeze(scratch, subject, "destination", changed_cut, @splat(17)));
+            const fresh_path = try std.fmt.allocPrint(scratch, "{s}/refused-again.par", .{path_buffer[0..length]});
+            const fresh_offer = try sender.placementOffer(scratch, subject, "destination", fresh_path);
+            const fresh_refusal = try p.sign(p.Decision, scratch, destination_key, .{ .transfer = fresh_offer.value.intent.transfer, .offer_digest = try p.digest(p.Offer, scratch, fresh_offer.value), .source = source_site, .destination = destination_site, .epoch = fresh_offer.value.intent.epoch + 1, .verdict = .{ .refused = .withdrawn } });
+            try sender.placementApplyDecision(scratch, subject, fresh_refusal);
+            phase = "reopen retained transfer decisions";
+            try sender.close(a);
+            sender_open = false;
+            try source_namespace.close();
+            source_open = false;
+            source_namespace = try native.Namespace.open(a, io, source_path);
+            source_open = true;
+            var reopened_profile = profile;
+            reopened_profile.placement = &source_config;
+            sender = try native.tasks.Service(OwnerTypes).init(a, io, &source_namespace, assets, &application, handlers, reopened_profile);
+            sender_open = true;
+            phase = "reject old transfer identity after restart";
+            try std.testing.expectError(error.OperationConflict, sender.placementFreeze(scratch, subject, "destination", changed_cut, @splat(14)));
+            const controller: p.Subject = .{ .task = subject.task };
+            const controller_cut = try sender.placementCut(scratch, controller);
+            try std.testing.expectError(error.OperationConflict, sender.placementFreeze(scratch, controller, "destination", controller_cut, @splat(14)));
+            try std.testing.expectEqual(.local, (try sender.placementStatus(scratch, controller)).?.phase);
+            try std.testing.expect(!try sender.shutdownIncomplete(scratch));
+        }
         return;
     }
     try std.testing.expectError(error.CustodyNotLocal, sender.workspaceControl(scratch, "source-must-stop", subject.task, work_id, cut.execution, cut.control, .advance));

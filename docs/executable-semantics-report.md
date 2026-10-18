@@ -190,6 +190,30 @@ does not override a later explicit park; a fresh cancellation can select cleanup
 again. Regression fixtures exercise both transfer outcomes and both scheduling
 orders.
 
+Custody publication now retains authenticated source-received decisions in the
+existing immutable decision journal, in the same transaction as custody release.
+It preserves a prior receipt before replacing the current intent and rejects a
+new frozen publication whose transfer ID already has a retained decision or is
+frozen by another local subject. The latter check uses the existing custody
+records, with no additional table or protocol. This covers later transfers,
+other local subjects and restart without relying on the
+latest custody record alone. Destination issuance still requires the actual local
+destination; retained knowledge grants no execution authority. Exact frozen
+retries, signed refusal, fresh transfer IDs and unsent withdrawal retain their
+existing meanings. The guarantee concerns retained local decision knowledge;
+it does not recover forgotten intermediate-development history or discover
+decisions held only by another namespace.
+
+A completed controller continues signed inspections after an explicit remote
+park whose settlement is incomplete. It stops after a settled park or terminal
+disposal is observed. These inspections do not resume or pump the parked work.
+The controller fixture supplies an authenticated incomplete park observation,
+advances the executor's control revision with another park, then obtains its
+actual settled observation through inspection and checks quiescence. Guest
+execution does not advance. The late worker `not_sent` transition is established
+by source tracing through the existing occurrence and shutdown predicates; this fixture
+does not claim to reproduce that environmental timing directly.
+
 The five deterministic native demonstrations cover ordinary investigation, one
 specialization reused on three distinct inputs, leaving a runtime investigation
 for source evidence, canonical guest-cut mobility, and unfinished-clone mobility.
