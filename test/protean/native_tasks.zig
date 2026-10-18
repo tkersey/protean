@@ -1426,10 +1426,14 @@ fn checkCleanupArchiveFact(a: std.mem.Allocator, frame: std.mem.Allocator, io: s
         if (pending) {
             try std.testing.expect(!restored.value.cancellation_applied);
             try std.testing.expectEqualStrings("test cancellation", restored.value.cancellation.?.bytes);
-            try std.testing.expectError(error.CustodyNotLocal, imported.requestCancel(frame, "cancel-0", id, "test cancellation"));
-            try std.testing.expectError(error.CustodyNotLocal, imported.requestCancel(frame, "later-cancel", id, "different later reason"));
+            const imported_head = destination.store.head;
+            try std.testing.expect((try imported.requestCancel(frame, "cancel-0", id, "test cancellation")).replayed);
+            try std.testing.expect((try imported.requestCancel(frame, "later-cancel", id, "different later reason")).replayed);
+            try std.testing.expectError(error.CustodyNotLocal, imported.requestCancel(frame, "copied-new-cancel", id, "test cancellation"));
+            try std.testing.expectError(error.OperationConflict, imported.requestCancel(frame, "cancel-0", id, "different reason"));
             try std.testing.expectError(error.CustodyNotLocal, imported.resumeTask(frame, "resume-control", id, restored.value.revision));
             try std.testing.expectEqual(.idle, try imported.pump(frame));
+            try std.testing.expectEqualDeep(imported_head, destination.store.head);
         } else {
             try std.testing.expectEqual(task.value.outcome_kind, restored.value.outcome_kind);
             var client: native.client.Client(CleanupTypes) = .{ .service = &imported };
@@ -2623,14 +2627,22 @@ test "receipt lookup retains exclusive admission and verifies evidence through t
         const recovery_id = if (index == 0) admitted.receipt.reconciliation.? else id;
         var recovery = try copied.reconciliation(frame, task_id, recovery_id);
         defer recovery.deinit();
+        const copied_head = copied_namespace.store.head;
         if (index == 0) {
             try std.testing.expect(recovery.value.outcome == .unresolved and recovery.value.outcome.unresolved == .interrupted);
-            try std.testing.expectError(error.CustodyNotLocal, copied.reconcile(frame, "interrupted-lookup", task_id, interrupt_task.value.revision, interrupted.occurrence, interrupted.attempt, .lookup));
+            const replayed = try copied.reconcile(frame, "interrupted-lookup", task_id, interrupt_task.value.revision, interrupted.occurrence, interrupted.attempt, .lookup);
+            try std.testing.expect(replayed.replayed);
+            try std.testing.expectEqualDeep(admitted.receipt, replayed.receipt);
+            try std.testing.expectError(error.CustodyNotLocal, copied.reconcile(frame, "copied-new-lookup", task_id, interrupt_task.value.revision, interrupted.occurrence, interrupted.attempt, .lookup));
         } else {
             try std.testing.expect(recovery.value.outcome == .reply_settled and recovery.value.provenance == .authentic);
             try std.testing.expectError(error.ArtifactUnavailable, copied.projectedArtifact(frame, task_id, recovery.value.evidence.?.digest));
-            try std.testing.expectError(error.CustodyNotLocal, copied.reconcile(frame, "lookup", task_id, revision, original.occurrence, original.attempt, .lookup));
+            const replayed = try copied.reconcile(frame, "lookup", task_id, revision, original.occurrence, original.attempt, .lookup);
+            try std.testing.expect(replayed.replayed);
+            try std.testing.expectEqualDeep(admission.receipt, replayed.receipt);
+            try std.testing.expectError(error.CustodyNotLocal, copied.reconcile(frame, "copied-new-lookup", task_id, revision, original.occurrence, original.attempt, .lookup));
         }
+        try std.testing.expectEqualDeep(copied_head, copied_namespace.store.head);
         try @import("native_test_support.zig").expectRetainedReceipt(frame, &copied_namespace, if (index == 0) admitted.receipt else admission.receipt);
         try std.testing.expectError(error.ArtifactUnavailable, copied.projectedArtifact(frame, task_id, recovery.value.original_occurrence.digest));
         _ = try copied_namespace.store.auditRetention(handlers, application.image_identity);

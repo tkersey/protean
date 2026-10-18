@@ -1156,10 +1156,10 @@ pub fn Service(comptime Types: type) type {
         }
 
         pub fn requestCancel(self: *Self, a: std.mem.Allocator, id: []const u8, task_id: state.TaskId, reason: []const u8) !Admission {
-            try self.requireCustody(a, task_id, null);
             if (reason.len > 256 or !std.unicode.utf8ValidateSlice(reason)) return error.InvalidParams;
             const request = try cancelDigest(a, task_id, .{ .bytes = reason });
             if (try self.replay(a, id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
             var decoded = try self.task(a, task_id);
             defer decoded.deinit();
             var value = decoded.value;
@@ -1245,10 +1245,10 @@ pub fn Service(comptime Types: type) type {
         }
 
         pub fn resumeTask(self: *Self, a: std.mem.Allocator, id: []const u8, task_id: state.TaskId, expected: u64) !Admission {
-            try self.requireCustody(a, task_id, null);
             const Request = struct { method: state.Method, task: state.TaskId, revision: u64 };
             const request = try operation(Request, a, .{ .method = .@"resume", .task = task_id, .revision = expected });
             if (try self.replay(a, id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
             var decoded = try self.task(a, task_id);
             defer decoded.deinit();
             var value = decoded.value;
@@ -1327,9 +1327,9 @@ pub fn Service(comptime Types: type) type {
         /// checks; pure computation completes locally, while asynchronous
         /// lookup gets a sealed pending record before the worker may start.
         pub fn reconcile(self: *Self, a: std.mem.Allocator, id: []const u8, task_id: state.TaskId, expected: u64, occurrence_id: state.Digest, attempt_id: state.Digest, recovery: state.RecoveryRequest) !Admission {
-            try self.requireCustody(a, task_id, null);
             const request_digest = try reconcileDigest(a, task_id, expected, occurrence_id, attempt_id, recovery);
             if (try self.replay(a, id, request_digest)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
             var decoded = try self.task(a, task_id);
             defer decoded.deinit();
             var value = decoded.value;
@@ -1599,9 +1599,9 @@ pub fn Service(comptime Types: type) type {
         }
 
         pub fn message(self: *Self, a: std.mem.Allocator, id: []const u8, task_id: state.TaskId, input: Types.Message) !Admission {
-            try self.requireCustody(a, task_id, null);
             const request = try messageDigest(a, task_id, input);
             if (try self.replay(a, id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
             var decoded = try self.task(a, task_id);
             defer decoded.deinit();
             var value = decoded.value;
@@ -1636,7 +1636,6 @@ pub fn Service(comptime Types: type) type {
         }
 
         pub fn respond(self: *Self, a: std.mem.Allocator, id: []const u8, task_id: state.TaskId, question_id: state.Digest, revision: u64, request_digest: state.Digest, schema_id: []const u8, answer_json: json.Value) !Admission {
-            try self.requireCustody(a, task_id, null);
             var decoded = try self.task(a, task_id);
             defer decoded.deinit();
             var value = decoded.value;
@@ -1665,6 +1664,7 @@ pub fn Service(comptime Types: type) type {
             const answer = answer_bytes orelse return error.IncompatibleProfile;
             const request = try answerDigest(a, task_id, question_id, revision, request_digest, schema_id, answer);
             if (try self.replay(a, id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
             if (question.answer) |saved_answer| {
                 if (!same(&saved_answer.digest, &storage.digest(answer))) return error.AnswerConflict;
                 const original = question.receipt orelse return error.CorruptState;
@@ -3306,7 +3306,6 @@ pub fn Service(comptime Types: type) type {
         fn placementModel(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, request: wc.Placement) !wc.Reply {
             const p = @import("placement.zig");
             const journal = @import("placement_journal.zig");
-            try self.requireCustody(a, task_id, null);
             const site = try self.placementSite();
             const id = p.operationId(site, task_id, operation_id, .action);
             if (try self.store().recordBytes(a, "placement_action", id, task_id)) |bytes| {
@@ -3321,6 +3320,7 @@ pub fn Service(comptime Types: type) type {
                 if (!same(wanted, actual)) return error.OperationConflict;
                 return placementReplyCopy(a, prior.value.action.value.reply);
             }
+            try self.requireCustody(a, task_id, null);
             if (self.workspace_replay != null) return error.InvalidArchive;
             try self.placement_pending.ensureUnusedCapacity(self.allocator, 1);
             var queued: ?struct { id: state.Digest, kind: PlacementKind } = null;
@@ -4821,13 +4821,13 @@ pub fn Service(comptime Types: type) type {
         }
 
         pub fn workspaceInteract(self: *Self, allocator: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, interaction: @FieldType(wc.Work, "interact")) !Admission {
-            try self.requireCustody(allocator, task_id, try wp.identity(interaction.expected.work, .work));
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             const a = arena.allocator();
             const Request = workspace.InteractionRequest;
             const request_digest = try operation(Request, a, .{ .task = task_id, .interaction = interaction });
             if (try self.replay(allocator, operation_id, request_digest)) |prior| return prior;
+            try self.requireCustody(allocator, task_id, try wp.identity(interaction.expected.work, .work));
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatible(parent.value);
@@ -5125,12 +5125,12 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn workspaceContextMutation(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, command: wc.Context, snapshot: ?state.Reference, input: ?state.Reference) !Admission {
-            try self.requireCustody(a, task_id, null);
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             const Request = workspace.ContextRequest;
             const request = try operation(Request, a, .{ .task = task_id, .command = command, .snapshot = snapshot, .input = input });
             if (try self.replay(a, operation_id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
             if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
             try self.store().begin();
             defer self.store().rollback();
@@ -6605,9 +6605,9 @@ pub fn Service(comptime Types: type) type {
         }
 
         pub fn workspaceSpecializeWithHooks(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, program_id: state.Digest, hooks: wc.RuntimeHooks) !Admission {
-            try self.requireCustody(a, task_id, null);
             const request = try operation(workspace.SpecializeRequest, a, .{ .task = task_id, .program = program_id, .hooks = hooks });
             if (try self.replay(a, operation_id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
@@ -7427,13 +7427,13 @@ pub fn Service(comptime Types: type) type {
             return built;
         }
         fn workspaceBuildKind(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, source: []const u8, source_kind: wc.SourceKind, catalog: ?state.Reference, exposures: []const wc.Exposure, diagnostic: *construction.Diagnostic) !Admission {
-            try self.requireCustody(a, task_id, null);
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatible(parent.value);
             const Request = workspace.BuildRequest;
             const request = try operation(Request, a, .{ .task = task_id, .source = .{ .bytes = source }, .source_kind = source_kind, .catalog = catalog, .exposures = .{ .items = exposures } });
             if (try self.replay(a, operation_id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
             if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
             if (catalog) |ref| try workspaceSnapshotAccess(parent.value, ref);
             var built = try self.workspaceCompile(a, source, @fromBackingInt(@intCast(@backingInt(source_kind))), catalog, exposures, diagnostic);
@@ -7617,13 +7617,13 @@ pub fn Service(comptime Types: type) type {
         }
         const StartDelegation = struct { record: workspace.Delegation, request: state.Digest, policy: workspace.RunPolicy, command: @FieldType(wc.Work, "delegate") };
         fn workspaceStartAdmitted(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, program_id: state.Digest, input: []const u8, policy: workspace.RunPolicy, origin: ?state.Reference, delegated: ?StartDelegation, runtime: ?state.Reference) !Admission {
-            try self.requireCustody(a, task_id, null);
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatible(parent.value);
             const Request = workspace.StartRequest;
             const request = if (delegated) |bound| bound.request else try operation(Request, a, .{ .task = task_id, .program = program_id, .input = .{ .bytes = input }, .policy = policy, .origin = origin, .runtime = runtime });
             if (try self.replay(a, operation_id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
             if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
             var artifact = try self.workspaceProgram(a, task_id, program_id);
             defer artifact.deinit();
@@ -8109,7 +8109,6 @@ pub fn Service(comptime Types: type) type {
         }
 
         pub fn workspaceControl(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, work_id: state.Digest, expected_execution: u64, expected_control: u64, command: workspace.Command) !Admission {
-            try self.requireCustody(a, task_id, work_id);
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatible(parent.value);
@@ -8117,6 +8116,7 @@ pub fn Service(comptime Types: type) type {
             const request = try operation(Request, a, .{ .task = task_id, .work = work_id, .execution = expected_execution, .control = expected_control, .command = command });
             const publication_command: workspace.PublicationCommand = .{ .control = .{ .execution = expected_execution, .control = expected_control, .command = command } };
             if (try self.replay(a, operation_id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, work_id);
             var saved = try self.workspaceWork(a, task_id, work_id);
             defer saved.deinit();
             var value = saved.value;

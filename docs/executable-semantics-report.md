@@ -336,6 +336,35 @@ restart/resumption, and available movement before delegation, after revocation,
 after an unavailable answer, and after successful delivery. Full current native,
 Linux and serial-review qualification is recorded on the pull request.
 
+### Retained receipts after custody changes
+
+An operation admitted before a lost acknowledgement remains an immutable fact
+after its task or work moves, freezes, or is imported without execution custody.
+The native operation owners now resolve an exact retained receipt before requiring
+custody for a new operation. The eleven ordinary receipt paths retain the existing
+principal/tenant operation key, request digest, current disclosure and task-access
+checks. The signed model-placement path likewise returns its verified, matching
+saved reply before admitting new placement work. Current profile compatibility
+requirements still apply. Receipt lookup does not acquire execution custody,
+enqueue work, repeat an effect, or create a new receipt.
+
+The owning controller-freeze fixture reproduced `CustodyNotLocal` for an already
+admitted build on the unchanged production implementation. Its expanded checks
+cover exact build, specialization, wrapped start and placement retries, unchanged
+store head, runnable subjects and controller cut, conflicting payloads, revoked
+or undisclosed authority, another principal, and fresh-operation denial. An
+ordinary imported copy returns its retained build receipt while denying a new
+build. Existing cancellation and recovery fixtures also check imported receipts
+without granting execution or recovery-worker authority.
+
+Six earlier assertions expected custody rejection for exact, already admitted
+cancellation or recovery retries on imported copies. Those expectations conflicted
+with the documented stable-operation lost-acknowledgement contract. They now
+require retained receipt replay, alongside added fresh-operation rejection and
+unchanged-store checks. Existing recovery acquisition counts, retained evidence,
+private-artifact denials and idle-copy checks remain. Full current qualification
+and serial-review results are recorded on the pull request.
+
 ## Qualification latency measurements
 
 The first Linux Kosmos qualification spent 40 minutes 42 seconds in native

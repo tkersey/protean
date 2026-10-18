@@ -588,12 +588,13 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     const input_schema = program_record.value.description.input_schema;
     var input_value = try native.dynamic_values.decode(a, try source_namespace.store.object(scratch, input_schema, null), input);
     defer input_value.deinit();
-    const started = try sender.workspaceCommand(scratch, "start", parent.receipt.task, .{ .work = .{ .start = .{
+    const start_command: contracts.workspace.Command = .{ .work = .{ .start = .{
         .program = try workspaceRef(scratch, .program, program.receipt.workspace.?),
         .input = .{ .inline_json = .{ .schema = try workspaceRef(scratch, .schema, input_schema.digest), .json_text = .{ .bytes = try native.json.canonical(scratch, input_value.value) } } },
         .policy = if (scenario == .root) .{ .stop = .terminal, .continuation = .owner_scheduled } else .{},
         .runtime = .{ .selected = runtime },
-    } } });
+    } } };
+    const started = try sender.workspaceCommand(scratch, "start", parent.receipt.task, start_command);
     try std.testing.expectEqual(.observed, started.disposition);
     const start_observation = (try native.json.parseAsset(scratch, started.observation_json.bytes, started.observation_json.bytes.len)).value;
     const work_ref = try native.values.fromJson(contracts.workspace.Ref, scratch, start_observation.object.get("work").?);
@@ -765,6 +766,42 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         const controller: p.Subject = .{ .task = subject.task };
         const controller_cut = try sender.placementCut(scratch, controller);
         _ = try sender.placementFreeze(scratch, controller, "successor", controller_cut, @splat(98));
+        const frozen_head = source_namespace.store.head;
+        const frozen_runnable = try scratch.dupe(native.workspace.Subject, sender.runnable.items);
+        const replayed_build = try sender.workspaceBuild(scratch, "build", parent.receipt.task, document, &diagnostic);
+        try std.testing.expect(replayed_build.replayed);
+        try std.testing.expectEqualDeep(program.receipt, replayed_build.receipt);
+        const replayed_specialization = try sender.workspaceSpecialize(scratch, "specialize", parent.receipt.task, program.receipt.workspace.?);
+        try std.testing.expect(replayed_specialization.replayed);
+        try std.testing.expectEqualDeep(specialized.receipt, replayed_specialization.receipt);
+        const replayed_start = try sender.workspaceCommand(scratch, "start", parent.receipt.task, start_command);
+        try std.testing.expectEqual(.observed, replayed_start.disposition);
+        const replayed_start_value = (try native.json.parseAsset(scratch, replayed_start.observation_json.bytes, replayed_start.observation_json.bytes.len)).value;
+        try std.testing.expect(replayed_start_value.object.get("replayed").?.bool);
+        try std.testing.expectEqualDeep(work_ref, try native.values.fromJson(contracts.workspace.Ref, scratch, replayed_start_value.object.get("work").?));
+        const replayed_sites = try sender.workspaceCommand(scratch, "placement-sites", subject.task, .{ .placement = .{ .sites = .{} } });
+        try std.testing.expectEqual(.observed, replayed_sites.disposition);
+        try std.testing.expectEqualStrings(sites.observation_json.bytes, replayed_sites.observation_json.bytes);
+        try std.testing.expectError(error.CustodyNotLocal, sender.workspaceBuild(scratch, "frozen-new-build", parent.receipt.task, document, &diagnostic));
+        try std.testing.expectError(error.CustodyNotLocal, sender.workspaceSpecialize(scratch, "frozen-new-specialization", parent.receipt.task, program.receipt.workspace.?));
+        try std.testing.expectEqual(.rejected, (try sender.workspaceCommand(scratch, "frozen-new-start", parent.receipt.task, start_command)).disposition);
+        try std.testing.expectEqual(.rejected, (try sender.workspaceCommand(scratch, "frozen-new-sites", subject.task, .{ .placement = .{ .sites = .{} } })).disposition);
+        try std.testing.expectError(error.OperationConflict, sender.workspaceBuild(scratch, "build", parent.receipt.task, try std.fmt.allocPrint(scratch, "\n{s}", .{document}), &diagnostic));
+        {
+            const authority = sender.profile.authority;
+            defer sender.profile.authority = authority;
+            sender.profile.authority.disclosure = false;
+            try std.testing.expectError(error.Denied, sender.workspaceBuild(scratch, "build", parent.receipt.task, document, &diagnostic));
+            sender.profile.authority = authority;
+            sender.profile.authority.revoked = true;
+            try std.testing.expectError(error.Denied, sender.workspaceBuild(scratch, "build", parent.receipt.task, document, &diagnostic));
+            sender.profile.authority = authority;
+            sender.profile.authority.principal = "other";
+            try std.testing.expectError(error.Denied, sender.workspaceBuild(scratch, "build", parent.receipt.task, document, &diagnostic));
+        }
+        try std.testing.expectEqualDeep(frozen_head, source_namespace.store.head);
+        try std.testing.expectEqualDeep(frozen_runnable, sender.runnable.items);
+        try std.testing.expectEqualDeep(controller_cut, try sender.placementCut(scratch, controller));
         if (scenario == .root) _ = try sender.workspacePump(scratch, "independent-local-progress", subject.task, .{ .expected = .{ .work = work_ref, .execution_revision = cut.execution, .control_revision = cut.control }, .base_quantum = 1 });
         var progressed_parent = try sender.task(scratch, subject.task);
         defer progressed_parent.deinit();
@@ -787,6 +824,12 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             var copied = try native.tasks.Service(OwnerTypes).init(a, io, &copy_namespace, assets, &application, handlers, copy_profile);
             defer copied.close(a) catch unreachable;
             _ = try copied.importCheckpoint(scratch, "copy-frozen", snapshot_path);
+            const copied_head = copy_namespace.store.head;
+            const copied_receipt = try copied.workspaceBuild(scratch, "build", parent.receipt.task, document, &diagnostic);
+            try std.testing.expect(copied_receipt.replayed);
+            try std.testing.expectEqualDeep(program.receipt, copied_receipt.receipt);
+            try std.testing.expectError(error.CustodyNotLocal, copied.workspaceBuild(scratch, "copied-new-build", parent.receipt.task, document, &diagnostic));
+            try std.testing.expectEqualDeep(copied_head, copy_namespace.store.head);
             try std.testing.expectError(error.InvalidTransfer, copied.placementOffer(scratch, controller, "successor", snapshot_path));
         }
         var snapshot_namespace = try native.Namespace.open(a, io, successor_path);

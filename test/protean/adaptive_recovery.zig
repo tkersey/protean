@@ -861,7 +861,12 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                     defer copy.close(frame) catch unreachable;
                     _ = try copy.importCheckpoint(frame, "import-unsettled", unresolved_archive);
                     try std.testing.expect((try copy.pump(frame)) == .idle);
-                    try std.testing.expectError(error.CustodyNotLocal, copy.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive));
+                    const copied_head = copy_namespace.store.head;
+                    const copied_receipt = try copy.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive);
+                    try std.testing.expect(copied_receipt.replayed);
+                    try std.testing.expectEqualDeep(admitted.receipt, copied_receipt.receipt);
+                    try std.testing.expectError(error.CustodyNotLocal, copy.reconcile(frame, "copied-new-recovery", task, revision, occurrence_id, attempt_id, .rederive));
+                    try std.testing.expectEqualDeep(copied_head, copy_namespace.store.head);
                     try @import("native_test_support.zig").expectRetainedReceipt(frame, &copy_namespace, admitted.receipt);
                     var copied = try copy.task(frame, task);
                     defer copied.deinit();
@@ -919,7 +924,12 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                     var imported = try native.tasks.Service(t).init(a, io, &destination, assets, &application, handlers, profile);
                     defer imported.close(frame) catch unreachable;
                     _ = try imported.importCheckpoint(frame, "import-rederived", archive_path);
-                    try std.testing.expectError(error.CustodyNotLocal, imported.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive));
+                    const imported_head = destination.store.head;
+                    const imported_receipt = try imported.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive);
+                    try std.testing.expect(imported_receipt.replayed);
+                    try std.testing.expectEqualDeep(admitted.receipt, imported_receipt.receipt);
+                    try std.testing.expectError(error.CustodyNotLocal, imported.reconcile(frame, "copied-new-recovery", task, revision, occurrence_id, attempt_id, .rederive));
+                    try std.testing.expectEqualDeep(imported_head, destination.store.head);
                     try @import("native_test_support.zig").expectRetainedReceipt(frame, &destination, admitted.receipt);
                     var imported_task = try imported.task(frame, task);
                     defer imported_task.deinit();
