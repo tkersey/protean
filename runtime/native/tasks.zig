@@ -931,12 +931,6 @@ pub fn Service(comptime Types: type) type {
             var saved = try self.task(a, active.task);
             defer saved.deinit();
             if (saved.value.execution_revision != active.execution_revision) return error.CorruptState;
-            // A completed physical operation has no pending command to freeze.
-            // Finish its checkpoint publication before transferring this owner.
-            if (active.root_cut_ready) {
-                _ = try self.pumpRoot(a, saved.value);
-                return;
-            }
             const capsule = try active.driver.retainCapsule(rootProvenance(saved.value));
             const dependencies = try capsuleDependencies(a, capsule);
             defer a.free(dependencies);
@@ -950,16 +944,16 @@ pub fn Service(comptime Types: type) type {
             try self.namespace.commit("controller.outer-suspend");
             self.active.?.outer_operation = pending.capsule;
         }
-        fn validateRootOperation(self: *Self, a: std.mem.Allocator, value: state.Task, saved: state.RootOperation) !void {
+        fn validateRootOperation(self: *Self, a: std.mem.Allocator, value: state.Task, saved: state.RootOperation) !bool {
             if (!std.meta.eql(saved.id, rootIdentity(value.id)) or !std.meta.eql(saved.task, value.id) or saved.execution_revision != value.execution_revision) return error.InvalidArchive;
-            const pending = saved.pending orelse return;
+            const pending = saved.pending orelse return false;
             if (value.terminal() or pending.guest_quantum > 256) return error.InvalidArchive;
             const bytes = try self.store().object(a, pending.capsule, null);
             defer a.free(bytes);
             var envelope = try kosmos.RuntimeCapsule.read(a, bytes);
             defer envelope.deinit();
             const record_value = envelope.value.record;
-            if (!std.meta.eql(record_value.provenance, rootProvenance(value)) or record_value.kind != .outer_execution or record_value.operation != .advance or
+            if (!std.meta.eql(record_value.provenance, rootProvenance(value)) or record_value.kind != .outer_execution or (record_value.operation != .advance and record_value.operation != null) or
                 !std.meta.eql(record_value.guest.image.digest, value.image.digest) or record_value.guest.image.bytes != value.image.bytes) return error.InvalidArchive;
             if (pending.dependencies.items.len != record_value.dependencies.len) return error.InvalidArchive;
             for (pending.dependencies.items, record_value.dependencies) |ref, expected| if (!std.meta.eql(ref.digest, expected.digest) or ref.bytes != expected.bytes) return error.InvalidArchive;
@@ -1005,6 +999,7 @@ pub fn Service(comptime Types: type) type {
             var context: u8 = 0;
             var candidate = try kosmos.RuntimeCapsule.restore(a, &prepared.guest, &prepared.runtime, bytes, .{ .context = &context, .claim = Inspect.claim });
             defer candidate.deinit();
+            return record_value.operation == null;
         }
 
         fn retire(self: *Self, a: std.mem.Allocator) !void {
@@ -1026,9 +1021,10 @@ pub fn Service(comptime Types: type) type {
             defer if (pending) |*saved| saved.deinit();
             const root_control = if (pending != null and pending.?.value.pending != null) try self.store().object(self.allocator, pending.?.value.pending.?.control, null) else null;
             errdefer if (root_control) |bytes| self.allocator.free(bytes);
+            var root_cut_ready = false;
             const driver = if (pending != null and pending.?.value.pending != null) restored: {
                 const operation_value = pending.?.value.pending.?;
-                try self.validateRootOperation(a, value, pending.?.value);
+                root_cut_ready = try self.validateRootOperation(a, value, pending.?.value);
                 const bytes = try self.store().object(a, operation_value.capsule, null);
                 defer a.free(bytes);
                 const Owner = struct {
@@ -1049,7 +1045,7 @@ pub fn Service(comptime Types: type) type {
                 defer a.free(checkpoint);
                 break :restored try evaluator.Driver.start(self.allocator, self.program, .{ .state = checkpoint });
             };
-            self.active = .{ .task = value.id, .execution_revision = value.execution_revision, .driver = driver, .root_control = root_control };
+            self.active = .{ .task = value.id, .execution_revision = value.execution_revision, .driver = driver, .root_control = root_control, .root_cut_ready = root_cut_ready };
             if (pending) |saved| if (saved.value.pending) |operation_value| {
                 self.active.?.root_quantum = operation_value.guest_quantum;
                 self.active.?.outer_operation = operation_value.capsule;
@@ -1759,10 +1755,19 @@ pub fn Service(comptime Types: type) type {
                 self.compatible(parent.value) catch continue;
                 if (try self.settleWorkspaceOne(a, parent.value, controller)) return true;
                 if (!controller) continue;
-                if (parent.value.cancellation != null and !parent.value.terminal() and parent.value.schedule != .parked) try self.runnableAdd(id);
+                if (try self.rootCleanupRunnable(a, parent.value)) try self.runnableAdd(id);
                 if (parent.value.terminal() and try self.taskCleanupComplete(a, parent.value)) self.unclaim(id);
             }
             return false;
+        }
+
+        fn rootCleanupRunnable(self: *Self, a: std.mem.Allocator, value: state.Task) !bool {
+            if (value.cancellation == null or value.terminal() or value.schedule == .parked) return false;
+            if (!value.cancellation_applied) return true;
+            const id = value.current_occurrence orelse return true;
+            var pending = try self.record(occurrence.Occurrence, a, "occurrence", id, value.id);
+            defer pending.deinit();
+            return pending.value.state != .awaiting and pending.value.state != .not_sent;
         }
 
         fn pumpTask(self: *Self, a: std.mem.Allocator, id: state.TaskId) !Step {
@@ -4264,7 +4269,7 @@ pub fn Service(comptime Types: type) type {
             try self.validatePendingMessages(a, value);
             var saved_operation = try self.rootOperation(a, value);
             defer if (saved_operation) |*saved| saved.deinit();
-            if (saved_operation) |saved| try self.validateRootOperation(a, value, saved.value);
+            if (saved_operation) |saved| _ = try self.validateRootOperation(a, value, saved.value);
             const driver = restored: {
                 // Restore owns its admitted input. Release the serialized copy
                 // before reconstruction, even when the caller uses an arena.
@@ -7086,7 +7091,7 @@ pub fn Service(comptime Types: type) type {
                 .root_operation => {
                     var saved = try self.record(state.RootOperation, a, "root_operation", row.id, task_id);
                     defer saved.deinit();
-                    try self.validateRootOperation(a, parent.value, saved.value);
+                    _ = try self.validateRootOperation(a, parent.value, saved.value);
                 },
                 .workspace_runtime => {
                     var record_value = try self.record(workspace.Runtime, a, "workspace_runtime", row.id, task_id);

@@ -884,6 +884,37 @@ still execute successfully in the complete current workflow. The custody lane
 also requires the five tests now present, after its former three-test summary
 assertion rejected an actual successful five-test Linux execution.
 
+Root retirement retains both physically suspended and physically completed outer
+operations through the existing capsule representation. It does not publish a
+guest transition or change the task revision. The root owner restores the capsule's
+validated completion phase and publishes the completed operation without pumping
+its accepted command again. This removes the hidden task mutation from every
+retirement caller, including child admission, runtime operations and parking.
+Admission still checks the original guest checkpoint provenance, exact accepted
+control and quantum, dependencies, runtime identity and actual outer state; a
+completed capsule must contain a publishable guest cut. Existing suspended root
+operations remain readable without changing the record schema.
+
+Cancellation ownership remains independent of readiness. An applied cancellation
+whose cleanup awaits input retains shutdown responsibility without being requeued
+as runnable work. An unapplied cancellation still wakes an ordinary pending
+question; an admitted answer wakes cleanup again. Human-mode interruption uses
+the same local-custody cancellation selector as stdio shutdown, including locally
+owned children when their controller is frozen or elsewhere. Its exit status also
+includes the service's incomplete-shutdown observation, independently of the root
+result. The second-interrupt and hard-deadline behavior is unchanged.
+
+The same focused fixtures reproduce `StaleRevision` during child admission and
+repeated `waiting` while cleanup awaits input against the preceding task owner.
+They pass with the changed owner: child admission preserves the root cut, parking
+and reopening retain completed physical progress, signed transfer preserves the
+source cut until an explicit destination resume, and answering the cleanup
+question completes cancellation. The ordinary-question cancellation wakeup and
+retained incomplete-shutdown observation are asserted separately. These are
+native fault and lifecycle observations; the human signal wiring is source-traced,
+without claiming an injected CLI signal experiment. The Linux owner lane requires
+all 69 tests, including the new cleanup-question case.
+
 The normal cache path keys compiled outputs by the selected build recipe, compiler
 contents, native target/environment, dependency locks, build configuration, shared
 source modules, required adaptive assets, and the selected test root's transitive

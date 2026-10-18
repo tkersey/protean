@@ -1379,6 +1379,96 @@ const CleanupApplication = struct {
     }
 };
 
+test "applied cancellation awaits cleanup input without recreating runnable work" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const Asking = struct {
+        pub fn emit(c: protean.Context) !horos.source.Module {
+            const b = c.builder;
+            const number = try b.scalar(u32);
+            const unit = try b.scalar(void);
+            const question = try horos_authoring.interop.operationId(c.author, try c.external("fair.question.v1", try c.schema(u32), try c.schema(u32), .read));
+            const entry = try b.declare(&.{number}, number, &.{question}, &.{});
+            const body = try b.declare(&.{}, number, &.{question}, &.{});
+            try b.define(body, try b.term(.{ .perform = .{ .effect = question, .payload = try b.constant(u32, 1) } }));
+            const exit_info = try horos.library.cleanup.exitInfo(b, unit);
+            const cleanup = try b.declare(&.{exit_info}, unit, &.{question}, &.{});
+            const answer = try b.variable(number);
+            try b.define(cleanup, try b.bind(answer, try b.term(.{ .perform = .{ .effect = question, .payload = try b.constant(u32, 2) } }), try b.pure(try b.constant(void, {}))));
+            const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{}, .result = number, .effects = &.{question} } } });
+            const cleanup_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{exit_info}, .result = unit, .effects = &.{question} } } });
+            try b.define(entry, try b.term(.{ .protect = .{ .body = try b.lambda(body, body_type), .cleanup = try b.lambda(cleanup, cleanup_type) } }));
+            return b.module(entry, unit);
+        }
+    };
+    var compiled = try protean.compile(a, protean.system(.{ .InitialArgs = u32, .Result = u32, .Failure = void, .application = Asking }));
+    defer compiled.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const frame = arena.allocator();
+    const image = try frame.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
+    _ = try compiled.encode(a, image);
+    const admitted = try horos.data.program_image.Admitted.decode(a, image);
+    defer admitted.deinit();
+    const manifest = try ownerManifest(frame, image, admitted.identity(), "cleanup-question");
+    const assets: native.discovery.Assets = .{ .image = image, .application = "cleanup-question", .manifest = manifest };
+    var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "unit", .image_identity = admitted.identity() };
+    defer application.deinit();
+    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
+    var handlers = try native.Registry.init(a, &.{native.question(u32, u32, .{ .identity = "fair.question.v1", .resource_role = "user", .answer_schema_id = "fair.answer.v1" }, FairCapture.present)});
+    defer handlers.deinit();
+    var grants: [1]native.registry.Grant = undefined;
+    const profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "cleanup-question-profile", .authority = .{ .grants = &grants, .principal = "test", .tenant = "test" } };
+    grants[0] = .{ .identity = handlers.entries[0].declaration.identity, .resource_role = "user", .resource_identity = try profile.resourceIdentity(frame, application.image_identity) };
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(io, &path_buffer);
+    const path = try std.fmt.allocPrint(frame, "{s}/state", .{path_buffer[0..length]});
+    var namespace = try native.Namespace.open(a, io, path);
+    defer namespace.close() catch unreachable;
+    var service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    defer service.close(frame) catch unreachable;
+    const submitted = try service.submit(frame, "asking", 11);
+    for (0..64) |_| {
+        if (try service.pump(frame) == .waiting) break;
+    } else return error.QuestionNotReached;
+    var ordinary = (try service.pendingQuestion(frame, submitted.receipt.task)).?;
+    defer ordinary.deinit();
+    _ = try service.requestCancel(frame, "cancel-asking", submitted.receipt.task, "stop");
+    for (0..64) |_| {
+        if (try service.pump(frame) == .waiting) break;
+    } else return error.CleanupQuestionNotReached;
+    var cleanup = (try service.pendingQuestion(frame, submitted.receipt.task)).?;
+    defer cleanup.deinit();
+    try std.testing.expect(!std.meta.eql(ordinary.value.id, cleanup.value.id));
+    var waiting = try service.task(frame, submitted.receipt.task);
+    defer waiting.deinit();
+    try std.testing.expect(waiting.value.cancellation_applied);
+    try std.testing.expectEqual(.active, waiting.value.schedule);
+    try std.testing.expectEqual(.waiting_input, try service.status(frame, waiting.value));
+    for (0..4) |_| {
+        try std.testing.expectEqual(.idle, try service.pump(frame));
+        try std.testing.expectEqual(0, service.runnable.items.len);
+        try std.testing.expectEqual(1, service.owned.items.len);
+        try std.testing.expect(try service.shutdownIncomplete(frame));
+    }
+    try service.park(frame);
+    _ = try service.respond(frame, "cleanup-answer", submitted.receipt.task, cleanup.value.id, cleanup.value.revision, cleanup.value.request_digest, "fair.answer.v1", .{ .number_string = "7" });
+    for (0..64) |_| {
+        _ = try service.pump(frame);
+        var current = try service.task(frame, submitted.receipt.task);
+        defer current.deinit();
+        if (current.value.terminal()) {
+            try std.testing.expectEqual(.cancelled, current.value.outcome_kind);
+            try std.testing.expect(try service.taskCleanupComplete(frame, current.value));
+            break;
+        }
+    } else return error.CleanupNotCompleted;
+    try std.testing.expectEqual(.idle, try service.pump(frame));
+    try std.testing.expect(!try service.shutdownIncomplete(frame));
+}
+
 fn checkCleanupArchiveFact(a: std.mem.Allocator, frame: std.mem.Allocator, io: std.Io, service: *native.tasks.Service(CleanupTypes), namespace: *native.Namespace, service_live: *bool, namespace_live: *bool, source: []const u8, directory: []const u8, id: [16]u8, pending: bool) !void {
     const assets = service.assets;
     const application = service.application;
@@ -3003,6 +3093,13 @@ fn controllerMicroprogress(comptime moving: bool) !void {
     var initial_destination = try native.Namespace.open(a, io, copy_path);
     const destination_identity = initial_destination.identity;
     try initial_destination.close();
+    const completed_path = try std.fmt.allocPrint(frame, "{s}/completed-copy", .{path_buffer[0..length]});
+    const completed_destination_identity = if (!moving) identity: {
+        var completed_destination = try native.Namespace.open(a, io, completed_path);
+        const result = completed_destination.identity;
+        try completed_destination.close();
+        break :identity result;
+    } else destination_identity;
     var namespace = try native.Namespace.open(a, io, path);
     var namespace_live = true;
     defer if (namespace_live) namespace.close() catch unreachable;
@@ -3148,5 +3245,96 @@ fn controllerMicroprogress(comptime moving: bool) !void {
     if (imported.active) |active| {
         try std.testing.expect(active.root_control == null);
         try std.testing.expect(!active.root_cut_ready);
+    }
+    for (0..3) |scenario| {
+        try imported.park(frame);
+        const operation_id = try std.fmt.allocPrint(frame, "deferred-root-{d}", .{scenario});
+        const deferred = try imported.submit(frame, operation_id, 14);
+        var builder = horos.source.Builder.init(a);
+        defer builder.deinit();
+        const number = try builder.scalar(u32);
+        const entry = try builder.declare(&.{number}, number, &.{}, &.{});
+        try builder.define(entry, try builder.pure(try builder.reference(builder.parameter(entry, 0))));
+        const document = try native.source_records.encode(frame, builder.module(entry, try builder.scalar(void)));
+        var diagnostic: native.program_construction.Diagnostic = .{};
+        const program = try imported.workspaceBuild(frame, try std.fmt.allocPrint(frame, "deferred-build-{d}", .{scenario}), deferred.receipt.task, document, &diagnostic);
+        while (imported.active == null or !std.meta.eql(imported.active.?.task, deferred.receipt.task) or imported.active.?.root_control == null) {
+            try std.testing.expectEqual(.progressed, try imported.pump(frame));
+        }
+        while (true) {
+            var progress = try imported.active.?.driver.pump(65536);
+            defer progress.deinit();
+            if (progress == .suspended) continue;
+            try std.testing.expect(progress == .event and progress.event.value == .cut);
+            break;
+        }
+        imported.active.?.root_cut_ready = true;
+        failing.fail_index = failing.alloc_index;
+        failing.resize_fail_index = failing.resize_index;
+        try std.testing.expectError(error.OutOfMemory, imported.pump(frame));
+        try std.testing.expect(!destination.store.fenced);
+        failing.fail_index = std.math.maxInt(usize);
+        failing.resize_fail_index = std.math.maxInt(usize);
+        var before = try imported.task(frame, deferred.receipt.task);
+        defer before.deinit();
+        if (scenario == 2) {
+            var completed_peer = destination_peer;
+            completed_peer.site.namespace = completed_destination_identity;
+            const completed_source_config: p.Configuration = .{ .signing_key = source_key, .peers = &.{completed_peer} };
+            imported.profile.placement = &completed_source_config;
+            const moving_subject: p.Subject = .{ .task = deferred.receipt.task };
+            const cut = try imported.placementCut(frame, moving_subject);
+            try std.testing.expectEqual(before.value.execution_revision, cut.execution);
+            try std.testing.expect(cut.outer != null);
+            _ = try imported.placementFreeze(frame, moving_subject, "destination", cut, @splat(91));
+            const moved_path = try std.fmt.allocPrint(frame, "{s}/completed-outer.bundle", .{path_buffer[0..length]});
+            const moved_offer = try imported.placementOffer(frame, moving_subject, "destination", moved_path);
+            try std.testing.expectEqual(.idle, try imported.pump(frame));
+            try imported.close(frame);
+            try destination.close();
+            destination = try native.Namespace.open(a, io, completed_path);
+            var receiver_profile = profile;
+            receiver_profile.placement = &destination_config;
+            imported = try native.tasks.Service(FairTypes).init(failing.allocator(), io, &destination, assets, &application, handlers, receiver_profile);
+            const decision = try imported.placementAccept(frame, "completed-outer-accept", "source", moved_offer, moved_path);
+            try std.testing.expect(decision.value.verdict == .accepted);
+            try std.testing.expectEqual(.idle, try imported.pump(frame));
+            var admitted_task = try imported.task(frame, moving_subject.task);
+            defer admitted_task.deinit();
+            try std.testing.expectEqual(before.value.execution_revision, admitted_task.value.execution_revision);
+            _ = try imported.resumeTask(frame, "completed-outer-resume", moving_subject.task, admitted_task.value.revision);
+            try std.testing.expectEqual(.progressed, try imported.pump(frame));
+            var received = try imported.task(frame, moving_subject.task);
+            defer received.deinit();
+            try std.testing.expectEqual(before.value.execution_revision + 1, received.value.execution_revision);
+            try std.testing.expect(!destination.store.fenced);
+            continue;
+        }
+        if (scenario == 0) {
+            const child = try imported.workspaceStart(frame, "child-after-deferred-root", deferred.receipt.task, program.receipt.workspace.?, try protean.contracts.encodeOwned(u32, frame, 19), .{ .stop = .terminal, .continuation = .owner_scheduled });
+            var child_value = try imported.workspaceWork(frame, deferred.receipt.task, child.receipt.workspace.?);
+            defer child_value.deinit();
+            try std.testing.expect(child_value.value.terminal());
+        }
+        try imported.park(frame);
+        var parked = try imported.task(frame, deferred.receipt.task);
+        defer parked.deinit();
+        try std.testing.expectEqual(before.value.execution_revision, parked.value.execution_revision);
+        try std.testing.expectEqualDeep(before.value.checkpoint, parked.value.checkpoint);
+        try std.testing.expectEqual(.parked, parked.value.schedule);
+        try std.testing.expectEqual(.idle, try imported.pump(frame));
+        _ = try imported.exportCheckpoint(frame, deferred.receipt.task, try std.fmt.allocPrint(frame, "{s}/deferred-{d}.bundle", .{ path_buffer[0..length], scenario }));
+        try imported.close(frame);
+        try destination.close();
+        destination = try native.Namespace.open(a, io, path);
+        imported = try native.tasks.Service(FairTypes).init(failing.allocator(), io, &destination, assets, &application, handlers, destination_profile);
+        var reopened = try imported.task(frame, deferred.receipt.task);
+        defer reopened.deinit();
+        _ = try imported.resumeTask(frame, try std.fmt.allocPrint(frame, "deferred-resume-{d}", .{scenario}), deferred.receipt.task, reopened.value.revision);
+        try std.testing.expectEqual(.progressed, try imported.pump(frame));
+        var published = try imported.task(frame, deferred.receipt.task);
+        defer published.deinit();
+        try std.testing.expectEqual(before.value.execution_revision + 1, published.value.execution_revision);
+        try std.testing.expect(!destination.store.fenced);
     }
 }

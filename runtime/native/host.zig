@@ -496,18 +496,19 @@ fn humanCommand(comptime Types: type, a: std.mem.Allocator, service: *tasks.Serv
             _ = try client.call(frame, .@"task.respond", params);
         }
     }
-    if (command == .run or command == .@"resume" or command == .cancel or command == .respond) try driveHuman(Types, a, service, id, operation_id);
+    const shutdown_incomplete = if (command == .run or command == .@"resume" or command == .cancel or command == .respond) try driveHuman(Types, a, service, operation_id) else false;
     try json.put(frame, &params, "task_id", json.string(try frame.dupe(u8, &std.fmt.bytesToHex(id, .lower))));
     const result = if (imported) |admitted| try client.admission(frame, admitted) else try client.call(frame, if (command == .status) .@"task.status" else .@"task.result", params);
     try std.Io.File.stdout().writeStreamingAll(service.io, try json.canonical(frame, result));
     try std.Io.File.stdout().writeStreamingAll(service.io, "\n");
     if (command != .status and command != .result and command != .@"import-checkpoint") {
-        return executionExit(result);
+        return executionExit(result, shutdown_incomplete);
     }
     return 0;
 }
 
-fn executionExit(result: json.Value) u8 {
+fn executionExit(result: json.Value, shutdown_incomplete: bool) u8 {
+    if (shutdown_incomplete) return 2;
     // Waiting for input can be part of cancellation cleanup. Readiness and
     // cancellation intent, not the presentation status, determine settlement.
     if (result.object.get("cancellation")) |intent| if (intent != .null) {
@@ -545,11 +546,12 @@ test "execution exit distinguishes application failure from incomplete cleanup" 
     inline for (cases) |case| {
         var result = try json.parse(std.testing.allocator, case[0], .{});
         defer result.deinit();
-        try std.testing.expectEqual(@as(u8, case[1]), executionExit(result.value));
+        try std.testing.expectEqual(@as(u8, case[1]), executionExit(result.value, false));
+        try std.testing.expectEqual(@as(u8, 2), executionExit(result.value, true));
     }
 }
 
-fn driveHuman(comptime Types: type, a: std.mem.Allocator, service: *tasks.Service(Types), id: [16]u8, operation_id: []const u8) !void {
+fn driveHuman(comptime Types: type, a: std.mem.Allocator, service: *tasks.Service(Types), operation_id: []const u8) !bool {
     interrupts.store(0, .release);
     if (c.protean_native_signals_begin(interrupt) != 0) return error.IoUnavailable;
     defer c.protean_native_signals_end();
@@ -570,7 +572,7 @@ fn driveHuman(comptime Types: type, a: std.mem.Allocator, service: *tasks.Servic
             shutdown_at = time;
             const digest = @import("store.zig").digest(operation_id);
             const operation = try std.fmt.allocPrint(frame, "interrupt-{s}", .{std.fmt.bytesToHex(digest, .lower)});
-            _ = try service.requestCancel(frame, operation, id, "human requested cancellation");
+            try service.cancelOwned(frame, operation, "human requested cancellation");
         }
         if (slot.future != null) {
             if (try service.shouldCancelWork(slot.work)) slot.cancel();
@@ -590,7 +592,7 @@ fn driveHuman(comptime Types: type, a: std.mem.Allocator, service: *tasks.Servic
                     continue;
                 }
                 try service.park(frame);
-                return;
+                return shutdown_at != null and try service.shutdownIncomplete(frame);
             },
         }
     }
