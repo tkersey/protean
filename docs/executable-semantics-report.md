@@ -401,6 +401,45 @@ and run concurrently; every operation and cleanup must finish. All demo assertio
 remain unchanged. Linux qualification must still complete
 the entire workflow within ten minutes.
 
+On `3325717`, [Linux run 39096051592](https://github.com/tkersey/protean/actions/runs/39096051592)
+completed eighteen of twenty qualification jobs but failed the workflow deadline
+at 621 seconds including teardown. The outer-capsule job spent 272 seconds
+building and was cancelled after 288 seconds of fixture execution. The workspace
+job spent 283 seconds building; its assertions passed in 256 seconds, but the job
+reached its deadline during teardown. Cache saving added five to six seconds;
+it was not the dominant cost.
+
+The two mobility demonstrations had independently repeated the complete
+retention-query sequence. That sequence and every one of its assertions now run
+in the canonical guest-cut demonstration, followed by specialization, transfer,
+the second alternative and cleanup. The mid-clone demonstration retains its
+actual live-clone inspection, `GuestCutUnavailable` rejection, exact outer capsule,
+work and controller custody transfers, both branch results and remote cancellation
+cleanup. Its separate query work did not advance the subject, as the retained
+query fixture's revision, realization and port-equality assertions check. This
+factoring removes duplicate analysis work without replacing either mobility
+fixture. On the identical safe executable, the outer demonstration passed in
+96.0 seconds with 41 model actions, versus 117.0 seconds with 50 actions before
+factoring. The full canonical guest-cut demonstration passed in 92.9 seconds.
+These are local macOS observations, not Linux workflow qualification.
+
+The foreign-reference rejection fixture now follows the shorter reverse-work
+trace in the other native group. It still receives an actual completed program
+from a different task in the same namespace and checks `ArtifactUnavailable`.
+The long reuse trace, all twelve work results, restart, ordered archive evidence
+and control-revision assertions remain intact. Every native group still runs.
+The factored workspace and control groups passed locally in 86.8 and 41.4 seconds
+respectively; the former still executed all 55 provider calls, while the latter
+executed the unchanged foreign-reference rejection after the reverse trace.
+
+An isolated attempt to move C compilation into the final Zig compile was not
+retained: local cold cross-build time changed from 189.0 to 206.3 seconds, and a
+comparison using the same already emitted assets changed from 118.4 to 124.5
+seconds. Both produced identical C objects, but neither measured a useful gain.
+Production compiler flags, backend, safety checks and runtime code remain unchanged
+by this fixture factoring. Final cold and cache-assisted workflow results are
+recorded on the pull request for their exact revisions.
+
 `tools/evaluation/workspace.mjs prepare --suite runtime` prepares matched ordinary,
 generic and runtime-optional arms for repetitive work, adaptive exploration and a
 small investigation. It retains input/expected-output hashes and counts actual

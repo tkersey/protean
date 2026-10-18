@@ -202,7 +202,9 @@ export async function verifyAdaptiveNative({app, applicationPath, group = 'all'}
   const groups = group === 'workspace' ? ['workspace'] : group === 'controls' ? ['controls', 'workspace-extra'] : ['controls', 'workspace', 'workspace-extra'];
   const results = await Promise.allSettled(groups.map(async name => {
     const suite = name === 'controls' ? 'controls' : 'workspace';
-    const workspaceScenarios = name === 'workspace' ? ['tools-reuse', 'tools-foreign'] : ['tools-reverse', 'tools-disabled'];
+    // The foreign-reference check needs a completed owner in the same store.
+    // Reuse the shorter reverse trace for that setup, balancing the two groups.
+    const workspaceScenarios = name === 'workspace' ? ['tools-reuse'] : ['tools-reverse', 'tools-foreign', 'tools-disabled'];
     const data = join(app.data, name), controller = join(app.controller, name);
     await Promise.all([mkdir(data), mkdir(controller)]);
     const started = performance.now();
@@ -833,6 +835,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         assert.equal(emitted.status, 0, emitted.stderr);
         toolSubject.mobility = JSON.parse(emitted.stdout);
       }
+      if (name === 'tools-foreign') assert(retainedProgram && retainedState, 'foreign-reference rejection requires an actual earlier task owner');
       let selectedState = name === 'tools-foreign' ? retainedState : join(app.data, name);
       toolSubject.state = selectedState;
       const selectedConfig = join(app.data, `${name}.json`);
@@ -942,7 +945,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         }
       } else if (name.startsWith('tools-runtime-')) {
         assert.equal(result.outcome.value.result.tag, 'no_result');
-        assert.equal(result.outcome.value.programs.length, name === 'tools-runtime-ordinary' ? 0 : ['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name) ? 2 : 1);
+        assert.equal(result.outcome.value.programs.length, name === 'tools-runtime-ordinary' ? 0 : name === 'tools-runtime-guest-mobility' ? 2 : 1);
         if (name === 'tools-runtime-ordinary') assert(!toolSubject.actions.some(action => ['program', 'work', 'context', 'placement'].includes(action.name)));
         if (name === 'tools-runtime-specialized') {
           assert.equal(toolSubject.results.length, 3);
@@ -956,7 +959,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         if (['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name)) {
           assert(name === 'tools-runtime-mobility' ? toolSubject.outer && toolSubject.controllerMoved : toolSubject.guestCut);
           assert(toolSubject.cleanupComplete);
-          assert(toolSubject.retention?.path.length > 0);
+          if (name === 'tools-runtime-guest-mobility') assert(toolSubject.retention?.path.length > 0);
           assert.deepEqual(toolSubject.branchValues, ['366', '376']);
           assert.equal(hash(await readFile(app.executable)), placement.binary);
         }
@@ -969,8 +972,10 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         assert.equal(result.outcome.value.programs.length, 0);
         assert.equal(result.outcome.value.work_calls, name === 'tools-disabled' ? '1' : '2');
       }
-      if (name === 'tools-reuse') {
+      if (['tools-reuse', 'tools-reverse'].includes(name)) {
         retainedProgram = toolSubject.program; retainedState = selectedState;
+      }
+      if (name === 'tools-reuse') {
         assert(alternateIndex > 38, 'materialization, retained work and the original long control trace all ran');
         assert.equal(result.outcome.value.model_calls, String(alternateIndex));
         assert.equal(result.outcome.value.evidence.length, 15, 'twelve results, two inputs, and the source remain retained');
@@ -980,7 +985,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         assert.equal(result.outcome.value.control.skills.length, 0);
       }
       toolRuns.push({scenario: name, provider_calls: alternateIndex, disposition: result.outcome.value.result.tag});
-      if (['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name)) toolRuns.at(-1).retention = {
+      if (name === 'tools-runtime-guest-mobility') toolRuns.at(-1).retention = {
         target: toolSubject.retention.target, path_edges: toolSubject.retention.path.length,
         result: toolSubject.retention.result,
       };
