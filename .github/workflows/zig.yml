@@ -33,11 +33,11 @@ jobs:
           - {lane: workspace-custody, compiled_profile: workspace-custody}
           - {lane: workspace-succession, compiled_profile: workspace-succession}
           - {lane: native, compiled_profile: product}
-          - {lane: native-workspace, compiled_profile: product}
+          - {lane: native-workspace, product_consumer: true}
           - {lane: native-placement, compiled_profile: product}
-          - {lane: runtime, compiled_profile: product}
-          - {lane: runtime-outer, compiled_profile: product}
-          - {lane: runtime-guest, compiled_profile: product}
+          - {lane: runtime, product_consumer: true}
+          - {lane: runtime-outer, product_consumer: true}
+          - {lane: runtime-guest, product_consumer: true}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -50,7 +50,8 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '26.9.0'
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      - if: ${{ !matrix.product_consumer }}
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: '0.17.0'
           mirror: https://zigmirror.com
@@ -58,7 +59,7 @@ jobs:
           use-cache: false
       - name: Restore complete compiler cache
         id: cache
-        if: github.event_name != 'workflow_dispatch' || inputs.compiler-cache
+        if: ${{ !matrix.product_consumer && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache) }}
         continue-on-error: true
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
@@ -100,7 +101,7 @@ jobs:
         if: matrix.lane == 'authoring'
         run: sh tools/check_zig_paths.sh
       - name: Restore locked native transport bytes
-        if: github.event_name != 'workflow_dispatch' || inputs.compiler-cache
+        if: ${{ !matrix.product_consumer && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache) }}
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
@@ -108,7 +109,7 @@ jobs:
             .protean-native/inputs/*.zip
           key: protean-native-archives-v2-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}
       - name: Authenticate and provision selected native inputs
-        if: matrix.lane != 'downstream'
+        if: ${{ !matrix.product_consumer && matrix.lane != 'downstream' }}
         run: |
           zig run tools/native/dependencies.zig -- setup \
             conformance/protean/dependencies.lock.json \
@@ -171,6 +172,25 @@ jobs:
           zig build "${targets[@]}" "${selection[@]}" -Doptimize=safe --summary all \
             --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables \
             2>&1 | tee "$RUNNER_TEMP/$lane-check.log"
+      - name: Package completed native product
+        if: matrix.compiled_profile == 'product'
+        run: node tools/native/qualification_product.mjs pack "$RUNNER_TEMP/protean-qualification"
+        env:
+          QUALIFICATION_INPUTS: ${{ steps.deployment_inputs.outputs.key }}
+          QUALIFICATION_LANE: ${{ matrix.lane }}
+      - name: Publish completed native product before independent checks
+        if: matrix.compiled_profile == 'product'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: ${{ runner.temp }}/native-product-${{ matrix.lane }}-${{ github.run_attempt }}.tar.gz
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      - name: Acquire current-run native product
+        if: matrix.product_consumer
+        run: node tools/native/qualification_product.mjs receive "$RUNNER_TEMP/protean-qualification"
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Save completed compiled qualification inputs
         if: matrix.compiled_profile && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.deployment_cache.outputs.cache-hit != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache)
         continue-on-error: true
@@ -369,7 +389,7 @@ jobs:
           retention-days: 14
       - name: Admit a complete bounded cache snapshot
         id: cache_size
-        if: ${{ !cancelled() && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.deployment_cache.outputs.cache-hit != 'true' && steps.build_cache_size.outputs.save != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache) }}
+        if: ${{ !cancelled() && !matrix.product_consumer && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.deployment_cache.outputs.cache-hit != 'true' && steps.build_cache_size.outputs.save != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache) }}
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"

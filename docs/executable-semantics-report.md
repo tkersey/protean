@@ -737,6 +737,40 @@ The remaining cold authoring job took 544 seconds, so this
 reduction predicts about forty seconds of whole-workflow headroom under the latest
 observed conditions; runner/compiler variation remains a limitation.
 
+### Sharing completed native products
+
+The semantic repair at `30130b9` passed all 340 macOS tests and its process,
+retention and independent downstream checks. Its cache-assisted Linux workflow
+passed in 541 seconds, but cold qualification ended at 612 seconds. Native
+workspace spent 331 seconds compiling the product and 214 seconds executing;
+its fixture finished before deadline cancellation, which did not qualify the job.
+The other eighteen qualification jobs passed. The unchanged owner job finished
+about 526 seconds after workflow creation in both runs.
+
+Two existing jobs, native controls and native placement, now publish the completed
+native executable and generated adaptive application before their independent
+checks and cache uploads. Four consumers use the first authenticated product
+available from the same run and attempt instead of independently compiling it.
+The bundle binds the actual checkout and complete compiled-input identity;
+archive and file digests are checked before the consumer directory is published.
+Only immutable preparation is shared. Every consumer still creates and cleans its
+own isolated deployment and mutable task state. The independent downstream source
+acquisition/build remains, as do both producer builds and their distinct checks.
+All nineteen qualification lanes, fixture commands/assertions, safety settings,
+resource limits and the final identity/time gate are unchanged.
+
+A three-job Linux diagnostic exposed the upload action's raw-file naming rule:
+with `archive: false`, the uploaded basename is the artifact identity. The corrected
+producer/attempt filename was then authenticated and retrieved while its producer
+continued testing and the second producer was still compiling. The corrected
+cache-assisted diagnostic passed all three jobs in 320 seconds; workspace executed
+its complete 43-call reuse trace. Local checks reject a changed archive digest,
+run attempt, checkout or file body without publishing consumer output. These are
+mechanism checks, not complete qualification or a cold-timing claim. Applicable
+macOS proof is retained because production and fixture inputs are unchanged;
+final cold and cache-assisted results for the complete successor are recorded on
+the pull request.
+
 `tools/evaluation/workspace.mjs prepare --suite runtime` prepares matched ordinary,
 generic and runtime-optional arms for repetitive work, adaptive exploration and a
 small investigation. It retains input/expected-output hashes and counts actual
