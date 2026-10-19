@@ -16,7 +16,7 @@ model evaluation is claimed.
 
 The integrated runtime inputs are Horos
 `592eb0839326f2d8a423b59ce2746ab18ef5136a` and Kosmos
-`ded2507d443708893496a17c3fec4cf4bcb1b625`. The dependency lock authenticates the
+`0ae7ad45ade2ea7512d563663a25f31c7b296311`. The dependency lock authenticates the
 selected source archives, Git trees and inventories. A repository checkout, a
 source archive, a Zig package and a final executable have distinct identities.
 
@@ -27,10 +27,10 @@ source archive, a Zig package and a final executable have distinct identities.
 | Private linear bridge | `kosmos.semantic-service/2` |
 | Artifact envelope | `kosmos.semantic-artifact/2` |
 | Compiler policy | `kosmos.source-lower/2` |
-| Authored semantic source | `cd73df16c3b9d3b0f3920fffa9c3d4a5ee71525cae6782f672e021d66da6ccb7` |
-| Generic artifact SHA-256 | `c3be797414210c55c2ea639a8c5cf8494c5b118a82ffc7b5836832eeb86e940b` (231,838 bytes; terminal service state remains live through the final bounded finish cut) |
-| macOS executable SHA-256 | `db71834b70e8ee8f13f4f6bf4a873430dcc0b601814c12c8f69faf756d94df8d` (10,442,296 bytes; production sources at `4910d16`, including completed-root retirement, cleanup readiness and human shutdown corrections, with Kosmos `ded2507`; current integration qualification is recorded on the pull request) |
-| WASM kernel SHA-256 | `9cda4b3d473d2badbc38645f57a0ece6c9e933aa67a08feb2d2a4f4b121f1d19` (Kosmos `ded2507` packaged kernel; source/native/WASM, ABI, capacity and real-browser qualification pass) |
+| Authored semantic source | `ae2e86f57d67fe6b1ac568ef703013b124f279b06b1a3e3b38415f4fcb637af5` |
+| Generic artifact SHA-256 | `2866f4660fa7f022e74db3f3ac9a42a995d999a4816be89d9618d5ba7e8cdd85` (228,187 bytes; one committed service state, with recovery retained through bounded advance and finish) |
+| macOS executable SHA-256 | Pending current dependency build; prior qualified executable `db71834b70e8ee8f13f4f6bf4a873430dcc0b601814c12c8f69faf756d94df8d` used production sources `4910d16` and Kosmos `ded2507`. |
+| WASM kernel SHA-256 | `d624b05b303cf25c3b569d09d89a247010b93e806dfadc55dc53ec0477509d7c` (Kosmos `0ae7ad4` packaged kernel; source/native/WASM, ABI, capacity and real-browser qualification pass) |
 
 These are built artifacts, not published release assets. The native manifest
 reports the authenticated inputs and compiler separately from the externally
@@ -313,6 +313,27 @@ dynamic loops and repeated calls, with estimated construction amortization at
 1,284 and 928 new sessions respectively under the report's stated assumptions.
 These are new-core observations; the preceding rows retain their historical scope.
 Current integrated deployment and Linux qualification are recorded on the pull request.
+
+Kosmos successor `0ae7ad4` collects dead large blob backing at bounded active
+cuts and retires the previous service state after publication. Direct and
+captured aliases retain their required storage. The allocation-failure fixture
+now preserves the original large backing inside the actual failure owner;
+canonical checkpoint size cannot substitute for that physical precondition.
+Contiguous free arena growth coalesces before allocation, preserving the existing
+repeated-session WASM bound. Native publication still owns rollback until commit.
+The complete local check passes 312 tests and all 68 steps in 363.437 seconds,
+including the same 47 independent-source fixtures / 9,570 observations,
+235 ABI boundaries / 23 transfers, and real Chromium/Firefox workers.
+
+The new isolated cost run retains all 421 records and eleven families. Dynamic
+loop execution medians are 49.016 ms generic and 42.839 ms specialized, versus
+0.032 ms direct native. Estimated new-session amortization is 1,232 dynamic-loop
+sessions and 921 repeated-call sessions under the stated included costs.
+Outer checkpoint/restore time improves; generic construction peak requested
+memory rises to 648,998,667 bytes. Unfavorable specialization cases remain in
+the Kosmos report. These allocator counters are not RSS. Current Protean
+integration results and normal Linux qualification remain separately reported
+on the pull request.
 
 ### Source-bound delegation and work movement
 
