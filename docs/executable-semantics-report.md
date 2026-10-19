@@ -29,7 +29,7 @@ source archive, a Zig package and a final executable have distinct identities.
 | Compiler policy | `kosmos.source-lower/2` |
 | Authored semantic source | `ae2e86f57d67fe6b1ac568ef703013b124f279b06b1a3e3b38415f4fcb637af5` |
 | Generic artifact SHA-256 | `2866f4660fa7f022e74db3f3ac9a42a995d999a4816be89d9618d5ba7e8cdd85` (228,187 bytes; one committed service state, with recovery retained through bounded advance and finish) |
-| macOS executable SHA-256 | `9437032450bc4b8f81cc8dbc4ed2b39bdc9d5b9b20d62736c084506f166cf86c` (10,458,712 bytes; production sources at `f0de821` with Kosmos `0ae7ad4`; the pull request records the seven local qualification groups, current Linux result and review status) |
+| macOS executable SHA-256 | `fb95b42aba00670e829cda6b07f9fec86d1f1eec4acc8292d7018bf6603f179e` (10,458,712 bytes; production sources at `3526fb3` with Kosmos `0ae7ad4`; the pull request records the seven local qualification groups, current Linux result and review status) |
 | WASM kernel SHA-256 | `d624b05b303cf25c3b569d09d89a247010b93e806dfadc55dc53ec0477509d7c` (Kosmos `0ae7ad4` packaged kernel; source/native/WASM, ABI, capacity and real-browser qualification pass) |
 
 These are built artifacts, not published release assets. The native manifest
