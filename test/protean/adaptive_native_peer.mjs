@@ -60,6 +60,16 @@ async function until(read, predicate, maximum = 400) {
   }
   assert.fail('adaptive task timeout');
 }
+
+function assertTransferOrigin(site, custody) {
+  const database = new DatabaseSync(join(site.state, 'state.sqlite'), {readOnly: true});
+  try {
+    const row = database.prepare("SELECT o.body, r.body AS digest FROM records r JOIN objects o ON o.digest=r.body WHERE r.kind='origin' AND r.id=? AND r.task=?")
+      .get(Buffer.from(custody.offer.value.archive_digest), Buffer.from(custody.task));
+    assert(row, 'destination retains the origin of the exact signed transfer archive');
+    assert.equal(hash(row.body), Buffer.from(row.digest).toString('hex'));
+  } finally { database.close(); }
+}
 const resultSchema = {root: 0, types: [{product: [1, 3]}, {array: {element: 2, length: 32}}, 'u8', 'bytes']};
 function resultValue(bytes) {
   assert.equal(bytes.subarray(0, 8).toString(), 'ABL_ERS3');
@@ -384,14 +394,13 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           const transferSubject = {task: [...Buffer.from(subject.task, 'hex')], work: [...Buffer.from(selected.value.id, 'hex')]};
           const custody = await within(until(async () => (await placementRequest(client, 'status', transferSubject)) ?? {}, custody => custody.phase === 'away', 12_000),
             120_000, 'runtime fixture work transfer did not settle');
-          const archive = join(subject.placement.source.spool, `outgoing-${Buffer.from(custody.intent.transfer).toString('hex')}.par`);
+          assertTransferOrigin(subject.placement.executor, custody);
           subject.transferArchive = {
-            path: archive,
             sha256: Buffer.from(custody.offer.value.archive_digest).toString('hex'),
             bytes: Number(custody.offer.value.archive_bytes),
             actionCount: subject.actions.length,
           };
-          subject.controlSchema = readArchive(await readFile(archive)).schemas.get('placement_control');
+          subject.controlSchema = subject.placement.controlSchema;
         }
         // Wait for the native owner to retain the real report. This read-only
         // timing witness never supplies a reply or advances work. The next
@@ -934,8 +943,8 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           const custody = await placementRequest(client, 'status', subject);
           if (custody?.phase === 'away') {
             assert.deepEqual(custody.owner, placement.successor.identity.site);
+            assertTransferOrigin(placement.successor, custody);
             toolSubject.transferArchive = {
-              path: join(placement.source.spool, `outgoing-${Buffer.from(custody.intent.transfer).toString('hex')}.par`),
               sha256: Buffer.from(custody.offer.value.archive_digest).toString('hex'),
               bytes: Number(custody.offer.value.archive_bytes),
               actionCount: toolSubject.actions.length,
@@ -1023,20 +1032,10 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       };
       assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
       if (name.startsWith('tools-runtime-')) {
-        let archiveBytes;
-        let accountedActions = toolSubject.actions;
-        if (placement) {
-          const transfer = toolSubject.transferArchive;
-          assert(transfer);
-          archiveBytes = await readFile(transfer.path);
-          assert.equal(hash(archiveBytes), transfer.sha256);
-          assert.equal(archiveBytes.length, transfer.bytes);
-          accountedActions = toolSubject.actions.slice(0, transfer.actionCount);
-        } else {
-          const bundle = join(app.data, `${name}.bundle`);
-          await invoke('export-checkpoint', '--state-dir', selectedState, '--task-id', task.task_id, '--output', bundle);
-          archiveBytes = await readFile(bundle);
-        }
+        const bundle = join(app.data, `${name}.bundle`);
+        await invoke('export-checkpoint', '--state-dir', selectedState, '--task-id', task.task_id, '--output', bundle);
+        const archiveBytes = await readFile(bundle);
+        const accountedActions = toolSubject.actions;
         const metrics = workspaceMetrics(readArchive(archiveBytes), JSON.parse(await readFile(applicationPath, 'utf8')));
         assert.equal(metrics.runtime_specializations_requested, accountedActions.filter(action => action.name === 'program' && action.arguments.command.tag === 'specialize').length);
         assert.equal(metrics.runtime_switches_requested, accountedActions.filter(action => (action.name === 'work' && action.arguments.command.tag === 'realize') || (action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize')).length);
@@ -1058,7 +1057,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           assert(metrics.distinct_runtime_artifact_bytes > 0);
         }
         toolRuns.at(-1).runtime_accounting = {
-          stage: placement ? name === 'tools-runtime-guest-mobility' ? 'work-transfer' : 'controller-transfer' : 'terminal',
+          stage: 'terminal',
           admitted_runtimes: metrics.admitted_runtimes,
           artifact_bytes: metrics.distinct_runtime_artifact_bytes,
           current_capsule_bytes: metrics.distinct_current_runtime_capsule_bytes,

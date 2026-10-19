@@ -1065,7 +1065,9 @@ recreate a decided archive. Optional operator limits bound aggregate incoming
 bytes and files under a directory lock; omission imposes no application quota.
 Native process checks exercise acceptance, refusal, replay and interrupted
 retirement at both sites. The pure evaluation arm rejects placement inspection
-and expansion as retained intermediate access.
+and expansion as retained intermediate access. Mobility fixtures bind the signed
+transfer digest to the destination's retained origin and obtain accounting from
+terminal checkpoint exports after transport files have been retired.
 
 ## Completion requirements
 

@@ -2,9 +2,12 @@
 // This helper prepares peers; the prescribed model trace selects the moves.
 import assert from 'node:assert/strict';
 import {createHash, createPrivateKey, createPublicKey} from 'node:crypto';
+import {execFile} from 'node:child_process';
 import {mkdir, mkdtemp, readFile, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
+import {promisify} from 'node:util';
 import {ProteanClient} from '../support/stdio-client.mts';
+import {readArchive} from './native_archive.mjs';
 
 const hex = bytes => Buffer.from(bytes).toString('hex');
 export const placementRequest = (client, tag, value) => client.call('placement', {request: {tag, value}}, 120_000);
@@ -28,14 +31,18 @@ export async function runtimePlacementFixture(app, configuration, trust, sourceS
   // Compatibility names the semantic service, independently of the profile's
   // resources. Obtain it from the actual binary without any model request.
   const probe = new ProteanClient(app.command, ['--offline', '--state-dir', join(directory, 'probe'), '--placement-config', sites[0].config], {cwd: app.data, env: {PATH: '/nonexistent'}});
-  let compatibility;
+  let compatibility, probeTask;
   try {
     await probe.initialize();
     const description = await probe.call('describe');
     const task = await probe.call('task.submit', {client_operation_id: 'compatibility-probe', application_id: 'adaptive-agent', profile_id: description.profile.id,
       input: {schema_id: 'adaptive-agent.input.v2', value: {task: 'Retain an offline compatibility witness.'}}});
     compatibility = await placementRequest(probe, 'compatibility', {task: [...Buffer.from(task.task_id, 'hex')], work: null});
+    probeTask = task.task_id;
   } finally { assert.deepEqual(await probe.close(), {code: 0, signal: null}); }
+  const probeArchive = join(directory, 'probe.par');
+  await promisify(execFile)(app.command, ['export-checkpoint', '--offline', '--state-dir', join(directory, 'probe'), '--task-id', probeTask, '--output', probeArchive], {cwd: app.data, env: {PATH: '/nonexistent'}});
+  const controlSchema = readArchive(await readFile(probeArchive)).schemas.get('placement_control');
   for (const site of sites) {
     const client = new ProteanClient(app.command, flags(site), {cwd: app.data, env: {PATH: '/nonexistent'}});
     try {
@@ -55,5 +62,5 @@ export async function runtimePlacementFixture(app, configuration, trust, sourceS
     }));
     await writeFile(site.config, JSON.stringify({signing_key_file: site.key, transport_directory: site.spool, peers}), {mode: 0o600});
   }
-  return {source: sites[0], executor: sites[1], successor: sites[2], binary};
+  return {source: sites[0], executor: sites[1], successor: sites[2], binary, controlSchema};
 }
