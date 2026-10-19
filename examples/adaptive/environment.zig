@@ -206,11 +206,12 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
             items[1] = fixtureProfile("deep", "fixture-model-b");
             break :blk @as(@FieldType(t.P.AdaptivePolicy, "profiles"), .{ .items = items });
         };
-        const core = t.toolMask(.{ "list", "read", "ask", "report", "stop", "inference_set", "skill_set", "program", "work", "context" });
+        const core = t.toolMask(.{ "list", "read", "ask", "report", "stop", "inference_set", "skill_set", "program", "work", "context", "placement" });
         var permitted: [t.P.declaration_count]bool = @splat(true);
         permitted[t.ordinal("program")] = true;
         permitted[t.ordinal("work")] = true;
         permitted[t.ordinal("context")] = true;
+        permitted[t.ordinal("placement")] = true;
         const policy: t.P.AdaptivePolicy = .{ .schema = .{ .bytes = t.P.adaptive_policy_identity }, .endpoint = if (config) |value| value.endpoint else .{ .bytes = "https://offline.invalid/v1/responses" }, .audience = if (config) |value| value.audience else .{ .bytes = "offline-fixture" }, .profiles = profiles, .catalog = work.reference(catalog), .core_tools = core, .permitted_tools = permitted };
         var root = native.json.object();
         try native.json.put(a, &root, "mode", native.json.string(mode));

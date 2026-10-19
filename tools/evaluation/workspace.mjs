@@ -13,24 +13,41 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const json = value => JSON.stringify(value, (_key, v) => typeof v === 'bigint' ? v.toString() : v, 2);
 const arms = {
   ordinary: 'Use ordinary source listing, reading, inspection and reporting. Do not construct programs or use program, work or context actions.',
-  pure: 'You may construct general pure programs and use their completed results as tools. Build with no exposed ports, start with terminal/owner_scheduled policy, wait for completion and collect the results. Do not use work.inspect, work.park, work.cancel, work.advance, work.interact or work.delegate, retained intermediate observations, or branching. Ordinary tools remain available.',
+  pure: 'You may construct general pure programs and use their completed results as tools. Build with no exposed ports, start with terminal/owner_scheduled policy, wait for completion and collect the results. Work actions are limited to start, wait and collect, including when sent through placement.control. Do not materialize guest_view, use retained intermediate observations, or branch. Ordinary tools remain available.',
   retained: 'You may use ordinary tools and the full computational workspace. Whether to construct, retain, expose ports, branch or delegate is your choice.',
+};
+const runtimeArms = {
+  ordinary: arms.ordinary,
+  generic: 'You may use ordinary tools and the full retained computational workspace with the packaged generic runtime. Do not specialize a program, select another runtime, switch realization, or materialize a guest_view. This condition leaves ordinary evidence access and guest execution available.',
+  runtime: 'You may use ordinary tools, the retained computational workspace, approved specialization, runtime switching, and executable runtime views or hypothetical analysis. Choose whether any of these help the task; they are optional. Include construction and inspection costs when judging reuse, and change your approach if broader evidence contradicts the current investigation.',
 };
 const option = (args, name, fallback) => { const i = args.indexOf(name); return i < 0 ? fallback : args[i + 1]; };
 const [mode, ...args] = process.argv.slice(2);
 if (import.meta.main && !['prepare', 'run'].includes(mode)) {
-  console.log('prepare --config CONFIG --out DIRECTORY [--repetitions 1] [--seconds 600]\nrun --plan DIRECTORY --binary BINARY --application APPLICATION_JSON --authorize-inference --credential-file PRIVATE_FILE');
+  console.log('prepare --config CONFIG --out DIRECTORY [--suite workspace|runtime] [--repetitions 1] [--seconds 600]\nrun --plan DIRECTORY --binary BINARY --application APPLICATION_JSON --authorize-inference --credential-file PRIVATE_FILE');
   process.exit(mode === '--help' || !mode ? 0 : 2);
 }
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+function workspaceAction(action) {
+  const command = action.arguments?.command;
+  if (action.name === 'placement') {
+    if (command?.tag === 'control') return {name: 'work', command: command.value?.command};
+    if (['inspect', 'expand'].includes(command?.tag)) return {name: 'work', command};
+  }
+  return {name: action.name, command};
+}
 export function armViolations(arm, actions) {
   return actions.filter(action => {
-    if (arm === 'ordinary') return ['program', 'work', 'context'].includes(action.name);
+    if (arm === 'ordinary') return ['program', 'work', 'context', 'placement'].includes(action.name);
+    const {name, command} = workspaceAction(action);
+    const guestView = name === 'context' && command?.tag === 'materialize' && command.value?.input?.tag === 'guest_view';
+    if (arm === 'generic') return (name === 'program' && command?.tag === 'specialize') ||
+      (name === 'work' && (command?.tag === 'realize' || (command?.tag === 'start' && command.value?.runtime?.tag === 'selected'))) || guestView;
     if (arm !== 'pure') return false;
-    const command = action.arguments?.command;
-    if (action.name === 'program') return command?.tag === 'build' && command.value?.exposures?.length;
-    if (action.name !== 'work') return false;
-    return ['inspect', 'park', 'cancel', 'advance', 'interact', 'delegate'].includes(command?.tag) ||
+    if (guestView) return true;
+    if (name === 'program') return command?.tag === 'build' && command.value?.exposures?.length;
+    if (name !== 'work') return false;
+    return !['start', 'wait', 'collect'].includes(command?.tag) ||
       (command?.tag === 'start' && (command.value?.policy?.stop !== 'terminal' || command.value?.policy?.continuation !== 'owner_scheduled'));
   });
 }
@@ -56,7 +73,12 @@ export function workspaceMetrics(archive, application) {
   const attempts = new Map(archive.manifest[6].filter(([kind]) => kind === 5).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('attempt'), archive.object(ref))]));
   const captures = new Map(archive.manifest[6].filter(([kind]) => kind === 4).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('capture'), archive.object(ref))]));
   const occurrences = new Map(archive.manifest[6].filter(([kind]) => kind === 0).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('occurrence'), archive.object(ref))]));
-  const stats = {controller: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, delegated: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, builds: 0, rejected_builds: 0, compiler_nanoseconds: 0, native_publication_nanoseconds: 0, checkpoint_publications: 0, current_checkpoint_bytes: 0, work_items: 0, result_bytes: 0, actions: []};
+  const stats = {controller: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, delegated: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, builds: 0, rejected_builds: 0, compiler_nanoseconds: 0, native_publication_nanoseconds: 0, checkpoint_publications: 0, current_checkpoint_bytes: 0, work_items: 0, result_bytes: 0, actions: [],
+    runtime_specializations_requested: 0, runtime_switches_requested: 0, guest_views_requested: 0,
+    admitted_runtimes: 0, distinct_runtime_artifact_bytes: 0, distinct_current_runtime_capsule_bytes: 0,
+    runtime_specialization_nanoseconds: null, runtime_validation_nanoseconds: null};
+  const runtimeArtifacts = new Map();
+  const runtimeCapsules = new Map();
   const actions = [];
   // Count possible provider delivery, including unknown delivery, but exclude
   // positive non-invocation evidence. Rearming an occurrence is only permitted
@@ -114,17 +136,31 @@ export function workspaceMetrics(archive, application) {
   // Archive records are ordered by kind and random identity. The retained
   // controller request carries the causal model-call watermark across restart.
   stats.actions = actions.sort((a, b) => a.watermark < b.watermark ? -1 : a.watermark > b.watermark ? 1 : 0).map(item => item.action);
+  for (const action of stats.actions) {
+    const {name, command} = workspaceAction(action);
+    if (name === 'program' && command?.tag === 'specialize') stats.runtime_specializations_requested++;
+    if (name === 'work' && command?.tag === 'realize') stats.runtime_switches_requested++;
+    if (name === 'context' && command?.tag === 'materialize' && command.value?.input?.tag === 'guest_view') stats.guest_views_requested++;
+  }
   for (const [kind, id, reference] of archive.manifest[6]) {
+    if (kind === 18) {
+      const selected = decodeValue(archive.schemas.get('workspace_runtime'), archive.object(reference));
+      assert.equal(selected.length, 4);
+      stats.admitted_runtimes++;
+      runtimeArtifacts.set(Buffer.from(selected[3][0]).toString('hex'), Number(selected[3][1]));
+    }
     if (kind === 9) {
       const work = decodeValue(archive.schemas.get('workspace_work'), archive.object(reference));
-      // Version 1 Work: the schema is carried in the archive; positions are this
+      // Version 2 Work: the schema is carried in the archive; positions are this
       // evaluator's explicit versioned interpretation, not imported authority.
-      assert.equal(work[0], 1);
-      assert.equal(work.length, 28);
-      stats.work_items++; stats.native_publication_nanoseconds += Number(work[27]);
-      stats.checkpoint_publications += Number(work[13]);
-      stats.current_checkpoint_bytes += Number(work[10][1]);
-      if (work[21].tag === 1) stats.result_bytes += Number(work[21].value[1]);
+      assert.equal(work[0], 2);
+      assert.equal(work.length, 34);
+      stats.work_items++; stats.native_publication_nanoseconds += Number(work[33]);
+      stats.checkpoint_publications += Number(work[19]);
+      stats.current_checkpoint_bytes += Number(work[16][1]);
+      for (const ref of [work[10].tag === 1 ? work[10].value : null, work[11].tag === 1 ? work[11].value[1] : null, work[12].tag === 1 ? work[12].value[0] : null])
+        if (ref) runtimeCapsules.set(Buffer.from(ref[0]).toString('hex'), Number(ref[1]));
+      if (work[27].tag === 1) stats.result_bytes += Number(work[27].value[1]);
     }
     if (kind !== 4) continue;
     const attempt = attempts.get(Buffer.from(id).toString('hex'));
@@ -139,6 +175,8 @@ export function workspaceMetrics(archive, application) {
       continue;
     }
   }
+  stats.distinct_runtime_artifact_bytes = [...runtimeArtifacts.values()].reduce((sum, bytes) => sum + bytes, 0);
+  stats.distinct_current_runtime_capsule_bytes = [...runtimeCapsules.values()].reduce((sum, bytes) => sum + bytes, 0);
   return stats;
 }
 
@@ -200,6 +238,7 @@ export async function evaluateCase({subject, build, output, binary, credential, 
   const report = {subject, build, task, elapsed_ms, peak_rss_sampled_bytes: peakRss, retained_namespace_bytes, status, result, archive, metrics,
     arm_violations: metrics ? armViolations(subject.arm, metrics.actions) : null, errors,
     adjudication: {task_correctness: null, evidence_coverage: null, successful_reframing: null, unnecessary_construction: null, branch_executions_not_used: null,
+      runtime_selection_appropriate: null, economic_benefit_including_setup: null,
       notes: 'Review expected.json, result and actions. Do not count scripted conformance traces as model efficacy. Missing usage or metrics is unknown, not zero.'}};
   await writeFile(join(output, 'report.json'), json(report));
   return report;
@@ -219,6 +258,9 @@ if (mode === 'prepare') {
   const configFile = resolve(option(args, '--config', '')), directory = resolve(option(args, '--out', ''));
   const config = JSON.parse(await readFile(configFile, 'utf8'));
   assert.equal(config.schema, 'adaptive-agent.configuration.v3');
+  const suite = option(args, '--suite', 'workspace');
+  assert(['workspace', 'runtime'].includes(suite), 'Choose workspace or runtime evaluation.');
+  const selectedArms = suite === 'runtime' ? runtimeArms : arms;
   const repetitions = Number(option(args, '--repetitions', '1')), seconds = Number(option(args, '--seconds', '600'));
   assert(Number.isSafeInteger(repetitions) && repetitions > 0 && Number.isSafeInteger(seconds) && seconds > 0);
   const profile = config.adaptive.profiles.find(p => p.id === config.adaptive.initial_profile); assert(profile);
@@ -232,8 +274,21 @@ if (mode === 'prepare') {
     {id: 'repetitive', prompt: 'For each row, compute gcd(key, value). Report the sum of these GCDs for each group, covering every row. Explain how you established coverage.', files: {'rows.csv': 'id,key,value,group\n' + rows.map(r => [r.id,r.key,r.value,r.group].join(',')).join('\n') + '\n'}, expected: {sums, rows: rows.length, evidence: ['rows.csv']}, inputs: [{id: 'rows', description: 'The same complete rows as rows.csv, as typed structured input.', rows, relation: [], selected: []}]},
     {id: 'reframing', prompt: 'Investigate why yesterday’s scheduled rollout did not appear. The initial incident note suspects slow ingestion. Establish the cause from available evidence and explain any remaining uncertainty.', files: {'incident.md': 'At 09:00 UTC operators saw no rollout. Initial hypothesis: ingestion backlog delayed eligibility. Investigate that hypothesis.\n', 'ingestion.csv': 'time_utc,queue_depth,oldest_age_seconds\n08:50,2,1\n08:55,1,1\n09:00,0,0\n09:05,0,0\n', 'schedule.conf': 'rollout = 09:00\ntimezone = America/Los_Angeles\n', 'scheduler.log': '2026-10-13T16:00:00Z rollout started\n2026-10-13T16:00:03Z rollout completed\n'}, expected: {cause: 'Schedule timezone mismatch: 09:00 Los Angeles was 16:00 UTC; ingestion was clear and rollout completed then.', evidence: ['ingestion.csv', 'schedule.conf', 'scheduler.log'], reframing: 'Reject the ingestion hypothesis using broader evidence. A pending child may be abandoned without an answer; that is optional, not a prompted required phase.'}, inputs: []},
   ];
+  if (suite === 'runtime') {
+    const datasets = Array.from({length: 8}, (_, batch) => {
+      const values = rows.map((r, i) => row(r.id, Number(r.key) + batch * 6, Number(r.value) + batch * (i % 5 + 1) * 12, r.group));
+      const totals = Array(8).fill(0);
+      for (const r of values) totals[Number(r.group)] += gcd(Number(r.key), Number(r.value));
+      return {id: `rows-${batch}`, rows: values, sums: totals};
+    });
+    families[1] = {id: 'repetitive',
+      prompt: 'For each of the eight independently supplied batches, compute gcd(key, value) for every row and report the sum for each group. Preserve batch identity and explain how you established complete coverage. Choose an approach appropriate to repeated execution on changing inputs.',
+      files: Object.fromEntries(datasets.map(batch => [`${batch.id}.csv`, 'id,key,value,group\n' + batch.rows.map(r => [r.id,r.key,r.value,r.group].join(',')).join('\n') + '\n'])),
+      expected: {batches: datasets.map(batch => ({id: batch.id, sums: batch.sums, rows: batch.rows.length})), evidence: datasets.map(batch => `${batch.id}.csv`), economy: 'Judge measured total costs against matched ordinary/generic runs; choosing specialization is not by itself a benefit.'},
+      inputs: datasets.map(batch => ({id: batch.id, description: `Complete typed input matching ${batch.id}.csv.`, rows: batch.rows, relation: [], selected: []}))};
+  }
   await mkdir(directory, {recursive: true});
-  const plan = {format: 'protean-workspace-evaluation/1', efficacy: 'unmeasured', repetitions, seconds_per_case: seconds, profile: frozen.adaptive.profiles[0], initial_effort: frozen.adaptive.initial_effort, cases: []};
+  const plan = {format: 'protean-workspace-evaluation/1', suite, efficacy: 'unmeasured', repetitions, seconds_per_case: seconds, profile: frozen.adaptive.profiles[0], initial_effort: frozen.adaptive.initial_effort, cases: []};
   for (const family of families) {
     const snapshot = join(directory, family.id, 'snapshot'); await mkdir(snapshot, {recursive: true});
     for (const [name, value] of Object.entries(family.files)) await writeFile(join(snapshot,name), value);
@@ -241,7 +296,7 @@ if (mode === 'prepare') {
     await writeFile(join(directory,family.id,'expected.json'), expected);
     const evidence = Object.entries(family.files).sort(([a],[b]) => a.localeCompare(b)).map(([path, text]) => ({path, sha256: hash(text)}));
     const evidence_sha256 = hash(json(evidence));
-    for (let repetition = 0; repetition < repetitions; repetition++) for (const [arm, instruction] of Object.entries(arms)) {
+    for (let repetition = 0; repetition < repetitions; repetition++) for (const [arm, instruction] of Object.entries(selectedArms)) {
       const id = `${family.id}-${repetition}-${arm}`, configPath = join(directory, `${id}.json`);
       const selected = {...frozen, adaptive: {...frozen.adaptive, snapshot_root: snapshot}, tools: {build: arm !== 'ordinary', run: arm !== 'ordinary', inputs: family.inputs}};
       await writeFile(configPath, json(selected));

@@ -11,6 +11,8 @@ const Storage = struct {
     resident: kosmos.Resident,
     live: bool,
     checkpoint: ?*kosmos.Checkpoint,
+    capsule: ?*kosmos.CapsuleReceipt,
+    capsule_provenance: ?kosmos.RuntimeCapsule.Provenance,
 };
 
 const ProgramStorage = struct {
@@ -26,10 +28,14 @@ pub const Program = opaque {
         return @ptrCast(@alignCast(self));
     }
     pub fn open(a: std.mem.Allocator, image: []const u8) !*Program {
+        return openSelected(a, image, null);
+    }
+    /// Runtime selection is made by the task owner after artifact approval.
+    pub fn openSelected(a: std.mem.Allocator, image: []const u8, runtime: ?*const kosmos.RuntimeArtifact) !*Program {
         const owner = try a.create(ProgramStorage);
         errdefer a.destroy(owner);
         owner.* = .{ .parent = a, .prepared = undefined };
-        owner.prepared = try kosmos.Prepared.init(a, image);
+        owner.prepared = if (runtime) |selected| try kosmos.Prepared.initWithRuntime(a, image, selected) else try kosmos.Prepared.init(a, image);
         return @ptrCast(owner);
     }
     pub fn close(self: *Program) !void {
@@ -37,6 +43,15 @@ pub const Program = opaque {
         if (owner.residents != 0) return error.UnfinishedSession;
         owner.prepared.deinit();
         owner.parent.destroy(owner);
+    }
+    /// Independent guest admission under this owner's already admitted runtime.
+    /// The returned preparation holds its own strong lease; no guest state or
+    /// environmental authority is shared.
+    pub fn prepare(self: *Program, a: std.mem.Allocator, image: []const u8) !kosmos.Prepared {
+        return kosmos.Prepared.initWithRuntime(a, image, &self.storage().prepared.runtime);
+    }
+    pub fn retainRuntime(self: *Program) !kosmos.RuntimeArtifact {
+        return self.storage().prepared.runtime.clone();
     }
 };
 
@@ -46,11 +61,93 @@ pub const Driver = opaque {
     }
 
     pub fn open(a: std.mem.Allocator, image: []const u8, instance: data.invocation.Instance) !*Driver {
-        const program = try Program.open(a, image);
+        return openSelected(a, image, instance, null);
+    }
+    pub fn openSelected(a: std.mem.Allocator, image: []const u8, instance: data.invocation.Instance, runtime: ?*const kosmos.RuntimeArtifact) !*Driver {
+        const program = try Program.openSelected(a, image, runtime);
         errdefer program.close() catch unreachable;
         const driver = try start(a, program, instance);
         driver.storage().own_program = true;
         return driver;
+    }
+
+    /// The owning task supplies the authenticated capsule verifier. Content
+    /// admission alone never installs a resident in the active owner.
+    pub fn openCapsule(a: std.mem.Allocator, image: []const u8, runtime: ?*const kosmos.RuntimeArtifact, bytes: []const u8, verifier: kosmos.RuntimeCapsule.Verifier) !*Driver {
+        var envelope = try kosmos.RuntimeCapsule.read(a, bytes);
+        defer envelope.deinit();
+        const program = try Program.openSelected(a, image, runtime);
+        errdefer program.close() catch unreachable;
+        const owner = try a.create(Storage);
+        errdefer a.destroy(owner);
+        owner.* = .{ .parent = a, .program = program, .own_program = true, .resident = try kosmos.Resident.restoreCapsule(a, &program.storage().prepared, bytes, verifier), .live = true, .checkpoint = null, .capsule = null, .capsule_provenance = envelope.value.record.provenance };
+        program.storage().residents += 1;
+        return @ptrCast(owner);
+    }
+
+    pub fn runtimeBinding(self: *Driver) !kosmos.RuntimeCapsule.Binding {
+        const owner = self.storage();
+        if (!owner.live) return error.InvalidState;
+        return owner.resident.runtimeBinding();
+    }
+    pub fn runtimeBytes(self: *Driver, a: std.mem.Allocator) ![]u8 {
+        const owner = self.storage();
+        if (!owner.live) return error.InvalidState;
+        return owner.resident.runtimeBytes(a);
+    }
+    pub fn publishCapsule(self: *Driver, a: std.mem.Allocator, kind: kosmos.RuntimeCapsule.Kind, provenance: kosmos.RuntimeCapsule.Provenance) !*kosmos.CapsuleReceipt {
+        const owner = self.storage();
+        if (!owner.live) return error.InvalidState;
+        return owner.resident.publishCapsule(a, kind, provenance);
+    }
+    pub fn realize(self: *Driver, expected: kosmos.RuntimeCapsule.Binding, selected: *const kosmos.RuntimeArtifact, provenance: kosmos.RuntimeCapsule.Provenance, publisher: kosmos.RuntimeCapsule.SwitchOwner) !kosmos.RuntimeCapsule.SwitchDecision {
+        const owner = self.storage();
+        if (!owner.live) return error.InvalidState;
+        const decision = try owner.resident.realize(expected, selected, provenance, publisher);
+        if (decision == .committed) self.clearReceipt();
+        return decision;
+    }
+    pub fn resolveRealization(self: *Driver, publisher: kosmos.RuntimeCapsule.SwitchOwner) !kosmos.RuntimeCapsule.SwitchDecision {
+        const owner = self.storage();
+        if (!owner.live) return error.InvalidState;
+        const decision = try owner.resident.resolveRealization(publisher);
+        if (decision == .committed) self.clearReceipt();
+        return decision;
+    }
+    fn clearReceipt(self: *Driver) void {
+        const owner = self.storage();
+        if (owner.checkpoint) |previous| previous.deinit();
+        owner.checkpoint = null;
+        if (owner.capsule) |previous| previous.deinit();
+        owner.capsule = null;
+        owner.capsule_provenance = null;
+    }
+
+    pub fn beginAdvance(self: *Driver, control: data.invocation.Control, guest_quantum: u64) !void {
+        const owner = self.storage();
+        if (!owner.live) return error.InvalidState;
+        try owner.resident.beginAdvance(control, guest_quantum);
+        self.clearReceipt();
+    }
+
+    pub fn pump(self: *Driver, base_quantum: u64) !kosmos.Session.Pump {
+        const owner = self.storage();
+        if (!owner.live) return error.InvalidState;
+        const result = try owner.resident.pump(base_quantum);
+        self.clearReceipt();
+        return result;
+    }
+
+    /// Retain an owner receipt through durable publication and later eviction.
+    /// Its bytes remain valid until the next successful mutation or retirement.
+    pub fn retainCapsule(self: *Driver, provenance: kosmos.RuntimeCapsule.Provenance) ![]const u8 {
+        const owner = self.storage();
+        if (!owner.live) return error.InvalidState;
+        const receipt = try owner.resident.publishCapsule(owner.parent, .outer_execution, provenance);
+        if (owner.capsule) |previous| previous.deinit();
+        owner.capsule = receipt;
+        owner.capsule_provenance = provenance;
+        return receipt.bytes();
     }
 
     pub fn start(a: std.mem.Allocator, program: *Program, instance: data.invocation.Instance) !*Driver {
@@ -67,28 +164,29 @@ pub const Driver = opaque {
         program.storage().residents += 1;
         owner.live = true;
         owner.checkpoint = null;
+        owner.capsule = null;
+        owner.capsule_provenance = null;
         return @ptrCast(owner);
     }
 
     /// The outcome belongs to output. The checkpoint remains owned here until
     /// the next successful drive or retirement, including after storage fails.
-    pub const Publication = struct { outcome: []u8, checkpoint: []const u8 };
+    pub const Publication = struct { outcome: []u8, checkpoint: []const u8, trace: ?kosmos.RuntimeInstrumentation.Output = null };
 
     pub fn drive(self: *Driver, output: std.mem.Allocator, control: data.invocation.Control, quantum: u64) !Publication {
         const owner = self.storage();
         if (!owner.live) return error.InvalidState;
         var published = try owner.resident.publish(.{ .encoded = output }, control, .{ .quantum = quantum, .checkpoint = .receipt });
         const checkpoint = published.takeCheckpoint().?;
-        if (owner.checkpoint) |previous| previous.deinit();
+        self.clearReceipt();
         owner.checkpoint = checkpoint;
-        return .{ .outcome = published.outcome.encoded, .checkpoint = checkpoint.bytes() };
+        return .{ .outcome = published.outcome.encoded, .checkpoint = checkpoint.bytes(), .trace = published.trace };
     }
     pub fn close(self: *Driver) !void {
         const owner = self.storage();
         if (!owner.live) return error.InvalidState;
         try owner.resident.close();
-        if (owner.checkpoint) |checkpoint| checkpoint.deinit();
-        owner.checkpoint = null;
+        self.clearReceipt();
         owner.live = false;
         owner.program.storage().residents -= 1;
         if (owner.own_program) try owner.program.close();
@@ -98,7 +196,13 @@ pub const Driver = opaque {
     pub fn retire(self: *Driver) !void {
         const owner = self.storage();
         if (!owner.live) return error.InvalidState;
-        if (owner.checkpoint) |checkpoint| {
+        // A freshly restored outer operation has a durable source capsule but
+        // no local receipt yet. Allocation failure leaves it live and retryable.
+        if (owner.capsule == null and owner.capsule_provenance != null) _ = try self.retainCapsule(owner.capsule_provenance.?);
+        if (owner.capsule) |capsule| {
+            try owner.resident.transferCapsule(capsule, .outer_execution);
+            self.clearReceipt();
+        } else if (owner.checkpoint) |checkpoint| {
             try owner.resident.transferCheckpoint(checkpoint);
             checkpoint.deinit();
             owner.checkpoint = null;

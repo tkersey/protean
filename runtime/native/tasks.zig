@@ -8,6 +8,7 @@ const occurrence = @import("occurrence.zig");
 const storage = @import("store.zig");
 const Namespace = @import("namespace.zig").Namespace;
 const evaluator = @import("driver.zig");
+const kosmos = @import("kosmos");
 const registry = @import("registry.zig");
 const discovery = @import("discovery.zig");
 const json = @import("json.zig");
@@ -42,6 +43,7 @@ pub const Profile = struct {
     /// Immutable resource objects admitted with every new task. Their ordinary
     /// references are retained by the task and therefore included in archives.
     resources: []const []const u8 = &.{},
+    placement: ?*const @import("placement.zig").Configuration = null,
 
     pub fn validate(self: Profile) !void {
         _ = try name(self.id);
@@ -105,7 +107,7 @@ pub const WorkResult = union(enum) {
 const RecoveryCompletion = union(enum) { evidence: []const u8, rederived: registry.RederivationFinding };
 const Recovered = union(enum) { capture: []const u8, reply: []const u8, not_sent, unsupported, unavailable, inconclusive, rejected };
 pub const Step = union(enum) { idle, progressed, waiting, work: Work };
-const Active = struct { task: state.TaskId, work: ?state.Digest = null, execution_revision: u64, driver: *evaluator.Driver };
+const Active = struct { task: state.TaskId, work: ?state.Digest = null, execution_revision: u64, realization_revision: u64 = 0, outer_operation: ?state.Reference = null, root_control: ?[]u8 = null, root_quantum: u64 = 0, root_cut_ready: bool = false, driver: *evaluator.Driver };
 
 fn same(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
@@ -142,6 +144,7 @@ fn reconcileDigest(a: std.mem.Allocator, task_id: state.TaskId, expected: u64, o
 pub fn Service(comptime Types: type) type {
     return struct {
         const Self = @This();
+        const PlacementKind = enum { move, control };
         allocator: std.mem.Allocator,
         io: std.Io,
         namespace: *Namespace,
@@ -159,9 +162,16 @@ pub fn Service(comptime Types: type) type {
         runnable_cursor: usize = 0,
         /// Unsettled cleanup retains ownership, but never runnable work.
         owned: std.ArrayList(state.TaskId) = .empty,
+        cleanup_cursor: usize = 0,
+        shutdown_cancel_requested: bool = false,
+        remote_stopped_parent: ?state.TaskId = null,
         owner_epoch: state.Digest = undefined,
         work: ?Work = null,
+        placement_pending: std.ArrayList(struct { task: state.TaskId, id: state.Digest, kind: PlacementKind }) = .empty,
+        placement_job: ?struct { task: state.TaskId, id: state.Digest, kind: PlacementKind, job: *@import("placement_job.zig").Job } = null,
         checked_workspace_programs: std.AutoHashMapUnmanaged(state.Digest, u64) = .empty,
+        checked_workspace_runtimes: std.AutoHashMapUnmanaged(state.Digest, u64) = .empty,
+        runtime_cache: ?struct { epoch: u64, artifact: kosmos.RuntimeArtifact } = null,
         // Import may use ordinary mutation projections only through an existing
         // matching receipt. Missing receipts must never execute a new mutation.
         workspace_replay: ?struct { replayed: bool, records: []const state.ArchiveRecord } = null,
@@ -174,6 +184,7 @@ pub fn Service(comptime Types: type) type {
             _ = try self.store().auditRetention(handlers, application.image_identity);
             try self.recover(a);
             try self.recoverWorkspace(a);
+            try self.recoverPlacementFiles(a);
             return self;
         }
         fn store(self: *Self) *storage.Store {
@@ -182,6 +193,41 @@ pub fn Service(comptime Types: type) type {
         fn allowed(self: *Self) !void {
             if (self.profile.authority.revoked or !self.profile.authority.disclosure) return error.Denied;
             if (self.store().fenced) return error.StorageUnavailable;
+        }
+        fn placementSite(self: *Self) !@import("placement.zig").Site {
+            const configured = self.profile.placement orelse return error.UnsupportedCapability;
+            return .{ .key = configured.signing_key.public_key.toBytes(), .namespace = self.namespace.identity };
+        }
+        fn requireCustody(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: ?state.Digest) !void {
+            // Historical validation may project an existing receipt, but its
+            // replay guard forbids executing a missing operation.
+            if (self.workspace_replay != null) return;
+            if (try @import("placement_journal.zig").custody(self.store(), a, .{ .task = task_id, .work = work_id })) |saved| {
+                var current = saved;
+                defer current.deinit();
+                if (self.profile.placement == null) return error.CustodyNotLocal;
+                try current.value.requireLocal(try self.placementSite());
+            } else if (!try self.store().locallyAdmitted(task_id)) {
+                return error.CustodyNotLocal;
+            }
+        }
+        fn hasLocalCustody(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: ?state.Digest) !bool {
+            self.requireCustody(a, task_id, work_id) catch |err| {
+                if (err == error.CustodyNotLocal) return false;
+                return err;
+            };
+            return true;
+        }
+        fn hasFrozenCustody(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: ?state.Digest) !bool {
+            if (self.profile.placement == null) return false;
+            var saved = try @import("placement_journal.zig").custody(self.store(), a, .{ .task = task_id, .work = work_id }) orelse return false;
+            defer saved.deinit();
+            return saved.value.phase == .frozen and std.meta.eql(saved.value.owner, try self.placementSite());
+        }
+        fn createCustody(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: ?state.Digest) !void {
+            if (self.profile.placement == null) return;
+            const p = @import("placement.zig");
+            try @import("placement_journal.zig").putCustody(self.store(), a, p.Custody.initial(.{ .task = task_id, .work = work_id }, try self.placementSite()));
         }
         pub fn task(self: *Self, a: std.mem.Allocator, id: state.TaskId) !contracts.Decoded(state.Task) {
             try self.allowed();
@@ -278,9 +324,9 @@ pub fn Service(comptime Types: type) type {
             return cleanupComplete(outcome.value) and try self.associatedWorkDisposed(a, value.id);
         }
         pub fn associatedWorkDisposed(self: *Self, a: std.mem.Allocator, task_id: state.TaskId) !bool {
-            return self.workspaceSettled(a, task_id, true);
+            return self.workspaceSettled(a, task_id, true, true, false);
         }
-        fn workspaceSettled(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, require_disposal: bool) !bool {
+        fn workspaceSettled(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, require_disposal: bool, include_remote: bool, require_park: bool) !bool {
             var query = try self.store().database.prepare("SELECT id FROM records WHERE task=? AND kind='workspace_work' ORDER BY id", &.{.{ .blob = &task_id }});
             defer query.deinit();
             var arena = std.heap.ArenaAllocator.init(a);
@@ -291,24 +337,47 @@ pub fn Service(comptime Types: type) type {
                 const id = bytes[0..32].*;
                 _ = arena.reset(.retain_capacity);
                 const temporary = arena.allocator();
+                if (!try self.hasLocalCustody(temporary, task_id, id)) {
+                    if (try self.hasFrozenCustody(temporary, task_id, id)) {
+                        var frozen = try self.retainedWorkspaceWork(temporary, task_id, id);
+                        defer frozen.deinit();
+                        if (require_disposal or require_park or frozen.value.cancellation != null) return false;
+                    }
+                    if (!include_remote) continue;
+                    var remote = try self.remoteWorkState(temporary, task_id, id);
+                    defer remote.deinit();
+                    if (remote.pending) return false;
+                    if (require_disposal) {
+                        const observed = if (remote.latest) |saved| saved.value.report.?.value.work_state.? else return false;
+                        if (!remoteDisposed(observed)) return false;
+                    } else if (require_park) {
+                        const observed = if (remote.latest) |saved| saved.value.report.?.value.work_state.? else return false;
+                        if (!remoteDisposed(observed) and !observed.parkSettled()) return false;
+                    }
+                    continue;
+                }
                 var child = try self.retainedWorkspaceWork(temporary, task_id, id);
                 defer child.deinit();
-                if (child.value.terminal()) {
-                    const outcome_bytes = try self.store().object(temporary, child.value.outcome, null);
-                    defer temporary.free(outcome_bytes);
-                    var outcome = try data.invocation.decode(data.invocation.Outcome, temporary, outcome_bytes);
-                    defer outcome.deinit();
-                    if (!cleanupComplete(outcome.value)) return false;
-                } else {
-                    if (require_disposal or child.value.cancellation != null) return false;
-                    if (child.value.current_occurrence) |current| {
-                        var pending = try self.record(occurrence.Occurrence, temporary, "occurrence", current, task_id);
-                        defer pending.deinit();
-                        switch (pending.value.state) {
-                            .dispatching, .unknown, .captured, .settled_reply => return false,
-                            else => {},
-                        }
-                    }
+                if (!try self.workspaceWorkSettled(temporary, child.value, require_disposal, require_park)) return false;
+            }
+            return true;
+        }
+
+        fn workspaceWorkSettled(self: *Self, a: std.mem.Allocator, child: workspace.Work, require_disposal: bool, require_park: bool) !bool {
+            if (child.terminal()) {
+                const outcome_bytes = try self.store().object(a, child.outcome, null);
+                defer a.free(outcome_bytes);
+                var outcome = try data.invocation.decode(data.invocation.Outcome, a, outcome_bytes);
+                defer outcome.deinit();
+                return cleanupComplete(outcome.value);
+            }
+            if (require_disposal or child.cancellation != null or (require_park and child.schedule != .parked)) return false;
+            if (child.current_occurrence) |current| {
+                var pending = try self.record(occurrence.Occurrence, a, "occurrence", current, child.task);
+                defer pending.deinit();
+                switch (pending.value.state) {
+                    .dispatching, .unknown, .captured, .settled_reply => return false,
+                    else => {},
                 }
             }
             return true;
@@ -318,17 +387,54 @@ pub fn Service(comptime Types: type) type {
                 var decoded = try self.task(a, id);
                 defer decoded.deinit();
                 const value = decoded.value;
-                if (value.terminal()) {
-                    const bytes = try self.store().object(a, value.outcome, null);
-                    defer a.free(bytes);
-                    var outcome = try data.invocation.decode(data.invocation.Outcome, a, bytes);
-                    defer outcome.deinit();
-                    if (!cleanupComplete(outcome.value)) return true;
-                } else if (try self.status(a, value) == .unknown or value.cancellation != null) return true;
-                if (!try self.workspaceSettled(a, id, false)) return true;
+                const controller = try self.hasLocalCustody(a, id, null) or try self.hasFrozenCustody(a, id, null);
+                if (controller) {
+                    if (value.terminal()) {
+                        const bytes = try self.store().object(a, value.outcome, null);
+                        defer a.free(bytes);
+                        var outcome = try data.invocation.decode(data.invocation.Outcome, a, bytes);
+                        defer outcome.deinit();
+                        if (!cleanupComplete(outcome.value)) return true;
+                    } else if (self.shutdown_cancel_requested or try self.status(a, value) == .unknown or value.cancellation != null) return true;
+                }
+                if (!try self.workspaceSettled(a, id, self.shutdown_cancel_requested or (controller and value.cancellation != null), controller, controller and value.terminal())) return true;
             }
             return false;
         }
+
+        /// Launch ownership names recovery tasks. Actual cancellation authority
+        /// is the local controller or the independently held local work subjects.
+        pub fn cancelOwned(self: *Self, a: std.mem.Allocator, instance: []const u8, reason: []const u8) !void {
+            self.shutdown_cancel_requested = true;
+            const owned = try a.dupe(state.TaskId, self.owned.items);
+            defer a.free(owned);
+            for (owned) |id| {
+                if (try self.hasLocalCustody(a, id, null)) {
+                    const operation_id = try std.fmt.allocPrint(a, "shutdown-{s}-{s}", .{ instance, std.fmt.bytesToHex(id, .lower) });
+                    defer a.free(operation_id);
+                    _ = try self.requestCancel(a, operation_id, id, reason);
+                    continue;
+                }
+                const children = try self.workspaceIds(a, id);
+                defer a.free(children);
+                for (children) |work_id| {
+                    if (!try self.hasLocalCustody(a, id, work_id)) continue;
+                    var child = try self.workspaceWork(a, id, work_id);
+                    defer child.deinit();
+                    if (child.value.terminal()) continue;
+                    const Identity = struct { instance: contracts.Bytes(null), task: state.TaskId, work: state.Digest };
+                    const identity = try operation(Identity, a, .{ .instance = .{ .bytes = instance }, .task = id, .work = work_id });
+                    const operation_id = try std.fmt.allocPrint(a, "shutdown-work-{s}", .{std.fmt.bytesToHex(identity, .lower)});
+                    defer a.free(operation_id);
+                    _ = try self.workspaceControl(a, operation_id, id, work_id, child.value.execution_revision, child.value.control_revision, .{ .cancel = .{ .bytes = reason } });
+                }
+            }
+        }
+
+        pub fn placementActive(self: *const Self) bool {
+            return self.placement_job != null or self.placement_pending.items.len != 0;
+        }
+
         fn workspaceIds(self: *Self, a: std.mem.Allocator, task_id: state.TaskId) ![]state.Digest {
             var query = try self.store().database.prepare("SELECT id FROM records WHERE task=? AND kind='workspace_work' ORDER BY id", &.{.{ .blob = &task_id }});
             defer query.deinit();
@@ -374,15 +480,244 @@ pub fn Service(comptime Types: type) type {
                 }
             }
         }
-        fn cancelWorkspaceOne(self: *Self, a: std.mem.Allocator, parent: state.Task) !bool {
+        const RemoteWorkState = struct {
+            latest: ?contracts.Decoded(@import("placement.zig").ControlRecord) = null,
+            pending: bool = false,
+            retry_pending: ?state.Digest = null,
+            fn deinit(self: *@This()) void {
+                if (self.latest) |*saved| saved.deinit();
+            }
+        };
+        fn remoteDisposed(value: @import("placement.zig").WorkState) bool {
+            return (value.outcome == .completed or value.outcome == .failed or value.outcome == .cancelled) and value.cleanup_complete;
+        }
+        fn remoteWorkState(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: state.Digest) !RemoteWorkState {
+            const p = @import("placement.zig");
+            var result: RemoteWorkState = .{};
+            errdefer result.deinit();
+            var custody = try @import("placement_journal.zig").custody(self.store(), a, .{ .task = task_id, .work = work_id }) orelse return result;
+            defer custody.deinit();
+            if (custody.value.phase != .away) return result;
+            var controller_custody = try @import("placement_journal.zig").custody(self.store(), a, .{ .task = task_id }) orelse return result;
+            defer controller_custody.deinit();
+            var query = try self.store().database.prepare("SELECT id FROM records WHERE task=? AND kind='placement_control' ORDER BY id", &.{.{ .blob = &task_id }});
+            defer query.deinit();
+            while (try query.step() == .row) {
+                const bytes = try query.bytes(0);
+                if (bytes.len != 32) return error.CorruptState;
+                var saved = try self.record(p.ControlRecord, a, "placement_control", bytes[0..32].*, task_id);
+                errdefer saved.deinit();
+                const control = saved.value.control.value;
+                if (!std.meta.eql(control.subject.work, work_id) or !std.meta.eql(control.controller, controller_custody.value.owner) or control.controller_epoch != controller_custody.value.epoch) {
+                    saved.deinit();
+                    continue;
+                }
+                if (saved.value.report) |report| {
+                    if (!std.meta.eql(report.value.executor, custody.value.owner) or report.value.custody_epoch != custody.value.epoch) {
+                        saved.deinit();
+                        continue;
+                    }
+                    if (report.value.work_state) |observed| {
+                        try p.matchReport(a, control, saved.value.route.items, report);
+                        if (!std.meta.eql(report.value.control, try p.digest(p.Control, a, control)) or report.value.custody_epoch != custody.value.epoch) {
+                            return error.InvalidRemoteCommand;
+                        }
+                        if (result.latest == null or observed.observed_at >= result.latest.?.value.report.?.value.work_state.?.observed_at) {
+                            if (result.latest) |*old| old.deinit();
+                            result.latest = saved;
+                            continue;
+                        }
+                    }
+                } else {
+                    result.pending = true;
+                    if (saved.value.last_error == null) result.retry_pending = saved.value.id;
+                }
+                saved.deinit();
+            }
+            return result;
+        }
+        fn settleRemoteWork(self: *Self, a: std.mem.Allocator, parent: state.Task, work_id: state.Digest) !bool {
+            const p = @import("placement.zig");
+            const cancellation_revision: ?u64 = if (parent.cancellation != null) try self.parentCancellationRevision(a, parent.id) else null;
+            var observed = try self.remoteWorkState(a, parent.id, work_id);
+            defer observed.deinit();
+            if (observed.pending) {
+                if (observed.retry_pending) |id| {
+                    try self.placement_pending.ensureUnusedCapacity(self.allocator, 1);
+                    self.placementQueue(parent.id, id, .control);
+                }
+                return false;
+            }
+            const reference = try wp.reference(a, .work, work_id);
+            var command: wc.Work = .{ .inspect = .{ .work = reference } };
+            var predecessor: state.Digest = @splat(0);
+            if (observed.latest) |saved| {
+                const report = saved.value.report.?;
+                const current = report.value.work_state.?;
+                if (remoteDisposed(current)) return false;
+                predecessor = try p.digest(p.Report, a, report.value);
+                const expected: wc.Expected = .{ .work = reference, .execution_revision = current.execution_revision, .control_revision = current.control_revision };
+                // A signed rejection at unchanged revisions needs operator
+                // reconciliation; do not generate an unbounded retry stream.
+                if (report.value.reply.disposition == .rejected and saved.value.control.value.cleanup_request == cancellation_revision) {
+                    const prior = switch (saved.value.control.value.command) {
+                        .cancel => |v| v.expected,
+                        .pump => |v| v.expected,
+                        .park => |v| v,
+                        else => null,
+                    };
+                    if (prior == null) return false;
+                    if (prior) |revision| if (revision.execution_revision == expected.execution_revision and revision.control_revision == expected.control_revision) return false;
+                }
+                if (cancellation_revision) |revision| {
+                    const acknowledged = try self.remoteCancellationAcknowledged(a, parent.id, work_id, revision);
+                    if (acknowledged and current.explicitly_parked) return false;
+                    command = if (current.cancellation == null or !acknowledged) .{ .cancel = .{ .expected = expected, .reason = parent.cancellation.? } } else .{ .pump = .{ .expected = expected, .base_quantum = 65536 } };
+                } else {
+                    if (current.explicitly_parked) {
+                        if (current.parkSettled()) return false;
+                    } else command = if (current.cancellation == null) .{ .park = expected } else .{ .pump = .{ .expected = expected, .base_quantum = 65536 } };
+                }
+            }
+            const identity = if (cancellation_revision) |revision|
+                try operation(struct { work: state.Digest, cancellation: state.Reason, request_revision: u64, predecessor: state.Digest }, a, .{ .work = work_id, .cancellation = parent.cancellation.?, .request_revision = revision, .predecessor = predecessor })
+            else
+                try operation(struct { work: state.Digest, completion_revision: u64, predecessor: state.Digest }, a, .{ .work = work_id, .completion_revision = parent.execution_revision, .predecessor = predecessor });
+            const operation_name = try std.fmt.allocPrint(a, "{s}-{s}", .{ if (cancellation_revision != null) "cleanup" else "close", std.fmt.bytesToHex(identity, .lower) });
+            defer a.free(operation_name);
+            try self.placement_pending.ensureUnusedCapacity(self.allocator, 1);
+            const bytes = self.placementControlExpanded(a, operation_name, parent.id, command, null, true, cancellation_revision) catch |err| switch (err) {
+                error.CustodyNotRemote, error.UnsupportedCapability, error.Denied => return false,
+                else => return err,
+            };
+            defer a.free(bytes);
+            var signed = try contracts.decodeOwned(p.Signed(p.Control), a, bytes);
+            defer signed.deinit();
+            const id = p.controlId(signed.value.value);
+            var saved = try self.record(p.ControlRecord, a, "placement_control", id, parent.id);
+            defer saved.deinit();
+            if (saved.value.report != null) return false;
+            self.placementQueue(parent.id, id, .control);
+            return true;
+        }
+
+        fn parentCancellationRevision(self: *Self, a: std.mem.Allocator, task_id: state.TaskId) !u64 {
+            var query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq DESC", &.{.{ .blob = &task_id }});
+            defer query.deinit();
+            while (try query.step() == .row) {
+                var event_value = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+                defer event_value.deinit();
+                if (event_value.value.kind == .cancellation_requested) return event_value.value.revision;
+            }
+            return error.CorruptState;
+        }
+
+        fn remoteCancellationAcknowledged(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: state.Digest, revision: u64) !bool {
+            const p = @import("placement.zig");
+            var events = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.revision>? ORDER BY e.seq DESC", &.{ .{ .blob = &task_id }, .{ .integer = @intCast(revision) } });
+            defer events.deinit();
+            while (try events.step() == .row) {
+                var event_value = try contracts.decodeOwned(state.Event, a, try events.bytes(0));
+                defer event_value.deinit();
+                const concerns_child = for (event_value.value.workspace_publications.items) |item| {
+                    if (std.meta.eql(item.work, work_id)) break true;
+                } else false;
+                if (!concerns_child) continue;
+                const reference = event_value.value.workspace_command orelse continue;
+                const bytes = try self.store().object(a, reference, null);
+                defer a.free(bytes);
+                var command = try contracts.decodeOwned(workspace.PublicationCommand, a, bytes);
+                defer command.deinit();
+                if (command.value == .control and command.value.control.command == .cancel) return true;
+            }
+            var query = try self.store().database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='placement_control'", &.{.{ .blob = &task_id }});
+            defer query.deinit();
+            while (try query.step() == .row) {
+                var saved = try contracts.decodeOwned(p.ControlRecord, a, try query.bytes(0));
+                defer saved.deinit();
+                const control = saved.value.control.value;
+                if (control.command != .cancel or control.cleanup_request != revision or !std.meta.eql(control.subject.work, work_id)) continue;
+                if (saved.value.report) |report| {
+                    try p.matchReport(a, control, saved.value.route.items, report);
+                    if (report.value.reply.disposition == .observed and try self.retainsController(a, control)) return true;
+                }
+            }
+            return false;
+        }
+
+        fn retainsController(self: *Self, a: std.mem.Allocator, control: @import("placement.zig").Control) !bool {
+            const p = @import("placement.zig");
+            const journal = @import("placement_journal.zig");
+            var current = try journal.custody(self.store(), a, .{ .task = control.subject.task }) orelse return error.InvalidTransfer;
+            defer current.deinit();
+            var site = current.value.owner;
+            var epoch = current.value.epoch;
+            if (std.meta.eql(control.controller, site) and control.controller_epoch == epoch) return true;
+            const lineage = try journal.controllerLineage(self.store(), a, control.subject.task);
+            defer a.free(lineage);
+            var index = lineage.len;
+            while (index > 0) {
+                index -= 1;
+                const prior = lineage[index];
+                const intent = prior.offer.value.intent;
+                if (prior.decision.value.epoch != epoch or !std.meta.eql(prior.decision.value.destination, site)) continue;
+                try p.verify(p.Offer, a, prior.offer, intent.source);
+                try p.matchDecision(a, prior.offer.value, prior.decision);
+                if (prior.decision.value.verdict != .accepted or !std.meta.eql(prior.decision.value.destination, intent.destination) or !std.meta.eql(intent.subject.task, control.subject.task) or intent.subject.work != null) return error.InvalidTransfer;
+                site = intent.source;
+                epoch = intent.epoch;
+                if (std.meta.eql(control.controller, site) and control.controller_epoch == epoch) return true;
+            }
+            return false;
+        }
+
+        fn workspaceExplicitlyParked(self: *Self, a: std.mem.Allocator, child: workspace.Work) !bool {
+            if (child.schedule != .parked) return false;
+            var query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq DESC", &.{.{ .blob = &child.task }});
+            defer query.deinit();
+            while (try query.step() == .row) {
+                var event_value = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+                defer event_value.deinit();
+                const concerns_child = for (event_value.value.workspace_publications.items) |item| {
+                    if (std.meta.eql(item.work, child.id)) break true;
+                } else false;
+                if (!concerns_child) continue;
+                const ref = event_value.value.workspace_command orelse continue;
+                const bytes = try self.store().object(a, ref, null);
+                defer a.free(bytes);
+                var command = try contracts.decodeOwned(workspace.PublicationCommand, a, bytes);
+                defer command.deinit();
+                if (command.value == .control) return command.value.control.command == .park;
+            }
+            return false;
+        }
+
+        fn settleWorkspaceOne(self: *Self, a: std.mem.Allocator, parent: state.Task, controller: bool) !bool {
             const ids = try self.workspaceIds(a, parent.id);
             defer a.free(ids);
             for (ids) |id| {
+                if (!try self.hasLocalCustody(a, parent.id, id)) {
+                    if (controller and (parent.cancellation != null or parent.terminal()) and try self.settleRemoteWork(a, parent, id)) return true;
+                    continue;
+                }
                 var child = try self.workspaceWork(a, parent.id, id);
                 defer child.deinit();
                 if (child.value.terminal()) continue;
+                if (!controller or parent.cancellation == null) {
+                    if (child.value.cancellation != null and child.value.schedule != .parked) try self.subjectAdd(.{ .task = parent.id, .work = id });
+                    if (controller and parent.terminal() and child.value.cancellation == null and child.value.schedule != .parked) {
+                        try self.parkWorkspaceOnClose(a, parent.id, id);
+                        self.subjectRemove(.{ .task = parent.id, .work = id });
+                        return true;
+                    }
+                    continue;
+                }
                 if (child.value.cancellation != null and
-                    (child.value.schedule != .parked or !try self.workspaceCancellationPending(a, parent.id, id))) continue;
+                    (child.value.schedule != .parked or !try self.workspaceCancellationPending(a, parent.id, id)))
+                {
+                    if (child.value.schedule != .parked) try self.subjectAdd(.{ .task = parent.id, .work = id });
+                    continue;
+                }
                 const operation_id = try std.fmt.allocPrint(a, "task-cancel-{s}-{d}", .{ std.fmt.bytesToHex(id, .lower), child.value.control_revision });
                 defer a.free(operation_id);
                 _ = try self.workspaceControl(a, operation_id, parent.id, id, child.value.execution_revision, child.value.control_revision, .{ .cancel = parent.cancellation.? });
@@ -567,6 +902,8 @@ pub fn Service(comptime Types: type) type {
         fn unclaim(self: *Self, id: state.TaskId) void {
             for (self.owned.items, 0..) |prior, i| if (same(&prior, &id)) {
                 _ = self.owned.orderedRemove(i);
+                if (i < self.cleanup_cursor) self.cleanup_cursor -= 1;
+                if (self.cleanup_cursor >= self.owned.items.len) self.cleanup_cursor = 0;
                 return;
             };
         }
@@ -598,11 +935,121 @@ pub fn Service(comptime Types: type) type {
                 if (reference.bytes != bytes.len or !same(&reference.digest, &storage.digest(bytes))) return error.IncompatibleProfile;
             }
         }
+        fn rootIdentity(id: state.TaskId) state.Digest {
+            var hash = std.crypto.hash.sha2.Sha256.init(.{});
+            hash.update("protean.controller.outer.v1\x00");
+            hash.update(&id);
+            var result: state.Digest = undefined;
+            hash.final(&result);
+            return result;
+        }
+        fn rootProvenance(value: state.Task) kosmos.RuntimeCapsule.Provenance {
+            return .{ .execution = rootIdentity(value.id), .custody = storage.digest(&value.id), .publication = .{ .digest = value.checkpoint.digest, .bytes = value.checkpoint.bytes } };
+        }
+        fn rootOperation(self: *Self, a: std.mem.Allocator, value: state.Task) !?contracts.Decoded(state.RootOperation) {
+            const bytes = try self.store().recordBytes(a, "root_operation", rootIdentity(value.id), value.id) orelse return null;
+            defer a.free(bytes);
+            var decoded = try contracts.decodeOwned(state.RootOperation, a, bytes);
+            errdefer decoded.deinit();
+            if (!std.meta.eql(decoded.value.id, rootIdentity(value.id)) or !std.meta.eql(decoded.value.task, value.id) or decoded.value.execution_revision != value.execution_revision) return error.InvalidArchive;
+            return decoded;
+        }
+        fn putRootOperation(self: *Self, a: std.mem.Allocator, value: state.RootOperation) !void {
+            if (try self.store().recordBytes(a, "root_operation", value.id, value.task)) |bytes| {
+                a.free(bytes);
+                try self.store().putRecord(state.RootOperation, "root_operation", value.id, value.task, value);
+            } else try self.store().createRecord(state.RootOperation, "root_operation", value.id, value.task, value);
+        }
+        fn rootConsumed(self: *Self, a: std.mem.Allocator, value: state.Task, control: data.invocation.Control) !?occurrence.Occurrence {
+            if (control != .reply and control != .cancel) return null;
+            const id = value.current_occurrence orelse return null;
+            var pending = try self.record(occurrence.Occurrence, a, "occurrence", id, value.id);
+            defer pending.deinit();
+            return try occurrence.consumed(pending.value, .{ .id = id, .task = value.id, .request = pending.value.request }, if (control == .cancel) .cancel else .{ .reply = storage.digest(control.reply) }, value.cancellation != null);
+        }
+        fn retainRootOperation(self: *Self, a: std.mem.Allocator) !void {
+            const active = self.active orelse return;
+            if (active.work != null or active.root_control == null) return;
+            var saved = try self.task(a, active.task);
+            defer saved.deinit();
+            if (saved.value.execution_revision != active.execution_revision) return error.CorruptState;
+            const capsule = try active.driver.retainCapsule(rootProvenance(saved.value));
+            const dependencies = try capsuleDependencies(a, capsule);
+            defer a.free(dependencies);
+            const code = try active.driver.runtimeBytes(a);
+            defer a.free(code);
+            try self.store().begin();
+            defer self.store().rollback();
+            _ = try self.store().putObject(code);
+            const pending: state.OuterOperation = .{ .capsule = try self.store().putObject(capsule), .dependencies = .{ .items = dependencies }, .control = try self.store().putObject(active.root_control.?), .guest_quantum = active.root_quantum };
+            try self.putRootOperation(a, .{ .id = rootIdentity(active.task), .task = active.task, .execution_revision = active.execution_revision, .pending = pending });
+            try self.namespace.commit("controller.outer-suspend");
+            self.active.?.outer_operation = pending.capsule;
+        }
+        fn validateRootOperation(self: *Self, a: std.mem.Allocator, value: state.Task, saved: state.RootOperation) !bool {
+            if (!std.meta.eql(saved.id, rootIdentity(value.id)) or !std.meta.eql(saved.task, value.id) or saved.execution_revision != value.execution_revision) return error.InvalidArchive;
+            const pending = saved.pending orelse return false;
+            if (value.terminal() or pending.guest_quantum > 256) return error.InvalidArchive;
+            const bytes = try self.store().object(a, pending.capsule, null);
+            defer a.free(bytes);
+            var envelope = try kosmos.RuntimeCapsule.read(a, bytes);
+            defer envelope.deinit();
+            const record_value = envelope.value.record;
+            if (!std.meta.eql(record_value.provenance, rootProvenance(value)) or record_value.kind != .outer_execution or (record_value.operation != .advance and record_value.operation != null) or
+                !std.meta.eql(record_value.guest.image.digest, value.image.digest) or record_value.guest.image.bytes != value.image.bytes) return error.InvalidArchive;
+            if (pending.dependencies.items.len != record_value.dependencies.len) return error.InvalidArchive;
+            for (pending.dependencies.items, record_value.dependencies) |ref, expected| if (!std.meta.eql(ref.digest, expected.digest) or ref.bytes != expected.bytes) return error.InvalidArchive;
+            const image = try self.store().object(a, value.image, null);
+            defer a.free(image);
+            var prepared = try self.program.prepare(a, image);
+            defer prepared.deinit();
+            if (!std.meta.eql(record_value.artifact.digest, prepared.runtime.identity) or record_value.artifact.bytes != prepared.runtime.core.?.encoded_length) return error.InvalidArchive;
+            const code = try self.store().object(a, .{ .digest = record_value.artifact.digest, .bytes = record_value.artifact.bytes }, null);
+            defer a.free(code);
+            // Check the exact accepted control against the original guest cut
+            // and the acquired occurrence, independently of the outer machine.
+            const control_bytes = try self.store().object(a, pending.control, null);
+            defer a.free(control_bytes);
+            var accepted = try contracts.decodeOwned(data.invocation.Control, a, control_bytes);
+            defer accepted.deinit();
+            var command = try kosmos.RuntimeCapsule.readCommand(a, envelope.value.command);
+            defer command.deinit();
+            if (command.value != .advance or command.value.advance.quantum != pending.guest_quantum or (pending.guest_quantum == 0 and accepted.value != .reply)) return error.InvalidArchive;
+            const actual = command.value.advance.control;
+            switch (accepted.value) {
+                .none => if (actual != .none or value.outcome_kind != .progressed or value.current_occurrence != null) return error.InvalidArchive,
+                .resume_yield => if (actual != .resume_yield or value.outcome_kind != .yielded or value.current_occurrence != null) return error.InvalidArchive,
+                .cancel => |reason| {
+                    const cancellation = value.cancellation orelse return error.InvalidArchive;
+                    if (value.cancellation_applied or reason != .text or !same(reason.text, cancellation.bytes) or actual != .cancel or !data.record.equal(data.invocation.Reason, reason, actual.cancel)) return error.InvalidArchive;
+                    _ = try self.rootConsumed(a, value, accepted.value);
+                },
+                .reply => |reply| {
+                    if (actual != .answer or value.outcome_kind != .requested or value.current_occurrence == null) return error.InvalidArchive;
+                    var response = try data.invocation.decode(data.invocation.Result, a, reply);
+                    defer response.deinit();
+                    var occurrence_value = try self.record(occurrence.Occurrence, a, "occurrence", value.current_occurrence.?, value.id);
+                    defer occurrence_value.deinit();
+                    const prior = occurrence_value.value;
+                    if (prior.work != null or prior.state != .settled_reply or !std.meta.eql(prior.state.settled_reply.reply, storage.digest(reply)) or !std.meta.eql(prior.request, response.value.request_identity) or !same(actual.answer, response.value.value)) return error.InvalidArchive;
+                    _ = try self.rootConsumed(a, value, accepted.value);
+                },
+            }
+            const Inspect = struct {
+                fn claim(_: *anyopaque, _: kosmos.RuntimeCapsule.Reference, _: kosmos.RuntimeCapsule.Record, _: kosmos.RuntimeCapsule.Reference) !void {}
+            };
+            var context: u8 = 0;
+            var candidate = try kosmos.RuntimeCapsule.restore(a, &prepared.guest, &prepared.runtime, bytes, .{ .context = &context, .claim = Inspect.claim });
+            defer candidate.deinit();
+            return record_value.operation == null;
+        }
+
         fn retire(self: *Self, a: std.mem.Allocator) !void {
-            _ = a;
+            try self.retainRootOperation(a);
             if (self.active) |active| {
                 try active.driver.retire();
                 try active.driver.destroy();
+                if (active.root_control) |bytes| self.allocator.free(bytes);
                 self.active = null;
             }
         }
@@ -612,10 +1059,39 @@ pub fn Service(comptime Types: type) type {
                 if (active.work == null and same(&active.task, &value.id) and active.execution_revision == value.execution_revision) return active.driver;
                 try self.retire(a);
             }
-            const checkpoint = try self.store().object(a, value.checkpoint, null);
-            defer a.free(checkpoint);
-            const driver = try evaluator.Driver.start(self.allocator, self.program, .{ .state = checkpoint });
-            self.active = .{ .task = value.id, .execution_revision = value.execution_revision, .driver = driver };
+            var pending = try self.rootOperation(a, value);
+            defer if (pending) |*saved| saved.deinit();
+            const root_control = if (pending != null and pending.?.value.pending != null) try self.store().object(self.allocator, pending.?.value.pending.?.control, null) else null;
+            errdefer if (root_control) |bytes| self.allocator.free(bytes);
+            var root_cut_ready = false;
+            const driver = if (pending != null and pending.?.value.pending != null) restored: {
+                const operation_value = pending.?.value.pending.?;
+                root_cut_ready = try self.validateRootOperation(a, value, pending.?.value);
+                const bytes = try self.store().object(a, operation_value.capsule, null);
+                defer a.free(bytes);
+                const Owner = struct {
+                    task: state.Task,
+                    reference: state.Reference,
+                    fn claim(context: *anyopaque, ref: kosmos.RuntimeCapsule.Reference, record_value: kosmos.RuntimeCapsule.Record, _: kosmos.RuntimeCapsule.Reference) !void {
+                        const owner: *@This() = @ptrCast(@alignCast(context));
+                        if (!std.meta.eql(ref.digest, owner.reference.digest) or ref.bytes != owner.reference.bytes or
+                            !std.meta.eql(record_value.provenance, rootProvenance(owner.task))) return error.InvalidArchive;
+                    }
+                };
+                var owner: Owner = .{ .task = value, .reference = operation_value.capsule };
+                var runtime = try self.program.retainRuntime();
+                defer runtime.deinit();
+                break :restored try evaluator.Driver.openCapsule(self.allocator, self.assets.image, &runtime, bytes, .{ .context = &owner, .claim = Owner.claim });
+            } else restored: {
+                const checkpoint = try self.store().object(a, value.checkpoint, null);
+                defer a.free(checkpoint);
+                break :restored try evaluator.Driver.start(self.allocator, self.program, .{ .state = checkpoint });
+            };
+            self.active = .{ .task = value.id, .execution_revision = value.execution_revision, .driver = driver, .root_control = root_control, .root_cut_ready = root_cut_ready };
+            if (pending) |saved| if (saved.value.pending) |operation_value| {
+                self.active.?.root_quantum = operation_value.guest_quantum;
+                self.active.?.outer_operation = operation_value.capsule;
+            };
             return driver;
         }
 
@@ -708,6 +1184,7 @@ pub fn Service(comptime Types: type) type {
             };
             // Establish the referenced task before its foreign-keyed events.
             try self.store().putTask(value, null);
+            try self.createCustody(a, task_id, null);
             try self.store().putEvent(.{ .task = task_id, .seq = 1, .revision = 1, .kind = .accepted, .data = .{ .bytes = "{}" } });
             const admitted = try self.receipt(a, .submit, id, request, value, .accepted, null, null);
             try self.namespace.commit("task.submit");
@@ -720,11 +1197,13 @@ pub fn Service(comptime Types: type) type {
             if (reason.len > 256 or !std.unicode.utf8ValidateSlice(reason)) return error.InvalidParams;
             const request = try cancelDigest(a, task_id, .{ .bytes = reason });
             if (try self.replay(a, id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
             var decoded = try self.task(a, task_id);
             defer decoded.deinit();
             var value = decoded.value;
             const previous = value.revision;
             const needs_cancellation = !value.terminal() or !try self.associatedWorkDisposed(a, task_id);
+            const queue_root = self.work == null or self.work.?.subject_work != null or !same(&self.work.?.task, &task_id);
             const executable = compatible: {
                 self.compatible(value) catch |err| switch (err) {
                     error.IncompatibleProfile => break :compatible false,
@@ -740,6 +1219,7 @@ pub fn Service(comptime Types: type) type {
                 const children = try self.workspaceIds(a, task_id);
                 defer a.free(children);
                 for (children) |child_id| {
+                    if (!try self.hasLocalCustody(a, task_id, child_id)) continue;
                     var child = try self.retainedWorkspaceWork(a, task_id, child_id);
                     defer child.deinit();
                     // Reopening requires explicit ownership. A new cancel
@@ -755,7 +1235,10 @@ pub fn Service(comptime Types: type) type {
             if (needs_cancellation and !executable) {
                 value.blocker = .incompatible_profile;
                 value.schedule = .parked;
-            } else if (executable and value.blocker == .incompatible_profile) value.blocker = null;
+            } else if (executable) {
+                if (value.blocker == .incompatible_profile) value.blocker = null;
+                if (!value.terminal() and queue_root) value.schedule = .queued;
+            }
             try self.store().begin();
             defer self.store().rollback();
             try self.event(&value, .cancellation_requested, "{}");
@@ -793,7 +1276,7 @@ pub fn Service(comptime Types: type) type {
                 }
             }
             if (needs_cancellation) {
-                if (self.work == null or self.work.?.subject_work != null or !same(&self.work.?.task, &task_id)) try self.runnableAdd(task_id);
+                if (queue_root) try self.runnableAdd(task_id);
                 self.claim(task_id);
             }
             return admitted;
@@ -803,6 +1286,7 @@ pub fn Service(comptime Types: type) type {
             const Request = struct { method: state.Method, task: state.TaskId, revision: u64 };
             const request = try operation(Request, a, .{ .method = .@"resume", .task = task_id, .revision = expected });
             if (try self.replay(a, id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
             var decoded = try self.task(a, task_id);
             defer decoded.deinit();
             var value = decoded.value;
@@ -883,6 +1367,7 @@ pub fn Service(comptime Types: type) type {
         pub fn reconcile(self: *Self, a: std.mem.Allocator, id: []const u8, task_id: state.TaskId, expected: u64, occurrence_id: state.Digest, attempt_id: state.Digest, recovery: state.RecoveryRequest) !Admission {
             const request_digest = try reconcileDigest(a, task_id, expected, occurrence_id, attempt_id, recovery);
             if (try self.replay(a, id, request_digest)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
             var decoded = try self.task(a, task_id);
             defer decoded.deinit();
             var value = decoded.value;
@@ -1154,6 +1639,7 @@ pub fn Service(comptime Types: type) type {
         pub fn message(self: *Self, a: std.mem.Allocator, id: []const u8, task_id: state.TaskId, input: Types.Message) !Admission {
             const request = try messageDigest(a, task_id, input);
             if (try self.replay(a, id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
             var decoded = try self.task(a, task_id);
             defer decoded.deinit();
             var value = decoded.value;
@@ -1216,6 +1702,7 @@ pub fn Service(comptime Types: type) type {
             const answer = answer_bytes orelse return error.IncompatibleProfile;
             const request = try answerDigest(a, task_id, question_id, revision, request_digest, schema_id, answer);
             if (try self.replay(a, id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
             if (question.answer) |saved_answer| {
                 if (!same(&saved_answer.digest, &storage.digest(answer))) return error.AnswerConflict;
                 const original = question.receipt orelse return error.CorruptState;
@@ -1280,10 +1767,21 @@ pub fn Service(comptime Types: type) type {
         /// transition. The caller services its control channel between calls.
         pub fn pump(self: *Self, a: std.mem.Allocator) !Step {
             try self.allowed();
+            if (try self.pumpPlacement(a)) return .progressed;
+            const cleanup_count = self.owned.items.len;
+            if (try self.pumpOwnedCleanup(a, @min(cleanup_count, 1))) return .progressed;
+            const step = try self.pumpRunnable(a);
+            if (step != .idle or cleanup_count <= 1) return step;
+            if (try self.pumpOwnedCleanup(a, cleanup_count - 1)) return .progressed;
+            return self.pumpRunnable(a);
+        }
+
+        fn pumpRunnable(self: *Self, a: std.mem.Allocator) !Step {
             // Scan one round, without charging or preparing blocked leaves.
             // Each actual transition yields back to the host control channel.
             const count = self.runnable.items.len;
             for (0..count) |_| {
+                if (self.runnable.items.len == 0) break;
                 const id = self.runnable.items[self.runnable_cursor];
                 self.runnable_cursor += 1;
                 if (self.runnable_cursor == self.runnable.items.len) self.runnable_cursor = 0;
@@ -1293,17 +1791,55 @@ pub fn Service(comptime Types: type) type {
             return .idle;
         }
 
+        // Cancellation is a retained obligation, independent of root runnable
+        // membership. Custody changes need no producer-specific wake-up.
+        fn pumpOwnedCleanup(self: *Self, a: std.mem.Allocator, count: usize) !bool {
+            for (0..count) |_| {
+                if (self.owned.items.len == 0) break;
+                const id = self.owned.items[self.cleanup_cursor];
+                self.cleanup_cursor = (self.cleanup_cursor + 1) % self.owned.items.len;
+                const controller = try self.hasLocalCustody(a, id, null);
+                var parent = try self.task(a, id);
+                defer parent.deinit();
+                self.compatible(parent.value) catch continue;
+                if (try self.settleWorkspaceOne(a, parent.value, controller)) return true;
+                if (!controller) continue;
+                if (try self.rootCleanupRunnable(a, parent.value)) try self.runnableAdd(id);
+                if (parent.value.terminal() and try self.taskCleanupComplete(a, parent.value)) self.unclaim(id);
+            }
+            return false;
+        }
+
+        fn rootCleanupRunnable(self: *Self, a: std.mem.Allocator, value: state.Task) !bool {
+            if (value.cancellation == null or value.terminal() or value.schedule == .parked) return false;
+            if (!value.cancellation_applied) return true;
+            const id = value.current_occurrence orelse return true;
+            var pending = try self.record(occurrence.Occurrence, a, "occurrence", id, value.id);
+            defer pending.deinit();
+            return pending.value.state != .awaiting and pending.value.state != .not_sent;
+        }
+
         fn pumpTask(self: *Self, a: std.mem.Allocator, id: state.TaskId) !Step {
+            self.requireCustody(a, id, null) catch |err| {
+                if (err != error.CustodyNotLocal) return err;
+                self.runnableRemove(id);
+                return .idle;
+            };
             var decoded = try self.task(a, id);
             defer decoded.deinit();
             const value = decoded.value;
-            if (value.cancellation != null and try self.cancelWorkspaceOne(a, value)) return .progressed;
             if (value.terminal()) {
                 self.runnableRemove(id);
                 if (try self.taskCleanupComplete(a, value)) self.unclaim(id);
                 return .progressed;
             }
             self.compatible(value) catch return self.blocked(a, value, .incompatible_profile);
+            if (self.active) |active| {
+                if (active.work == null and std.meta.eql(active.task, id) and active.root_control != null) return self.pumpRoot(a, value);
+            }
+            var saved_operation = try self.rootOperation(a, value);
+            defer if (saved_operation) |*saved| saved.deinit();
+            if (saved_operation != null and saved_operation.?.value.pending != null) return self.pumpRoot(a, value);
             var current: ?contracts.Decoded(occurrence.Occurrence) = null;
             defer if (current) |*item| item.deinit();
             if (value.current_occurrence) |identity| current = try self.record(occurrence.Occurrence, a, "occurrence", identity, id);
@@ -1354,9 +1890,41 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn advance(self: *Self, a: std.mem.Allocator, initial: state.Task, control: data.invocation.Control, consumed: ?occurrence.Occurrence) !Step {
+            try self.requireCustody(a, initial.id, null);
             const driver = try self.resident(a, initial);
             const quantum: u64 = if (control == .reply and initial.cancellation != null and !initial.cancellation_applied) 0 else 256;
-            const publication = try driver.drive(a, control, quantum);
+            _ = consumed;
+            const encoded_control = try contracts.encodeOwned(data.invocation.Control, self.allocator, control);
+            driver.beginAdvance(control, quantum) catch |err| {
+                self.allocator.free(encoded_control);
+                return err;
+            };
+            self.active.?.root_control = encoded_control;
+            self.active.?.root_quantum = quantum;
+            return self.pumpRoot(a, initial);
+        }
+
+        fn pumpRoot(self: *Self, a: std.mem.Allocator, initial: state.Task) anyerror!Step {
+            const driver = try self.resident(a, initial);
+            var decoded = try contracts.decodeOwned(data.invocation.Control, a, self.active.?.root_control orelse return error.CorruptState);
+            defer decoded.deinit();
+            const control = decoded.value;
+            const consumed = try self.rootConsumed(a, initial, control);
+            // Physical pumping is transactional. An allocation failure leaves
+            // the accepted operation live and retryable without fencing storage.
+            if (!self.active.?.root_cut_ready) {
+                var progress = try driver.pump(65536);
+                defer progress.deinit();
+                if (progress == .suspended) return .progressed;
+                if (progress != .event or progress.event.value != .cut) return error.InvalidRuntimeProgress;
+                self.active.?.root_cut_ready = true;
+            }
+            // Publication is transactional too. Keep the completed-cut phase
+            // on failure so retry cannot apply the accepted command twice.
+            const publication = try driver.drive(a, .none, 0);
+            self.allocator.free(self.active.?.root_control.?);
+            self.active.?.root_control = null;
+            self.active.?.root_cut_ready = false;
             const encoded = publication.outcome;
             defer a.free(encoded);
             // Kosmos may now be ahead of storage. Any failure below fences all
@@ -1377,6 +1945,16 @@ pub fn Service(comptime Types: type) type {
             defer self.store().rollback();
             value.checkpoint = try self.store().putObject(checkpoint);
             value.outcome = try self.store().putObject(encoded);
+            // Terminal state has no remaining guest cleanup. Its checkpoint
+            // and outcome are now owned by the transaction, so release the
+            // physical evaluator before materializing potentially much larger
+            // client JSON. Failure below still fences the uncommitted owner;
+            // restart uses the prior durable cut and acquired reply.
+            if (outcome.value == .completed or outcome.value == .failed or outcome.value == .cancelled) {
+                try driver.close();
+                try driver.destroy();
+                self.active = null;
+            }
             if (consumed) |prior| {
                 try self.store().putRecord(occurrence.Occurrence, "occurrence", prior.id, value.id, prior);
                 const question_id: ?state.Digest = switch (prior.state.admitted) {
@@ -1449,16 +2027,18 @@ pub fn Service(comptime Types: type) type {
                 }
                 value.messages.items = &.{};
             }
+            try self.putRootOperation(a, .{ .id = rootIdentity(value.id), .task = value.id, .execution_revision = value.execution_revision, .pending = null });
             try self.persist(a, value, initial.revision, "world.advance", .preserve);
-            self.active.?.execution_revision = value.execution_revision;
+            if (self.active) |*active| {
+                active.outer_operation = null;
+                active.execution_revision = value.execution_revision;
+            }
             if (value.terminal()) {
-                try driver.close();
-                try driver.destroy();
-                self.active = null;
                 self.runnableRemove(value.id);
                 const children = try self.workspaceIds(a, value.id);
                 defer a.free(children);
                 for (children) |child_id| {
+                    if (!try self.hasLocalCustody(a, value.id, child_id)) continue;
                     var child = try self.workspaceWork(a, value.id, child_id);
                     defer child.deinit();
                     if (child.value.cancellation == null and !child.value.terminal()) {
@@ -1640,6 +2220,7 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn dispatchAcquisition(self: *Self, a: std.mem.Allocator, initial: state.Task, pending: occurrence.Occurrence, entry: registry.Entry, request_bytes: []const u8, prepared: ?[]const u8, operation_kind: state.AttemptOperation) !Step {
+            try self.requireCustody(a, initial.id, pending.work);
             if (self.work != null) return .idle;
             const subject = try self.occurrenceSubject(a, initial, pending);
             // Consume the already-authorized transition. Preparation and
@@ -1732,6 +2313,7 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn interpretCapture(self: *Self, a: std.mem.Allocator, initial: state.Task, pending: occurrence.Occurrence) !Step {
+            try self.requireCustody(a, initial.id, pending.work);
             const attempt_id = pending.state.captured.id;
             var attempt = try self.record(state.Attempt, a, "attempt", attempt_id, initial.id);
             defer attempt.deinit();
@@ -1816,6 +2398,8 @@ pub fn Service(comptime Types: type) type {
 
         /// All front ends publish a joined worker through this same owner.
         pub fn completeWork(self: *Self, a: std.mem.Allocator, work: Work, result: WorkResult) !void {
+            try self.currentWork(work);
+            try self.requireCustody(a, work.task, work.subject_work);
             switch (result) {
                 .acquired => |bytes| return self.acquire(a, work, bytes),
                 .not_sent => return self.notSent(a, work),
@@ -1851,6 +2435,7 @@ pub fn Service(comptime Types: type) type {
         /// Acquisition is published before any subsequent Kosmos consumption.
         pub fn acquire(self: *Self, a: std.mem.Allocator, work: Work, reply: []const u8) !void {
             try self.currentWork(work);
+            try self.requireCustody(a, work.task, work.subject_work);
             if (work.recovery != null) return self.completeRecoveryWork(a, work, .{ .evidence = reply });
             if (work.operation == .workspace_build or work.entry.declaration.capture != null) return self.capture(a, work, reply);
             defer self.releaseWork();
@@ -1880,6 +2465,7 @@ pub fn Service(comptime Types: type) type {
         }
         pub fn unknown(self: *Self, a: std.mem.Allocator, work: Work) !void {
             try self.currentWork(work);
+            try self.requireCustody(a, work.task, work.subject_work);
             if (work.recovery != null) return self.completeRecoveryWork(a, work, null);
             defer self.releaseWork();
             errdefer self.store().fence();
@@ -1908,6 +2494,7 @@ pub fn Service(comptime Types: type) type {
 
         pub fn notSent(self: *Self, a: std.mem.Allocator, work: Work) !void {
             try self.currentWork(work);
+            try self.requireCustody(a, work.task, work.subject_work);
             if (work.recovery != null) return self.completeRecoveryWork(a, work, null);
             defer self.releaseWork();
             errdefer self.store().fence();
@@ -2507,8 +3094,1057 @@ pub fn Service(comptime Types: type) type {
             if (!same(result, bound_bytes)) return error.InvalidArchive;
         }
 
+        fn retirePlacementFiles(self: *Self, a: std.mem.Allocator, decision: @import("placement.zig").Signed(@import("placement.zig").Decision)) !void {
+            const config = self.profile.placement orelse return;
+            if (config.transport_directory == null) return;
+            const p = @import("placement.zig");
+            const stage = @import("placement_stage.zig");
+            try p.verify(p.Decision, a, decision, decision.value.destination);
+            const site = try self.placementSite();
+            const directory = try self.placementDirectory(a);
+            if (std.meta.eql(site, decision.value.destination)) try stage.retire(a, directory, .placement, decision.value.offer_digest);
+            if (std.meta.eql(site, decision.value.source)) try stage.retire(a, directory, .outgoing, decision.value.transfer);
+        }
+
+        pub fn recoverPlacementFiles(self: *Self, a: std.mem.Allocator) !void {
+            const config = self.profile.placement orelse return;
+            if (config.transport_directory == null) return;
+            try self.store().checkIntegrity();
+            const p = @import("placement.zig");
+            var rows = try self.store().database.prepare("SELECT body FROM placement_decisions", &.{});
+            defer rows.deinit();
+            while (try rows.step() == .row) {
+                var decision = try contracts.decodeOwned(p.Signed(p.Decision), a, try rows.bytes(0));
+                defer decision.deinit();
+                try self.retirePlacementFiles(a, decision.value);
+            }
+        }
+
+        fn placementPeer(self: *Self, peer_name: []const u8) !@import("placement.zig").Peer {
+            const config = self.profile.placement orelse return error.UnsupportedCapability;
+            for (config.peers) |peer| if (same(peer.name, peer_name)) return peer;
+            return error.Denied;
+        }
+
+        pub fn placementRequest(self: *Self, a: std.mem.Allocator, request: @import("placement.zig").Request) !json.Value {
+            const p = @import("placement.zig");
+            switch (request) {
+                .identify => return values.toJson(struct { site: p.Site, native_build: state.Digest, resource_binding: state.Digest }, a, .{ .site = try self.placementSite(), .native_build = self.profile.runtime_identity, .resource_binding = try self.profile.resourceIdentity(a, self.application.image_identity) }),
+                .challenge => |nonce| return values.toJson(p.Signed(p.Hello), a, try p.sign(p.Hello, a, (self.profile.placement orelse return error.UnsupportedCapability).signing_key, .{ .site = try self.placementSite(), .native_build = self.profile.runtime_identity, .challenge = nonce })),
+                .status => |subject| return values.toJson(?p.Custody, a, try self.placementStatus(a, subject)),
+                .cut => |subject| return values.toJson(p.Cut, a, try self.placementCut(a, subject)),
+                .compatibility => |subject| return values.toJson(p.Compatibility, a, try self.placementCompatibility(a, subject)),
+                .freeze => |v| return values.toJson(p.Intent, a, try self.placementFreeze(a, v.subject, v.peer.bytes, v.expected, v.transfer)),
+                .move => |v| return values.toJson(p.Signed(p.Decision), a, try self.placementMove(a, v.subject, v.peer.bytes, v.expected, v.transfer)),
+                .offer => |v| return values.toJson(p.Signed(p.Offer), a, try self.placementOffer(a, v.subject, v.peer.bytes, v.path.bytes)),
+                .accept => |v| return values.toJson(p.Signed(p.Decision), a, try self.placementAccept(a, v.operation.bytes, v.peer.bytes, v.offer, v.path.bytes)),
+                .stage => |v| {
+                    try self.allowed();
+                    const peer = try self.placementPeer(v.peer.bytes);
+                    try p.verify(p.Offer, a, v.offer, peer.site);
+                    if (!std.meta.eql(v.offer.value.intent.destination, try self.placementSite())) return error.InvalidTransfer;
+                    if (try @import("placement_journal.zig").decision(self.store(), a, v.offer.value.intent.transfer)) |saved| {
+                        var prior = saved;
+                        defer prior.deinit();
+                        try p.matchDecision(a, v.offer.value, prior.value);
+                        try self.retirePlacementFiles(a, prior.value);
+                        return values.toJson(u64, a, v.offer.value.archive_bytes);
+                    }
+                    if (peer.archive_limit) |limit| if (v.offer.value.archive_bytes > limit) return error.Capacity;
+                    return values.toJson(u64, a, try @import("placement_stage.zig").write(a, self.io, try self.placementDirectory(a), self.profile.placement.?.staging_limits, v.offer.value, v.offset, v.bytes.bytes));
+                },
+                .accept_staged => |v| {
+                    const path = try @import("placement_stage.zig").path(a, try self.placementDirectory(a), v.offer.value);
+                    defer a.free(path);
+                    return values.toJson(p.Signed(p.Decision), a, try self.placementAccept(a, v.operation.bytes, v.peer.bytes, v.offer, path));
+                },
+                .refuse => |v| return values.toJson(p.Signed(p.Decision), a, try self.placementRefuse(a, v.peer.bytes, v.offer, v.reason)),
+                .decision => |v| try self.placementApplyDecision(a, v.subject, v.decision),
+                .abort_unsent => |v| try self.placementAbortUnsent(a, v.subject, v.transfer),
+                .withdraw => |v| try self.placementWithdraw(a, v.task, v.transfer),
+                .control => |v| {
+                    const bytes = try self.placementControl(a, v.operation.bytes, v.task, v.command);
+                    defer a.free(bytes);
+                    var signed = try contracts.decodeOwned(p.Signed(p.Control), a, bytes);
+                    defer signed.deinit();
+                    return values.toJson(p.Signed(p.Control), a, signed.value);
+                },
+                .execute_control => |v| {
+                    const bytes = try self.placementExecuteControl(a, v.peer.bytes, v.control);
+                    defer a.free(bytes);
+                    var signed = try contracts.decodeOwned(p.Signed(p.Report), a, bytes);
+                    defer signed.deinit();
+                    return values.toJson(p.Signed(p.Report), a, signed.value);
+                },
+                .resolve_control => |v| {
+                    const bytes = try self.placementResolveControl(a, v.peer.bytes, v.control, v.route.items);
+                    defer a.free(bytes);
+                    var resolution = try contracts.decodeOwned(p.ControlResolution, a, bytes);
+                    defer resolution.deinit();
+                    return values.toJson(p.ControlResolution, a, resolution.value);
+                },
+                .report => |v| try self.placementApplyReport(a, v.task, v.control, v.report),
+                .follow_controller => |v| try self.placementFollowController(a, v.source.bytes, v.destination.bytes, v.offer, v.decision),
+                .follow_controller_proof => |v| try self.placementFollowController(a, (try self.placementPeerAt(v.offer.value.intent.source)).name, (try self.placementPeerAt(v.decision.value.destination)).name, v.offer, v.decision),
+            }
+            return json.object();
+        }
+
+        fn placementDirectory(self: *Self, a: std.mem.Allocator) ![]const u8 {
+            const configured = self.profile.placement orelse return error.UnsupportedCapability;
+            const path = configured.transport_directory orelse return error.UnsupportedCapability;
+            const c = @import("native_c");
+            const dir = try @import("namespace.zig").openDirectory(a, path, false, true);
+            defer _ = c.close(dir);
+            var spool: c.struct_protean_native_stat = undefined;
+            var owner: c.struct_protean_native_stat = undefined;
+            if (c.protean_native_fstat(dir, &spool) != 0 or c.protean_native_fstat(self.namespace.directory, &owner) != 0) return error.StorageUnavailable;
+            var cursor = c.dup(dir);
+            if (cursor < 0) return error.StorageUnavailable;
+            defer _ = c.close(cursor);
+            while (true) {
+                if (spool.st_dev == owner.st_dev and spool.st_ino == owner.st_ino) return error.UnsafeStatePath;
+                const parent = c.openat(cursor, "..", c.O_RDONLY | c.O_DIRECTORY | c.O_NOFOLLOW | c.O_CLOEXEC);
+                if (parent < 0) return error.StorageUnavailable;
+                var ancestor: c.struct_protean_native_stat = undefined;
+                if (c.protean_native_fstat(parent, &ancestor) != 0) {
+                    _ = c.close(parent);
+                    return error.StorageUnavailable;
+                }
+                if (ancestor.st_dev == spool.st_dev and ancestor.st_ino == spool.st_ino) {
+                    _ = c.close(parent);
+                    break;
+                }
+                _ = c.close(cursor);
+                cursor = parent;
+                spool = ancestor;
+            }
+            return path;
+        }
+
+        fn placementPeerAt(self: *Self, site: @import("placement.zig").Site) !@import("placement.zig").Peer {
+            const config = self.profile.placement orelse return error.UnsupportedCapability;
+            for (config.peers) |peer| if (std.meta.eql(peer.site, site)) return peer;
+            return error.Denied;
+        }
+
+        fn placementSubject(task_id: state.TaskId, selected: wc.PlacementSubject) !@import("placement.zig").Subject {
+            return .{ .task = task_id, .work = switch (selected) {
+                .controller => null,
+                .work => |ref| try wp.identity(ref, .work),
+            } };
+        }
+
+        fn placementReplyCopy(a: std.mem.Allocator, reply: wc.Reply) !wc.Reply {
+            var result = reply;
+            result.observation_json.bytes = try a.dupe(u8, reply.observation_json.bytes);
+            inline for (.{ "selected_view", "program", "evidence" }) |field| if (@field(result, field)) |*ref| {
+                ref.id.bytes = try a.dupe(u8, ref.id.bytes);
+            };
+            return result;
+        }
+
+        fn placementQueue(self: *Self, task_id: state.TaskId, id: state.Digest, kind: PlacementKind) void {
+            if (self.placement_job) |running| if (std.meta.eql(running.id, id) and running.kind == kind) return;
+            for (self.placement_pending.items) |pending| if (std.meta.eql(pending.id, id) and pending.kind == kind) return;
+            self.placement_pending.appendAssumeCapacity(.{ .task = task_id, .id = id, .kind = kind });
+        }
+
+        fn placementFailure(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, id: state.Digest, kind: PlacementKind, err: anyerror) !void {
+            const p = @import("placement.zig");
+            try self.store().begin();
+            defer self.store().rollback();
+            switch (kind) {
+                .move => {
+                    var saved = try self.record(p.Move, a, "placement_move", id, task_id);
+                    defer saved.deinit();
+                    saved.value.last_error = try name(@errorName(err));
+                    try self.store().putRecord(p.Move, "placement_move", id, task_id, saved.value);
+                },
+                .control => {
+                    var saved = try self.record(p.ControlRecord, a, "placement_control", id, task_id);
+                    defer saved.deinit();
+                    saved.value.last_error = try name(@errorName(err));
+                    try self.store().putRecord(p.ControlRecord, "placement_control", id, task_id, saved.value);
+                },
+            }
+            try self.namespace.commit("placement.transport-blocked");
+        }
+
+        fn placementStartJob(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, id: state.Digest, kind: PlacementKind) !?*@import("placement_job.zig").Job {
+            const p = @import("placement.zig");
+            const jobs = @import("placement_job.zig");
+            switch (kind) {
+                .move => {
+                    var saved = try self.record(p.Move, a, "placement_move", id, task_id);
+                    defer saved.deinit();
+                    if (!std.meta.eql(saved.value.owner, try self.placementSite())) return error.CustodyNotLocal;
+                    if (saved.value.decision != null or saved.value.cancelled) return null;
+                    const subject = saved.value.subject;
+                    const prior = try self.placementStatus(a, subject);
+                    if (prior) |custody| if (custody.intent) |intent| {
+                        if (std.meta.eql(intent.transfer, id) and custody.decision != null) {
+                            saved.value.decision = custody.decision;
+                            saved.value.last_error = null;
+                            try self.store().begin();
+                            defer self.store().rollback();
+                            try self.store().putRecord(p.Move, "placement_move", id, task_id, saved.value);
+                            try self.namespace.commit("placement.move-recovered");
+                            return null;
+                        }
+                    };
+                    if (saved.value.withdraw_requested) {
+                        const custody = prior orelse return error.InvalidTransfer;
+                        const offer = custody.offer orelse return error.InvalidTransfer;
+                        if (!std.meta.eql(offer.value.intent.transfer, id)) return error.InvalidTransfer;
+                        const peer = try self.placementPeer(saved.value.request.site.bytes);
+                        const input: jobs.Input = .{ .withdraw = offer };
+                        const bytes = try contracts.encodeOwned(jobs.Input, a, input);
+                        defer a.free(bytes);
+                        try self.placementAuthorizeMessage(a, peer, subject, bytes);
+                        return try jobs.Job.start(self.allocator, self.io, peer, input);
+                    }
+                    const expected = if (prior) |custody| expected: {
+                        if (custody.intent) |intent| if (std.meta.eql(intent.transfer, id)) break :expected intent.cut;
+                        if (custody.epoch != saved.value.request.custody_epoch) return error.StaleCustody;
+                        break :expected try self.placementCut(a, subject);
+                    } else try self.placementCut(a, subject);
+                    _ = try self.placementFreeze(a, subject, saved.value.request.site.bytes, expected, id);
+                    const path = try std.fmt.allocPrint(a, "{s}/outgoing-{s}.par", .{ try self.placementDirectory(a), std.fmt.bytesToHex(id, .lower) });
+                    defer a.free(path);
+                    const offer = try self.placementOffer(a, subject, saved.value.request.site.bytes, path);
+                    return try jobs.Job.start(self.allocator, self.io, try self.placementPeer(saved.value.request.site.bytes), .{ .move = .{ .offer = offer, .path = .{ .bytes = path } } });
+                },
+                .control => {
+                    var saved = try self.record(p.ControlRecord, a, "placement_control", id, task_id);
+                    defer saved.deinit();
+                    if (saved.value.report != null) return null;
+                    try self.requireCustody(a, task_id, null);
+                    if (!std.meta.eql(saved.value.control.value.controller, try self.placementSite())) return error.CustodyNotLocal;
+                    const lineage = try @import("placement_journal.zig").controllerLineage(self.store(), a, task_id);
+                    defer a.free(lineage);
+                    const head = try p.routeHead(a, saved.value.control.value, saved.value.route.items);
+                    const peer = try self.placementPeerAt(head.site);
+                    const input: jobs.Input = .{ .control = .{ .message = saved.value.control, .route = saved.value.route, .lineage = .{ .items = lineage } } };
+                    const bytes = try contracts.encodeOwned(jobs.Input, a, input);
+                    defer a.free(bytes);
+                    try self.placementAuthorizeMessage(a, peer, saved.value.control.value.subject, bytes);
+                    return try jobs.Job.start(self.allocator, self.io, peer, input);
+                },
+            }
+        }
+
+        fn pumpPlacement(self: *Self, a: std.mem.Allocator) !bool {
+            const p = @import("placement.zig");
+            if (self.placement_job) |running| {
+                if (!running.job.finished.load(.acquire)) return false;
+                defer {
+                    running.job.deinit();
+                    self.placement_job = null;
+                }
+                const result = running.job.result catch |err| {
+                    try self.placementFailure(a, running.task, running.id, running.kind, err);
+                    return true;
+                };
+                switch (result) {
+                    .decision => |decision| {
+                        var saved = try self.record(p.Move, a, "placement_move", running.id, running.task);
+                        defer saved.deinit();
+                        try self.placementApplyDecision(a, saved.value.subject, decision);
+                        saved.value.decision = decision;
+                        saved.value.last_error = null;
+                        try self.store().begin();
+                        defer self.store().rollback();
+                        try self.store().putRecord(p.Move, "placement_move", running.id, running.task, saved.value);
+                        try self.namespace.commit("placement.move-complete");
+                    },
+                    .report => |bytes| {
+                        var resolution = try contracts.decodeOwned(p.ControlResolution, a, bytes);
+                        defer resolution.deinit();
+                        switch (resolution.value) {
+                            .report => |report| try self.placementApplyReport(a, running.task, running.id, report),
+                            .next => |next| {
+                                // The joined job still occupies placement_job;
+                                // enqueue directly after reserving before commit.
+                                self.placementFollowExecutor(a, running.task, running.id, next) catch |err| {
+                                    if (self.store().fenced or err == error.OutOfMemory or err == error.StorageUnavailable) return err;
+                                    try self.placementFailure(a, running.task, running.id, .control, err);
+                                };
+                            },
+                        }
+                    },
+                }
+                return true;
+            }
+            if (self.placement_pending.items.len == 0 or self.work != null) return false;
+            const selected = self.placement_pending.orderedRemove(0);
+            const job = self.placementStartJob(a, selected.task, selected.id, selected.kind) catch |err| {
+                if (self.store().fenced or err == error.OutOfMemory or err == error.StorageUnavailable) return err;
+                try self.placementFailure(a, selected.task, selected.id, selected.kind, err);
+                return true;
+            };
+            if (job) |started| self.placement_job = .{ .task = selected.task, .id = selected.id, .kind = selected.kind, .job = started };
+            return true;
+        }
+
+        /// Model-selected placement is a native operation with an immutable
+        /// signed observation. A move queues transport only after this receipt;
+        /// it cannot retire the controller from inside its own callback.
+        fn placementModel(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, request: wc.Placement) !wc.Reply {
+            const p = @import("placement.zig");
+            const journal = @import("placement_journal.zig");
+            const site = try self.placementSite();
+            const id = p.operationId(site, task_id, operation_id, .action);
+            if (try self.store().recordBytes(a, "placement_action", id, task_id)) |bytes| {
+                defer a.free(bytes);
+                var prior = try contracts.decodeOwned(p.ActionRecord, a, bytes);
+                defer prior.deinit();
+                try p.verify(p.Action, a, prior.value.action, site);
+                const wanted = try contracts.encodeOwned(wc.Placement, a, request);
+                defer a.free(wanted);
+                const actual = try contracts.encodeOwned(wc.Placement, a, prior.value.action.value.request);
+                defer a.free(actual);
+                if (!same(wanted, actual)) return error.OperationConflict;
+                return placementReplyCopy(a, prior.value.action.value.reply);
+            }
+            try self.requireCustody(a, task_id, null);
+            if (self.workspace_replay != null) return error.InvalidArchive;
+            try self.placement_pending.ensureUnusedCapacity(self.allocator, 1);
+            var queued: ?struct { id: state.Digest, kind: PlacementKind } = null;
+            var new_move: ?p.Move = null;
+            var observation = json.object();
+            switch (request) {
+                .sites => {
+                    var sites: std.array_list.Managed(json.Value) = .init(a);
+                    for (self.profile.placement.?.peers) |peer| {
+                        var item = json.object();
+                        try json.put(a, &item, "name", json.string(try a.dupe(u8, peer.name)));
+                        try json.put(a, &item, "site", try values.toJson(p.Site, a, peer.site));
+                        try json.put(a, &item, "transport", .{ .bool = peer.channel != null });
+                        try sites.append(item);
+                    }
+                    try json.put(a, &observation, "sites", .{ .array = sites });
+                },
+                .inspect => |selected| {
+                    const subject = try placementSubject(task_id, selected);
+                    try json.put(a, &observation, "custody", try values.toJson(?p.Custody, a, try self.placementStatus(a, subject)));
+                    try json.put(a, &observation, "retained_cut", try values.toJson(p.Cut, a, try self.placementCut(a, subject)));
+                },
+                .assess => |selected| {
+                    const subject = try placementSubject(task_id, selected.subject);
+                    const peer = try self.placementPeer(selected.site.bytes);
+                    const profiles_match = std.meta.eql(peer.compatibility, try self.placementCompatibility(a, subject)) and std.meta.eql(peer.resource_binding, try self.profile.resourceIdentity(a, self.application.image_identity));
+                    try json.put(a, &observation, "compatible", .{ .bool = profiles_match });
+                    try json.put(a, &observation, "transport", .{ .bool = peer.channel != null });
+                    try json.put(a, &observation, "disclosure", json.string("checked over the exact private closure when staging"));
+                    try json.put(a, &observation, "cut", try values.toJson(p.Cut, a, try self.placementCut(a, subject)));
+                },
+                .move => |selected| {
+                    if (selected.operation.bytes.len == 0) return error.InvalidOperation;
+                    const peer = try self.placementPeer(selected.site.bytes);
+                    if (peer.channel == null) return error.UnsupportedCapability;
+                    _ = try self.placementDirectory(a);
+                    const move_id = p.operationId(site, task_id, selected.operation.bytes, .move);
+                    if (try self.store().recordBytes(a, "placement_move", move_id, task_id)) |bytes| {
+                        defer a.free(bytes);
+                        var prior = try contracts.decodeOwned(p.Move, a, bytes);
+                        defer prior.deinit();
+                        const wanted = try contracts.encodeOwned(@TypeOf(selected), a, selected);
+                        defer a.free(wanted);
+                        const actual = try contracts.encodeOwned(@TypeOf(selected), a, prior.value.request);
+                        defer a.free(actual);
+                        if (!same(wanted, actual)) return error.OperationConflict;
+                        observation = try values.toJson(p.Move, a, prior.value);
+                        if (prior.value.decision == null and !prior.value.cancelled) queued = .{ .id = move_id, .kind = .move };
+                    } else {
+                        const subject = try placementSubject(task_id, selected.subject);
+                        try self.requireCustody(a, task_id, subject.work);
+                        const custody_value = (try self.placementStatus(a, subject)) orelse p.Custody.initial(subject, site);
+                        try custody_value.requireLocal(site);
+                        if (custody_value.epoch != selected.custody_epoch) return error.StaleCustody;
+                        new_move = .{ .id = move_id, .task = task_id, .owner = site, .action = undefined, .request = selected, .subject = subject, .expected = null };
+                        try json.put(a, &observation, "transfer", json.string(try a.dupe(u8, &std.fmt.bytesToHex(move_id, .lower))));
+                        try json.put(a, &observation, "status", json.string("queued"));
+                        queued = .{ .id = move_id, .kind = .move };
+                    }
+                },
+                .retry, .withdraw => {
+                    const selected_operation = if (request == .retry) request.retry.operation else request.withdraw.operation;
+                    const move_id = p.operationId(site, task_id, selected_operation.bytes, .move);
+                    if (request == .withdraw) try self.placementWithdraw(a, task_id, move_id);
+                    var prior = try self.record(p.Move, a, "placement_move", move_id, task_id);
+                    defer prior.deinit();
+                    if (!std.meta.eql(prior.value.owner, site)) return error.CustodyNotLocal;
+                    observation = try values.toJson(p.Move, a, prior.value);
+                    if (prior.value.decision == null and !prior.value.cancelled) queued = .{ .id = move_id, .kind = .move };
+                },
+                .control, .expand => {
+                    const expanded = request == .expand;
+                    const selected_command: wc.Work = if (expanded) .{ .inspect = .{ .work = request.expand.work } } else request.control.command;
+                    const selected_operation = if (expanded) request.expand.operation else request.control.operation;
+                    const bytes = try self.placementControlExpanded(a, selected_operation.bytes, task_id, selected_command, if (expanded) .{ .reference = request.expand.reference, .page = request.expand.page } else null, true, null);
+                    defer a.free(bytes);
+                    var control = try contracts.decodeOwned(p.Signed(p.Control), a, bytes);
+                    defer control.deinit();
+                    const control_id = p.controlId(control.value.value);
+                    var saved = try journal.control(self.store(), a, task_id, control_id) orelse return error.CorruptState;
+                    defer saved.deinit();
+                    if (saved.value.report) |report| {
+                        // Remote references remain owned by that executor.
+                        // An observation cannot mint local value/view custody.
+                        try json.put(a, &observation, "remote_reply", try values.toJson(wc.Reply, a, report.value.reply));
+                    } else {
+                        const head = try p.routeHead(a, saved.value.control.value, saved.value.route.items);
+                        const peer = try self.placementPeerAt(head.site);
+                        if (peer.channel == null) return error.UnsupportedCapability;
+                        try json.put(a, &observation, "control", json.string(try a.dupe(u8, &std.fmt.bytesToHex(control_id, .lower))));
+                        try json.put(a, &observation, "status", json.string("queued"));
+                        try json.put(a, &observation, "last_error", try values.toJson(?state.Name, a, saved.value.last_error));
+                        queued = .{ .id = control_id, .kind = .control };
+                    }
+                },
+            }
+            const reply: wc.Reply = .{ .disposition = .observed, .observation_json = .{ .bytes = try json.canonical(a, observation) } };
+            const signed = try p.sign(p.Action, a, self.profile.placement.?.signing_key, .{ .id = id, .task = task_id, .owner = site, .operation = try name(operation_id), .request = request, .reply = reply });
+            try self.store().begin();
+            defer self.store().rollback();
+            var controller = try journal.custody(self.store(), a, .{ .task = task_id });
+            defer if (controller) |*saved| saved.deinit();
+            if (controller == null) try self.createCustody(a, task_id, null);
+            try self.store().createRecord(p.ActionRecord, "placement_action", id, task_id, .{ .id = id, .task = task_id, .action = signed });
+            if (new_move) |*move| {
+                move.action = try self.snapshotRecord(p.ActionRecord, a, "placement_action", id, task_id);
+                try self.store().createRecord(p.Move, "placement_move", move.id, task_id, move.*);
+            }
+            try self.namespace.commit("placement.model-action");
+            if (queued) |pending| self.placementQueue(task_id, pending.id, pending.kind);
+            return reply;
+        }
+
+        /// Historical signatures preserve identity; each new disclosure still
+        /// needs the launch's current policy. The temporary object lets the
+        /// policy inspect the exact bytes, without publishing a new operation.
+        fn placementAuthorizeMessage(self: *Self, a: std.mem.Allocator, peer: @import("placement.zig").Peer, subject: @import("placement.zig").Subject, message_bytes: []const u8) !void {
+            var parent = try self.task(a, subject.task);
+            defer parent.deinit();
+            var scratch = std.heap.ArenaAllocator.init(a);
+            defer scratch.deinit();
+            const closure = try archive_api.disclosureClosure(scratch.allocator(), self.store(), subject.task);
+            const refs = try scratch.allocator().alloc(state.Reference, closure.len + 1);
+            @memcpy(refs[0..closure.len], closure);
+            try self.store().begin();
+            defer self.store().rollback();
+            refs[closure.len] = try self.store().putObject(message_bytes);
+            try peer.disclose(peer.context, subject, refs);
+        }
+
+        // The message's exact bytes join the current private task closure.
+        // Disclosure admission happens before publication and transport.
+        fn placementPutControl(self: *Self, a: std.mem.Allocator, peer: @import("placement.zig").Peer, record_value: @import("placement.zig").ControlRecord, message_bytes: []const u8, label: []const u8) !void {
+            var parent = try self.task(a, record_value.task);
+            defer parent.deinit();
+            var scratch = std.heap.ArenaAllocator.init(a);
+            defer scratch.deinit();
+            const closure = try archive_api.disclosureClosure(scratch.allocator(), self.store(), record_value.task);
+            const refs = try scratch.allocator().alloc(state.Reference, closure.len + 1);
+            @memcpy(refs[0..closure.len], closure);
+            try self.store().begin();
+            defer self.store().rollback();
+            refs[closure.len] = try self.store().putObject(message_bytes);
+            try peer.disclose(peer.context, record_value.control.value.subject, refs);
+            try @import("placement_journal.zig").putControl(self.store(), a, record_value);
+            try self.namespace.commit(label);
+        }
+
+        pub fn placementStatus(self: *Self, a: std.mem.Allocator, subject: @import("placement.zig").Subject) !?@import("placement.zig").Custody {
+            var parent = try self.task(a, subject.task);
+            defer parent.deinit();
+            var saved = try @import("placement_journal.zig").custody(self.store(), a, subject) orelse return null;
+            defer saved.deinit();
+            return saved.value;
+        }
+
+        /// Persist before transport. An unanswered command prevents controller
+        /// succession, so a delayed command cannot cross an ownership epoch.
+        pub fn placementControl(self: *Self, a: std.mem.Allocator, operation_name: []const u8, task_id: state.TaskId, command: wc.Work) ![]u8 {
+            return self.placementControlExpanded(a, operation_name, task_id, command, null, false, null);
+        }
+        fn placementControlExpanded(self: *Self, a: std.mem.Allocator, operation_name: []const u8, task_id: state.TaskId, command: wc.Work, expansion: @FieldType(@import("placement.zig").Control, "expansion"), require_transport: bool, cleanup_request: ?u64) ![]u8 {
+            const p = @import("placement.zig");
+            const journal = @import("placement_journal.zig");
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            const site = try self.placementSite();
+            const work_id = try wp.identity(try p.commandWork(command), .work);
+            var controller = try journal.custody(self.store(), a, .{ .task = task_id }) orelse return error.InvalidTransfer;
+            defer controller.deinit();
+            try controller.value.requireLocal(site);
+            var executor = try journal.custody(self.store(), a, .{ .task = task_id, .work = work_id }) orelse return error.InvalidTransfer;
+            defer executor.deinit();
+            if (executor.value.phase != .away or std.meta.eql(executor.value.owner, site)) return error.CustodyNotRemote;
+            if (operation_name.len == 0 or operation_name.len > 128) return error.InvalidOperation;
+            const value: p.Control = .{ .subject = .{ .task = task_id, .work = work_id }, .controller = site, .controller_epoch = controller.value.epoch, .executor = executor.value.owner, .custody_epoch = executor.value.epoch, .operation = .{ .bytes = operation_name }, .command = command, .expansion = expansion, .cleanup_request = cleanup_request, .parent_stopped = parent.value.terminal() or parent.value.cancellation != null };
+            const id = p.controlId(value);
+            if (try journal.control(self.store(), a, task_id, id)) |saved| {
+                var prior = saved;
+                defer prior.deinit();
+                var replay_value = value;
+                replay_value.executor = prior.value.control.value.executor;
+                replay_value.custody_epoch = prior.value.control.value.custody_epoch;
+                replay_value.parent_stopped = prior.value.control.value.parent_stopped;
+                if (replay_value.cleanup_request == null) replay_value.cleanup_request = prior.value.control.value.cleanup_request;
+                if (!std.meta.eql(try p.digest(p.Control, a, prior.value.control.value), try p.digest(p.Control, a, replay_value))) return error.OperationConflict;
+                const bytes = try contracts.encodeOwned(p.Signed(p.Control), a, prior.value.control);
+                errdefer a.free(bytes);
+                const head = try p.routeHead(a, prior.value.control.value, prior.value.route.items);
+                try self.placementAuthorizeMessage(a, try self.placementPeerAt(head.site), value.subject, bytes);
+                return bytes;
+            }
+            if (require_transport and (try self.placementPeerAt(value.executor)).channel == null) return error.UnsupportedCapability;
+            const signed = try p.sign(p.Control, a, self.profile.placement.?.signing_key, value);
+            const result = try contracts.encodeOwned(p.Signed(p.Control), a, signed);
+            errdefer a.free(result);
+            try self.placementPutControl(a, try self.placementPeerAt(value.executor), .{ .id = id, .task = task_id, .control = signed }, result, "placement.control");
+            return result;
+        }
+
+        pub fn placementExecuteControl(self: *Self, a: std.mem.Allocator, peer_name: []const u8, signed: @import("placement.zig").Signed(@import("placement.zig").Control)) ![]u8 {
+            return self.placementExecuteRoutedControl(a, peer_name, signed, &.{});
+        }
+
+        pub fn placementResolveControl(self: *Self, a: std.mem.Allocator, peer_name: []const u8, signed: @import("placement.zig").Signed(@import("placement.zig").Control), route: []const @import("placement.zig").Succession) ![]u8 {
+            const p = @import("placement.zig");
+            const journal = @import("placement_journal.zig");
+            var parent = try self.task(a, signed.value.subject.task);
+            defer parent.deinit();
+            const peer = try self.placementPeer(peer_name);
+            try p.verify(p.Control, a, signed, peer.site);
+            const head = try p.routeHead(a, signed.value, route);
+            if (!std.meta.eql(head.site, try self.placementSite())) return error.InvalidRemoteCommand;
+            var prior = try journal.control(self.store(), a, signed.value.subject.task, p.controlId(signed.value));
+            defer if (prior) |*saved| saved.deinit();
+            if (prior) |saved| {
+                if (!std.meta.eql(try p.digest(p.Control, a, signed.value), try p.digest(p.Control, a, saved.value.control.value))) return error.OperationConflict;
+                if (saved.value.report) |report| {
+                    try p.matchReport(a, signed.value, route, report);
+                    const bytes = try contracts.encodeOwned(p.ControlResolution, a, .{ .report = report });
+                    errdefer a.free(bytes);
+                    try self.placementAuthorizeMessage(a, peer, signed.value.subject, bytes);
+                    return bytes;
+                }
+            }
+            var controller = try journal.custody(self.store(), a, .{ .task = signed.value.subject.task }) orelse return error.InvalidTransfer;
+            defer controller.deinit();
+            if (!std.meta.eql(controller.value.owner, peer.site) or controller.value.epoch != signed.value.controller_epoch) return error.StaleController;
+            if (try journal.nextExecutor(self.store(), a, signed.value.subject, head)) |next| {
+                const bytes = try contracts.encodeOwned(p.ControlResolution, a, .{ .next = next });
+                errdefer a.free(bytes);
+                try self.placementAuthorizeMessage(a, peer, signed.value.subject, bytes);
+                return bytes;
+            }
+            const report_bytes = try self.placementExecuteRoutedControl(a, peer_name, signed, route);
+            defer a.free(report_bytes);
+            var report = try contracts.decodeOwned(p.Signed(p.Report), a, report_bytes);
+            defer report.deinit();
+            const result = try contracts.encodeOwned(p.ControlResolution, a, .{ .report = report.value });
+            errdefer a.free(result);
+            try self.placementAuthorizeMessage(a, peer, signed.value.subject, result);
+            return result;
+        }
+
+        fn placementExecuteRoutedControl(self: *Self, a: std.mem.Allocator, peer_name: []const u8, signed: @import("placement.zig").Signed(@import("placement.zig").Control), route: []const @import("placement.zig").Succession) ![]u8 {
+            const p = @import("placement.zig");
+            const journal = @import("placement_journal.zig");
+            var parent = try self.task(a, signed.value.subject.task);
+            defer parent.deinit();
+            const peer = try self.placementPeer(peer_name);
+            const site = try self.placementSite();
+            try p.verify(p.Control, a, signed, peer.site);
+            const value = signed.value;
+            const head = try p.routeHead(a, value, route);
+            if (!std.meta.eql(head.site, site) or value.subject.work == null or
+                !std.meta.eql(try wp.identity(try p.commandWork(value.command), .work), value.subject.work.?)) return error.InvalidRemoteCommand;
+            const id = p.controlId(value);
+            var prior = try journal.control(self.store(), a, value.subject.task, id);
+            defer if (prior) |*saved| saved.deinit();
+            if (prior) |saved| {
+                if (!std.meta.eql(try p.digest(p.Control, a, saved.value.control.value), try p.digest(p.Control, a, value))) return error.OperationConflict;
+                if (saved.value.report) |report| {
+                    try p.matchReport(a, value, route, report);
+                    const bytes = try contracts.encodeOwned(p.Signed(p.Report), a, report);
+                    errdefer a.free(bytes);
+                    try self.placementAuthorizeMessage(a, peer, value.subject, bytes);
+                    return bytes;
+                }
+            }
+            var controller = try journal.custody(self.store(), a, .{ .task = value.subject.task }) orelse return error.InvalidTransfer;
+            defer controller.deinit();
+            if (!std.meta.eql(controller.value.owner, peer.site) or controller.value.epoch != value.controller_epoch) return error.StaleController;
+            var executor = try journal.custody(self.store(), a, value.subject) orelse return error.InvalidTransfer;
+            defer executor.deinit();
+            try executor.value.requireLocal(site);
+            if (executor.value.epoch != head.epoch) return error.StaleCustody;
+            const route_changed = if (prior) |saved| changed: {
+                if (saved.value.route.items.len != route.len) break :changed true;
+                for (saved.value.route.items, route) |left, right| if (!std.meta.eql(left, right)) break :changed true;
+                break :changed false;
+            } else true;
+            if (route_changed) {
+                try self.store().begin();
+                defer self.store().rollback();
+                try journal.putControl(self.store(), a, .{ .id = id, .task = value.subject.task, .control = signed, .route = .{ .items = route } });
+                try self.namespace.commit("placement.receive-control");
+            }
+            // Native workspace receipts make a retry after execution but before
+            // report publication idempotent. The transport never supplies an
+            // environmental response or new adapter grant.
+            var scratch = std.heap.ArenaAllocator.init(a);
+            defer scratch.deinit();
+            const operation_name = try std.fmt.allocPrint(scratch.allocator(), "placement-{s}", .{std.fmt.bytesToHex(id, .lower)});
+            const selected: wc.Command = if (value.expansion) |expand| .{ .context = .{ .expand = .{ .reference = expand.reference, .page = expand.page } } } else .{ .work = value.command };
+            const reply = reply: {
+                const previous = self.remote_stopped_parent;
+                self.remote_stopped_parent = if (value.parent_stopped) value.subject.task else null;
+                defer self.remote_stopped_parent = previous;
+                break :reply try self.workspaceCommand(scratch.allocator(), operation_name, value.subject.task, selected);
+            };
+            var observed_work = try self.workspaceWork(scratch.allocator(), value.subject.task, value.subject.work.?);
+            defer observed_work.deinit();
+            const outcome_bytes = try self.store().object(scratch.allocator(), observed_work.value.outcome, null);
+            var outcome = try data.invocation.decode(data.invocation.Outcome, scratch.allocator(), outcome_bytes);
+            defer outcome.deinit();
+            const observed: p.WorkState = .{ .observed_at = self.store().head.generation, .execution_revision = observed_work.value.execution_revision, .control_revision = observed_work.value.control_revision, .outcome = observed_work.value.outcome_kind, .cleanup_complete = cleanupComplete(outcome.value), .cancellation = observed_work.value.cancellation, .explicitly_parked = try self.workspaceExplicitlyParked(a, observed_work.value), .park_complete = try self.workspaceWorkSettled(a, observed_work.value, false, true) };
+            const report = try p.sign(p.Report, a, self.profile.placement.?.signing_key, .{ .control = try p.digest(p.Control, a, value), .executor = site, .custody_epoch = head.epoch, .reply = reply, .work_state = observed });
+            const result = try contracts.encodeOwned(p.Signed(p.Report), a, report);
+            errdefer a.free(result);
+            try self.placementPutControl(a, peer, .{ .id = id, .task = value.subject.task, .control = signed, .route = .{ .items = route }, .report = report }, result, "placement.control-report");
+            return result;
+        }
+
+        pub fn placementFollowExecutor(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, control_id: state.Digest, next: @import("placement.zig").Succession) !void {
+            const p = @import("placement.zig");
+            const journal = @import("placement_journal.zig");
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            try self.requireCustody(a, task_id, null);
+            var saved = try journal.control(self.store(), a, task_id, control_id) orelse return error.InvalidRemoteCommand;
+            defer saved.deinit();
+            const control = saved.value.control.value;
+            if (!std.meta.eql(control.controller, try self.placementSite()) or saved.value.report != null) return error.InvalidRemoteCommand;
+            const head = try p.routeHead(a, control, saved.value.route.items);
+            const successor = try p.routeNext(a, control.subject, head, next);
+            _ = try self.placementPeerAt(successor.site);
+            var directory = try journal.custody(self.store(), a, control.subject) orelse return error.InvalidTransfer;
+            defer directory.deinit();
+            if (directory.value.phase != .away) return error.CustodyNotRemote;
+            const update = directory.value.epoch < successor.epoch;
+            if (update and (!std.meta.eql(directory.value.owner, head.site) or directory.value.epoch != head.epoch)) return error.StaleCustody;
+            if (directory.value.epoch == successor.epoch and !std.meta.eql(directory.value.owner, successor.site)) return error.InvalidTransfer;
+            const route = try a.alloc(p.Succession, saved.value.route.items.len + 1);
+            defer a.free(route);
+            @memcpy(route[0..saved.value.route.items.len], saved.value.route.items);
+            route[route.len - 1] = next;
+            var updated = saved.value;
+            updated.route = .{ .items = route };
+            updated.last_error = null;
+            try self.placement_pending.ensureUnusedCapacity(self.allocator, 1);
+            try self.store().begin();
+            defer self.store().rollback();
+            try journal.putControl(self.store(), a, updated);
+            if (update) {
+                directory.value.owner = successor.site;
+                directory.value.epoch = successor.epoch;
+                directory.value.intent = next.offer.value.intent;
+                directory.value.offer = next.offer;
+                directory.value.decision = next.decision;
+                try journal.putCustody(self.store(), a, directory.value);
+            }
+            try self.namespace.commit("placement.executor-succession");
+            self.placement_pending.appendAssumeCapacity(.{ .task = task_id, .id = control_id, .kind = .control });
+        }
+
+        pub fn placementApplyReport(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, control_id: state.Digest, report: @import("placement.zig").Signed(@import("placement.zig").Report)) !void {
+            const p = @import("placement.zig");
+            const journal = @import("placement_journal.zig");
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            var saved = try journal.control(self.store(), a, task_id, control_id) orelse return error.InvalidRemoteCommand;
+            defer saved.deinit();
+            const control = saved.value.control.value;
+            try p.matchReport(a, control, saved.value.route.items, report);
+            if (!std.meta.eql(control.controller, try self.placementSite())) return error.InvalidRemoteCommand;
+            if (saved.value.report) |prior| {
+                if (!std.meta.eql(try p.digest(p.Report, a, prior.value), try p.digest(p.Report, a, report.value))) return error.OperationConflict;
+                return;
+            }
+            saved.value.report = report;
+            saved.value.last_error = null;
+            const wake = (parent.value.cancellation != null or parent.value.terminal()) and try self.hasLocalCustody(a, task_id, null);
+            if (wake) {
+                try self.ensureOwnershipCapacity(task_id);
+                try self.runnable.ensureUnusedCapacity(self.allocator, 1);
+            }
+            try self.store().begin();
+            defer self.store().rollback();
+            try journal.putControl(self.store(), a, saved.value);
+            try self.namespace.commit("placement.acknowledge-control");
+            if (wake) {
+                self.claim(task_id);
+                if (parent.value.cancellation != null) self.subjectAddAssumeCapacity(.{ .task = task_id });
+            }
+        }
+
+        /// A worker learns controller succession from both native signatures.
+        /// This updates a remote directory entry and cannot activate a copy.
+        pub fn placementFollowController(self: *Self, a: std.mem.Allocator, source_peer: []const u8, destination_peer: []const u8, offer: @import("placement.zig").Signed(@import("placement.zig").Offer), decision: @import("placement.zig").Signed(@import("placement.zig").Decision)) !void {
+            const p = @import("placement.zig");
+            const journal = @import("placement_journal.zig");
+            var parent = try self.task(a, offer.value.intent.subject.task);
+            defer parent.deinit();
+            const source_peer_value = try self.placementPeer(source_peer);
+            const destination_peer_value = try self.placementPeer(destination_peer);
+            try p.verify(p.Offer, a, offer, source_peer_value.site);
+            try p.matchDecision(a, offer.value, decision);
+            if (offer.value.intent.subject.work != null or decision.value.verdict != .accepted or
+                !std.meta.eql(decision.value.destination, destination_peer_value.site)) return error.InvalidTransfer;
+            const subject = offer.value.intent.subject;
+            var saved = try journal.custody(self.store(), a, subject) orelse return error.InvalidTransfer;
+            defer saved.deinit();
+            const site = try self.placementSite();
+            if (std.meta.eql(saved.value.owner, site) or std.meta.eql(decision.value.destination, site)) return error.InvalidTransfer;
+            if (saved.value.epoch == decision.value.epoch and std.meta.eql(saved.value.owner, decision.value.destination)) return;
+            if (saved.value.epoch != offer.value.intent.epoch or !std.meta.eql(saved.value.owner, source_peer_value.site)) return error.StaleController;
+            try journal.requireSettled(self.store(), a, subject, site);
+            saved.value.owner = decision.value.destination;
+            saved.value.epoch = decision.value.epoch;
+            saved.value.phase = .away;
+            saved.value.intent = offer.value.intent;
+            saved.value.offer = offer;
+            saved.value.decision = decision;
+            try self.store().begin();
+            defer self.store().rollback();
+            try journal.putCustody(self.store(), a, saved.value);
+            try self.namespace.commit("placement.controller-succession");
+        }
+
+        /// Before an offer is published there is no possible destination
+        /// acceptance. Once offered, only its signed decision can release it.
+        pub fn placementAbortUnsent(self: *Self, a: std.mem.Allocator, subject: @import("placement.zig").Subject, transfer: state.Digest) !void {
+            const journal = @import("placement_journal.zig");
+            var parent = try self.task(a, subject.task);
+            defer parent.deinit();
+            var saved = try journal.custody(self.store(), a, subject) orelse return error.InvalidTransfer;
+            defer saved.deinit();
+            if (saved.value.phase != .frozen or saved.value.intent == null or saved.value.offer != null or
+                !std.meta.eql(saved.value.owner, try self.placementSite()) or !std.meta.eql(saved.value.intent.?.transfer, transfer)) return error.InvalidTransfer;
+            saved.value.phase = .local;
+            saved.value.intent = null;
+            try self.store().begin();
+            defer self.store().rollback();
+            try journal.putCustody(self.store(), a, saved.value);
+            try self.namespace.commit("placement.withdraw-unsent");
+        }
+
+        /// Stop local transport before deciding whether a peer could hold an
+        /// offer. Published offers require that peer's durable refusal (or its
+        /// already committed acceptance), even when no response was received.
+        pub fn placementWithdraw(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, transfer: state.Digest) !void {
+            const p = @import("placement.zig");
+            const journal = @import("placement_journal.zig");
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            const site = try self.placementSite();
+            var saved = try self.record(p.Move, a, "placement_move", transfer, task_id);
+            defer saved.deinit();
+            if (!std.meta.eql(saved.value.owner, site)) return error.CustodyNotLocal;
+            if (saved.value.decision != null or saved.value.cancelled) return;
+            try self.placement_pending.ensureUnusedCapacity(self.allocator, 1);
+            if (self.placement_job) |running| if (running.kind == .move and std.meta.eql(running.id, transfer)) {
+                running.job.deinit();
+                self.placement_job = null;
+            };
+            var i: usize = 0;
+            while (i < self.placement_pending.items.len) {
+                const pending = self.placement_pending.items[i];
+                if (pending.kind == .move and std.meta.eql(pending.id, transfer)) {
+                    _ = self.placement_pending.orderedRemove(i);
+                } else i += 1;
+            }
+            var custody = try journal.custody(self.store(), a, saved.value.subject);
+            defer if (custody) |*value| value.deinit();
+            const same_transfer = if (custody) |value| if (value.value.intent) |intent| std.meta.eql(intent.transfer, transfer) else false else false;
+            const offered = same_transfer and custody.?.value.offer != null;
+            saved.value.withdraw_requested = true;
+            saved.value.last_error = null;
+            try self.store().begin();
+            defer self.store().rollback();
+            if (same_transfer and custody.?.value.decision != null) {
+                saved.value.decision = custody.?.value.decision;
+            } else if (!offered) {
+                if (same_transfer and custody.?.value.phase == .frozen) {
+                    custody.?.value.phase = .local;
+                    custody.?.value.intent = null;
+                    try journal.putCustody(self.store(), a, custody.?.value);
+                }
+                saved.value.cancelled = true;
+            }
+            try self.store().putRecord(p.Move, "placement_move", transfer, task_id, saved.value);
+            try self.namespace.commit("placement.withdraw-requested");
+            if (offered and saved.value.decision == null) self.placementQueue(task_id, transfer, .move);
+        }
+
+        pub fn placementCompatibility(self: *Self, a: std.mem.Allocator, subject: @import("placement.zig").Subject) !@import("placement.zig").Compatibility {
+            var parent = try self.task(a, subject.task);
+            defer parent.deinit();
+            // Compatibility belongs to the admitted artifact. Inspecting it
+            // must not restore execution or acquire a publication obligation.
+            var selected: ?SelectedRuntime = null;
+            defer if (selected) |*runtime| runtime.deinit();
+            if (subject.work) |id| {
+                var child = try self.workspaceWork(a, subject.task, id);
+                defer child.deinit();
+                if (child.value.runtime) |ref| {
+                    selected = try self.workspaceRuntime(a, subject.task, ref.digest, child.value.program);
+                    if (!std.meta.eql(ref, selected.?.record.value.artifact)) return error.InvalidRuntime;
+                }
+            }
+            var packaged = try self.program.retainRuntime();
+            defer packaged.deinit();
+            const manifest = if (selected) |runtime| runtime.admitted.content.value.manifest else packaged.content.value.manifest;
+            return .{ .base = storage.digest(manifest.requirements.base), .admission = storage.digest(manifest.requirements.admission), .bridge = storage.digest(manifest.requirements.bridge), .semantics = manifest.source, .private_state = storage.digest(kosmos.RuntimeCapsule.identity) };
+        }
+
+        pub fn placementCut(self: *Self, a: std.mem.Allocator, subject: @import("placement.zig").Subject) !@import("placement.zig").Cut {
+            const p = @import("placement.zig");
+            if (subject.work) |id| {
+                var child = try self.workspaceWork(a, subject.task, id);
+                defer child.deinit();
+                const value = child.value;
+                return .{ .execution = value.execution_revision, .control = value.control_revision, .realization = value.realization_revision, .checkpoint = p.ObjectIdentity.from(value.checkpoint), .outer = p.ObjectIdentity.optional(if (value.outer_operation) |pending| pending.capsule else value.runtime_capsule), .runtime = p.ObjectIdentity.optional(value.runtime) };
+            }
+            try self.retainRootOperation(a);
+            var parent = try self.task(a, subject.task);
+            defer parent.deinit();
+            var saved = try self.rootOperation(a, parent.value);
+            defer if (saved) |*item| item.deinit();
+            return .{ .execution = parent.value.execution_revision, .control = parent.value.revision, .realization = 0, .checkpoint = p.ObjectIdentity.from(parent.value.checkpoint), .outer = p.ObjectIdentity.optional(if (saved != null and saved.?.value.pending != null) saved.?.value.pending.?.capsule else null) };
+        }
+
+        /// Separate controller and work subjects retain independent epochs.
+        /// This returns only after the source can no longer run the subject.
+        pub fn placementFreeze(self: *Self, a: std.mem.Allocator, subject: @import("placement.zig").Subject, peer_name: []const u8, expected: @import("placement.zig").Cut, transfer: state.Digest) !@import("placement.zig").Intent {
+            const p = @import("placement.zig");
+            const journal = @import("placement_journal.zig");
+            var parent = try self.task(a, subject.task);
+            defer parent.deinit();
+            const site = try self.placementSite();
+            const peer = try self.placementPeer(peer_name);
+            var prior = try journal.custody(self.store(), a, subject);
+            defer if (prior) |*saved| saved.deinit();
+            if (prior == null and !try self.store().locallyAdmitted(subject.task)) return error.CustodyNotLocal;
+            const current = if (prior) |saved| saved.value else p.Custody.initial(subject, site);
+            if (current.phase == .frozen and current.intent != null and std.meta.eql(current.intent.?.transfer, transfer)) {
+                const intent = current.intent.?;
+                if (!std.meta.eql(intent.destination, peer.site) or !std.meta.eql(intent.cut, expected)) return error.OperationConflict;
+                return intent;
+            }
+            try current.requireLocal(site);
+            try journal.requireSettled(self.store(), a, subject, site);
+            if (subject.work == null) {
+                var moves = try self.store().database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.kind='placement_move' AND r.task=?", &.{.{ .blob = &subject.task }});
+                defer moves.deinit();
+                while (try moves.step() == .row) {
+                    var moving = try contracts.decodeOwned(p.Move, a, try moves.bytes(0));
+                    defer moving.deinit();
+                    if (std.meta.eql(moving.value.owner, site) and moving.value.decision == null and !moving.value.cancelled and !std.meta.eql(moving.value.id, transfer)) return error.UnsettledRemoteControl;
+                }
+            }
+            try self.compatible(parent.value);
+            if (!std.meta.eql(expected, try self.placementCut(a, subject))) return error.StaleRevision;
+            if (self.work) |running| if (std.meta.eql(running.task, subject.task) and std.meta.eql(running.subject_work, subject.work)) return error.UnsettledOccurrence;
+            if (subject.work) |work_id| {
+                const ids = try self.workspaceIds(a, subject.task);
+                defer a.free(ids);
+                for (ids) |id| {
+                    var child = try self.workspaceWork(a, subject.task, id);
+                    defer child.deinit();
+                    const ref = child.value.delegation orelse continue;
+                    if (child.value.terminal() and child.value.answer_value == null) continue;
+                    var delegation = try contracts.decodeOwned(workspace.Delegation, a, try self.store().object(a, ref, null));
+                    defer delegation.deinit();
+                    if (!std.meta.eql(work_id, child.value.id) and !std.meta.eql(work_id, delegation.value.work)) continue;
+                    if (try self.delegationCurrent(a, parent.value, child.value)) return error.UnsettledOccurrence;
+                }
+            }
+            var pending_rows = try self.store().database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.kind='occurrence' AND r.task=?", &.{.{ .blob = &subject.task }});
+            defer pending_rows.deinit();
+            while (try pending_rows.step() == .row) {
+                var pending = try contracts.decodeOwned(occurrence.Occurrence, a, try pending_rows.bytes(0));
+                defer pending.deinit();
+                if (!std.meta.eql(pending.value.work, subject.work)) continue;
+                if (pending.value.state == .dispatching or pending.value.state == .unknown) return error.UnsettledOccurrence;
+            }
+            const compatibility = try self.placementCompatibility(a, subject);
+            const resources = try self.profile.resourceIdentity(a, self.application.image_identity);
+            if (!std.meta.eql(compatibility, peer.compatibility) or !std.meta.eql(resources, peer.resource_binding)) return error.IncompatibleProfile;
+            const intent: p.Intent = .{ .transfer = transfer, .subject = subject, .source = site, .destination = peer.site, .source_native = self.profile.runtime_identity, .destination_native = peer.native_build, .epoch = current.epoch, .cut = expected, .compatibility = compatibility, .resources = resources, .disclosure = peer.disclosure_policy };
+            const frozen = try current.freeze(site, intent);
+            // Retire before publication. If retirement fails, nothing has been
+            // offered and the sole source retains its prior ownership.
+            if (self.active) |active| if (std.meta.eql(active.task, subject.task) and std.meta.eql(active.work, subject.work)) try self.retire(a);
+            try self.store().begin();
+            defer self.store().rollback();
+            // Enabling placement on an existing local task first records its
+            // complete controller/work directory. Copies of its other subjects
+            // cannot inherit implicit local custody at a destination.
+            var controller = try journal.custody(self.store(), a, .{ .task = subject.task });
+            defer if (controller) |*record_value| record_value.deinit();
+            if (controller == null) try journal.putCustody(self.store(), a, p.Custody.initial(.{ .task = subject.task }, site));
+            const children = try self.workspaceIds(a, subject.task);
+            defer a.free(children);
+            for (children) |id| {
+                var child = try journal.custody(self.store(), a, .{ .task = subject.task, .work = id });
+                defer if (child) |*record_value| record_value.deinit();
+                if (child == null) try journal.putCustody(self.store(), a, p.Custody.initial(.{ .task = subject.task, .work = id }, site));
+            }
+            try journal.putCustody(self.store(), a, frozen);
+            // Capture the exact export while custody and its directory are still
+            // unpublished. Later sibling progress cannot change this cut.
+            var snapshot_arena = std.heap.ArenaAllocator.init(a);
+            defer snapshot_arena.deinit();
+            const snapshot_a = snapshot_arena.allocator();
+            const manifest = try archive_api.prepare(snapshot_a, self.store(), subject.task, self.assets.manifest);
+            try self.validateArchiveAdmissions(snapshot_a, parent.value, manifest);
+            try self.validateOccurrenceProvenance(snapshot_a, parent.value, manifest.records.items);
+            try self.validateCapturedProjections(parent.value, manifest.records.items, .inspect);
+            try self.validateWorkspaceRecordBodies(snapshot_a, subject.task, manifest.records.items);
+            try archive_api.retainAssets(snapshot_a, self.store(), self.assets.manifest);
+            const snapshot: p.Snapshot = .{ .id = frozen.id, .task = subject.task, .work = subject.work, .frozen = .{ .intent = intent, .manifest = manifest } };
+            if (try self.store().recordBytes(snapshot_a, "placement_snapshot", snapshot.id, snapshot.task)) |bytes| {
+                snapshot_a.free(bytes);
+                try self.store().putRecord(p.Snapshot, "placement_snapshot", snapshot.id, snapshot.task, snapshot);
+            } else try self.store().createRecord(p.Snapshot, "placement_snapshot", snapshot.id, snapshot.task, snapshot);
+            try self.namespace.commit("placement.freeze");
+            self.subjectRemove(.{ .task = subject.task, .work = subject.work });
+            return intent;
+        }
+
+        /// Prepare the authenticated transport file locally. No peer sees an
+        /// offer until both its file and signed source record are durable.
+        pub fn placementOffer(self: *Self, a: std.mem.Allocator, subject: @import("placement.zig").Subject, peer_name: []const u8, path: []const u8) !@import("placement.zig").Signed(@import("placement.zig").Offer) {
+            const p = @import("placement.zig");
+            const journal = @import("placement_journal.zig");
+            var parent = try self.task(a, subject.task);
+            defer parent.deinit();
+            const peer = try self.placementPeer(peer_name);
+            var saved = try journal.custody(self.store(), a, subject) orelse return error.InvalidTransfer;
+            defer saved.deinit();
+            const site = try self.placementSite();
+            if (saved.value.phase != .frozen or saved.value.intent == null or
+                !std.meta.eql(saved.value.owner, site) or !std.meta.eql(saved.value.intent.?.source, site) or
+                !std.meta.eql(saved.value.intent.?.destination, peer.site)) return error.InvalidTransfer;
+            const intent = saved.value.intent.?;
+            if (!std.meta.eql(intent.source_native, self.profile.runtime_identity) or !std.meta.eql(intent.destination_native, peer.native_build) or
+                !std.meta.eql(intent.compatibility, peer.compatibility) or !std.meta.eql(intent.resources, peer.resource_binding) or
+                !std.meta.eql(intent.resources, try self.profile.resourceIdentity(a, self.application.image_identity)) or
+                !std.meta.eql(intent.disclosure, peer.disclosure_policy)) return error.IncompatibleProfile;
+            if (saved.value.offer) |prior| {
+                var retained = try archive_api.Reader.open(a, path);
+                defer retained.deinit();
+                if (!std.meta.eql(retained.identity, prior.value.archive_digest) or retained.bytes != prior.value.archive_bytes) return error.InvalidTransfer;
+                if (peer.archive_limit) |limit| if (retained.bytes > limit) return error.Capacity;
+                try peer.disclose(peer.context, subject, retained.manifest.value.objects.items);
+                return prior;
+            }
+            var snapshot = try self.record(p.Snapshot, a, "placement_snapshot", saved.value.id, subject.task);
+            defer snapshot.deinit();
+            const frozen_snapshot = snapshot.value.frozen orelse return error.InvalidTransfer;
+            if (!std.meta.eql(frozen_snapshot.intent, saved.value.intent.?)) return error.InvalidTransfer;
+            const exported = try archive_api.writePrepared(self.allocator, self.io, self.store(), frozen_snapshot.manifest, self.assets.manifest, path, self.namespace.directory);
+            var reader = try archive_api.Reader.open(a, path);
+            defer reader.deinit();
+            if (!std.meta.eql(reader.identity, exported.sha256) or reader.bytes != exported.bytes) return error.InvalidTransfer;
+            if (peer.archive_limit) |limit| if (reader.bytes > limit) return error.Capacity;
+            try peer.disclose(peer.context, subject, reader.manifest.value.objects.items);
+            const signed = try p.sign(p.Offer, a, self.profile.placement.?.signing_key, .{ .intent = saved.value.intent.?, .archive_digest = exported.sha256, .archive_bytes = exported.bytes });
+            const offered_value = try saved.value.offered(a, signed);
+            try self.store().begin();
+            defer self.store().rollback();
+            try journal.putCustody(self.store(), a, offered_value);
+            try self.namespace.commit("placement.offer");
+            return signed;
+        }
+
+        /// Native convenience operation over the same bilateral protocol. All
+        /// interruption paths retain frozen custody until a signed decision.
+        pub fn placementMove(self: *Self, a: std.mem.Allocator, subject: @import("placement.zig").Subject, peer_name: []const u8, expected: @import("placement.zig").Cut, transfer: state.Digest) !@import("placement.zig").Signed(@import("placement.zig").Decision) {
+            const peer = try self.placementPeer(peer_name);
+            if (peer.channel == null) return error.UnsupportedCapability;
+            const directory = try self.placementDirectory(a);
+            if (try self.placementStatus(a, subject)) |prior| if (prior.intent) |intent| {
+                if (std.meta.eql(intent.transfer, transfer)) {
+                    if (!std.meta.eql(intent.cut, expected) or !std.meta.eql(intent.destination, peer.site)) return error.OperationConflict;
+                    if (prior.decision) |decision| {
+                        try self.retirePlacementFiles(a, decision);
+                        return decision;
+                    }
+                }
+            };
+            _ = try self.placementFreeze(a, subject, peer_name, expected, transfer);
+            const path = try std.fmt.allocPrint(a, "{s}/outgoing-{s}.par", .{ directory, std.fmt.bytesToHex(transfer, .lower) });
+            defer a.free(path);
+            const offer = try self.placementOffer(a, subject, peer_name, path);
+            var connection = try @import("placement_transport.zig").Connection.open(a, self.io, peer);
+            defer connection.deinit();
+            const decision = try connection.transfer(a, offer, path);
+            try self.placementApplyDecision(a, subject, decision);
+            return decision;
+        }
+
+        pub fn placementApplyDecision(self: *Self, a: std.mem.Allocator, subject: @import("placement.zig").Subject, signed: @import("placement.zig").Signed(@import("placement.zig").Decision)) !void {
+            const journal = @import("placement_journal.zig");
+            var parent = try self.task(a, subject.task);
+            defer parent.deinit();
+            var saved = try journal.custody(self.store(), a, subject) orelse return error.InvalidTransfer;
+            defer saved.deinit();
+            const result = try saved.value.decided(a, signed);
+            if (std.meta.eql(result, saved.value)) return self.retirePlacementFiles(a, signed);
+            try self.store().begin();
+            defer self.store().rollback();
+            try journal.putCustody(self.store(), a, result);
+            try self.namespace.commit("placement.decision");
+            try self.retirePlacementFiles(a, signed);
+            // Refusal releases custody but does not override a user's parked
+            // state or implicitly select the next execution action.
+        }
+
+        pub fn placementRefuse(self: *Self, a: std.mem.Allocator, peer_name: []const u8, offered: @import("placement.zig").Signed(@import("placement.zig").Offer), reason: @import("placement.zig").Refusal) !@import("placement.zig").Signed(@import("placement.zig").Decision) {
+            const p = @import("placement.zig");
+            const journal = @import("placement_journal.zig");
+            try self.allowed();
+            const peer = try self.placementPeer(peer_name);
+            const site = try self.placementSite();
+            try p.verify(p.Offer, a, offered, peer.site);
+            if (!std.meta.eql(offered.value.intent.destination, site)) return error.InvalidTransfer;
+            if (try journal.decision(self.store(), a, offered.value.intent.transfer)) |existing| {
+                var prior = existing;
+                defer prior.deinit();
+                try p.matchDecision(a, offered.value, prior.value);
+                try self.retirePlacementFiles(a, prior.value);
+                return prior.value;
+            }
+            const signed = try p.sign(p.Decision, a, self.profile.placement.?.signing_key, .{ .transfer = offered.value.intent.transfer, .offer_digest = try p.digest(p.Offer, a, offered.value), .source = peer.site, .destination = site, .epoch = try std.math.add(u64, offered.value.intent.epoch, 1), .verdict = .{ .refused = reason } });
+            try self.store().begin();
+            defer self.store().rollback();
+            try journal.putDecision(self.store(), a, site, offered.value, signed);
+            try self.namespace.commit("placement.refused");
+            try self.retirePlacementFiles(a, signed);
+            return signed;
+        }
+
         pub fn exportCheckpoint(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, path: []const u8) !archive_api.Exported {
             try self.archiveAccess();
+            try self.retainRootOperation(a);
             _ = try self.store().auditRetention(self.handlers, self.application.image_identity);
             var value = try self.task(a, task_id);
             defer value.deinit();
@@ -2529,13 +4165,60 @@ pub fn Service(comptime Types: type) type {
         /// Existing task IDs/receipts survive; current grants are never loaded
         /// from the archive and no resident becomes runnable on import.
         pub fn importCheckpoint(self: *Self, a: std.mem.Allocator, id: []const u8, path: []const u8) !Admission {
+            return self.importCheckpointFrom(a, id, path, null);
+        }
+
+        const PlacementImport = struct {
+            offer: @import("placement.zig").Signed(@import("placement.zig").Offer),
+            decision: @import("placement.zig").Signed(@import("placement.zig").Decision),
+            peer: @import("placement.zig").Peer,
+        };
+
+        pub fn placementAccept(self: *Self, a: std.mem.Allocator, operation_id: []const u8, peer_name: []const u8, offered: @import("placement.zig").Signed(@import("placement.zig").Offer), path: []const u8) !@import("placement.zig").Signed(@import("placement.zig").Decision) {
+            const p = @import("placement.zig");
+            const journal = @import("placement_journal.zig");
+            try self.allowed();
+            const peer = try self.placementPeer(peer_name);
+            const site = try self.placementSite();
+            const intent = offered.value.intent;
+            try p.verify(p.Offer, a, offered, peer.site);
+            if (!std.meta.eql(intent.destination, site)) return error.InvalidTransfer;
+            if (try journal.decision(self.store(), a, intent.transfer)) |existing| {
+                var prior = existing;
+                defer prior.deinit();
+                try p.matchDecision(a, offered.value, prior.value);
+                try self.retirePlacementFiles(a, prior.value);
+                return prior.value;
+            }
+            if (!std.meta.eql(intent.destination_native, self.profile.runtime_identity) or !std.meta.eql(intent.source_native, peer.native_build) or
+                !std.meta.eql(intent.compatibility, peer.compatibility) or !std.meta.eql(intent.resources, peer.resource_binding) or
+                !std.meta.eql(intent.resources, try self.profile.resourceIdentity(a, self.application.image_identity)) or
+                !std.meta.eql(intent.disclosure, peer.disclosure_policy)) return error.IncompatibleProfile;
+            const signed = try p.sign(p.Decision, a, self.profile.placement.?.signing_key, .{ .transfer = intent.transfer, .offer_digest = try p.digest(p.Offer, a, offered.value), .source = peer.site, .destination = site, .epoch = try std.math.add(u64, intent.epoch, 1), .verdict = .accepted });
+            _ = try self.importCheckpointFrom(a, operation_id, path, .{ .offer = offered, .decision = signed, .peer = peer });
+            try self.retirePlacementFiles(a, signed);
+            return signed;
+        }
+
+        fn importCheckpointFrom(self: *Self, a: std.mem.Allocator, id: []const u8, path: []const u8, placement: ?PlacementImport) !Admission {
             try self.archiveAccess();
             var reader = try archive_api.Reader.open(self.allocator, path);
             defer reader.deinit();
-            const Request = struct { method: state.Method, archive: state.Digest };
-            const request = try operation(Request, a, .{ .method = .import_checkpoint, .archive = reader.identity });
+            const request = if (placement) |transfer| blk: {
+                if (!std.meta.eql(reader.identity, transfer.offer.value.archive_digest) or reader.bytes != transfer.offer.value.archive_bytes) return error.InvalidTransfer;
+                if (transfer.peer.archive_limit) |limit| if (reader.bytes > limit) return error.Capacity;
+                try transfer.peer.disclose(transfer.peer.context, transfer.offer.value.intent.subject, reader.manifest.value.objects.items);
+                const Request = struct { method: state.Method, archive: state.Digest, transfer: state.Digest };
+                break :blk try operation(Request, a, .{ .method = .import_checkpoint, .archive = reader.identity, .transfer = transfer.offer.value.intent.transfer });
+            } else blk: {
+                const Request = struct { method: state.Method, archive: state.Digest };
+                break :blk try operation(Request, a, .{ .method = .import_checkpoint, .archive = reader.identity });
+            };
             if (try self.replay(a, id, request)) |prior| return prior;
-            if (self.store().head.generation != 0 or self.active != null or self.runnable.items.len != 0) return error.NonEmptyNamespace;
+            if ((placement == null and self.store().head.generation != 0) or self.active != null or self.runnable.items.len != 0) return error.NonEmptyNamespace;
+            var tasks_present = try self.store().database.prepare("SELECT 1 FROM tasks LIMIT 1", &.{});
+            defer tasks_present.deinit();
+            if (try tasks_present.step() == .row) return error.NonEmptyNamespace;
             try self.store().begin();
             defer self.store().rollback();
             try reader.acquire(self.store());
@@ -2575,6 +4258,46 @@ pub fn Service(comptime Types: type) type {
             // rollback failures retain their own fencing behavior.
             _ = try @import("retention.zig").verify(self.store(), self.handlers);
             try self.validateImportedState(a, value, inspected.current);
+            const accepted_custody = if (placement) |transfer| accepted: {
+                const p = @import("placement.zig");
+                const intent = transfer.offer.value.intent;
+                if (!std.meta.eql(value.id, intent.subject.task) or !std.meta.eql(original_runtime, intent.source_native) or
+                    !std.meta.eql(try self.placementCut(a, intent.subject), intent.cut) or
+                    !std.meta.eql(try self.placementCompatibility(a, intent.subject), intent.compatibility)) return error.InvalidTransfer;
+                var frozen = try @import("placement_journal.zig").custody(self.store(), a, intent.subject) orelse return error.InvalidTransfer;
+                defer frozen.deinit();
+                break :accepted try p.accept(a, try self.placementSite(), frozen.value, transfer.offer, transfer.decision);
+            } else null;
+            for (reader.manifest.value.records.items) |row| if (row.kind == .placement_custody) {
+                var copied = try self.record(@import("placement.zig").Custody, a, "placement_custody", row.id, value.id);
+                defer copied.deinit();
+                if (copied.value.phase != .away) {
+                    copied.value.phase = .away;
+                    try @import("placement_journal.zig").putCustody(self.store(), a, copied.value);
+                }
+            };
+            if (placement) |transfer| {
+                const p = @import("placement.zig");
+                const journal = @import("placement_journal.zig");
+                const intent = transfer.offer.value.intent;
+                // Copied controller/work data grants no custody over another
+                // subject. Legacy unregistered subjects stay at the source.
+                const others = try self.workspaceIds(a, value.id);
+                defer a.free(others);
+                for (others) |work_id| if (!std.meta.eql(intent.subject.work, @as(?state.Digest, work_id))) {
+                    var prior = try journal.custody(self.store(), a, .{ .task = value.id, .work = work_id });
+                    defer if (prior) |*record_value| record_value.deinit();
+                    if (prior == null) try journal.putCustody(self.store(), a, p.Custody.initial(.{ .task = value.id, .work = work_id }, intent.source));
+                };
+                if (intent.subject.work != null) {
+                    var prior = try journal.custody(self.store(), a, .{ .task = value.id });
+                    defer if (prior) |*record_value| record_value.deinit();
+                    if (prior == null) try journal.putCustody(self.store(), a, p.Custody.initial(.{ .task = value.id }, intent.source));
+                }
+                try self.retire(a);
+                try journal.putCustody(self.store(), a, accepted_custody.?);
+                try journal.putDecision(self.store(), a, try self.placementSite(), transfer.offer.value, transfer.decision);
+            }
             const previous = value.revision;
             value.revision = try std.math.add(u64, previous, 1);
             const origin: state.Origin = .{ .id = reader.identity, .task = value.id, .build = reader.manifest.value.build, .native_identity = original_runtime, .source_revision = previous };
@@ -2644,9 +4367,20 @@ pub fn Service(comptime Types: type) type {
         fn validateImportedState(self: *Self, a: std.mem.Allocator, value: state.Task, pending: ?occurrence.Occurrence) !void {
             if (value.cancellation_applied and value.cancellation == null) return error.InvalidArchive;
             try self.validatePendingMessages(a, value);
-            const driver = try self.resident(a, value);
-            errdefer self.retire(a) catch {
-                self.store().fence();
+            var saved_operation = try self.rootOperation(a, value);
+            defer if (saved_operation) |*saved| saved.deinit();
+            if (saved_operation) |saved| _ = try self.validateRootOperation(a, value, saved.value);
+            const driver = restored: {
+                // Restore owns its admitted input. Release the serialized copy
+                // before reconstruction, even when the caller uses an arena.
+                const guest_checkpoint = try self.store().object(self.allocator, value.checkpoint, null);
+                defer self.allocator.free(guest_checkpoint);
+                break :restored try evaluator.Driver.start(self.allocator, self.program, .{ .state = guest_checkpoint });
+            };
+            var driver_live = true;
+            defer if (driver_live) {
+                driver.retire() catch self.store().fence();
+                driver.destroy() catch self.store().fence();
             };
             const publication = try driver.drive(a, .none, 0);
             const observed = publication.outcome;
@@ -2660,6 +4394,11 @@ pub fn Service(comptime Types: type) type {
             defer decoded.deinit();
             if (!same(@tagName(decoded.value), @tagName(value.outcome_kind))) return error.InvalidArchive;
             try validateCancellation(a, value, decoded.value, checkpoint);
+            // All guest/cut checks are complete. Result mapping consumes the
+            // separately owned outcome, so it need not overlap the evaluator.
+            try driver.retire();
+            try driver.destroy();
+            driver_live = false;
             switch (decoded.value) {
                 .requested => |requested| {
                     const current = pending orelse return error.InvalidArchive;
@@ -2682,7 +4421,6 @@ pub fn Service(comptime Types: type) type {
                 else => {},
             }
             if (!value.terminal() and (value.result != null or value.client_result != null or value.result_artifact != null)) return error.InvalidArchive;
-            try self.retire(a);
         }
         fn validateImportedResult(self: *Self, comptime T: type, a: std.mem.Allocator, value: state.Task, bytes: []const u8) !void {
             var decoded = try contracts.decodeOwned(T, a, bytes);
@@ -2718,6 +4456,10 @@ pub fn Service(comptime Types: type) type {
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatible(parent.value);
+            if (command == .placement) return self.placementModel(a, operation_id, task_id, command.placement) catch |err| {
+                if (self.store().fenced or err == error.OutOfMemory or err == error.StorageUnavailable) return err;
+                return workspaceRejection(a, err);
+            };
             const executed = self.workspaceExecute(a, operation_id, task_id, admitted, basis) catch |err| {
                 if (self.store().fenced or err == error.OutOfMemory or err == error.StorageUnavailable) return err;
                 return workspaceRejection(a, err);
@@ -2754,13 +4496,18 @@ pub fn Service(comptime Types: type) type {
         fn workspaceExecute(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, authorized: workspace.Authorized, basis: ?workspace.ReadObservation) !WorkspaceExecution {
             const command = authorized.command;
             switch (command) {
+                .placement => return error.InvalidState,
                 .program => |program| switch (program) {
                     .describe => |request| {
                         const description = switch (request.section) {
                             .source_records => try @import("source_records.zig").describe(a),
                             .values => try a.dupe(u8, "Runtime values use JSON arrays for products and sequences, {\"tag\":ordinal,\"value\":payload} for sums, {} for unit, booleans, exact decimal strings for 64-bit integers, UTF-8 strings for text, and base64url strings for bytes. Supply the actual program input schema reference. Program source uses the separately described Horos record transport."),
                             .bindings => try a.dupe(u8, "Pure source records require no environmental adapter. No effect request grants authority. Workspace observations and input ports do not restrict the controller's next action."),
+                            .runtimes => try a.dupe(u8, "The packaged generic Horos evaluator is the default. program.specialize derives a checked realization for an admitted program. work.start may select its task-owned runtime reference; work.realize switches at a guest cut without changing guest execution revision. work.request_cut publishes a guest or outer checkpoint. Runtime artifacts never grant environmental authority; active or unknown delivery blocks a switch."),
                             .examples => try construction.example(a),
+                            .retention_query => try construction.runtimeQuery(a, true),
+                            .divergence_query => try construction.runtimeQuery(a, false),
+                            .hypothetical_reply => try construction.hypotheticalReply(a),
                             .components => blk: {
                                 const ref = authorized.catalog orelse return error.UnavailableDescription;
                                 var parent = try self.task(a, task_id);
@@ -2794,6 +4541,13 @@ pub fn Service(comptime Types: type) type {
                         return .{ .admitted = admitted };
                     },
                     .inspect => |request| {
+                        if (request.program.kind == .runtime) {
+                            var selected = try self.workspaceRuntime(a, task_id, try wp.identity(request.program, .runtime), null);
+                            defer selected.deinit();
+                            const text = try json.canonical(a, try self.workspaceRuntimeObservation(a, selected.record.value));
+                            defer a.free(text);
+                            return .{ .observation = try wp.page(a, text, request.page) };
+                        }
                         const id = try wp.identity(request.program, .program);
                         var program_value = try self.workspaceProgram(a, task_id, id);
                         defer program_value.deinit();
@@ -2802,6 +4556,7 @@ pub fn Service(comptime Types: type) type {
                         defer a.free(text);
                         return .{ .observation = try wp.page(a, text, request.page) };
                     },
+                    .specialize => |request| return .{ .admitted = try self.workspaceSpecializeWithHooks(a, operation_id, task_id, try wp.identity(request.program, .program), request.hooks) },
                 },
                 .work => |work_command| switch (work_command) {
                     .start => |request| {
@@ -2828,8 +4583,16 @@ pub fn Service(comptime Types: type) type {
                             },
                         };
                         defer a.free(input);
-                        return .{ .admitted = try self.workspaceStartValue(a, operation_id, task_id, program_id, input, request.policy, origin) };
+                        const selected: ?state.Reference = if (request.runtime == .selected) blk: {
+                            var selected = try self.workspaceRuntime(a, task_id, try wp.identity(request.runtime.selected, .runtime), program_id);
+                            defer selected.deinit();
+                            break :blk selected.record.value.artifact;
+                        } else null;
+                        return .{ .admitted = try self.workspaceStartAdmitted(a, operation_id, task_id, program_id, input, request.policy, origin, null, selected) };
                     },
+                    .pump => |request| return .{ .admitted = try self.workspacePump(a, operation_id, task_id, request) },
+                    .realize => |request| return .{ .admitted = try self.workspaceRealize(a, operation_id, task_id, request) },
+                    .request_cut => |request| return .{ .admitted = try self.workspaceRequestCut(a, operation_id, task_id, request) },
                     .inspect => |request| {
                         if (basis) |frozen| return .{ .observation = try self.renderWorkspaceWorkObservation(a, frozen.works.works.items[0].?.work, frozen.works.works.items[0].?.occurrence, frozen.works.event_watermark) };
                         var value = try self.workspaceWork(a, task_id, try wp.identity(request.work, .work));
@@ -2998,6 +4761,12 @@ pub fn Service(comptime Types: type) type {
             const bytes = try self.store().object(a, receipt_value.workspace_observation orelse return error.CorruptState, null);
             defer a.free(bytes);
             var observation = switch (receipt_value.workspace_kind orelse return error.CorruptState) {
+                .runtime => blk: {
+                    var selected = try contracts.decodeOwned(workspace.Runtime, a, bytes);
+                    defer selected.deinit();
+                    if (!std.meta.eql(selected.value.task, task_id) or !std.meta.eql(selected.value.artifact.digest, receipt_value.workspace.?)) return error.CorruptState;
+                    break :blk try self.workspaceRuntimeObservation(a, selected.value);
+                },
                 .program => blk: {
                     var artifact = try contracts.decodeOwned(workspace.ProgramArtifact, a, bytes);
                     defer artifact.deinit();
@@ -3067,6 +4836,12 @@ pub fn Service(comptime Types: type) type {
             try json.put(a, &result, "program", try values.toJson(wc.Ref, a, try wp.reference(a, .program, value.program)));
             try json.put(a, &result, "execution_revision", try json.number(a, value.execution_revision));
             try json.put(a, &result, "control_revision", try json.number(a, value.control_revision));
+            try json.put(a, &result, "realization_revision", try json.number(a, value.realization_revision));
+            try json.put(a, &result, "runtime", if (value.runtime) |ref| try values.toJson(wc.Ref, a, try wp.reference(a, .runtime, ref.digest)) else json.string("packaged-generic"));
+            try json.put(a, &result, "available_cut", json.string(if (value.outer_operation != null) "outer_execution" else "guest_cut"));
+            try json.put(a, &result, "outer_operation", try values.toJson(?state.Reference, a, if (value.outer_operation) |operation_value| operation_value.capsule else null));
+            try json.put(a, &result, "runtime_capsule", try values.toJson(?state.Reference, a, value.runtime_capsule));
+            try json.put(a, &result, "runtime_trace", try values.toJson(?kosmos.RuntimeInstrumentation.Output, a, if (value.runtime_trace) |trace| trace.output else null));
             try json.put(a, &result, "event_watermark", try json.number(a, observed_at));
             try json.put(a, &result, "outcome", json.string(@tagName(value.outcome_kind)));
             try json.put(a, &result, "schedule", json.string(@tagName(value.schedule)));
@@ -3161,6 +4936,7 @@ pub fn Service(comptime Types: type) type {
             const Request = workspace.InteractionRequest;
             const request_digest = try operation(Request, a, .{ .task = task_id, .interaction = interaction });
             if (try self.replay(allocator, operation_id, request_digest)) |prior| return prior;
+            try self.requireCustody(allocator, task_id, try wp.identity(interaction.expected.work, .work));
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatible(parent.value);
@@ -3168,7 +4944,7 @@ pub fn Service(comptime Types: type) type {
             defer saved.deinit();
             var value = saved.value;
             if (value.execution_revision != interaction.expected.execution_revision or value.control_revision != interaction.expected.control_revision) return error.StaleRevision;
-            if (!workspaceInteractionAllowed(parent.value.terminal() or parent.value.cancellation != null, value)) return error.InvalidState;
+            if (!workspaceInteractionAllowed(self.workspaceParentStopped(parent.value), value)) return error.InvalidState;
             const port_reference = value.current_port orelse return error.NoExposedPort;
             const port_bytes = try self.store().object(a, port_reference, null);
             defer a.free(port_bytes);
@@ -3359,6 +5135,10 @@ pub fn Service(comptime Types: type) type {
                 try json.put(a, &result, "complete_file", .{ .bool = origin.start == 0 and origin.end == origin.file_bytes });
             }
             if (derivation.frozen_input) |ref| try json.put(a, &result, "frozen_input", try values.toJson(state.Reference, a, ref));
+            if (derivation.inspection) |origin| {
+                try json.put(a, &result, "inspection", try values.toJson(wc.GuestViewSelection, a, .{ .expected = .{ .work = try wp.reference(a, .work, origin.observation.work.id), .execution_revision = origin.observation.work.execution_revision, .control_revision = origin.observation.work.control_revision }, .realization_revision = origin.observation.work.realization_revision, .nodes = origin.nodes }));
+                try json.put(a, &result, "checkpoint", try values.toJson(state.Reference, a, origin.observation.work.checkpoint));
+            }
             return result;
         }
 
@@ -3459,11 +5239,30 @@ pub fn Service(comptime Types: type) type {
             const Request = workspace.ContextRequest;
             const request = try operation(Request, a, .{ .task = task_id, .command = command, .snapshot = snapshot, .input = input });
             if (try self.replay(a, operation_id, request)) |prior| return prior;
-            if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
+            try self.requireCustody(a, task_id, null);
+            if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
             try self.store().begin();
             defer self.store().rollback();
             const artifact: state.Reference, const kind: @FieldType(wc.Ref, "kind") = switch (command) {
                 .materialize => |materialize| blk: {
+                    if (materialize.input == .guest_view) {
+                        if (materialize.sources.items.len != 0) return error.InvalidMaterialization;
+                        const selection = materialize.input.guest_view;
+                        const observed = try self.freezeWorkspaceWork(a, task_id, selection.expected.work, false);
+                        try inspectionSelection(observed.work, selection);
+                        // The controller can disclose graph metadata of its own
+                        // work. Node selection narrows that grant; it never
+                        // exposes payload, source text or another task's work.
+                        var prepared = try self.inspectionRuntime(a, observed.work);
+                        defer prepared.deinit();
+                        const code = try prepared.runtime.encode(a);
+                        defer a.free(code);
+                        const origin: workspace.Inspection = .{ .observation = observed, .nodes = selection.nodes, .runtime_code = try self.store().putObject(code) };
+                        const derived = try self.workspaceInspectionBytes(a, task_id, origin);
+                        defer a.free(derived.schema);
+                        defer a.free(derived.value);
+                        break :blk .{ try self.workspacePublishValue(a, task_id, try self.store().putObject(derived.schema), try self.store().putObject(derived.value), .{ .kind = .inspection, .sources = .{ .items = &.{} }, .inspection = origin }), .value };
+                    }
                     if (materialize.input == .authorized_input) {
                         if (materialize.sources.items.len != 0) return error.InvalidMaterialization;
                         const ref = input orelse return error.UnauthorizedInput;
@@ -3542,6 +5341,15 @@ pub fn Service(comptime Types: type) type {
             const provenance = try contracts.encodeOwned(workspace.Derivation, a, saved.value.derivation);
             defer a.free(provenance);
             if (saved.value.description.version != 1 or !std.meta.eql(storage.digest(encoded), id) or encoded.len != saved.value.artifact.bytes or !std.meta.eql(storage.digest(provenance), saved.value.description.provenance.digest)) return error.CorruptState;
+            if (saved.value.derivation.inspection) |origin| {
+                const d = saved.value.derivation;
+                if (d.kind != .inspection or d.sources.items.len != 0 or d.program != null or d.work != null or d.acquisition != null or d.frozen_input != null or d.delegation != null or d.capture != null) return error.InvalidArchive;
+                const derived = try self.workspaceInspectionBytes(a, task_id, origin);
+                defer a.free(derived.schema);
+                defer a.free(derived.value);
+                if (!std.meta.eql(saved.value.description.schema, state.Reference{ .digest = storage.digest(derived.schema), .bytes = derived.schema.len }) or
+                    !std.meta.eql(saved.value.description.value, state.Reference{ .digest = storage.digest(derived.value), .bytes = derived.value.len })) return error.InvalidArchive;
+            } else if (saved.value.derivation.kind == .inspection) return error.InvalidArchive;
             if (saved.value.derivation.acquisition) |origin| {
                 if (saved.value.derivation.kind != .acquisition or saved.value.derivation.sources.items.len != 0 or saved.value.derivation.program != null or saved.value.derivation.work != null or saved.value.derivation.frozen_input != null) return error.CorruptState;
                 var parent = try self.task(a, task_id);
@@ -3567,11 +5375,70 @@ pub fn Service(comptime Types: type) type {
             } else if (saved.value.derivation.kind == .acquisition) return error.CorruptState;
             if (saved.value.derivation.delegation != null or saved.value.derivation.capture != null) try self.validateDelegatedValue(a, task_id, saved.value);
             const origin = saved.value.derivation;
-            if (origin.program == null and origin.work == null and origin.acquisition == null and origin.frozen_input == null and origin.delegation == null and origin.capture == null) {
+            if (origin.program == null and origin.work == null and origin.acquisition == null and origin.frozen_input == null and origin.delegation == null and origin.capture == null and origin.inspection == null) {
                 const expected: @TypeOf(origin.kind) = if (origin.sources.items.len == 0) .hypothesis else .judgment;
                 if (origin.kind != expected) return error.InvalidArchive;
             }
             return .{ .artifact = saved.value.artifact, .schema = saved.value.description.schema, .value = saved.value.description.value, .provenance = saved.value.description.provenance };
+        }
+
+        fn inspectionSelection(work: workspace.Work, selected: wc.GuestViewSelection) !void {
+            if (!std.meta.eql(work.id, try wp.identity(selected.expected.work, .work)) or
+                work.execution_revision != selected.expected.execution_revision or work.control_revision != selected.expected.control_revision or
+                work.realization_revision != selected.realization_revision) return error.StaleRevision;
+        }
+
+        fn inspectionRuntime(self: *Self, a: std.mem.Allocator, work: workspace.Work) !kosmos.Prepared {
+            var program = try self.workspaceProgram(a, work.task, work.program);
+            defer program.deinit();
+            const image = try self.store().object(a, program.value.description.image, null);
+            defer a.free(image);
+            if (work.runtime) |ref| {
+                var selected = try self.workspaceRuntime(a, work.task, ref.digest, work.program);
+                defer selected.deinit();
+                return kosmos.Prepared.initWithRuntime(a, image, &selected.admitted);
+            }
+            return self.program.prepare(a, image);
+        }
+
+        fn workspaceInspectionBytes(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, origin: workspace.Inspection) !struct { schema: []u8, value: []u8 } {
+            const work = origin.observation.work;
+            if (!std.meta.eql(work.task, task_id)) return error.Denied;
+            try self.validateWorkspacePublication(a, task_id, origin.observation);
+            var prepared = try self.inspectionRuntime(a, work);
+            defer prepared.deinit();
+            const code = try self.store().object(a, origin.runtime_code, null);
+            defer a.free(code);
+            if (!std.meta.eql(prepared.runtime.identity, origin.runtime_code.digest)) return error.InvalidRuntime;
+            const checkpoint = try self.store().object(a, work.checkpoint, null);
+            defer a.free(checkpoint);
+            var mask: ?[]bool = null;
+            defer if (mask) |items| a.free(items);
+            if (origin.nodes == .selected) {
+                var decoded = try data.state_image.decodeGraph(a, checkpoint);
+                defer decoded.deinit();
+                mask = try a.alloc(bool, decoded.state.nodes.len);
+                @memset(mask.?, false);
+                for (origin.nodes.selected.items) |node| {
+                    if (node >= mask.?.len) return error.InvalidDisclosure;
+                    mask.?[@intCast(node)] = true;
+                }
+            }
+            const disclosure = try operation(struct { task: state.TaskId, work: state.Digest, checkpoint: state.Reference, scope: wc.NodeScope }, a, .{ .task = task_id, .work = work.id, .checkpoint = work.checkpoint, .scope = origin.nodes });
+            var view = try kosmos.RuntimeViews.capture(a, prepared.guest.core.?.admitted(), checkpoint, .{
+                .guest = prepared.guest.core.?.admitted().identity(),
+                .core = prepared.runtime.content.value.manifest.source,
+                .realization = prepared.runtime.identity,
+                .checkpoint = work.checkpoint.digest,
+                .execution = work.id,
+                .guest_revision = work.execution_revision,
+                .realization_revision = work.realization_revision,
+                .disclosure = disclosure,
+            }, mask);
+            defer view.deinit();
+            const schema = try kosmos.RuntimeViews.schemaBytes(a);
+            errdefer a.free(schema);
+            return .{ .schema = schema, .value = try kosmos.RuntimeViews.encode(a, view.value) };
         }
 
         fn validateDelegatedValue(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, value: workspace.Value) !void {
@@ -3668,9 +5535,10 @@ pub fn Service(comptime Types: type) type {
 
         fn workspaceIsRead(command: wc.Command) bool {
             return switch (command) {
-                .program => |p| p != .build,
+                .program => |p| p != .build and p != .specialize,
                 .work => |w| w == .inspect or w == .collect or w == .wait,
                 .context => |c| c == .inspect or c == .expand,
+                .placement => false,
             };
         }
 
@@ -3709,12 +5577,18 @@ pub fn Service(comptime Types: type) type {
             return result;
         }
 
+        fn workspaceParentStopped(self: *const Self, parent: state.Task) bool {
+            return parent.terminal() or parent.cancellation != null or
+                if (self.remote_stopped_parent) |id| std.meta.eql(id, parent.id) else false;
+        }
+
         fn workspaceInteractionAllowed(parent_stopped: bool, child: workspace.Work) bool {
             return !child.terminal() and (child.cancellation == null or child.cancellation_applied) and
                 (!parent_stopped or child.cancellation_applied);
         }
 
         fn workspaceStoppedAt(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, watermark: u64) !bool {
+            if (self.remote_stopped_parent) |id| if (std.meta.eql(id, task_id)) return true;
             var query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq<=? ORDER BY e.seq", &.{ .{ .blob = &task_id }, .{ .integer = std.math.cast(i64, watermark) orelse return error.InvalidArchive } });
             defer query.deinit();
             while (try query.step() == .row) {
@@ -3751,6 +5625,9 @@ pub fn Service(comptime Types: type) type {
             defer saved.deinit();
             var work = saved.value;
             work.inputs.items = try a.dupe(state.Reference, work.inputs.items);
+            work.runtime_dependencies.items = try a.dupe(state.Reference, work.runtime_dependencies.items);
+            if (work.runtime_trace) |*trace| trace.dependencies.items = try a.dupe(state.Reference, trace.dependencies.items);
+            if (work.outer_operation) |*pending| pending.dependencies.items = try a.dupe(state.Reference, pending.dependencies.items);
             if (work.cancellation) |reason| work.cancellation = .{ .bytes = try a.dupe(u8, reason.bytes) };
             var pending: ?occurrence.Occurrence = null;
             if (work.current_occurrence) |id| {
@@ -3764,7 +5641,7 @@ pub fn Service(comptime Types: type) type {
         fn workPublication(a: std.mem.Allocator, observed: workspace.WorkObservation) !state.WorkPublication {
             const bytes = try contracts.encodeOwned(workspace.WorkObservation, a, observed);
             defer a.free(bytes);
-            return .{ .work = observed.work.id, .execution_revision = observed.work.execution_revision, .control_revision = observed.work.control_revision, .observation = storage.digest(bytes), .control = workspace.ControlObservation.from(observed) };
+            return .{ .work = observed.work.id, .execution_revision = observed.work.execution_revision, .control_revision = observed.work.control_revision, .runtime = observed.work.runtime, .realization_revision = observed.work.realization_revision, .runtime_capsule = observed.work.runtime_capsule, .runtime_trace = observed.work.runtime_trace != null, .outer_operation = if (observed.work.outer_operation) |pending| pending.capsule else null, .checkpoint = observed.work.checkpoint, .observation = storage.digest(bytes), .control = workspace.ControlObservation.from(observed) };
         }
 
         fn samePublication(a: std.mem.Allocator, declared: state.WorkPublication, observed: state.WorkPublication) !bool {
@@ -3776,9 +5653,21 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn publicationSchedule(value: workspace.ControlObservation) state.Schedule {
-            if (value.outcome == .requested) return if (value.instrument and !value.port and value.policy.continuation == .owner_scheduled) .queued else .parked;
+            if (value.outcome == .requested) return if ((value.cancellation != null and !value.cancellation_applied) or (value.instrument and !value.port and value.policy.continuation == .owner_scheduled)) .queued else .parked;
             if (value.outcome == .completed or value.outcome == .failed or value.outcome == .cancelled) return .parked;
             return if (value.cancellation != null or (value.policy.continuation == .owner_scheduled and value.policy.stop != .next_slice and (value.outcome != .yielded or value.policy.stop == .terminal))) .queued else .parked;
+        }
+
+        fn delegatedControl(before: workspace.ControlObservation, has_outer: bool, policy: workspace.RunPolicy) workspace.ControlObservation {
+            var after = before;
+            after.policy = policy;
+            if (!has_outer and before.delivery == .not_sent and before.instrument) after.delivery = .ready;
+            const cancel_ready = before.cancellation != null and !before.cancellation_applied and
+                (after.delivery == .ready or after.delivery == .awaiting or after.delivery == .not_sent);
+            const runnable = has_outer or after.delivery == null or after.delivery == .settled_reply or after.delivery == .captured or
+                (after.delivery == .ready and before.instrument) or cancel_ready;
+            after.schedule = if (policy.continuation == .explicit_only) .parked else if (after.delivery == .dispatching) .active else if (runnable) .queued else .parked;
+            return after;
         }
 
         const WorkspaceAdmission = struct { request: state.Digest, work: state.Digest, kind: @FieldType(wc.Ref, "kind") };
@@ -3837,7 +5726,7 @@ pub fn Service(comptime Types: type) type {
 
         // Replay proves receipt stability only after admission. At the archive
         // boundary, derive the content relationship from the retained command.
-        fn validateWorkspaceContextOutput(self: *Self, a: std.mem.Allocator, parent: state.Task, context: @FieldType(workspace.PublicationCommand, "context"), identity: state.Digest) !void {
+        fn validateWorkspaceContextOutput(self: *Self, a: std.mem.Allocator, parent: state.Task, context: @FieldType(workspace.PublicationCommand, "context"), identity: state.Digest, event_seq: u64) !void {
             switch (context.command) {
                 .select => |selection| {
                     const refs = try a.alloc(state.Reference, selection.values.items.len);
@@ -3855,6 +5744,22 @@ pub fn Service(comptime Types: type) type {
                     var sources: std.ArrayList(state.Reference) = .empty;
                     defer sources.deinit(a);
                     switch (materialize.input) {
+                        .guest_view => |selection| {
+                            if (materialize.sources.items.len != 0) return error.InvalidArchive;
+                            var retained = try self.record(workspace.Value, a, "workspace_value", try workspaceContentCustody(a, parent.id, identity), parent.id);
+                            defer retained.deinit();
+                            const origin = retained.value.derivation.inspection orelse return error.InvalidArchive;
+                            try inspectionSelection(origin.observation.work, selection);
+                            if (origin.observation.work.event_watermark >= event_seq) return error.InvalidArchive;
+                            const requested_scope = try contracts.encodeOwned(wc.NodeScope, a, selection.nodes);
+                            defer a.free(requested_scope);
+                            const retained_scope = try contracts.encodeOwned(wc.NodeScope, a, origin.nodes);
+                            defer a.free(retained_scope);
+                            if (!same(requested_scope, retained_scope)) return error.InvalidArchive;
+                            // Value access already reconstructs the exact bytes
+                            // from the journal-bound observation and scope.
+                            return;
+                        },
                         .authorized_input => {
                             if (materialize.sources.items.len != 0) return error.InvalidArchive;
                             const ref = context.input orelse return error.InvalidArchive;
@@ -3910,6 +5815,7 @@ pub fn Service(comptime Types: type) type {
             const items = event_value.workspace_publications.items;
             const kind: @FieldType(wc.Ref, "kind") = switch (command) {
                 .build => .program,
+                .specialize => .runtime,
                 .context => |context| switch (context.command) {
                     .materialize => .value,
                     .select => .view,
@@ -3919,13 +5825,29 @@ pub fn Service(comptime Types: type) type {
             };
             if (admission.kind != kind) return error.InvalidArchive;
             const count: usize = switch (command) {
-                .build, .context => 0,
+                .build, .context, .specialize => 0,
                 .delegate => 2,
                 else => 1,
             };
             if (items.len != count) return error.InvalidArchive;
             if (count != 0 and !std.meta.eql(items[0].work, admission.work)) return error.InvalidArchive;
             const request = switch (command) {
+                .specialize => |selection| blk: {
+                    var selected = try self.workspaceRuntime(a, parent.id, admission.work, selection.program);
+                    defer selected.deinit();
+                    const hooks = selected.admitted.content.value.hooks;
+                    if (hooks.control != selection.hooks.control or hooks.storage != selection.hooks.storage) return error.InvalidArchive;
+                    break :blk try operation(workspace.SpecializeRequest, a, .{ .task = parent.id, .program = selection.program, .hooks = selection.hooks });
+                },
+                .realize => |selection| try operation(workspace.RealizeRequest, a, .{ .task = parent.id, .work = admission.work, .execution = selection.execution, .control = selection.control, .realization = selection.realization, .runtime = selection.runtime }),
+                .pump => |selection| blk: {
+                    if (!std.meta.eql(try wp.identity(selection.expected.work, .work), admission.work)) return error.InvalidArchive;
+                    break :blk try operation(workspace.PumpRequest, a, .{ .task = parent.id, .command = selection });
+                },
+                .request_cut => |selection| blk: {
+                    if (!std.meta.eql(try wp.identity(selection.expected.work, .work), admission.work)) return error.InvalidArchive;
+                    break :blk try operation(workspace.CutRequest, a, .{ .task = parent.id, .command = selection });
+                },
                 .build => blk: {
                     var program = try self.workspaceProgram(a, parent.id, admission.work);
                     defer program.deinit();
@@ -3934,14 +5856,14 @@ pub fn Service(comptime Types: type) type {
                     break :blk try operation(workspace.BuildRequest, a, .{ .task = parent.id, .source = .{ .bytes = try self.store().object(a, artifact.source, null) }, .source_kind = @fromBackingInt(@intCast(@backingInt(artifact.source_kind))), .catalog = artifact.catalog, .exposures = artifact.exposures });
                 },
                 .context => |context| blk: {
-                    try self.validateWorkspaceContextOutput(a, parent, context, admission.work);
+                    try self.validateWorkspaceContextOutput(a, parent, context, admission.work, event_value.seq);
                     break :blk try operation(workspace.ContextRequest, a, .{ .task = parent.id, .command = context.command, .snapshot = context.snapshot, .input = context.input });
                 },
                 .start => |start| blk: {
                     var work = try self.retainedWorkspaceWork(a, parent.id, admission.work);
                     defer work.deinit();
                     if (!start.origin) try self.validateWorkspaceInitialInput(a, work.value);
-                    break :blk try operation(workspace.StartRequest, a, .{ .task = parent.id, .program = work.value.program, .input = .{ .bytes = try self.store().object(a, work.value.input, null) }, .policy = start.policy, .origin = if (start.origin) work.value.input_value else null });
+                    break :blk try operation(workspace.StartRequest, a, .{ .task = parent.id, .program = work.value.program, .input = .{ .bytes = try self.store().object(a, work.value.input, null) }, .policy = start.policy, .origin = if (start.origin) work.value.input_value else null, .runtime = start.runtime });
                 },
                 .control => |control| try operation(workspace.ControlRequest, a, .{ .task = parent.id, .work = admission.work, .execution = control.execution, .control = control.control, .command = control.command }),
                 .interact => |interaction| try operation(workspace.InteractionRequest, a, .{ .task = parent.id, .interaction = interaction }),
@@ -3969,9 +5891,51 @@ pub fn Service(comptime Types: type) type {
 
         fn validateWorkspaceControl(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, item: state.WorkPublication, prior: ?state.WorkPublication, command: ?workspace.PublicationCommand, admission: ?WorkspaceAdmission) !void {
             const actual = item.control;
+            const execution_changed = if (prior) |before| item.execution_revision != before.execution_revision else true;
+            if (execution_changed) {
+                var required = false;
+                if (item.runtime) |runtime| {
+                    var selected = try self.workspaceRuntime(a, parent.id, runtime.digest, null);
+                    defer selected.deinit();
+                    required = selected.admitted.content.value.hooks.enabled();
+                }
+                if (item.runtime_trace != required) return error.InvalidArchive;
+            } else if (command != null and command.? == .realize) {
+                if (item.runtime_trace) return error.InvalidArchive;
+            } else if (item.runtime_trace != prior.?.runtime_trace) return error.InvalidArchive;
+            if (execution_changed and item.outer_operation != null) return error.InvalidArchive;
+            if (item.outer_operation) |current_capsule| {
+                if (prior) |before| {
+                    if (before.outer_operation) |previous_capsule| {
+                        if (!std.meta.eql(current_capsule, previous_capsule)) {
+                            const before_bytes = try self.store().object(a, previous_capsule, null);
+                            defer a.free(before_bytes);
+                            const after_bytes = try self.store().object(a, current_capsule, null);
+                            defer a.free(after_bytes);
+                            var previous = try kosmos.RuntimeCapsule.read(a, before_bytes);
+                            defer previous.deinit();
+                            var current = try kosmos.RuntimeCapsule.read(a, after_bytes);
+                            defer current.deinit();
+                            if (current.value.record.outer_revision <= previous.value.record.outer_revision or
+                                current.value.record.guest_revision != previous.value.record.guest_revision or
+                                !std.meta.eql(current.value.record.artifact, previous.value.record.artifact) or
+                                !same(current.value.command, previous.value.command)) return error.InvalidArchive;
+                        }
+                    } else if (command == null or command.? != .pump) return error.InvalidArchive;
+                } else return error.InvalidArchive;
+            } else if (!execution_changed and prior != null and prior.?.outer_operation != null) return error.InvalidArchive;
             if ((actual.outcome == .requested) != (actual.delivery != null) or (actual.port and actual.delivery == null)) return error.InvalidArchive;
             var expected = actual;
             if (prior) |before| {
+                if (command == null or command.? != .realize) {
+                    if (!std.meta.eql(item.runtime, before.runtime) or item.realization_revision != before.realization_revision) return error.InvalidArchive;
+                }
+                if (item.execution_revision == before.execution_revision) {
+                    if (!std.meta.eql(item.checkpoint, before.checkpoint)) return error.InvalidArchive;
+                    const pumping = item.outer_operation != null and !std.meta.eql(item.outer_operation, before.outer_operation);
+                    if (!pumping and (command == null or (command.? != .realize and command.? != .request_cut)))
+                        if (!std.meta.eql(item.runtime_capsule, before.runtime_capsule)) return error.InvalidArchive;
+                } else if (item.runtime_capsule != null) return error.InvalidArchive;
                 expected.policy = before.control.policy;
                 expected.cancellation = before.control.cancellation;
                 expected.blocker = before.control.blocker;
@@ -3980,15 +5944,48 @@ pub fn Service(comptime Types: type) type {
                 if (item.execution_revision == before.execution_revision and (actual.outcome != before.control.outcome or actual.port != before.control.port or actual.cancellation_applied != before.control.cancellation_applied)) return error.InvalidArchive;
             } else {
                 if (item.execution_revision != 1 or item.control_revision != 1 or command == null) return error.InvalidArchive;
+                if (item.realization_revision != 0 or item.runtime_capsule != null) return error.InvalidArchive;
                 expected.cancellation = null;
                 expected.blocker = null;
                 if (actual.cancellation_applied) return error.InvalidArchive;
             }
 
             if (command) |decoded| switch (decoded) {
-                .build, .context => return error.InvalidArchive,
+                .build, .context, .specialize => return error.InvalidArchive,
+                .realize => |selection| {
+                    const before = prior orelse return error.InvalidArchive;
+                    if (before.outer_operation != null or selection.execution != before.execution_revision or selection.control != before.control_revision or selection.realization != before.realization_revision or
+                        item.execution_revision != before.execution_revision or item.control_revision -| before.control_revision != 1 or item.realization_revision -| before.realization_revision != 1 or
+                        !std.meta.eql(item.runtime, selection.runtime) or !std.meta.eql(item.runtime_capsule, selection.target) or
+                        actual.delivery == .dispatching or actual.delivery == .unknown or actual.delivery != before.control.delivery) return error.InvalidArchive;
+                    try self.validateRuntimeSwitch(a, parent.id, item, before, selection);
+                },
+                .pump => |selection| {
+                    const before = prior orelse return error.InvalidArchive;
+                    if (selection.expected.execution_revision != before.execution_revision or selection.expected.control_revision != before.control_revision or
+                        !std.meta.eql(try wp.identity(selection.expected.work, .work), item.work) or item.control_revision -| before.control_revision != 1 or
+                        selection.base_quantum == 0 or selection.base_quantum > 1048576) return error.InvalidArchive;
+                    if (execution_changed) {
+                        expected.schedule = publicationSchedule(expected);
+                    } else {
+                        if (item.outer_operation == null or actual.delivery != before.control.delivery) return error.InvalidArchive;
+                        expected.schedule = if (expected.cancellation != null or expected.policy.continuation == .owner_scheduled) .queued else .parked;
+                    }
+                },
+                .request_cut => |selection| {
+                    const before = prior orelse return error.InvalidArchive;
+                    if (selection.expected.execution_revision != before.execution_revision or selection.expected.control_revision != before.control_revision or
+                        !std.meta.eql(try wp.identity(selection.expected.work, .work), item.work) or item.execution_revision != before.execution_revision or item.control_revision -| before.control_revision != 1 or
+                        actual.delivery == .dispatching or actual.delivery == .unknown or actual.delivery != before.control.delivery or item.runtime_capsule == null) return error.InvalidArchive;
+                    const capsule_bytes = try self.store().object(a, item.runtime_capsule.?, null);
+                    defer a.free(capsule_bytes);
+                    var capsule = try kosmos.RuntimeCapsule.read(a, capsule_bytes);
+                    defer capsule.deinit();
+                    if (!same(@tagName(capsule.value.record.kind), @tagName(selection.level))) return error.InvalidArchive;
+                },
                 .start => |start| {
                     if (prior != null or actual.instrument) return error.InvalidArchive;
+                    if (!std.meta.eql(item.runtime, start.runtime)) return error.InvalidArchive;
                     expected.policy = start.policy;
                     expected.schedule = publicationSchedule(expected);
                 },
@@ -3998,8 +5995,13 @@ pub fn Service(comptime Types: type) type {
                     if (before.control.outcome == .completed or before.control.outcome == .failed or before.control.outcome == .cancelled) return error.InvalidArchive;
                     const advanced = item.execution_revision > before.execution_revision;
                     if (control.command == .advance) {
-                        if (!advanced or item.control_revision != before.control_revision) return error.InvalidArchive;
-                        expected.schedule = publicationSchedule(expected);
+                        if (item.control_revision != before.control_revision) return error.InvalidArchive;
+                        if (advanced) {
+                            expected.schedule = publicationSchedule(expected);
+                        } else {
+                            if (before.outer_operation == null or item.outer_operation == null or actual.delivery != before.control.delivery) return error.InvalidArchive;
+                            expected.schedule = if (expected.cancellation != null or expected.policy.continuation == .owner_scheduled) .queued else .parked;
+                        }
                     } else {
                         if (item.control_revision -| before.control_revision != 1) return error.InvalidArchive;
                         switch (control.command) {
@@ -4009,11 +6011,10 @@ pub fn Service(comptime Types: type) type {
                             },
                             .delegate => |policy| {
                                 if (advanced) return error.InvalidArchive;
-                                expected.policy = policy;
-                                const rearmed = before.control.delivery == .not_sent and before.control.instrument;
-                                if (actual.delivery != (if (rearmed) .ready else before.control.delivery)) return error.InvalidArchive;
-                                const runnable = actual.delivery == null or actual.delivery == .settled_reply or actual.delivery == .captured or (actual.delivery == .ready and actual.instrument);
-                                expected.schedule = if (policy.continuation == .explicit_only) .parked else if (actual.delivery == .dispatching) .active else if (runnable) .queued else .parked;
+                                const delegated = delegatedControl(before.control, before.outer_operation != null, policy);
+                                expected.policy = delegated.policy;
+                                expected.delivery = delegated.delivery;
+                                expected.schedule = delegated.schedule;
                             },
                             .cancel => |reason| {
                                 if (expected.cancellation == null) expected.cancellation = reason;
@@ -4021,7 +6022,7 @@ pub fn Service(comptime Types: type) type {
                                     expected.schedule = publicationSchedule(expected);
                                 } else {
                                     if (actual.delivery != before.control.delivery) return error.InvalidArchive;
-                                    expected.schedule = switch (actual.delivery orelse return error.InvalidArchive) {
+                                    expected.schedule = if (item.outer_operation != null) .queued else switch (actual.delivery orelse return error.InvalidArchive) {
                                         .dispatching => .active,
                                         .captured => .queued,
                                         .unknown => .parked,
@@ -4053,6 +6054,7 @@ pub fn Service(comptime Types: type) type {
                         expected.schedule = .parked;
                     } else {
                         if (prior != null or !actual.instrument or !std.meta.eql((admission orelse return error.InvalidArchive).work, item.work)) return error.InvalidArchive;
+                        if (item.runtime != null) return error.InvalidArchive;
                         expected.policy = .{ .stop = .terminal, .continuation = .owner_scheduled };
                         expected.schedule = publicationSchedule(expected);
                     }
@@ -4062,6 +6064,9 @@ pub fn Service(comptime Types: type) type {
                 if (item.execution_revision > before.execution_revision) {
                     if (item.control_revision != before.control_revision) return error.InvalidArchive;
                     expected.schedule = publicationSchedule(expected);
+                } else if (item.outer_operation != null and before.outer_operation != null and item.control_revision == before.control_revision) {
+                    if (actual.delivery != before.control.delivery) return error.InvalidArchive;
+                    expected.schedule = if (expected.cancellation != null or expected.policy.continuation == .owner_scheduled) .queued else .parked;
                 } else if (item.control_revision > before.control_revision) {
                     if (item.execution_revision != before.execution_revision or !try self.workspaceStoppedAt(a, parent.id, event_value.seq - 1) or actual.delivery != before.control.delivery) return error.InvalidArchive;
                     expected.schedule = .parked;
@@ -4235,7 +6240,8 @@ pub fn Service(comptime Types: type) type {
                     },
                     else => return error.InvalidState,
                 },
-                .program => |p| if (p == .build) return error.InvalidState,
+                .program => |p| if (p == .build or p == .specialize) return error.InvalidState,
+                .placement => return error.InvalidState,
             }
             if (command == .work or refs.len != 0) {
                 const observations = try a.alloc(?workspace.WorkObservation, refs.len);
@@ -4316,6 +6322,7 @@ pub fn Service(comptime Types: type) type {
                     else => return error.InvalidArchive,
                 },
                 .program => {},
+                .placement => return error.InvalidArchive,
             }
             if (std.meta.activeTag(basis) != expected) return error.InvalidArchive;
             switch (basis) {
@@ -4369,6 +6376,29 @@ pub fn Service(comptime Types: type) type {
             const command = authorized.value.command;
             const operation_id = std.fmt.bytesToHex(pending.id, .lower);
             const expected: wc.Reply = switch (saved.evidence) {
+                .placement => |reference| placement_reply: {
+                    const p = @import("placement.zig");
+                    if (command != .placement) return error.InvalidArchive;
+                    const bytes = try self.store().object(a, reference, null);
+                    defer a.free(bytes);
+                    var record_value = try contracts.decodeOwned(p.ActionRecord, a, bytes);
+                    defer record_value.deinit();
+                    const action = record_value.value.action;
+                    try p.verify(p.Action, a, action, action.value.owner);
+                    const id = p.operationId(action.value.owner, parent.id, &operation_id, .action);
+                    if (!std.meta.eql(id, record_value.value.id) or !std.meta.eql(id, action.value.id) or
+                        !std.meta.eql(parent.id, action.value.task) or !same(action.value.operation.bytes, &operation_id)) return error.InvalidArchive;
+                    try requireArchiveRecord(records, .placement_action, id);
+                    var indexed = try self.record(p.ActionRecord, a, "placement_action", id, parent.id);
+                    defer indexed.deinit();
+                    if (!std.meta.eql(indexed.value.action.signature, action.signature)) return error.InvalidArchive;
+                    const wanted = try contracts.encodeOwned(wc.Placement, a, command.placement);
+                    defer a.free(wanted);
+                    const actual = try contracts.encodeOwned(wc.Placement, a, action.value.request);
+                    defer a.free(actual);
+                    if (!same(wanted, actual)) return error.InvalidArchive;
+                    break :placement_reply try placementReplyCopy(a, action.value.reply);
+                },
                 .read => |basis| blk: {
                     const watermark: ?u64 = switch (basis) {
                         .immutable => null,
@@ -4479,7 +6509,16 @@ pub fn Service(comptime Types: type) type {
             const observation = try self.workspaceCommandFrom(a, &operation_id, initial.id, command.value, if (basis) |frozen| frozen.value else null);
             var parsed = try json.parseAsset(a, observation.observation_json.bytes, observation.observation_json.bytes.len);
             defer parsed.deinit();
-            const evidence: workspace.ReplyEvidence = if (observation.disposition == .rejected)
+            var placement_evidence: ?state.Reference = null;
+            if (command.value.command == .placement and self.profile.placement != null) {
+                const p = @import("placement.zig");
+                const action_id = p.operationId(try self.placementSite(), initial.id, &operation_id, .action);
+                if (try self.store().recordBytes(a, "placement_action", action_id, initial.id)) |bytes| {
+                    defer a.free(bytes);
+                    placement_evidence = .{ .digest = storage.digest(bytes), .bytes = bytes.len };
+                }
+            }
+            const evidence: workspace.ReplyEvidence = if (placement_evidence) |reference| .{ .placement = reference } else if (observation.disposition == .rejected)
                 .{ .rejected = .{ .stage = .operation, .code = try name(try json.text(parsed.value.object.get("error") orelse return error.CorruptState)) } }
             else if (basis) |frozen| .{ .read = frozen.value } else .{ .admitted = .{ .replayed = (parsed.value.object.get("replayed") orelse return error.CorruptState).bool } };
             return self.settleWorkspaceReply(a, initial, pending, observation, evidence);
@@ -4562,7 +6601,7 @@ pub fn Service(comptime Types: type) type {
             return ready;
         }
         fn workspaceWaitWakeNeeded(self: *Self, a: std.mem.Allocator, parent: state.Task, ownership: Ownership) !bool {
-            if (parent.terminal()) return false;
+            if (parent.terminal() or !try self.hasLocalCustody(a, parent.id, null)) return false;
             var owned = ownership == .acquire;
             for (self.owned.items) |id| owned = owned or std.meta.eql(id, parent.id);
             if (!owned) return false;
@@ -4610,6 +6649,389 @@ pub fn Service(comptime Types: type) type {
             }
             try self.persist(a, parent, fresh.value.revision, "workspace.reply", .preserve);
             return .progressed;
+        }
+
+        const SelectedRuntime = struct {
+            record: contracts.Decoded(workspace.Runtime),
+            admitted: kosmos.RuntimeArtifact,
+            fn deinit(self: *SelectedRuntime) void {
+                self.admitted.deinit();
+                self.record.deinit();
+            }
+        };
+
+        fn retainValidatedRuntime(self: *Self, admitted: *const kosmos.RuntimeArtifact) !void {
+            var retained = try admitted.clone();
+            errdefer retained.deinit();
+            try self.checked_workspace_runtimes.put(self.allocator, admitted.identity, self.store().integrity_epoch);
+            if (self.runtime_cache) |*cached| cached.artifact.deinit();
+            self.runtime_cache = .{ .epoch = self.store().integrity_epoch, .artifact = retained };
+        }
+
+        fn workspaceRuntime(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, digest: state.Digest, program_id: ?state.Digest) !SelectedRuntime {
+            const id = try workspaceContentCustody(a, task_id, digest);
+            var saved = try self.record(workspace.Runtime, a, "workspace_runtime", id, task_id);
+            errdefer saved.deinit();
+            if (!std.meta.eql(saved.value.id, id) or !std.meta.eql(saved.value.task, task_id) or !std.meta.eql(saved.value.artifact.digest, digest)) return error.InvalidRuntime;
+            var program = try self.workspaceProgram(a, task_id, saved.value.program);
+            defer program.deinit();
+            if (program_id) |required| if (!std.meta.eql(required, saved.value.program)) {
+                var requested = try self.workspaceProgram(a, task_id, required);
+                defer requested.deinit();
+                if (!std.meta.eql(requested.value.description.image, program.value.description.image)) return error.InvalidRuntime;
+            };
+            const image = try self.store().object(a, program.value.description.image, null);
+            defer a.free(image);
+            const guest = try data.program_image.Admitted.decode(a, image);
+            defer guest.deinit();
+            var admitted = cached: {
+                if (self.runtime_cache) |*cached| {
+                    if (cached.epoch == self.store().integrity_epoch and std.meta.eql(cached.artifact.identity, digest)) break :cached try cached.artifact.clone();
+                }
+                const bytes = try self.store().object(a, saved.value.artifact, null);
+                defer a.free(bytes);
+                break :cached try kosmos.RuntimeArtifact.init(self.allocator, bytes, digest);
+            };
+            errdefer admitted.deinit();
+            const bound = admitted.content.value.guest orelse return error.InvalidRuntime;
+            if (!std.mem.eql(u8, &bound, &guest.identity()) or !same(admitted.content.value.manifest.compiler.horos_package, @import("native_options").horos_identity)) return error.InvalidRuntime;
+            if (self.checked_workspace_runtimes.get(digest) != self.store().integrity_epoch) {
+                // Validation owns and releases its large temporary arenas.
+                // A caller's response arena may intentionally ignore free.
+                try kosmos.RuntimeCompiler.validate(self.allocator, &admitted);
+            }
+            try self.retainValidatedRuntime(&admitted);
+            return .{ .record = saved, .admitted = admitted };
+        }
+
+        fn workspaceRuntimeObservation(self: *Self, a: std.mem.Allocator, saved: workspace.Runtime) !json.Value {
+            var selected = try self.workspaceRuntime(a, saved.task, saved.artifact.digest, saved.program);
+            defer selected.deinit();
+            if (!std.meta.eql(saved, selected.record.value)) return error.InvalidRuntime;
+            const bundle = selected.admitted.content.value;
+            var result = json.object();
+            try json.put(a, &result, "runtime", try values.toJson(wc.Ref, a, try wp.reference(a, .runtime, saved.artifact.digest)));
+            try json.put(a, &result, "origin_program", try values.toJson(wc.Ref, a, try wp.reference(a, .program, saved.program)));
+            try json.put(a, &result, "guest", json.string(try a.dupe(u8, &std.fmt.bytesToHex(bundle.guest.?, .lower))));
+            try json.put(a, &result, "source", json.string(try a.dupe(u8, &std.fmt.bytesToHex(bundle.manifest.source, .lower))));
+            try json.put(a, &result, "base", json.string(try a.dupe(u8, bundle.manifest.requirements.base)));
+            try json.put(a, &result, "admission", json.string(try a.dupe(u8, bundle.manifest.requirements.admission)));
+            try json.put(a, &result, "bridge", json.string(try a.dupe(u8, bundle.manifest.requirements.bridge)));
+            try json.put(a, &result, "artifact_bytes", try json.number(a, saved.artifact.bytes));
+            try json.put(a, &result, "code_bytes", try json.number(a, bundle.image.len));
+            try json.put(a, &result, "approval", json.string("exact-source-and-independent-derivation"));
+            try json.put(a, &result, "hydration", json.string("canonical-guest-cut"));
+            try json.put(a, &result, "hooks", try values.toJson(kosmos.RuntimeInstrumentation.Hooks, a, bundle.hooks));
+            try json.put(a, &result, "trace_failure_policy", json.string("publication-fences-owner-and-retains-prior-durable-cut"));
+            return result;
+        }
+
+        pub fn workspaceSpecialize(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, program_id: state.Digest) !Admission {
+            return self.workspaceSpecializeWithHooks(a, operation_id, task_id, program_id, .{});
+        }
+
+        pub fn workspaceSpecializeWithHooks(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, program_id: state.Digest, hooks: wc.RuntimeHooks) !Admission {
+            const request = try operation(workspace.SpecializeRequest, a, .{ .task = task_id, .program = program_id, .hooks = hooks });
+            if (try self.replay(a, operation_id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
+            var program = try self.workspaceProgram(a, task_id, program_id);
+            defer program.deinit();
+            const image = try self.store().object(a, program.value.description.image, null);
+            defer a.free(image);
+            const guest = try data.program_image.Admitted.decode(a, image);
+            defer guest.deinit();
+            // Compiler and proof scratch ends before the next phase. Keeping it
+            // in the caller's response arena retains completed work, including
+            // independently decoded proofs, until that entire request ends.
+            const bytes = try kosmos.RuntimeCompiler.compile(self.allocator, .{ .guest = guest, .horos_package = @import("native_options").horos_identity, .hooks = .{ .control = hooks.control, .storage = hooks.storage } });
+            defer self.allocator.free(bytes);
+            var admitted = try kosmos.RuntimeArtifact.init(self.allocator, bytes, storage.digest(bytes));
+            defer admitted.deinit();
+            try kosmos.RuntimeCompiler.validate(self.allocator, &admitted);
+            try self.retainValidatedRuntime(&admitted);
+            try self.store().begin();
+            defer self.store().rollback();
+            const artifact = try self.store().putObject(bytes);
+            const id = try workspaceContentCustody(a, task_id, artifact.digest);
+            var saved: workspace.Runtime = .{ .id = id, .task = task_id, .program = program_id, .artifact = artifact };
+            if (try self.store().recordBytes(a, "workspace_runtime", id, task_id)) |prior| {
+                defer a.free(prior);
+                var existing = try self.workspaceRuntime(a, task_id, artifact.digest, program_id);
+                defer existing.deinit();
+                saved = existing.record.value;
+            } else try self.store().createRecord(workspace.Runtime, "workspace_runtime", id, task_id, saved);
+            const record_bytes = try contracts.encodeOwned(workspace.Runtime, a, saved);
+            defer a.free(record_bytes);
+            const observation = try self.store().putObject(record_bytes);
+            return self.workspaceCommit(a, parent.value, operation_id, request, artifact.digest, .runtime, observation, .{ .specialize = .{ .program = program_id, .hooks = hooks } });
+        }
+
+        fn runtimeWork(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, expected: wc.Expected) !contracts.Decoded(workspace.Work) {
+            try self.requireCustody(a, task_id, try wp.identity(expected.work, .work));
+            var work = try self.workspaceWork(a, task_id, try wp.identity(expected.work, .work));
+            errdefer work.deinit();
+            if (work.value.execution_revision != expected.execution_revision or work.value.control_revision != expected.control_revision) return error.StaleRevision;
+            if (work.value.current_occurrence) |id| {
+                var pending = try self.record(occurrence.Occurrence, a, "occurrence", id, task_id);
+                defer pending.deinit();
+                if (pending.value.state == .dispatching or pending.value.state == .unknown) return error.UnresolvedDelivery;
+            }
+            return work;
+        }
+
+        fn runtimeProvenance(work: workspace.Work) kosmos.RuntimeCapsule.Provenance {
+            return .{ .execution = work.id, .custody = storage.digest(&work.task), .publication = .{ .digest = work.checkpoint.digest, .bytes = work.checkpoint.bytes } };
+        }
+
+        pub fn workspaceRequestCut(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, command: @FieldType(wc.Work, "request_cut")) !Admission {
+            const request = try operation(workspace.CutRequest, a, .{ .task = task_id, .command = command });
+            if (try self.replay(a, operation_id, request)) |prior| return prior;
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
+            var work = try self.runtimeWork(a, task_id, command.expected);
+            defer work.deinit();
+            const driver = try self.workspaceResident(a, work.value);
+            const capsule_receipt = try driver.publishCapsule(a, switch (command.level) {
+                .guest_cut => .guest_cut,
+                .outer_execution => .outer_execution,
+            }, runtimeProvenance(work.value));
+            defer capsule_receipt.deinit();
+            const code = try driver.runtimeBytes(a);
+            defer a.free(code);
+            try self.store().begin();
+            defer self.store().rollback();
+            _ = try self.store().putObject(code);
+            work.value.runtime_capsule = try self.store().putObject(capsule_receipt.bytes());
+            work.value.runtime_dependencies = .{ .items = try capsuleDependencies(a, capsule_receipt.bytes()) };
+            defer a.free(work.value.runtime_dependencies.items);
+            work.value.control_revision = try std.math.add(u64, work.value.control_revision, 1);
+            work.value.event_watermark = parent.value.event_high + 1;
+            try self.store().putRecord(workspace.Work, "workspace_work", work.value.id, task_id, work.value);
+            return self.workspaceCommit(a, parent.value, operation_id, request, work.value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", work.value.id, task_id), .{ .request_cut = command });
+        }
+
+        pub fn workspaceRealize(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, command: @FieldType(wc.Work, "realize")) !Admission {
+            var selected: ?SelectedRuntime = if (command.runtime == .selected) try self.workspaceRuntime(a, task_id, try wp.identity(command.runtime.selected, .runtime), null) else null;
+            defer if (selected) |*item| item.deinit();
+            const target: ?state.Reference = if (selected) |item| item.record.value.artifact else null;
+            const work_id = try wp.identity(command.expected.work, .work);
+            const request = try operation(workspace.RealizeRequest, a, .{ .task = task_id, .work = work_id, .execution = command.expected.execution_revision, .control = command.expected.control_revision, .realization = command.realization_revision, .runtime = target });
+            if (try self.replay(a, operation_id, request)) |prior| return prior;
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
+            var work = try self.runtimeWork(a, task_id, command.expected);
+            defer work.deinit();
+            if (work.value.outer_operation != null) return error.GuestCutUnavailable;
+            if (work.value.realization_revision != command.realization_revision) return error.StaleRevision;
+            var program = try self.workspaceProgram(a, task_id, work.value.program);
+            defer program.deinit();
+            if (selected) |item| if (!std.meta.eql(item.record.value.program, work.value.program)) {
+                var origin = try self.workspaceProgram(a, task_id, item.record.value.program);
+                defer origin.deinit();
+                if (!std.meta.eql(origin.value.description.image, program.value.description.image)) return error.InvalidRuntime;
+            };
+            const image = try self.store().object(a, program.value.description.image, null);
+            defer a.free(image);
+            var generic: ?kosmos.Prepared = if (selected == null) try self.program.prepare(self.allocator, image) else null;
+            defer if (generic) |*item| item.deinit();
+            const target_artifact = if (selected) |*item| &item.admitted else &generic.?.runtime;
+            const driver = try self.workspaceResident(a, work.value);
+            const source_code = try driver.runtimeBytes(a);
+            defer a.free(source_code);
+            const target_code = try target_artifact.encode(a);
+            defer a.free(target_code);
+            const Publisher = struct {
+                host: *Self,
+                a: std.mem.Allocator,
+                parent: state.Task,
+                work: workspace.Work,
+                operation_id: []const u8,
+                request: state.Digest,
+                target: ?state.Reference,
+                source_code: []const u8,
+                target_code: []const u8,
+                result: ?Admission = null,
+                failure: ?anyerror = null,
+                fn publish(context: *anyopaque, _: kosmos.RuntimeCapsule.Binding, source_capsule: []const u8, target_capsule: []const u8) kosmos.RuntimeCapsule.SwitchDecision {
+                    const publication: *@This() = @ptrCast(@alignCast(context));
+                    publication.result = publication.commit(source_capsule, target_capsule) catch |err| {
+                        publication.failure = err;
+                        return if (publication.host.store().fenced) .uncertain else .rejected;
+                    };
+                    return .committed;
+                }
+                fn commit(publication: *@This(), source_capsule: []const u8, target_capsule: []const u8) !Admission {
+                    const host = publication.host;
+                    try host.store().begin();
+                    defer host.store().rollback();
+                    const source_code_ref = try host.store().putObject(publication.source_code);
+                    const target_code_ref = try host.store().putObject(publication.target_code);
+                    const before = try host.store().putObject(source_capsule);
+                    const after = try host.store().putObject(target_capsule);
+                    var next = publication.work;
+                    next.runtime = publication.target;
+                    next.runtime_capsule = after;
+                    next.runtime_trace = null;
+                    next.runtime_dependencies = .{ .items = try capsuleDependencies(publication.a, target_capsule) };
+                    defer publication.a.free(next.runtime_dependencies.items);
+                    next.realization_revision = try std.math.add(u64, next.realization_revision, 1);
+                    next.control_revision = try std.math.add(u64, next.control_revision, 1);
+                    next.event_watermark = publication.parent.event_high + 1;
+                    try host.store().putRecord(workspace.Work, "workspace_work", next.id, next.task, next);
+                    const dependencies = [_]state.Reference{ source_code_ref, target_code_ref, next.runtime_dependencies.items[1] };
+                    return host.workspaceCommit(publication.a, publication.parent, publication.operation_id, publication.request, next.id, .work, try host.snapshotRecord(workspace.Work, publication.a, "workspace_work", next.id, next.task), .{ .realize = .{ .execution = publication.work.execution_revision, .control = publication.work.control_revision, .realization = publication.work.realization_revision, .runtime = publication.target, .source = before, .target = after, .dependencies = .{ .items = &dependencies } } });
+                }
+            };
+            var publisher: Publisher = .{ .host = self, .a = a, .parent = parent.value, .work = work.value, .operation_id = operation_id, .request = request, .target = target, .source_code = source_code, .target_code = target_code };
+            const decision = try driver.realize(try driver.runtimeBinding(), target_artifact, runtimeProvenance(work.value), .{ .context = &publisher, .publish = Publisher.publish });
+            if (publisher.failure) |err| return err;
+            if (decision != .committed) return error.PublicationUncertain;
+            self.active.?.realization_revision = command.realization_revision + 1;
+            return publisher.result orelse return error.CorruptState;
+        }
+
+        fn capsuleDependencies(a: std.mem.Allocator, bytes: []const u8) ![]state.Reference {
+            var decoded = try kosmos.RuntimeCapsule.read(a, bytes);
+            defer decoded.deinit();
+            if (decoded.value.record.dependencies.len != 2) return error.InvalidRuntime;
+            const refs = try a.alloc(state.Reference, 2);
+            for (refs, decoded.value.record.dependencies) |*out, ref| out.* = .{ .digest = ref.digest, .bytes = ref.bytes };
+            return refs;
+        }
+
+        fn validatePublishedCapsule(self: *Self, a: std.mem.Allocator, work: workspace.Work, ref: state.Reference, expected_runtime: ?state.Reference) !void {
+            return self.validatePublishedCapsuleTrace(a, work, ref, expected_runtime, null, null);
+        }
+
+        fn validatePublishedCapsuleTrace(self: *Self, a: std.mem.Allocator, work: workspace.Work, ref: state.Reference, expected_runtime: ?state.Reference, trace: ?kosmos.RuntimeInstrumentation.Output, pending_operation: ?workspace.OuterOperation) !void {
+            const bytes = try self.store().object(a, ref, null);
+            defer a.free(bytes);
+            var envelope = try kosmos.RuntimeCapsule.read(a, bytes);
+            defer envelope.deinit();
+            const record_value = envelope.value.record;
+            if (!std.meta.eql(record_value.provenance.execution, work.id) or !std.meta.eql(record_value.provenance.custody, storage.digest(&work.task)) or
+                record_value.provenance.publication == null or !std.meta.eql(record_value.provenance.publication.?.digest, work.checkpoint.digest) or record_value.provenance.publication.?.bytes != work.checkpoint.bytes) return error.InvalidArchive;
+            var program = try self.workspaceProgram(a, work.task, work.program);
+            defer program.deinit();
+            if (!std.meta.eql(record_value.guest.image.digest, program.value.description.image.digest) or record_value.guest.image.bytes != program.value.description.image.bytes) return error.InvalidArchive;
+            const image = try self.store().object(a, program.value.description.image, null);
+            defer a.free(image);
+            const runtime_ref: state.Reference = .{ .digest = record_value.artifact.digest, .bytes = record_value.artifact.bytes };
+            const code = try self.store().object(a, runtime_ref, null);
+            defer a.free(code);
+            var selected = if (expected_runtime) |expected| chosen: {
+                if (!std.meta.eql(runtime_ref, expected)) return error.InvalidArchive;
+                var owned = try self.workspaceRuntime(a, work.task, expected.digest, work.program);
+                defer owned.deinit();
+                if (!std.meta.eql(owned.record.value.artifact, expected)) return error.InvalidArchive;
+                break :chosen try owned.admitted.clone();
+            } else chosen: {
+                var packaged = try self.program.prepare(a, image);
+                defer packaged.deinit();
+                if (!std.meta.eql(runtime_ref.digest, packaged.runtime.identity) or runtime_ref.bytes != packaged.runtime.core.?.encoded_length) return error.InvalidArchive;
+                break :chosen try packaged.runtime.clone();
+            };
+            defer selected.deinit();
+            var prepared = try kosmos.Prepared.initWithRuntime(a, image, &selected);
+            defer prepared.deinit();
+            const CheckOnly = struct {
+                // Private archive candidate, never installed in Service.active
+                // and never given an environmental adapter or execution turn.
+                fn inspect(_: *anyopaque, _: kosmos.RuntimeCapsule.Reference, _: kosmos.RuntimeCapsule.Record, _: kosmos.RuntimeCapsule.Reference) !void {}
+            };
+            if (pending_operation) |pending| {
+                if (trace != null or record_value.operation != .advance or record_value.kind != .outer_execution or
+                    !std.meta.eql(ref, pending.capsule) or pending.guest_quantum > 256) return error.InvalidArchive;
+                try self.validateOuterControl(a, work, pending, envelope.value.command);
+            } else if (record_value.operation != null) return error.InvalidArchive;
+            var context: u8 = 0;
+            var candidate = try kosmos.RuntimeCapsule.restore(a, &prepared.guest, &selected, bytes, .{ .context = &context, .claim = CheckOnly.inspect });
+            defer candidate.deinit();
+            if (pending_operation != null) return;
+            const checkpoint = try candidate.checkpoint(a);
+            defer a.free(checkpoint);
+            if (!std.meta.eql(storage.digest(checkpoint), work.checkpoint.digest) or checkpoint.len != work.checkpoint.bytes) return error.InvalidArchive;
+            if (trace) |expected| {
+                // Re-run only the source observer on a private candidate. A
+                // zero-quantum advance does not perform a guest transition.
+                if (!std.meta.eql(expected.source, selected.content.value.manifest.source) or
+                    !std.meta.eql(expected.realization, selected.identity) or
+                    !std.meta.eql(expected.guest, candidate.guest.admitted().identity()) or
+                    expected.guest_revision != candidate.guest_revision) return error.InvalidArchive;
+                var observation = try candidate.exchange(.{ .advance = .{ .control = .none, .quantum = 0 } });
+                defer observation.deinit();
+                if (observation.value != .cut or observation.value.cut.guest_work != 0 or !std.meta.eql(observation.value.cut.trace, @as(?kosmos.RuntimeInstrumentation.Trace, expected.trace))) return error.InvalidArchive;
+            }
+        }
+
+        fn validateOuterControl(self: *Self, a: std.mem.Allocator, work: workspace.Work, pending: workspace.OuterOperation, encoded: []const u8) !void {
+            const bytes = try self.store().object(a, pending.control, null);
+            defer a.free(bytes);
+            var accepted = try contracts.decodeOwned(data.invocation.Control, a, bytes);
+            defer accepted.deinit();
+            var issued = try kosmos.RuntimeCapsule.readCommand(a, encoded);
+            defer issued.deinit();
+            if (issued.value != .advance or issued.value.advance.quantum != pending.guest_quantum or
+                (pending.guest_quantum == 0 and accepted.value != .reply)) return error.InvalidArchive;
+            const actual = issued.value.advance.control;
+            switch (accepted.value) {
+                .none => if (actual != .none or work.outcome_kind != .progressed) return error.InvalidArchive,
+                .resume_yield => if (actual != .resume_yield or work.outcome_kind != .yielded) return error.InvalidArchive,
+                .cancel => |reason| {
+                    const saved = work.cancellation orelse return error.InvalidArchive;
+                    if (actual != .cancel or reason != .text or !same(reason.text, saved.bytes) or
+                        !data.record.equal(data.invocation.Reason, reason, actual.cancel)) return error.InvalidArchive;
+                },
+                .reply => |reply| {
+                    if (actual != .answer or work.outcome_kind != .requested) return error.InvalidArchive;
+                    var response = try data.invocation.decode(data.invocation.Result, a, reply);
+                    defer response.deinit();
+                    var occurrence_value = try self.record(occurrence.Occurrence, a, "occurrence", work.current_occurrence orelse return error.InvalidArchive, work.task);
+                    defer occurrence_value.deinit();
+                    const value = occurrence_value.value;
+                    const acquisition = switch (value.state) {
+                        .settled_reply => |acquired| acquired,
+                        .admitted => |admitted| if (admitted == .reply) admitted.reply else return error.InvalidArchive,
+                        else => return error.InvalidArchive,
+                    };
+                    if (!std.meta.eql(value.work, work.id) or !std.meta.eql(value.request, response.value.request_identity) or
+                        !std.meta.eql(acquisition.reply, storage.digest(reply)) or !same(actual.answer, response.value.value)) return error.InvalidArchive;
+                },
+            }
+        }
+
+        fn validateRuntimeSwitch(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, item: state.WorkPublication, prior: state.WorkPublication, command: @FieldType(workspace.PublicationCommand, "realize")) !void {
+            var current = try self.workspaceWork(a, task_id, item.work);
+            defer current.deinit();
+            var work = current.value;
+            work.checkpoint = prior.checkpoint orelse return error.InvalidArchive;
+            try self.validatePublishedCapsule(a, work, command.source, prior.runtime);
+            try self.validatePublishedCapsule(a, work, command.target, item.runtime);
+            const before_bytes = try self.store().object(a, command.source, null);
+            defer a.free(before_bytes);
+            const after_bytes = try self.store().object(a, command.target, null);
+            defer a.free(after_bytes);
+            var before = try kosmos.RuntimeCapsule.read(a, before_bytes);
+            defer before.deinit();
+            var after = try kosmos.RuntimeCapsule.read(a, after_bytes);
+            defer after.deinit();
+            const source_record = before.value.record;
+            const target_record = after.value.record;
+            if (source_record.kind != .guest_cut or target_record.kind != .guest_cut or !same(before.value.checkpoint, after.value.checkpoint) or
+                !std.meta.eql(source_record.checkpoint.digest, work.checkpoint.digest) or source_record.checkpoint.bytes != work.checkpoint.bytes or
+                source_record.guest_revision != target_record.guest_revision or source_record.outer_revision == std.math.maxInt(u64) or target_record.outer_revision != source_record.outer_revision + 1) return error.InvalidArchive;
+            const dependencies = [_]state.Reference{
+                .{ .digest = source_record.artifact.digest, .bytes = source_record.artifact.bytes },
+                .{ .digest = target_record.artifact.digest, .bytes = target_record.artifact.bytes },
+                .{ .digest = target_record.guest.image.digest, .bytes = target_record.guest.image.bytes },
+            };
+            if (command.dependencies.items.len != dependencies.len) return error.InvalidArchive;
+            for (dependencies, command.dependencies.items) |wanted, actual| if (!std.meta.eql(wanted, actual)) return error.InvalidArchive;
         }
 
         pub fn workspaceProgram(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, program_id: state.Digest) !contracts.Decoded(workspace.Program) {
@@ -4676,7 +7098,7 @@ pub fn Service(comptime Types: type) type {
             defer a.free(bytes);
             var saved = try contracts.decodeOwned(workspace.Work, a, bytes);
             errdefer saved.deinit();
-            if (saved.value.version != 1 or !std.meta.eql(saved.value.id, work_id) or !std.meta.eql(saved.value.task, task_id)) return error.CorruptState;
+            if (saved.value.version != 2 or !std.meta.eql(saved.value.id, work_id) or !std.meta.eql(saved.value.task, task_id)) return error.CorruptState;
             return saved;
         }
 
@@ -4783,6 +7205,17 @@ pub fn Service(comptime Types: type) type {
             const Generation = struct { work: state.Digest, generation: u64 };
             var generations: std.AutoHashMap(Generation, void) = .init(a);
             for (records) |row| switch (row.kind) {
+                .root_operation => {
+                    var saved = try self.record(state.RootOperation, a, "root_operation", row.id, task_id);
+                    defer saved.deinit();
+                    _ = try self.validateRootOperation(a, parent.value, saved.value);
+                },
+                .workspace_runtime => {
+                    var record_value = try self.record(workspace.Runtime, a, "workspace_runtime", row.id, task_id);
+                    defer record_value.deinit();
+                    var admitted = try self.workspaceRuntime(a, task_id, record_value.value.artifact.digest, record_value.value.program);
+                    defer admitted.deinit();
+                },
                 .workspace_program => {
                     var record_value = try self.record(workspace.Program, a, "workspace_program", row.id, task_id);
                     defer record_value.deinit();
@@ -4802,6 +7235,7 @@ pub fn Service(comptime Types: type) type {
                         if (!std.meta.eql(source.artifact, ref)) return error.InvalidArchive;
                     }
                     const derivation = record_value.value.derivation;
+                    if (derivation.inspection) |origin| try self.validateWorkspaceWorkSnapshot(a, parent.value, origin.observation, records);
                     if (derivation.kind == .computation) {
                         var work = try self.workspaceWork(a, task_id, derivation.work orelse return error.InvalidArchive);
                         defer work.deinit();
@@ -4918,11 +7352,11 @@ pub fn Service(comptime Types: type) type {
             if (count != value.inputs.items.len) return error.InvalidArchive;
         }
 
-        fn validateWorkspaceWorkSnapshot(self: *Self, a: std.mem.Allocator, parent: state.Task, snapshot: workspace.WorkObservation, records: []const state.ArchiveRecord) !void {
+        fn validateWorkspacePublication(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, snapshot: workspace.WorkObservation) !void {
             const value = snapshot.work;
-            if (!std.meta.eql(value.task, parent.id)) return error.InvalidArchive;
+            if (!std.meta.eql(value.task, task_id)) return error.InvalidArchive;
             const publication_binding = try workPublication(a, snapshot);
-            var event_query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq=?", &.{ .{ .blob = &parent.id }, .{ .integer = std.math.cast(i64, value.event_watermark) orelse return error.InvalidArchive } });
+            var event_query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq=?", &.{ .{ .blob = &task_id }, .{ .integer = std.math.cast(i64, value.event_watermark) orelse return error.InvalidArchive } });
             defer event_query.deinit();
             if (try event_query.step() != .row) return error.InvalidArchive;
             var published = try contracts.decodeOwned(state.Event, a, try event_query.bytes(0));
@@ -4932,14 +7366,55 @@ pub fn Service(comptime Types: type) type {
                 matches += 1;
             };
             if (matches != 1) return error.InvalidArchive;
+        }
+
+        fn validateWorkspaceWorkSnapshot(self: *Self, a: std.mem.Allocator, parent: state.Task, snapshot: workspace.WorkObservation, records: []const state.ArchiveRecord) !void {
+            const value = snapshot.work;
+            try self.validateWorkspacePublication(a, parent.id, snapshot);
             // A checkpoint certifies execution, not native custody facts. Those
             // facts either remain immutable or grow monotonically in the owner.
             var current = try self.workspaceWork(a, parent.id, value.id);
             defer current.deinit();
             inline for (.{ "version", "program", "input", "input_value", "origin_work", "delegation" }) |field|
                 if (!std.meta.eql(@field(value, field), @field(current.value, field))) return error.InvalidArchive;
-            inline for (.{ "execution_revision", "control_revision", "port_generation", "event_watermark" }) |field|
+            inline for (.{ "execution_revision", "control_revision", "realization_revision", "port_generation", "event_watermark" }) |field|
                 if (@field(value, field) > @field(current.value, field)) return error.InvalidArchive;
+            if (value.realization_revision == current.value.realization_revision and !std.meta.eql(value.runtime, current.value.runtime)) return error.InvalidArchive;
+            if (value.runtime) |ref| {
+                var selected = try self.workspaceRuntime(a, parent.id, ref.digest, value.program);
+                defer selected.deinit();
+                if (!std.meta.eql(ref, selected.record.value.artifact)) return error.InvalidArchive;
+                try requireArchiveRecord(records, .workspace_runtime, selected.record.value.id);
+            }
+            if (value.outer_operation) |pending| {
+                try self.validatePublishedCapsuleTrace(a, value, pending.capsule, value.runtime, null, pending);
+                const capsule_bytes = try self.store().object(a, pending.capsule, null);
+                defer a.free(capsule_bytes);
+                const dependencies = try capsuleDependencies(a, capsule_bytes);
+                defer a.free(dependencies);
+                if (dependencies.len != pending.dependencies.items.len) return error.InvalidArchive;
+                for (dependencies, pending.dependencies.items) |wanted, actual| if (!std.meta.eql(wanted, actual)) return error.InvalidArchive;
+            }
+            if (value.runtime_capsule) |ref| {
+                if (value.outer_operation) |pending| {
+                    if (!std.meta.eql(ref, pending.capsule)) return error.InvalidArchive;
+                } else try self.validatePublishedCapsule(a, value, ref, value.runtime);
+                const capsule_bytes = try self.store().object(a, ref, null);
+                defer a.free(capsule_bytes);
+                const dependencies = try capsuleDependencies(a, capsule_bytes);
+                defer a.free(dependencies);
+                if (dependencies.len != value.runtime_dependencies.items.len) return error.InvalidArchive;
+                for (dependencies, value.runtime_dependencies.items) |wanted, actual| if (!std.meta.eql(wanted, actual)) return error.InvalidArchive;
+            } else if (value.runtime_dependencies.items.len != 0) return error.InvalidArchive;
+            if (value.runtime_trace) |trace| {
+                try self.validatePublishedCapsuleTrace(a, value, trace.capsule, value.runtime, trace.output, null);
+                const bytes = try self.store().object(a, trace.capsule, null);
+                defer a.free(bytes);
+                const dependencies = try capsuleDependencies(a, bytes);
+                defer a.free(dependencies);
+                if (dependencies.len != trace.dependencies.items.len) return error.InvalidArchive;
+                for (dependencies, trace.dependencies.items) |wanted, actual| if (!std.meta.eql(wanted, actual)) return error.InvalidArchive;
+            }
             try self.validateWorkspaceInputs(a, value);
             inline for (.{ "result", "result_value", "answer_value", "instrument_occurrence" }) |field| {
                 if (@field(value, field) != null and !std.meta.eql(@field(value, field), @field(current.value, field))) return error.InvalidArchive;
@@ -4970,9 +7445,17 @@ pub fn Service(comptime Types: type) type {
             const input = try self.workspaceValueReference(a, parent.id, try wp.reference(a, .value, (value.input_value orelse return error.InvalidArchive).digest));
             if (!std.meta.eql(input.value, value.input) or !std.meta.eql(input.schema, program.value.description.input_schema)) return error.InvalidArchive;
             for (value.inputs.items) |ref| _ = try self.workspaceValueReference(a, parent.id, try wp.reference(a, .value, ref.digest));
-            const driver = try self.workspaceResident(a, value);
-            defer self.retire(a) catch self.store().fence();
-            const publication = try driver.drive(a, .none, 0);
+            var prepared = try self.inspectionRuntime(self.allocator, value);
+            defer prepared.deinit();
+            const checkpoint = try self.store().object(a, value.checkpoint, null);
+            defer a.free(checkpoint);
+            var candidate = try kosmos.Session.restore(self.allocator, &prepared, checkpoint);
+            defer candidate.deinit();
+            var finished = try kosmos.invocation.finishPublication(a, &candidate, .receipt, null);
+            defer finished.outcome.deinit();
+            defer self.allocator.free(finished.checkpoint.?);
+            const publication = .{ .outcome = try data.invocation.encodeOwned(data.invocation.Outcome, a, finished.outcome.record), .checkpoint = finished.checkpoint.? };
+            defer a.free(publication.outcome);
             if (!std.meta.eql(storage.digest(publication.outcome), value.outcome.digest) or publication.outcome.len != value.outcome.bytes or
                 !std.meta.eql(storage.digest(publication.checkpoint), value.checkpoint.digest) or publication.checkpoint.len != value.checkpoint.bytes) return error.InvalidArchive;
             var observed = try data.invocation.decode(data.invocation.Outcome, a, publication.outcome);
@@ -5076,7 +7559,8 @@ pub fn Service(comptime Types: type) type {
             const Request = workspace.BuildRequest;
             const request = try operation(Request, a, .{ .task = task_id, .source = .{ .bytes = source }, .source_kind = source_kind, .catalog = catalog, .exposures = .{ .items = exposures } });
             if (try self.replay(a, operation_id, request)) |prior| return prior;
-            if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
+            try self.requireCustody(a, task_id, null);
+            if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
             if (catalog) |ref| try workspaceSnapshotAccess(parent.value, ref);
             var built = try self.workspaceCompile(a, source, @fromBackingInt(@intCast(@backingInt(source_kind))), catalog, exposures, diagnostic);
             defer built.deinit();
@@ -5176,7 +7660,10 @@ pub fn Service(comptime Types: type) type {
                 try self.store().putReceipt(&key, request, bytes);
             }
             try self.runnable.ensureUnusedCapacity(self.allocator, 2);
-            const disposed = parent.terminal() and try self.taskCleanupComplete(a, parent);
+            const disposed = if (try self.hasLocalCustody(a, parent.id, null) or try self.hasFrozenCustody(a, parent.id, null))
+                parent.terminal() and try self.taskCleanupComplete(a, parent)
+            else
+                try self.workspaceSettled(a, parent.id, true, false, false);
             try self.persist(a, parent, initial.revision, "workspace.publish", .acquire);
             if (disposed) self.unclaim(parent.id);
             return .{ .receipt = saved, .replayed = false };
@@ -5189,7 +7676,7 @@ pub fn Service(comptime Types: type) type {
             if (try self.replay(a, operation_id, request)) |prior| return prior;
             var parent = try self.task(a, task_id);
             defer parent.deinit();
-            if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
+            if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
             const parent_occurrence = parent.value.current_occurrence orelse return error.InvalidDelegation;
             const operation_name = std.fmt.bytesToHex(parent_occurrence, .lower);
             if (!same(operation_id, &operation_name)) return error.InvalidDelegation;
@@ -5197,6 +7684,7 @@ pub fn Service(comptime Types: type) type {
             defer original.deinit();
             if (original.value.work != null or original.value.state != .ready) return error.InvalidDelegation;
             const target_id = try wp.identity(selection.expected.work, .work);
+            try self.requireCustody(a, task_id, target_id);
             var target = try self.workspaceWork(a, task_id, target_id);
             defer target.deinit();
             if (target.value.execution_revision != selection.expected.execution_revision or target.value.control_revision != selection.expected.control_revision) return error.StaleRevision;
@@ -5244,24 +7732,25 @@ pub fn Service(comptime Types: type) type {
             defer a.free(record_bytes);
             const input = try contracts.encodeOwned(instrument.Input, a, .{ .delegation = .{ .digest = storage.digest(record_bytes), .bytes = record_bytes.len } });
             defer a.free(input);
-            return self.workspaceStartAdmitted(a, operation_id, task_id, program.digest, input, .{ .stop = .terminal, .continuation = .owner_scheduled }, null, .{ .record = record_value, .request = request, .policy = selection.policy, .command = selection });
+            return self.workspaceStartAdmitted(a, operation_id, task_id, program.digest, input, .{ .stop = .terminal, .continuation = .owner_scheduled }, null, .{ .record = record_value, .request = request, .policy = selection.policy, .command = selection }, null);
         }
 
         pub fn workspaceStart(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, program_id: state.Digest, input: []const u8, policy: workspace.RunPolicy) !Admission {
             return self.workspaceStartValue(a, operation_id, task_id, program_id, input, policy, null);
         }
         fn workspaceStartValue(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, program_id: state.Digest, input: []const u8, policy: workspace.RunPolicy, origin: ?state.Reference) !Admission {
-            return self.workspaceStartAdmitted(a, operation_id, task_id, program_id, input, policy, origin, null);
+            return self.workspaceStartAdmitted(a, operation_id, task_id, program_id, input, policy, origin, null, null);
         }
         const StartDelegation = struct { record: workspace.Delegation, request: state.Digest, policy: workspace.RunPolicy, command: @FieldType(wc.Work, "delegate") };
-        fn workspaceStartAdmitted(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, program_id: state.Digest, input: []const u8, policy: workspace.RunPolicy, origin: ?state.Reference, delegated: ?StartDelegation) !Admission {
+        fn workspaceStartAdmitted(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, program_id: state.Digest, input: []const u8, policy: workspace.RunPolicy, origin: ?state.Reference, delegated: ?StartDelegation, runtime: ?state.Reference) !Admission {
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatible(parent.value);
             const Request = workspace.StartRequest;
-            const request = if (delegated) |bound| bound.request else try operation(Request, a, .{ .task = task_id, .program = program_id, .input = .{ .bytes = input }, .policy = policy, .origin = origin });
+            const request = if (delegated) |bound| bound.request else try operation(Request, a, .{ .task = task_id, .program = program_id, .input = .{ .bytes = input }, .policy = policy, .origin = origin, .runtime = runtime });
             if (try self.replay(a, operation_id, request)) |prior| return prior;
-            if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
+            try self.requireCustody(a, task_id, null);
+            if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
             var artifact = try self.workspaceProgram(a, task_id, program_id);
             defer artifact.deinit();
             const kind = artifact.value.description.source_kind;
@@ -5277,7 +7766,12 @@ pub fn Service(comptime Types: type) type {
             try self.retire(a);
             var id: state.Digest = undefined;
             if (delegated) |bound| id = bound.record.instrument else try self.io.randomSecure(&id);
-            const driver = try evaluator.Driver.open(self.allocator, image, .{ .initial_args = input });
+            var selected: ?SelectedRuntime = if (runtime) |ref| try self.workspaceRuntime(a, task_id, ref.digest, program_id) else null;
+            defer if (selected) |*value| value.deinit();
+            if (selected) |value| if (!std.meta.eql(runtime.?, value.record.value.artifact)) return error.InvalidRuntime;
+            var packaged = try self.program.retainRuntime();
+            defer packaged.deinit();
+            const driver = try evaluator.Driver.openSelected(self.allocator, image, .{ .initial_args = input }, if (selected) |*value| &value.admitted else &packaged);
             self.active = .{ .task = task_id, .work = id, .execution_revision = 0, .driver = driver };
             errdefer if (!self.store().fenced) self.retire(a) catch self.store().fence();
             const native_started = std.Io.Clock.awake.now(self.io);
@@ -5305,6 +7799,7 @@ pub fn Service(comptime Types: type) type {
                 .id = id,
                 .task = task_id,
                 .program = program_id,
+                .runtime = runtime,
                 .delegation = delegation_ref,
                 .origin_work = if (delegated) |bound| bound.record.work else null,
                 .input = try self.store().putObject(input),
@@ -5320,17 +7815,37 @@ pub fn Service(comptime Types: type) type {
             };
             saved.input_value = origin orelse try self.workspacePublishValue(a, task_id, artifact.value.description.input_schema, saved.input, .{ .kind = .hypothesis, .sources = .{ .items = &.{} } });
             try self.workspacePublication(a, &saved, publication);
+            defer if (saved.runtime_trace) |trace| a.free(trace.dependencies.items);
             try self.store().createRecord(workspace.Work, "workspace_work", id, task_id, saved);
-            const admitted = try self.workspaceCommitRelated(a, parent.value, operation_id, request, id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", id, task_id), if (delegated) |bound| bound.record.work else null, if (delegated) |bound| .{ .delegate = bound.command } else .{ .start = .{ .policy = policy, .origin = origin != null } });
+            try self.createCustody(a, task_id, id);
+            const admitted = try self.workspaceCommitRelated(a, parent.value, operation_id, request, id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", id, task_id), if (delegated) |bound| bound.record.work else null, if (delegated) |bound| .{ .delegate = bound.command } else .{ .start = .{ .policy = policy, .origin = origin != null, .runtime = runtime } });
             self.active.?.execution_revision = saved.execution_revision;
             if (saved.schedule == .queued) self.subjectAppendAssumeCapacity(.{ .task = task_id, .work = id });
             return admitted;
         }
 
+        fn workspaceTracePublication(self: *Self, a: std.mem.Allocator, value: workspace.Work, trace: kosmos.RuntimeInstrumentation.Output) !workspace.RuntimeTrace {
+            const driver = self.active.?.driver;
+            const capsule = try driver.publishCapsule(a, .outer_execution, runtimeProvenance(value));
+            defer capsule.deinit();
+            const code = try driver.runtimeBytes(a);
+            defer a.free(code);
+            _ = try self.store().putObject(code);
+            return .{ .output = trace, .capsule = try self.store().putObject(capsule.bytes()), .dependencies = .{ .items = try capsuleDependencies(a, capsule.bytes()) } };
+        }
+
         fn workspacePublication(self: *Self, a: std.mem.Allocator, value: *workspace.Work, publication: evaluator.Driver.Publication) !void {
+            value.runtime_capsule = null;
+            value.runtime_trace = null;
+            value.outer_operation = null;
+            value.runtime_dependencies = .{ .items = &.{} };
             var outcome = try data.invocation.decode(data.invocation.Outcome, a, publication.outcome);
             defer outcome.deinit();
             value.checkpoint = try self.store().putObject(publication.checkpoint);
+            if (publication.trace) |trace| {
+                value.runtime_trace = self.workspaceTracePublication(a, value.*, trace) catch return error.InstrumentationPublicationBlocked;
+            }
+            errdefer if (value.runtime_trace) |trace| a.free(trace.dependencies.items);
             value.outcome = try self.store().putObject(publication.outcome);
             value.schedule = .parked;
             switch (outcome.value) {
@@ -5382,13 +7897,12 @@ pub fn Service(comptime Types: type) type {
             }
             // No unbound external request is dispatched. A run policy grants
             // continued computation, never the authority to invent an answer.
-            if (value.outcome_kind == .requested and value.delegation != null and value.current_port == null and value.policy.continuation == .owner_scheduled) value.schedule = .queued;
-            if (!value.terminal() and value.outcome_kind != .requested and (value.cancellation != null or (value.policy.continuation == .owner_scheduled and value.policy.stop != .next_slice and (value.outcome_kind != .yielded or value.policy.stop == .terminal)))) value.schedule = .queued;
+            value.schedule = publicationSchedule(workspace.ControlObservation.from(.{ .work = value.*, .occurrence = null }));
         }
 
         fn workspaceResident(self: *Self, a: std.mem.Allocator, value: workspace.Work) !*evaluator.Driver {
             if (self.active) |active| {
-                if (std.meta.eql(active.task, value.task) and active.work != null and std.meta.eql(active.work.?, value.id) and active.execution_revision == value.execution_revision) return active.driver;
+                if (std.meta.eql(active.task, value.task) and active.work != null and std.meta.eql(active.work.?, value.id) and active.execution_revision == value.execution_revision and active.realization_revision == value.realization_revision and std.meta.eql(active.outer_operation, if (value.outer_operation) |pending| @as(?state.Reference, pending.capsule) else null)) return active.driver;
                 try self.retire(a);
             }
             var artifact = try self.workspaceProgram(a, value.task, value.program);
@@ -5397,8 +7911,30 @@ pub fn Service(comptime Types: type) type {
             defer a.free(image);
             const checkpoint = try self.store().object(a, value.checkpoint, null);
             defer a.free(checkpoint);
-            const driver = try evaluator.Driver.open(self.allocator, image, .{ .state = checkpoint });
-            self.active = .{ .task = value.task, .work = value.id, .execution_revision = value.execution_revision, .driver = driver };
+            var selected: ?SelectedRuntime = if (value.runtime) |ref| try self.workspaceRuntime(a, value.task, ref.digest, value.program) else null;
+            defer if (selected) |*item| item.deinit();
+            if (selected) |item| if (!std.meta.eql(value.runtime.?, item.record.value.artifact)) return error.InvalidRuntime;
+            var packaged = try self.program.retainRuntime();
+            defer packaged.deinit();
+            const driver = if (value.outer_operation) |pending| restored: {
+                try self.validatePublishedCapsuleTrace(a, value, pending.capsule, value.runtime, null, pending);
+                const bytes = try self.store().object(a, pending.capsule, null);
+                defer a.free(bytes);
+                const Owner = struct {
+                    work: workspace.Work,
+                    reference: state.Reference,
+                    fn claim(context: *anyopaque, ref: kosmos.RuntimeCapsule.Reference, record_value: kosmos.RuntimeCapsule.Record, _: kosmos.RuntimeCapsule.Reference) !void {
+                        const owner: *@This() = @ptrCast(@alignCast(context));
+                        if (!std.meta.eql(ref.digest, owner.reference.digest) or ref.bytes != owner.reference.bytes or
+                            !std.meta.eql(record_value.provenance, runtimeProvenance(owner.work))) return error.InvalidArchive;
+                    }
+                };
+                // The task's immutable publication and current exclusive native
+                // namespace ownership authorize this one resident installation.
+                var owner: Owner = .{ .work = value, .reference = pending.capsule };
+                break :restored try evaluator.Driver.openCapsule(self.allocator, image, if (selected) |*item| &item.admitted else &packaged, bytes, .{ .context = &owner, .claim = Owner.claim });
+            } else try evaluator.Driver.openSelected(self.allocator, image, .{ .state = checkpoint }, if (selected) |*item| &item.admitted else &packaged);
+            self.active = .{ .task = value.task, .work = value.id, .execution_revision = value.execution_revision, .realization_revision = value.realization_revision, .outer_operation = if (value.outer_operation) |pending| pending.capsule else null, .driver = driver };
             return driver;
         }
 
@@ -5476,12 +8012,18 @@ pub fn Service(comptime Types: type) type {
             defer delegation.deinit();
             const admitted = delegation.value;
             if (!std.meta.eql(admitted.task, parent.id) or !std.meta.eql(admitted.instrument, child.id)) return error.CorruptState;
+            if (!try self.hasLocalCustody(a, parent.id, admitted.work)) return false;
             var target = try self.workspaceWork(a, parent.id, admitted.work);
             defer target.deinit();
             return target.value.cancellation == null and !target.value.terminal() and target.value.control_revision == admitted.control_revision and std.meta.eql(target.value.current_port, admitted.port);
         }
 
         fn pumpWorkspace(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: state.Digest) !Step {
+            self.requireCustody(a, task_id, work_id) catch |err| {
+                if (err != error.CustodyNotLocal) return err;
+                self.subjectRemove(.{ .task = task_id, .work = work_id });
+                return .idle;
+            };
             var saved = try self.workspaceWork(a, task_id, work_id);
             defer saved.deinit();
             const subject: workspace.Subject = .{ .task = task_id, .work = work_id };
@@ -5502,6 +8044,10 @@ pub fn Service(comptime Types: type) type {
             if ((parent.value.cancellation != null or parent.value.terminal()) and saved.value.cancellation == null) {
                 try self.parkWorkspaceOnClose(a, task_id, work_id);
                 self.subjectRemove(subject);
+                return .progressed;
+            }
+            if (saved.value.outer_operation != null) {
+                _ = try self.workspacePumpWork(a, parent.value, saved.value, 65536, null, @splat(0), null);
                 return .progressed;
             }
             if (saved.value.current_occurrence) |id| {
@@ -5535,25 +8081,125 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn workspaceRunnable(self: *Self, a: std.mem.Allocator, parent: state.Task, child: workspace.Work) !bool {
+            if (!try self.hasLocalCustody(a, parent.id, child.id)) return false;
             if (!child.terminal()) return child.schedule != .parked;
             return child.answer_value != null and try self.delegationCurrent(a, parent, child);
         }
 
-        fn workspaceAdvance(self: *Self, a: std.mem.Allocator, parent: state.Task, initial: workspace.Work, control: data.invocation.Control, operation_id: ?[]const u8, request: state.Digest, command: ?workspace.PublicationCommand) !Admission {
+        pub fn workspacePump(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, command: @FieldType(wc.Work, "pump")) !Admission {
+            if (command.base_quantum == 0 or command.base_quantum > 1048576) return error.InvalidParams;
+            const request = try operation(workspace.PumpRequest, a, .{ .task = task_id, .command = command });
+            if (try self.replay(a, operation_id, request)) |prior| return prior;
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            try self.compatible(parent.value);
+            var work = try self.runtimeWork(a, task_id, command.expected);
+            defer work.deinit();
+            if (work.value.terminal()) return error.InvalidState;
+            if (self.workspaceParentStopped(parent.value) and work.value.cancellation == null) return error.InvalidState;
+            work.value.control_revision = try std.math.add(u64, work.value.control_revision, 1);
+            return self.workspacePumpWork(a, parent.value, work.value, command.base_quantum, operation_id, request, .{ .pump = command });
+        }
+
+        fn workspacePumpWork(self: *Self, a: std.mem.Allocator, parent: state.Task, initial: workspace.Work, base_quantum: u64, operation_id: ?[]const u8, request: state.Digest, command: ?workspace.PublicationCommand) !Admission {
+            try self.requireCustody(a, initial.task, initial.id);
             try self.runnable.ensureUnusedCapacity(self.allocator, 1);
             const driver = try self.workspaceResident(a, initial);
-            var consumed: ?occurrence.Occurrence = null;
-            if (control == .cancel or control == .reply) if (initial.current_occurrence) |id| {
-                var pending = try self.record(occurrence.Occurrence, a, "occurrence", id, initial.task);
-                defer pending.deinit();
-                consumed = try occurrence.consumed(pending.value, .{ .id = id, .task = initial.task, .work = initial.id, .request = pending.value.request }, if (control == .cancel) .cancel else .{ .reply = storage.digest(control.reply) }, initial.cancellation != null);
+            var control = workspaceContinuation(initial);
+            var decoded: ?contracts.Decoded(data.invocation.Control) = null;
+            defer if (decoded) |*value| value.deinit();
+            var control_bytes: ?[]u8 = null;
+            defer if (control_bytes) |bytes| a.free(bytes);
+            var reply_bytes: ?[]u8 = null;
+            defer if (reply_bytes) |bytes| a.free(bytes);
+            const native_started = std.Io.Clock.awake.now(self.io);
+            const guest_quantum = if (initial.outer_operation) |pending| pending.guest_quantum else blk: {
+                if (initial.current_occurrence) |id| {
+                    var occurrence_value = try self.record(occurrence.Occurrence, a, "occurrence", id, initial.task);
+                    defer occurrence_value.deinit();
+                    if (occurrence_value.value.state == .settled_reply) {
+                        reply_bytes = try self.store().acquiredObject(a, occurrence_value.value.state.settled_reply.reply, null);
+                        control = .{ .reply = reply_bytes.? };
+                    } else if (control != .cancel or (occurrence_value.value.state != .ready and occurrence_value.value.state != .awaiting and occurrence_value.value.state != .not_sent)) return error.WaitingInput;
+                }
+                break :blk @as(u64, if (control == .reply and initial.cancellation != null and !initial.cancellation_applied) 0 else 256);
             };
+            if (initial.outer_operation) |pending| {
+                const bytes = try self.store().object(a, pending.control, null);
+                defer a.free(bytes);
+                decoded = try contracts.decodeOwned(data.invocation.Control, a, bytes);
+                control = decoded.?.value;
+            } else {
+                control_bytes = try contracts.encodeOwned(data.invocation.Control, a, control);
+                _ = try self.workspaceConsumed(a, initial, control);
+                try driver.beginAdvance(control, guest_quantum);
+            }
+            errdefer self.store().fence();
+            var progress = try driver.pump(base_quantum);
+            defer progress.deinit();
+            const elapsed = std.math.cast(u64, @max(0, std.Io.Clock.awake.now(self.io).nanoseconds - native_started.nanoseconds)) orelse std.math.maxInt(u64);
+            if (progress == .event and progress.event.value == .cut) {
+                // The operation already applied its control. Publish the cut
+                // with a read-only zero-quantum observation, never another reply.
+                const publication = try driver.drive(a, .none, 0);
+                defer a.free(publication.outcome);
+                return self.workspaceFinish(a, parent, initial, control, publication, elapsed, operation_id, request, command);
+            }
+            if (progress != .suspended) return error.InvalidRuntimeProgress;
+            const capsule = try driver.retainCapsule(runtimeProvenance(initial));
+            const code = try driver.runtimeBytes(a);
+            defer a.free(code);
+            try self.store().begin();
+            defer self.store().rollback();
+            _ = try self.store().putObject(code);
+            var value = initial;
+            value.outer_operation = .{
+                .capsule = try self.store().putObject(capsule),
+                .dependencies = .{ .items = try capsuleDependencies(a, capsule) },
+                .control = if (initial.outer_operation) |pending| pending.control else try self.store().putObject(control_bytes.?),
+                .guest_quantum = guest_quantum,
+            };
+            defer a.free(value.outer_operation.?.dependencies.items);
+            value.runtime_capsule = null;
+            value.runtime_dependencies = .{ .items = &.{} };
+            value.native_publication_nanoseconds +|= elapsed;
+            value.event_watermark = try std.math.add(u64, parent.event_high, 1);
+            value.schedule = if (value.cancellation != null or value.policy.continuation == .owner_scheduled) .queued else .parked;
+            try self.store().putRecord(workspace.Work, "workspace_work", value.id, value.task, value);
+            const admitted = try self.workspaceCommit(a, parent, operation_id, request, value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, value.task), command);
+            self.active.?.outer_operation = value.outer_operation.?.capsule;
+            const subject: workspace.Subject = .{ .task = value.task, .work = value.id };
+            if (value.schedule == .queued) self.subjectAddAssumeCapacity(subject) else self.subjectRemove(subject);
+            return admitted;
+        }
+
+        fn workspaceConsumed(self: *Self, a: std.mem.Allocator, work: workspace.Work, control: data.invocation.Control) !?occurrence.Occurrence {
+            if (control == .cancel or control == .reply) if (work.current_occurrence) |id| {
+                var pending = try self.record(occurrence.Occurrence, a, "occurrence", id, work.task);
+                defer pending.deinit();
+                return try occurrence.consumed(pending.value, .{ .id = id, .task = work.task, .work = work.id, .request = pending.value.request }, if (control == .cancel) .cancel else .{ .reply = storage.digest(control.reply) }, work.cancellation != null);
+            };
+            return null;
+        }
+
+        fn workspaceAdvance(self: *Self, a: std.mem.Allocator, parent: state.Task, initial: workspace.Work, control: data.invocation.Control, operation_id: ?[]const u8, request: state.Digest, command: ?workspace.PublicationCommand) !Admission {
+            try self.requireCustody(a, initial.task, initial.id);
+            if (initial.outer_operation != null) return self.workspacePumpWork(a, parent, initial, 65536, operation_id, request, command);
+            try self.runnable.ensureUnusedCapacity(self.allocator, 1);
+            const driver = try self.workspaceResident(a, initial);
+            _ = try self.workspaceConsumed(a, initial, control);
             const native_started = std.Io.Clock.awake.now(self.io);
             const publication = try driver.drive(a, control, if (control == .reply and initial.cancellation != null and !initial.cancellation_applied) 0 else 256);
             defer a.free(publication.outcome);
             errdefer self.store().fence();
+            const elapsed = std.math.cast(u64, @max(0, std.Io.Clock.awake.now(self.io).nanoseconds - native_started.nanoseconds)) orelse std.math.maxInt(u64);
+            return self.workspaceFinish(a, parent, initial, control, publication, elapsed, operation_id, request, command);
+        }
+
+        fn workspaceFinish(self: *Self, a: std.mem.Allocator, parent: state.Task, initial: workspace.Work, control: data.invocation.Control, publication: evaluator.Driver.Publication, elapsed: u64, operation_id: ?[]const u8, request: state.Digest, command: ?workspace.PublicationCommand) !Admission {
+            const consumed = try self.workspaceConsumed(a, initial, control);
             var value = initial;
-            value.native_publication_nanoseconds +|= std.math.cast(u64, @max(0, std.Io.Clock.awake.now(self.io).nanoseconds - native_started.nanoseconds)) orelse std.math.maxInt(u64);
+            value.native_publication_nanoseconds +|= elapsed;
             if (control == .cancel) value.cancellation_applied = true;
             if (consumed != null) {
                 value.current_occurrence = null;
@@ -5565,6 +8211,7 @@ pub fn Service(comptime Types: type) type {
             defer self.store().rollback();
             if (consumed) |prior| try self.store().putRecord(occurrence.Occurrence, "occurrence", prior.id, value.task, prior);
             try self.workspacePublication(a, &value, publication);
+            defer if (value.runtime_trace) |trace| a.free(trace.dependencies.items);
             if (value.outcome_kind == .completed and value.delegation != null) {
                 value.answer_value = try self.workspaceInstrumentAnswer(a, parent, value);
                 if (value.answer_value) |answer| {
@@ -5581,6 +8228,7 @@ pub fn Service(comptime Types: type) type {
             const runnable = try self.workspaceRunnable(a, parent, value);
             const admitted = try self.workspaceCommit(a, parent, operation_id, request, value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, value.task), command);
             self.active.?.execution_revision = value.execution_revision;
+            self.active.?.outer_operation = null;
             const subject: workspace.Subject = .{ .task = value.task, .work = value.id };
             if (runnable) self.subjectAddAssumeCapacity(subject) else self.subjectRemove(subject);
             return admitted;
@@ -5594,12 +8242,21 @@ pub fn Service(comptime Types: type) type {
             const request = try operation(Request, a, .{ .task = task_id, .work = work_id, .execution = expected_execution, .control = expected_control, .command = command });
             const publication_command: workspace.PublicationCommand = .{ .control = .{ .execution = expected_execution, .control = expected_control, .command = command } };
             if (try self.replay(a, operation_id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, work_id);
             var saved = try self.workspaceWork(a, task_id, work_id);
             defer saved.deinit();
             var value = saved.value;
             if (value.execution_revision != expected_execution or value.control_revision != expected_control) return error.StaleRevision;
             if (value.terminal()) return error.InvalidState;
-            if (command != .park and command != .cancel and (parent.value.terminal() or parent.value.cancellation != null)) return error.InvalidState;
+            if (command != .park and command != .cancel and self.workspaceParentStopped(parent.value)) return error.InvalidState;
+            if (value.outer_operation != null and (command == .advance or command == .cancel)) {
+                if (command == .cancel) {
+                    if (command.cancel.bytes.len > 256 or !std.unicode.utf8ValidateSlice(command.cancel.bytes)) return error.InvalidParams;
+                    if (value.cancellation == null) value.cancellation = command.cancel;
+                    value.control_revision = try std.math.add(u64, value.control_revision, 1);
+                }
+                return self.workspacePumpWork(a, parent.value, value, 65536, operation_id, request, publication_command);
+            }
             if (command == .cancel) {
                 if (command.cancel.bytes.len > 256 or !std.unicode.utf8ValidateSlice(command.cancel.bytes)) return error.InvalidParams;
                 if (value.cancellation == null) value.cancellation = command.cancel;
@@ -5651,20 +8308,19 @@ pub fn Service(comptime Types: type) type {
             switch (command) {
                 .park => value.schedule = .parked,
                 .delegate => |policy| {
-                    value.policy = policy;
-                    var can_run = value.current_occurrence == null;
-                    var in_flight = false;
+                    var before = workspace.ControlObservation.from(.{ .work = value, .occurrence = null });
                     if (value.current_occurrence) |id| {
                         var pending = try self.record(occurrence.Occurrence, a, "occurrence", id, task_id);
                         defer pending.deinit();
-                        in_flight = pending.value.state == .dispatching;
-                        can_run = pending.value.state == .settled_reply or pending.value.state == .captured or (pending.value.state == .ready and value.delegation != null);
-                        if (pending.value.state == .not_sent and value.delegation != null) {
+                        before.delivery = std.meta.activeTag(pending.value.state);
+                        const delegated = delegatedControl(before, value.outer_operation != null, policy);
+                        if (delegated.delivery != before.delivery) {
                             rearmed = try occurrence.rearm(pending.value, .{ .id = id, .task = task_id, .work = work_id, .request = pending.value.request });
-                            can_run = true;
                         }
                     }
-                    value.schedule = if (policy.continuation == .explicit_only) .parked else if (in_flight) .active else if (can_run) .queued else .parked;
+                    const delegated = delegatedControl(before, value.outer_operation != null, policy);
+                    value.policy = delegated.policy;
+                    value.schedule = delegated.schedule;
                 },
                 .advance, .cancel => unreachable,
             }
@@ -5679,6 +8335,7 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn parkWorkspaceOnClose(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: state.Digest) !void {
+            try self.requireCustody(a, task_id, work_id);
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             var saved = try self.workspaceWork(a, task_id, work_id);
@@ -5695,26 +8352,37 @@ pub fn Service(comptime Types: type) type {
 
         pub fn close(self: *Self, a: std.mem.Allocator) !void {
             if (self.work != null) return error.Busy;
+            if (self.placement_job) |job| {
+                job.job.deinit();
+                self.placement_job = null;
+            }
             try self.retire(a);
             try self.program.close();
             self.runnable.deinit(self.allocator);
+            self.placement_pending.deinit(self.allocator);
             self.owned.deinit(self.allocator);
             self.checked_workspace_programs.deinit(self.allocator);
+            self.checked_workspace_runtimes.deinit(self.allocator);
+            if (self.runtime_cache) |*cached| cached.artifact.deinit();
             self.* = undefined;
         }
 
         pub fn park(self: *Self, a: std.mem.Allocator) !void {
             if (self.work != null) return error.Busy;
-            for (0..self.runnable.items.len) |offset| {
-                const id = self.runnable.items[(self.runnable_cursor + offset) % self.runnable.items.len];
+            if (self.placement_job) |job| {
+                job.job.deinit();
+                self.placement_job = null;
+            }
+            self.placement_pending.clearRetainingCapacity();
+            for (self.owned.items) |id| {
                 // Host suspension drops volatile ownership, not the child's
                 // admitted scheduling intent. Explicit task resume restores
                 // eligible children; a controller work.park remains durable.
-                if (id.work != null) continue;
-                var decoded = try self.task(a, id.task);
+                if (!try self.hasLocalCustody(a, id, null) and !try self.hasFrozenCustody(a, id, null)) continue;
+                var decoded = try self.task(a, id);
                 defer decoded.deinit();
                 var value = decoded.value;
-                if (value.terminal()) continue;
+                if (value.terminal() or value.schedule == .parked) continue;
                 const previous = value.revision;
                 value.revision = try std.math.add(u64, previous, 1);
                 value.schedule = .parked;

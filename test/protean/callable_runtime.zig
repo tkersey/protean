@@ -37,8 +37,7 @@ test "static-code callable preserves actual Kosmos observations and branch work"
                 .state => |state| try kosmos.Session.restoreImage(allocator, invocation_image_0, state),
             };
             defer session.deinit();
-            session.statistics = &raw_stats;
-            session.store.statistics = &raw_stats.storage;
+            session.setStatistics(&raw_stats);
             _ = try kosmos.invocation.advance(&session, .none, null);
             break :observed try kosmos.invocation.finish(allocator, &session, true);
         };
@@ -53,8 +52,7 @@ test "static-code callable preserves actual Kosmos observations and branch work"
                 .state => |state| try kosmos.Session.restoreImage(allocator, invocation_image_1, state),
             };
             defer session.deinit();
-            session.statistics = &selected_stats;
-            session.store.statistics = &selected_stats.storage;
+            session.setStatistics(&selected_stats);
             _ = try kosmos.invocation.advance(&session, .none, null);
             break :observed try kosmos.invocation.finish(allocator, &session, true);
         };

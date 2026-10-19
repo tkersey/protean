@@ -451,6 +451,53 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
                 } else if (!same(&item.task, &value.id)) return error.CorruptState;
                 try collector.visit(T, item);
                 if (T == state.Reconciliation) try state.visitReconciliationHistory(a, store, item, &collector);
+                if (comptime same(kind, "placement_action")) {
+                    const p = @import("placement.zig");
+                    try p.verify(p.Action, a, item.action, item.action.value.owner);
+                    if (!std.meta.eql(item.id, item.action.value.id) or !std.meta.eql(item.task, item.action.value.task) or
+                        !std.meta.eql(item.id, p.operationId(item.action.value.owner, item.task, item.action.value.operation.bytes, .action))) return error.InvalidArchive;
+                }
+                if (comptime same(kind, "placement_control")) {
+                    const p = @import("placement.zig");
+                    try p.verify(p.Control, a, item.control, item.control.value.controller);
+                    if (!std.meta.eql(item.id, p.controlId(item.control.value)) or !std.meta.eql(item.task, item.control.value.subject.task)) return error.InvalidArchive;
+                    _ = try p.routeHead(a, item.control.value, item.route.items);
+                    if (item.report) |report| {
+                        try p.matchReport(a, item.control.value, item.route.items, report);
+                    }
+                }
+                if (comptime same(kind, "placement_move")) {
+                    const p = @import("placement.zig");
+                    const action_bytes = try store.object(a, item.action, null);
+                    defer a.free(action_bytes);
+                    var action = try contracts.decodeOwned(p.ActionRecord, a, action_bytes);
+                    defer action.deinit();
+                    try p.verify(p.Action, a, action.value.action, item.owner);
+                    if (action.value.action.value.request != .move or !std.meta.eql(item.task, action.value.task) or
+                        !std.meta.eql(item.id, p.operationId(item.owner, item.task, item.request.operation.bytes, .move))) return error.InvalidArchive;
+                    if (!std.meta.eql(item.subject.task, item.task)) return error.InvalidArchive;
+                    switch (item.request.subject) {
+                        .controller => if (item.subject.work != null) return error.InvalidArchive,
+                        .work => |ref| {
+                            if (ref.kind != .work or ref.id.bytes.len != 64 or item.subject.work == null) return error.InvalidArchive;
+                            var expected_work: state.Digest = undefined;
+                            _ = std.fmt.hexToBytes(&expected_work, ref.id.bytes) catch return error.InvalidArchive;
+                            if (!std.meta.eql(expected_work, item.subject.work.?)) return error.InvalidArchive;
+                        },
+                    }
+                    const wanted = try contracts.encodeOwned(@TypeOf(item.request), a, action.value.action.value.request.move);
+                    defer a.free(wanted);
+                    const actual = try contracts.encodeOwned(@TypeOf(item.request), a, item.request);
+                    defer a.free(actual);
+                    if (!same(wanted, actual)) return error.InvalidArchive;
+                }
+                if (comptime same(kind, "placement_succession")) {
+                    const p = @import("placement.zig");
+                    try p.verify(p.Offer, a, item.offer, item.offer.value.intent.source);
+                    try p.matchDecision(a, item.offer.value, item.decision);
+                    if (item.decision.value.verdict != .accepted or !std.meta.eql(item.id, item.decision.value.transfer) or
+                        !std.meta.eql(item.task, item.offer.value.intent.subject.task)) return error.InvalidArchive;
+                }
                 if (comptime same(kind, "occurrence")) {
                     switch (item.state) {
                         .dispatching => return error.UnsettledOccurrence,
@@ -552,6 +599,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         var decoded = try contracts.decodeOwned(state.Event, store.allocator, bytes);
         defer decoded.deinit();
         try collector.visit(state.Event, decoded.value);
+        try state.visitWorkspaceCommand(a, store, decoded.value, &collector);
         if (!same(&decoded.value.task, &value.id) or decoded.value.seq != row.seq or decoded.value.revision != row.revision) return error.CorruptState;
         try @import("schemas.zig").validateEventData(store.allocator, decoded.value.kind, decoded.value.data.bytes);
         const identity = try validateEventFacts(store, archive, value, &admissions, decoded.value);
@@ -650,16 +698,79 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
     return .{ .task = task, .objects = objects, .current = current };
 }
 
+/// Current retained data for disclosure of a control message or observation.
+/// Unlike a movable execution archive, this may include an active occurrence:
+/// examining its bytes cannot activate it at another owner.
+pub fn disclosureClosure(a: std.mem.Allocator, store: *storage.Store, task: state.TaskId) ![]state.Reference {
+    try store.checkIntegrity();
+    var query = try store.database.prepare(
+        \\WITH RECURSIVE roots(digest) AS (
+        \\ SELECT body FROM tasks WHERE id=? UNION SELECT body FROM records WHERE task=?
+        \\ UNION SELECT body FROM events WHERE task=? UNION SELECT receipt FROM operations WHERE task=?
+        \\), reachable(digest) AS (
+        \\ SELECT digest FROM roots UNION SELECT d.child FROM dependencies d JOIN reachable r ON d.parent=r.digest
+        \\) SELECT o.digest,length(o.body) FROM objects o JOIN reachable r ON o.digest=r.digest ORDER BY o.digest
+    , &.{ .{ .blob = &task }, .{ .blob = &task }, .{ .blob = &task }, .{ .blob = &task } });
+    defer query.deinit();
+    var result: std.ArrayList(state.Reference) = .empty;
+    errdefer result.deinit(a);
+    while (try query.step() == .row) {
+        const id = try query.bytes(0);
+        const length = try query.integer(1);
+        if (id.len != 32 or length < 0) return error.CorruptState;
+        try result.append(a, .{ .digest = id[0..32].*, .bytes = @intCast(length) });
+    }
+    return result.toOwnedSlice(a);
+}
+
+/// Build a complete immutable index while the caller owns its snapshot scope.
+/// A caller retaining it beyond the current store state must retain its edges.
+pub fn prepare(a: std.mem.Allocator, store: *storage.Store, task: state.TaskId, build: []const u8) !state.Archive {
+    var manifest = try store.archiveIndex(a, task, .{ .digest = storage.digest(build), .bytes = build.len });
+    const definitions = try schemaSet(a);
+    manifest.schemas.items = definitions.schemas;
+    var inspected = try inspect(a, store, manifest, build);
+    defer inspected.task.deinit();
+    manifest.objects.items = inspected.objects;
+    return manifest;
+}
+
+/// The transaction retaining a prepared snapshot must also retain the supplied
+/// build and schema bytes. All other objects already belong to the Store.
+pub fn retainAssets(a: std.mem.Allocator, store: *storage.Store, build: []const u8) !void {
+    _ = try store.putObject(build);
+    const definitions = try schemaSet(a);
+    for (definitions.blobs) |blob| _ = try store.putObject(blob.bytes);
+}
+
 pub fn write(a: std.mem.Allocator, io: std.Io, store: *storage.Store, task: state.TaskId, build: []const u8, path: []const u8, state_directory: c_int) !Exported {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    const temporary = arena.allocator();
-    var manifest = try store.archiveIndex(temporary, task, .{ .digest = storage.digest(build), .bytes = build.len });
-    const definitions = try schemaSet(temporary);
-    manifest.schemas.items = definitions.schemas;
-    var inspected = try inspect(temporary, store, manifest, build);
+    const manifest = try prepare(arena.allocator(), store, task, build);
+    return writeManifest(a, io, store, manifest, build, path, state_directory, false);
+}
+
+fn sameReferences(left: []const state.Reference, right: []const state.Reference) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |lhs, rhs| if (!std.meta.eql(lhs, rhs)) return false;
+    return true;
+}
+
+pub fn writePrepared(a: std.mem.Allocator, io: std.Io, store: *storage.Store, manifest: state.Archive, build: []const u8, path: []const u8, state_directory: c_int) !Exported {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var inspected = try inspect(arena.allocator(), store, manifest, build);
     defer inspected.task.deinit();
-    manifest.objects.items = inspected.objects;
+    if (!std.meta.eql(storage.digest(build), manifest.build.digest) or build.len != manifest.build.bytes or
+        !sameReferences(inspected.objects, manifest.objects.items)) return error.InvalidArchive;
+    return writeManifest(a, io, store, manifest, build, path, state_directory, true);
+}
+
+fn writeManifest(a: std.mem.Allocator, io: std.Io, store: *storage.Store, manifest: state.Archive, build: []const u8, path: []const u8, state_directory: c_int, replay: bool) !Exported {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const temporary = arena.allocator();
+    const definitions = try schemaSet(temporary);
     const schema = try values.schemaBytes(state.Archive, temporary);
     const encoded = try contracts.encodeOwned(state.Archive, temporary, manifest);
     var total: u64 = 0;
@@ -697,5 +808,18 @@ pub fn write(a: std.mem.Allocator, io: std.Io, store: *storage.Store, task: stat
             try store.writeObject(ref, &output);
         }
     }
-    return output.finish();
+    return output.finish() catch |err| {
+        if (!replay or err != error.AlreadyExists) return err;
+        // A crash may publish the file before its signed offer. Compare every
+        // byte with the retained snapshot, including all sibling records.
+        var expected: state.Digest = undefined;
+        output.hash.final(&expected);
+        var retained = try Reader.open(a, path);
+        defer retained.deinit();
+        if (!std.meta.eql(retained.identity, expected) or retained.bytes != output.bytes) return error.InvalidTransfer;
+        // The interrupted writer may have linked before syncing the directory.
+        // The offer can become durable only after both retained bytes and name.
+        if (c.fsync(retained.fd) != 0 or c.fsync(output.directory) != 0) return error.StorageUnavailable;
+        return .{ .sha256 = expected, .bytes = output.bytes };
+    };
 }

@@ -27,6 +27,9 @@ ordinary arm; the pure arm asks the controller to use only completed pure work.
 It is not a separate runtime or a hard capability sandbox. Review recorded
 actions and `arm_violations` before admitting a comparison. An arm violation is
 an invalid comparison, not an improvement attributable to retained interaction.
+Pure work permits terminal, owner-scheduled starts, waits and collection; pumping,
+cut requests, realization changes and guest views violate that arm. Classification
+and runtime-switch counts also interpret work commands inside `placement.control`.
 
 After separately authorizing paid inference:
 
@@ -71,6 +74,35 @@ being guessed from termination. Record the evaluator's reasoning, including
 failed or incomplete attempts. Compare all repetitions and all costs; no required
 success rate, token reduction, minimum branch count, or mandatory construction
 is built into the evaluation.
+
+## Runtime discretion comparison
+
+Prepare the executable-semantics comparison with the same runner:
+
+```sh
+node tools/evaluation/workspace.mjs prepare --suite runtime \
+  --config examples/adaptive/adaptive.example.json \
+  --out /tmp/protean-runtime-evaluation --repetitions 3 --seconds 600
+```
+
+The three arms are ordinary tools, retained computation under the packaged
+generic runtime, and the full optional runtime/view interface. Each receives the
+same evidence, model, effort and time budget. The families are a direct lookup,
+eight different batches of dynamic GCD inputs that can reuse one program, and
+the ingestion investigation whose answer requires broader scheduling evidence.
+No prompt requires the model to specialize or to complete an analysis experiment.
+
+The report counts requested specializations, realization switches and guest views
+from accepted controller actions. It separately counts admitted runtime records,
+distinct artifact bytes and distinct current capsule bytes from the archive.
+Requests may be rejected; their count is not a count of successful operations.
+Separate specialization/validation times remain null because the archive does
+not measure those intervals; total elapsed time includes them. Adjudicate runtime
+selection and economic benefit including setup against matched repetitions.
+The generic-arm restrictions are prompt ablations with recorded violations,
+not a new capability boundary. Use the same separately authorized `run` command
+above. Preparing either suite makes zero provider calls; live efficacy remains
+unmeasured until an authorized comparison is executed and adjudicated.
 
 For deterministic costs and independent execution agreement:
 

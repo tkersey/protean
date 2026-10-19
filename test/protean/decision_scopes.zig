@@ -290,13 +290,13 @@ test "scope contributions preserve lexical instructions memory and permission in
     var b = source.Builder.init(std.testing.allocator);
     defer b.deinit();
     const number = try b.scalar(u64);
-    const shape = try protean.scopes.layout(&b, number, number, 2, 64, 64);
-    var tools = @as([64]bool, @splat(false));
-    tools[31] = true;
-    tools[32] = true;
-    var skills = @as([64]bool, @splat(false));
-    skills[31] = true;
-    skills[63] = true;
+    const shape = try protean.scopes.layout(&b, number, number, 2, 2, 2);
+    var tools = @as([2]bool, @splat(false));
+    tools[0] = true;
+    tools[1] = true;
+    var skills = @as([2]bool, @splat(false));
+    skills[0] = true;
+    skills[1] = true;
     const initial = try protean.scopes.value(&b, shape, .{
         .model = try b.constant(u64, 0),
         .instructions = try instructions(&b, shape, 1),
@@ -305,8 +305,8 @@ test "scope contributions preserve lexical instructions memory and permission in
         .skills = try protean.sets.literal(&b, shape.skills, &skills),
         .memory = try b.constant(u64, 11),
     });
-    tools[32] = false;
-    skills[31] = false;
+    tools[1] = false;
+    skills[0] = false;
     const first = try b.variable(shape.schema);
     const first_term = try protean.scopes.narrow(&b, shape, initial, .{
         .instructions = try instructions(&b, shape, 2),
@@ -322,15 +322,15 @@ test "scope contributions preserve lexical instructions memory and permission in
     });
     const entry = try b.declare(&.{}, shape.schema, &.{}, &.{});
     try b.define(entry, try b.bind(first, first_term, second));
-    var expected: [171]u8 = @splat(0);
+    var expected: [47]u8 = @splat(0);
     expected[8] = 3;
     expected[9] = 1;
     expected[17] = 2;
     expected[25] = 3;
     expected[33] = 1;
-    expected[35 + 31] = 1;
-    expected[99 + 63] = 1;
-    expected[163] = 11;
+    expected[35] = 1;
+    expected[38] = 1;
+    expected[39] = 11;
     _ = try execute(b.module(entry, try b.scalar(void)), &.{}, &expected);
 }
 

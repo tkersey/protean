@@ -10,8 +10,15 @@ const {execute} = await import(pathToFileURL(oraclePath));
 const {Kernel, encodeInput, decodeRequest, encodeResult, decodeOutcome} = await import(pathToFileURL(embeddingPath));
 const kernel = wasmPath ? new Uint8Array(await readFile(wasmPath)) : null;
 const wasm = kernel ? await Kernel.create({bytes: kernel, expectedSha256: createHash('sha256').update(kernel).digest('hex')}) : null;
+if (wasm) wasm.setLimits({input: 8 << 20, working: 64 << 20, output: 8 << 20});
 const reports = [];
-for (const name of ['gcd', 'recursive', 'alternatives', 'mutable-alternatives', 'shallow', 'successor', 'attachments']) {
+const capsulePacket = spawnSync(peer, ['capsule-export'], {maxBuffer: 64 << 20});
+assert.equal(capsulePacket.status, 0, capsulePacket.stderr.toString());
+const capsuleCut = spawnSync(peer, ['capsule-import'], {input: capsulePacket.stdout, maxBuffer: 64 << 20});
+assert.equal(capsuleCut.status, 0, capsuleCut.stderr.toString());
+const capsulePortability = {packetSha256: createHash('sha256').update(capsulePacket.stdout).digest('hex'),
+  guestCutSha256: createHash('sha256').update(capsuleCut.stdout).digest('hex'), exactOuterRestore: true, duplicateCustodyRejected: true};
+for (const name of ['gcd', 'recursive', 'alternatives', 'mutable-alternatives', 'shallow', 'successor', 'attachments', 'mobility']) {
   const emitted = spawnSync(peer, [name], {maxBuffer: 16 << 20, encoding: 'utf8'});
   assert.equal(emitted.status, 0, emitted.stderr);
   const fixture = JSON.parse(emitted.stdout), image = Buffer.from(fixture.image, 'base64url');
@@ -61,4 +68,4 @@ for (const name of ['gcd', 'recursive', 'alternatives', 'mutable-alternatives', 
     reports.push({name, case: caseIndex, source_oracle: true, native_wasm: Boolean(wasm), producer_switching: Boolean(wasm), boundaries, checkpointBytes, maximumCheckpoint, outcomeBytes, nativeMillisecondsIncludingProcessStartup: nativeMilliseconds, wasmMilliseconds, compileNanoseconds: fixture.compile_ns, compilerArenaBytes: fixture.compiler_arena_bytes, controllerModelCalls: 0, delegatedModelCalls: 0});
   }
 }
-console.log(JSON.stringify({workspace_execution: reports}));
+console.log(JSON.stringify({workspace_execution: reports, capsule_portability: capsulePortability}));

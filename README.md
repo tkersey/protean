@@ -5,10 +5,11 @@ Formerly Agent; see the [rename notes](docs/rename.md).
 Protean builds agents as typed, resumable programs. Its supported application is
 **Protean**: a native executable that investigates a read-only snapshot,
 selects among approved models and reasoning settings, loads approved skills,
-asks questions, and constructs and reuses bounded pure tools.
+asks questions, and optionally constructs, retains, inspects and moves computations.
 
 The application is authored in Zig. Horos checks and compiles its control
-flow into BPI3; native Kosmos owns execution and continuation. Protean supplies
+flow into BPI3; Kosmos's portable semantic core and restricted native base own
+execution and continuation. Protean supplies
 provider I/O, tools, task storage, and CLI/stdio clients. The host does not
 interpret a recipe or run a second application policy loop.
 
@@ -62,7 +63,8 @@ builds the adaptive application through that public API.
 [Architecture](docs/architecture.md) ·
 [Trust boundaries](docs/security_model.md) ·
 [Adaptive model contracts](docs/model-invocation-v11.md) ·
-[Native Responses](docs/native-responses.md)
+[Native Responses](docs/native-responses.md) ·
+[Computational workspace and placement](docs/computational-workspace.md)
 
 ## Qualification
 
@@ -80,17 +82,18 @@ and offline execution. Source and compiler caches are authenticated or reused
 without deleting unrelated local data.
 
 CI qualifies Linux and retains only the adaptive executable, its build metadata,
-program/contracts, and example configuration. The complete workflow target is
-300 seconds and its maximum is 360 seconds. Exact-head results belong to the PR;
+program/contracts, and example configuration. Each job and the complete workflow
+must finish within 600 seconds, for both cold and warm qualification. Exact-head results belong to the PR;
 a previous run does not qualify a changed candidate.
 
 ## Retired applications
 
 The fixed repository agent, native minimal demo, inquiry/parser/document
 applications, JavaScript runners, and JavaScript mobility deployment have been
-removed. See [migration notes](docs/migration_from_3.md). Distributed adaptive
-mobility is future work. Checkpoint export/import preserves local continuation
-and compatibility checks; it does not establish exclusive distributed custody.
+removed. See [migration notes](docs/migration_from_3.md). Native placement uses
+signed bilateral transfers with separate controller and work custody. Ordinary
+checkpoint import preserves data and compatibility evidence; execution requires
+the original owning namespace or an authenticated placement acceptance.
 
 Horos's independent source oracle and Kosmos's source-agreement tests remain
 outside this product. Kosmos's optional JS/WASM embedding remains supported by

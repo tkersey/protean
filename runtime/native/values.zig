@@ -86,7 +86,7 @@ pub fn fromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error
 }
 
 pub fn toJson(comptime T: type, a: std.mem.Allocator, value: T) std.mem.Allocator.Error!json.Value {
-    if (comptime schemas.isText(T)) return json.string(value.bytes);
+    if (comptime schemas.isText(T)) return json.string(try a.dupe(u8, value.bytes));
     if (comptime contracts.native.wrapped(T)) {
         if (T.protean_value_kind == .bytes) {
             const result = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(value.bytes.len));
@@ -187,6 +187,14 @@ test "client mapping preserves full-width values and rejects coercion and unknow
     try parsed.value.object.put(a, "count", .{ .string = "1" });
     try parsed.value.object.put(a, "extra", .null);
     try std.testing.expectError(error.InvalidParams, fromJson(Record, a, parsed.value));
+    const runtime_schema = try schemas.ClientSchema(Record).alloc(std.testing.allocator);
+    defer std.testing.allocator.free(runtime_schema);
+    try std.testing.expectEqualSlices(u8, &schemas.ClientSchema(Record).value, runtime_schema);
+    try std.testing.expectError(error.OutOfMemory, schemas.ClientSchema(Record).alloc(std.testing.failing_allocator));
+    const Escaped = struct { @"quote\"slash\\雪": union(enum) { signed: i64, nested: ??bool } };
+    const escaped_schema = try schemas.ClientSchema(Escaped).alloc(std.testing.allocator);
+    defer std.testing.allocator.free(escaped_schema);
+    try std.testing.expectEqualSlices(u8, &schemas.ClientSchema(Escaped).value, escaped_schema);
     var schema = try json.parse(a, &schemas.ClientSchema(Record).value, .{});
     defer schema.deinit();
     try std.testing.expectEqualStrings("string", schema.value.object.get("properties").?.object.get("count").?.object.get("type").?.string);
@@ -233,4 +241,21 @@ test "nested optional client values preserve every independent wire discriminant
         }
     }
     try std.testing.expectEqualStrings("agent-client-values/1.1", schemas.client_mapping);
+}
+
+test "JSON projection owns nested text independently of decoded input" {
+    const Text = contracts.Utf8;
+    const Choice = union(enum) { text: Text, empty: void };
+    const Record = struct { text: Text, nested: [1]?Choice };
+    var output = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer output.deinit();
+    const bytes = try contracts.encodeOwned(Record, std.testing.allocator, .{ .text = .{ .bytes = "root" }, .nested = .{.{ .text = .{ .bytes = "nested" } }} });
+    defer std.testing.allocator.free(bytes);
+    var source = try contracts.decodeOwned(Record, std.testing.allocator, bytes);
+    const projected = try toJson(Record, output.allocator(), source.value);
+    @memset(@constCast(source.value.text.bytes), 'x');
+    @memset(@constCast(source.value.nested[0].?.text.bytes), 'x');
+    source.deinit();
+    try std.testing.expectEqualStrings("root", projected.object.get("text").?.string);
+    try std.testing.expectEqualStrings("nested", projected.object.get("nested").?.array.items[0].object.get("value").?.string);
 }

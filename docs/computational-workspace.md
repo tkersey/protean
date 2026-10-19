@@ -114,6 +114,158 @@ constant-memory guarantee for all retained state.
 
 ## Acceptance witnesses
 
+### Optional runtime inspection
+
+`program.specialize` derives a checked runtime for an admitted guest program.
+Its `origin_program` names the first source artifact used to admit that runtime;
+`guest` identifies the exact compiled guest image. Distinct task-owned sources
+with that same image can share the runtime, while each work item retains its own
+source, exposed ports and authority. Copying runtime bytes grants no task custody.
+`work.start.runtime` selects that runtime or the packaged generic evaluator.
+`work.realize` switches at the exact execution, control and realization revision;
+the guest checkpoint and execution revision stay fixed. `work.request_cut`
+publishes either a guest cut or an outer execution capsule. These operations are
+optional and never grant environmental authority.
+
+`context.materialize` accepts `guest_view` with an expected work revision,
+realization revision, and `nodes` scope (`all` or selected numeric node IDs).
+The task owner authorizes metadata from that task's own work. The result includes
+reference and ownership edges, roots, node kinds and available block/activation
+positions. It includes no guest payloads, blob contents or source text. Numeric
+node IDs describe one checkpoint; they are not continuation handles.
+
+The `inspection` derivation retains the exact work publication, checkpoint,
+runtime code and node scope. Access reconstructs the value from that publication;
+archive validation checks its journal and runtime dependencies. A partial view
+does not claim graph completeness. A later request may select another scope.
+Materializing or querying a view does not advance the inspected work.
+
+The native controller also advances in bounded physical steps. Its guest
+execution revision changes only when a guest cut is published. Parking,
+eviction, export, or placement retains an unfinished operation as an outer
+capsule with its exact accepted control. Recovery resumes that operation before
+applying newer cancellation intent; an acquired response is consumed once.
+
+### Optional native placement
+
+`placement.sites`, `inspect` and `assess` expose operator-admitted peers and
+retained custody/cut facts. `placement.move` selects a peer name, an independent
+controller or work subject, an operation name and the expected custody epoch.
+The native owner captures the cut, signs and retains the action, freezes that
+subject, then stages its complete archive over the configured peer channel.
+An exact outer capsule includes its selected runtime artifact; that artifact
+does not have to be preinstalled at the destination.
+
+The configured command opens an owner stdio session. Access to that session
+grants the full owner API, including unsigned local placement operations.
+Operators must restrict process launch and stdio access to trusted owners;
+the signed peer handshake does not authenticate or restrict a stdio client.
+Peer replies are parsed as responses and cannot call back into the launching
+owner's API.
+
+The launch option `--placement-config FILE` reads this operator-owned shape:
+
+```json
+{
+  "signing_key_file": "/private/site-key.hex",
+  "transport_directory": "/private/placement-spool",
+  "staging_limits": {"bytes": 1073741824, "files": 16},
+  "peers": [{
+    "name": "worker",
+    "public_key": "<64 hexadecimal characters>",
+    "namespace": "<64 hexadecimal characters>",
+    "native_build": "<64 hexadecimal characters>",
+    "compatibility": {
+      "base": "<64 hexadecimal characters>",
+      "admission": "<64 hexadecimal characters>",
+      "bridge": "<64 hexadecimal characters>",
+      "semantics": "<64 hexadecimal characters>",
+      "private_state": "<64 hexadecimal characters>"
+    },
+    "resource_binding": "<64 hexadecimal characters>",
+    "disclosure": {"allow_private": true},
+    "command": ["/approved/protean", "serve", "--transport", "stdio",
+                "--offline", "--state-dir", "/private/worker",
+                "--placement-config", "/private/worker.json"],
+    "remote_name": "controller",
+    "timeout_ms": 30000
+  }]
+}
+```
+
+The seed file contains 32 bytes as hexadecimal and must be owned by the current
+user with no group/other permissions. The spool must already exist as a private
+directory outside the execution namespace. Keys and command paths are launch
+inputs; they never enter model actions or transferred archives. Native
+`placement` RPC requests `identify` and `compatibility` expose the actual site,
+build, resource and subject profile identities used for operator pinning.
+Disclosures default to denied. Optional `denied_objects`,
+`maximum_object_bytes` and peer `archive_limit` constrain the actual retained
+closure, including code, constants, runtime metadata and observations.
+Optional `staging_limits` bounds aggregate incoming archive bytes and file count
+under the spool lock. Omission imposes no application quota; filesystem capacity
+remains the limit. Durable acceptance or refusal retires the staged archive and
+the source transport copy. Restart completes interrupted retirement from retained
+decisions, while undecided transfers preserve resumable bytes.
+
+`placement.retry` continues a retained transfer. `placement.withdraw` cancels an
+unsent transfer locally or asks the destination for its signed decision. A lost
+reply or a disconnected process never releases frozen source custody. If the
+destination already accepted, withdrawal returns that acceptance. Reusing the
+same operation with changed parameters rejects. Imported copies cannot activate
+serialized local or frozen custody, even if the tags name the receiving site.
+Omitting those tags or disabling placement configuration grants no execution:
+fresh local admission belongs to the namespace and is never exported. Only the
+subject verified by bilateral acceptance becomes local. Other copied subjects
+remain remote, including a child frozen before its controller moved; signed
+executor succession resolves its eventual destination.
+Freezing retains the complete archive manifest in the source transaction.
+Other locally owned work may progress afterward without changing that export.
+The retained export is a source obligation and is excluded from transferred
+archives. Replaying an offer still checks the current runtime, peer profile,
+size limit and disclosure policy.
+
+`placement.control` sends a revision-bound work command to the current executor;
+`placement.expand` requests a page from that executor. Signed controller
+succession accompanies controls after controller movement. Returned references
+remain remote references and do not become locally owned values or selected
+views. Remote reply observations preserve the original signed response.
+If work moves onward, the previous executor returns its signed bilateral
+succession proof. The controller verifies each transfer, updates its directory
+and sends the original command to the configured successor. A retained report
+from an earlier executor remains an exact receipt; it is not fresh progress at
+the successor. Cached messages and newly routed messages require current
+disclosure admission before transmission.
+
+Parent cancellation uses signed executor observations to cancel and pump
+separately placed work. Completion requires a terminal executor observation
+with cleanup complete. An unresolved control or unavailable transport remains
+incomplete; a stale local work copy cannot certify remote cleanup. A fresh parent
+cancellation after reopening retries an unanswered idempotent control whose
+transport has not recorded a failure. Recorded failures require explicit retry
+or reconciliation.
+Each automatic cleanup request names the controller's durable cancellation
+event. A later explicit executor park remains parked until a fresh cancellation
+request. Cancellation remains an owned obligation while custody is frozen and
+resumes when an abort or refusal restores local custody. Cancel-mode shutdown
+drains active placement transport within its existing deadline and reports
+unresolved cleanup as incomplete.
+
+Destination admission currently requires an empty task namespace. Placement
+does not merge independently advancing task archives. Acceptance retains the
+continuation without automatically resuming it; an explicit native resume or
+remote work command selects subsequent execution. The subprocess channel closes
+after the signed response, so long-running remote execution needs a continuing
+native owner. The protocol preserves custody across that process lifetime.
+
+`program.describe` sections `retention_query` and `divergence_query` return
+ordinary Horos source records for building reusable query programs. The retention
+input is a view and target node. The divergence input contains two finite traces
+with explicit bindings and completeness. Results distinguish partial absence,
+observed finite agreement and incomparable controls. Preserve the view references
+in `context.materialize.sources` when constructing a query input, then start the
+query from that value reference so its result retains the inspection ancestry.
+
 These are bounded discriminators, not a proof of arbitrary algorithm correctness.
 The acceptance IDs identify the requested relationships. Owner/source inspection
 is distinguished from concrete execution where it supplies the argument.
@@ -149,9 +301,8 @@ is distinguished from concrete execution where it supplies the argument.
 Historical independent byte fixtures are retained. Replaced old tool-action tests
 now exercise the new canonical actions, with the same large catalog, reuse,
 authorization and recovery obligations. Current generated sources additionally
-recompile to identical BPI3 before execution. The two workspace test/emitter roots
-use Debug because Zig 0.17's Safe optimizer crashes compiling those roots;
-imported product modules and the shipped native executable retain Safe mode.
+recompile to identical BPI3 before execution. Qualification runs the workspace
+test roots, imported product modules and shipped native executable in Safe mode.
 
 ## Qualification and measurements
 

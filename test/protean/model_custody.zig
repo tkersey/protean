@@ -364,10 +364,6 @@ test "dynamic normalization bounds preserve reply-schema compatibility before mo
                 defer rejected.deinit();
                 try std.testing.expect(rejected.record == .failed);
                 try std.testing.expectEqualSlices(u8, &.{}, rejected.record.failed.value);
-                if (@typeInfo(@FieldType(@TypeOf(value.request.invocation.normalization_limits), field)) == .optional) @field(value.request.invocation.normalization_limits, field).? -= 1 else @field(value.request.invocation.normalization_limits, field) -= 1;
-                var exact = try start(compiled.program, value);
-                defer exact.deinit();
-                try expectRequest(exact, value);
                 @field(value.request.invocation.normalization_limits, field) = 0;
                 value.request.invocation.selection = .{
                     .minimum_calls = 0,
@@ -381,6 +377,10 @@ test "dynamic normalization bounds preserve reply-schema compatibility before mo
                 defer finished.deinit();
                 try std.testing.expect(finished.record == .completed);
             }
+            const exact_input: Input = .{ .request = template(&.{}, single), .offered = .{ true, false } };
+            var exact = try start(compiled.program, exact_input);
+            defer exact.deinit();
+            try expectRequest(exact, exact_input);
             // These policy limits do not change any field of P.Result. They
             // remain caller-owned rather than acquiring an unnecessary cap.
             var independent: Input = .{

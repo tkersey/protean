@@ -56,8 +56,24 @@ fn FixedWriter(comptime capacity: usize) type {
     };
 }
 
+const SliceWriter = struct {
+    bytes: []u8,
+    cursor: usize = 0,
+
+    fn byte(self: *@This(), value: u8) void {
+        std.debug.assert(self.cursor < self.bytes.len);
+        self.bytes[self.cursor] = value;
+        self.cursor += 1;
+    }
+    fn raw(self: *@This(), value: []const u8) void {
+        std.debug.assert(value.len <= self.bytes.len - self.cursor);
+        @memcpy(self.bytes[self.cursor..][0..value.len], value);
+        self.cursor += value.len;
+    }
+};
+
 fn writeString(writer: anytype, comptime value: []const u8) void {
-    if (!std.unicode.utf8ValidateSlice(value)) {
+    if (comptime !std.unicode.utf8ValidateSlice(value)) {
         @compileError("protean JSON source string must be valid UTF-8");
     }
     const hex = "0123456789abcdef";
@@ -220,6 +236,14 @@ pub fn ClientSchema(comptime T: type) type {
             writeClientSchema(T, &writer);
             break :blk writer.length;
         };
+        /// Owned bytes from the same mapping, emitted at runtime for large schemas.
+        pub fn alloc(allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+            const bytes = try allocator.alloc(u8, length);
+            var writer = SliceWriter{ .bytes = bytes };
+            writeClientSchema(T, &writer);
+            std.debug.assert(writer.cursor == bytes.len);
+            return bytes;
+        }
         pub const value = blk: {
             @setEvalBranchQuota(1_000_000);
             var writer = FixedWriter(length){};
@@ -238,7 +262,7 @@ fn writePositiveDecimalRange(comptime maximum: u64, writer: anytype) void {
         writeUnsigned(writer, digits.len - 2);
         writer.raw("}|");
     }
-    for (digits, 0..) |digit, i| {
+    inline for (digits, 0..) |digit, i| {
         const lower: u8 = if (i == 0) '1' else '0';
         if (digit <= lower) continue;
         writer.raw(digits[0..i]);

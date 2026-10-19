@@ -1,5 +1,6 @@
 //! Independent execution witnesses for the source-record transport. Algorithms
 //! are authored records; no build-time result or native callback is supplied.
+const support = @import("workspace_test_support.zig");
 const std = @import("std");
 const horos = @import("horos");
 const data = @import("horos_data");
@@ -9,9 +10,7 @@ const contracts = @import("protean_contracts");
 const source = horos.source;
 const Id = source.Id;
 
-fn workspaceRef(a: std.mem.Allocator, kind: @FieldType(contracts.workspace.Ref, "kind"), id: [32]u8) !contracts.workspace.Ref {
-    return .{ .kind = kind, .id = .{ .bytes = try a.dupe(u8, &std.fmt.bytesToHex(id, .lower)) } };
-}
+const workspaceRef = support.workspaceRef;
 
 const gcd = @import("workspace_sources.zig").gcd;
 const listLength = @import("workspace_sources.zig").listLength;
@@ -19,40 +18,7 @@ const alternatives = @import("workspace_sources.zig").alternatives;
 
 /// Reject allocation after an actual store commit, without depending on an
 /// allocation ordinal or adding a fault hook to the production owner.
-const AfterCommitAllocator = struct {
-    backing: std.mem.Allocator,
-    namespace: *native.Namespace,
-    generation: u64,
-    rejected: usize = 0,
-
-    fn allocator(self: *@This()) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
-    }
-    fn blocked(self: *@This()) bool {
-        if (self.namespace.store.head.generation == self.generation) return false;
-        self.rejected += 1;
-        return true;
-    }
-    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
-        const self: *@This() = @ptrCast(@alignCast(ctx));
-        if (self.blocked()) return null;
-        return self.backing.rawAlloc(len, alignment, ra);
-    }
-    fn resize(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
-        const self: *@This() = @ptrCast(@alignCast(ctx));
-        if (len > bytes.len and self.blocked()) return false;
-        return self.backing.rawResize(bytes, alignment, len, ra);
-    }
-    fn remap(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
-        const self: *@This() = @ptrCast(@alignCast(ctx));
-        if (len > bytes.len and self.blocked()) return null;
-        return self.backing.rawRemap(bytes, alignment, len, ra);
-    }
-    fn free(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
-        const self: *@This() = @ptrCast(@alignCast(ctx));
-        self.backing.rawFree(bytes, alignment, ra);
-    }
-};
+const AfterCommitAllocator = support.AfterCommitAllocator;
 
 /// Keep allocations in an outer arena, but destroy freed contents so an arena
 /// cannot accidentally hide a projection borrowing a decoded record's storage.
@@ -297,13 +263,7 @@ test "exposure carries capabilities through closed handler returns clauses and s
     }
 }
 
-fn compile(a: std.mem.Allocator, b: *source.Builder, module: source.Module) !native.program_construction.Built {
-    _ = b;
-    const text = try native.source_records.encode(a, module);
-    defer a.free(text);
-    var diagnostic: native.program_construction.Diagnostic = .{};
-    return native.program_construction.build(a, text, null, &diagnostic);
-}
+const compile = support.compile;
 
 fn execute(a: std.mem.Allocator, prepared: *kosmos.Prepared, input: []const u8, expected: u64) !u64 {
     var session = try kosmos.Session.start(a, prepared, input);
@@ -367,66 +327,9 @@ test "BUILD-02 concrete native execution traverses recursive structured input ov
     }
 }
 
-const OwnerTypes = struct {
-    pub const application_id = "workspace-owner-test";
-    pub const input_schema_id = "workspace-owner.input/1";
-    pub const output_schema_id = "workspace-owner.output/1";
-    pub const failure_schema_id = "workspace-owner.failure/1";
-    pub const message_schema_id = "workspace-owner.message/1";
-    pub const Input = struct { u64, u64 };
-    pub const Output = u64;
-    pub const Failure = void;
-    pub const Message = void;
-};
+const OwnerTypes = support.OwnerTypes;
 
-fn expectContextOutputBound(service: anytype, a: std.mem.Allocator, task: native.testing.state.TaskId, operation_id: []const u8, replacement: contracts.workspace.Ref, replacement_reply: ?contracts.workspace.Reply) !void {
-    const store = &service.namespace.store;
-    var manifest_digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
-    const index = try store.archiveIndex(a, task, .{ .digest = manifest_digest, .bytes = service.assets.manifest.len });
-    try store.begin();
-    defer store.rollback();
-    var operations = try store.database.prepare("SELECT p.id,o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?", &.{.{ .blob = &task }});
-    defer operations.deinit();
-    var changed = false;
-    var revision: u64 = 0;
-    while (try operations.step() == .row) {
-        var receipt = (try contracts.decodeOwned(native.testing.state.Receipt, a, try operations.bytes(1))).value;
-        if (!std.mem.eql(u8, receipt.client_operation_id.bytes, operation_id)) continue;
-        revision = receipt.revision;
-        try std.testing.expectEqual(replacement.kind, receipt.workspace_kind.?);
-        receipt.workspace = try nativeIdentity(replacement);
-        receipt.workspace_observation = try store.objectReference(receipt.workspace.?, null);
-        const rewritten = try store.putObject(try contracts.encodeOwned(native.testing.state.Receipt, a, receipt));
-        try store.database.run("UPDATE operations SET receipt=? WHERE id=?", &.{ .{ .blob = &rewritten.digest }, .{ .text = try operations.bytes(0) } });
-        var events = try store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.revision=?", &.{ .{ .blob = &task }, .{ .integer = @intCast(receipt.revision) } });
-        defer events.deinit();
-        try std.testing.expect(try events.step() == .row);
-        var event_value = (try contracts.decodeOwned(native.testing.state.Event, a, try events.bytes(0))).value;
-        event_value.data.bytes = try std.fmt.allocPrint(a, "{{\"workspace_id\":\"{s}\"}}", .{replacement.id.bytes});
-        const event_ref = try store.putObject(try contracts.encodeOwned(native.testing.state.Event, a, event_value));
-        try store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &event_ref.digest }, .{ .blob = &task }, .{ .integer = @intCast(event_value.seq) } });
-        changed = true;
-        break;
-    }
-    try std.testing.expect(changed);
-    if (replacement_reply) |reply| {
-        var id: [32]u8 = undefined;
-        _ = try std.fmt.hexToBytes(&id, operation_id);
-        var pending = (try contracts.decodeOwned(native.testing.occurrence.Occurrence, a, (try store.recordBytes(a, "occurrence", id, task)).?)).value;
-        var projected = reply;
-        var observation = (try native.json.parse(a, reply.observation_json.bytes, .{})).value;
-        try native.json.put(a, &observation, "receipt_revision", try native.json.number(a, revision));
-        projected.observation_json.bytes = try native.json.canonical(a, observation);
-        const payload = try contracts.encodeOwned(contracts.workspace.Reply, a, projected);
-        const bound = try data.invocation.encodeOwned(data.invocation.Result, a, .{ .request_identity = pending.request, .value = payload });
-        pending.state.settled_reply.reply = (try store.putObject(bound)).digest;
-        try store.putRecord(native.testing.occurrence.Occurrence, "occurrence", id, task, pending);
-    }
-    // All substituted objects remain legitimate task-owned artifacts; receipt,
-    // event and optional acquired reply have coherent content hashes.
-    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(a, task, index.records.items));
-}
+const expectContextOutputBound = support.expectContextOutputBound;
 
 fn expectWorkInputHistoryBound(service: anytype, a: std.mem.Allocator, task: native.testing.state.TaskId, work_id: [32]u8, inputs: []const native.testing.state.Reference) !void {
     const store = &service.namespace.store;
@@ -1826,6 +1729,17 @@ test "AUT-07 OWN-11 concrete authored wait wakes for a user message or selected 
             service = try native.tasks.Service(WaitTypes).init(a, io, &namespace, assets, &application, handlers, profile);
             service_open = true;
             _ = try service.importCheckpoint(scratch, "import-wait", archive_path);
+            try std.testing.expectError(error.CustodyNotLocal, service.message(scratch, "copy-wait-amendment", parent.receipt.task, selection));
+            try std.testing.expectError(error.CustodyNotLocal, service.resumeTask(scratch, "copy-wait-resume", parent.receipt.task, 1));
+            try std.testing.expectEqual(.idle, std.meta.activeTag(try service.pump(scratch)));
+            try service.close(scratch);
+            service_open = false;
+            try namespace.close();
+            namespace_open = false;
+            namespace = try native.Namespace.open(a, io, path);
+            namespace_open = true;
+            service = try native.tasks.Service(WaitTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+            service_open = true;
             _ = try service.message(scratch, "wait-amendment", parent.receipt.task, selection);
             // Opening the namespace and appending input do not implicitly
             // resume old ownership; the explicit resume restores the wait.
@@ -2205,6 +2119,28 @@ fn inputPort(b: *source.Builder, text: bool) !source.Module {
     return b.module(entry, unit);
 }
 
+fn expectDelegationMoveBlocked(service: anytype, a: std.mem.Allocator, task: native.testing.state.TaskId, target: [32]u8, instrument: [32]u8) !void {
+    for ([_][32]u8{ target, instrument }) |id| {
+        const subject: native.placement.Subject = .{ .task = task, .work = id };
+        const head = service.namespace.store.head;
+        const cut = try service.placementCut(a, subject);
+        try std.testing.expectError(error.UnsettledOccurrence, service.placementFreeze(a, subject, "destination", cut, @splat(75)));
+        try std.testing.expectEqualDeep(head, service.namespace.store.head);
+        try std.testing.expectEqualDeep(cut, try service.placementCut(a, subject));
+    }
+}
+
+fn expectDelegationMoveAvailable(service: anytype, a: std.mem.Allocator, subject: native.placement.Subject) !void {
+    const cut = try service.placementCut(a, subject);
+    var transfer: [32]u8 = undefined;
+    try service.io.randomSecure(&transfer);
+    _ = try service.placementFreeze(a, subject, "destination", cut, transfer);
+    try std.testing.expectEqual(.frozen, (try service.placementStatus(a, subject)).?.phase);
+    try service.placementAbortUnsent(a, subject, transfer);
+    try std.testing.expectEqual(.local, (try service.placementStatus(a, subject)).?.phase);
+    try std.testing.expectEqualDeep(cut, try service.placementCut(a, subject));
+}
+
 test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences while root messages remain independent" {
     const a = std.testing.allocator;
     const io = std.testing.io;
@@ -2230,7 +2166,7 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
     const snapshot = try contracts.encodeOwned(contracts.RepositorySnapshot, a, .{ .version = 2, .excluded_entries = 0, .files = .{ .items = &.{.{ .path = .{ .bytes = "source.txt" }, .sha256 = digest, .contents = .{ .bytes = text } }} } });
     defer a.free(snapshot);
     var grants: [declarations.len]native.registry.Grant = undefined;
-    const profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "delegation-test", .resources = &.{snapshot}, .authority = .{ .grants = &grants, .principal = "test", .tenant = "test", .inference = true } };
+    var profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "delegation-test", .resources = &.{snapshot}, .authority = .{ .grants = &grants, .principal = "test", .tenant = "test", .inference = true } };
     for (declarations, &grants) |declaration, *grant| grant.* = .{ .identity = declaration.identity, .resource_role = declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
@@ -2248,6 +2184,16 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
     defer arena.deinit();
     const scratch = arena.allocator();
     const Scenario = enum { model, snapshot, snapshot_empty, model_unavailable, revoked, unknown, unknown_wait, not_sent_wait, cancel_capture, cancel_not_sent, cancel_park_not_sent, park_cancel_not_sent, invalid_capture, response_failed, response_incomplete, response_error };
+    const source_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(73));
+    const destination_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(74));
+    const Disclosure = struct {
+        fn check(_: *anyopaque, _: native.placement.Subject, _: []const native.testing.state.Reference) !void {}
+    };
+    var disclosure: u8 = 0;
+    var peers = [_]native.placement.Peer{.{ .name = "destination", .site = .{ .key = destination_key.public_key.toBytes(), .namespace = @splat(74) }, .native_build = profile.runtime_identity, .compatibility = .{ .base = @splat(0), .admission = @splat(0), .bridge = @splat(0), .semantics = @splat(0), .private_state = @splat(0) }, .resource_binding = try profile.resourceIdentity(scratch, application.image_identity), .disclosure_policy = @splat(74), .context = &disclosure, .disclose = Disclosure.check }};
+    const placement: native.placement.Configuration = .{ .signing_key = source_key, .peers = &peers };
+    profile.placement = &placement;
+    service.profile.placement = &placement;
     for (std.enums.values(Scenario)) |scenario| {
         const snapshot_mode = scenario == .snapshot or scenario == .snapshot_empty;
         const successful = scenario == .model or snapshot_mode;
@@ -2261,6 +2207,8 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
         try std.testing.expect(built_reply.program != null);
         const target_start = try service.workspaceStart(scratch, try std.fmt.allocPrint(scratch, "start-{s}", .{suffix}), parent.receipt.task, try nativeIdentity(built_reply.program.?), &.{}, .{});
         const target_id = target_start.receipt.workspace.?;
+        peers[0].compatibility = try service.placementCompatibility(scratch, .{ .task = parent.receipt.task, .work = target_id });
+        if (scenario == .model) try expectDelegationMoveAvailable(&service, scratch, .{ .task = parent.receipt.task, .work = target_id });
         var target = try service.workspaceWork(scratch, parent.receipt.task, target_id);
         defer target.deinit();
         var port = try contracts.decodeOwned(native.workspace.Port, scratch, try namespace.store.object(scratch, target.value.current_port.?, null));
@@ -2282,6 +2230,7 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                     defer candidate.deinit();
                     if (candidate.value.delegation != null) instrument_id = candidate.value.id;
                 }
+                if (successful and instrument_id != null) try expectDelegationMoveBlocked(&service, scratch, parent.receipt.task, target_id, instrument_id.?);
                 if (scenario == .model and instrument_id != null) {
                     // Keep the admitted instrument but omit the other half of
                     // the same delegation, restoring its prior valid target.
@@ -2388,6 +2337,28 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                     try std.testing.expectEqual(before.value.execution_revision, after_completion.value.execution_revision);
                     try std.testing.expectEqual(before.value.control_revision, after_completion.value.control_revision);
                     try std.testing.expectEqual(@as(native.testing.state.Schedule, if (scenario == .cancel_park_not_sent) .parked else .queued), after_completion.value.schedule);
+                    if (scenario == .cancel_not_sent) {
+                        _ = try service.workspacePump(scratch, "suspend-instrument-cancel", parent.receipt.task, .{ .expected = .{ .work = try workspaceRef(scratch, .work, instrument_id.?), .execution_revision = after_completion.value.execution_revision, .control_revision = after_completion.value.control_revision }, .base_quantum = 1 });
+                        var suspended = try service.workspaceWork(scratch, parent.receipt.task, instrument_id.?);
+                        defer suspended.deinit();
+                        try std.testing.expect(suspended.value.outer_operation != null);
+                        try service.validateWorkspace(scratch, parent.receipt.task);
+                        for ([_]@FieldType(contracts.workspace.Policy, "continuation"){ .explicit_only, .owner_scheduled }) |continuation| {
+                            var before_delegate = try service.workspaceWork(scratch, parent.receipt.task, instrument_id.?);
+                            defer before_delegate.deinit();
+                            _ = try service.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "delegate-suspended-{s}", .{@tagName(continuation)}), parent.receipt.task, instrument_id.?, before_delegate.value.execution_revision, before_delegate.value.control_revision, .{ .delegate = .{ .stop = .terminal, .continuation = continuation } });
+                            var delegated = try service.workspaceWork(scratch, parent.receipt.task, instrument_id.?);
+                            defer delegated.deinit();
+                            try std.testing.expectEqualDeep(suspended.value.outer_operation, delegated.value.outer_operation);
+                            try std.testing.expectEqual(suspended.value.execution_revision, delegated.value.execution_revision);
+                            try std.testing.expectEqual(@as(native.testing.state.Schedule, if (continuation == .explicit_only) .parked else .queued), delegated.value.schedule);
+                            const occurrence_bytes = (try namespace.store.recordBytes(scratch, "occurrence", delegated.value.current_occurrence.?, parent.receipt.task)).?;
+                            var pending = try contracts.decodeOwned(native.testing.occurrence.Occurrence, scratch, occurrence_bytes);
+                            defer pending.deinit();
+                            try std.testing.expect(pending.value.state == .not_sent);
+                            try service.validateWorkspace(scratch, parent.receipt.task);
+                        }
+                    }
                 } else if (scenario == .unknown) {
                     try service.unknown(scratch, step.work);
                     _ = try service.requestCancel(scratch, "cancel-parent-with-unknown-child", parent.receipt.task, "");
@@ -2439,6 +2410,7 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                 if (completed.value.answer_value != null) {
                     try std.testing.expectEqual(.completed, completed.value.outcome_kind);
                     try std.testing.expectEqual(.requested, result.value.outcome_kind);
+                    try expectDelegationMoveBlocked(&service, scratch, parent.receipt.task, target_id, instrument_id.?);
                     if (scenario == .model) try expectModelRequestBudget(&service, scratch, completed.value);
                     try expectInstrumentAnswerBound(&service, scratch, completed.value);
                     try service.close(scratch);
@@ -2579,6 +2551,9 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
             try std.testing.expectEqual(@as(u64, 1), root.value.inference_attempts);
         }
         if (scenario == .model) try expectProgramProgressIsDerived(&service, scratch, parent.receipt.task);
+        if (successful or scenario == .revoked or scenario == .model_unavailable) {
+            for ([_][32]u8{ target_id, instrument_id.? }) |id| try expectDelegationMoveAvailable(&service, scratch, .{ .task = parent.receipt.task, .work = id });
+        }
         const archive_path = try std.fmt.allocPrint(scratch, "{s}/{s}.par", .{ path_buffer[0..length], suffix });
         _ = try service.exportCheckpoint(scratch, parent.receipt.task, archive_path);
         const import_path = try std.fmt.allocPrint(scratch, "{s}/import-{s}", .{ path_buffer[0..length], suffix });
@@ -2699,33 +2674,9 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
     }
 }
 
-fn nativeIdentity(ref: contracts.workspace.Ref) ![32]u8 {
-    var result: [32]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&result, ref.id.bytes);
-    return result;
-}
+const nativeIdentity = support.nativeIdentity;
 
-fn fixtureManifest(a: std.mem.Allocator, image: []const u8, identity: [32]u8, application_bytes: []const u8) ![]u8 {
-    var image_digest: [32]u8 = undefined;
-    var assets_digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(image, &image_digest, .{});
-    std.crypto.hash.sha2.Sha256.hash(application_bytes, &assets_digest, .{});
-    const image_hex = std.fmt.bytesToHex(image_digest, .lower);
-    const identity_hex = std.fmt.bytesToHex(identity, .lower);
-    const assets_hex = std.fmt.bytesToHex(assets_digest, .lower);
-    return std.json.Stringify.valueAlloc(a, .{
-        .native_host_contract = "unit-native-contract",
-        .protocol = "agent-host/2.1",
-        .client_mapping = "agent-client-values/1.1",
-        .state_format = "agent-native-state/13",
-        .optimize = "debug",
-        .program_sha256 = @as([]const u8, &image_hex),
-        .program_identity = @as([]const u8, &identity_hex),
-        .application_assets_sha256 = @as([]const u8, &assets_hex),
-        .dependencies = .{ .world = "unit-kosmos", .boundary = "unit-horos" },
-        .compiler = .{ .version = "0.17.0" },
-    }, .{});
-}
+const fixtureManifest = support.fixtureManifest;
 
 test "deep recursive workspace values support input admission inspection expansion and port replies" {
     const a = std.testing.allocator;
