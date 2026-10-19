@@ -421,7 +421,9 @@ pub fn Service(comptime Types: type) type {
                     var child = try self.workspaceWork(a, id, work_id);
                     defer child.deinit();
                     if (child.value.terminal()) continue;
-                    const operation_id = try std.fmt.allocPrint(a, "shutdown-{s}-{s}", .{ instance, std.fmt.bytesToHex(work_id, .lower) });
+                    const Identity = struct { instance: contracts.Bytes(null), task: state.TaskId, work: state.Digest };
+                    const identity = try operation(Identity, a, .{ .instance = .{ .bytes = instance }, .task = id, .work = work_id });
+                    const operation_id = try std.fmt.allocPrint(a, "shutdown-work-{s}", .{std.fmt.bytesToHex(identity, .lower)});
                     defer a.free(operation_id);
                     _ = try self.workspaceControl(a, operation_id, id, work_id, child.value.execution_revision, child.value.control_revision, .{ .cancel = .{ .bytes = reason } });
                 }
@@ -5568,6 +5570,18 @@ pub fn Service(comptime Types: type) type {
             return if (value.cancellation != null or (value.policy.continuation == .owner_scheduled and value.policy.stop != .next_slice and (value.outcome != .yielded or value.policy.stop == .terminal))) .queued else .parked;
         }
 
+        fn delegatedControl(before: workspace.ControlObservation, has_outer: bool, policy: workspace.RunPolicy) workspace.ControlObservation {
+            var after = before;
+            after.policy = policy;
+            if (!has_outer and before.delivery == .not_sent and before.instrument) after.delivery = .ready;
+            const cancel_ready = before.cancellation != null and !before.cancellation_applied and
+                (after.delivery == .ready or after.delivery == .awaiting or after.delivery == .not_sent);
+            const runnable = has_outer or after.delivery == null or after.delivery == .settled_reply or after.delivery == .captured or
+                (after.delivery == .ready and before.instrument) or cancel_ready;
+            after.schedule = if (policy.continuation == .explicit_only) .parked else if (after.delivery == .dispatching) .active else if (runnable) .queued else .parked;
+            return after;
+        }
+
         const WorkspaceAdmission = struct { request: state.Digest, work: state.Digest, kind: @FieldType(wc.Ref, "kind") };
 
         fn workspaceInteractionReply(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, interaction: @FieldType(wc.Work, "interact")) !workspace.PortReply {
@@ -5909,11 +5923,10 @@ pub fn Service(comptime Types: type) type {
                             },
                             .delegate => |policy| {
                                 if (advanced) return error.InvalidArchive;
-                                expected.policy = policy;
-                                const rearmed = before.control.delivery == .not_sent and before.control.instrument;
-                                if (actual.delivery != (if (rearmed) .ready else before.control.delivery)) return error.InvalidArchive;
-                                const runnable = item.outer_operation != null or actual.delivery == null or actual.delivery == .settled_reply or actual.delivery == .captured or (actual.delivery == .ready and actual.instrument);
-                                expected.schedule = if (policy.continuation == .explicit_only) .parked else if (actual.delivery == .dispatching) .active else if (runnable) .queued else .parked;
+                                const delegated = delegatedControl(before.control, before.outer_operation != null, policy);
+                                expected.policy = delegated.policy;
+                                expected.delivery = delegated.delivery;
+                                expected.schedule = delegated.schedule;
                             },
                             .cancel => |reason| {
                                 if (expected.cancellation == null) expected.cancellation = reason;
@@ -8207,20 +8220,19 @@ pub fn Service(comptime Types: type) type {
             switch (command) {
                 .park => value.schedule = .parked,
                 .delegate => |policy| {
-                    value.policy = policy;
-                    var can_run = value.outer_operation != null or value.current_occurrence == null;
-                    var in_flight = false;
+                    var before = workspace.ControlObservation.from(.{ .work = value, .occurrence = null });
                     if (value.current_occurrence) |id| {
                         var pending = try self.record(occurrence.Occurrence, a, "occurrence", id, task_id);
                         defer pending.deinit();
-                        in_flight = pending.value.state == .dispatching;
-                        can_run = value.outer_operation != null or pending.value.state == .settled_reply or pending.value.state == .captured or (pending.value.state == .ready and value.delegation != null);
-                        if (value.outer_operation == null and pending.value.state == .not_sent and value.delegation != null) {
+                        before.delivery = std.meta.activeTag(pending.value.state);
+                        const delegated = delegatedControl(before, value.outer_operation != null, policy);
+                        if (delegated.delivery != before.delivery) {
                             rearmed = try occurrence.rearm(pending.value, .{ .id = id, .task = task_id, .work = work_id, .request = pending.value.request });
-                            can_run = true;
                         }
                     }
-                    value.schedule = if (policy.continuation == .explicit_only) .parked else if (in_flight) .active else if (can_run) .queued else .parked;
+                    const delegated = delegatedControl(before, value.outer_operation != null, policy);
+                    value.policy = delegated.policy;
+                    value.schedule = delegated.schedule;
                 },
                 .advance, .cancel => unreachable,
             }

@@ -225,7 +225,9 @@ original work revisions and port remain unchanged. Eight non-tail retained frame
 and aliased state produce a measured prefix of 108 and independent alternatives
 126 and 136. After specialization it moves the canonical guest cut to a fresh
 native executor, checks the selected runtime, exact capsule and execution revision,
-and supplies the second branch input there. Cancellation completes actual cleanup.
+switches to the packaged generic evaluator while preserving the port and execution
+revision, and supplies the second branch input there. The switch advances the
+realization revision. Cancellation completes actual cleanup.
 
 The outer-capsule case retains 128 frames and suspends during the first actual
 multi-shot clone, with a live clone frame and binding independently decoded from
@@ -240,7 +242,7 @@ for accounting. Evaluation arm checks normalize these wrappers; pure-tool
 comparisons permit only terminal owner-scheduled start, wait and collect, and
 reject guest views. Local capsule-verifier tests alone do not establish these host
 laws. Native workspace checks separately retain actual selected-specialized outer
-transport and selected-to-generic switching after import.
+transport and selected-to-generic switching after reopening the source namespace.
 
 ## Qualification evidence
 
@@ -919,11 +921,16 @@ operations remain readable without changing the record schema.
 Cancellation ownership remains independent of readiness. An applied cancellation
 whose cleanup awaits input retains shutdown responsibility without being requeued
 as runnable work. An unapplied cancellation still wakes an ordinary pending
-question; an admitted answer wakes cleanup again. Human-mode interruption uses
+question, including after owner-scheduled policy delegation; explicit-only policy
+still parks it. Policy execution and archive validation share the same transition,
+which preserves an unsent occurrence while an outer cancellation is suspended.
+An admitted answer wakes cleanup again. Human-mode interruption uses
 the same local-custody cancellation selector as stdio shutdown, including locally
 owned children when their controller is frozen or elsewhere. Its exit status also
 includes the service's incomplete-shutdown observation, independently of the root
-result. The second-interrupt and hard-deadline behavior is unchanged.
+result. Child shutdown operation names encode the instance, task and work through
+the existing canonical digest, keeping full human interrupt identities within the
+public name bound. The second-interrupt and hard-deadline behavior is unchanged.
 
 The same focused fixtures reproduce `StaleRevision` during child admission and
 repeated `waiting` while cleanup awaits input against the preceding task owner.

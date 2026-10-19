@@ -235,6 +235,12 @@ function* mobilityTrace(subject, guestCut = false) {
     assert(!work.outer_operation);
     assert.deepEqual(work.runtime_capsule, subject.guestCut);
     assert.equal(work.execution_revision, subject.guestRevision);
+    const beforeSwitch = work;
+    work = yield* command('realize', {expected: expected(work), realization_revision: work.realization_revision, runtime: {tag: 'packaged', value: {}}});
+    assert.equal(work.execution_revision, beforeSwitch.execution_revision);
+    assert.equal(work.realization_revision, beforeSwitch.realization_revision + 1);
+    assert.equal(work.runtime, 'packaged-generic');
+    assert.deepEqual(work.port, beforeSwitch.port);
     work = yield* answer(work, {tag: 0, value: '20'});
   } else {
     assert.deepEqual(work.outer_operation, subject.outer);

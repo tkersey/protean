@@ -2337,6 +2337,28 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                     try std.testing.expectEqual(before.value.execution_revision, after_completion.value.execution_revision);
                     try std.testing.expectEqual(before.value.control_revision, after_completion.value.control_revision);
                     try std.testing.expectEqual(@as(native.testing.state.Schedule, if (scenario == .cancel_park_not_sent) .parked else .queued), after_completion.value.schedule);
+                    if (scenario == .cancel_not_sent) {
+                        _ = try service.workspacePump(scratch, "suspend-instrument-cancel", parent.receipt.task, .{ .expected = .{ .work = try workspaceRef(scratch, .work, instrument_id.?), .execution_revision = after_completion.value.execution_revision, .control_revision = after_completion.value.control_revision }, .base_quantum = 1 });
+                        var suspended = try service.workspaceWork(scratch, parent.receipt.task, instrument_id.?);
+                        defer suspended.deinit();
+                        try std.testing.expect(suspended.value.outer_operation != null);
+                        try service.validateWorkspace(scratch, parent.receipt.task);
+                        for ([_]@FieldType(contracts.workspace.Policy, "continuation"){ .explicit_only, .owner_scheduled }) |continuation| {
+                            var before_delegate = try service.workspaceWork(scratch, parent.receipt.task, instrument_id.?);
+                            defer before_delegate.deinit();
+                            _ = try service.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "delegate-suspended-{s}", .{@tagName(continuation)}), parent.receipt.task, instrument_id.?, before_delegate.value.execution_revision, before_delegate.value.control_revision, .{ .delegate = .{ .stop = .terminal, .continuation = continuation } });
+                            var delegated = try service.workspaceWork(scratch, parent.receipt.task, instrument_id.?);
+                            defer delegated.deinit();
+                            try std.testing.expectEqualDeep(suspended.value.outer_operation, delegated.value.outer_operation);
+                            try std.testing.expectEqual(suspended.value.execution_revision, delegated.value.execution_revision);
+                            try std.testing.expectEqual(@as(native.testing.state.Schedule, if (continuation == .explicit_only) .parked else .queued), delegated.value.schedule);
+                            const occurrence_bytes = (try namespace.store.recordBytes(scratch, "occurrence", delegated.value.current_occurrence.?, parent.receipt.task)).?;
+                            var pending = try contracts.decodeOwned(native.testing.occurrence.Occurrence, scratch, occurrence_bytes);
+                            defer pending.deinit();
+                            try std.testing.expect(pending.value.state == .not_sent);
+                            try service.validateWorkspace(scratch, parent.receipt.task);
+                        }
+                    }
                 } else if (scenario == .unknown) {
                     try service.unknown(scratch, step.work);
                     _ = try service.requestCancel(scratch, "cancel-parent-with-unknown-child", parent.receipt.task, "");

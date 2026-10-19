@@ -385,6 +385,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
             path: archive,
             sha256: Buffer.from(custody.offer.value.archive_digest).toString('hex'),
             bytes: Number(custody.offer.value.archive_bytes),
+            actionCount: subject.actions.length,
           };
           subject.controlSchema = readArchive(await readFile(archive)).schemas.get('placement_control');
         }
@@ -933,6 +934,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
               path: join(placement.source.spool, `outgoing-${Buffer.from(custody.intent.transfer).toString('hex')}.par`),
               sha256: Buffer.from(custody.offer.value.archive_digest).toString('hex'),
               bytes: Number(custody.offer.value.archive_bytes),
+              actionCount: toolSubject.actions.length,
             };
             await assert.rejects(client.call('task.resume', {client_operation_id: 'stale-controller-resume', task_id: task.task_id, expected_revision: custody.intent.cut.control}), error => error.data?.kind === 'StateConflict');
             assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
@@ -1017,25 +1019,27 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       };
       assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
       if (name.startsWith('tools-runtime-')) {
-        // Movement already produced and admitted an exact archive containing
-        // every runtime construction/switch in these traces. Account that real
-        // transfer cut without performing another full export for measurement.
-        // Terminal cleanup remains checked above through the successor owner.
         let archiveBytes;
+        let accountedActions = toolSubject.actions;
         if (placement) {
           const transfer = toolSubject.transferArchive;
           assert(transfer);
           archiveBytes = await readFile(transfer.path);
           assert.equal(hash(archiveBytes), transfer.sha256);
           assert.equal(archiveBytes.length, transfer.bytes);
+          accountedActions = toolSubject.actions.slice(0, transfer.actionCount);
         } else {
           const bundle = join(app.data, `${name}.bundle`);
           await invoke('export-checkpoint', '--state-dir', selectedState, '--task-id', task.task_id, '--output', bundle);
           archiveBytes = await readFile(bundle);
         }
         const metrics = workspaceMetrics(readArchive(archiveBytes), JSON.parse(await readFile(applicationPath, 'utf8')));
-        assert.equal(metrics.runtime_specializations_requested, toolSubject.actions.filter(action => action.name === 'program' && action.arguments.command.tag === 'specialize').length);
-        assert.equal(metrics.runtime_switches_requested, toolSubject.actions.filter(action => (action.name === 'work' && action.arguments.command.tag === 'realize') || (action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize')).length);
+        assert.equal(metrics.runtime_specializations_requested, accountedActions.filter(action => action.name === 'program' && action.arguments.command.tag === 'specialize').length);
+        assert.equal(metrics.runtime_switches_requested, accountedActions.filter(action => (action.name === 'work' && action.arguments.command.tag === 'realize') || (action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize')).length);
+        if (name === 'tools-runtime-guest-mobility') {
+          const afterTransfer = toolSubject.actions.slice(toolSubject.transferArchive.actionCount);
+          assert.equal(afterTransfer.filter(action => action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize').length, 1);
+        }
         if (name === 'tools-runtime-mobility') {
           const transported = metrics.actions.filter(action => action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize');
           assert(transported.length > 0);

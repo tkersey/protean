@@ -464,6 +464,16 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
             saw_pending_question = true;
             try std.testing.expect(current.value.current_port != null);
             try std.testing.expectEqual(.queued, current.value.schedule);
+            _ = try imported.workspaceControl(scratch, "pending-cancel-explicit", parent.receipt.task, question_id, current.value.execution_revision, current.value.control_revision, .{ .delegate = .{ .stop = .terminal, .continuation = .explicit_only } });
+            var explicit = try imported.workspaceWork(scratch, parent.receipt.task, question_id);
+            defer explicit.deinit();
+            try std.testing.expectEqual(.parked, explicit.value.schedule);
+            _ = try imported.workspaceControl(scratch, "pending-cancel-owner", parent.receipt.task, question_id, explicit.value.execution_revision, explicit.value.control_revision, .{ .delegate = .{ .stop = .terminal, .continuation = .owner_scheduled } });
+            var delegated = try imported.workspaceWork(scratch, parent.receipt.task, question_id);
+            defer delegated.deinit();
+            try std.testing.expectEqual(.queued, delegated.value.schedule);
+            try std.testing.expectEqualDeep(current.value.current_port, delegated.value.current_port);
+            try imported.validateWorkspace(scratch, parent.receipt.task);
         }
         _ = try imported.pump(scratch);
     }
@@ -1637,7 +1647,9 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             defer before_cancel.deinit();
             try std.testing.expect(!before_cancel.value.terminal());
             try std.testing.expect(successor.owned.items.len != 0);
-            try successor.cancelOwned(scratch, "executor-shutdown", "stop local executor");
+            const interrupt = "interrupt-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            try std.testing.expectEqual(@as(usize, 74), interrupt.len);
+            try successor.cancelOwned(scratch, interrupt, "stop local executor");
             var after_cancel = try successor.workspaceWork(scratch, subject.task, work_id);
             defer after_cancel.deinit();
             try std.testing.expect(after_cancel.value.cancellation != null);
