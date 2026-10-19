@@ -101,6 +101,7 @@ pub const Control = struct {
     /// The controller's durable cancellation event revision. It orders repeated
     /// cleanup requests without comparing clocks across namespaces.
     cleanup_request: ?u64 = null,
+    parent_stopped: bool = false,
 };
 /// Signed lifecycle facts from the current executor. These are observations;
 /// they carry no local continuation, value reference, or environmental grant.

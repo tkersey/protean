@@ -164,6 +164,7 @@ pub fn Service(comptime Types: type) type {
         owned: std.ArrayList(state.TaskId) = .empty,
         cleanup_cursor: usize = 0,
         shutdown_cancel_requested: bool = false,
+        remote_stopped_parent: ?state.TaskId = null,
         owner_epoch: state.Digest = undefined,
         work: ?Work = null,
         placement_pending: std.ArrayList(struct { task: state.TaskId, id: state.Digest, kind: PlacementKind }) = .empty,
@@ -385,8 +386,7 @@ pub fn Service(comptime Types: type) type {
                 var decoded = try self.task(a, id);
                 defer decoded.deinit();
                 const value = decoded.value;
-                const controller = try self.hasLocalCustody(a, id, null);
-                if (!controller and (self.shutdown_cancel_requested or value.cancellation != null) and try self.hasFrozenCustody(a, id, null)) return true;
+                const controller = try self.hasLocalCustody(a, id, null) or try self.hasFrozenCustody(a, id, null);
                 if (controller) {
                     if (value.terminal()) {
                         const bytes = try self.store().object(a, value.outcome, null);
@@ -3490,7 +3490,8 @@ pub fn Service(comptime Types: type) type {
         fn placementControlExpanded(self: *Self, a: std.mem.Allocator, operation_name: []const u8, task_id: state.TaskId, command: wc.Work, expansion: @FieldType(@import("placement.zig").Control, "expansion"), require_transport: bool, cleanup_request: ?u64) ![]u8 {
             const p = @import("placement.zig");
             const journal = @import("placement_journal.zig");
-            try self.allowed();
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
             const site = try self.placementSite();
             const work_id = try wp.identity(try p.commandWork(command), .work);
             var controller = try journal.custody(self.store(), a, .{ .task = task_id }) orelse return error.InvalidTransfer;
@@ -3500,7 +3501,7 @@ pub fn Service(comptime Types: type) type {
             defer executor.deinit();
             if (executor.value.phase != .away or std.meta.eql(executor.value.owner, site)) return error.CustodyNotRemote;
             if (operation_name.len == 0 or operation_name.len > 128) return error.InvalidOperation;
-            const value: p.Control = .{ .subject = .{ .task = task_id, .work = work_id }, .controller = site, .controller_epoch = controller.value.epoch, .executor = executor.value.owner, .custody_epoch = executor.value.epoch, .operation = .{ .bytes = operation_name }, .command = command, .expansion = expansion, .cleanup_request = cleanup_request };
+            const value: p.Control = .{ .subject = .{ .task = task_id, .work = work_id }, .controller = site, .controller_epoch = controller.value.epoch, .executor = executor.value.owner, .custody_epoch = executor.value.epoch, .operation = .{ .bytes = operation_name }, .command = command, .expansion = expansion, .cleanup_request = cleanup_request, .parent_stopped = parent.value.terminal() or parent.value.cancellation != null };
             const id = p.controlId(value);
             if (try journal.control(self.store(), a, task_id, id)) |saved| {
                 var prior = saved;
@@ -3508,6 +3509,7 @@ pub fn Service(comptime Types: type) type {
                 var replay_value = value;
                 replay_value.executor = prior.value.control.value.executor;
                 replay_value.custody_epoch = prior.value.control.value.custody_epoch;
+                replay_value.parent_stopped = prior.value.control.value.parent_stopped;
                 if (replay_value.cleanup_request == null) replay_value.cleanup_request = prior.value.control.value.cleanup_request;
                 if (!std.meta.eql(try p.digest(p.Control, a, prior.value.control.value), try p.digest(p.Control, a, replay_value))) return error.OperationConflict;
                 const bytes = try contracts.encodeOwned(p.Signed(p.Control), a, prior.value.control);
@@ -3531,7 +3533,8 @@ pub fn Service(comptime Types: type) type {
         pub fn placementResolveControl(self: *Self, a: std.mem.Allocator, peer_name: []const u8, signed: @import("placement.zig").Signed(@import("placement.zig").Control), route: []const @import("placement.zig").Succession) ![]u8 {
             const p = @import("placement.zig");
             const journal = @import("placement_journal.zig");
-            try self.allowed();
+            var parent = try self.task(a, signed.value.subject.task);
+            defer parent.deinit();
             const peer = try self.placementPeer(peer_name);
             try p.verify(p.Control, a, signed, peer.site);
             const head = try p.routeHead(a, signed.value, route);
@@ -3570,7 +3573,8 @@ pub fn Service(comptime Types: type) type {
         fn placementExecuteRoutedControl(self: *Self, a: std.mem.Allocator, peer_name: []const u8, signed: @import("placement.zig").Signed(@import("placement.zig").Control), route: []const @import("placement.zig").Succession) ![]u8 {
             const p = @import("placement.zig");
             const journal = @import("placement_journal.zig");
-            try self.allowed();
+            var parent = try self.task(a, signed.value.subject.task);
+            defer parent.deinit();
             const peer = try self.placementPeer(peer_name);
             const site = try self.placementSite();
             try p.verify(p.Control, a, signed, peer.site);
@@ -3616,15 +3620,18 @@ pub fn Service(comptime Types: type) type {
             defer scratch.deinit();
             const operation_name = try std.fmt.allocPrint(scratch.allocator(), "placement-{s}", .{std.fmt.bytesToHex(id, .lower)});
             const selected: wc.Command = if (value.expansion) |expand| .{ .context = .{ .expand = .{ .reference = expand.reference, .page = expand.page } } } else .{ .work = value.command };
-            const reply = try self.workspaceCommand(scratch.allocator(), operation_name, value.subject.task, selected);
+            const reply = reply: {
+                const previous = self.remote_stopped_parent;
+                self.remote_stopped_parent = if (value.parent_stopped) value.subject.task else null;
+                defer self.remote_stopped_parent = previous;
+                break :reply try self.workspaceCommand(scratch.allocator(), operation_name, value.subject.task, selected);
+            };
             var observed_work = try self.workspaceWork(scratch.allocator(), value.subject.task, value.subject.work.?);
             defer observed_work.deinit();
-            var observed_parent = try self.task(scratch.allocator(), value.subject.task);
-            defer observed_parent.deinit();
             const outcome_bytes = try self.store().object(scratch.allocator(), observed_work.value.outcome, null);
             var outcome = try data.invocation.decode(data.invocation.Outcome, scratch.allocator(), outcome_bytes);
             defer outcome.deinit();
-            const observed: p.WorkState = .{ .observed_at = observed_parent.value.event_high, .execution_revision = observed_work.value.execution_revision, .control_revision = observed_work.value.control_revision, .outcome = observed_work.value.outcome_kind, .cleanup_complete = cleanupComplete(outcome.value), .cancellation = observed_work.value.cancellation, .explicitly_parked = try self.workspaceExplicitlyParked(a, observed_work.value), .park_complete = try self.workspaceWorkSettled(a, observed_work.value, false, true) };
+            const observed: p.WorkState = .{ .observed_at = self.store().head.generation, .execution_revision = observed_work.value.execution_revision, .control_revision = observed_work.value.control_revision, .outcome = observed_work.value.outcome_kind, .cleanup_complete = cleanupComplete(outcome.value), .cancellation = observed_work.value.cancellation, .explicitly_parked = try self.workspaceExplicitlyParked(a, observed_work.value), .park_complete = try self.workspaceWorkSettled(a, observed_work.value, false, true) };
             const report = try p.sign(p.Report, a, self.profile.placement.?.signing_key, .{ .control = try p.digest(p.Control, a, value), .executor = site, .custody_epoch = head.epoch, .reply = reply, .work_state = observed });
             const result = try contracts.encodeOwned(p.Signed(p.Report), a, report);
             errdefer a.free(result);
@@ -3635,7 +3642,8 @@ pub fn Service(comptime Types: type) type {
         pub fn placementFollowExecutor(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, control_id: state.Digest, next: @import("placement.zig").Succession) !void {
             const p = @import("placement.zig");
             const journal = @import("placement_journal.zig");
-            try self.allowed();
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
             try self.requireCustody(a, task_id, null);
             var saved = try journal.control(self.store(), a, task_id, control_id) orelse return error.InvalidRemoteCommand;
             defer saved.deinit();
@@ -3676,7 +3684,8 @@ pub fn Service(comptime Types: type) type {
         pub fn placementApplyReport(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, control_id: state.Digest, report: @import("placement.zig").Signed(@import("placement.zig").Report)) !void {
             const p = @import("placement.zig");
             const journal = @import("placement_journal.zig");
-            try self.allowed();
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
             var saved = try journal.control(self.store(), a, task_id, control_id) orelse return error.InvalidRemoteCommand;
             defer saved.deinit();
             const control = saved.value.control.value;
@@ -3688,8 +3697,6 @@ pub fn Service(comptime Types: type) type {
             }
             saved.value.report = report;
             saved.value.last_error = null;
-            var parent = try self.task(a, task_id);
-            defer parent.deinit();
             const wake = (parent.value.cancellation != null or parent.value.terminal()) and try self.hasLocalCustody(a, task_id, null);
             if (wake) {
                 try self.ensureOwnershipCapacity(task_id);
@@ -3710,7 +3717,8 @@ pub fn Service(comptime Types: type) type {
         pub fn placementFollowController(self: *Self, a: std.mem.Allocator, source_peer: []const u8, destination_peer: []const u8, offer: @import("placement.zig").Signed(@import("placement.zig").Offer), decision: @import("placement.zig").Signed(@import("placement.zig").Decision)) !void {
             const p = @import("placement.zig");
             const journal = @import("placement_journal.zig");
-            try self.allowed();
+            var parent = try self.task(a, offer.value.intent.subject.task);
+            defer parent.deinit();
             const source_peer_value = try self.placementPeer(source_peer);
             const destination_peer_value = try self.placementPeer(destination_peer);
             try p.verify(p.Offer, a, offer, source_peer_value.site);
@@ -3741,7 +3749,8 @@ pub fn Service(comptime Types: type) type {
         /// acceptance. Once offered, only its signed decision can release it.
         pub fn placementAbortUnsent(self: *Self, a: std.mem.Allocator, subject: @import("placement.zig").Subject, transfer: state.Digest) !void {
             const journal = @import("placement_journal.zig");
-            try self.allowed();
+            var parent = try self.task(a, subject.task);
+            defer parent.deinit();
             var saved = try journal.custody(self.store(), a, subject) orelse return error.InvalidTransfer;
             defer saved.deinit();
             if (saved.value.phase != .frozen or saved.value.intent == null or saved.value.offer != null or
@@ -3760,7 +3769,8 @@ pub fn Service(comptime Types: type) type {
         pub fn placementWithdraw(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, transfer: state.Digest) !void {
             const p = @import("placement.zig");
             const journal = @import("placement_journal.zig");
-            try self.allowed();
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
             const site = try self.placementSite();
             var saved = try self.record(p.Move, a, "placement_move", transfer, task_id);
             defer saved.deinit();
@@ -3843,7 +3853,8 @@ pub fn Service(comptime Types: type) type {
         pub fn placementFreeze(self: *Self, a: std.mem.Allocator, subject: @import("placement.zig").Subject, peer_name: []const u8, expected: @import("placement.zig").Cut, transfer: state.Digest) !@import("placement.zig").Intent {
             const p = @import("placement.zig");
             const journal = @import("placement_journal.zig");
-            try self.allowed();
+            var parent = try self.task(a, subject.task);
+            defer parent.deinit();
             const site = try self.placementSite();
             const peer = try self.placementPeer(peer_name);
             var prior = try journal.custody(self.store(), a, subject);
@@ -3866,8 +3877,6 @@ pub fn Service(comptime Types: type) type {
                     if (std.meta.eql(moving.value.owner, site) and moving.value.decision == null and !moving.value.cancelled and !std.meta.eql(moving.value.id, transfer)) return error.UnsettledRemoteControl;
                 }
             }
-            var parent = try self.task(a, subject.task);
-            defer parent.deinit();
             try self.compatible(parent.value);
             if (!std.meta.eql(expected, try self.placementCut(a, subject))) return error.StaleRevision;
             if (self.work) |running| if (std.meta.eql(running.task, subject.task) and std.meta.eql(running.subject_work, subject.work)) return error.UnsettledOccurrence;
@@ -4009,7 +4018,8 @@ pub fn Service(comptime Types: type) type {
 
         pub fn placementApplyDecision(self: *Self, a: std.mem.Allocator, subject: @import("placement.zig").Subject, signed: @import("placement.zig").Signed(@import("placement.zig").Decision)) !void {
             const journal = @import("placement_journal.zig");
-            try self.allowed();
+            var parent = try self.task(a, subject.task);
+            defer parent.deinit();
             var saved = try journal.custody(self.store(), a, subject) orelse return error.InvalidTransfer;
             defer saved.deinit();
             const result = try saved.value.decided(a, signed);
@@ -4844,7 +4854,7 @@ pub fn Service(comptime Types: type) type {
             defer saved.deinit();
             var value = saved.value;
             if (value.execution_revision != interaction.expected.execution_revision or value.control_revision != interaction.expected.control_revision) return error.StaleRevision;
-            if (!workspaceInteractionAllowed(parent.value.terminal() or parent.value.cancellation != null, value)) return error.InvalidState;
+            if (!workspaceInteractionAllowed(self.workspaceParentStopped(parent.value), value)) return error.InvalidState;
             const port_reference = value.current_port orelse return error.NoExposedPort;
             const port_bytes = try self.store().object(a, port_reference, null);
             defer a.free(port_bytes);
@@ -5140,7 +5150,7 @@ pub fn Service(comptime Types: type) type {
             const request = try operation(Request, a, .{ .task = task_id, .command = command, .snapshot = snapshot, .input = input });
             if (try self.replay(a, operation_id, request)) |prior| return prior;
             try self.requireCustody(a, task_id, null);
-            if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
+            if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
             try self.store().begin();
             defer self.store().rollback();
             const artifact: state.Reference, const kind: @FieldType(wc.Ref, "kind") = switch (command) {
@@ -5477,12 +5487,18 @@ pub fn Service(comptime Types: type) type {
             return result;
         }
 
+        fn workspaceParentStopped(self: *const Self, parent: state.Task) bool {
+            return parent.terminal() or parent.cancellation != null or
+                if (self.remote_stopped_parent) |id| std.meta.eql(id, parent.id) else false;
+        }
+
         fn workspaceInteractionAllowed(parent_stopped: bool, child: workspace.Work) bool {
             return !child.terminal() and (child.cancellation == null or child.cancellation_applied) and
                 (!parent_stopped or child.cancellation_applied);
         }
 
         fn workspaceStoppedAt(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, watermark: u64) !bool {
+            if (self.remote_stopped_parent) |id| if (std.meta.eql(id, task_id)) return true;
             var query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq<=? ORDER BY e.seq", &.{ .{ .blob = &task_id }, .{ .integer = std.math.cast(i64, watermark) orelse return error.InvalidArchive } });
             defer query.deinit();
             while (try query.step() == .row) {
@@ -6619,7 +6635,7 @@ pub fn Service(comptime Types: type) type {
             try self.requireCustody(a, task_id, null);
             var parent = try self.task(a, task_id);
             defer parent.deinit();
-            if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
+            if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
             var program = try self.workspaceProgram(a, task_id, program_id);
             defer program.deinit();
             const image = try self.store().object(a, program.value.description.image, null);
@@ -6674,7 +6690,7 @@ pub fn Service(comptime Types: type) type {
             if (try self.replay(a, operation_id, request)) |prior| return prior;
             var parent = try self.task(a, task_id);
             defer parent.deinit();
-            if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
+            if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
             var work = try self.runtimeWork(a, task_id, command.expected);
             defer work.deinit();
             const driver = try self.workspaceResident(a, work.value);
@@ -6706,7 +6722,7 @@ pub fn Service(comptime Types: type) type {
             if (try self.replay(a, operation_id, request)) |prior| return prior;
             var parent = try self.task(a, task_id);
             defer parent.deinit();
-            if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
+            if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
             var work = try self.runtimeWork(a, task_id, command.expected);
             defer work.deinit();
             if (work.value.outer_operation != null) return error.GuestCutUnavailable;
@@ -7443,7 +7459,7 @@ pub fn Service(comptime Types: type) type {
             const request = try operation(Request, a, .{ .task = task_id, .source = .{ .bytes = source }, .source_kind = source_kind, .catalog = catalog, .exposures = .{ .items = exposures } });
             if (try self.replay(a, operation_id, request)) |prior| return prior;
             try self.requireCustody(a, task_id, null);
-            if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
+            if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
             if (catalog) |ref| try workspaceSnapshotAccess(parent.value, ref);
             var built = try self.workspaceCompile(a, source, @fromBackingInt(@intCast(@backingInt(source_kind))), catalog, exposures, diagnostic);
             defer built.deinit();
@@ -7559,7 +7575,7 @@ pub fn Service(comptime Types: type) type {
             if (try self.replay(a, operation_id, request)) |prior| return prior;
             var parent = try self.task(a, task_id);
             defer parent.deinit();
-            if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
+            if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
             const parent_occurrence = parent.value.current_occurrence orelse return error.InvalidDelegation;
             const operation_name = std.fmt.bytesToHex(parent_occurrence, .lower);
             if (!same(operation_id, &operation_name)) return error.InvalidDelegation;
@@ -7633,7 +7649,7 @@ pub fn Service(comptime Types: type) type {
             const request = if (delegated) |bound| bound.request else try operation(Request, a, .{ .task = task_id, .program = program_id, .input = .{ .bytes = input }, .policy = policy, .origin = origin, .runtime = runtime });
             if (try self.replay(a, operation_id, request)) |prior| return prior;
             try self.requireCustody(a, task_id, null);
-            if (parent.value.terminal() or parent.value.cancellation != null) return error.InvalidState;
+            if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
             var artifact = try self.workspaceProgram(a, task_id, program_id);
             defer artifact.deinit();
             const kind = artifact.value.description.source_kind;
@@ -7979,7 +7995,7 @@ pub fn Service(comptime Types: type) type {
             var work = try self.runtimeWork(a, task_id, command.expected);
             defer work.deinit();
             if (work.value.terminal()) return error.InvalidState;
-            if ((parent.value.terminal() or parent.value.cancellation != null) and work.value.cancellation == null) return error.InvalidState;
+            if (self.workspaceParentStopped(parent.value) and work.value.cancellation == null) return error.InvalidState;
             work.value.control_revision = try std.math.add(u64, work.value.control_revision, 1);
             return self.workspacePumpWork(a, parent.value, work.value, command.base_quantum, operation_id, request, .{ .pump = command });
         }
@@ -8131,7 +8147,7 @@ pub fn Service(comptime Types: type) type {
             var value = saved.value;
             if (value.execution_revision != expected_execution or value.control_revision != expected_control) return error.StaleRevision;
             if (value.terminal()) return error.InvalidState;
-            if (command != .park and command != .cancel and (parent.value.terminal() or parent.value.cancellation != null)) return error.InvalidState;
+            if (command != .park and command != .cancel and self.workspaceParentStopped(parent.value)) return error.InvalidState;
             if (value.outer_operation != null and (command == .advance or command == .cancel)) {
                 if (command == .cancel) {
                     if (command.cancel.bytes.len > 256 or !std.unicode.utf8ValidateSlice(command.cancel.bytes)) return error.InvalidParams;

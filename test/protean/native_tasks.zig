@@ -1573,15 +1573,51 @@ test "terminal cleanup failures retain allocator-governed shutdown ownership wit
     const length = try temporary.dir.realPath(io, &path_buffer);
     const path = try std.fmt.allocPrint(a, "{s}/state", .{path_buffer[0..length]});
     defer a.free(path);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const frame = arena.allocator();
+    {
+        const p = native.placement;
+        const probe_path = try std.fmt.allocPrint(frame, "{s}/frozen-cleanup", .{path_buffer[0..length]});
+        var probe_namespace = try native.Namespace.open(a, io, probe_path);
+        defer probe_namespace.close() catch unreachable;
+        var probe = try native.tasks.Service(CleanupTypes).init(a, io, &probe_namespace, assets, &application, handlers, profile);
+        defer probe.close(frame) catch unreachable;
+        const submitted = try probe.submit(frame, "failed-cleanup", true);
+        for (0..3) |_| try std.testing.expectEqual(.progressed, try probe.pump(frame));
+        var terminal = try probe.task(frame, submitted.receipt.task);
+        defer terminal.deinit();
+        try std.testing.expectEqual(.failed, terminal.value.outcome_kind);
+        try std.testing.expect(terminal.value.cancellation == null);
+        try std.testing.expect(!try probe.taskCleanupComplete(frame, terminal.value));
+        try std.testing.expectEqual(@as(usize, 1), probe.owned.items.len);
+        try std.testing.expectEqual(.idle, try probe.pump(frame));
+        const subject: p.Subject = .{ .task = submitted.receipt.task };
+        const source_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(43));
+        const destination_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(44));
+        const Allow = struct {
+            fn disclose(_: *anyopaque, _: p.Subject, _: []const native.testing.state.Reference) !void {}
+        };
+        const peer: p.Peer = .{ .name = "destination", .site = .{ .key = destination_key.public_key.bytes, .namespace = @splat(45) }, .native_build = profile.runtime_identity, .compatibility = try probe.placementCompatibility(frame, subject), .resource_binding = try profile.resourceIdentity(frame, application.image_identity), .disclosure_policy = @splat(46), .context = undefined, .disclose = Allow.disclose };
+        const config: p.Configuration = .{ .signing_key = source_key, .peers = &.{peer} };
+        probe.profile.placement = &config;
+        try std.testing.expect(try probe.shutdownIncomplete(frame));
+        _ = try probe.placementFreeze(frame, subject, "destination", try probe.placementCut(frame, subject), @splat(47));
+        try std.testing.expectEqual(.frozen, (try probe.placementStatus(frame, subject)).?.phase);
+        try std.testing.expect(try probe.shutdownIncomplete(frame));
+        try std.testing.expect(!try probe.taskCleanupComplete(frame, terminal.value));
+        try std.testing.expectEqual(.idle, try probe.pump(frame));
+        try probe.placementAbortUnsent(frame, subject, @splat(47));
+        try std.testing.expectEqual(.local, (try probe.placementStatus(frame, subject)).?.phase);
+        try std.testing.expect(try probe.shutdownIncomplete(frame));
+        try std.testing.expectEqual(.idle, try probe.pump(frame));
+    }
     var namespace = try native.Namespace.open(a, io, path);
     var namespace_live = true;
     defer if (namespace_live) namespace.close() catch unreachable;
     var service = try native.tasks.Service(CleanupTypes).init(a, io, &namespace, assets, &application, handlers, profile);
     var service_live = true;
     defer if (service_live) service.close(a) catch unreachable;
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const frame = arena.allocator();
     var client: native.client.Client(CleanupTypes) = .{ .service = &service };
     // Successful cleanup releases ownership. Failed cleanup stays owned beyond
     // the former fixed sixteen-task quota without adding runnable work.

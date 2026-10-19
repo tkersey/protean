@@ -936,6 +936,37 @@ native fault and lifecycle observations; the human signal wiring is source-trace
 without claiming an injected CLI signal experiment. The Linux owner lane requires
 all 69 tests, including the new cleanup-question case.
 
+Retained-task placement operations acquire the current principal/tenant grant
+before changing custody, cancelling queued transport, following a signed successor,
+or recording a received control. Exact frozen retries and report admissions use
+the same task grant. Site signatures, custody epochs and disclosure checks retain
+their separate roles. Initial staging/refusal may legitimately precede local task
+admission; archive acceptance still checks the imported task inside its transaction.
+
+Signed remote controls include the authoritative controller's stopped-parent fact.
+The executor applies that fact to the named task while interpreting the command,
+using the existing workspace lifecycle rules. A stale executor copy cannot permit
+fresh advancement, delegation or realization changes after parent completion.
+Parking, cancellation, cancellation pumping and admitted cleanup interaction retain
+their distinct permissions. Exact retries retain the original signed command and
+report; the transient interpretation context grants no custody or environmental
+access and is cleared on return or failure.
+
+Remote lifecycle reports use the executor namespace's committed generation as
+their observation order. Persisting one report advances that generation before a
+later report can be produced, including read-only inspections that leave the task
+event watermark unchanged. Replayed reports retain their original order. Selection
+compares only the current executor/custody and controller epochs; it does not compare
+clocks across sites or infer freshness from control hashes or arrival order.
+
+Frozen controller custody retains shutdown responsibility until acceptance
+transfers it. Terminal failure and cleanup completion remain separate facts even
+without a cancellation request. The shutdown check now uses the same local-or-frozen
+responsibility as ownership retirement; execution still requires local custody.
+These changes concern the unreleased placement schema introduced by this candidate,
+whose peers bind exact native builds; they do not claim compatibility between
+intermediate development binaries or reconstruct their old signed reports.
+
 The normal cache path keys compiled outputs by the selected build recipe, compiler
 contents, native target/environment, dependency locks, build configuration, shared
 source modules, required adaptive assets, and the selected test root's transitive

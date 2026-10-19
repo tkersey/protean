@@ -710,6 +710,17 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         source_peers[0].channel = .{ .argv = &.{"/usr/bin/false"}, .remote_name = "source" };
         const queued_move = try sender.workspaceCommand(scratch, "queue-before-progress", subject.task, .{ .placement = .{ .move = .{ .operation = .{ .bytes = "queued-work" }, .subject = .{ .work = work_ref }, .site = .{ .bytes = "destination" }, .custody_epoch = 0 } } });
         try std.testing.expectEqual(.observed, queued_move.disposition);
+        inline for (.{ "principal", "tenant" }) |field| {
+            const authority = sender.profile.authority;
+            defer sender.profile.authority = authority;
+            const before = source_namespace.store.head;
+            const pending_before = try scratch.dupe(@TypeOf(sender.placement_pending.items[0]), sender.placement_pending.items);
+            @field(sender.profile.authority, field) = "foreign";
+            try std.testing.expectError(error.Denied, sender.placementWithdraw(scratch, subject.task, p.operationId(source_site, subject.task, "queued-work", .move)));
+            try std.testing.expectEqualDeep(before, source_namespace.store.head);
+            try std.testing.expectEqualDeep(pending_before, sender.placement_pending.items);
+            try std.testing.expect(sender.placement_job == null);
+        }
         _ = try sender.workspacePump(scratch, "queued-work-progress", subject.task, .{ .expected = .{ .work = work_ref, .execution_revision = cut.execution, .control_revision = cut.control }, .base_quantum = 1 });
         const progressed_cut = try sender.placementCut(scratch, subject);
         try std.testing.expect(!std.meta.eql(cut, progressed_cut));
@@ -934,6 +945,8 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             var parked = false;
             var incomplete_park = false;
             var refreshed_park = false;
+            var inspection_reports: u64 = 0;
+            var parked_task_watermark: u64 = 0;
             var prior_command: ?p.Signed(p.Control) = null;
             var prior_report: ?p.Signed(p.Report) = null;
             for (0..8) |_| {
@@ -999,6 +1012,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
                     phase = "execute remote close observation";
                     const result = try contracts.decodeOwned(p.Signed(p.Report), scratch, try closing_executor.placementExecuteControl(scratch, "successor", selected_command));
                     try std.testing.expectEqual(.observed, result.value.value.reply.disposition);
+                    if (prior_report) |previous| try std.testing.expect(result.value.value.work_state.?.observed_at > previous.value.work_state.?.observed_at);
                     prior_report = result.value;
                     prior_command = selected_command;
                     if (selected_command.value.command == .park) {
@@ -1014,16 +1028,77 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
                         const later = try closing_executor.placementCut(scratch, subject);
                         try std.testing.expectEqual(parked_child.value.execution_revision, later.execution);
                         try std.testing.expectEqual(parked_child.value.control_revision + 1, later.control);
+                        var observed_parent = try closing_executor.task(scratch, subject.task);
+                        defer observed_parent.deinit();
+                        parked_task_watermark = observed_parent.value.event_high;
                         incomplete_park = true;
                     } else if (incomplete_park) {
                         try std.testing.expect(result.value.value.work_state.?.parkSettled());
                         try std.testing.expectEqualDeep(work_ref, prior_command.?.value.command.inspect.work);
-                        parked = true;
-                        refreshed_park = true;
+                        var observed_parent = try closing_executor.task(scratch, subject.task);
+                        defer observed_parent.deinit();
+                        try std.testing.expectEqual(parked_task_watermark, observed_parent.value.event_high);
+                        inspection_reports += 1;
+                        if (inspection_reports < 3) {
+                            var incomplete = result.value.value;
+                            incomplete.work_state.?.park_complete = false;
+                            prior_report = try p.sign(p.Report, scratch, source_key, incomplete);
+                        } else {
+                            parked = true;
+                            refreshed_park = true;
+                        }
                     }
                 }
             }
             try std.testing.expect(completed and parked and incomplete_park and refreshed_park);
+            try std.testing.expectEqual(@as(u64, 3), inspection_reports);
+            const last = prior_report.?.value.work_state.?;
+            const expected: contracts.workspace.Expected = .{ .work = work_ref, .execution_revision = last.execution_revision, .control_revision = last.control_revision };
+            const stopped_commands = [_]contracts.workspace.Work{
+                .{ .advance = expected },
+                .{ .delegate = .{ .expected = expected, .policy = .{} } },
+                .{ .pump = .{ .expected = expected, .base_quantum = 1 } },
+                .{ .request_cut = .{ .expected = expected, .level = .outer_execution } },
+                .{ .realize = .{ .expected = expected, .realization_revision = running_child.value.realization_revision, .runtime = .{ .packaged = .{} } } },
+            };
+            var stopped_controls: [stopped_commands.len]p.Signed(p.Control) = undefined;
+            {
+                var closing_namespace = try native.Namespace.open(a, io, successor_path);
+                defer closing_namespace.close() catch unreachable;
+                var closing_controller = try native.tasks.Service(OwnerTypes).init(a, io, &closing_namespace, assets, &application, handlers, snapshot_profile);
+                defer closing_controller.close(a) catch unreachable;
+                var terminal_parent = try closing_controller.task(scratch, subject.task);
+                defer terminal_parent.deinit();
+                try std.testing.expect(terminal_parent.value.terminal());
+                for (stopped_commands, &stopped_controls, 0..) |command, *signed, index| {
+                    const operation_name = try std.fmt.allocPrint(scratch, "after-parent-completion-{d}", .{index});
+                    const bytes = try closing_controller.placementControl(scratch, operation_name, subject.task, command);
+                    const decoded = try contracts.decodeOwned(p.Signed(p.Control), scratch, bytes);
+                    signed.* = decoded.value;
+                    try std.testing.expect(signed.value.parent_stopped);
+                    try std.testing.expectEqualSlices(u8, bytes, try closing_controller.placementControl(scratch, operation_name, subject.task, command));
+                }
+            }
+            {
+                var executor_namespace = try native.Namespace.open(a, io, source_path);
+                defer executor_namespace.close() catch unreachable;
+                var closing_executor = try native.tasks.Service(OwnerTypes).init(a, io, &executor_namespace, assets, &application, handlers, source_profile);
+                defer closing_executor.close(a) catch unreachable;
+                var retained_parent = try closing_executor.task(scratch, subject.task);
+                defer retained_parent.deinit();
+                try std.testing.expect(!retained_parent.value.terminal());
+                const before = try closing_executor.placementCut(scratch, subject);
+                for (stopped_controls) |control_value| {
+                    const bytes = try closing_executor.placementExecuteControl(scratch, "successor", control_value);
+                    const rejected = try contracts.decodeOwned(p.Signed(p.Report), scratch, bytes);
+                    try std.testing.expectEqual(.rejected, rejected.value.value.reply.disposition);
+                    const observation = (try native.json.parseAsset(scratch, rejected.value.value.reply.observation_json.bytes, rejected.value.value.reply.observation_json.bytes.len)).value;
+                    try std.testing.expectEqualStrings("InvalidState", observation.object.get("error").?.string);
+                    try std.testing.expectEqualDeep(before, try closing_executor.placementCut(scratch, subject));
+                    try std.testing.expect(closing_executor.remote_stopped_parent == null);
+                    try std.testing.expectEqualSlices(u8, bytes, try closing_executor.placementExecuteControl(scratch, "successor", control_value));
+                }
+            }
         }
         if (scenario == .preoffer) {
             const child_path = try std.fmt.allocPrint(scratch, "{s}/child-after-controller.par", .{path_buffer[0..length]});
@@ -1103,6 +1178,16 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         try std.testing.expect(sender.active.?.root_control != null);
     }
     _ = try sender.placementFreeze(scratch, subject, "destination", cut, @splat(14));
+    inline for (.{ "principal", "tenant" }) |field| {
+        const authority = sender.profile.authority;
+        defer sender.profile.authority = authority;
+        const before = source_namespace.store.head;
+        @field(sender.profile.authority, field) = "foreign";
+        try std.testing.expectError(error.Denied, sender.task(scratch, subject.task));
+        try std.testing.expectError(error.Denied, sender.placementAbortUnsent(scratch, subject, @splat(14)));
+        try std.testing.expectError(error.Denied, sender.placementFreeze(scratch, subject, "destination", cut, @splat(14)));
+        try std.testing.expectEqualDeep(before, source_namespace.store.head);
+    }
     if (scenario == .work) {
         try std.testing.expect(sender.active != null);
         try std.testing.expect(sender.active.?.work == null);
@@ -1365,6 +1450,14 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     sender = try native.tasks.Service(OwnerTypes).init(a, io, &source_namespace, assets, &application, handlers, source_profile);
     sender_open = true;
     try std.testing.expectError(error.CustodyNotLocal, sender.workspaceControl(scratch, "lost-ack", subject.task, work_id, cut.execution, cut.control, .advance));
+    inline for (.{ "principal", "tenant" }) |field| {
+        const authority = sender.profile.authority;
+        defer sender.profile.authority = authority;
+        const before = source_namespace.store.head;
+        @field(sender.profile.authority, field) = "foreign";
+        try std.testing.expectError(error.Denied, sender.placementApplyDecision(scratch, subject, accepted));
+        try std.testing.expectEqualDeep(before, source_namespace.store.head);
+    }
     try sender.placementApplyDecision(scratch, subject, accepted);
     try sender.placementApplyDecision(scratch, subject, accepted);
     try std.testing.expectEqual(.away, (try sender.placementStatus(scratch, subject)).?.phase);
@@ -1401,6 +1494,15 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     destination_open = true;
     receiver = try native.tasks.Service(OwnerTypes).init(a, io, &destination_namespace, assets, &application, handlers, resumed_profile);
     receiver_open = true;
+    inline for (.{ "principal", "tenant" }) |field| {
+        const authority = receiver.profile.authority;
+        defer receiver.profile.authority = authority;
+        const before = destination_namespace.store.head;
+        @field(receiver.profile.authority, field) = "foreign";
+        try std.testing.expectError(error.Denied, receiver.placementExecuteControl(scratch, "source", control.value));
+        try std.testing.expectError(error.Denied, receiver.placementResolveControl(scratch, "source", control.value, &.{}));
+        try std.testing.expectEqualDeep(before, destination_namespace.store.head);
+    }
     const report_bytes = try receiver.placementExecuteControl(scratch, "source", control.value);
     try std.testing.expectEqualSlices(u8, report_bytes, try receiver.placementExecuteControl(scratch, "source", control.value));
     inline for (.{ "principal", "tenant" }) |field| {
@@ -1476,6 +1578,16 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         var forged = route[0];
         forged.offer.value.intent.epoch += 1;
         try std.testing.expectError(error.SignatureVerificationFailed, sender.placementFollowExecutor(scratch, subject.task, p.controlId(delayed.value.value), forged));
+        inline for (.{ "principal", "tenant" }) |field| {
+            const authority = sender.profile.authority;
+            defer sender.profile.authority = authority;
+            const before = source_namespace.store.head;
+            const pending_before = try scratch.dupe(@TypeOf(sender.placement_pending.items[0]), sender.placement_pending.items);
+            @field(sender.profile.authority, field) = "foreign";
+            try std.testing.expectError(error.Denied, sender.placementFollowExecutor(scratch, subject.task, p.controlId(delayed.value.value), route[0]));
+            try std.testing.expectEqualDeep(before, source_namespace.store.head);
+            try std.testing.expectEqualDeep(pending_before, sender.placement_pending.items);
+        }
         try sender.placementFollowExecutor(scratch, subject.task, p.controlId(delayed.value.value), route[0]);
         try std.testing.expectEqualDeep(successor_site, (try sender.placementStatus(scratch, subject)).?.owner);
         try std.testing.expectEqualSlices(u8, delayed_bytes, try sender.placementControl(scratch, "delayed-inspect", subject.task, .{ .inspect = .{ .work = work_ref } }));
@@ -1595,6 +1707,14 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     receiver_open = true;
     try std.testing.expectError(error.MissingArtifact, receiver.namespace.store.objectReference(advanced_controller.checkpoint.digest, null));
     try std.testing.expectError(error.StaleController, receiver.placementExecuteControl(scratch, "successor", successor_control.value));
+    inline for (.{ "principal", "tenant" }) |field| {
+        const authority = receiver.profile.authority;
+        defer receiver.profile.authority = authority;
+        const before = destination_namespace.store.head;
+        @field(receiver.profile.authority, field) = "foreign";
+        try std.testing.expectError(error.Denied, receiver.placementFollowController(scratch, "source", "successor", controller_offer, controller_decision));
+        try std.testing.expectEqualDeep(before, destination_namespace.store.head);
+    }
     try receiver.placementFollowController(scratch, "source", "successor", controller_offer, controller_decision);
     try receiver.placementFollowController(scratch, "source", "successor", controller_offer, controller_decision);
     var stale_control = control.value.value;
@@ -1630,6 +1750,8 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             if (iteration == 0) {
                 try std.testing.expect(!try successor.associatedWorkDisposed(scratch, subject.task));
                 _ = try successor.requestCancel(scratch, "cancel-with-remote-work", subject.task, "controller stopped");
+                const replayed_control = try successor.placementControl(scratch, "new-controller-inspect", subject.task, .{ .inspect = .{ .work = work_ref } });
+                try std.testing.expectEqualSlices(u8, try contracts.encodeOwned(p.Signed(p.Control), scratch, successor_control.value), replayed_control);
             }
             if (cleanup_report.value.work_state.?.explicitly_parked and !resumed_after_park) {
                 try std.testing.expect(parked_once);
