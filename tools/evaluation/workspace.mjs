@@ -30,9 +30,11 @@ if (import.meta.main && !['prepare', 'run'].includes(mode)) {
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 function workspaceAction(action) {
   const command = action.arguments?.command;
-  return action.name === 'placement' && command?.tag === 'control'
-    ? {name: 'work', command: command.value?.command}
-    : {name: action.name, command};
+  if (action.name === 'placement') {
+    if (command?.tag === 'control') return {name: 'work', command: command.value?.command};
+    if (['inspect', 'expand'].includes(command?.tag)) return {name: 'work', command};
+  }
+  return {name: action.name, command};
 }
 export function armViolations(arm, actions) {
   return actions.filter(action => {

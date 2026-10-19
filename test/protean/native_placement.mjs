@@ -2,7 +2,7 @@
 // authenticated transport. No private production key or inference is used.
 import assert from 'node:assert/strict';
 import {createHash, createPrivateKey, createPublicKey} from 'node:crypto';
-import {mkdirSync, readFileSync, writeFileSync} from 'node:fs';
+import {mkdirSync, readFileSync, writeFileSync, readdirSync} from 'node:fs';
 import {join} from 'node:path';
 import {deployment} from './native_deployment.mjs';
 import {ProteanClient} from '../support/stdio-client.mts';
@@ -19,7 +19,7 @@ const sites = ['source', 'destination'].map((name, index) => {
 });
 const hex = bytes => Buffer.from(bytes).toString('hex');
 const request = (client, tag, value, timeout = 120_000) => client.call('placement', {request: {tag, value}}, timeout);
-const config = (site, peers = []) => writeFileSync(site.config, JSON.stringify({signing_key_file: site.key, transport_directory: site.spool, peers}), {mode: 0o600});
+const config = (site, peers = []) => writeFileSync(site.config, JSON.stringify({signing_key_file: site.key, transport_directory: site.spool, staging_limits: {bytes: 1073741824, files: 16}, peers}), {mode: 0o600});
 const launch = async site => {
   const client = new ProteanClient(app.command, ['--offline', '--state-dir', site.state, '--placement-config', site.config], {cwd: app.data, env: {PATH: '/nonexistent'}});
   client.child.stderr.on('data', bytes => process.stderr.write(bytes));
@@ -61,9 +61,15 @@ try {
   const move = {subject, peer: 'destination', expected: cut, transfer};
   const decision = await request(active, 'move', move, 300_000);
   assert.equal(decision.value.verdict.tag, 'accepted');
+  assert.deepEqual(readdirSync(source.spool), []);
+  assert.deepEqual(readdirSync(destination.spool), []);
   assert.deepEqual(await request(active, 'move', move), decision, 'duplicate source transfer returns the committed signed decision');
   assert.equal((await request(active, 'status', subject)).phase, 'away');
   await assert.rejects(active.call('task.resume', {client_operation_id: 'stale-source', task_id: submitted.task_id, expected_revision: cut.control}), error => error.data?.kind === 'StateConflict');
+  await active.close(); active = null;
+  writeFileSync(join(source.spool, `outgoing-${hex(transfer)}.par`), 'interrupted source retirement', {mode: 0o600});
+  active = await launch(source);
+  assert.deepEqual(readdirSync(source.spool), []);
   await active.close(); active = null;
   active = await launch(destination);
   const acquired = await request(active, 'status', subject);
@@ -75,10 +81,36 @@ try {
   assert.deepEqual(carried.checkpoint, cut.checkpoint);
   assert.equal(carried.execution, cut.execution);
   assert.deepEqual(await request(active, 'refuse', {peer: 'source', offer: acquired.offer, reason: 'withdrawn'}), decision, 'withdrawal cannot revoke a committed acceptance');
+  assert.equal(await request(active, 'stage', {peer: 'source', offer: acquired.offer, offset: '0', bytes: ''}), acquired.offer.value.archive_bytes);
+  assert.deepEqual(await request(active, 'accept_staged', {operation: 'accepted-retry', peer: 'source', offer: acquired.offer}), decision);
+  assert.deepEqual(readdirSync(destination.spool), []);
+  await active.close(); active = null;
+  writeFileSync(join(destination.spool, `placement-${hex(decision.value.offer_digest)}.par`), 'interrupted retirement', {mode: 0o600});
+  active = await launch(destination);
+  assert.deepEqual(readdirSync(destination.spool), []);
+  assert.deepEqual(await request(active, 'accept_staged', {operation: 'accepted-after-reopen', peer: 'source', offer: acquired.offer}), decision);
+  const refusedTransfer = Array(32).fill(32);
+  await request(active, 'freeze', {subject, peer: 'source', expected: await request(active, 'cut', subject), transfer: refusedTransfer});
+  const refusedOffer = await request(active, 'offer', {subject, peer: 'source', path: join(destination.spool, `outgoing-${hex(refusedTransfer)}.par`)});
+  await active.close(); active = null;
+  active = await launch(source);
+  assert.equal(await request(active, 'stage', {peer: 'destination', offer: refusedOffer, offset: '0', bytes: ''}), '0');
+  assert.equal(readdirSync(source.spool).length, 1);
+  const refusal = await request(active, 'refuse', {peer: 'destination', offer: refusedOffer, reason: 'withdrawn'});
+  assert.equal(refusal.value.verdict.tag, 'refused');
+  assert.deepEqual(readdirSync(source.spool), []);
+  assert.deepEqual(await request(active, 'accept_staged', {operation: 'refused-retry', peer: 'destination', offer: refusedOffer}), refusal);
+  assert.equal(await request(active, 'stage', {peer: 'destination', offer: refusedOffer, offset: '0', bytes: ''}), refusedOffer.value.archive_bytes);
+  assert.deepEqual(readdirSync(source.spool), []);
+  await active.close(); active = null;
+  active = await launch(destination);
+  await request(active, 'decision', {subject, decision: refusal});
+  assert.deepEqual(readdirSync(destination.spool), []);
+  assert.equal((await request(active, 'status', subject)).phase, 'local');
   assert.equal(createHash('sha256').update(readFileSync(app.executable)).digest('hex'), binary);
   await active.close(); active = null;
   passed = true;
-  console.log(JSON.stringify({native_placement: 'authenticated process transfer', duplicate_acceptance: true, destination_reopened: true, stale_source_rejected: true, native_binary_unchanged: true, live_provider: false}));
+  console.log(JSON.stringify({native_placement: 'authenticated process transfer', duplicate_acceptance: true, destination_reopened: true, staged_archives_retired: true, decided_restage_suppressed: true, retirement_recovered: true, refusal_retired: true, stale_source_rejected: true, native_binary_unchanged: true, live_provider: false}));
 } finally {
   if (active) await active.close();
   await app.close(passed);

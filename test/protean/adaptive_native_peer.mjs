@@ -35,6 +35,10 @@ import {workspaceMetrics, armViolations, evaluateCase} from '../../tools/evaluat
   assert.deepEqual(armViolations('retained', [...retained.map(remote), runtime.at(-1)]), []);
   assert.equal(armViolations('ordinary', completed.map(remote)).length, completed.length);
   assert.deepEqual(armViolations('pure', [work('start')]), [work('start')]);
+  const placementReads = ['inspect', 'expand'].map(tag => ({name: 'placement', arguments: {command: {tag}}}));
+  assert.deepEqual(armViolations('pure', placementReads), placementReads);
+  assert.deepEqual(armViolations('ordinary', placementReads), placementReads);
+  for (const arm of ['generic', 'retained', 'runtime']) assert.deepEqual(armViolations(arm, placementReads), []);
 }
 import {contract, assertAdaptiveCaptures} from './adaptive_capture_checks.mjs';
 import {runtimeTrace} from './runtime_trace.mjs';

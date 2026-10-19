@@ -358,6 +358,7 @@ pub fn run(comptime Types: type, comptime Environment: type, init: std.process.I
         if (service == null) return 64;
         profile.placement = try @import("placement_configuration.zig").load(profile_allocator, init.io, path);
         service.?.profile.placement = profile.placement;
+        try service.?.recoverPlacementFiles(a);
     }
     if (task_text) |text| {
         if (comptime @hasDecl(Environment, "taskInput")) {

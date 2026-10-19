@@ -23,7 +23,7 @@ const Peer = struct {
     remote_name: ?[]const u8 = null,
     timeout_ms: u32 = 30000,
 };
-const Document = struct { signing_key_file: []const u8, peers: []const Peer, transport_directory: ?[]const u8 = null };
+const Document = struct { signing_key_file: []const u8, peers: []const Peer, transport_directory: ?[]const u8 = null, staging_limits: ?p.StagingLimits = null };
 const Disclosure = struct {
     allow_private: bool,
     denied: []const p.Digest,
@@ -91,7 +91,7 @@ pub fn load(a: std.mem.Allocator, io: std.Io, path: []const u8) !*const p.Config
         for (peers[0..index]) |prior| if (std.meta.eql(prior.site, peer.site)) return error.InvalidConfiguration;
     }
     const result = try a.create(p.Configuration);
-    result.* = .{ .signing_key = key, .peers = peers, .transport_directory = document.transport_directory };
+    result.* = .{ .signing_key = key, .peers = peers, .transport_directory = document.transport_directory, .staging_limits = document.staging_limits };
     return result;
 }
 
@@ -121,9 +121,10 @@ test "placement launch configuration admits private keys and pinned peers" {
     try temporary.dir.writeFile(io, .{ .sub_path = "key", .data = hex });
     try std.testing.expectEqual(@as(c_int, 0), c.fchmodat(temporary.dir.handle, "key", 0o600, 0));
     const peer: Peer = .{ .name = "peer", .public_key = hex, .namespace = hex, .native_build = hex, .compatibility = .{ .base = hex, .admission = hex, .bridge = hex, .semantics = hex, .private_state = hex }, .resource_binding = hex, .disclosure = .{ .allow_private = true }, .command = &.{"/usr/bin/false"}, .remote_name = "source" };
-    const bytes = try std.json.Stringify.valueAlloc(a, Document{ .signing_key_file = key_path, .peers = &.{peer}, .transport_directory = root[0..length] }, .{});
+    const bytes = try std.json.Stringify.valueAlloc(a, Document{ .signing_key_file = key_path, .peers = &.{peer}, .transport_directory = root[0..length], .staging_limits = .{ .bytes = 4096, .files = 2 } }, .{});
     try temporary.dir.writeFile(io, .{ .sub_path = "config.json", .data = bytes });
     const configured = try load(a, io, config_path);
+    try std.testing.expectEqualDeep(p.StagingLimits{ .bytes = 4096, .files = 2 }, configured.staging_limits.?);
     try std.testing.expectEqualStrings("peer", configured.peers[0].name);
     try std.testing.expectEqualStrings("/usr/bin/false", configured.peers[0].channel.?.argv[0]);
     const key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(1));

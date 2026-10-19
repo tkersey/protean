@@ -8,12 +8,14 @@ const Ed25519 = std.crypto.sign.Ed25519;
 pub const Digest = state.Digest;
 pub const Site = struct { key: [32]u8, namespace: Digest };
 pub const Subject = struct { task: state.TaskId, work: ?Digest = null };
+pub const StagingLimits = struct { bytes: u64, files: usize };
 pub const Configuration = struct {
     /// Launch-owned secret; it is never part of a persisted protocol record.
     signing_key: Ed25519.KeyPair,
     peers: []const Peer,
     /// Operator-owned private directory outside the execution namespace.
     transport_directory: ?[]const u8 = null,
+    staging_limits: ?StagingLimits = null,
 };
 pub const Channel = struct { argv: []const []const u8, remote_name: []const u8, timeout_ms: u32 = 30000 };
 pub const Peer = struct {

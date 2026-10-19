@@ -184,6 +184,7 @@ pub fn Service(comptime Types: type) type {
             _ = try self.store().auditRetention(handlers, application.image_identity);
             try self.recover(a);
             try self.recoverWorkspace(a);
+            try self.recoverPlacementFiles(a);
             return self;
         }
         fn store(self: *Self) *storage.Store {
@@ -3093,6 +3094,32 @@ pub fn Service(comptime Types: type) type {
             if (!same(result, bound_bytes)) return error.InvalidArchive;
         }
 
+        fn retirePlacementFiles(self: *Self, a: std.mem.Allocator, decision: @import("placement.zig").Signed(@import("placement.zig").Decision)) !void {
+            const config = self.profile.placement orelse return;
+            if (config.transport_directory == null) return;
+            const p = @import("placement.zig");
+            const stage = @import("placement_stage.zig");
+            try p.verify(p.Decision, a, decision, decision.value.destination);
+            const site = try self.placementSite();
+            const directory = try self.placementDirectory(a);
+            if (std.meta.eql(site, decision.value.destination)) try stage.retire(a, directory, .placement, decision.value.offer_digest);
+            if (std.meta.eql(site, decision.value.source)) try stage.retire(a, directory, .outgoing, decision.value.transfer);
+        }
+
+        pub fn recoverPlacementFiles(self: *Self, a: std.mem.Allocator) !void {
+            const config = self.profile.placement orelse return;
+            if (config.transport_directory == null) return;
+            try self.store().checkIntegrity();
+            const p = @import("placement.zig");
+            var rows = try self.store().database.prepare("SELECT body FROM placement_decisions", &.{});
+            defer rows.deinit();
+            while (try rows.step() == .row) {
+                var decision = try contracts.decodeOwned(p.Signed(p.Decision), a, try rows.bytes(0));
+                defer decision.deinit();
+                try self.retirePlacementFiles(a, decision.value);
+            }
+        }
+
         fn placementPeer(self: *Self, peer_name: []const u8) !@import("placement.zig").Peer {
             const config = self.profile.placement orelse return error.UnsupportedCapability;
             for (config.peers) |peer| if (same(peer.name, peer_name)) return peer;
@@ -3116,8 +3143,15 @@ pub fn Service(comptime Types: type) type {
                     const peer = try self.placementPeer(v.peer.bytes);
                     try p.verify(p.Offer, a, v.offer, peer.site);
                     if (!std.meta.eql(v.offer.value.intent.destination, try self.placementSite())) return error.InvalidTransfer;
+                    if (try @import("placement_journal.zig").decision(self.store(), a, v.offer.value.intent.transfer)) |saved| {
+                        var prior = saved;
+                        defer prior.deinit();
+                        try p.matchDecision(a, v.offer.value, prior.value);
+                        try self.retirePlacementFiles(a, prior.value);
+                        return values.toJson(u64, a, v.offer.value.archive_bytes);
+                    }
                     if (peer.archive_limit) |limit| if (v.offer.value.archive_bytes > limit) return error.Capacity;
-                    return values.toJson(u64, a, try @import("placement_stage.zig").write(a, try self.placementDirectory(a), v.offer.value, v.offset, v.bytes.bytes));
+                    return values.toJson(u64, a, try @import("placement_stage.zig").write(a, self.io, try self.placementDirectory(a), self.profile.placement.?.staging_limits, v.offer.value, v.offset, v.bytes.bytes));
                 },
                 .accept_staged => |v| {
                     const path = try @import("placement_stage.zig").path(a, try self.placementDirectory(a), v.offer.value);
@@ -4050,7 +4084,10 @@ pub fn Service(comptime Types: type) type {
             if (try self.placementStatus(a, subject)) |prior| if (prior.intent) |intent| {
                 if (std.meta.eql(intent.transfer, transfer)) {
                     if (!std.meta.eql(intent.cut, expected) or !std.meta.eql(intent.destination, peer.site)) return error.OperationConflict;
-                    if (prior.decision) |decision| return decision;
+                    if (prior.decision) |decision| {
+                        try self.retirePlacementFiles(a, decision);
+                        return decision;
+                    }
                 }
             };
             _ = try self.placementFreeze(a, subject, peer_name, expected, transfer);
@@ -4071,11 +4108,12 @@ pub fn Service(comptime Types: type) type {
             var saved = try journal.custody(self.store(), a, subject) orelse return error.InvalidTransfer;
             defer saved.deinit();
             const result = try saved.value.decided(a, signed);
-            if (std.meta.eql(result, saved.value)) return;
+            if (std.meta.eql(result, saved.value)) return self.retirePlacementFiles(a, signed);
             try self.store().begin();
             defer self.store().rollback();
             try journal.putCustody(self.store(), a, result);
             try self.namespace.commit("placement.decision");
+            try self.retirePlacementFiles(a, signed);
             // Refusal releases custody but does not override a user's parked
             // state or implicitly select the next execution action.
         }
@@ -4092,6 +4130,7 @@ pub fn Service(comptime Types: type) type {
                 var prior = existing;
                 defer prior.deinit();
                 try p.matchDecision(a, offered.value, prior.value);
+                try self.retirePlacementFiles(a, prior.value);
                 return prior.value;
             }
             const signed = try p.sign(p.Decision, a, self.profile.placement.?.signing_key, .{ .transfer = offered.value.intent.transfer, .offer_digest = try p.digest(p.Offer, a, offered.value), .source = peer.site, .destination = site, .epoch = try std.math.add(u64, offered.value.intent.epoch, 1), .verdict = .{ .refused = reason } });
@@ -4099,6 +4138,7 @@ pub fn Service(comptime Types: type) type {
             defer self.store().rollback();
             try journal.putDecision(self.store(), a, site, offered.value, signed);
             try self.namespace.commit("placement.refused");
+            try self.retirePlacementFiles(a, signed);
             return signed;
         }
 
@@ -4147,6 +4187,7 @@ pub fn Service(comptime Types: type) type {
                 var prior = existing;
                 defer prior.deinit();
                 try p.matchDecision(a, offered.value, prior.value);
+                try self.retirePlacementFiles(a, prior.value);
                 return prior.value;
             }
             if (!std.meta.eql(intent.destination_native, self.profile.runtime_identity) or !std.meta.eql(intent.source_native, peer.native_build) or
@@ -4155,6 +4196,7 @@ pub fn Service(comptime Types: type) type {
                 !std.meta.eql(intent.disclosure, peer.disclosure_policy)) return error.IncompatibleProfile;
             const signed = try p.sign(p.Decision, a, self.profile.placement.?.signing_key, .{ .transfer = intent.transfer, .offer_digest = try p.digest(p.Offer, a, offered.value), .source = peer.site, .destination = site, .epoch = try std.math.add(u64, intent.epoch, 1), .verdict = .accepted });
             _ = try self.importCheckpointFrom(a, operation_id, path, .{ .offer = offered, .decision = signed, .peer = peer });
+            try self.retirePlacementFiles(a, signed);
             return signed;
         }
 

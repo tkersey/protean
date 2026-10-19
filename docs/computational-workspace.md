@@ -156,12 +156,20 @@ subject, then stages its complete archive over the configured peer channel.
 An exact outer capsule includes its selected runtime artifact; that artifact
 does not have to be preinstalled at the destination.
 
+The configured command opens an owner stdio session. Access to that session
+grants the full owner API, including unsigned local placement operations.
+Operators must restrict process launch and stdio access to trusted owners;
+the signed peer handshake does not authenticate or restrict a stdio client.
+Peer replies are parsed as responses and cannot call back into the launching
+owner's API.
+
 The launch option `--placement-config FILE` reads this operator-owned shape:
 
 ```json
 {
   "signing_key_file": "/private/site-key.hex",
   "transport_directory": "/private/placement-spool",
+  "staging_limits": {"bytes": 1073741824, "files": 16},
   "peers": [{
     "name": "worker",
     "public_key": "<64 hexadecimal characters>",
@@ -194,6 +202,11 @@ build, resource and subject profile identities used for operator pinning.
 Disclosures default to denied. Optional `denied_objects`,
 `maximum_object_bytes` and peer `archive_limit` constrain the actual retained
 closure, including code, constants, runtime metadata and observations.
+Optional `staging_limits` bounds aggregate incoming archive bytes and file count
+under the spool lock. Omission imposes no application quota; filesystem capacity
+remains the limit. Durable acceptance or refusal retires the staged archive and
+the source transport copy. Restart completes interrupted retirement from retained
+decisions, while undecided transfers preserve resumable bytes.
 
 `placement.retry` continues a retained transfer. `placement.withdraw` cancels an
 unsent transfer locally or asks the destination for its signed decision. A lost
