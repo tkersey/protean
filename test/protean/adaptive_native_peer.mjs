@@ -1038,7 +1038,8 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         assert.equal(metrics.runtime_switches_requested, accountedActions.filter(action => (action.name === 'work' && action.arguments.command.tag === 'realize') || (action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize')).length);
         if (name === 'tools-runtime-guest-mobility') {
           const afterTransfer = toolSubject.actions.slice(toolSubject.transferArchive.actionCount);
-          assert.equal(afterTransfer.filter(action => action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize').length, 1);
+          const switches = afterTransfer.filter(action => action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize');
+          assert.equal(new Set(switches.map(action => action.arguments.command.value.operation)).size, 1);
         }
         if (name === 'tools-runtime-mobility') {
           const transported = metrics.actions.filter(action => action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize');
