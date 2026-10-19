@@ -18,6 +18,78 @@ const fixtureManifest = support.fixtureManifest;
 const gcd = @import("workspace_sources.zig").gcd;
 const listLength = @import("workspace_sources.zig").listLength;
 
+const CleanupTrace = struct {
+    scans: usize = 0,
+    extern "c" fn sqlite3_db_handle(?*anyopaque) ?*anyopaque;
+    extern "c" fn sqlite3_trace_v2(?*anyopaque, c_uint, ?*const fn (c_uint, ?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) c_int, ?*anyopaque) c_int;
+
+    fn observe(_: c_uint, context: ?*anyopaque, _: ?*anyopaque, sql: ?*anyopaque) callconv(.c) c_int {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const text = std.mem.span(@as([*:0]const u8, @ptrCast(sql.?)));
+        if (std.mem.eql(u8, text, "SELECT id FROM records WHERE task=? AND kind='workspace_work' ORDER BY id")) self.scans += 1;
+        return 0;
+    }
+};
+
+test "scheduler bounds cleanup scans during productive scheduling and completes idle sweeps" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const module = try gcd(&builder);
+    const entry = &builder.functions.items[@intCast(module.entry)];
+    for (0..2) |_| entry.body = try builder.term(.{ .yield_then = entry.body.? });
+    var root = try compile(a, &builder, builder.module(module.entry, module.failure));
+    defer root.deinit();
+    const admitted = try data.program_image.Admitted.decode(a, root.image);
+    defer admitted.deinit();
+    var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "scheduler-unit", .image_identity = admitted.identity() };
+    defer application.deinit();
+    const manifest = try fixtureManifest(a, root.image, admitted.identity(), "scheduler-unit");
+    defer a.free(manifest);
+    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
+    const assets: native.discovery.Assets = .{ .image = root.image, .application = "scheduler-unit", .manifest = manifest };
+    var handlers = try native.Registry.init(a, &.{});
+    defer handlers.deinit();
+    const profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "scheduler-test", .authority = .{ .grants = &.{}, .principal = "test", .tenant = "test" } };
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var path_buffer: [4096]u8 = undefined;
+    const length = try temp.dir.realPath(io, &path_buffer);
+    var productive_scan_bound = true;
+    for ([_]usize{ 8, 32 }) |count| {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const path = try std.fmt.allocPrint(scratch, "{s}/tasks-{d}", .{ path_buffer[0..length], count });
+        var namespace = try native.Namespace.open(a, io, path);
+        defer namespace.close() catch unreachable;
+        var service = try native.tasks.Service(OwnerTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+        defer service.close(a) catch unreachable;
+        const ids = try scratch.alloc(native.testing.state.TaskId, count);
+        for (ids, 0..) |*id, index| id.* = (try service.submit(scratch, try std.fmt.allocPrint(scratch, "task-{d}", .{index}), .{ 25, 5 })).receipt.task;
+        var statement = try namespace.store.database.prepare("SELECT 1", &.{});
+        const database = CleanupTrace.sqlite3_db_handle(statement.handle);
+        statement.deinit();
+        var trace: CleanupTrace = .{};
+        try std.testing.expectEqual(@as(c_int, 0), CleanupTrace.sqlite3_trace_v2(database, 1, CleanupTrace.observe, &trace));
+        defer std.debug.assert(CleanupTrace.sqlite3_trace_v2(database, 0, null, null) == 0);
+        for (0..count) |_| try std.testing.expect(try service.pump(scratch) != .idle);
+        std.debug.print("cleanup scans: owners={d} productive_pumps={d} scans={d}\n", .{ count, count, trace.scans });
+        productive_scan_bound = productive_scan_bound and trace.scans == count;
+        for (ids) |id| {
+            var task = try service.task(scratch, id);
+            defer task.deinit();
+            try std.testing.expect(task.value.execution_revision > 0);
+        }
+        try service.park(scratch);
+        trace.scans = 0;
+        try std.testing.expectEqual(.idle, try service.pump(scratch));
+        try std.testing.expectEqual(count, trace.scans);
+    }
+    try std.testing.expect(productive_scan_bound);
+}
+
 test "runtime selection switches exact guest cuts and retains carried artifacts through archive import" {
     var phase: []const u8 = "runtime selection and import";
     errdefer std.debug.print("runtime selection: {s}\n", .{phase});
@@ -518,7 +590,26 @@ test "terminal parent cancellation resumes after a signed refusal" {
     try placementCase(.cancel_refused);
 }
 
-fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward, cancel_abort, cancel_refused, root_cancel_abort, root_cancel_refused }) !void {
+test "controller succession preserves local cancellation acknowledgement and later park" {
+    try placementCase(.local_ack);
+}
+
+test "controller succession preserves remote cancellation acknowledgement and later park" {
+    try placementCase(.remote_ack);
+}
+
+fn pendingCleanup(service: anytype, a: std.mem.Allocator, task_id: native.testing.state.TaskId) !?native.placement.Signed(native.placement.Control) {
+    const p = native.placement;
+    var query = try service.namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='placement_control'", &.{.{ .blob = &task_id }});
+    defer query.deinit();
+    while (try query.step() == .row) {
+        const saved = try contracts.decodeOwned(p.ControlRecord, a, try query.bytes(0));
+        if (saved.value.report == null and std.mem.startsWith(u8, saved.value.control.value.operation.bytes, "cleanup-")) return saved.value.control;
+    }
+    return null;
+}
+
+fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward, cancel_abort, cancel_refused, root_cancel_abort, root_cancel_refused, local_ack, remote_ack }) !void {
     var phase: []const u8 = "setup";
     var attack_index: usize = 0;
     errdefer std.debug.print("placement {s}: {s} ({d})\n", .{ @tagName(scenario), phase, attack_index });
@@ -653,6 +744,136 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     const destination_config: p.Configuration = .{ .signing_key = destination_key, .peers = &destination_peers };
     const successor_config: p.Configuration = .{ .signing_key = successor_key, .peers = &successor_peers };
     sender.profile.placement = &source_config;
+    if (scenario == .local_ack or scenario == .remote_ack) {
+        var ack_source_profile = profile;
+        ack_source_profile.placement = &source_config;
+        var ack_destination_profile = profile;
+        ack_destination_profile.placement = &destination_config;
+        var ack_successor_profile = profile;
+        ack_successor_profile.placement = &successor_config;
+        if (scenario == .remote_ack) {
+            _ = try sender.placementFreeze(scratch, subject, "destination", cut, @splat(74));
+            const work_archive = try std.fmt.allocPrint(scratch, "{s}/ack-work.par", .{path_buffer[0..length]});
+            const work_offer = try sender.placementOffer(scratch, subject, "destination", work_archive);
+            try sender.close(a);
+            sender_open = false;
+            try source_namespace.close();
+            source_open = false;
+            var work_decision: p.Signed(p.Decision) = undefined;
+            {
+                var ns = try native.Namespace.open(a, io, destination_path);
+                defer ns.close() catch unreachable;
+                var executor = try native.tasks.Service(OwnerTypes).init(a, io, &ns, assets, &application, handlers, ack_destination_profile);
+                defer executor.close(a) catch unreachable;
+                work_decision = try executor.placementAccept(scratch, "ack-work", "source", work_offer, work_archive);
+            }
+            source_namespace = try native.Namespace.open(a, io, source_path);
+            source_open = true;
+            sender = try native.tasks.Service(OwnerTypes).init(a, io, &source_namespace, assets, &application, handlers, ack_source_profile);
+            sender_open = true;
+            try sender.placementApplyDecision(scratch, subject, work_decision);
+            source_peers[0].channel = .{ .argv = &.{"/usr/bin/false"}, .remote_name = "source" };
+        }
+        _ = try sender.requestCancel(scratch, "ack-parent-cancel", subject.task, "stop");
+        if (scenario == .local_ack) {
+            _ = try sender.pump(scratch);
+            var cancelled = try sender.workspaceWork(scratch, subject.task, work_id);
+            defer cancelled.deinit();
+            try std.testing.expect(cancelled.value.cancellation != null and !cancelled.value.terminal());
+            _ = try sender.workspaceControl(scratch, "ack-local-park", subject.task, work_id, cancelled.value.execution_revision, cancelled.value.control_revision, .park);
+        } else {
+            var acknowledged = false;
+            for (0..4) |_| {
+                _ = try sender.pump(scratch);
+                const command = (try pendingCleanup(&sender, scratch, subject.task)).?;
+                try sender.close(a);
+                sender_open = false;
+                try source_namespace.close();
+                source_open = false;
+                var report: p.Signed(p.Report) = undefined;
+                {
+                    var ns = try native.Namespace.open(a, io, destination_path);
+                    defer ns.close() catch unreachable;
+                    var executor = try native.tasks.Service(OwnerTypes).init(a, io, &ns, assets, &application, handlers, ack_destination_profile);
+                    defer executor.close(a) catch unreachable;
+                    report = (try contracts.decodeOwned(p.Signed(p.Report), scratch, try executor.placementExecuteControl(scratch, "source", command))).value;
+                    try std.testing.expectEqual(.observed, report.value.reply.disposition);
+                    if (command.value.command == .cancel) {
+                        const current = report.value.work_state.?;
+                        try std.testing.expect(current.cancellation != null and !current.cleanup_complete);
+                        _ = try executor.workspaceControl(scratch, "ack-remote-park", subject.task, work_id, current.execution_revision, current.control_revision, .park);
+                        acknowledged = true;
+                    }
+                }
+                source_namespace = try native.Namespace.open(a, io, source_path);
+                source_open = true;
+                sender = try native.tasks.Service(OwnerTypes).init(a, io, &source_namespace, assets, &application, handlers, ack_source_profile);
+                sender_open = true;
+                try sender.placementApplyReport(scratch, subject.task, p.controlId(command.value), report);
+                if (acknowledged) break;
+            }
+            try std.testing.expect(acknowledged);
+        }
+        var parent_before_move = try sender.task(scratch, subject.task);
+        defer parent_before_move.deinit();
+        try std.testing.expect(!parent_before_move.value.terminal());
+        const controller: p.Subject = .{ .task = subject.task };
+        _ = try sender.placementFreeze(scratch, controller, "successor", try sender.placementCut(scratch, controller), @splat(75));
+        const controller_archive = try std.fmt.allocPrint(scratch, "{s}/ack-controller.par", .{path_buffer[0..length]});
+        const controller_offer = try sender.placementOffer(scratch, controller, "successor", controller_archive);
+        try sender.close(a);
+        sender_open = false;
+        try source_namespace.close();
+        source_open = false;
+        var decision: p.Signed(p.Decision) = undefined;
+        var inspection: p.Signed(p.Control) = undefined;
+        {
+            var ns = try native.Namespace.open(a, io, successor_path);
+            defer ns.close() catch unreachable;
+            var successor = try native.tasks.Service(OwnerTypes).init(a, io, &ns, assets, &application, handlers, ack_successor_profile);
+            defer successor.close(a) catch unreachable;
+            decision = try successor.placementAccept(scratch, "ack-controller", "source", controller_offer, controller_archive);
+            inspection = (try contracts.decodeOwned(p.Signed(p.Control), scratch, try successor.placementControl(scratch, "ack-inspect", subject.task, .{ .inspect = .{ .work = work_ref } }))).value;
+        }
+        {
+            var ns = try native.Namespace.open(a, io, source_path);
+            defer ns.close() catch unreachable;
+            var former = try native.tasks.Service(OwnerTypes).init(a, io, &ns, assets, &application, handlers, ack_source_profile);
+            defer former.close(a) catch unreachable;
+            try former.placementApplyDecision(scratch, controller, decision);
+        }
+        var inspection_report: p.Signed(p.Report) = undefined;
+        {
+            var ns = try native.Namespace.open(a, io, if (scenario == .local_ack) source_path else destination_path);
+            defer ns.close() catch unreachable;
+            var executor = try native.tasks.Service(OwnerTypes).init(a, io, &ns, assets, &application, handlers, if (scenario == .local_ack) ack_source_profile else ack_destination_profile);
+            defer executor.close(a) catch unreachable;
+            if (scenario == .remote_ack) try executor.placementFollowController(scratch, "source", "successor", controller_offer, decision);
+            inspection_report = (try contracts.decodeOwned(p.Signed(p.Report), scratch, try executor.placementExecuteControl(scratch, "successor", inspection))).value;
+            try std.testing.expectEqual(.observed, inspection_report.value.reply.disposition);
+            try std.testing.expect(inspection_report.value.work_state.?.explicitly_parked);
+        }
+        successor_peers[if (scenario == .local_ack) 1 else 0].channel = .{ .argv = &.{"/usr/bin/false"}, .remote_name = "successor" };
+        {
+            var ns = try native.Namespace.open(a, io, successor_path);
+            defer ns.close() catch unreachable;
+            var successor = try native.tasks.Service(OwnerTypes).init(a, io, &ns, assets, &application, handlers, ack_successor_profile);
+            defer successor.close(a) catch unreachable;
+            try successor.placementApplyReport(scratch, subject.task, p.controlId(inspection.value), inspection_report);
+            var parent_cut = try successor.task(scratch, subject.task);
+            defer parent_cut.deinit();
+            _ = try successor.resumeTask(scratch, "ack-resume-controller", subject.task, parent_cut.value.revision);
+            _ = try successor.pump(scratch);
+            try std.testing.expectEqual(null, try pendingCleanup(&successor, scratch, subject.task));
+            try std.testing.expect(try successor.shutdownIncomplete(scratch));
+            _ = try successor.requestCancel(scratch, "ack-fresh-cancel", subject.task, "stop again");
+            _ = try successor.pump(scratch);
+            const fresh = (try pendingCleanup(&successor, scratch, subject.task)).?;
+            try std.testing.expect(fresh.value.command == .cancel);
+            try std.testing.expect(fresh.value.cleanup_request.? > parent_before_move.value.revision);
+        }
+        return;
+    }
     if (scenario == .root_cancel_abort or scenario == .root_cancel_refused) {
         phase = "settle local child while cancelling controller is frozen";
         const controller: p.Subject = .{ .task = subject.task };

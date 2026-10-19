@@ -1016,6 +1016,45 @@ imports the authored semantic service and restricted base. Host-side source
 construction and independent translation validation are outside that execution
 closure and remain explicit trusted tooling.
 
+## Retained cleanup scheduling and cancellation acknowledgment
+
+Productive pumping checks one owner at the rotating cleanup cursor before
+advancing runnable work. If runnable work makes no progress, the same call
+finishes the remaining cleanup sweep and checks runnable work again before
+reporting idle. Cancellation ownership, frozen-custody recovery and terminal-root
+cleanup keep their existing admission and mutation paths.
+
+SQLite statement tracing measures the workspace scans in this prepass using
+nonterminal owned tasks and one productive pump per task:
+
+| Owned tasks / productive pumps | Preceding `2ea4480` owner | Repaired owner |
+| --- | ---: | ---: |
+| 8 / 8 | 64 scans | 8 scans |
+| 32 / 32 | 1,024 scans | 32 scans |
+
+Each task advances, and a fully parked collection still receives a complete
+cleanup sweep before idle. These counts describe the removed repeated owner
+scan, not a constant-time bound on pumping or a measured wall-clock speedup.
+Child and history scans, blocked runnable work and idle sweeps retain their
+input-dependent costs.
+
+Cancellation acknowledgment is a retained historical fact. A local cancellation
+publication after the parent's cancellation event, or an observed signed remote
+cancel report naming that exact event and work, survives controller succession.
+The remote acknowledgment's controller must belong to the accepted bilateral
+lineage leading to current custody. Fresh executor observations and new commands
+still require current identities and epochs; historical acknowledgment grants no
+current command authority. No wire or stored-record schema changes.
+
+Two actual namespace-transfer fixtures apply cancellation locally or acknowledge
+it remotely, explicitly park the child, transfer its controller, obtain a fresh
+inspection and resume the controller. Both reject replaying the old cancellation
+over that park and require a new parent cancellation to queue fresh cancellation.
+Both fail against `2ea4480` and pass with the repaired owner. All thirteen native
+runtime/custody tests pass, including the existing abort/refusal, stale-controller,
+runtime-selection and cleanup cases. CI retains every existing lane and includes
+the three new tests in its selection and succession groups.
+
 ## Completion requirements
 
 Completion requires Linux qualification within the unchanged ten-minute limit,

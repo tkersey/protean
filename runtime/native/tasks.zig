@@ -613,20 +613,59 @@ pub fn Service(comptime Types: type) type {
 
         fn remoteCancellationAcknowledged(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: state.Digest, revision: u64) !bool {
             const p = @import("placement.zig");
-            var controller = try @import("placement_journal.zig").custody(self.store(), a, .{ .task = task_id }) orelse return error.InvalidTransfer;
-            defer controller.deinit();
+            var events = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.revision>? ORDER BY e.seq DESC", &.{ .{ .blob = &task_id }, .{ .integer = @intCast(revision) } });
+            defer events.deinit();
+            while (try events.step() == .row) {
+                var event_value = try contracts.decodeOwned(state.Event, a, try events.bytes(0));
+                defer event_value.deinit();
+                const concerns_child = for (event_value.value.workspace_publications.items) |item| {
+                    if (std.meta.eql(item.work, work_id)) break true;
+                } else false;
+                if (!concerns_child) continue;
+                const reference = event_value.value.workspace_command orelse continue;
+                const bytes = try self.store().object(a, reference, null);
+                defer a.free(bytes);
+                var command = try contracts.decodeOwned(workspace.PublicationCommand, a, bytes);
+                defer command.deinit();
+                if (command.value == .control and command.value.control.command == .cancel) return true;
+            }
             var query = try self.store().database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='placement_control'", &.{.{ .blob = &task_id }});
             defer query.deinit();
             while (try query.step() == .row) {
                 var saved = try contracts.decodeOwned(p.ControlRecord, a, try query.bytes(0));
                 defer saved.deinit();
                 const control = saved.value.control.value;
-                if (control.command != .cancel or control.cleanup_request != revision or !std.meta.eql(control.subject.work, work_id) or
-                    !std.meta.eql(control.controller, controller.value.owner) or control.controller_epoch != controller.value.epoch) continue;
+                if (control.command != .cancel or control.cleanup_request != revision or !std.meta.eql(control.subject.work, work_id)) continue;
                 if (saved.value.report) |report| {
                     try p.matchReport(a, control, saved.value.route.items, report);
-                    if (report.value.reply.disposition == .observed) return true;
+                    if (report.value.reply.disposition == .observed and try self.retainsController(a, control)) return true;
                 }
+            }
+            return false;
+        }
+
+        fn retainsController(self: *Self, a: std.mem.Allocator, control: @import("placement.zig").Control) !bool {
+            const p = @import("placement.zig");
+            const journal = @import("placement_journal.zig");
+            var current = try journal.custody(self.store(), a, .{ .task = control.subject.task }) orelse return error.InvalidTransfer;
+            defer current.deinit();
+            var site = current.value.owner;
+            var epoch = current.value.epoch;
+            if (std.meta.eql(control.controller, site) and control.controller_epoch == epoch) return true;
+            const lineage = try journal.controllerLineage(self.store(), a, control.subject.task);
+            defer a.free(lineage);
+            var index = lineage.len;
+            while (index > 0) {
+                index -= 1;
+                const prior = lineage[index];
+                const intent = prior.offer.value.intent;
+                if (prior.decision.value.epoch != epoch or !std.meta.eql(prior.decision.value.destination, site)) continue;
+                try p.verify(p.Offer, a, prior.offer, intent.source);
+                try p.matchDecision(a, prior.offer.value, prior.decision);
+                if (prior.decision.value.verdict != .accepted or !std.meta.eql(prior.decision.value.destination, intent.destination) or !std.meta.eql(intent.subject.task, control.subject.task) or intent.subject.work != null) return error.InvalidTransfer;
+                site = intent.source;
+                epoch = intent.epoch;
+                if (std.meta.eql(control.controller, site) and control.controller_epoch == epoch) return true;
             }
             return false;
         }
@@ -1728,7 +1767,15 @@ pub fn Service(comptime Types: type) type {
         pub fn pump(self: *Self, a: std.mem.Allocator) !Step {
             try self.allowed();
             if (try self.pumpPlacement(a)) return .progressed;
-            if (try self.pumpOwnedCleanup(a)) return .progressed;
+            const cleanup_count = self.owned.items.len;
+            if (try self.pumpOwnedCleanup(a, @min(cleanup_count, 1))) return .progressed;
+            const step = try self.pumpRunnable(a);
+            if (step != .idle or cleanup_count <= 1) return step;
+            if (try self.pumpOwnedCleanup(a, cleanup_count - 1)) return .progressed;
+            return self.pumpRunnable(a);
+        }
+
+        fn pumpRunnable(self: *Self, a: std.mem.Allocator) !Step {
             // Scan one round, without charging or preparing blocked leaves.
             // Each actual transition yields back to the host control channel.
             const count = self.runnable.items.len;
@@ -1745,8 +1792,7 @@ pub fn Service(comptime Types: type) type {
 
         // Cancellation is a retained obligation, independent of root runnable
         // membership. Custody changes need no producer-specific wake-up.
-        fn pumpOwnedCleanup(self: *Self, a: std.mem.Allocator) !bool {
-            const count = self.owned.items.len;
+        fn pumpOwnedCleanup(self: *Self, a: std.mem.Allocator, count: usize) !bool {
             for (0..count) |_| {
                 if (self.owned.items.len == 0) break;
                 const id = self.owned.items[self.cleanup_cursor];
