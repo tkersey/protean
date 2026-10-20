@@ -596,10 +596,8 @@ pub fn retentionObserver(b: *source.Builder) !source.Module {
     const emitted = try c.schema(@FieldType(RetentionObservation, "emitted"), b);
     const Conclusion = @FieldType(@import("kosmos").RuntimeViews.queries.RetentionResult, "conclusion");
     const conclusion = try c.schema(Conclusion, b);
-    const unknown = try b.literal(.{
-        .schema = conclusion,
-        .bytes = try c.encodeOwned(Conclusion, b.allocator(), .unknown_partial),
-    });
+    const ordinal = try b.scalar(u32);
+    const unknown = try b.constant(u32, @backingInt(Conclusion.unknown_partial));
     const entry = try b.declare(&.{input}, output, &.{}, &.{});
     const argument = try b.reference(b.parameter(entry, 0));
     const selected = try b.primitive(disclosed, .field, &.{argument}, 0);
@@ -608,7 +606,8 @@ pub fn retentionObserver(b: *source.Builder) !source.Module {
     const result = try b.variable(query_result);
     const relation = try b.reference(result);
     const disposition = try b.primitive(conclusion, .field, &.{relation}, 1);
-    const request = try b.primitive(boolean, .equal, &.{ disposition, unknown }, 0);
+    const tag = try b.primitive(ordinal, .enum_tag, &.{disposition}, 0);
+    const request = try b.primitive(boolean, .equal, &.{ tag, unknown }, 0);
     const observation = try b.primitive(emitted, .product, &.{ relation, request }, 0);
     try b.define(entry, try b.bind(result, try b.term(.{ .call = .{
         .function = query.entry,
