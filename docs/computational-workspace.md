@@ -129,6 +129,9 @@ optional owner diagnostic. Construction checks exact schemas and authority,
 then inserts the protected offer/model/handoff bridge and inert boot boundary.
 Raw private imports, external effects and nonexportable carry are rejected.
 The model can choose other evidence or reconstruction while child work waits.
+Invalid output evidence or citations park only that task at its last published
+cut with an `InvalidResultReference` diagnostic. Its acquired replies and cleanup
+remain owned, cancellation remains available, and unrelated tasks can continue.
 
 Enable `tools.reconstruct` alongside the existing build/run permissions to allow
 activation. `program.adopt` names the successor and a pure converter, the

@@ -186,7 +186,7 @@ fn eventFields(kind: state.EventType) []const EventField {
     return switch (kind) {
         .input_required => &.{ .{ .name = "question_id", .kind = .digest }, .{ .name = "question_revision", .kind = .counter }, .{ .name = "request_digest", .kind = .digest }, .{ .name = "answer_schema_id", .kind = .name }, .{ .name = "prompt", .kind = .prompt, .optional = true }, .{ .name = "prompt_ref", .kind = .prompt_ref, .optional = true } },
         .message_queued, .message_consumed, .message_not_consumed => &.{ .{ .name = "message_id", .kind = .digest }, .{ .name = "ordinal", .kind = .counter }, .{ .name = "disposition", .kind = .disposition } },
-        .blocked => &.{.{ .name = "delivery", .kind = .delivery, .optional = true }},
+        .blocked => &.{ .{ .name = "delivery", .kind = .delivery, .optional = true }, .{ .name = "reason", .kind = .name, .optional = true } },
         .imported => &.{.{ .name = "archive_sha256", .kind = .digest }},
         .reconciled => &.{.{ .name = "reconciliation_id", .kind = .digest }},
         .workspace_read => &.{.{ .name = "occurrence_id", .kind = .digest }},

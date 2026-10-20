@@ -2316,6 +2316,23 @@ pub fn Service(comptime Types: type) type {
             var outcome = try data.invocation.decode(data.invocation.Outcome, a, encoded);
             defer outcome.deinit();
             if (outcome.value == .needs_capacity) return error.Capacity;
+            var checked_output: ?contracts.Decoded(Types.Output) = null;
+            defer if (checked_output) |*checked| checked.deinit();
+            var checked_failure: ?contracts.Decoded(Types.Failure) = null;
+            defer if (checked_failure) |*checked| checked.deinit();
+            if (outcome.value == .completed) {
+                checked_output = try contracts.decodeOwned(Types.Output, a, outcome.value.completed);
+                self.validateResult(Types.Output, a, initial, checked_output.?.value) catch |err| {
+                    if (err != error.InvalidResultReference) return err;
+                    return self.rejectResult(a, initial, driver);
+                };
+            } else if (outcome.value == .failed) {
+                checked_failure = try contracts.decodeOwned(Types.Failure, a, outcome.value.failed.value);
+                self.validateResult(Types.Failure, a, initial, checked_failure.?.value) catch |err| {
+                    if (err != error.InvalidResultReference) return err;
+                    return self.rejectResult(a, initial, driver);
+                };
+            }
             const checkpoint = publication.checkpoint;
             var value = initial;
             value.revision = try std.math.add(u64, value.revision, 1);
@@ -2378,19 +2395,15 @@ pub fn Service(comptime Types: type) type {
                     value.outcome_kind = .requested;
                 },
                 .completed => |bytes| {
-                    var checked = try contracts.decodeOwned(Types.Output, a, bytes);
-                    defer checked.deinit();
                     value.outcome_kind = .completed;
                     value.result = try self.store().putObject(bytes);
-                    try self.clientResult(Types.Output, a, &value, Types.output_schema_id, checked.value);
+                    try self.clientResult(Types.Output, a, &value, Types.output_schema_id, checked_output.?.value);
                     try self.event(&value, .completed, "{}");
                 },
-                .failed => |failure| {
-                    var checked = try contracts.decodeOwned(Types.Failure, a, failure.value);
-                    defer checked.deinit();
+                .failed => {
                     value.outcome_kind = .failed;
                     value.result = value.outcome;
-                    try self.clientResult(Types.Failure, a, &value, Types.failure_schema_id, checked.value);
+                    try self.clientResult(Types.Failure, a, &value, Types.failure_schema_id, checked_failure.?.value);
                     try self.event(&value, .failed, "{}");
                 },
                 .cancelled => {
@@ -2434,8 +2447,23 @@ pub fn Service(comptime Types: type) type {
             }
             return .progressed;
         }
+        fn rejectResult(self: *Self, a: std.mem.Allocator, initial: state.Task, driver: *evaluator.Driver) !Step {
+            try driver.close();
+            try driver.destroy();
+            self.active = null;
+            var value = initial;
+            value.revision = try std.math.add(u64, value.revision, 1);
+            value.blocker = .denied;
+            value.schedule = .parked;
+            try self.store().begin();
+            defer self.store().rollback();
+            try self.putRootOperation(a, .{ .id = rootIdentity(value.id), .task = value.id, .execution_revision = value.execution_revision, .pending = null });
+            try self.event(&value, .blocked, "{\"reason\":\"InvalidResultReference\"}");
+            try self.persist(a, value, initial.revision, "task.blocked", .preserve);
+            self.runnableRemove(value.id);
+            return .waiting;
+        }
         fn clientResult(self: *Self, comptime T: type, a: std.mem.Allocator, value: *state.Task, schema_id: []const u8, result: T) !void {
-            try self.validateResult(T, a, value.*, result);
             const bytes = try json.canonicalBounded(self.allocator, try values.toJson(T, a, result), try self.store().database.blobLimit());
             defer self.allocator.free(bytes);
             value.client_result = try self.store().putObject(bytes);
@@ -2477,13 +2505,20 @@ pub fn Service(comptime Types: type) type {
                 return error.InvalidResultReference;
             }
             pub fn workspaceReference(this: @This(), ref: wc.Ref, kind: @FieldType(wc.Ref, "kind")) !void {
-                const id = try wp.identity(ref, kind);
+                const id = wp.identity(ref, kind) catch return error.InvalidResultReference;
+                const custody_id = try workspaceContentCustody(this.allocator, this.task, id);
                 switch (kind) {
                     .program => {
+                        const bytes = (try this.service.store().recordBytes(this.allocator, "workspace_program", custody_id, this.task)) orelse return error.InvalidResultReference;
+                        this.allocator.free(bytes);
                         var program = try this.service.workspaceProgram(this.allocator, this.task, id);
                         defer program.deinit();
                     },
-                    .value => _ = try this.service.workspaceValueReference(this.allocator, this.task, ref),
+                    .value => {
+                        const bytes = (try this.service.store().recordBytes(this.allocator, "workspace_value", custody_id, this.task)) orelse return error.InvalidResultReference;
+                        this.allocator.free(bytes);
+                        _ = try this.service.workspaceValueReference(this.allocator, this.task, ref);
+                    },
                     else => return error.InvalidResultReference,
                 }
             }
