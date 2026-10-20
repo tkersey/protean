@@ -23,6 +23,7 @@ pub const ValueScope = union(enum) {
 pub const Disclosure = struct {
     values: ValueScope = .{ .none = .{} },
     blobs: c.Vector(struct { blob: u64, offset: u64, length: u64 }, null) = .{ .items = &.{} },
+    snapshot: bool = false,
 };
 pub const GuestViewSelection = struct {
     level: enum { guest_cut, outer_execution } = .guest_cut,

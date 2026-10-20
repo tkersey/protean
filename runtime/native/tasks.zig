@@ -8242,7 +8242,7 @@ pub fn Service(comptime Types: type) type {
             var mask: ?[]bool = null;
             defer if (mask) |items| a.free(items);
             if (origin.nodes == .selected) {
-                var decoded = try data.state_image.decodeGraph(a, checkpoint);
+                var decoded = try data.state_image.decodeGraphBorrowed(a, checkpoint, .{});
                 defer decoded.deinit();
                 mask = try a.alloc(bool, decoded.state.nodes.len);
                 @memset(mask.?, false);
@@ -8289,13 +8289,15 @@ pub fn Service(comptime Types: type) type {
             prepared: *kosmos.Prepared,
             origin: workspace.Inspection,
         ) !InspectionValue {
+            if (origin.disclosure) |selected| if (selected.snapshot)
+                return error.InvalidDisclosure;
             const work = origin.observation.work;
             const ref = if (work.outer_operation) |pending| pending.capsule else work.runtime_capsule orelse return error.OuterCutUnavailable;
             const bytes = try self.store().object(a, ref, null);
             defer a.free(bytes);
             var capsule = try kosmos.RuntimeCapsule.read(a, bytes);
             defer capsule.deinit();
-            var graph = try data.state_image.decodeGraph(a, capsule.value.checkpoint);
+            var graph = try data.state_image.decodeGraphBorrowed(a, capsule.value.checkpoint, .{});
             defer graph.deinit();
             var mask: ?[]bool = null;
             defer if (mask) |selected| a.free(selected);
@@ -8327,7 +8329,7 @@ pub fn Service(comptime Types: type) type {
             selected: wc.Disclosure,
             disclosure: state.Digest,
         ) !InspectionValue {
-            var graph = try data.state_image.decodeGraph(a, checkpoint);
+            var graph = try data.state_image.decodeGraphBorrowed(a, checkpoint, .{});
             defer graph.deinit();
             const scope = try @import("workspace_observers.zig").disclosure(
                 a,

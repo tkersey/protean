@@ -309,6 +309,13 @@ or field and exact blob ranges. Each observation reports its actual scope and
 omissions; it does not imply complete graph, value or blob coverage. Numeric
 node IDs describe one checkpoint; they are not continuation handles.
 
+Explicit `disclosure.snapshot: true` returns an owned, reconstructible guest
+state only at `guest_cut`, with `nodes.all`, `disclosure.values.nodes.all` and
+no bounded blob ranges. It opts into the complete payload, bound to the exact
+checkpoint and disclosure. Partial selections and outer snapshots are rejected;
+ordinary metadata and richer partial views carry no reconstructible snapshot.
+The disclosed state is analysis input and conveys no live execution or custody.
+
 The `inspection` derivation retains the exact work publication, checkpoint,
 runtime code, node scope and disclosure. Access reconstructs the value from that publication;
 archive validation checks its journal and runtime dependencies. A partial view

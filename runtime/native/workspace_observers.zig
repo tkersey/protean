@@ -24,8 +24,11 @@ pub fn disclosure(
     nodes: ?[]const bool,
     selected: w.Disclosure,
 ) !Disclosed {
+    if (selected.snapshot and (nodes != null or selected.values != .nodes or
+        selected.values.nodes != .all or selected.blobs.items.len != 0))
+        return error.InvalidDisclosure;
     var result: Disclosed = .{
-        .value = .{ .nodes = nodes },
+        .value = .{ .nodes = nodes, .snapshot = selected.snapshot },
         .fields = try a.alloc(views.FieldSelection, if (selected.values == .fields)
             selected.values.fields.items.len
         else
