@@ -198,13 +198,16 @@ pub fn validateOutput(admission: anytype, output: Output) !void {
     if (output.result == .report) {
         const report = output.result.report;
         if (report.summary.bytes.len == 0 or report.claims.items.len == 0) return error.InvalidResultReference;
+        var cited = false;
         for (report.claims.items) |claim| {
             if (claim.statement.bytes.len == 0 or (claim.kind != .observation and claim.reasoning.bytes.len == 0) or (claim.kind != .hypothesis and claim.evidence_indices.items.len == 0)) return error.InvalidResultReference;
+            cited = cited or claim.evidence_indices.items.len != 0;
             for (claim.evidence_indices.items, 0..) |index, i| {
                 if (index >= output.evidence.items.len) return error.InvalidResultReference;
                 for (claim.evidence_indices.items[0..i]) |prior| if (prior == index) return error.InvalidResultReference;
             }
         }
+        if (!cited) return error.InvalidResultReference;
     }
 }
 fn requireOutputReference(comptime T: type, a: std.mem.Allocator, actual: T, expected: T) !void {

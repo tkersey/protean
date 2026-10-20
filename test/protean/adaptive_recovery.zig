@@ -201,19 +201,19 @@ test "adaptive malformed capture remains private and portable without claiming s
 }
 
 test "adaptive workspace interrupted pure build restarts without ambiguous delivery" {
-    try workspaceRecovery(true, false, false);
+    try workspaceRecovery(true, false, .none);
 }
 
 test "adaptive workspace captured build imports and executes exact retained code and input" {
-    try workspaceRecovery(false, false, false);
+    try workspaceRecovery(false, false, .none);
 }
 
 test "adaptive workspace AUT-02 AUT-03 BUILD-01 controller abandons a binary framing and executes novel source twice" {
-    try workspaceRecovery(false, true, false);
+    try workspaceRecovery(false, true, .none);
 }
 
-test "adaptive workspace reconstructed controller cannot publish invented source evidence" {
-    try workspaceRecovery(false, false, true);
+test "adaptive workspace reconstructed controller cannot publish invalid output" {
+    inline for (.{ .origin, .citation }) |check| try workspaceRecovery(false, false, check);
 }
 
 const ReframeTrace = struct {
@@ -328,7 +328,7 @@ fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.d
     }, null, assets);
 }
 
-fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool, comptime output_origin: bool) !void {
+fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool, comptime output_check: enum { none, origin, citation }) !void {
     const c = protean.contracts;
     const wc = c.workspace;
     const a = std.testing.allocator;
@@ -358,7 +358,7 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool, compt
     defer temporary.cleanup();
     var buffer: [4096]u8 = undefined;
     const directory = buffer[0..try temporary.dir.realPath(io, &buffer)];
-    const configured = try generatedToolConfiguration(permanent, io, assets, temporary.dir, directory, output_origin);
+    const configured = try generatedToolConfiguration(permanent, io, assets, temporary.dir, directory, output_check != .none);
     var grants: [environment.handlers.len]native.registry.Grant = undefined;
     const profile: native.tasks.Profile = .{ .id = configured.id, .runtime_identity = @splat(73), .bytes = configured.bytes, .environment = configured.environment, .resources = configured.resources, .authority = .{ .grants = &grants, .principal = "adaptive-unit", .tenant = "local", .inference = true } };
     for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
@@ -457,9 +457,9 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool, compt
         if (work.entry.declaration.inference) {
             var prepared = try c.decodeOwned(t.P.AdaptivePrepared, frame, work.prepared.?);
             defer prepared.deinit();
-            if (output_origin) {
+            if (output_check != .none) {
                 try service.notSent(frame, work);
-                try installInventedOutput(&service, frame, task, prepared.value.request);
+                try installInvalidOutput(&service, frame, task, prepared.value.request, output_check == .citation);
                 for (0..4096) |_| {
                     _ = service.pump(frame) catch |err| {
                         try std.testing.expectEqual(error.InvalidResultReference, err);
@@ -546,15 +546,15 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool, compt
     return error.WorkspaceRecoveryDidNotComplete;
 }
 
-fn installInventedOutput(service: *native.tasks.Service(t), a: std.mem.Allocator, task: [16]u8, request: t.P.AdaptiveRequest) !void {
+fn installInvalidOutput(service: *native.tasks.Service(t), a: std.mem.Allocator, task: [16]u8, request: t.P.AdaptiveRequest, uncited: bool) !void {
     const c = protean.contracts;
     var parent = try service.task(a, task);
     defer parent.deinit();
     const interaction = (try c.decodeOwned(native.testing.state.ControllerInteraction, a, (try service.namespace.store.recordBytes(a, "controller_interaction", parent.value.controller_interaction.?, task)).?)).value;
     const carry = (try c.decodeOwned(t.ControllerCarry, a, try service.namespace.store.object(a, interaction.carry, null))).value;
     const output: t.Output = .{
-        .result = .{ .report = .{ .summary = .{ .bytes = "Invented evidence" }, .claims = .{ .items = &.{.{ .kind = .observation, .statement = .{ .bytes = "This source was acquired" }, .reasoning = .{ .bytes = "" }, .evidence_indices = .{ .items = &.{0} } }} }, .limitations = .{ .items = &.{} } } },
-        .evidence = .{ .items = &.{.{ .source = .{ .object = .{ .digest = @splat(194), .bytes = 12 }, .snapshot = @splat(195), .path = .{ .bytes = "unacquired.zig" }, .sha256 = .{ .bytes = &(@as([64]u8, @splat('a'))) }, .start = 0, .end = 12, .file_bytes = 12 } }} },
+        .result = .{ .report = .{ .summary = .{ .bytes = "Unsubstantiated result" }, .claims = .{ .items = &.{.{ .kind = if (uncited) .hypothesis else .observation, .statement = .{ .bytes = "The source might establish this claim" }, .reasoning = .{ .bytes = if (uncited) "A hypothesis without any cited claim" else "" }, .evidence_indices = .{ .items = if (uncited) &.{} else &.{0} } }} }, .limitations = .{ .items = &.{} } } },
+        .evidence = .{ .items = if (uncited) &.{} else &.{.{ .source = .{ .object = .{ .digest = @splat(194), .bytes = 12 }, .snapshot = @splat(195), .path = .{ .bytes = "unacquired.zig" }, .sha256 = .{ .bytes = &(@as([64]u8, @splat('a'))) }, .start = 0, .end = 12, .file_bytes = 12 } }} },
         .programs = .{ .items = &.{} },
         .control = carry.state.control,
         .receipts = .{ .items = &.{} },

@@ -21,6 +21,49 @@ pub fn controller(b: *source.Builder, indexed: bool) !source.Module {
     return b.module(entry, unit);
 }
 
+pub fn controllerWithHandler(b: *source.Builder, shallow: bool) !source.Module {
+    const original = try controller(b, false);
+    const function = b.functions.items[@intCast(original.entry)];
+    const input = b.variables.items[@intCast(function.parameters[0])];
+    const number = function.result;
+    const unit = original.failure;
+    const deliberate = function.effects[0];
+    const local = try b.effect(.{ .identity = "example/controller-local", .payload = unit, .result = unit, .external = false });
+    const capability = try b.schema(.{ .internal = .{ .capability = local } });
+    const mode: @import("horos_data").program.Mode = if (shallow) .shallow else .deep;
+    const token = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = local,
+        .input = unit,
+        .answer = number,
+        .effects = &.{deliberate},
+        .escaping = if (shallow) &.{deliberate} else &.{},
+        .handled = &.{local},
+        .capture_bound = &.{ unit, number, input, capability },
+        .mode = mode,
+        .use = .linear,
+    } } });
+    const returns = try b.declare(&.{number}, number, &.{}, &.{});
+    try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
+    const clause = try b.declare(&.{ unit, token }, number, &.{deliberate}, &.{});
+    const handler = try b.handler(.{ .mode = mode, .input = number, .answer = number, .effects = &.{deliberate}, .return_function = returns, .clauses = &.{.{ .effect = local, .function = clause, .resumption = token }} });
+    try b.define(clause, if (shallow)
+        try b.term(.{ .resume_with = .{ .resumption = try b.reference(b.parameter(clause, 1)), .argument = try b.constant(void, {}), .handler = handler } })
+    else
+        try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(clause, 1)), .argument = try b.constant(void, {}) } }));
+    const body = try b.declare(&.{ capability, input }, number, &.{deliberate}, &.{});
+    try b.define(body, try b.term(.{ .call = .{ .function = original.entry, .arguments = &.{try b.reference(b.parameter(body, 1))} } }));
+    const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{ capability, input }, .result = number, .effects = &.{deliberate} } } });
+    const entry = try b.declare(&.{input}, number, &.{deliberate}, &.{});
+    try b.define(entry, try b.term(.{ .handle = .{ .handler = handler, .body = try b.lambda(body, body_type), .arguments = &.{try b.reference(b.parameter(entry, 0))} } }));
+    return b.module(entry, original.failure);
+}
+
+pub fn controllerWithUnusedImport(b: *source.Builder) !source.Module {
+    const original = try controller(b, false);
+    _ = try b.effect(.{ .identity = "controller/1/snapshot", .payload = try b.scalar(u64), .result = try b.scalar(void), .external = false });
+    return b.module(original.entry, original.failure);
+}
+
 pub fn retainedHandlers(b: *source.Builder, shallow: bool) !source.Module {
     const original = if (shallow) try source.examples.shallowResumptions(b) else try source.examples.successorState(b);
     // These fixtures supply every capability explicitly. Making their effects
@@ -277,6 +320,9 @@ pub const Reconstruction = struct {
         return controllerWithCleanup(b, indexed, cleanup, null, 0);
     }
     pub fn controllerWithCleanup(b: *source.Builder, indexed: bool, cleanup: bool, workspace_command: ?c.workspace.Command, cleanup_steps: usize) !source.Module {
+        return controllerWithReplay(b, indexed, cleanup, workspace_command, cleanup_steps, false);
+    }
+    pub fn controllerWithReplay(b: *source.Builder, indexed: bool, cleanup: bool, workspace_command: ?c.workspace.Command, cleanup_steps: usize, replay_adoption: bool) !source.Module {
         const e: E = .{ .b = b };
         const unit = try e.schema(void);
         const state_schema = if (indexed) try e.schema(Indexed) else try e.schema(Direct);
@@ -285,7 +331,9 @@ pub const Reconstruction = struct {
         const payload = try b.schema(.{ .product = &.{ try e.schema(Proposal), state_schema } });
         const reply = try e.schema(c.controller.Reply(Response));
         const deliberate = try b.effect(.{ .identity = "controller/1/deliberate", .payload = payload, .result = reply, .external = false });
-        const loop = try b.declare(&.{state_schema}, try e.schema(Output), &.{deliberate}, &.{});
+        const workspace_effect = if (workspace_command != null or replay_adoption) try b.effect(.{ .identity = "controller/1/workspace", .payload = try e.schema(c.workspace.Command), .result = try e.schema(c.workspace.Reply), .external = false }) else null;
+        const main_effects: []const Id = if (replay_adoption) try b.allocator().dupe(Id, &.{ deliberate, workspace_effect.? }) else &.{deliberate};
+        const loop = try b.declare(&.{state_schema}, try e.schema(Output), main_effects, &.{});
         const state = try b.reference(b.parameter(loop, 0));
         const records = try e.field(Input, state, 0);
         const position = try e.field(u64, state, if (indexed) 2 else 1);
@@ -312,11 +360,23 @@ pub const Reconstruction = struct {
             const ordinary = try e.product(Direct, &.{ records, next_position, next_total, next_covered, cut, try b.constant(bool, false) });
             const revisited = try e.product(Direct, &.{ records, try e.length(records), total, covered, cut, try b.constant(bool, false) });
             const proposal = try e.product(Proposal, &.{ selected, item, try e.field(u64, next, 2), try e.field(u64, next, 3), try b.constant(bool, false), cut });
-            const interact = try b.bind(response, try b.term(.{ .perform = .{ .effect = deliberate, .payload = try b.primitive(payload, .product, &.{ proposal, next }, 0) } }), try e.call(loop, &.{next}));
+            const continued = try e.call(loop, &.{next});
+            const settled = if (replay_adoption) blk: {
+                const ordinary_response = try b.variable(unit);
+                const adoption = try b.variable(try e.schema(c.workspace.Adoption));
+                const program = try b.primitive(try e.schema(c.workspace.Program), .variant, &.{try b.reference(adoption)}, @backingInt(@as(@import("std").meta.Tag(c.workspace.Program), .adopt)));
+                const command = try b.primitive(try e.schema(c.workspace.Command), .variant, &.{program}, @backingInt(@as(@import("std").meta.Tag(c.workspace.Command), .program)));
+                const performed = try b.term(.{ .perform = .{ .effect = workspace_effect.?, .payload = command } });
+                break :blk try b.term(.{ .match_sum = .{ .value = try e.field(Response, try b.reference(response), 0), .cases = &.{
+                    .{ .variable = ordinary_response, .body = continued },
+                    .{ .variable = adoption, .body = try b.bind(try b.variable(try e.schema(c.workspace.Reply)), performed, continued) },
+                } } });
+            } else continued;
+            const interact = try b.bind(response, try b.term(.{ .perform = .{ .effect = deliberate, .payload = try b.primitive(payload, .product, &.{ proposal, next }, 0) } }), settled);
             const step = try b.bind(next_state, try e.choose(try e.field(bool, state, 5), try b.pure(revisited), try b.pure(ordinary)), interact);
             try b.define(loop, try e.choose(try b.primitive(try e.schema(bool), .less, &.{ position, try e.length(records) }, 0), step, try e.result(state, false)));
         }
-        const body = try b.declare(&.{input}, try e.schema(Output), &.{deliberate}, &.{});
+        const body = try b.declare(&.{input}, try e.schema(Output), main_effects, &.{});
         const value = if (indexed) try e.field(Indexed, try b.reference(b.parameter(body, 0)), 1) else try e.field(Private, try b.reference(b.parameter(body, 0)), 1);
         if (indexed) {
             try b.define(body, try e.call(loop, &.{value}));
@@ -329,17 +389,16 @@ pub const Reconstruction = struct {
         if (!cleanup) return b.module(body, unit);
         const info = try @import("horos").library.cleanup.exitInfo(b, unit);
         const dispose = try b.effect(.{ .identity = "controller/1/snapshot", .payload = try e.schema(u64), .result = unit, .external = false });
-        const workspace_effect = if (workspace_command != null) try b.effect(.{ .identity = "controller/1/workspace", .payload = try e.schema(c.workspace.Command), .result = try e.schema(c.workspace.Reply), .external = false }) else null;
-        const cleanup_effects = if (workspace_effect) |effect| try b.allocator().dupe(@TypeOf(dispose), &.{ dispose, effect }) else &.{dispose};
+        const cleanup_effects = if (workspace_command != null) try b.allocator().dupe(@TypeOf(dispose), &.{ workspace_effect.?, dispose }) else &.{dispose};
         const unwind = try b.declare(&.{info}, unit, cleanup_effects, &.{});
         var cleanup_payload = try e.number(7);
         for (0..cleanup_steps) |_| cleanup_payload = try b.primitive(try e.schema(u64), .integer_bit_xor, &.{ cleanup_payload, try e.number(1) }, 0);
         const cleanup_call = try b.term(.{ .perform = .{ .effect = dispose, .payload = cleanup_payload } });
         const disposed = if (cleanup_steps == 0) cleanup_call else try b.bind(try b.variable(unit), cleanup_call, try b.bind(try b.variable(try e.schema(u64)), try b.pure(cleanup_payload), try b.pure(try b.literal(.{ .schema = unit, .bytes = &.{} }))));
-        try b.define(unwind, if (workspace_effect) |effect| try b.bind(try b.variable(try e.schema(c.workspace.Reply)), try b.term(.{ .perform = .{ .effect = effect, .payload = try b.literal(.{ .schema = try e.schema(c.workspace.Command), .bytes = try c.encodeOwned(c.workspace.Command, b.allocator(), workspace_command.?) }) } }), disposed) else disposed);
-        const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{input}, .result = try e.schema(Output), .effects = &.{deliberate} } } });
+        try b.define(unwind, if (workspace_command) |command| try b.bind(try b.variable(try e.schema(c.workspace.Reply)), try b.term(.{ .perform = .{ .effect = workspace_effect.?, .payload = try b.literal(.{ .schema = try e.schema(c.workspace.Command), .bytes = try c.encodeOwned(c.workspace.Command, b.allocator(), command) }) } }), disposed) else disposed);
+        const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{input}, .result = try e.schema(Output), .effects = main_effects } } });
         const cleanup_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{info}, .result = unit, .effects = cleanup_effects } } });
-        const effects = if (workspace_effect) |effect| try b.allocator().dupe(@TypeOf(dispose), &.{ deliberate, dispose, effect }) else &.{ deliberate, dispose };
+        const effects = if (workspace_effect) |effect| try b.allocator().dupe(@TypeOf(dispose), &.{ deliberate, effect, dispose }) else &.{ deliberate, dispose };
         const entry = try b.declare(&.{input}, try e.schema(Output), effects, &.{});
         try b.define(entry, try b.term(.{ .protect = .{ .body = try b.lambda(body, body_type), .cleanup = try b.lambda(unwind, cleanup_type), .arguments = &.{try b.reference(b.parameter(entry, 0))} } }));
         return b.module(entry, unit);

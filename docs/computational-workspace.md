@@ -170,6 +170,8 @@ answers never become acquired evidence. Trials cannot issue live root commands.
 Explicit trials progress through `work.advance` or `work.pump`; changing their
 continuation policy can admit owner scheduling. Each trial reply publishes its
 occurrence with the work observation, including before the next evaluator step.
+An explicit trial parks after that host reply; a fresh `advance` or bounded `pump`
+consumes it. Host settlement does not grant an additional evaluator quantum.
 
 Behavioral succession and controller movement advance one authority lineage.
 Frozen movement excludes activation; preparation excludes a controller move.

@@ -109,6 +109,11 @@ pub fn conversionSchema(a: std.mem.Allocator, carry: []const u8) ![]u8 {
     return data.schema.encodeOwned(a, builder.schemas.items, root);
 }
 
+fn bridgeEffects(a: std.mem.Allocator, effects: []const Id, deliberate: Id, offer: Id, handoff: Id) ![]const Id {
+    if (std.mem.indexOfScalar(Id, effects, deliberate) == null) return effects;
+    return std.mem.concat(a, Id, &.{ effects, &.{ offer, handoff } });
+}
+
 pub fn generate(a: std.mem.Allocator, module: source.Module, contract: Contract) !Generated {
     const entry = module.functions[@intCast(module.entry)];
     if (entry.parameters.len != 1) return error.InvalidControllerInterface;
@@ -196,18 +201,19 @@ pub fn generate(a: std.mem.Allocator, module: source.Module, contract: Contract)
     const handoff_payload = try b.schema(.{ .product = &.{ model.payload, model.result } });
     const handoff = try b.effect(.{ .identity = contracts.controller.handoff_identity, .payload = handoff_payload, .result = public_result, .external = true });
     for (b.functions.items) |*function| {
-        if (std.mem.indexOfScalar(Id, function.effects, deliberate) != null) function.effects = try std.mem.concat(b.allocator(), Id, &.{ function.effects, &.{ offer, handoff } });
+        function.effects = try bridgeEffects(b.allocator(), function.effects, deliberate, offer, handoff);
     }
     for (b.handlers.items) |*handler| {
         for (handler.clauses) |clause| if (std.mem.indexOfScalar(Id, imported_effects.items, clause.effect) != null) return error.InvalidControllerInterface;
-        if (std.mem.indexOfScalar(Id, handler.effects, deliberate) != null) handler.effects = try std.mem.concat(b.allocator(), Id, &.{ handler.effects, &.{ offer, handoff } });
+        handler.effects = try bridgeEffects(b.allocator(), handler.effects, deliberate, offer, handoff);
     }
     for (b.schemas.items) |*schema| if (schema.* == .internal) switch (schema.internal) {
-        .computation => |*computation| if (std.mem.indexOfScalar(Id, computation.effects, deliberate) != null) {
-            computation.effects = try std.mem.concat(b.allocator(), Id, &.{ computation.effects, &.{ offer, handoff } });
+        .computation => |*computation| {
+            computation.effects = try bridgeEffects(b.allocator(), computation.effects, deliberate, offer, handoff);
         },
-        .resumption => |*resumption| if (std.mem.indexOfScalar(Id, resumption.effects, deliberate) != null) {
-            resumption.effects = try std.mem.concat(b.allocator(), Id, &.{ resumption.effects, &.{ offer, handoff } });
+        .resumption => |*resumption| {
+            resumption.effects = try bridgeEffects(b.allocator(), resumption.effects, deliberate, offer, handoff);
+            resumption.escaping = try bridgeEffects(b.allocator(), resumption.escaping, deliberate, offer, handoff);
         },
         else => {},
     };
@@ -227,8 +233,14 @@ pub fn generate(a: std.mem.Allocator, module: source.Module, contract: Contract)
     try b.define(wrapper, try b.bind(prepared, offered, try b.bind(response, infer, gate)));
     const unit = try b.scalar(void);
     const boot = try b.effect(.{ .identity = boot_identity, .payload = input, .result = unit, .external = true });
-    const effects = try std.mem.concat(b.allocator(), Id, &.{ b.functions.items[@intCast(module.entry)].effects, &.{boot} });
-    const root = try b.declare(&.{input}, entry.result, effects, entry.regions);
+    var effects: std.ArrayList(Id) = .empty;
+    try effects.appendSlice(b.allocator(), b.functions.items[@intCast(module.entry)].effects);
+    for (imported_effects.items) |effect| {
+        if (std.mem.indexOfScalar(Id, effects.items, effect) == null) try effects.append(b.allocator(), effect);
+    }
+    try effects.append(b.allocator(), boot);
+    std.mem.sort(Id, effects.items, {}, std.sort.asc(Id));
+    const root = try b.declare(&.{input}, entry.result, effects.items, entry.regions);
     const argument = try b.reference(b.parameter(root, 0));
     const boot_term = try b.term(.{ .perform = .{ .effect = boot, .payload = argument } });
     const invoke = try b.term(.{ .call = .{ .function = module.entry, .arguments = &.{argument} } });

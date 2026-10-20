@@ -33,14 +33,21 @@ test "BUILD-C02 controller construction binds exact imports and publishes inert 
     const contract: controller.Contract = .{
         .result = .{ .bytes = number_bytes },
         .failure = .{ .bytes = unit_bytes },
-        .imports = .{ .items = &.{.{ .import = .deliberate, .payload = .{ .bytes = number_bytes }, .result = .{ .bytes = controller_reply }, .native_result = .{ .bytes = number_bytes } }} },
+        .imports = .{ .items = &.{
+            .{ .import = .deliberate, .payload = .{ .bytes = number_bytes }, .result = .{ .bytes = controller_reply }, .native_result = .{ .bytes = number_bytes } },
+            .{ .import = .snapshot, .payload = .{ .bytes = number_bytes }, .result = .{ .bytes = unit_bytes } },
+        } },
     };
     const Echo = struct {
         fn invoke(_: native.Context, value: u64) !u64 {
             return value;
         }
+        fn snapshot(_: native.Context, _: u64) !void {}
     };
-    var handlers = try native.Registry.init(a, &.{native.registry.controllerImport(.deliberate, native.leaf(u64, u64, .{ .identity = "fixture.model", .resource_role = "inference", .inference = true }, Echo.invoke))});
+    var handlers = try native.Registry.init(a, &.{
+        native.registry.controllerImport(.deliberate, native.leaf(u64, u64, .{ .identity = "fixture.model", .resource_role = "inference", .inference = true }, Echo.invoke)),
+        native.registry.controllerImport(.snapshot, native.leaf(u64, void, .{ .identity = "fixture.snapshot", .resource_role = "snapshot" }, Echo.snapshot)),
+    });
     defer handlers.deinit();
     var root_builder = source.Builder.init(a);
     defer root_builder.deinit();
@@ -66,15 +73,21 @@ test "BUILD-C02 controller construction binds exact imports and publishes inert 
     defer arena.deinit();
     const scratch = arena.allocator();
     const task = (try service.submit(scratch, "controller-parent", .{ 25, 5 })).receipt.task;
-    for ([_]bool{ false, true }) |indexed| {
+    for (0..5) |variant| {
+        const indexed = variant == 1;
         var b = source.Builder.init(a);
         defer b.deinit();
-        const module = try @import("workspace_sources.zig").controller(&b, indexed);
+        const sources = @import("workspace_sources.zig");
+        const module = switch (variant) {
+            2, 3 => try sources.controllerWithHandler(&b, variant == 3),
+            4 => try sources.controllerWithUnusedImport(&b),
+            else => try sources.controller(&b, indexed),
+        };
         const text = try native.source_records.encode(a, module);
         defer a.free(text);
         var diagnostic: construction.Diagnostic = .{};
         const command: contracts.workspace.Command = .{ .program = .{ .build = .{ .source = .{ .json_text = .{ .bytes = text } }, .source_kind = .source_records, .exposures = .{ .items = &.{} }, .role = .controller } } };
-        const operation_id = if (indexed) "controller-B" else "controller-A";
+        const operation_id = ([_][]const u8{ "controller-A", "controller-B", "controller-deep", "controller-shallow", "controller-unused-import" })[variant];
         const reply_value = try service.workspaceCommand(scratch, operation_id, task, command);
         if (reply_value.disposition != .observed) std.debug.print("controller construction: {s}\n", .{reply_value.observation_json.bytes});
         try std.testing.expectEqual(.observed, reply_value.disposition);
@@ -88,6 +101,39 @@ test "BUILD-C02 controller construction binds exact imports and publishes inert 
         try std.testing.expectEqualDeep(reply_value.program, repeated.program);
         try std.testing.expectEqualStrings(controller.identity, built.controller.?.contract.bytes);
         try std.testing.expectEqualStrings(built.controller.?.private_input.bytes, built.controller.?.carry.bytes);
+        const compiled = try data.program_image.Admitted.decode(a, built.image);
+        defer compiled.deinit();
+        try std.testing.expectEqual(@as(usize, if (variant == 4) 2 else 1), built.controller.?.imports.items.len);
+        for (built.controller.?.imports.items) |binding| {
+            const effect = for (compiled.program().effects) |effect| {
+                if (std.mem.eql(u8, effect.identity, binding.identity.bytes)) break effect;
+            } else return error.MissingControllerImport;
+            const payload = try data.schema.encodeOwned(a, compiled.program().schemas, effect.payload);
+            defer a.free(payload);
+            const result = try data.schema.encodeOwned(a, compiled.program().schemas, effect.result);
+            defer a.free(result);
+            try std.testing.expectEqualStrings(binding.payload.bytes, payload);
+            try std.testing.expectEqualStrings(binding.result.bytes, result);
+        }
+        if (variant == 4) {
+            try std.testing.expectEqual(.snapshot, built.controller.?.imports.items[1].import);
+            var unavailable = contract;
+            unavailable.imports.items = contract.imports.items[0..1];
+            try std.testing.expectError(error.UnavailableControllerImport, construction.buildController(a, text, unavailable, null, &diagnostic));
+            var signatures = [_]@TypeOf(contract.imports.items[0]){ contract.imports.items[0], contract.imports.items[1] };
+            signatures[1].result.bytes = number_bytes;
+            var wrong_signature = contract;
+            wrong_signature.imports.items = &signatures;
+            try std.testing.expectError(error.InvalidControllerInterface, construction.buildController(a, text, wrong_signature, null, &diagnostic));
+            var redundant = contract;
+            redundant.imports.items = &.{ contract.imports.items[0], contract.imports.items[1], contract.imports.items[1] };
+            try std.testing.expectError(error.DuplicateControllerImport, construction.buildController(a, text, redundant, null, &diagnostic));
+            _ = try b.effect(b.effects.items[1]);
+            const duplicate = try native.source_records.encode(a, b.module(module.entry, module.failure));
+            defer a.free(duplicate);
+            try std.testing.expectError(error.DuplicateControllerImport, construction.buildController(a, duplicate, contract, null, &diagnostic));
+            b.effects.items.len -= 1;
+        }
         const Input = struct { anchor: controller.TaskAnchor, private: u64 };
         const IndexedInput = struct { anchor: controller.TaskAnchor, private: struct { first: u64, second: u64 } };
         const input = if (indexed)
@@ -3684,6 +3730,7 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
         const started_json = (try native.json.parse(a, started.observation_json.bytes, .{})).value;
         const work_ref = try native.values.fromJson(contracts.workspace.Ref, a, native.json.get(started_json, "work").?);
         const id = try nativeIdentity(work_ref);
+        var bounded_trial_pump = false;
         for (0..128) |_| {
             var work = try service.workspaceWork(a, task, id);
             defer work.deinit();
@@ -3714,6 +3761,37 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
                 break;
             }
             if (explicit and work.value.schedule == .parked) {
+                if (case == 4 and !bounded_trial_pump and work.value.current_occurrence != null) {
+                    const pending = (try contracts.decodeOwned(native.testing.occurrence.Occurrence, a, (try service.namespace.store.recordBytes(a, "occurrence", work.value.current_occurrence.?, task)).?)).value;
+                    try std.testing.expectEqual(.ready, std.meta.activeTag(pending.state));
+                    const expected: contracts.workspace.Expected = .{ .work = work_ref, .execution_revision = work.value.execution_revision, .control_revision = work.value.control_revision };
+                    _ = try service.workspacePump(a, "trial-queue-bounded-pump", task, .{ .expected = expected, .base_quantum = 1 });
+                    for (0..16) |_| {
+                        const progress = try service.pump(a);
+                        try std.testing.expect(progress != .work);
+                        var settled = try service.workspaceWork(a, task, id);
+                        defer settled.deinit();
+                        try std.testing.expectEqual(work.value.execution_revision, settled.value.execution_revision);
+                        try std.testing.expect(settled.value.outer_operation == null);
+                        if (settled.value.schedule == .parked) break;
+                    } else return error.ExplicitTrialReplyDidNotPark;
+                    var settled = try service.workspaceWork(a, task, id);
+                    defer settled.deinit();
+                    const reply = (try contracts.decodeOwned(native.testing.occurrence.Occurrence, a, (try service.namespace.store.recordBytes(a, "occurrence", settled.value.current_occurrence.?, task)).?)).value;
+                    try std.testing.expectEqual(.settled_reply, std.meta.activeTag(reply.state));
+                    try service.validateWorkspace(a, task);
+                    const small: @FieldType(contracts.workspace.Work, "pump") = .{ .expected = .{ .work = work_ref, .execution_revision = settled.value.execution_revision, .control_revision = settled.value.control_revision }, .base_quantum = 1 };
+                    _ = try service.workspacePump(a, "trial-consume-bounded-pump", task, small);
+                    var suspended = try service.workspaceWork(a, task, id);
+                    defer suspended.deinit();
+                    try std.testing.expect(suspended.value.outer_operation != null);
+                    try std.testing.expectEqual(.parked, suspended.value.schedule);
+                    try std.testing.expectEqual(settled.value.execution_revision, suspended.value.execution_revision);
+                    try std.testing.expect((try service.workspacePump(a, "trial-consume-bounded-pump", task, small)).replayed);
+                    try service.validateWorkspace(a, task);
+                    bounded_trial_pump = true;
+                    continue;
+                }
                 const operation_id = try std.fmt.allocPrint(a, "trial-explicit-{d}-{d}-{d}", .{ case, work.value.execution_revision, work.value.control_revision });
                 const expected: contracts.workspace.Expected = .{ .work = work_ref, .execution_revision = work.value.execution_revision, .control_revision = work.value.control_revision };
                 const command: contracts.workspace.Command = .{ .work = if (case == 4) .{ .pump = .{ .expected = expected, .base_quantum = 65536 } } else if (case == 5) .{ .delegate = .{ .expected = expected, .policy = .{ .stop = .terminal, .continuation = .owner_scheduled }, .interpretation = .{ .none = .{} } } } else .{ .advance = expected } };
@@ -3740,6 +3818,7 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
                 try service.acquire(a, step.work, try contracts.encodeOwned(Reconstruction.Response, a, response));
             }
         } else return error.TrialDidNotSettle;
+        if (case == 4) try std.testing.expect(bounded_trial_pump);
         var after = try service.task(a, task);
         defer after.deinit();
         try std.testing.expectEqualDeep(before.value.controller, after.value.controller);
@@ -3870,7 +3949,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
     };
     var source_builder = source.Builder.init(a);
     defer source_builder.deinit();
-    const original_source = try native.source_records.encode(scratch, try Reconstruction.controllerWithCleanup(&source_builder, false, true, cleanup_command, if (scenario == .residual_outer) 256 else 0));
+    const original_source = try native.source_records.encode(scratch, try Reconstruction.controllerWithReplay(&source_builder, false, true, cleanup_command, if (scenario == .residual_outer) 256 else 0, scenario == .conversion_failure));
     var diagnostic: native.program_construction.Diagnostic = .{};
     var original = native.program_construction.buildController(a, original_source, contract, null, &diagnostic) catch |err| {
         std.debug.print("fixture seed {s}: {s} function={?d} term={?d} value={?d}\n", .{ @errorName(err), @tagName(diagnostic.phase), diagnostic.source.function, diagnostic.source.term, diagnostic.source.value });
@@ -4119,6 +4198,26 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                         .instructions, .cancellation, .operator_cancel => .aborted,
                         else => .failed,
                     }), rejected.phase);
+                    if (scenario == .conversion_failure) {
+                        const replay = try service.workspaceCommand(frame, "failed-adoption-receipt", task, .{ .program = .{ .adopt = handoff } });
+                        try std.testing.expectEqual(.observed, replay.disposition);
+                        for (0..128) |_| {
+                            const progress = try service.pump(frame);
+                            try std.testing.expect(progress != .work);
+                            var query = try namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.kind='workspace_reply' AND r.task=?", &.{.{ .blob = &task }});
+                            defer query.deinit();
+                            if (try query.step() != .row) continue;
+                            const evidence = (try contracts.decodeOwned(native.workspace.ReplyObservation, frame, try query.bytes(0))).value;
+                            try std.testing.expectEqual(.rejected, std.meta.activeTag(evidence.evidence));
+                            try std.testing.expectEqual(.authorization, evidence.evidence.rejected.stage);
+                            try std.testing.expectEqualStrings("ControllerHandoffRequired", evidence.evidence.rejected.code.bytes);
+                            const request = (try data.invocation.decode(data.invocation.Request, frame, try namespace.store.object(frame, evidence.request, null))).value;
+                            const command = (try contracts.decodeOwned(contracts.workspace.Command, frame, request.binding.payload)).value;
+                            try std.testing.expectEqualDeep(handoff, command.program.adopt);
+                            try service.validateWorkspace(frame, task);
+                            break;
+                        } else return error.AuthoredAdoptionDidNotSettle;
+                    }
                     if (scenario == .conversion_schema) {
                         var forged = rejected;
                         forged.event_cut = initial_binding.activated_at;

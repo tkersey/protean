@@ -7441,11 +7441,11 @@ pub fn Service(comptime Types: type) type {
         fn authorizeWorkspaceOccurrence(self: *Self, a: std.mem.Allocator, initial: state.Task, pending: occurrence.Occurrence, entry: registry.Entry, payload: []const u8) ![]u8 {
             const bytes = try self.authorizeWorkspace(a, initial, entry, payload);
             errdefer a.free(bytes);
-            if (pending.residual != null) {
-                var authorized = try contracts.decodeOwned(workspace.Authorized, a, bytes);
-                defer authorized.deinit();
-                if (!workspaceIsRead(authorized.value.command)) return error.Denied;
-            }
+            var authorized = try contracts.decodeOwned(workspace.Authorized, a, bytes);
+            defer authorized.deinit();
+            const command = authorized.value.command;
+            if (command == .program and command.program == .adopt) return error.ControllerHandoffRequired;
+            if (pending.residual != null and !workspaceIsRead(command)) return error.Denied;
             return bytes;
         }
 
@@ -8000,7 +8000,11 @@ pub fn Service(comptime Types: type) type {
                     expected.schedule = .parked;
                 } else {
                     if (item.execution_revision != before.execution_revision or item.control_revision != before.control_revision or actual.delivery == null) return error.InvalidArchive;
-                    if (actual.delivery == before.control.delivery and actual.blocker != null) {
+                    if (actual.delivery == .settled_reply and before.control.delivery == .settled_reply and
+                        before.control.trial and before.control.policy.continuation == .explicit_only and before.control.cancellation == null)
+                    {
+                        expected.schedule = .parked;
+                    } else if (actual.delivery == before.control.delivery and actual.blocker != null) {
                         // A dispatch/interpretation rejection records an actual
                         // environmental diagnostic, not an execution result.
                         if (actual.delivery != .ready and actual.delivery != .captured and actual.delivery != .unknown) return error.InvalidArchive;
@@ -10413,6 +10417,16 @@ pub fn Service(comptime Types: type) type {
                 }
                 if (pending.value.state == .unknown or pending.value.state == .not_sent) return self.blockedOccurrence(a, parent.value, pending.value, .unavailable_environment);
                 if (pending.value.state != .settled_reply) return .idle;
+                if (saved.value.trial != null and saved.value.policy.continuation == .explicit_only and saved.value.cancellation == null) {
+                    var value = saved.value;
+                    value.schedule = .parked;
+                    value.event_watermark = try std.math.add(u64, parent.value.event_high, 1);
+                    try self.store().begin();
+                    defer self.store().rollback();
+                    try self.store().putRecord(workspace.Work, "workspace_work", value.id, task_id, value);
+                    _ = try self.workspaceCommit(a, parent.value, null, @splat(0), value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, task_id), null);
+                    return .progressed;
+                }
                 const reply = try self.store().acquiredObject(a, pending.value.state.settled_reply.reply, null);
                 defer a.free(reply);
                 _ = try self.workspaceAdvance(a, parent.value, saved.value, .{ .reply = reply }, null, @splat(0), null);
