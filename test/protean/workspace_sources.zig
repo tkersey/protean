@@ -267,7 +267,7 @@ pub const Reconstruction = struct {
     pub const Indexed = struct { records: Input, index: Input, cursor: u64, total: u64, covered: u64, instruction_cut: u64, exceptional: u64 };
     pub const Private = union(enum) { initial: Input, @"resume": Direct };
     pub const Proposal = struct { position: u64, value: u64, total: u64, covered: u64, indexed: bool, instruction_cut: u64 };
-    pub const Response = union(enum) { next: void, adopt: c.workspace.Adoption };
+    pub const Response = union(enum) { next: void, adopt: c.workspace.Adoption, inspect: c.workspace.Ref };
     pub const Types = struct {
         pub const application_id = "reconstruction-fixture";
         pub const input_schema_id = "reconstruction.input/1";
@@ -367,9 +367,14 @@ pub const Reconstruction = struct {
                 const program = try b.primitive(try e.schema(c.workspace.Program), .variant, &.{try b.reference(adoption)}, @backingInt(@as(@import("std").meta.Tag(c.workspace.Program), .adopt)));
                 const command = try b.primitive(try e.schema(c.workspace.Command), .variant, &.{program}, @backingInt(@as(@import("std").meta.Tag(c.workspace.Command), .program)));
                 const performed = try b.term(.{ .perform = .{ .effect = workspace_effect.?, .payload = command } });
+                const inspected = try b.variable(try e.schema(c.workspace.Ref));
+                const inspection = try e.product(@FieldType(c.workspace.Work, "inspect"), &.{try b.reference(inspected)});
+                const work = try b.primitive(try e.schema(c.workspace.Work), .variant, &.{inspection}, @backingInt(@as(@import("std").meta.Tag(c.workspace.Work), .inspect)));
+                const inspect_command = try b.primitive(try e.schema(c.workspace.Command), .variant, &.{work}, @backingInt(@as(@import("std").meta.Tag(c.workspace.Command), .work)));
                 break :blk try b.term(.{ .match_sum = .{ .value = try e.field(Response, try b.reference(response), 0), .cases = &.{
                     .{ .variable = ordinary_response, .body = continued },
                     .{ .variable = adoption, .body = try b.bind(try b.variable(try e.schema(c.workspace.Reply)), performed, continued) },
+                    .{ .variable = inspected, .body = try b.bind(try b.variable(try e.schema(c.workspace.Reply)), try b.term(.{ .perform = .{ .effect = workspace_effect.?, .payload = inspect_command } }), continued) },
                 } } });
             } else continued;
             const interact = try b.bind(response, try b.term(.{ .perform = .{ .effect = deliberate, .payload = try b.primitive(payload, .product, &.{ proposal, next }, 0) } }), settled);

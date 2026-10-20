@@ -157,6 +157,7 @@ controller parked. Replaying the same operation returns its original admission.
 The superseded execution becomes a residual under its original image. It may
 only unwind qualified cleanup. Inspect residual references through `work.inspect`
 and use `work.park`, `advance` or `cancel` with their execution/control revisions.
+Retained observations preserve the published cleanup state at their event cut.
 Unknown delivery remains unresolved and cannot be reinterpreted as completion.
 Root completion does not imply that residual cleanup is complete. The existing
 reconciliation API handles an unknown residual occurrence using its real binding.

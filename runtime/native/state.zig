@@ -133,6 +133,41 @@ pub const ControllerResidual = struct {
     outer_operation: ?OuterOperation = null,
 };
 
+pub const ControllerResidualObservation = struct {
+    id: Digest,
+    task: TaskId,
+    controller: Digest,
+    succession: Digest,
+    initial_checkpoint: Reference,
+    checkpoint: Reference,
+    outcome: Reference,
+    outcome_kind: Outcome,
+    current_occurrence: ?Digest,
+    execution_revision: u64,
+    control_revision: u64,
+    cancellation_applied: bool,
+    schedule: Schedule,
+    blocker: ?Blocker,
+
+    pub fn from(value: ControllerResidual) ControllerResidualObservation {
+        var result: ControllerResidualObservation = undefined;
+        inline for (@typeInfo(ControllerResidualObservation).@"struct".field_names) |field| @field(result, field) = @field(value, field);
+        return result;
+    }
+
+    pub fn retained(value: ControllerResidualObservation) ControllerResidual {
+        var result: ControllerResidual = undefined;
+        inline for (@typeInfo(ControllerResidualObservation).@"struct".field_names) |field| @field(result, field) = @field(value, field);
+        result.outer_operation = null;
+        return result;
+    }
+};
+
+pub const ResidualPublication = struct {
+    value: ControllerResidualObservation,
+    occurrence: ?@import("occurrence.zig").Occurrence,
+};
+
 pub const Task = struct {
     id: TaskId,
     application_id: Name,
@@ -308,6 +343,7 @@ pub const Event = struct {
     /// Snapshots still require checkpoint, occurrence, and provenance validation.
     workspace_publications: contracts.Vector(WorkPublication, null) = .{ .items = &.{} },
     workspace_command: ?Reference = null,
+    residual_publications: contracts.Vector(ResidualPublication, null) = .{ .items = &.{} },
 };
 
 pub const WorkPublication = struct {

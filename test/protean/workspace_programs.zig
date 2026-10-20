@@ -3709,7 +3709,7 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
         .{ .identity = .{ .bytes = contracts.controller.effect_prefix ++ "snapshot" }, .payload = cleanup_payload, .response = unit },
     };
     var first_trial: ?[32]u8 = null;
-    for (0..16) |case| {
+    for (0..18) |case| {
         errdefer std.debug.print("controller trial case {d}\n", .{case});
         const input = try reconstructionValue(Reconstruction.Types.ControllerInput, service, a, task, try std.fmt.allocPrint(a, "trial-input-{d}", .{case}), .{ .anchor = .{ .task = task }, .private = .{ .initial = .{ .items = if (case == 1) &.{3} else if (case == 7) &.{4} else &.{2} } } });
         if (case == 0) {
@@ -3725,7 +3725,8 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
         }
         var selected_responses = responses;
         if (case == 6) selected_responses[0].response = unit;
-        const explicit = case == 3 or case == 4 or case == 5;
+        const cancelled = case == 16 or case == 17;
+        const explicit = case == 3 or case == 4 or case == 5 or cancelled;
         const started = try service.workspaceCommand(a, try std.fmt.allocPrint(a, "trial-start-{d}", .{case}), task, .{ .work = .{ .start = .{ .program = original, .input = .{ .reference = input }, .policy = .{ .stop = .terminal, .continuation = if (explicit) .explicit_only else .owner_scheduled }, .trial = .{ .synthetic = .{ .responses = .{ .items = if (case == 2) selected_responses[1..] else &selected_responses }, .live_inference = case == 2 } } } } });
         try std.testing.expectEqual(.observed, started.disposition);
         const started_json = (try native.json.parse(a, started.observation_json.bytes, .{})).value;
@@ -3754,11 +3755,19 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
             }
         }
         var bounded_trial_pump = false;
+        var cleanup_admitted = false;
         for (0..128) |_| {
             var work = try service.workspaceWork(a, task, id);
             defer work.deinit();
             if (work.value.terminal()) {
                 try std.testing.expect(case != 1 and case != 6 and case != 7);
+                if (cancelled) {
+                    try std.testing.expect(cleanup_admitted);
+                    try std.testing.expect(work.value.cancellation_applied);
+                    try std.testing.expectEqual(.cancelled, work.value.outcome_kind);
+                    try service.validateWorkspace(a, task);
+                    break;
+                }
                 try std.testing.expectEqual(.completed, work.value.outcome_kind);
                 const result = (try contracts.decodeOwned(Reconstruction.Output, a, try service.namespace.store.object(a, work.value.result.?, null))).value;
                 try std.testing.expectEqualDeep(Reconstruction.Output{ .total = 2, .covered = 1, .instruction_cut = 1 }, result);
@@ -3784,6 +3793,22 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
                 break;
             }
             if (explicit and work.value.schedule == .parked) {
+                if (cancelled and work.value.current_occurrence != null) {
+                    const pending = (try contracts.decodeOwned(native.testing.occurrence.Occurrence, a, (try service.namespace.store.recordBytes(a, "occurrence", work.value.current_occurrence.?, task)).?)).value;
+                    var request = try data.invocation.decode(data.invocation.Request, a, try service.namespace.store.object(a, pending.request_object, null));
+                    defer request.deinit();
+                    if (work.value.cancellation == null and std.mem.eql(u8, request.value.binding.semantic_identity, contracts.controller.effect_prefix ++ "deliberate")) {
+                        try std.testing.expectEqual(.ready, std.meta.activeTag(pending.state));
+                        _ = try service.workspaceControl(a, try std.fmt.allocPrint(a, "trial-cancel-{d}", .{case}), task, id, work.value.execution_revision, work.value.control_revision, .{ .cancel = .{ .bytes = "Cancel synthetic trial" } });
+                        continue;
+                    }
+                    if (work.value.cancellation != null) {
+                        try std.testing.expectEqual(.ready, std.meta.activeTag(pending.state));
+                        try std.testing.expect(work.value.cancellation_applied);
+                        try std.testing.expectEqualStrings(contracts.controller.effect_prefix ++ "snapshot", request.value.binding.semantic_identity);
+                        cleanup_admitted = true;
+                    }
+                }
                 if (case == 4 and !bounded_trial_pump and work.value.current_occurrence != null) {
                     const pending = (try contracts.decodeOwned(native.testing.occurrence.Occurrence, a, (try service.namespace.store.recordBytes(a, "occurrence", work.value.current_occurrence.?, task)).?)).value;
                     try std.testing.expectEqual(.ready, std.meta.activeTag(pending.state));
@@ -3817,9 +3842,17 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
                 }
                 const operation_id = try std.fmt.allocPrint(a, "trial-explicit-{d}-{d}-{d}", .{ case, work.value.execution_revision, work.value.control_revision });
                 const expected: contracts.workspace.Expected = .{ .work = work_ref, .execution_revision = work.value.execution_revision, .control_revision = work.value.control_revision };
-                const command: contracts.workspace.Command = .{ .work = if (case == 4) .{ .pump = .{ .expected = expected, .base_quantum = 65536 } } else if (case == 5) .{ .delegate = .{ .expected = expected, .policy = .{ .stop = .terminal, .continuation = .owner_scheduled }, .interpretation = .{ .none = .{} } } } else .{ .advance = expected } };
+                const command: contracts.workspace.Command = .{ .work = if (case == 4 or case == 17) .{ .pump = .{ .expected = expected, .base_quantum = 65536 } } else if (case == 5) .{ .delegate = .{ .expected = expected, .policy = .{ .stop = .terminal, .continuation = .owner_scheduled }, .interpretation = .{ .none = .{} } } } else .{ .advance = expected } };
                 const advanced = try service.workspaceCommand(a, operation_id, task, command);
                 try std.testing.expectEqual(.observed, advanced.disposition);
+                if (cancelled and cleanup_admitted) {
+                    var queued = try service.workspaceWork(a, task, id);
+                    defer queued.deinit();
+                    try std.testing.expectEqual(.queued, queued.value.schedule);
+                    try std.testing.expectEqual(work.value.execution_revision, queued.value.execution_revision);
+                    try std.testing.expectEqualDeep(work.value.current_occurrence, queued.value.current_occurrence);
+                    try service.validateWorkspace(a, task);
+                }
                 const replayed = try service.workspaceCommand(a, operation_id, task, command);
                 const observation = (try native.json.parse(a, replayed.observation_json.bytes, .{})).value;
                 try std.testing.expect(native.json.get(observation, "replayed").?.bool);
@@ -3926,7 +3959,7 @@ fn reconstructionModelMove(service: anytype, a: std.mem.Allocator, root: []const
     return error.MovedModelDidNotResume;
 }
 
-pub const ReconstructionCase = enum { round_trip, conversion_failure, conversion_schema, conversion_interrupt, instructions, cancellation, held_cleanup, recovery_cleanup, residual_read, residual_wait, residual_wait_park, residual_wait_complete, residual_mutation, residual_cancel, residual_custody, residual_outer, late_placement, model_mobility, invalid_offer, operator, operator_unrearmed, operator_unrearmed_cancel, operator_failure, operator_failure_plain, operator_cancel };
+pub const ReconstructionCase = enum { round_trip, conversion_failure, conversion_schema, conversion_interrupt, instructions, cancellation, held_cleanup, recovery_cleanup, residual_read, residual_history, residual_wait, residual_wait_park, residual_wait_complete, residual_mutation, residual_cancel, residual_custody, residual_outer, late_placement, model_mobility, invalid_offer, operator, operator_unrearmed, operator_unrearmed_cancel, operator_failure, operator_failure_plain, operator_cancel };
 
 test "WORK-C03 one task reconstructs a per-record method into an index and returns through current facts" {
     try reconstructionContinuity(null, .round_trip);
@@ -3934,7 +3967,7 @@ test "WORK-C03 one task reconstructs a per-record method into an index and retur
 
 test "WORK-C07 C08 C09 conversion and owner interleavings preserve the predecessor and residual obligations" {
     var failures: usize = 0;
-    for ([_]ReconstructionCase{ .conversion_failure, .conversion_schema, .conversion_interrupt, .instructions, .cancellation, .held_cleanup, .recovery_cleanup, .residual_read, .residual_wait, .residual_wait_park, .residual_wait_complete, .residual_mutation, .residual_cancel, .residual_custody, .residual_outer, .late_placement, .model_mobility, .invalid_offer, .operator, .operator_unrearmed, .operator_unrearmed_cancel, .operator_failure, .operator_failure_plain, .operator_cancel }) |case| reconstructionContinuity(null, case) catch |err| {
+    for ([_]ReconstructionCase{ .conversion_failure, .conversion_schema, .conversion_interrupt, .instructions, .cancellation, .held_cleanup, .recovery_cleanup, .residual_read, .residual_history, .residual_wait, .residual_wait_park, .residual_wait_complete, .residual_mutation, .residual_cancel, .residual_custody, .residual_outer, .late_placement, .model_mobility, .invalid_offer, .operator, .operator_unrearmed, .operator_unrearmed_cancel, .operator_failure, .operator_failure_plain, .operator_cancel }) |case| reconstructionContinuity(null, case) catch |err| {
         std.debug.print("reconstruction {s}: {s}\n", .{ @tagName(case), @errorName(err) });
         if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
         failures += 1;
@@ -3972,7 +4005,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
     };
     var source_builder = source.Builder.init(a);
     defer source_builder.deinit();
-    const original_source = try native.source_records.encode(scratch, try Reconstruction.controllerWithReplay(&source_builder, false, true, cleanup_command, if (scenario == .residual_outer) 256 else 0, scenario == .conversion_failure));
+    const original_source = try native.source_records.encode(scratch, try Reconstruction.controllerWithReplay(&source_builder, false, true, cleanup_command, if (scenario == .residual_outer) 256 else 0, scenario == .conversion_failure or scenario == .residual_history));
     var diagnostic: native.program_construction.Diagnostic = .{};
     var original = native.program_construction.buildController(a, original_source, contract, null, &diagnostic) catch |err| {
         std.debug.print("fixture seed {s}: {s} function={?d} term={?d} value={?d}\n", .{ @errorName(err), @tagName(diagnostic.phase), diagnostic.source.function, diagnostic.source.term, diagnostic.source.value });
@@ -4123,6 +4156,8 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
     var interleaved = false;
     var child_parked = false;
     var held_residual: ?[32]u8 = null;
+    var history_residual: ?[32]u8 = null;
+    var history_advanced = false;
     var first_handoff: ?contracts.workspace.Adoption = null;
     var first_succession: ?[32]u8 = null;
     var operator_params: ?native.json.Value = null;
@@ -4370,6 +4405,13 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                 try std.testing.expectEqualStrings("activated", native.json.get(observation, "phase").?.string);
             }
             if (epochs == 1) {
+                if (scenario == .residual_history) {
+                    const succession = (try contracts.decodeOwned(native.testing.state.ControllerSuccession, frame, (try namespace.store.recordBytes(frame, "controller_succession", first_succession.?, task)).?)).value;
+                    history_residual = succession.residual.?;
+                    const residual = (try contracts.decodeOwned(native.testing.state.ControllerResidual, frame, (try namespace.store.recordBytes(frame, "controller_residual", history_residual.?, task)).?)).value;
+                    const parked = try service.workspaceCommand(frame, "park-residual-history", task, .{ .work = .{ .park = .{ .work = try workspaceRef(frame, .residual, residual.id), .execution_revision = residual.execution_revision, .control_revision = residual.control_revision } } });
+                    try std.testing.expectEqual(.observed, parked.disposition);
+                }
                 try std.testing.expectError(error.StaleOccurrence, service.acquire(frame, first_work.?, &.{}));
                 if (operator_params) |params| {
                     var client: native.client.Client(Reconstruction.Types) = .{ .service = &service };
@@ -4560,6 +4602,14 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
             var output = try contracts.decodeOwned(Reconstruction.Output, frame, try namespace.store.object(frame, current.value.result.?, null));
             defer output.deinit();
             try std.testing.expectEqualDeep(Reconstruction.Output{ .total = 117, .covered = 4, .instruction_cut = if (amended) 3 else 2 }, output.value);
+            if (scenario == .residual_history and !history_advanced) {
+                const residual = (try contracts.decodeOwned(native.testing.state.ControllerResidual, frame, (try namespace.store.recordBytes(frame, "controller_residual", history_residual.?, task)).?)).value;
+                try std.testing.expect(residual.outcome_kind != .completed and residual.outcome_kind != .failed and residual.outcome_kind != .cancelled);
+                try std.testing.expectEqual(.parked, residual.schedule);
+                const advanced = try service.workspaceCommand(frame, "advance-residual-history", task, .{ .work = .{ .advance = .{ .work = try workspaceRef(frame, .residual, residual.id), .execution_revision = residual.execution_revision, .control_revision = residual.control_revision } } });
+                try std.testing.expectEqual(.observed, advanced.disposition);
+                history_advanced = true;
+            }
             if (held_cleanup) {
                 try std.testing.expect(!try service.taskCleanupComplete(frame, current.value));
                 break;
@@ -4622,7 +4672,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                     first_succession = id;
                 }
                 break :blk .{ .adopt = adoption };
-            } else .{ .next = {} };
+            } else if (scenario == .residual_history) .{ .inspect = try workspaceRef(frame, .residual, history_residual.?) } else .{ .next = {} };
             if (calls == 0) first_work = work;
             if (scenario == .model_mobility) {
                 try reconstructionModelMove(&service, frame, path_buffer[0..length], task, work, destination_identity.?, &service_open, &namespace_open);
@@ -4724,6 +4774,119 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
     defer final_task.deinit();
     try std.testing.expect(final_task.value.terminal());
     try std.testing.expectEqual(@as(u64, if (amended_retry) 5 else 3), final_task.value.inference_attempts);
+    if (scenario == .residual_history) {
+        stage = "residual historical read";
+        try std.testing.expect(history_advanced);
+        const residual = (try contracts.decodeOwned(native.testing.state.ControllerResidual, scratch, (try namespace.store.recordBytes(scratch, "controller_residual", history_residual.?, task)).?)).value;
+        try std.testing.expectEqual(.cancelled, residual.outcome_kind);
+        const later = native.testing.state.ControllerResidualObservation.from(residual);
+        const later_reply = try service.workspaceCommand(scratch, "inspect-terminal-residual", task, .{ .work = .{ .inspect = .{ .work = try workspaceRef(scratch, .residual, residual.id) } } });
+        try std.testing.expectEqual(.observed, later_reply.disposition);
+        var retained: ?native.workspace.ReplyObservation = null;
+        {
+            var query = try namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='workspace_reply'", &.{.{ .blob = &task }});
+            defer query.deinit();
+            while (try query.step() == .row) {
+                const candidate = (try contracts.decodeOwned(native.workspace.ReplyObservation, scratch, try query.bytes(0))).value;
+                if (candidate.evidence != .read or candidate.evidence.read != .residual) continue;
+                if (!std.meta.eql(candidate.evidence.read.residual.value.id, residual.id)) continue;
+                try std.testing.expect(retained == null);
+                retained = candidate;
+            }
+        }
+        const earlier = retained orelse return error.MissingResidualReadObservation;
+        const observed = earlier.evidence.read.residual;
+        try std.testing.expectEqual(.parked, observed.value.schedule);
+        try std.testing.expect(observed.value.outcome_kind != .completed and observed.value.outcome_kind != .failed and observed.value.outcome_kind != .cancelled);
+        try std.testing.expect(observed.value.execution_revision < later.execution_revision);
+        try std.testing.expect(observed.event_watermark < final_task.value.event_high);
+        const occurrence = (try contracts.decodeOwned(native.testing.occurrence.Occurrence, scratch, (try namespace.store.recordBytes(scratch, "occurrence", earlier.id, task)).?)).value;
+        try std.testing.expect(occurrence.state == .admitted);
+        try service.validateWorkspace(scratch, task);
+        for (0..2) |variant| {
+            stage = if (variant == 0) "reject residual time substitution" else "reject coordinated residual publication substitution";
+            try namespace.store.begin();
+            defer namespace.store.rollback();
+            var forged = earlier;
+            forged.evidence.read.residual.value = later;
+            try std.testing.expectEqual(observed.event_watermark, forged.evidence.read.residual.event_watermark);
+            const forged_evidence = try namespace.store.putObject(try contracts.encodeOwned(native.workspace.ReplyObservation, scratch, forged));
+            try namespace.store.database.run("UPDATE records SET body=? WHERE kind='workspace_reply' AND id=?", &.{ .{ .blob = &forged_evidence.digest }, .{ .blob = &earlier.id } });
+            const payload = try contracts.encodeOwned(contracts.workspace.Reply, scratch, later_reply);
+            const bound = try data.invocation.encodeOwned(data.invocation.Result, scratch, .{ .request_identity = occurrence.request, .value = payload });
+            var acquired = occurrence;
+            acquired.state.admitted.reply.reply = (try namespace.store.putObject(bound)).digest;
+            try namespace.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", earlier.id, task, acquired);
+            if (variant == 1) {
+                var query = try namespace.store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq<=? ORDER BY e.seq DESC", &.{ .{ .blob = &task }, .{ .integer = @intCast(observed.event_watermark) } });
+                defer query.deinit();
+                var replaced = false;
+                while (try query.step() == .row) {
+                    var event = (try contracts.decodeOwned(native.testing.state.Event, scratch, try query.bytes(0))).value;
+                    const publications = try scratch.dupe(native.testing.state.ResidualPublication, event.residual_publications.items);
+                    for (publications) |*publication| {
+                        if (!std.meta.eql(publication.value.id, residual.id)) continue;
+                        publication.value = later;
+                        publication.occurrence = null;
+                        replaced = true;
+                    }
+                    if (!replaced) continue;
+                    event.residual_publications.items = publications;
+                    const rewritten = try namespace.store.putObject(try contracts.encodeOwned(native.testing.state.Event, scratch, event));
+                    try namespace.store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &rewritten.digest }, .{ .blob = &task }, .{ .integer = @intCast(event.seq) } });
+                    break;
+                }
+                try std.testing.expect(replaced);
+            }
+            try std.testing.expectError(error.InvalidArchive, service.validateWorkspace(scratch, task));
+            namespace.store.rollback();
+            try service.validateWorkspace(scratch, task);
+        }
+        {
+            stage = "reject residual cleanup occurrence time substitution";
+            var dispatch: ?native.testing.state.Event = null;
+            var settled: ?native.testing.state.ResidualPublication = null;
+            var cleanup_occurrence: ?[32]u8 = null;
+            {
+                var query = try namespace.store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq", &.{.{ .blob = &task }});
+                defer query.deinit();
+                while (try query.step() == .row) {
+                    const event = (try contracts.decodeOwned(native.testing.state.Event, scratch, try query.bytes(0))).value;
+                    for (event.residual_publications.items) |publication| {
+                        if (!std.meta.eql(publication.value.id, residual.id)) continue;
+                        const pending = publication.occurrence orelse continue;
+                        if (pending.state == .ready) cleanup_occurrence = pending.id;
+                        if (cleanup_occurrence == null or !std.meta.eql(cleanup_occurrence.?, pending.id)) continue;
+                        if (pending.state == .dispatching) {
+                            try std.testing.expectEqual(.active, publication.value.schedule);
+                            try std.testing.expect(dispatch == null);
+                            dispatch = event;
+                        } else if (pending.state == .settled_reply and dispatch != null) {
+                            try std.testing.expectEqual(.queued, publication.value.schedule);
+                            try std.testing.expect(event.seq > dispatch.?.seq);
+                            settled = publication;
+                        }
+                    }
+                }
+            }
+            var forged = dispatch orelse return error.MissingResidualCleanupDispatch;
+            const replacement = settled orelse return error.MissingResidualCleanupReply;
+            const publications = try scratch.dupe(native.testing.state.ResidualPublication, forged.residual_publications.items);
+            forged.residual_publications.items = publications;
+            for (publications) |*publication| {
+                if (!std.meta.eql(publication.value.id, residual.id)) continue;
+                try std.testing.expectEqualDeep(publication.occurrence.?.id, replacement.occurrence.?.id);
+                publication.* = replacement;
+            }
+            try namespace.store.begin();
+            defer namespace.store.rollback();
+            const rewritten = try namespace.store.putObject(try contracts.encodeOwned(native.testing.state.Event, scratch, forged));
+            try namespace.store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &rewritten.digest }, .{ .blob = &task }, .{ .integer = @intCast(forged.seq) } });
+            try std.testing.expectError(error.InvalidArchive, service.validateWorkspace(scratch, task));
+            namespace.store.rollback();
+            try service.validateWorkspace(scratch, task);
+        }
+    }
     if (held_residual) |id| {
         for (0..2) |foreign_identity| {
             var foreign_profile = profile;
@@ -4835,7 +4998,66 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                         for (0..8) |_| try std.testing.expect(try service.pump(scratch) == .idle);
                         _ = try service.requestCancel(scratch, "fresh-cancel-unsent-cleanup", task, "Explicitly retry known-unsent cleanup");
                         retried_cleanup = true;
-                    } else try service.acquire(scratch, progress.work, &.{});
+                    } else {
+                        stage = "rederive retried residual cleanup";
+                        try service.unknown(scratch, progress.work);
+                        var unknown = try service.task(scratch, task);
+                        defer unknown.deinit();
+                        const admitted_recovery = try service.reconcile(scratch, "rederive-retried-cleanup", task, unknown.value.revision, progress.work.occurrence, progress.work.attempt, .rederive);
+                        const computation = blk: {
+                            for (0..16) |_| {
+                                const next = try service.pump(scratch);
+                                if (next == .work) break :blk next.work;
+                            }
+                            return error.RetriedCleanupRecoveryDidNotStart;
+                        };
+                        try std.testing.expect(computation.recovery != null and computation.cleanup);
+                        const worker = try native.testing.Worker.init(a, io);
+                        defer worker.deinit(a) catch unreachable;
+                        try worker.start(computation, profile.authority, null);
+                        while (!worker.finished()) try io.sleep(.fromMilliseconds(1), .awake);
+                        try worker.join();
+                        defer worker.release() catch unreachable;
+                        try service.completeWork(scratch, computation, worker.result.?);
+                        var recovered = try service.reconciliation(scratch, task, admitted_recovery.receipt.reconciliation.?);
+                        defer recovered.deinit();
+                        try std.testing.expect(recovered.value.outcome == .reply_settled);
+                        try std.testing.expectEqual(.rederived, recovered.value.provenance);
+                        const previous = (try contracts.decodeOwned(native.testing.state.Reconciliation, scratch, try namespace.store.object(scratch, recovered.value.previous.?, null))).value;
+                        try std.testing.expect(previous.outcome == .pending);
+                        try service.validateWorkspace(scratch, task);
+                        stage = "reject invented residual recovery capture";
+                        try namespace.store.begin();
+                        defer namespace.store.rollback();
+                        var replaced = false;
+                        {
+                            var query = try namespace.store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq", &.{.{ .blob = &task }});
+                            defer query.deinit();
+                            while (try query.step() == .row) {
+                                var event = (try contracts.decodeOwned(native.testing.state.Event, scratch, try query.bytes(0))).value;
+                                if (event.revision != admitted_recovery.receipt.revision) continue;
+                                const publications = try scratch.dupe(native.testing.state.ResidualPublication, event.residual_publications.items);
+                                for (publications) |*publication| {
+                                    if (!std.meta.eql(publication.value.id, id)) continue;
+                                    const pending_occurrence = publication.occurrence orelse continue;
+                                    try std.testing.expectEqualDeep(progress.work.occurrence, pending_occurrence.id);
+                                    try std.testing.expect(pending_occurrence.state == .unknown);
+                                    try std.testing.expectEqualDeep(progress.work.attempt, pending_occurrence.state.unknown.id);
+                                    publication.occurrence.?.state = .{ .captured = .{ .id = progress.work.attempt } };
+                                    replaced = true;
+                                }
+                                if (!replaced) continue;
+                                event.residual_publications.items = publications;
+                                const forged = try namespace.store.putObject(try contracts.encodeOwned(native.testing.state.Event, scratch, event));
+                                try namespace.store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &forged.digest }, .{ .blob = &task }, .{ .integer = @intCast(event.seq) } });
+                                break;
+                            }
+                        }
+                        try std.testing.expect(replaced);
+                        try std.testing.expectError(error.InvalidArchive, service.validateWorkspace(scratch, task));
+                        namespace.store.rollback();
+                        try service.validateWorkspace(scratch, task);
+                    }
                 }
                 var parent = try service.task(scratch, task);
                 defer parent.deinit();
@@ -4856,4 +5078,30 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
     stage = "export";
     const exported = try service.exportCheckpoint(scratch, task, try std.fmt.allocPrint(scratch, "{s}/reconstructed.archive", .{path_buffer[0..length]}));
     try std.testing.expect(exported.bytes > 0);
+    if (scenario == .residual_history) {
+        stage = "residual history reopen";
+        try service.close(a);
+        service_open = false;
+        try namespace.close();
+        namespace_open = false;
+        namespace = try native.Namespace.open(a, io, path);
+        namespace_open = true;
+        service = try native.tasks.Service(Reconstruction.Types).init(a, io, &namespace, assets, &application, handlers, profile);
+        service_open = true;
+        try service.validateWorkspace(scratch, task);
+        var reopened = try service.task(scratch, task);
+        defer reopened.deinit();
+        try std.testing.expect(try service.taskCleanupComplete(scratch, reopened.value));
+        stage = "residual history import";
+        try service.close(a);
+        service_open = false;
+        try namespace.close();
+        namespace_open = false;
+        var destination_namespace = try native.Namespace.open(a, io, try std.fmt.allocPrint(scratch, "{s}/history-destination", .{path_buffer[0..length]}));
+        defer destination_namespace.close() catch unreachable;
+        var destination = try native.tasks.Service(Reconstruction.Types).init(a, io, &destination_namespace, assets, &application, handlers, profile);
+        defer destination.close(a) catch unreachable;
+        _ = try destination.importCheckpoint(scratch, "import-residual-history", try std.fmt.allocPrint(scratch, "{s}/reconstructed.archive", .{path_buffer[0..length]}));
+        try destination.validateWorkspace(scratch, task);
+    }
 }

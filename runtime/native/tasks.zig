@@ -949,8 +949,11 @@ pub fn Service(comptime Types: type) type {
             return self.publicationEvent(value, kind, bytes, &.{}, null);
         }
         fn publicationEvent(self: *Self, value: *state.Task, kind: state.EventType, bytes: []const u8, publications: []const state.WorkPublication, command: ?state.Reference) !void {
+            return self.subjectPublicationEvent(value, kind, bytes, publications, &.{}, command);
+        }
+        fn subjectPublicationEvent(self: *Self, value: *state.Task, kind: state.EventType, bytes: []const u8, publications: []const state.WorkPublication, residuals: []const state.ResidualPublication, command: ?state.Reference) !void {
             value.event_high = try std.math.add(u64, value.event_high, 1);
-            try self.store().putEvent(.{ .task = value.id, .seq = value.event_high, .revision = value.revision, .kind = kind, .data = .{ .bytes = bytes }, .workspace_publications = .{ .items = publications }, .workspace_command = command });
+            try self.store().putEvent(.{ .task = value.id, .seq = value.event_high, .revision = value.revision, .kind = kind, .data = .{ .bytes = bytes }, .workspace_publications = .{ .items = publications }, .workspace_command = command, .residual_publications = .{ .items = residuals } });
         }
         fn messageEvent(self: *Self, a: std.mem.Allocator, value: *state.Task, kind: state.EventType, item: state.Message) !void {
             const body = try state.messageData(a, item, item.disposition);
@@ -964,16 +967,17 @@ pub fn Service(comptime Types: type) type {
             return self.persistScheduled(a, value, previous, transition, ownership, &.{});
         }
         fn persistScheduled(self: *Self, a: std.mem.Allocator, value: state.Task, previous: u64, transition: []const u8, ownership: Ownership, scheduled: []const workspace.Subject) !void {
-            try self.store().putTask(value, previous);
+            var successor = value;
             // Eligibility is derived from the transaction's complete successor.
             // Reserve before commit: an acknowledged event cannot lose its
             // wake-up to allocation failure, or require each producer to notify.
             var wake: std.ArrayList(workspace.Subject) = .empty;
             defer wake.deinit(a);
-            try self.workspaceWaitWakeups(a, value, ownership, &wake);
+            try self.workspaceWaitWakeups(a, &successor, ownership, &wake);
             try wake.appendSlice(a, scheduled);
             if (ownership == .acquire) try self.ensureOwnershipCapacity(value.id);
             try self.runnable.ensureUnusedCapacity(self.allocator, wake.items.len);
+            try self.store().putTask(successor, previous);
             try self.namespace.commit(transition);
             if (ownership == .acquire) self.claim(value.id);
             for (wake.items) |subject| self.subjectAddAssumeCapacity(subject);
@@ -2540,6 +2544,7 @@ pub fn Service(comptime Types: type) type {
                 residual.value.schedule = schedule;
                 residual.value.blocker = blocker;
                 try self.store().putRecord(state.ControllerResidual, "controller_residual", id, parent.id, residual.value);
+                try self.residualProgressEvent(a, parent, residual.value);
                 return;
             }
             const id = pending.work orelse return;
@@ -2996,7 +3001,7 @@ pub fn Service(comptime Types: type) type {
             } else if (residual.current_occurrence != null) return error.InvalidArchive;
             if (residual.outer_operation) |pending| _ = try self.validateControllerOperation(a, parent, pending, residual, historical);
         }
-        fn validateResidualObservation(self: *Self, a: std.mem.Allocator, observed: state.ControllerResidual) !void {
+        fn validateResidualObservation(self: *Self, a: std.mem.Allocator, observed: state.ControllerResidualObservation) !void {
             var current = try self.record(state.ControllerResidual, a, "controller_residual", observed.id, observed.task);
             defer current.deinit();
             inline for (.{ "controller", "succession", "initial_checkpoint" }) |field| if (!std.meta.eql(@field(observed, field), @field(current.value, field))) return error.InvalidArchive;
@@ -3006,13 +3011,27 @@ pub fn Service(comptime Types: type) type {
             };
             var parent = try self.task(a, observed.task);
             defer parent.deinit();
-            try self.validateControllerResidualValue(self.allocator, parent.value, observed, observed.execution_revision < current.value.execution_revision);
+            try self.validateControllerResidualValue(self.allocator, parent.value, observed.retained(), true);
         }
-        fn controllerResidualObservation(_: *Self, a: std.mem.Allocator, value: state.ControllerResidual) !json.Value {
-            var result = try values.toJson(state.ControllerResidual, a, value);
+        fn controllerResidualObservation(_: *Self, a: std.mem.Allocator, value: state.ControllerResidualObservation) !json.Value {
+            var result = try values.toJson(state.ControllerResidualObservation, a, value);
             try json.put(a, &result, "work", try values.toJson(wc.Ref, a, try wp.reference(a, .residual, value.id)));
             try json.put(a, &result, "role", json.string("retired_controller"));
             return result;
+        }
+        fn residualPublication(self: *Self, a: std.mem.Allocator, value: state.ControllerResidual) !state.ResidualPublication {
+            var pending: ?occurrence.Occurrence = null;
+            if (value.current_occurrence) |id| {
+                var saved = try self.record(occurrence.Occurrence, a, "occurrence", id, value.task);
+                defer saved.deinit();
+                pending = saved.value;
+            }
+            return .{ .value = .from(value), .occurrence = pending };
+        }
+        fn residualProgressEvent(self: *Self, a: std.mem.Allocator, parent: *state.Task, value: state.ControllerResidual) !void {
+            const bytes = try std.fmt.allocPrint(a, "{{\"workspace_id\":\"{s}\"}}", .{std.fmt.bytesToHex(value.id, .lower)});
+            defer a.free(bytes);
+            try self.subjectPublicationEvent(parent, .workspace_progress, bytes, &.{}, &.{try self.residualPublication(a, value)}, null);
         }
         fn controllerResidualControl(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, id: state.Digest, execution: u64, control: u64, command: workspace.Command) !Admission {
             const request = try operation(workspace.ResidualControlRequest, a, .{ .task = task_id, .residual = id, .execution = execution, .control = control, .command = command });
@@ -3121,7 +3140,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().createRecord(occurrence.Occurrence, "occurrence", occurrence_id, value.id, .{ .id = occurrence_id, .task = value.id, .request = request.value.request_identity, .request_object = try self.store().putObject(outcome.value.requested.request) });
             try self.store().createRecord(workspace.ExecutionRoute, "execution_route", occurrence_id, value.id, .{ .id = occurrence_id, .task = value.id, .work = null, .image = binding.image, .program_identity = binding.program_identity, .controller = binding_id, .controller_epoch = epoch });
             try self.putRootOperation(a, .{ .id = rootIdentity(value.id), .task = value.id, .execution_revision = value.execution_revision, .pending = null });
-            try self.event(&value, .controller, event_data);
+            try self.subjectPublicationEvent(&value, .controller, event_data, &.{}, &.{try self.residualPublication(a, residual)}, null);
             try self.persistScheduled(a, value, parent.revision, "controller.activate", .preserve, &.{ .{ .task = value.id, .residual = residual_id }, .{ .task = value.id } });
             return .progressed;
         }
@@ -3285,6 +3304,7 @@ pub fn Service(comptime Types: type) type {
             const terminal = residual.outcome_kind == .completed or residual.outcome_kind == .failed or residual.outcome_kind == .cancelled;
             if (terminal) residual.schedule = .parked;
             try self.store().putRecord(state.ControllerResidual, "controller_residual", id, task_id, residual);
+            try self.residualProgressEvent(a, &value, residual);
             try self.persist(a, value, parent.value.revision, "controller.residual", .preserve);
             self.active.?.execution_revision = residual.execution_revision;
             if (terminal) {
@@ -6477,7 +6497,7 @@ pub fn Service(comptime Types: type) type {
                             if (basis) |frozen| return .{ .observation = try self.controllerResidualObservation(a, frozen.residual.value) };
                             var residual = try self.record(state.ControllerResidual, a, "controller_residual", try wp.identity(request.work, .residual), task_id);
                             defer residual.deinit();
-                            return .{ .observation = try self.controllerResidualObservation(a, residual.value) };
+                            return .{ .observation = try self.controllerResidualObservation(a, .from(residual.value)) };
                         }
                         if (basis) |frozen| return .{ .observation = try self.renderWorkspaceWorkObservation(a, frozen.works.works.items[0].?.work, frozen.works.works.items[0].?.occurrence, frozen.works.event_watermark) };
                         var value = try self.workspaceWork(a, task_id, try wp.identity(request.work, .work));
@@ -6651,7 +6671,7 @@ pub fn Service(comptime Types: type) type {
                     var residual = try contracts.decodeOwned(state.ControllerResidual, a, bytes);
                     defer residual.deinit();
                     if (!std.meta.eql(residual.value.task, task_id) or !std.meta.eql(residual.value.id, receipt_value.workspace.?)) return error.InvalidArchive;
-                    break :blk try self.controllerResidualObservation(a, residual.value);
+                    break :blk try self.controllerResidualObservation(a, .from(residual.value));
                 },
                 .runtime => blk: {
                     var selected = try contracts.decodeOwned(workspace.Runtime, a, bytes);
@@ -8063,6 +8083,212 @@ pub fn Service(comptime Types: type) type {
             return error.InvalidArchive;
         }
 
+        fn residualPublicationAt(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, id: state.Digest, watermark: u64) !state.ControllerResidualObservation {
+            var query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq<=? ORDER BY e.seq DESC", &.{ .{ .blob = &task_id }, .{ .integer = std.math.cast(i64, watermark) orelse return error.InvalidArchive } });
+            defer query.deinit();
+            while (try query.step() == .row) {
+                var saved = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+                defer saved.deinit();
+                for (saved.value.residual_publications.items) |item| if (std.meta.eql(item.value.id, id)) return item.value;
+            }
+            return error.InvalidArchive;
+        }
+
+        fn residualWaitReadyAt(self: *Self, a: std.mem.Allocator, parent: state.Task, id: state.Digest, watermark: u64) !bool {
+            var waiting = try self.record(workspace.Wait, a, "workspace_wait", id, parent.id);
+            defer waiting.deinit();
+            if (try self.workspaceInterruptedAt(a, parent.id, watermark)) return true;
+            for (waiting.value.selection.works.items) |ref| {
+                const work = try wp.identity(ref, .work);
+                const seq = try self.workspacePublicationAt(a, parent.id, work, watermark);
+                if (seq > waiting.value.selection.after) return true;
+                var query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq=?", &.{ .{ .blob = &parent.id }, .{ .integer = @intCast(seq) } });
+                defer query.deinit();
+                if (try query.step() != .row) return error.InvalidArchive;
+                var saved = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+                defer saved.deinit();
+                for (saved.value.workspace_publications.items) |item| if (std.meta.eql(item.work, work)) {
+                    if (item.control.outcome == .completed or item.control.outcome == .failed or item.control.outcome == .cancelled) return true;
+                };
+            }
+            return false;
+        }
+
+        fn residualRecoveryAt(self: *Self, a: std.mem.Allocator, parent: state.Task, id: state.Digest, revision: u64) !bool {
+            var query = try self.store().database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='reconciliation'", &.{.{ .blob = &parent.id }});
+            defer query.deinit();
+            while (try query.step() == .row) {
+                var saved = try contracts.decodeOwned(state.Reconciliation, a, try query.bytes(0));
+                defer saved.deinit();
+                if (saved.value.admission_revision == revision and std.meta.eql(saved.value.occurrence, id) and saved.value.owner_epoch != null) return true;
+            }
+            return false;
+        }
+
+        fn residualRecoveredAt(self: *Self, a: std.mem.Allocator, parent: state.Task, pending: occurrence.Occurrence, revision: u64) !bool {
+            const attempt = switch (pending.state) {
+                .captured, .not_sent => |value| value.id,
+                .settled_reply => |value| value.attempt,
+                else => return error.InvalidArchive,
+            };
+            var query = try self.store().database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='reconciliation'", &.{.{ .blob = &parent.id }});
+            defer query.deinit();
+            while (try query.step() == .row) {
+                var saved = try contracts.decodeOwned(state.Reconciliation, a, try query.bytes(0));
+                defer saved.deinit();
+                const value = saved.value;
+                if (!std.meta.eql(value.occurrence, pending.id) or !std.meta.eql(value.attempt, attempt) or value.admission_revision > revision) continue;
+                const matches = switch (pending.state) {
+                    .captured => blk: {
+                        if (value.outcome == .capture_admitted) break :blk true;
+                        if (value.outcome != .reply_settled) break :blk false;
+                        const ref = value.previous orelse break :blk false;
+                        var previous = try contracts.decodeOwned(state.Reconciliation, a, try self.store().object(a, ref, null));
+                        defer previous.deinit();
+                        break :blk std.meta.eql(previous.value.id, value.id) and std.meta.eql(previous.value.task, parent.id) and std.meta.eql(previous.value.occurrence, pending.id) and std.meta.eql(previous.value.attempt, attempt) and previous.value.outcome == .capture_admitted;
+                    },
+                    .not_sent => value.outcome == .not_sent,
+                    .settled_reply => |reply| value.outcome == .reply_settled and std.meta.eql(value.outcome.reply_settled.digest, reply.reply),
+                    else => unreachable,
+                };
+                if (matches) return true;
+            }
+            return false;
+        }
+
+        fn validateResidualDelivery(self: *Self, a: std.mem.Allocator, parent: state.Task, before: occurrence.Occurrence, after: occurrence.Occurrence, revision: u64) !void {
+            if (std.meta.eql(before, after)) return;
+            const binding: occurrence.Binding = .{ .id = before.id, .task = parent.id, .residual = before.residual, .request = before.request };
+            const expected = switch (after.state) {
+                .dispatching => |attempt| occurrence.dispatch(before, binding, attempt.id, false, true) catch return error.InvalidArchive,
+                .awaiting => |waiting| occurrence.awaiting(before, binding, waiting, false) catch return error.InvalidArchive,
+                .unknown => |attempt| occurrence.unknown(before, binding, attempt.id) catch return error.InvalidArchive,
+                .not_sent => |attempt| blk: {
+                    if (before.state == .unknown) {
+                        if (!try self.residualRecoveredAt(a, parent, after, revision)) return error.InvalidArchive;
+                        break :blk occurrence.recoveredNotSent(before, binding, attempt.id) catch return error.InvalidArchive;
+                    }
+                    break :blk occurrence.notSent(before, binding, attempt.id) catch return error.InvalidArchive;
+                },
+                .captured => |attempt| blk: {
+                    if (before.state == .unknown) {
+                        if (!try self.residualRecoveredAt(a, parent, after, revision)) return error.InvalidArchive;
+                        break :blk occurrence.recoveredCapture(before, binding, attempt.id) catch return error.InvalidArchive;
+                    }
+                    break :blk occurrence.captured(before, binding, attempt.id) catch return error.InvalidArchive;
+                },
+                .settled_reply => |reply| blk: {
+                    if (reply.answer) |answer| break :blk occurrence.answered(before, binding, answer.question, answer.pending_digest, answer.digest, reply.reply, false) catch return error.InvalidArchive;
+                    var dispatched = before;
+                    if (before.state == .ready) {
+                        const bytes = try self.store().object(a, before.request_object, null);
+                        defer a.free(bytes);
+                        var request = try data.invocation.decode(data.invocation.Request, a, bytes);
+                        defer request.deinit();
+                        const entry = try self.handlers.resolve(request.value, try self.occurrenceImage(a, parent, before));
+                        if (entry.declaration.kind != .workspace) return error.InvalidArchive;
+                        dispatched = occurrence.dispatch(before, binding, reply.attempt, false, true) catch return error.InvalidArchive;
+                    } else if (before.state == .unknown and !try self.residualRecoveredAt(a, parent, after, revision)) return error.InvalidArchive;
+                    break :blk occurrence.acquired(dispatched, binding, reply.attempt, reply.reply) catch return error.InvalidArchive;
+                },
+                .ready, .admitted => return error.InvalidArchive,
+            };
+            if (!std.meta.eql(expected, after)) return error.InvalidArchive;
+        }
+
+        fn validateResidualPublication(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, item: state.ResidualPublication, prior: ?state.ResidualPublication, command: ?workspace.PublicationCommand, admission: ?WorkspaceAdmission) !void {
+            const value = item.value;
+            if (!std.meta.eql(value.task, parent.id)) return error.InvalidArchive;
+            if (item.occurrence) |pending| {
+                if (!std.meta.eql(value.current_occurrence, pending.id) or !std.meta.eql(pending.task, parent.id) or pending.work != null or (value.cancellation_applied and !std.meta.eql(pending.residual, value.id))) return error.InvalidArchive;
+                var current = try self.record(occurrence.Occurrence, a, "occurrence", pending.id, parent.id);
+                defer current.deinit();
+                if (!std.meta.eql(pending.request, current.value.request) or !std.meta.eql(pending.request_object, current.value.request_object)) return error.InvalidArchive;
+                const acquired: ?occurrence.Acquired = switch (pending.state) {
+                    .settled_reply => |reply| reply,
+                    .admitted => |settled| if (settled == .reply) settled.reply else null,
+                    else => null,
+                };
+                if (acquired) |expected| {
+                    const actual = switch (current.value.state) {
+                        .settled_reply => |reply| reply,
+                        .admitted => |settled| if (settled == .reply) settled.reply else return error.InvalidArchive,
+                        else => return error.InvalidArchive,
+                    };
+                    if (!std.meta.eql(expected, actual)) return error.InvalidArchive;
+                }
+            } else if (value.current_occurrence != null) return error.InvalidArchive;
+            if (prior) |before| {
+                if (before.value.outcome_kind == .completed or before.value.outcome_kind == .failed or before.value.outcome_kind == .cancelled) return error.InvalidArchive;
+                var expected = before.value;
+                if (command) |selected| {
+                    const admitted = admission orelse return error.InvalidArchive;
+                    if (event_value.kind != .workspace or selected != .residual or !std.meta.eql(admitted.work, value.id) or selected.residual.execution != before.value.execution_revision or selected.residual.control != before.value.control_revision or selected.residual.command == .delegate) return error.InvalidArchive;
+                    expected.control_revision = std.math.add(u64, expected.control_revision, 1) catch return error.InvalidArchive;
+                    expected.schedule = if (selected.residual.command == .park) .parked else .queued;
+                    expected.blocker = null;
+                    if (!std.meta.eql(expected, value)) return error.InvalidArchive;
+                    var pending = before.occurrence;
+                    if (pending) |*old| {
+                        if (old.state == .unknown or old.state == .dispatching) return error.InvalidArchive;
+                        if (old.state == .not_sent and selected.residual.command != .park) old.* = occurrence.rearm(old.*, .{ .id = old.id, .task = parent.id, .residual = old.residual, .request = old.request }) catch return error.InvalidArchive;
+                    }
+                    if (!std.meta.eql(pending, item.occurrence)) return error.InvalidArchive;
+                    var observed = try contracts.decodeOwned(state.ControllerResidual, a, try self.store().object(a, admitted.observation orelse return error.InvalidArchive, null));
+                    defer observed.deinit();
+                    if (!std.meta.eql(value, state.ControllerResidualObservation.from(observed.value))) return error.InvalidArchive;
+                } else {
+                    if (event_value.kind != .workspace_progress) return error.InvalidArchive;
+                    if (value.execution_revision != before.value.execution_revision) {
+                        expected.execution_revision = std.math.add(u64, expected.execution_revision, 1) catch return error.InvalidArchive;
+                        expected.checkpoint = value.checkpoint;
+                        expected.outcome = value.outcome;
+                        expected.outcome_kind = value.outcome_kind;
+                        expected.current_occurrence = value.current_occurrence;
+                        expected.cancellation_applied = true;
+                        expected.schedule = if (value.outcome_kind == .completed or value.outcome_kind == .failed or value.outcome_kind == .cancelled) .parked else .queued;
+                        if (!std.meta.eql(expected, value)) return error.InvalidArchive;
+                        if (item.occurrence) |pending| if (pending.state != .ready) return error.InvalidArchive;
+                        try self.validateResidualObservation(a, value);
+                    } else {
+                        const pending = item.occurrence orelse return error.InvalidArchive;
+                        if (before.occurrence == null or !std.meta.eql(pending.id, before.occurrence.?.id)) return error.InvalidArchive;
+                        try self.validateResidualDelivery(a, parent, before.occurrence.?, pending, event_value.revision);
+                        if (value.blocker != null) {
+                            if (pending.state != .ready and pending.state != .captured and pending.state != .unknown and pending.state != .not_sent) return error.InvalidArchive;
+                            expected.schedule = .parked;
+                            expected.blocker = value.blocker;
+                            if (value.blocker == .waiting_workspace and (pending.state != .ready or !value.cancellation_applied or try self.residualWaitReadyAt(a, parent, pending.id, event_value.seq - 1))) return error.InvalidArchive;
+                        } else {
+                            expected.blocker = null;
+                            expected.schedule = switch (pending.state) {
+                                .dispatching => .active,
+                                .awaiting => .parked,
+                                .captured, .settled_reply => .queued,
+                                .ready => blk: {
+                                    if (before.value.blocker != .waiting_workspace or before.value.schedule != .parked or !value.cancellation_applied or !try self.residualWaitReadyAt(a, parent, pending.id, event_value.seq - 1)) return error.InvalidArchive;
+                                    break :blk .queued;
+                                },
+                                .unknown => blk: {
+                                    if (!try self.residualRecoveryAt(a, parent, pending.id, event_value.revision)) return error.InvalidArchive;
+                                    break :blk .queued;
+                                },
+                                else => return error.InvalidArchive,
+                            };
+                        }
+                        if (!std.meta.eql(expected, value)) return error.InvalidArchive;
+                    }
+                }
+            } else {
+                if (event_value.kind != .controller or command != null or value.execution_revision == 0 or value.control_revision != 1 or value.cancellation_applied or value.schedule != .queued or value.blocker != null) return error.InvalidArchive;
+                var succession = try self.record(state.ControllerSuccession, a, "controller_succession", value.succession, parent.id);
+                defer succession.deinit();
+                const original = succession.value;
+                if (original.phase != .activated or original.activation_event != event_value.seq or !std.meta.eql(original.residual, value.id) or !std.meta.eql(original.predecessor, value.controller) or !std.meta.eql(original.checkpoint, value.initial_checkpoint) or !std.meta.eql(original.checkpoint, value.checkpoint) or !std.meta.eql(original.outcome, value.outcome) or !std.meta.eql(value.current_occurrence, original.handoff)) return error.InvalidArchive;
+                try self.validateResidualObservation(a, value);
+            }
+        }
+
         fn validateWorkspacePublications(self: *Self, a: std.mem.Allocator, parent: state.Task, records: []const state.ArchiveRecord) !void {
             const Position = struct { publication: state.WorkPublication, seq: u64 };
             var latest: std.AutoHashMap(state.Digest, Position) = .init(a);
@@ -8071,8 +8297,8 @@ pub fn Service(comptime Types: type) type {
             defer admissions.deinit();
             var replies: std.AutoHashMap(state.Digest, void) = .init(a);
             defer replies.deinit();
-            var residual_controls: std.AutoHashMap(state.Digest, u64) = .init(a);
-            defer residual_controls.deinit();
+            var residuals: std.AutoHashMap(state.Digest, state.ResidualPublication) = .init(a);
+            defer residuals.deinit();
             var operations = try self.store().database.prepare("SELECT o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?", &.{.{ .blob = &parent.id }});
             defer operations.deinit();
             while (try operations.step() == .row) {
@@ -8097,18 +8323,7 @@ pub fn Service(comptime Types: type) type {
                     const ref = event_value.workspace_command orelse return error.InvalidArchive;
                     command = try contracts.decodeOwned(workspace.PublicationCommand, a, try self.store().object(a, ref, null));
                     try self.validateWorkspaceAdmission(a, parent, event_value, command.?.value, (admission orelse return error.InvalidArchive).value);
-                    if (command.?.value == .residual) {
-                        const admitted = admission.?.value;
-                        const selected = command.?.value.residual;
-                        const before = residual_controls.get(admitted.work) orelse 1;
-                        const after = std.math.add(u64, before, 1) catch return error.InvalidArchive;
-                        if (selected.control != before or selected.command == .delegate) return error.InvalidArchive;
-                        var observed = try contracts.decodeOwned(state.ControllerResidual, a, try self.store().object(a, admitted.observation orelse return error.InvalidArchive, null));
-                        defer observed.deinit();
-                        const value = observed.value;
-                        if (!std.meta.eql(value.id, admitted.work) or !std.meta.eql(value.task, parent.id) or value.execution_revision != selected.execution or value.control_revision != after or value.blocker != null or value.schedule != @as(state.Schedule, if (selected.command == .park) .parked else .queued)) return error.InvalidArchive;
-                        try residual_controls.put(admitted.work, after);
-                    }
+                    if (event_value.residual_publications.items.len != @as(usize, if (command.?.value == .residual) 1 else 0)) return error.InvalidArchive;
                     if (command.?.value == .interact) {
                         const reply = try self.workspaceInteractionReply(a, parent.id, command.?.value.interact);
                         try requireArchiveRecord(records, .workspace_port_reply, reply.id);
@@ -8116,7 +8331,20 @@ pub fn Service(comptime Types: type) type {
                     }
                 } else if (event_value.workspace_command != null) return error.InvalidArchive;
 
-                if (event_value.kind == .workspace_progress and event_value.workspace_publications.items.len == 0) return error.InvalidArchive;
+                if (event_value.kind == .workspace_progress and event_value.workspace_publications.items.len == 0 and event_value.residual_publications.items.len == 0) return error.InvalidArchive;
+                if (event_value.kind == .controller and event_value.residual_publications.items.len != 1) return error.InvalidArchive;
+                if (event_value.residual_publications.items.len > 1) return error.InvalidArchive;
+                for (event_value.residual_publications.items) |item| {
+                    try requireArchiveRecord(records, .controller_residual, item.value.id);
+                    try self.validateResidualPublication(a, parent, event_value, item, residuals.get(item.value.id), if (command) |decoded| decoded.value else null, if (admission) |entry| entry.value else null);
+                    if (event_value.kind != .controller) {
+                        var parsed = try json.parseAsset(a, event_value.data.bytes, event_value.data.bytes.len);
+                        defer parsed.deinit();
+                        const text = try json.text(parsed.value.object.get("workspace_id") orelse return error.InvalidArchive);
+                        if (!std.meta.eql(try wp.identity(.{ .kind = .residual, .id = .{ .bytes = text } }, .residual), item.value.id)) return error.InvalidArchive;
+                    }
+                    try residuals.put(item.value.id, item);
+                }
                 if (event_value.kind == .workspace_read) {
                     var parsed = try json.parseAsset(a, event_value.data.bytes, event_value.data.bytes.len);
                     defer parsed.deinit();
@@ -8166,7 +8394,8 @@ pub fn Service(comptime Types: type) type {
                 if (row.kind == .controller_residual) {
                     var residual = try self.record(state.ControllerResidual, a, "controller_residual", row.id, parent.id);
                     defer residual.deinit();
-                    if (residual.value.control_revision != (residual_controls.get(row.id) orelse 1)) return error.InvalidArchive;
+                    const last = residuals.get(row.id) orelse return error.InvalidArchive;
+                    if (!std.meta.eql(last, try self.residualPublication(a, residual.value))) return error.InvalidArchive;
                 }
                 if (row.kind != .workspace_work) continue;
                 const current = try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, row.id), true);
@@ -8183,7 +8412,7 @@ pub fn Service(comptime Types: type) type {
             if (command == .work and command.work == .inspect and command.work.inspect.work.kind == .residual) {
                 var residual = try self.record(state.ControllerResidual, a, "controller_residual", try wp.identity(command.work.inspect.work, .residual), parent.id);
                 defer residual.deinit();
-                return contracts.encodeOwned(workspace.ReadObservation, allocator, .{ .residual = .{ .value = residual.value, .event_watermark = parent.event_high } });
+                return contracts.encodeOwned(workspace.ReadObservation, allocator, .{ .residual = .{ .value = .from(residual.value), .event_watermark = parent.event_high } });
             }
             var refs: []const wc.Ref = &.{};
             var one: [1]wc.Ref = undefined;
@@ -8267,6 +8496,7 @@ pub fn Service(comptime Types: type) type {
             if (command == .work and command.work == .inspect and command.work.inspect.work.kind == .residual) {
                 if (basis != .residual or basis.residual.event_watermark > parent.event_high or !std.meta.eql(basis.residual.value.id, try wp.identity(command.work.inspect.work, .residual)) or !std.meta.eql(basis.residual.value.task, parent.id)) return error.InvalidArchive;
                 try requireArchiveRecord(records, .controller_residual, basis.residual.value.id);
+                if (!std.meta.eql(basis.residual.value, try self.residualPublicationAt(a, parent.id, basis.residual.value.id, basis.residual.event_watermark))) return error.InvalidArchive;
                 try self.validateResidualObservation(a, basis.residual.value);
                 return;
             }
@@ -8624,18 +8854,18 @@ pub fn Service(comptime Types: type) type {
             }
             return ready;
         }
-        fn workspaceWaitWakeups(self: *Self, a: std.mem.Allocator, parent: state.Task, ownership: Ownership, wake: *std.ArrayList(workspace.Subject)) !void {
+        fn workspaceWaitWakeups(self: *Self, a: std.mem.Allocator, parent: *state.Task, ownership: Ownership, wake: *std.ArrayList(workspace.Subject)) !void {
             if (!try self.hasLocalCustody(a, parent.id, null)) return;
             var owned = ownership == .acquire;
             for (self.owned.items) |id| owned = owned or std.meta.eql(id, parent.id);
             if (!owned) return;
             // Custody can retain cancellation while this launch cannot execute
             // the task. Journal writes must not turn that ownership into a wake.
-            self.compatible(parent) catch |err| switch (err) {
+            self.compatible(parent.*) catch |err| switch (err) {
                 error.IncompatibleProfile => return,
             };
             if (!parent.terminal()) if (parent.current_occurrence) |id| {
-                if (try self.workspaceWaitReadyAt(a, parent, id)) try wake.append(a, .{ .task = parent.id });
+                if (try self.workspaceWaitReadyAt(a, parent.*, id)) try wake.append(a, .{ .task = parent.id });
             };
             const ids = try self.controllerResidualIds(a, parent.id);
             defer a.free(ids);
@@ -8644,10 +8874,11 @@ pub fn Service(comptime Types: type) type {
                 defer residual.deinit();
                 if (residual.value.schedule != .parked or residual.value.blocker != .waiting_workspace or !residual.value.cancellation_applied) continue;
                 const current = residual.value.current_occurrence orelse continue;
-                if (!try self.workspaceWaitReadyAt(a, parent, current)) continue;
+                if (!try self.workspaceWaitReadyAt(a, parent.*, current)) continue;
                 residual.value.schedule = .queued;
                 residual.value.blocker = null;
                 try self.store().putRecord(state.ControllerResidual, "controller_residual", id, parent.id, residual.value);
+                try self.residualProgressEvent(a, parent, residual.value);
                 try wake.append(a, .{ .task = parent.id, .residual = id });
             }
         }
@@ -9271,7 +9502,8 @@ pub fn Service(comptime Types: type) type {
                     var residual = try contracts.decodeOwned(state.ControllerResidual, a, try self.store().object(a, receipt_value.value.workspace_observation orelse return error.InvalidArchive, null));
                     defer residual.deinit();
                     if (!std.meta.eql(receipt_value.value.workspace, residual.value.id) or !std.meta.eql(residual.value.task, task_id)) return error.InvalidArchive;
-                    try self.validateResidualObservation(a, residual.value);
+                    try self.validateResidualObservation(a, .from(residual.value));
+                    if (residual.value.outer_operation) |pending| _ = try self.validateControllerOperation(a, parent.value, pending, residual.value, true);
                     continue;
                 }
                 if (receipt_value.value.method != .workspace or receipt_value.value.workspace_kind != .work) continue;
@@ -9833,6 +10065,8 @@ pub fn Service(comptime Types: type) type {
             defer a.free(event_data);
             var publications: [2]state.WorkPublication = undefined;
             var publication_count: usize = 0;
+            var residuals: [1]state.ResidualPublication = undefined;
+            var residual_count: usize = 0;
             var receipt_id: state.Digest = undefined;
             try self.io.randomSecure(&receipt_id);
             var frozen = observation;
@@ -9853,6 +10087,12 @@ pub fn Service(comptime Types: type) type {
                 defer a.free(snapshot);
                 frozen = try self.store().putObject(snapshot);
             }
+            if (kind == .residual) {
+                var saved_residual = try self.record(state.ControllerResidual, a, "controller_residual", identity, parent.id);
+                defer saved_residual.deinit();
+                residuals[0] = try self.residualPublication(a, saved_residual.value);
+                residual_count = 1;
+            }
             if (related) |id| {
                 publications[publication_count] = try workPublication(a, try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, id), true));
                 publication_count += 1;
@@ -9865,8 +10105,8 @@ pub fn Service(comptime Types: type) type {
             // Internal program publication is observed through the subsequent
             // work/delegation or captured build reply. Only work progress has
             // the retained publication facts needed for a journal projection.
-            if (operation_id != null or publication_count != 0)
-                try self.publicationEvent(&parent, if (operation_id != null) .workspace else .workspace_progress, event_data, publications[0..publication_count], command_ref);
+            if (operation_id != null or publication_count != 0 or residual_count != 0)
+                try self.subjectPublicationEvent(&parent, if (operation_id != null) .workspace else .workspace_progress, event_data, publications[0..publication_count], residuals[0..residual_count], command_ref);
             const saved: state.Receipt = .{ .id = receipt_id, .client_operation_id = try name(operation_id orelse "workspace.progress"), .method = .workspace, .request_digest = request, .task = parent.id, .revision = parent.revision, .disposition = .accepted, .workspace = identity, .workspace_kind = kind, .workspace_observation = frozen };
             if (operation_id) |op| {
                 const bytes = try contracts.encodeOwned(state.Receipt, a, saved);
@@ -10477,7 +10717,7 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn trialControlReady(value: workspace.ControlObservation) bool {
-            return value.trial and !value.port and value.cancellation == null and (value.delivery == .ready or value.delivery == .not_sent);
+            return value.trial and !value.port and (value.cancellation == null or value.cancellation_applied) and (value.delivery == .ready or value.delivery == .not_sent);
         }
 
         fn queueControllerTrial(self: *Self, a: std.mem.Allocator, parent: state.Task, initial: workspace.Work, operation_id: []const u8, request: state.Digest, command: workspace.PublicationCommand) !?Admission {

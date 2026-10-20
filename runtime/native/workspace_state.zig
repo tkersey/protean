@@ -235,7 +235,7 @@ pub const PublicationCommand = union(enum) {
 pub const ReadObservation = union(enum) {
     immutable,
     controller: struct { binding: ?state.Digest, epoch: u64, residuals: contracts.Vector(state.Digest, null), event_watermark: u64 },
-    residual: struct { value: state.ControllerResidual, event_watermark: u64 },
+    residual: struct { value: state.ControllerResidualObservation, event_watermark: u64 },
     works: struct {
         works: contracts.Vector(?WorkObservation, null),
         event_watermark: u64,

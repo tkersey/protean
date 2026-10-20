@@ -183,7 +183,7 @@ fn omitArchiveFact(a: std.mem.Allocator, io: std.Io, shape: anytype, task: anyty
             task: [16]u8,
             seq: u64,
             revision: u64,
-            kind: enum { accepted, input_required, input_accepted, message_queued, message_consumed, message_not_consumed, cancellation_requested, parked, resumed, blocked, delivery_unknown, completed, failed, cancelled, imported, reconciled, workspace, workspace_progress, workspace_read },
+            kind: enum { accepted, input_required, input_accepted, message_queued, message_consumed, message_not_consumed, cancellation_requested, parked, resumed, blocked, delivery_unknown, completed, failed, cancelled, imported, reconciled, workspace, workspace_progress, workspace_read, controller, controller_requested },
             data: protean.contracts.Bytes(48 * 1024),
             workspace_publications: protean.contracts.Vector(struct {
                 work: [32]u8,
@@ -203,6 +203,7 @@ fn omitArchiveFact(a: std.mem.Allocator, io: std.Io, shape: anytype, task: anyty
                 },
             }, null),
             workspace_command: ?Reference,
+            residual_publications: protean.contracts.Vector(native.testing.state.ResidualPublication, null),
         };
         var found = false;
         const events = try a.dupe(@TypeOf(archive.events.items[0]), archive.events.items);
@@ -211,6 +212,8 @@ fn omitArchiveFact(a: std.mem.Allocator, io: std.Io, shape: anytype, task: anyty
             for (blobs.items) |blob| {
                 if (!std.mem.eql(u8, &blob.reference.digest, &row.body.digest)) continue;
                 var event = (try protean.contracts.decodeOwned(Event, a, blob.bytes)).value;
+                try std.testing.expectEqual(@as(usize, 0), event.workspace_publications.items.len);
+                try std.testing.expectEqual(@as(usize, 0), event.residual_publications.items.len);
                 if (change == .message_not_consumed) {
                     if (event.kind != .message_not_consumed) break;
                 } else {
