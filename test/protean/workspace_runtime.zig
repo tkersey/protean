@@ -1640,6 +1640,8 @@ fn semanticGuestSnapshot(
             .sources = .{ .items = &.{} },
         } },
     });
+    if (response.disposition != .observed)
+        std.debug.print("semantic snapshot: {s}\n", .{response.observation_json.bytes});
     try std.testing.expectEqual(.observed, response.disposition);
     const value_id = try nativeIdentity(response.evidence.?);
     const custody = try native.workspace.custodyId(a, original.task, value_id);

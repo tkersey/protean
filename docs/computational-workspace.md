@@ -308,6 +308,9 @@ block/activation positions. Optional `disclosure` selects typed values by node
 or field and exact blob ranges. Each observation reports its actual scope and
 omissions; it does not imply complete graph, value or blob coverage. Numeric
 node IDs describe one checkpoint; they are not continuation handles.
+Selected schemas include owned structural definitions and their reachable schema
+dependencies. IDs retain their program-relative meaning; a wire descriptor is
+present only for exportable types.
 
 Explicit `disclosure.snapshot: true` returns an owned, reconstructible guest
 state only at `guest_cut`, with `nodes.all`, `disclosure.values.nodes.all` and

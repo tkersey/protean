@@ -161,7 +161,7 @@ test "optional model inputs retain nullable schemas and nested codec structure" 
 test "guest snapshot disclosure remains an explicit model boolean" {
     const Selected = invocation.Profile(union(enum) {
         disclose: contracts.workspace.Disclosure,
-    }, .{.{ .name = "disclose", .description = "Select guest data." }}, limits);
+    }, .{.{ .name = "disclose", .description = "Select guest data." }}, .{});
     const tool = Selected.allDeclarations().items[0];
     try std.testing.expect(std.mem.indexOf(
         u8,
