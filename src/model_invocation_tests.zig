@@ -160,7 +160,7 @@ test "optional model inputs retain nullable schemas and nested codec structure" 
 
 test "guest snapshot disclosure remains an explicit model boolean" {
     const Selected = invocation.Profile(union(enum) {
-        disclose: @import("workspace_contracts.zig").Disclosure,
+        disclose: contracts.workspace.Disclosure,
     }, .{.{ .name = "disclose", .description = "Select guest data." }}, limits);
     const tool = Selected.allDeclarations().items[0];
     try std.testing.expect(std.mem.indexOf(
@@ -171,6 +171,6 @@ test "guest snapshot disclosure remains an explicit model boolean" {
     const last = tool.argument_codec.items[tool.argument_codec.items.len - 1];
     try std.testing.expectEqualStrings("snapshot", last.field.name.bytes);
     try std.testing.expectEqual(.boolean, last.field.kind);
-    const defaults: @import("workspace_contracts.zig").Disclosure = .{};
+    const defaults: contracts.workspace.Disclosure = .{};
     try std.testing.expect(!defaults.snapshot);
 }

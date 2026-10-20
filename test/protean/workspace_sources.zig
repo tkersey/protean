@@ -568,7 +568,7 @@ pub fn cutObserver(b: *source.Builder, fails: bool) !source.Module {
 pub const RetentionObservation = struct {
     target: u64,
     emitted: struct {
-        relation: @import("kosmos").RuntimeQueries.RetentionResult,
+        relation: @import("kosmos").RuntimeViews.queries.RetentionResult,
         request_all_nodes: bool,
     },
 };
@@ -576,7 +576,7 @@ pub const RetentionObservation = struct {
 pub fn retentionObserver(b: *source.Builder) !source.Module {
     const data = @import("horos_data");
     const c = @import("protean_contracts");
-    const query = try @import("kosmos").RuntimeQueries.retention(b);
+    const query = try @import("kosmos").RuntimeViews.queries.retention(b);
     const query_function = b.functions.items[@intCast(query.entry)];
     const query_input = b.variables.items[@intCast(query_function.parameters[0])];
     const query_result = query_function.result;
@@ -591,7 +591,7 @@ pub fn retentionObserver(b: *source.Builder) !source.Module {
     const input = try b.schema(.{ .product = &.{ disclosed, number } });
     const output = try c.schema(RetentionObservation, b);
     const emitted = try c.schema(@FieldType(RetentionObservation, "emitted"), b);
-    const Conclusion = @FieldType(@import("kosmos").RuntimeQueries.RetentionResult, "conclusion");
+    const Conclusion = @FieldType(@import("kosmos").RuntimeViews.queries.RetentionResult, "conclusion");
     const conclusion = try c.schema(Conclusion, b);
     const unknown = try b.literal(.{
         .schema = conclusion,
