@@ -3708,6 +3708,7 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
         .{ .identity = .{ .bytes = contracts.controller.effect_prefix ++ "deliberate" }, .payload = payload, .response = response_ref },
         .{ .identity = .{ .bytes = contracts.controller.effect_prefix ++ "snapshot" }, .payload = cleanup_payload, .response = unit },
     };
+    var first_trial: ?[32]u8 = null;
     for (0..16) |case| {
         errdefer std.debug.print("controller trial case {d}\n", .{case});
         const input = try reconstructionValue(Reconstruction.Types.ControllerInput, service, a, task, try std.fmt.allocPrint(a, "trial-input-{d}", .{case}), .{ .anchor = .{ .task = task }, .private = .{ .initial = .{ .items = if (case == 1) &.{3} else if (case == 7) &.{4} else &.{2} } } });
@@ -3730,6 +3731,28 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
         const started_json = (try native.json.parse(a, started.observation_json.bytes, .{})).value;
         const work_ref = try native.values.fromJson(contracts.workspace.Ref, a, native.json.get(started_json, "work").?);
         const id = try nativeIdentity(work_ref);
+        if (case == 0) first_trial = id;
+        if (case == 1 or case == 2) {
+            const store = &service.namespace.store;
+            var saved_trial = try contracts.decodeOwned(native.workspace.Trial, a, (try store.recordBytes(a, "workspace_trial", id, task)).?);
+            defer saved_trial.deinit();
+            var prior_trial = try contracts.decodeOwned(native.workspace.Trial, a, (try store.recordBytes(a, "workspace_trial", first_trial.?, task)).?);
+            defer prior_trial.deinit();
+            for (0..@as(usize, if (case == 1) 2 else 1)) |variant| {
+                var altered = saved_trial.value;
+                if (variant == 0) {
+                    altered.selection.synthetic.live_inference = !altered.selection.synthetic.live_inference;
+                } else {
+                    altered.view = prior_trial.value.view;
+                    altered.view_works = prior_trial.value.view_works;
+                }
+                try store.begin();
+                defer store.rollback();
+                try store.putRecord(native.workspace.Trial, "workspace_trial", id, task, altered);
+                try std.testing.expectError(error.InvalidArchive, service.validateWorkspace(a, task));
+                store.rollback();
+            }
+        }
         var bounded_trial_pump = false;
         for (0..128) |_| {
             var work = try service.workspaceWork(a, task, id);

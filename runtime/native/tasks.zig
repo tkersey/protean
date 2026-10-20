@@ -7780,6 +7780,19 @@ pub fn Service(comptime Types: type) type {
                 .start => |start| blk: {
                     var work = try self.retainedWorkspaceWork(a, parent.id, admission.work);
                     defer work.deinit();
+                    if ((start.trial == .none) != (work.value.trial == null)) return error.InvalidArchive;
+                    if (work.value.trial) |id| {
+                        var trial = try self.record(workspace.Trial, a, "workspace_trial", id, parent.id);
+                        defer trial.deinit();
+                        const selected = try contracts.encodeOwned(wc.Trial, a, start.trial);
+                        defer a.free(selected);
+                        const retained = try contracts.encodeOwned(wc.Trial, a, trial.value.selection);
+                        defer a.free(retained);
+                        if (!same(selected, retained)) return error.InvalidArchive;
+                        var view = try contracts.decodeOwned(contracts.controller.OwnerView, a, try self.store().object(a, trial.value.view, null));
+                        defer view.deinit();
+                        if (event_value.seq == 0 or view.value.event_cut != event_value.seq - 1) return error.InvalidArchive;
+                    }
                     if (!start.origin) try self.validateWorkspaceInitialInput(a, work.value);
                     break :blk try operation(workspace.StartRequest, a, .{ .task = parent.id, .program = work.value.program, .input = .{ .bytes = try self.store().object(a, work.value.input, null) }, .policy = start.policy, .origin = if (start.origin) work.value.input_value else null, .runtime = start.runtime, .trial = start.trial });
                 },
