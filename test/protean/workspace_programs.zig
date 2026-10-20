@@ -16,6 +16,34 @@ const gcd = @import("workspace_sources.zig").gcd;
 const listLength = @import("workspace_sources.zig").listLength;
 const alternatives = @import("workspace_sources.zig").alternatives;
 
+test "BUILD-S01 unused semantic bridge declarations grant no construction authority" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const original = try gcd(&b);
+    const unit = try b.scalar(void);
+    _ = try b.effect(.{
+        .identity = "kosmos.semantic-service/1",
+        .payload = unit,
+        .result = unit,
+        .external = false,
+    });
+    const text = try native.source_records.encode(a, b.module(original.entry, original.failure));
+    defer a.free(text);
+    var diagnostic: native.program_construction.Diagnostic = .{};
+    try std.testing.expectError(error.ForbiddenEffect, native.program_construction.build(a, text, null, &diagnostic));
+    try std.testing.expectEqual(.authority, diagnostic.phase);
+    const descriptor = try data.schema.encodeOwned(a, b.schemas.items, unit);
+    defer a.free(descriptor);
+    const contract: contracts.controller.Contract = .{
+        .result = .{ .bytes = descriptor },
+        .failure = .{ .bytes = descriptor },
+        .imports = .{ .items = &.{} },
+    };
+    try std.testing.expectError(error.ForbiddenEffect, native.program_construction.buildController(a, text, contract, null, &diagnostic));
+    try std.testing.expectEqual(.authority, diagnostic.phase);
+}
+
 test "BUILD-C02 controller construction binds exact imports and publishes inert boot before carry" {
     const a = std.testing.allocator;
     const construction = native.program_construction;
@@ -1585,7 +1613,7 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
         try std.testing.expectEqual(.rejected, rejected.disposition);
         try std.testing.expect(rejected.program == null);
         const failure = (try native.json.parse(scratch, rejected.observation_json.bytes, .{})).value;
-        try std.testing.expectEqualStrings("InvalidParams", failure.object.get("error").?.string);
+        try std.testing.expectEqualStrings("SchemaMismatch", failure.object.get("error").?.string);
     }
     try service.validateWorkspace(scratch, frozen_parent.receipt.task);
 
@@ -2984,6 +3012,14 @@ test "deep recursive workspace values support input admission inspection expansi
     const enormous_inspect = try service.workspaceCommand(scratch, "enormous-inspect", parent.receipt.task, .{ .work = .{ .inspect = .{ .work = try workspaceRef(scratch, .work, enormous_start.receipt.workspace.?) } } });
     const enormous_json = (try native.json.parse(scratch, enormous_inspect.observation_json.bytes, .{})).value;
     try std.testing.expectEqualStrings("completed", enormous_json.object.get("outcome").?.string);
+    const interpretation = enormous_json.object.get("interpretation_evidence").?;
+    try std.testing.expectEqualStrings("experimental", interpretation.object.get("evidence_class").?.string);
+    try std.testing.expectEqual(.null, std.meta.activeTag(interpretation.object.get("analysis_checker").?));
+    try std.testing.expectEqualDeep(enormous_program.receipt.workspace.?, try nativeIdentity(try native.values.fromJson(contracts.workspace.Ref, scratch, interpretation.object.get("program").?)));
+    try std.testing.expectEqualDeep(enormous_start.receipt.workspace.?, try nativeIdentity(try native.values.fromJson(contracts.workspace.Ref, scratch, interpretation.object.get("work").?)));
+    var enormous_work = try service.workspaceWork(scratch, parent.receipt.task, enormous_start.receipt.workspace.?);
+    defer enormous_work.deinit();
+    try std.testing.expectEqualDeep(enormous_work.value.input_value.?.digest, try nativeIdentity(try native.values.fromJson(contracts.workspace.Ref, scratch, interpretation.object.get("input").?)));
     try std.testing.expect(!enormous_json.object.get("result_preview").?.object.get("complete").?.bool);
     const enormous_ref = try native.values.fromJson(contracts.workspace.Ref, scratch, enormous_json.object.get("result").?);
     const enormous_tail = try service.workspaceCommand(scratch, "enormous-tail", parent.receipt.task, .{ .context = .{ .expand = .{ .reference = enormous_ref, .page = .{ .offset = 2_999_999_995, .maximum = 10 } } } });
@@ -3648,6 +3684,66 @@ const ReconstructionModel = struct {
     }
 };
 
+fn reconstructionRuntimeAction(service: anytype, a: std.mem.Allocator) !void {
+    const task = (try service.submit(a, "runtime-controller-task", .{ .items = &.{ 2, 3 } })).receipt.task;
+    var requested: ?@FieldType(contracts.workspace.Work, "realize_controller") = null;
+    var switched = false;
+    var calls: usize = 0;
+    for (0..256) |_| {
+        var before = try service.task(a, task);
+        defer before.deinit();
+        if (before.value.terminal()) {
+            if (!switched) return error.ControllerRealizationNotObserved;
+            try std.testing.expectEqual(@as(usize, 2), calls);
+            try service.validateWorkspace(a, task);
+            return;
+        }
+        const progress = try service.pump(a);
+        if (progress == .work) {
+            if (!progress.work.entry.declaration.inference) {
+                try service.acquire(a, progress.work, &.{});
+            } else {
+                calls += 1;
+                var current = try service.task(a, task);
+                defer current.deinit();
+                if (requested == null) {
+                    const id = current.value.controller_interaction orelse return error.MissingControllerInteraction;
+                    var interaction = try contracts.decodeOwned(native.testing.state.ControllerInteraction, a, (try service.namespace.store.recordBytes(a, "controller_interaction", id, task)).?);
+                    defer interaction.deinit();
+                    const bytes = try service.namespace.store.object(a, interaction.value.overlay, null);
+                    defer a.free(bytes);
+                    var overlay = try native.json.parse(a, bytes, .{});
+                    defer overlay.deinit();
+                    const target = try native.values.fromJson(contracts.workspace.ControllerTarget, a, native.json.get(native.json.get(overlay.value, "control").?, "realization_target").?);
+                    try std.testing.expectEqual(.action, std.meta.activeTag(target));
+                    requested = .{ .expected = target, .runtime = .{ .packaged = .{} } };
+                    try service.acquire(a, progress.work, try contracts.encodeOwned(Reconstruction.Response, a, .{ .realize = requested.? }));
+                } else try service.acquire(a, progress.work, try contracts.encodeOwned(Reconstruction.Response, a, .{ .next = {} }));
+            }
+        }
+        var after = try service.task(a, task);
+        defer after.deinit();
+        if (after.value.realization_revision != before.value.realization_revision) {
+            try std.testing.expect(!switched);
+            try std.testing.expectEqual(before.value.realization_revision + 1, after.value.realization_revision);
+            try std.testing.expectEqual(before.value.controller_epoch, after.value.controller_epoch);
+            try std.testing.expectEqual(before.value.execution_revision, after.value.execution_revision);
+            try std.testing.expectEqualDeep(before.value.checkpoint, after.value.checkpoint);
+            try std.testing.expectEqualDeep(before.value.current_occurrence, after.value.current_occurrence);
+            try std.testing.expectEqualDeep(before.value.controller, after.value.controller);
+            const operation = std.fmt.bytesToHex(before.value.current_occurrence.?, .lower);
+            try std.testing.expect((try service.workspaceRealizeController(a, &operation, task, requested.?)).replayed);
+            try std.testing.expectError(error.StaleController, service.workspaceRealizeController(a, "stale-controller-action", task, requested.?));
+            var changed = requested.?;
+            changed.expected.action.epoch += 1;
+            try std.testing.expectError(error.OperationConflict, service.workspaceRealizeController(a, &operation, task, changed));
+            try service.validateWorkspace(a, task);
+            switched = true;
+        }
+    }
+    return error.ControllerRealizationDidNotComplete;
+}
+
 fn reconstructionSource(service: anytype, a: std.mem.Allocator, task: [16]u8, epoch: u64, program: contracts.workspace.Ref, expected_source: []const u8) !void {
     var parts: std.ArrayList(u8) = .empty;
     defer parts.deinit(a);
@@ -4005,7 +4101,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
     };
     var source_builder = source.Builder.init(a);
     defer source_builder.deinit();
-    const original_source = try native.source_records.encode(scratch, try Reconstruction.controllerWithReplay(&source_builder, false, true, cleanup_command, if (scenario == .residual_outer) 256 else 0, scenario == .conversion_failure or scenario == .residual_history));
+    const original_source = try native.source_records.encode(scratch, try Reconstruction.controllerWithActions(&source_builder, false, true, cleanup_command, if (scenario == .residual_outer) 256 else 0, scenario == .conversion_failure or scenario == .residual_history, scenario == .round_trip));
     var diagnostic: native.program_construction.Diagnostic = .{};
     var original = native.program_construction.buildController(a, original_source, contract, null, &diagnostic) catch |err| {
         std.debug.print("fixture seed {s}: {s} function={?d} term={?d} value={?d}\n", .{ @errorName(err), @tagName(diagnostic.phase), diagnostic.source.function, diagnostic.source.term, diagnostic.source.value });
@@ -4082,6 +4178,10 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
         _ = try service.exportCheckpoint(scratch, p.task, try std.fmt.allocPrint(scratch, "{s}/restored.archive", .{path_buffer[0..length]}));
         return;
     };
+    if (process == null and scenario == .round_trip) {
+        stage = "controller runtime action";
+        try reconstructionRuntimeAction(&service, scratch);
+    }
     stage = "submit";
     const task = (try service.submit(scratch, "reconstruction-task", .{ .items = if (scenario == .invalid_offer) &.{4} else &.{ 2, 3, 107, 5 } })).receipt.task;
     var initial = try service.task(a, task);

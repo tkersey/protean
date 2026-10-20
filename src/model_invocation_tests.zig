@@ -144,3 +144,16 @@ test "bounded tool arguments support nested union payloads" {
     try std.testing.expectEqual(@as(?u32, 256), Nested.normalizationLimits().maximum_arguments_bytes);
     try std.testing.expect(std.mem.indexOf(u8, tool.input_schema_json.bytes, "\"anyOf\"") != null);
 }
+
+test "optional model inputs retain nullable schemas and nested codec structure" {
+    const Optional = invocation.Profile(union(enum) {
+        observe: struct { selection: ?struct { node: u64 } },
+    }, .{.{ .name = "observe", .description = "Select disclosed input." }}, limits);
+    const tool = Optional.allDeclarations().items[0];
+    try std.testing.expectEqual(@as(usize, 3), tool.argument_codec.items.len);
+    try std.testing.expectEqual(.optional, tool.argument_codec.items[0].field.kind);
+    try std.testing.expectEqual(@as(u32, 1), tool.argument_codec.items[0].children);
+    try std.testing.expectEqual(.product, tool.argument_codec.items[1].field.kind);
+    try std.testing.expectEqual(.unsigned_integer, tool.argument_codec.items[2].field.kind);
+    try std.testing.expect(std.mem.indexOf(u8, tool.input_schema_json.bytes, "\"type\":\"null\"") != null);
+}

@@ -39,6 +39,17 @@ import {workspaceMetrics, armViolations, evaluateCase} from '../../tools/evaluat
   assert.deepEqual(armViolations('pure', placementReads), placementReads);
   assert.deepEqual(armViolations('ordinary', placementReads), placementReads);
   for (const arm of ['generic', 'retained', 'runtime']) assert.deepEqual(armViolations(arm, placementReads), []);
+  const construction = [
+    {name: 'program', arguments: {command: {tag: 'derive'}}},
+    {name: 'program', arguments: {command: {tag: 'validate'}}},
+    work('guard'),
+  ];
+  assert.deepEqual(armViolations('specialization', construction), construction);
+  assert.deepEqual(armViolations('interpretation', construction), construction);
+  assert.deepEqual(armViolations('construction', construction), []);
+  assert.deepEqual(armViolations('interpretation', runtime), runtime.slice(0, 3));
+  assert.deepEqual(armViolations('specialization', runtime), runtime.slice(3));
+  assert.deepEqual(armViolations('interpretation', [remote(work('realize_controller'))]), [remote(work('realize_controller'))]);
 }
 import {contract, assertAdaptiveCaptures} from './adaptive_capture_checks.mjs';
 import {runtimeTrace} from './runtime_trace.mjs';

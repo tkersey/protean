@@ -42,7 +42,20 @@ pub const Wait = struct {
     selection: @FieldType(contracts.workspace.Work, "wait"),
 };
 
-pub const Operation = enum { build, start, control, interact, specialize, realize, request_cut, pump };
+pub const Operation = enum {
+    build,
+    start,
+    control,
+    interact,
+    specialize,
+    realize,
+    request_cut,
+    pump,
+    derive,
+    validate,
+    observe,
+    stop_observing,
+};
 pub const Command = union(enum) { advance, park, delegate: RunPolicy, cancel: state.Reason };
 
 pub const RunPolicy = contracts.workspace.Policy;
@@ -113,6 +126,46 @@ pub const Runtime = struct {
     task: state.TaskId,
     program: state.Digest,
     artifact: state.Reference,
+    validation: ?ValidationFact = null,
+};
+
+pub const CandidateArtifact = struct {
+    version: u32 = 1,
+    ancestor: state.Reference,
+    guest: state.Reference,
+    proposal: state.Reference,
+    code: state.Reference,
+    producer: ?state.Reference,
+    root: state.Digest,
+    checker: state.Name,
+};
+
+pub const Candidate = struct {
+    id: state.Digest,
+    task: state.TaskId,
+    program: state.Digest,
+    artifact: state.Reference,
+    description: CandidateArtifact,
+};
+
+pub const ValidationFact = struct {
+    version: u32 = 1,
+    candidate: state.Reference,
+    ancestor: state.Reference,
+    guest: state.Reference,
+    root: state.Digest,
+    checker: state.Name,
+};
+
+pub const SemanticRequest = struct {
+    method: state.Method = .workspace,
+    task: state.TaskId,
+    command: contracts.workspace.Program,
+};
+pub const SemanticObservation = struct {
+    candidate: ?state.Reference,
+    runtime: ?state.Reference,
+    output: state.Reference,
 };
 
 /// One source-derived cut observation and the exact machine that produced it.
@@ -124,10 +177,53 @@ pub const RuntimeTrace = struct {
 
 pub const OuterOperation = state.OuterOperation;
 
+pub const Guard = struct {
+    candidate: state.Reference,
+    code: state.Reference,
+    revision: u64,
+    continuation: ?state.Reference = null,
+    pending_control: ?state.Reference = null,
+    initialized: bool = false,
+    guest_quantum: u64 = 0,
+    disposition: enum { ready, agreed, incomplete, diverged } = .ready,
+    failure: ?state.Name = null,
+    agreed_segments: u64 = 0,
+    reference_nanoseconds: u64 = 0,
+    candidate_nanoseconds: u64 = 0,
+    reference_operation: ?OuterOperation = null,
+    candidate_segment: ?struct { checkpoint: state.Reference, observation: state.Reference, guest_work: u64 } = null,
+};
+
 pub const Trial = struct { id: state.Digest, task: state.TaskId, selection: contracts.workspace.Trial, view: state.Reference, view_works: contracts.Vector(WorkObservation, null), policy: state.Reference, responses: contracts.Vector(struct { identity: contracts.Utf8, payload: state.Reference, response: state.Reference }, null) };
 
+pub const Observer = struct {
+    stopped: bool = false,
+    selection: contracts.workspace.Observe,
+    source: state.Reference,
+    source_work: state.Digest,
+    source_revision: u64,
+    accumulator: state.Reference,
+    previous: ?state.Reference = null,
+    consumed_revision: ?u64 = null,
+    gap_first: ?u64 = null,
+    gap_last: ?u64 = null,
+};
+
+pub const ObserverEnvelope = struct {
+    selection: contracts.workspace.GuestViewSelection,
+    publication: u64,
+    cursor: u64,
+    prior_cursor: ?u64,
+    guest_work_delta: ?u64,
+    gap_first: ?u64,
+    gap_last: ?u64,
+    granularity: @FieldType(contracts.workspace.ObserverPolicy, "granularity"),
+    disclosed_value: state.Reference,
+    control: ControlObservation,
+};
+
 pub const Work = struct {
-    version: u32 = 2,
+    version: u32 = 3,
     id: state.Digest,
     task: state.TaskId,
     trial: ?state.Digest = null,
@@ -166,6 +262,9 @@ pub const Work = struct {
     /// Measured owner drive/publication time, excluding I/O wait and inference.
     /// Informational accounting, never execution or import authority.
     native_publication_nanoseconds: u64 = 0,
+    observer: ?Observer = null,
+    guard: ?Guard = null,
+    guest_work: u64 = 0,
 
     pub fn terminal(self: Work) bool {
         return switch (self.outcome_kind) {
@@ -203,10 +302,30 @@ pub const ControlObservation = struct {
 };
 
 pub const StartRequest = struct { method: state.Method = .workspace, kind: Operation = .start, task: state.TaskId, program: state.Digest, input: contracts.Bytes(null), policy: RunPolicy, origin: ?state.Reference, runtime: ?state.Reference = null, trial: contracts.workspace.Trial = .{ .none = .{} } };
+pub const ObserveRequest = struct {
+    method: state.Method = .workspace,
+    kind: Operation = .observe,
+    task: state.TaskId,
+    selection: contracts.workspace.Observe,
+};
+pub const StopObservingRequest = struct {
+    method: state.Method = .workspace,
+    kind: Operation = .stop_observing,
+    task: state.TaskId,
+    expected: contracts.workspace.Expected,
+};
 pub const SpecializeRequest = struct { method: state.Method = .workspace, kind: Operation = .specialize, task: state.TaskId, program: state.Digest, hooks: contracts.workspace.RuntimeHooks = .{} };
 pub const RealizeRequest = struct { method: state.Method = .workspace, kind: Operation = .realize, task: state.TaskId, work: state.Digest, execution: u64, control: u64, realization: u64, runtime: ?state.Reference };
 pub const CutRequest = struct { method: state.Method = .workspace, kind: Operation = .request_cut, task: state.TaskId, command: @FieldType(contracts.workspace.Work, "request_cut") };
 pub const PumpRequest = struct { method: state.Method = .workspace, kind: Operation = .pump, task: state.TaskId, command: @FieldType(contracts.workspace.Work, "pump") };
+pub const GuardRequest = struct {
+    method: state.Method = .workspace,
+    task: state.TaskId,
+    command: union(enum) {
+        guard: @FieldType(contracts.workspace.Work, "guard"),
+        unguard: @FieldType(contracts.workspace.Work, "unguard"),
+    },
+};
 pub const ResidualControlRequest = struct { method: state.Method = .workspace, task: state.TaskId, residual: state.Digest, execution: u64, control: u64, command: Command };
 pub const ControlRequest = struct { method: state.Method = .workspace, kind: Operation = .control, task: state.TaskId, work: state.Digest, execution: u64, control: u64, command: Command };
 pub const InteractionRequest = struct { kind: Operation = .interact, task: state.TaskId, interaction: @FieldType(contracts.workspace.Work, "interact") };
@@ -216,15 +335,40 @@ pub const ContextRequest = struct { task: state.TaskId, command: contracts.works
 
 /// The existing receipt binds these inputs by request digest. Start input bytes
 /// and identity already have immutable work custody, so do not copy them here.
+pub const ControllerRealizeRequest = struct {
+    task: state.TaskId,
+    command: @FieldType(contracts.workspace.Work, "realize_controller"),
+};
+pub const ControllerRealization = struct {
+    cut: contracts.workspace.ControllerCut,
+    occurrence: ?state.Digest,
+    command: @FieldType(contracts.workspace.Work, "realize_controller"),
+    controller: ?state.Digest,
+    checkpoint: state.Reference,
+    runtime: ?state.Reference,
+    source: state.Reference,
+    target: state.Reference,
+    dependencies: contracts.Vector(state.Reference, null),
+};
+
 pub const PublicationCommand = union(enum) {
+    realize_controller: ControllerRealization,
+    stop_observing: contracts.workspace.Expected,
     residual: struct { execution: u64, control: u64, command: Command },
     build,
     specialize: struct { program: state.Digest, hooks: contracts.workspace.RuntimeHooks = .{} },
+    semantic: struct {
+        command: contracts.workspace.Program,
+        input: state.Reference,
+        output: state.Reference,
+    },
     realize: struct { execution: u64, control: u64, realization: u64, runtime: ?state.Reference, source: state.Reference, target: state.Reference, dependencies: contracts.Vector(state.Reference, null) },
     request_cut: @FieldType(contracts.workspace.Work, "request_cut"),
+    guard: @FieldType(contracts.workspace.Work, "guard"),
+    unguard: @FieldType(contracts.workspace.Work, "unguard"),
     pump: @FieldType(contracts.workspace.Work, "pump"),
     context: struct { command: contracts.workspace.Context, snapshot: ?state.Reference, input: ?state.Reference },
-    start: struct { policy: RunPolicy, origin: bool, runtime: ?state.Reference = null, trial: contracts.workspace.Trial = .{ .none = .{} } },
+    start: struct { observer: ?Observer = null, policy: RunPolicy, origin: bool, runtime: ?state.Reference = null, trial: contracts.workspace.Trial = .{ .none = .{} } },
     control: struct { execution: u64, control: u64, command: Command },
     interact: @FieldType(contracts.workspace.Work, "interact"),
     delegate: @FieldType(contracts.workspace.Work, "delegate"),
@@ -234,7 +378,16 @@ pub const PublicationCommand = union(enum) {
 /// Executable claims in each work are checked against its retained checkpoint.
 pub const ReadObservation = union(enum) {
     immutable,
-    controller: struct { binding: ?state.Digest, epoch: u64, residuals: contracts.Vector(state.Digest, null), event_watermark: u64 },
+    controller: struct {
+        binding: ?state.Digest,
+        epoch: u64,
+        execution_revision: u64,
+        runtime: ?state.Reference = null,
+        realization_revision: u64 = 0,
+        interaction: ?state.Digest = null,
+        residuals: contracts.Vector(state.Digest, null),
+        event_watermark: u64,
+    },
     residual: struct { value: state.ControllerResidualObservation, event_watermark: u64 },
     works: struct {
         works: contracts.Vector(?WorkObservation, null),
@@ -280,13 +433,23 @@ pub const Derivation = struct {
     delegation: ?state.Reference = null,
     capture: ?state.Reference = null,
     inspection: ?Inspection = null,
+    semantic_source: ?SemanticSource = null,
+};
+
+pub const SemanticSource = struct {
+    selection: @FieldType(contracts.workspace.Materialization, "semantic_source"),
+    basis: ReadObservation,
+    guest: state.Reference,
+    runtime: state.Reference,
 };
 
 /// Ordinary immutable evidence. Nominal references in the retained snapshot
 /// keep its checkpoint and runtime dependencies inside archive closure.
 pub const Inspection = struct {
+    level: @FieldType(contracts.workspace.GuestViewSelection, "level") = .guest_cut,
     observation: WorkObservation,
     nodes: contracts.workspace.NodeScope,
+    disclosure: ?contracts.workspace.Disclosure = null,
     runtime_code: state.Reference,
 };
 

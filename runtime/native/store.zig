@@ -52,6 +52,7 @@ pub fn Record(comptime kind: []const u8) type {
         .origin => state.Origin,
         .workspace_program => @import("workspace_state.zig").Program,
         .workspace_runtime => @import("workspace_state.zig").Runtime,
+        .workspace_candidate => @import("workspace_state.zig").Candidate,
         .workspace_work => @import("workspace_state.zig").Work,
         .workspace_trial => @import("workspace_state.zig").Trial,
         .workspace_value => @import("workspace_state.zig").Value,
@@ -643,6 +644,8 @@ pub const Store = struct {
         if (comptime std.mem.eql(u8, kind, "placement_action")) @compileError("placement observations are immutable");
         if (comptime std.mem.eql(u8, kind, "placement_succession")) @compileError("placement succession proofs are immutable");
         if (comptime std.mem.eql(u8, kind, "workspace_runtime")) @compileError("immutable runtime records are created once");
+        if (comptime std.mem.eql(u8, kind, "workspace_candidate"))
+            @compileError("immutable candidate records are created once");
         if (comptime std.mem.eql(u8, kind, "artifact") or std.mem.eql(u8, kind, "attempt") or std.mem.eql(u8, kind, "origin") or std.mem.eql(u8, kind, "workspace_program") or std.mem.eql(u8, kind, "workspace_value") or std.mem.eql(u8, kind, "workspace_view") or std.mem.eql(u8, kind, "workspace_port") or std.mem.eql(u8, kind, "workspace_port_reply") or std.mem.eql(u8, kind, "execution_route") or std.mem.eql(u8, kind, "workspace_wait") or std.mem.eql(u8, kind, "workspace_delegation") or std.mem.eql(u8, kind, "workspace_reply")) @compileError("immutable native records are created once");
         try self.writing();
         errdefer self.rollback();

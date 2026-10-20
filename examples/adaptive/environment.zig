@@ -167,10 +167,14 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
     const mode = if (options.offline) "offline" else if (options.test_provider) "controlled-test" else "live";
     var config: ?Config = null;
     var tool_config: ?t.ToolConfiguration = null;
+    var semantic_config: ?t.SemanticConfiguration = null;
+    var semantic_policy: ?native.configuration.SemanticPolicy = null;
     var configuration_digest: ?[]const u8 = null;
     if (options.config_path) |path| {
         const bytes = try native.configuration.readFile(a, io, path, null, false);
         var parsed = try native.json.parse(a, bytes, .{ .bytes = bytes.len, .tokens = bytes.len, .members = bytes.len });
+        if (parsed.value == .object and !parsed.value.object.contains("semantic_construction"))
+            try native.json.put(a, &parsed.value, "semantic_construction", .null);
         if (parsed.value == .object) if (parsed.value.object.getPtr("tools")) |tools| {
             if (tools.* == .object and !tools.object.contains("reconstruct")) try native.json.put(a, tools, "reconstruct", .{ .bool = false });
         };
@@ -178,6 +182,11 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
         if (!std.mem.eql(u8, value.schema.bytes, "adaptive-agent.configuration.v3")) return error.InvalidConfiguration;
         config = value.adaptive;
         tool_config = value.tools;
+        semantic_config = value.semantic_construction;
+        semantic_policy = try native.configuration.semanticPolicy(
+            a,
+            parsed.value.object.get("semantic_construction").?,
+        );
         configuration_digest = try hex(a, try native.json.canonical(a, parsed.value));
     }
     var resources: std.ArrayList([]const u8) = .empty;
@@ -254,6 +263,11 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
         try native.json.put(a, &root, "snapshot", try native.values.toJson(native.registry.ObjectReference, a, .{ .digest = digest(snapshot), .bytes = snapshot.len }));
         try native.json.put(a, &root, "adaptive", try native.values.toJson(t.P.AdaptivePolicy, a, policy));
         if (tool_policy) |value| try native.json.put(a, &root, "tool_construction", try native.values.toJson(t.ToolPolicy, a, value));
+        try native.json.put(a, &root, "semantic_construction", try native.values.toJson(
+            ?t.SemanticConfiguration,
+            a,
+            semantic_config,
+        ));
         try native.json.put(a, &root, "initial_profile", native.json.string(if (config) |value| value.initial_profile.bytes else "analysis"));
         try native.json.put(a, &root, "initial_effort", native.json.string(if (config) |value| @tagName(value.initial_effort) else "medium"));
         profile_bytes = try native.json.canonical(a, root);
@@ -329,7 +343,7 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
     owner.* = .{ .snapshot = try native.repository.Snapshot.openBorrowed(a, resources.items[0]), .profile_identity = digest(profile_bytes), .policy = policy, .catalog = catalog.value, .tools = tool_policy, .initial = .{ .selection = .{ .profile_id = initial.id, .profile_digest = try Admission.profileDigest(a, initial), .effective_effort = effort, .control_revision = 0 }, .top_effort = effort, .epoch = 0, .epoch_reason = .initial, .eviction_generation = 0, .skills = .{ .items = &.{} } }, .provider = .{ .token = token, .approved_endpoint = policy.endpoint.bytes, .trust_root = trust_root }, .offline = options.offline };
     // Fail admission before dispatch if catalog metadata cannot fit core input.
     _ = try context.instructions(a, policy, catalog.value);
-    return .{ .id = if (options.offline) "offline" else if (options.test_provider) "controlled-test" else "adaptive", .bytes = profile_bytes, .resources = resources.items, .environment = owner };
+    return .{ .id = if (options.offline) "offline" else if (options.test_provider) "controlled-test" else "adaptive", .bytes = profile_bytes, .resources = resources.items, .environment = owner, .semantic_construction = semantic_policy };
 }
 
 /// Recorded provider scenario, selected only by the explicit offline launch.

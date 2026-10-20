@@ -131,3 +131,56 @@ attempts. Judge task correctness, evidence coverage, unnecessary reconstruction
 and recovery from misleading assumptions against the frozen expected answers.
 Admission, successful activation and scripted demonstrations do not establish
 improvement. Live efficacy is unmeasured until an authorized run is adjudicated.
+
+## Semantic construction comparison
+
+Prepare the semantic suite without provider calls:
+
+```sh
+node tools/evaluation/workspace.mjs prepare --suite semantic \
+  --config /private/operator-approved-adaptive.json \
+  --out /tmp/protean-semantic-evaluation --repetitions 3 --seconds 600
+```
+
+The suite freezes the same profile, effort, evidence, expected-answer hashes and
+time allowance across three arms:
+
+| Arm | Available approach |
+|---|---|
+| `specialization` | Ordinary tools, retained work and built-in specialization/runtime selection; no semantic source, programmable observations, interpretations, candidate construction or guard. |
+| `interpretation` | Exact semantic source, programmable observations and isolated interpretations; no specialization, candidate derivation/validation, runtime replacement or guard. |
+| `construction` | All operator-permitted source, observer, interpretation, transformer, validation, guard and qualified realization operations. |
+
+The workload families are direct configuration lookup, eight distinct batches of
+256 dynamic GCD inputs, and the misleading ingestion investigation. Construction
+is optional: choosing ordinary tools, declining a transformation or abandoning a
+candidate remains a valid model decision. Expected answers are retained for
+adjudication, outside the model's snapshot evidence.
+
+Preparation preserves the supplied `semantic_construction` policy; it never
+approves a root or checker automatically. Configure exact installed roots and
+checker identities, and enable `guard` only when comparison resources are
+authorized. Missing approval remains a real denial in the run. The existing
+`run --authorize-inference --credential-file ...` invocation is still required
+separately. Arm restrictions are prompt ablations with recorded
+`arm_violations`, not proof that arbitrary authored code stayed within a semantic
+category. Review the actual code, inputs and actions when adjudicating them.
+
+Metrics distinguish requested derivations, validations, guards and observers
+from retained candidate artifacts and validated runtime facts. They record
+distinct candidate code bytes, validated versus unvalidated retained candidates,
+admitted runtimes, distinct runtime/capsule bytes and cumulative guard reference
+and candidate nanoseconds. Guard costs are accumulated from publication history,
+including replaced or discontinued guards. An unvalidated candidate count does
+not distinguish a rejected candidate from one never submitted for validation;
+inspect the action/result evidence for that distinction.
+
+The existing compiler capture total, native publication time, model usage,
+elapsed time, sampled RSS and retained bytes remain part of every comparison,
+including unsuccessful attempts. Separate runtime specialization and validation
+timing fields remain `null`; observer and interpretation costs are included in
+ordinary work/publication totals rather than presented as independently measured
+subtotals. Request counts are not success counts. Keep failed, interrupted and
+abandoned candidates in the comparison and adjudicate correctness, coverage and
+total cost against all matched repetitions. Preparing or inspecting this suite
+does not establish live model efficacy.

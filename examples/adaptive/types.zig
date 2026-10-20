@@ -6,7 +6,7 @@ pub const tool_types = @import("tool_types.zig");
 pub const controls = protean.adaptive_controls;
 pub const model = protean.model_invocation;
 pub const application_id = "adaptive-agent";
-pub const application_version = "7.0.0";
+pub const application_version = "8.0.0";
 pub const input_schema_id = "adaptive-agent.input.v2";
 pub const output_schema_id = "adaptive-agent.output.v5";
 pub const failure_schema_id = "adaptive-agent.failure.v1";
@@ -244,7 +244,17 @@ pub const DataRow = struct { id: u64, key: u64, value: u64, group: u64 };
 pub const DataRows = contracts.Vector(DataRow, null);
 pub const ToolInputConfig = struct { id: contracts.Text(64), description: contracts.Text(256), rows: DataRows, relation: DataRows, selected: tool_types.Keys };
 pub const ToolConfiguration = struct { build: bool, run: bool, reconstruct: bool = false, inputs: contracts.Vector(ToolInputConfig, null) };
-pub const ConfigurationV3 = struct { schema: contracts.Text(64), adaptive: Configuration, tools: ?ToolConfiguration };
+pub const SemanticConfiguration = struct {
+    roots: contracts.Vector(contracts.Text(64), null),
+    checkers: contracts.Vector(contracts.Text(128), null),
+    guard: bool,
+};
+pub const ConfigurationV3 = struct {
+    schema: contracts.Text(64),
+    adaptive: Configuration,
+    tools: ?ToolConfiguration,
+    semantic_construction: ?SemanticConfiguration = null,
+};
 pub const ToolInputReference = struct { id: contracts.Text(64), description: contracts.Text(256), object: model.ArtifactReference };
 pub const ToolPolicy = struct { build: bool, run: bool, reconstruct: bool = false, catalog: model.ArtifactReference, inputs: contracts.Vector(ToolInputReference, null) };
 // Ordinary wire contracts accompany the emitted Horos image. External

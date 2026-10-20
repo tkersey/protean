@@ -57,7 +57,7 @@ export async function runtimePlacementFixture(app, configuration, trust, sourceS
     const peers = sites.filter(remote => remote !== site).map(remote => ({
       name: remote.name, public_key: remote.publicKey, namespace: hex(remote.identity.site.namespace), native_build: binary,
       resource_binding: hex(remote.identity.resource_binding),
-      compatibility: Object.fromEntries(Object.entries(compatibility).map(([key, value]) => [key, hex(value)])),
+      compatibility: Object.fromEntries(Object.entries(compatibility).map(([key, value]) => [key, value === null ? null : hex(value)])),
       disclosure: {allow_private: true}, command: [app.executable, 'serve', '--transport', 'stdio', ...flags(remote)],
       remote_name: site.name, timeout_ms: 120_000,
     }));

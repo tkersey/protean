@@ -41,6 +41,7 @@ test {
     _ = discovery;
     _ = placement;
     _ = placement_configuration;
+    _ = configuration;
     _ = @import("placement_stage.zig");
     _ = @import("occurrence.zig");
     _ = @import("store.zig");

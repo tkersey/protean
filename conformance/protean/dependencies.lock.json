@@ -3,50 +3,50 @@
   "status": "development-integration",
   "boundary": {
     "repository": "tkersey/horos",
-    "commit": "592eb0839326f2d8a423b59ce2746ab18ef5136a",
-    "gitTree": "ce1fec549d6eb79f859fc73d1b66b8feb11fa479",
-    "version": "6.0.0",
+    "commit": "816d2d83ed2e60226121be80052adab2d36732a5",
+    "gitTree": "39dbc1c5042031d5e26a4af6a7c4d3b8d97bac54",
+    "version": "6.1.0",
     "source": {
-      "inventorySha256": "2dab0aed8e2ec7409477764fc5535ad8342d4dd8e677b02e9389bfdb6df945d3",
-      "entries": 418,
-      "bytes": 8939498
+      "inventorySha256": "f545ab3fa795fd57d510873d8f2bfebd5f1e681cace257380142d9c68a77740d",
+      "entries": 434,
+      "bytes": 9770197
     },
     "archive": {
-      "url": "https://github.com/tkersey/horos/archive/592eb0839326f2d8a423b59ce2746ab18ef5136a.tar.gz",
-      "sha256": "f552f214d5d5e0d83d11e9bbd35b08d0e613413bd91d7358f49476f23c05b18f",
-      "bytes": 1648359,
-      "origin": "GitHub commit archive authenticated against the complete Git tree."
+      "url": "https://github.com/tkersey/horos/archive/816d2d83ed2e60226121be80052adab2d36732a5.tar.gz",
+      "sha256": "38a10919e1eb3825277873efae3aeb45602e2806607256c272556e29e8377028",
+      "bytes": 1749818,
+      "origin": "Local git archive of the exact committed tree; transport bytes are locally retained, not authenticated as a GitHub archive."
     },
-    "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree.",
+    "authentication": "Committed local development source and archive authenticated; remote availability is not asserted.",
     "package": {
-      "zigHash": "horos-6.0.0-flclaDfbQAD6K8zS9U8ts9xpziBg_1zaU23OvgqKePKb",
+      "zigHash": "horos-6.1.0-flclaD9lTQDIPTTYqpKRQVlTuqLNPdbhjkex50CzBfiw",
       "defaultProfile": "zig-managed",
       "profiles": {
         "zig-managed": {
-          "inventorySha256": "da62cc22217ec75acf1e13ee898073ff18562b0c3b7cf367432df6b7148efbc3",
-          "entries": 398,
-          "bytes": 4250423
+          "inventorySha256": "3b421c20775fca48d15b14fdc240945e10d54f722a537e7be1ef68327f37e6f7",
+          "entries": 411,
+          "bytes": 5072191
         },
         "archive-extracted": {
-          "inventorySha256": "da62cc22217ec75acf1e13ee898073ff18562b0c3b7cf367432df6b7148efbc3",
-          "entries": 398,
-          "bytes": 4250423
+          "inventorySha256": "3b421c20775fca48d15b14fdc240945e10d54f722a537e7be1ef68327f37e6f7",
+          "entries": 411,
+          "bytes": 5072191
         }
       },
       "archive": {
-        "sha256": "58086aff4e7778c744a3776d703c30973a720934c7ffdd15fad22b6793c6e868",
-        "bytes": 857926
+        "sha256": "9015c953444732bf358f45795da45e16e98dccb2874c26eced22f0d49c143337",
+        "bytes": 982307
       }
     },
     "api": {
       "authoring": "src/root.zig",
       "data": "src/data/root.zig",
       "source": "src/source.zig",
-      "profile": "Horos 6 checked first-order specialization and recovery; unchanged BMO1/BPI3/PST3 and invocation grammars",
+      "profile": "Horos 6.1 finite source relations, private product layout transport and pure slices; unchanged BMO1/BPI3/PST3 and invocation grammars",
       "files": [
         {
           "path": "src/root.zig",
-          "sha256": "19ee59e4a8e6a78b763947c586725a26300dc2bd6d7a72e85f0eb217a51f6003"
+          "sha256": "3741eb20be3b6999e39ba72be54112e933ea01b8cfb30182c2bb0da3c0178d44"
         },
         {
           "path": "src/data/root.zig",
@@ -54,7 +54,7 @@
         },
         {
           "path": "src/source.zig",
-          "sha256": "dba84f92c23e2e3ff2a450d4e7d6e8a7998f98786d929dac9f24b0a154c19214"
+          "sha256": "e4ae010d139d854870bafeefe07c20f45687a364f56ef7cbe2345f1f36498715"
         },
         {
           "path": "docs/bpi3-wire.md",
@@ -66,52 +66,52 @@
         },
         {
           "path": "src/data/graph_order.zig",
-          "sha256": "d23f420a481ee063ccc615f22b4161ffe6159039e1b231455d3b22ec07311b84"
+          "sha256": "fd0d4e5a1cb34232bad7039d7ae81ffcdaeb4edba9115d5e03da1c30dd39a91f"
         },
         {
           "path": "src/data/invocation.zig",
-          "sha256": "e5d5aa5d54aa1a0af999b1beed6f41e72d2e3ddb28c99aad2d237e3b797bc393"
+          "sha256": "85b466d7a314b2d04d80e4c5ceb887199639e578c901c06d7a2261f86c0cc5b4"
         },
         {
           "path": "src/data/closed_compilation.zig",
-          "sha256": "76efa8cee6634c6ec1987bad31cda70cf6246a16b5a27633ed8209a5f7264599"
+          "sha256": "1021df8517292a095271b68a7d78fd56ae6e59eebc1454ad21c620171eab73a9"
         },
         {
           "path": "src/source/diagnostic.zig",
-          "sha256": "85065ffd93cd623a0eaebbb4e75731bfd5d87a6a615a9043aebc7750daf2ad36"
+          "sha256": "0ec3d8b038018a41a5185636ab1a936b404a58ef55c1bad3b7d67b50596e93c4"
         },
         {
           "path": "src/authoring.zig",
-          "sha256": "d5d508b8f1cbc9be04c7ff42990616bd26a5d5088c14c42edd67ca768b3ac288"
+          "sha256": "5c949c3116bcb6d41ac8834447898c8753258fbd0b7dd9e28f5bedd1b27a57b9"
         },
         {
           "path": "src/data/native_shape.zig",
-          "sha256": "5f12695e20b1fb2fa663cb4e5d278b27e1231bdd8af7c6709e95cc7291d60f34"
+          "sha256": "01f982bf51aa6ea0e60216561fc6a48b50bef01876786aa5204f9b792868da4b"
         },
         {
           "path": "src/authoring/runtime.zig",
-          "sha256": "755db87e807dffd1fcbc9aa5997308e81122206e0645b8f27042bd515d9e7642"
+          "sha256": "ae0db553aeb657847737aa263ca71b7b8bc01e7a4cc1af6f7a1f2ab6a6482376"
         }
       ]
     }
   },
   "world": {
     "repository": "tkersey/kosmos",
-    "commit": "0ae7ad45ade2ea7512d563663a25f31c7b296311",
-    "gitTree": "b1a9db9c05cc766b9512b72a0c6b6162358b8e1f",
-    "version": "9.0.0",
+    "commit": "6b1e020294a5fe9546af4e2b92a21267b315c419",
+    "gitTree": "4a2d4b85a1cead6d3895cb2123b01e6a53bdf2ff",
+    "version": "9.1.0",
     "source": {
-      "inventorySha256": "f373d6a5c7df676ca79a7f29154f47647638161ae3a9274d7a34aae6d65636ff",
-      "entries": 201,
-      "bytes": 2663470
+      "inventorySha256": "4e6d5b6d75d3844cc26ea9bd27a2031a9d006888b63363910e2b3f7220c69688",
+      "entries": 211,
+      "bytes": 3178212
     },
     "archive": {
-      "url": "https://github.com/tkersey/kosmos/archive/0ae7ad45ade2ea7512d563663a25f31c7b296311.tar.gz",
-      "sha256": "98a38e555576c65d13857f72468a411a196a1fda6615038633433ab75f3bf9ac",
-      "bytes": 610879,
-      "origin": "GitHub commit archive authenticated against the complete Git tree."
+      "url": "https://github.com/tkersey/kosmos/archive/6b1e020294a5fe9546af4e2b92a21267b315c419.tar.gz",
+      "sha256": "d23e89b5de24c725f0720db9359450b8042dfcb063de3eb79d63ebc942c90785",
+      "bytes": 697644,
+      "origin": "Local git archive of the exact committed tree; transport bytes are locally retained, not authenticated as a GitHub archive."
     },
-    "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree."
+    "authentication": "Committed local development source and archive authenticated; remote availability is not asserted."
   },
   "toolchain": {
     "zig": {
@@ -124,16 +124,13 @@
   "publicationObservation": {
     "compatiblePublishedReleaseObserved": false,
     "releases": [],
-    "pullRequests": [
-      "https://github.com/tkersey/horos/pull/174",
-      "https://github.com/tkersey/kosmos/pull/71"
-    ]
+    "pullRequests": []
   },
   "limitations": [
-    "Development Horos 6.0.0 and Kosmos 9.0.0 commits published in draft PRs; complete remote archive transport and source identities authenticated. These are not released versions.",
+    "Local committed integration only; dependency commits and local archive bytes have not been published. The recorded GitHub URLs identify the intended commits but remote transport remains unqualified.",
     "Controlled-provider qualification does not establish live-provider availability or model quality; existing saved tasks retain their original executable and image bindings."
   ],
   "notes": [
-    "Exact published development source tuple for executable semantics. Final platform, performance and review qualification remains open."
+    "Source overrides and retained local commit archives provide the exact dependency tuple for local qualification."
   ]
 }

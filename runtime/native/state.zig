@@ -39,8 +39,8 @@ pub const Outcome = enum { progressed, yielded, requested, completed, failed, ca
 pub const Schedule = enum { queued, active, parked };
 pub const Status = enum { queued, running, waiting_input, parked, cancelling, blocked, unknown, completed, failed, cancelled };
 /// Portable task records. Source-local retention records are not archive kinds.
-pub const RecordKind = enum { occurrence, question, message, artifact, capture, attempt, origin, reconciliation, workspace_program, workspace_work, workspace_value, workspace_view, workspace_port, workspace_port_reply, execution_route, workspace_wait, workspace_delegation, workspace_reply, workspace_runtime, placement_custody, placement_control, placement_action, placement_move, placement_succession, root_operation, controller_binding, controller_interaction, controller_succession, controller_residual, placement_behavior, workspace_trial };
-pub const Blocker = enum { missing_capability, denied, capacity, missing_artifact, incompatible_profile, unavailable_environment, waiting_workspace };
+pub const RecordKind = enum { occurrence, question, message, artifact, capture, attempt, origin, reconciliation, workspace_program, workspace_work, workspace_value, workspace_view, workspace_port, workspace_port_reply, execution_route, workspace_wait, workspace_delegation, workspace_reply, workspace_runtime, placement_custody, placement_control, placement_action, placement_move, placement_succession, root_operation, controller_binding, controller_interaction, controller_succession, controller_residual, placement_behavior, workspace_trial, workspace_candidate };
+pub const Blocker = enum { missing_capability, denied, capacity, missing_artifact, incompatible_profile, unavailable_environment, waiting_workspace, observation_blocked };
 
 /// Physical controller progress is independent of the last published guest cut.
 /// This row is replaced on suspension and cleared atomically with the next cut.
@@ -131,6 +131,7 @@ pub const ControllerResidual = struct {
     schedule: Schedule = .queued,
     blocker: ?Blocker = null,
     outer_operation: ?OuterOperation = null,
+    runtime: ?Reference = null,
 };
 
 pub const ControllerResidualObservation = struct {
@@ -148,6 +149,8 @@ pub const ControllerResidualObservation = struct {
     cancellation_applied: bool,
     schedule: Schedule,
     blocker: ?Blocker,
+
+    runtime: ?Reference = null,
 
     pub fn from(value: ControllerResidual) ControllerResidualObservation {
         var result: ControllerResidualObservation = undefined;
@@ -208,6 +211,9 @@ pub const Task = struct {
     inference_request_bytes: u64,
     inference_output_tokens: u64,
     evidence_bytes: u64,
+    controller_runtime: ?Reference = null,
+    realization_revision: u64 = 0,
+    observers_present: bool = false,
 
     pub fn terminal(task: @This()) bool {
         return switch (task.outcome_kind) {
@@ -358,6 +364,9 @@ pub const WorkPublication = struct {
     checkpoint: ?Reference = null,
     observation: Digest,
     control: @import("workspace_state.zig").ControlObservation,
+    observer: ?@import("workspace_state.zig").Observer = null,
+    guard: ?@import("workspace_state.zig").Guard = null,
+    guest_work: u64 = 0,
 };
 
 pub const Artifact = struct {
@@ -504,6 +513,15 @@ pub fn visitReconciliationHistory(a: std.mem.Allocator, store: anytype, current:
     }
 }
 
+pub fn controllerExecutionIdentity(id: TaskId) Digest {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update("protean.controller.outer.v1\x00");
+    hash.update(&id);
+    var result: Digest = undefined;
+    hash.final(&result);
+    return result;
+}
+
 /// An operation receipt retains the exact observation returned at admission,
 /// including historical work checkpoints superseded by later execution.
 pub fn visitWorkspaceReceipt(a: std.mem.Allocator, store: anytype, receipt: Receipt, collector: anytype) anyerror!void {
@@ -517,7 +535,7 @@ pub fn visitWorkspaceReceipt(a: std.mem.Allocator, store: anytype, receipt: Rece
     const bytes = try store.object(a, ref, null);
     defer a.free(bytes);
     const w = @import("workspace_state.zig");
-    inline for (.{ .{ .program, w.ProgramArtifact }, .{ .work, w.WorkObservation }, .{ .value, w.ValueArtifact }, .{ .view, w.ViewArtifact }, .{ .runtime, w.Runtime }, .{ .residual, ControllerResidual } }) |entry| {
+    inline for (.{ .{ .program, w.ProgramArtifact }, .{ .work, w.WorkObservation }, .{ .value, w.ValueArtifact }, .{ .view, w.ViewArtifact }, .{ .runtime, w.Runtime }, .{ .residual, ControllerResidual }, .{ .controller, w.ControllerRealization }, .{ .candidate, w.SemanticObservation } }) |entry| {
         if (kind == entry[0]) {
             const T = entry[1];
             var decoded = try contracts.decodeOwned(T, a, bytes);
@@ -532,6 +550,11 @@ pub fn visitWorkspaceReceipt(a: std.mem.Allocator, store: anytype, receipt: Rece
                 if (!std.meta.eql(decoded.value.id, id) or !std.meta.eql(decoded.value.task, receipt.task)) return error.CorruptState;
             } else if (T == w.Runtime) {
                 if (!std.meta.eql(decoded.value.artifact.digest, id) or !std.meta.eql(decoded.value.task, receipt.task)) return error.CorruptState;
+            } else if (T == w.ControllerRealization) {
+                if (!std.meta.eql(controllerExecutionIdentity(receipt.task), id)) return error.CorruptState;
+            } else if (T == w.SemanticObservation) {
+                const expected = if (decoded.value.candidate) |candidate| candidate.digest else ref.digest;
+                if (!std.meta.eql(expected, id)) return error.CorruptState;
             } else if (!std.meta.eql(ref.digest, id)) return error.CorruptState;
             try collector.typed(T, ref, decoded.value);
             return;

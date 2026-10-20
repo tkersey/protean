@@ -134,7 +134,7 @@ pub fn fixtureManifest(a: std.mem.Allocator, image: []const u8, identity: [32]u8
         .native_host_contract = "unit-native-contract",
         .protocol = "agent-host/2.1",
         .client_mapping = "agent-client-values/1.1",
-        .state_format = "agent-native-state/17",
+        .state_format = "agent-native-state/18",
         .optimize = "debug",
         .program_sha256 = @as([]const u8, &image_hex),
         .program_identity = @as([]const u8, &identity_hex),

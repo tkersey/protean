@@ -95,6 +95,11 @@ pub const Driver = opaque {
         if (!owner.live) return error.InvalidState;
         return owner.resident.runtimeBytes(a);
     }
+    pub fn runtimeObservation(self: *Driver, a: std.mem.Allocator) !kosmos.RuntimeObservation {
+        const owner = self.storage();
+        if (!owner.live) return error.InvalidState;
+        return owner.resident.runtimeObservation(a);
+    }
     pub fn publishCapsule(self: *Driver, a: std.mem.Allocator, kind: kosmos.RuntimeCapsule.Kind, provenance: kosmos.RuntimeCapsule.Provenance) !*kosmos.CapsuleReceipt {
         const owner = self.storage();
         if (!owner.live) return error.InvalidState;
@@ -171,7 +176,12 @@ pub const Driver = opaque {
 
     /// The outcome belongs to output. The checkpoint remains owned here until
     /// the next successful drive or retirement, including after storage fails.
-    pub const Publication = struct { outcome: []u8, checkpoint: []const u8, trace: ?kosmos.RuntimeInstrumentation.Output = null };
+    pub const Publication = struct {
+        outcome: []u8,
+        checkpoint: []const u8,
+        trace: ?kosmos.RuntimeInstrumentation.Output = null,
+        guest_work: u64 = 0,
+    };
 
     pub fn drive(self: *Driver, output: std.mem.Allocator, control: data.invocation.Control, quantum: u64) !Publication {
         const owner = self.storage();
@@ -180,7 +190,7 @@ pub const Driver = opaque {
         const checkpoint = published.takeCheckpoint().?;
         self.clearReceipt();
         owner.checkpoint = checkpoint;
-        return .{ .outcome = published.outcome.encoded, .checkpoint = checkpoint.bytes(), .trace = published.trace };
+        return .{ .outcome = published.outcome.encoded, .checkpoint = checkpoint.bytes(), .trace = published.trace, .guest_work = published.guest_work };
     }
     pub fn close(self: *Driver) !void {
         const owner = self.storage();

@@ -135,6 +135,83 @@ pub fn binaryQuestion(b: *source.Builder) !source.Module {
     return b.module(entry, unit);
 }
 
+pub const SemanticGuestInput = struct { yields: u64, seed: u64 };
+
+pub fn semanticGuest(b: *source.Builder) !source.Module {
+    const question = try binaryQuestion(b);
+    const branches = try mutableAlternatives(b);
+    const unit = question.failure;
+    const number = try b.scalar(u64);
+    const boolean = try b.scalar(bool);
+    const input = try @import("protean_contracts").schema(SemanticGuestInput, b);
+    const question_effect = b.functions.items[@intCast(question.entry)].effects[0];
+    const alternative_effects = b.functions.items[@intCast(branches.entry)].effects;
+    const effects = [_]source.Id{ question_effect, alternative_effects[0], alternative_effects[1] };
+    const info = try @import("horos").library.cleanup.exitInfo(b, unit);
+    const body = try b.declare(&.{}, boolean, &.{question_effect}, &.{});
+    const answer = try b.variable(boolean);
+    try b.define(body, try b.bind(answer, try b.term(.{ .call = .{
+        .function = question.entry,
+        .arguments = &.{try b.constant(void, {})},
+    } }), try b.term(.{ .yield_then = try b.pure(try b.reference(answer)) })));
+    const cleanup = try b.declare(&.{info}, unit, &.{}, &.{});
+    try b.define(cleanup, try b.term(.{ .yield_then = try b.pure(try b.constant(void, {})) }));
+    const body_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{},
+        .result = boolean,
+        .effects = &.{question_effect},
+    } } });
+    const cleanup_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{info},
+        .result = unit,
+    } } });
+    const run = try b.declare(&.{number}, number, &effects, &.{});
+    const protected_answer = try b.variable(boolean);
+    const true_branch = try b.term(.{ .call = .{
+        .function = branches.entry,
+        .arguments = &.{try b.reference(b.parameter(run, 0))},
+    } });
+    const false_branch = try b.pure(try b.constant(u64, 0));
+    const selected = try b.term(.{ .conditional = .{
+        .condition = try b.reference(protected_answer),
+        .when_true = true_branch,
+        .when_false = false_branch,
+    } });
+    try b.define(run, try b.bind(protected_answer, try b.term(.{ .protect = .{
+        .body = try b.lambda(body, body_type),
+        .cleanup = try b.lambda(cleanup, cleanup_type),
+    } }), selected));
+    const prefix = try b.declare(&.{ number, number }, number, &effects, &.{});
+    const remaining = try b.reference(b.parameter(prefix, 0));
+    const seed = try b.reference(b.parameter(prefix, 1));
+    const zero = try b.constant(u64, 0);
+    const mechanical = try b.primitive(number, .integer_bit_xor, &.{ seed, zero }, 0);
+    const fault = try b.failureLiteral(try b.constant(void, {}));
+    const next = try b.value(.{ .schema = number, .expression = .{ .primitive = .{
+        .opcode = .integer_sub,
+        .operands = &.{ remaining, try b.constant(u64, 1) },
+        .failures = &.{.{ .kind = .arithmetic_overflow, .value = fault }},
+    } } });
+    try b.define(prefix, try b.term(.{ .conditional = .{
+        .condition = try b.primitive(boolean, .equal, &.{ remaining, zero }, 0),
+        .when_true = try b.term(.{ .call = .{ .function = run, .arguments = &.{mechanical} } }),
+        .when_false = try b.term(.{ .yield_then = try b.term(.{ .call = .{
+            .function = prefix,
+            .arguments = &.{ next, mechanical },
+        } }) }),
+    } }));
+    const entry = try b.declare(&.{input}, number, &effects, &.{});
+    const argument = try b.reference(b.parameter(entry, 0));
+    try b.define(entry, try b.term(.{ .call = .{
+        .function = prefix,
+        .arguments = &.{
+            try b.primitive(number, .field, &.{argument}, 0),
+            try b.primitive(number, .field, &.{argument}, 1),
+        },
+    } }));
+    return b.module(entry, unit);
+}
+
 pub fn mutableAlternatives(b: *source.Builder) !source.Module {
     const u = try b.scalar(u64);
     const unit = try b.scalar(void);
@@ -267,7 +344,7 @@ pub const Reconstruction = struct {
     pub const Indexed = struct { records: Input, index: Input, cursor: u64, total: u64, covered: u64, instruction_cut: u64, exceptional: u64 };
     pub const Private = union(enum) { initial: Input, @"resume": Direct };
     pub const Proposal = struct { position: u64, value: u64, total: u64, covered: u64, indexed: bool, instruction_cut: u64 };
-    pub const Response = union(enum) { next: void, adopt: c.workspace.Adoption, inspect: c.workspace.Ref };
+    pub const Response = union(enum) { next: void, adopt: c.workspace.Adoption, inspect: c.workspace.Ref, realize: @FieldType(c.workspace.Work, "realize_controller") };
     pub const Types = struct {
         pub const application_id = "reconstruction-fixture";
         pub const input_schema_id = "reconstruction.input/1";
@@ -323,6 +400,9 @@ pub const Reconstruction = struct {
         return controllerWithReplay(b, indexed, cleanup, workspace_command, cleanup_steps, false);
     }
     pub fn controllerWithReplay(b: *source.Builder, indexed: bool, cleanup: bool, workspace_command: ?c.workspace.Command, cleanup_steps: usize, replay_adoption: bool) !source.Module {
+        return controllerWithActions(b, indexed, cleanup, workspace_command, cleanup_steps, replay_adoption, false);
+    }
+    pub fn controllerWithActions(b: *source.Builder, indexed: bool, cleanup: bool, workspace_command: ?c.workspace.Command, cleanup_steps: usize, replay_adoption: bool, realize_runtime: bool) !source.Module {
         const e: E = .{ .b = b };
         const unit = try e.schema(void);
         const state_schema = if (indexed) try e.schema(Indexed) else try e.schema(Direct);
@@ -331,8 +411,8 @@ pub const Reconstruction = struct {
         const payload = try b.schema(.{ .product = &.{ try e.schema(Proposal), state_schema } });
         const reply = try e.schema(c.controller.Reply(Response));
         const deliberate = try b.effect(.{ .identity = "controller/1/deliberate", .payload = payload, .result = reply, .external = false });
-        const workspace_effect = if (workspace_command != null or replay_adoption) try b.effect(.{ .identity = "controller/1/workspace", .payload = try e.schema(c.workspace.Command), .result = try e.schema(c.workspace.Reply), .external = false }) else null;
-        const main_effects: []const Id = if (replay_adoption) try b.allocator().dupe(Id, &.{ deliberate, workspace_effect.? }) else &.{deliberate};
+        const workspace_effect = if (workspace_command != null or replay_adoption or realize_runtime) try b.effect(.{ .identity = "controller/1/workspace", .payload = try e.schema(c.workspace.Command), .result = try e.schema(c.workspace.Reply), .external = false }) else null;
+        const main_effects: []const Id = if (replay_adoption or realize_runtime) try b.allocator().dupe(Id, &.{ deliberate, workspace_effect.? }) else &.{deliberate};
         const loop = try b.declare(&.{state_schema}, try e.schema(Output), main_effects, &.{});
         const state = try b.reference(b.parameter(loop, 0));
         const records = try e.field(Input, state, 0);
@@ -361,7 +441,7 @@ pub const Reconstruction = struct {
             const revisited = try e.product(Direct, &.{ records, try e.length(records), total, covered, cut, try b.constant(bool, false) });
             const proposal = try e.product(Proposal, &.{ selected, item, try e.field(u64, next, 2), try e.field(u64, next, 3), try b.constant(bool, false), cut });
             const continued = try e.call(loop, &.{next});
-            const settled = if (replay_adoption) blk: {
+            const settled = if (replay_adoption or realize_runtime) blk: {
                 const ordinary_response = try b.variable(unit);
                 const adoption = try b.variable(try e.schema(c.workspace.Adoption));
                 const program = try b.primitive(try e.schema(c.workspace.Program), .variant, &.{try b.reference(adoption)}, @backingInt(@as(@import("std").meta.Tag(c.workspace.Program), .adopt)));
@@ -371,10 +451,14 @@ pub const Reconstruction = struct {
                 const inspection = try e.product(@FieldType(c.workspace.Work, "inspect"), &.{try b.reference(inspected)});
                 const work = try b.primitive(try e.schema(c.workspace.Work), .variant, &.{inspection}, @backingInt(@as(@import("std").meta.Tag(c.workspace.Work), .inspect)));
                 const inspect_command = try b.primitive(try e.schema(c.workspace.Command), .variant, &.{work}, @backingInt(@as(@import("std").meta.Tag(c.workspace.Command), .work)));
+                const realization = try b.variable(try e.schema(@FieldType(c.workspace.Work, "realize_controller")));
+                const realize_work = try b.primitive(try e.schema(c.workspace.Work), .variant, &.{try b.reference(realization)}, @backingInt(@as(@import("std").meta.Tag(c.workspace.Work), .realize_controller)));
+                const realize_command = try b.primitive(try e.schema(c.workspace.Command), .variant, &.{realize_work}, @backingInt(@as(@import("std").meta.Tag(c.workspace.Command), .work)));
                 break :blk try b.term(.{ .match_sum = .{ .value = try e.field(Response, try b.reference(response), 0), .cases = &.{
                     .{ .variable = ordinary_response, .body = continued },
-                    .{ .variable = adoption, .body = try b.bind(try b.variable(try e.schema(c.workspace.Reply)), performed, continued) },
-                    .{ .variable = inspected, .body = try b.bind(try b.variable(try e.schema(c.workspace.Reply)), try b.term(.{ .perform = .{ .effect = workspace_effect.?, .payload = inspect_command } }), continued) },
+                    .{ .variable = adoption, .body = if (replay_adoption) try b.bind(try b.variable(try e.schema(c.workspace.Reply)), performed, continued) else continued },
+                    .{ .variable = inspected, .body = if (replay_adoption) try b.bind(try b.variable(try e.schema(c.workspace.Reply)), try b.term(.{ .perform = .{ .effect = workspace_effect.?, .payload = inspect_command } }), continued) else continued },
+                    .{ .variable = realization, .body = if (realize_runtime) try b.bind(try b.variable(try e.schema(c.workspace.Reply)), try b.term(.{ .perform = .{ .effect = workspace_effect.?, .payload = realize_command } }), continued) else continued },
                 } } });
             } else continued;
             const interact = try b.bind(response, try b.term(.{ .perform = .{ .effect = deliberate, .payload = try b.primitive(payload, .product, &.{ proposal, next }, 0) } }), settled);
@@ -443,3 +527,119 @@ pub const Reconstruction = struct {
         return b.module(entry, try e.schema(void));
     }
 };
+
+pub fn cutObserver(b: *source.Builder, fails: bool) !source.Module {
+    const data = @import("horos_data");
+    const views = @import("kosmos").RuntimeViews;
+    const view = try data.schema.native.lower(data.schema.native.info(views.GuestView), b);
+    const envelope = try data.schema.native.lower(
+        data.schema.native.info(@import("protean_native").workspace.ObserverEnvelope),
+        b,
+    );
+    const disclosed = try b.schema(.{ .product = &.{ envelope, view } });
+    const binding = try data.schema.native.lower(data.schema.native.info(views.Binding), b);
+    const number = try b.scalar(u64);
+    const unit = try b.scalar(void);
+    const input = try b.schema(.{ .product = &.{ disclosed, number } });
+    const output = try b.schema(.{ .product = &.{ number, number } });
+    const entry = try b.declare(&.{input}, output, &.{}, &.{});
+    const parameter = try b.reference(b.parameter(entry, 0));
+    const selected = try b.primitive(disclosed, .field, &.{parameter}, 0);
+    const cut = try b.primitive(view, .field, &.{selected}, 1);
+    const before = try b.primitive(number, .field, &.{parameter}, 1);
+    const provenance = try b.primitive(binding, .field, &.{cut}, 0);
+    const revision = try b.primitive(number, .field, &.{provenance}, 5);
+    const sum = try b.value(.{ .schema = number, .expression = .{ .primitive = .{
+        .opcode = .integer_add,
+        .operands = &.{ before, revision },
+        .failures = &.{.{ .kind = .arithmetic_overflow, .value = try b.constant(void, {}) }},
+    } } });
+    const nodes = try data.schema.native.lower(data.schema.native.info([]const views.Node), b);
+    const list = try b.primitive(nodes, .field, &.{cut}, 2);
+    const count = try b.primitive(number, .sequence_length, &.{list}, 0);
+    const result = try b.primitive(output, .product, &.{ sum, count }, 0);
+    try b.define(entry, if (fails)
+        try b.term(.{ .fail = try b.constant(void, {}) })
+    else
+        try b.pure(result));
+    return b.module(entry, unit);
+}
+
+pub const RetentionObservation = struct {
+    target: u64,
+    emitted: struct {
+        relation: @import("kosmos").RuntimeQueries.RetentionResult,
+        request_all_nodes: bool,
+    },
+};
+
+pub fn retentionObserver(b: *source.Builder) !source.Module {
+    const data = @import("horos_data");
+    const c = @import("protean_contracts");
+    const query = try @import("kosmos").RuntimeQueries.retention(b);
+    const query_function = b.functions.items[@intCast(query.entry)];
+    const query_input = b.variables.items[@intCast(query_function.parameters[0])];
+    const query_result = query_function.result;
+    const view = try data.schema.native.lower(
+        data.schema.native.info(@import("kosmos").RuntimeViews.GuestView),
+        b,
+    );
+    const envelope = try c.schema(@import("protean_native").workspace.ObserverEnvelope, b);
+    const disclosed = try b.schema(.{ .product = &.{ envelope, view } });
+    const number = try b.scalar(u64);
+    const boolean = try b.scalar(bool);
+    const input = try b.schema(.{ .product = &.{ disclosed, number } });
+    const output = try c.schema(RetentionObservation, b);
+    const emitted = try c.schema(@FieldType(RetentionObservation, "emitted"), b);
+    const Conclusion = @FieldType(@import("kosmos").RuntimeQueries.RetentionResult, "conclusion");
+    const conclusion = try c.schema(Conclusion, b);
+    const unknown = try b.literal(.{
+        .schema = conclusion,
+        .bytes = try c.encodeOwned(Conclusion, b.allocator(), .unknown_partial),
+    });
+    const entry = try b.declare(&.{input}, output, &.{}, &.{});
+    const argument = try b.reference(b.parameter(entry, 0));
+    const selected = try b.primitive(disclosed, .field, &.{argument}, 0);
+    const cut = try b.primitive(view, .field, &.{selected}, 1);
+    const target = try b.primitive(number, .field, &.{argument}, 1);
+    const result = try b.variable(query_result);
+    const relation = try b.reference(result);
+    const disposition = try b.primitive(conclusion, .field, &.{relation}, 1);
+    const request = try b.primitive(boolean, .equal, &.{ disposition, unknown }, 0);
+    const observation = try b.primitive(emitted, .product, &.{ relation, request }, 0);
+    try b.define(entry, try b.bind(result, try b.term(.{ .call = .{
+        .function = query.entry,
+        .arguments = &.{try b.primitive(query_input, .product, &.{ cut, target }, 0)},
+    } }), try b.pure(try b.primitive(output, .product, &.{ target, observation }, 0))));
+    return b.module(entry, query.failure);
+}
+
+pub fn outerCutObserver(b: *source.Builder) !source.Module {
+    const data = @import("horos_data");
+    const view = try data.schema.native.lower(
+        data.schema.native.info(@import("kosmos").RuntimeCapsule.OuterView),
+        b,
+    );
+    const envelope = try data.schema.native.lower(
+        data.schema.native.info(@import("protean_native").workspace.ObserverEnvelope),
+        b,
+    );
+    const disclosed = try b.schema(.{ .product = &.{ envelope, view } });
+    const number = try b.scalar(u64);
+    const unit = try b.scalar(void);
+    const input = try b.schema(.{ .product = &.{ disclosed, number } });
+    const output = try b.schema(.{ .product = &.{ number, number } });
+    const entry = try b.declare(&.{input}, output, &.{}, &.{});
+    const parameter = try b.reference(b.parameter(entry, 0));
+    const selected = try b.primitive(disclosed, .field, &.{parameter}, 0);
+    const event = try b.primitive(envelope, .field, &.{selected}, 0);
+    const cursor = try b.primitive(number, .field, &.{event}, 2);
+    const before = try b.primitive(number, .field, &.{parameter}, 1);
+    const sum = try b.value(.{ .schema = number, .expression = .{ .primitive = .{
+        .opcode = .integer_add,
+        .operands = &.{ before, cursor },
+        .failures = &.{.{ .kind = .arithmetic_overflow, .value = try b.constant(void, {}) }},
+    } } });
+    try b.define(entry, try b.pure(try b.primitive(output, .product, &.{ sum, cursor }, 0)));
+    return b.module(entry, unit);
+}
