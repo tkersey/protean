@@ -889,6 +889,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       if (suite === 'runtime') console.error(JSON.stringify({runtime_fixture: name, stage: 'launch'}));
       scenario = name; alternateIndex = 0;
       toolSubject = {recipe: name === 'tools-reverse' ? reverseRecipe : coverageRecipe, foreign: retainedProgram};
+      if (name === 'tools-runtime-mobility') toolSubject.packagedControllerSource = asset.controller.source_records;
       if (['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name)) {
         assert(sourcePeer, 'the mobility scenario requires its Horos source emitter');
         const emitted = await execute(sourcePeer, ['mobility'], {encoding: 'utf8', maxBuffer: 16 << 20});
@@ -1080,7 +1081,8 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         await invoke('export-checkpoint', '--state-dir', selectedState, '--task-id', task.task_id, '--output', bundle);
         const archiveBytes = await readFile(bundle);
         const accountedActions = toolSubject.actions;
-        const metrics = workspaceMetrics(readArchive(archiveBytes), JSON.parse(await readFile(applicationPath, 'utf8')));
+        const archived = readArchive(archiveBytes);
+        const metrics = workspaceMetrics(archived, JSON.parse(await readFile(applicationPath, 'utf8')));
         assert.equal(metrics.runtime_specializations_requested, accountedActions.filter(action => action.name === 'program' && action.arguments.command.tag === 'specialize').length);
         assert.equal(metrics.runtime_switches_requested, accountedActions.filter(action => (action.name === 'work' && action.arguments.command.tag === 'realize') || (action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize')).length);
         if (name === 'tools-runtime-guest-mobility') {
@@ -1089,6 +1091,10 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           assert.equal(new Set(switches.map(action => action.arguments.command.value.operation)).size, 1);
         }
         if (name === 'tools-runtime-mobility') {
+          const sourceReference = toolSubject.controllerSourceReference;
+          assert.equal(sourceReference.kind, 'source');
+          const sourceBytes = archived.object([Buffer.from(sourceReference.id, 'hex'), BigInt(Buffer.byteLength(toolSubject.controllerSource))]);
+          assert.equal(sourceBytes.toString('utf8'), toolSubject.controllerSource);
           assert.equal(metrics.controller_adoptions, 1);
           assert.equal(metrics.rejected_adoptions, 0);
           assert(metrics.compiler_nanoseconds > 0);

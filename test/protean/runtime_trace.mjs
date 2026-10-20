@@ -1,6 +1,7 @@
 // Prescribed choices exercise the actual model/workspace boundary. They make
 // no claim that a live model discovers the strategy or chooses it well.
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 const call = (name, tag, value) => [name, {command: {tag, value}}];
 const observed = reply => {
   assert(['observed', 'admitted'].includes(reply.disposition), JSON.stringify(reply));
@@ -75,9 +76,10 @@ function* reconstructionTrace(subject) {
   }
   const before = JSON.parse(yield* pages('program', 'describe', {section: 'current_controller'}));
   assert.equal(before.controller_epoch, 0);
-  const source = yield* pages('context', 'expand', {reference: before.source});
+  const source = subject.packagedControllerSource;
+  assert.equal(before.source.id, createHash('sha256').update(source).digest('hex'));
   subject.controllerSource = source;
-  const candidate = observed(yield call('program', 'build', {source: {tag: 'json_text', value: source}, source_kind: 'source_records', exposures: [], role: 'controller'}));
+  const candidate = observed(yield call('program', 'build', {source: {tag: 'reference', value: before.source}, source_kind: 'source_records', exposures: [], role: 'controller'}));
   const converter = observed(yield call('program', 'build', {source: {tag: 'json_text', value: subject.controllerConverter}, source_kind: 'source_records', exposures: []}));
   subject.reconstructionPrograms = [candidate.program, converter.program];
   subject.adopting = true;
@@ -95,7 +97,13 @@ function* reconstructionTrace(subject) {
   assert.equal(after.controller_epoch, 1);
   assert.deepEqual(after.program, candidate.program);
   assert.notDeepEqual(after.binding.id, before.binding.id);
-  assert.equal(yield* pages('context', 'expand', {reference: after.source}), source);
+  assert.deepEqual(after.source, before.source);
+  const page = observed(yield call('context', 'expand', {reference: after.source, page: {offset: 0, maximum: 48 * 1024}}));
+  assert.equal(Number(page.offset), 0);
+  assert.equal(Number(page.total_bytes), Buffer.byteLength(source));
+  assert(Number(page.next_offset) > 0);
+  assert.equal(page.text, Buffer.from(source).subarray(0, Number(page.next_offset)).toString('utf8'));
+  subject.controllerSourceReference = after.source;
   subject.controllerReconstructed = true;
 }
 
