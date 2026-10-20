@@ -628,24 +628,48 @@ const GeneratedRuntime = struct {
 
 fn transformerDocument(b: *source.Builder) !source.Module {
     const transform = try kosmos.RuntimeTransformation.scalar(b);
-    const function = b.functions.items[@intCast(transform.entry)];
+    const layout = try kosmos.RuntimeTransformation.indexedLayout(b);
+    const function = b.functions.items[@intCast(layout)];
     const argument_schema = b.variables.items[@intCast(function.parameters[0])];
-    const input = try contracts.schema(native.source_records.Document, b);
+    const input = try contracts.schema(native.source_records.IndexedDocument, b);
     const output = try contracts.schema(native.program_construction.CandidateDocument, b);
     const entry = try b.declare(&.{input}, output, &.{}, &.{});
     const document = try b.reference(b.parameter(entry, 0));
-    const module_schema = b.schemas.items[@intCast(argument_schema)].product[0];
-    const module = try b.primitive(module_schema, .field, &.{document}, 1);
-    const argument = try b.primitive(argument_schema, .product, &.{
-        module, try b.constant(u64, 0), try b.constant(u64, 1),
-    }, 0);
+    const module = try producerField(b, document, 1);
+    const references = try producerField(b, document, 2);
+    const argument = try layoutInput(b, module, references, argument_schema);
     const proposal = try b.variable(function.result);
-    const candidate = try layoutCandidate(b, try b.reference(proposal), output);
-    try b.define(entry, try b.bind(proposal, try b.term(.{ .call = .{
-        .function = transform.entry,
+    const candidate = try scalarCandidate(b, transform, try b.reference(proposal), output);
+    const transformed = try b.bind(proposal, try b.term(.{ .call = .{
+        .function = layout,
         .arguments = &.{argument},
-    } }), candidate));
+    } }), candidate);
+    const untouched = try b.primitive(function.result, .product, &.{
+        module,
+        try producerLiteral(b, []const source.relation.RecordStep, &.{}),
+        try producerLiteral(b, @FieldType(kosmos.RuntimeCompiler.RecordProposal, "interfaces"), null),
+    }, 0);
+    const normalized = try b.bind(proposal, try b.pure(untouched), candidate);
+    const schemas = try producerField(b, module, std.meta.fieldIndex(source.Module, "schemas").?);
+    const selected = try producerField(b, try producerField(b, argument, 1), 0);
+    const schema = try producerRequired(b, schemas, selected);
+    const fields = try producerPayload(b, schema, std.meta.fieldIndex(data.program.Schema, "product").?);
+    const first = try producerRequired(b, fields, try b.constant(u64, 0));
+    const second = try producerRequired(b, fields, try b.constant(u64, 1));
+    const reorder = try b.primitive(try b.scalar(bool), .less, &.{ second, first }, 0);
+    try b.define(entry, try b.term(.{ .conditional = .{
+        .condition = reorder,
+        .when_true = transformed,
+        .when_false = normalized,
+    } }));
     return b.module(entry, transform.failure);
+}
+
+fn producerLiteral(b: *source.Builder, comptime T: type, value: T) !Id {
+    return b.literal(.{
+        .schema = try contracts.schema(T, b),
+        .bytes = try contracts.encodeOwned(T, b.allocator(), value),
+    });
 }
 
 fn producerField(b: *source.Builder, value: Id, index: usize) !Id {
@@ -678,8 +702,7 @@ fn producerRequired(b: *source.Builder, sequence: Id, index: Id) !Id {
     return producerPayload(b, try b.primitive(optional, .sequence_get, &.{ sequence, index }, 0), 1);
 }
 
-fn layoutInput(b: *source.Builder, proposal: Id, schema: Id) !Id {
-    const module = try producerField(b, proposal, 0);
+fn layoutInput(b: *source.Builder, module: Id, references: Id, schema: Id) !Id {
     const functions = try producerField(b, module, std.meta.fieldIndex(source.Module, "functions").?);
     const entry_id = try producerField(b, module, std.meta.fieldIndex(source.Module, "entry").?);
     const entry = try producerRequired(b, functions, entry_id);
@@ -691,22 +714,15 @@ fn layoutInput(b: *source.Builder, proposal: Id, schema: Id) !Id {
         .bytes = try contracts.encodeOwned([]const Id, b.allocator(), &.{ 1, 0 }),
     });
     const layout = try b.primitive(layout_schema, .product, &.{ result, coordinates }, 0);
-    return b.primitive(schema, .product, &.{ module, layout }, 0);
+    return b.primitive(schema, .product, &.{ module, layout, references }, 0);
 }
 
-fn layoutCandidate(b: *source.Builder, proposal: Id, output: Id) !Id {
-    const layout = try kosmos.RuntimeTransformation.layout(b);
-    const function = b.functions.items[@intCast(layout)];
+fn scalarCandidate(b: *source.Builder, scalar: source.Module, proposal: Id, output: Id) !Id {
+    const function = b.functions.items[@intCast(scalar.entry)];
     const input = b.variables.items[@intCast(function.parameters[0])];
-    const argument = try layoutInput(b, proposal, input);
-    const module = try producerField(b, proposal, 0);
-    const schemas = try producerField(b, module, std.meta.fieldIndex(source.Module, "schemas").?);
-    const selected = try producerField(b, try producerField(b, argument, 1), 0);
-    const schema = try producerRequired(b, schemas, selected);
-    const fields = try producerPayload(b, schema, std.meta.fieldIndex(data.program.Schema, "product").?);
-    const first = try producerRequired(b, fields, try b.constant(u64, 0));
-    const second = try producerRequired(b, fields, try b.constant(u64, 1));
-    const reorder = try b.primitive(try b.scalar(bool), .less, &.{ second, first }, 0);
+    const argument = try b.primitive(input, .product, &.{
+        try producerField(b, proposal, 0), try b.constant(u64, 0), try b.constant(u64, 1),
+    }, 0);
     const result = try b.variable(function.result);
     const returned = try b.reference(result);
     const steps = try producerField(b, proposal, 1);
@@ -717,16 +733,10 @@ fn layoutCandidate(b: *source.Builder, proposal: Id, output: Id) !Id {
         try producerField(b, returned, 0), combined, try producerField(b, returned, 2),
     }, 0);
     const document = try b.primitive(output, .product, &.{ try b.constant(u32, 1), final }, 0);
-    const transformed = try b.bind(result, try b.term(.{ .call = .{
-        .function = layout,
+    return b.bind(result, try b.term(.{ .call = .{
+        .function = scalar.entry,
         .arguments = &.{argument},
     } }), try b.pure(document));
-    const normalized = try b.primitive(output, .product, &.{ try b.constant(u32, 1), proposal }, 0);
-    return b.term(.{ .conditional = .{
-        .condition = reorder,
-        .when_true = transformed,
-        .when_false = try b.pure(normalized),
-    } });
 }
 
 fn semanticReference(
@@ -780,8 +790,9 @@ fn finishTransformer(
             defer result.deinit();
             try std.testing.expectEqual(@as(u32, 1), result.value.version);
             try std.testing.expectEqual(@as(usize, if (expected_layout) 2 else 1), result.value.proposal.steps.len);
-            try std.testing.expect(result.value.proposal.steps[0].rule == .scalar);
-            if (expected_layout) try std.testing.expect(result.value.proposal.steps[1].rule == .product_layout);
+            const steps = result.value.proposal.steps;
+            try std.testing.expect(steps[steps.len - 1].rule == .scalar);
+            if (expected_layout) try std.testing.expect(steps[0].rule == .product_layout);
             std.debug.print("generated transformer {s}: input={d} result={d} guest_work={d} publications={d} elapsed_ms={d}\n", .{
                 label,
                 current.value.input.bytes,
@@ -822,6 +833,7 @@ fn runTransformer(
             .input = .{ .semantic_source = .{
                 .subject = ancestor,
                 .module = .{ .selected = .{} },
+                .references = true,
             } },
             .sources = .{ .items = &.{} },
         } } },

@@ -30,6 +30,13 @@ does not replace its output. The independent checker admits its supported scalar
 closed-helper, relocation, specialization, and private product-layout relations.
 Unsupported relations and exhausted checks cannot approve a candidate.
 
+Optional source materialization includes a digest-bound reverse-reference index.
+The host enumerates source references; ordinary generated code selects and edits
+the affected declarations. Default materialization does not build the index.
+Validation reconstructs the relation independently from the complete source.
+A same-schema missing-reference mutation remains well typed and is rejected by
+that checker.
+
 Checked realization changes preserve retained guest state. Reference guards
 compare canonical successor state, observation, and guest work before the
 reference owner publishes effects. Agreement is finite evidence, not a proof of
@@ -76,19 +83,19 @@ rather than only the net file-size difference.
 | Repository | Changed test files | Added bytes | Deleted bytes |
 |---|---:|---:|---:|
 | Horos | 3 | 26,035 | 0 |
-| Kosmos | 8 | 73,155 | 773 |
-| Protean | 11 | 160,385 | 5,088 |
-| Total | 22 | 259,575 | 5,861 |
+| Kosmos | 8 | 76,091 | 773 |
+| Protean | 12 | 163,387 | 8,215 |
+| Total | 23 | 265,513 | 8,988 |
 
 No test modules, directories, executables, or CI lanes were added. Protean's
 existing workspace execution count advances from 12 to 13. The largest extension
-is `workspace_runtime.zig` at 136,509 added bytes; the low module count does not
+is `workspace_runtime.zig` at 138,280 added bytes; the low module count does not
 make this a small fixture change. Its generated producer and candidate are reused
 by the custody, five-arm, and mobility checks, avoiding a third producer run.
 Historical independent byte fixtures remain unchanged.
 
 The packaged semantic core is 234,530 bytes, SHA-256
-`bc258c694c9bde928f21363a17f3b9efd9fd0b8407e8153c2b705755c64daeb2`.
+`fedc7ddb03284b65bb28ab6fdb390b3e7b5db1129ff0eaa502da6237dc3f4af8`.
 Generated candidates use `kosmos.semantic-artifact/3` and
 `kosmos.source-relation/1`; the existing artifact family remains `/2`.
 
@@ -107,7 +114,7 @@ Every command has a 600-second watchdog.
 
 Horos reports 60 compiler steps: 60 executed cold, 49 executed and 11 cached
 warm. Its largest reported individual compiler RSS is 2 GB; this is not aggregate
-concurrent memory. Kosmos's committed TigerStyle ratchet passes at `35cb6ff`
-with 33 changed files, 5,423 changed lines, zero diagnostics, and 24 auditor tests.
+concurrent memory. Kosmos's committed TigerStyle ratchet passes at `acf8d71`
+with 35 changed files, 5,762 changed lines, zero diagnostics, and 24 auditor tests.
 The focused disclosure and allocation/rollback regressions pass; they do not
 substitute for the outstanding full-tree and product qualification.

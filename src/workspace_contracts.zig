@@ -37,7 +37,11 @@ pub const Materialization = union(enum) {
     snapshot: struct { path: c.Utf8, offset: u64, maximum: u64 },
     authorized_input: c.Utf8,
     guest_view: GuestViewSelection,
-    semantic_source: struct { subject: SemanticTarget, module: SemanticModule },
+    semantic_source: struct {
+        subject: SemanticTarget,
+        module: SemanticModule,
+        references: bool = false,
+    },
 };
 pub const Policy = struct {
     stop: enum { next_slice, next_exposed_event, terminal } = .next_slice,

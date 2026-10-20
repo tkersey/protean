@@ -116,8 +116,9 @@ constant-memory guarantee for all retained state.
 
 These operations compose through the same program, work and context owners.
 They do not prescribe an analysis sequence or require a runtime replacement.
-`program.describe` with `semantic_candidates` returns the actual proposal schema,
-checker identity, permitted roots/checkers and guard availability.
+`program.describe` with `semantic_candidates` returns the actual proposal and
+indexed-source schemas, checker identity, permitted roots/checkers and guard
+availability.
 
 `program.inspect.target.semantic_source` names a retained runtime, a work with
 exact execution/control/realization revisions, or a controller cut/action.
@@ -136,6 +137,24 @@ consume this value and compute another source/evidence document. Source and
 evidence inspection is paged; materializing a module deliberately retains the
 whole typed module. Merely declaring a `kosmos.semantic-service` effect in
 ordinary source, including unused source, cannot acquire the private bridge.
+
+The optional `references: true` materialization selects a distinct typed
+`IndexedDocument` containing `version`, `module` and `references`. The default
+retains the existing version-one `Document` and does not construct an index.
+Kosmos binds the index to the selected module's canonical source digest. For each
+source catalog kind and declaration ID, its reverse-reference rows contain the
+sorted, unique declarations that refer to it. These are complete source facts;
+the host does not select a transformation, target, rewrite or proof rule. An
+ordinary program can consume the index to perform those decisions and produce
+the same independently checked candidate format.
+
+Materializing references performs work and allocation proportional to source
+catalogs and reference edges, then retains the complete typed index alongside
+the module. Existing materialization limits and allocator failures still apply;
+the index adds no implicit truncation or fallback. Retained provenance includes
+the selection, so replay and archive validation reconstruct the same canonical
+module and index rather than trusting a submitted index. Requesting references
+does not grant execution, publication or runtime-replacement authority.
 
 `work.observe` selects an ordinary program, a `guest_view` source, an initial
 accumulator and an explicit policy. Its input is the typed product

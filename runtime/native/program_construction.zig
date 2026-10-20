@@ -238,6 +238,7 @@ pub fn semanticModuleValue(
     a: std.mem.Allocator,
     runtime: *const @import("kosmos").RuntimeArtifact,
     selection: contracts.workspace.SemanticModule,
+    references: bool,
 ) !SemanticValue {
     var exported = try @import("kosmos").RuntimeCompiler.exportSource(a, runtime);
     defer exported.deinit();
@@ -258,6 +259,18 @@ pub fn semanticModuleValue(
             break :blk extracted.?.module();
         },
     };
+    if (references) {
+        var indexed = try @import("kosmos").RuntimeCompiler.sourceReferences(a, module);
+        defer indexed.deinit();
+        const schema = try @import("values.zig").schemaBytes(records.IndexedDocument, a);
+        errdefer a.free(schema);
+        const value = try contracts.encodeOwned(records.IndexedDocument, a, .{
+            .version = 1,
+            .module = module,
+            .references = indexed.value,
+        });
+        return .{ .schema = schema, .value = value };
+    }
     const schema = try @import("values.zig").schemaBytes(records.Document, a);
     errdefer a.free(schema);
     const value = try contracts.encodeOwned(records.Document, a, .{ .version = 1, .module = module });

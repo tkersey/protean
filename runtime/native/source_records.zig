@@ -8,6 +8,11 @@ const values = @import("values.zig");
 
 pub const identity = "protean-horos-source-records/1";
 pub const Document = struct { version: u32, module: horos.source.Module };
+pub const IndexedDocument = struct {
+    version: u32,
+    module: horos.source.Module,
+    references: @import("kosmos").RuntimeCompiler.SourceReferences,
+};
 const Error = values.Error;
 
 pub const Owned = struct {

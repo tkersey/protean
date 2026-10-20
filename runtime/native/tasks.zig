@@ -7022,6 +7022,14 @@ pub fn Service(comptime Types: type) type {
                 kosmos.RuntimeCompiler.checker_identity,
             ));
             try json.put(a, &result, "proposal_schema", json.string(try a.dupe(u8, schema)));
+            const indexed_schema = try @import("source_records.zig").describeRecord(
+                @import("source_records.zig").IndexedDocument,
+                a,
+            );
+            defer a.free(indexed_schema);
+            try json.put(a, &result, "indexed_source_schema", json.string(
+                try a.dupe(u8, indexed_schema),
+            ));
             var roots: json.Value = .{ .array = .init(a) };
             var checkers: json.Value = .{ .array = .init(a) };
             if (self.profile.semantic_construction) |policy| {
@@ -8096,7 +8104,12 @@ pub fn Service(comptime Types: type) type {
             defer admitted.deinit();
             const runtime = try admitted.encode(a);
             errdefer a.free(runtime);
-            const derived = try construction.semanticModuleValue(a, &admitted, selection.module);
+            const derived = try construction.semanticModuleValue(
+                a,
+                &admitted,
+                selection.module,
+                selection.references,
+            );
             return .{
                 .schema = derived.schema,
                 .value = derived.value,
@@ -8133,7 +8146,12 @@ pub fn Service(comptime Types: type) type {
             defer a.free(bytes);
             var retained = try kosmos.RuntimeArtifact.init(a, bytes, origin.runtime.digest);
             defer retained.deinit();
-            return construction.semanticModuleValue(a, &retained, origin.selection.module);
+            return construction.semanticModuleValue(
+                a,
+                &retained,
+                origin.selection.module,
+                origin.selection.references,
+            );
         }
 
         fn workspaceValueReference(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, ref: wc.Ref) !WorkspaceValueReference {
