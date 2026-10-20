@@ -3383,6 +3383,14 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     }
     if (scenario == .work) {
         phase = "suspend controller before child freeze";
+        var controller = try sender.task(scratch, subject.task);
+        defer controller.deinit();
+        _ = try sender.resumeTask(
+            scratch,
+            "resume-controller-before-child-freeze",
+            subject.task,
+            controller.value.revision,
+        );
         try std.testing.expectEqual(.progressed, try sender.pump(scratch));
         try std.testing.expect(sender.active != null);
         try std.testing.expect(sender.active.?.subject == .root);

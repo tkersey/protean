@@ -45,9 +45,9 @@ settlement and cleanup. Active guards and observer subscriptions must be removed
 before the unsupported mobility cases.
 
 The implementation rebases onto accepted controller reconstruction
-`2e40ce45d0f4b9b2ee81838386d5f1e0693ea228`. Application 8.0.0, workspace contract
-4, and native state format 18 retain historical executable bindings; they do not
-migrate old state implicitly. Horos is 6.1.0 and Kosmos is 9.1.0. The
+`2e40ce45d0f4b9b2ee81838386d5f1e0693ea228`. Package/host 7.0.0, application 8.0.0,
+workspace contract 4, and native state format 18 retain historical executable
+bindings; they do not migrate old state implicitly. Horos is 6.1.0 and Kosmos is 9.1.0. The
 [dependency lock](../conformance/protean/dependencies.lock.json) records exact
 local source commits and archive identities. Remote archive transport remains
 unqualified.
@@ -84,12 +84,12 @@ rather than only the net file-size difference.
 |---|---:|---:|---:|
 | Horos | 3 | 26,035 | 0 |
 | Kosmos | 8 | 76,091 | 773 |
-| Protean | 12 | 163,387 | 8,215 |
-| Total | 23 | 265,513 | 8,988 |
+| Protean | 13 | 163,797 | 8,340 |
+| Total | 24 | 265,923 | 9,113 |
 
 No test modules, directories, executables, or CI lanes were added. Protean's
 existing workspace execution count advances from 12 to 13. The largest extension
-is `workspace_runtime.zig` at 138,280 added bytes; the low module count does not
+is `workspace_runtime.zig` at 138,565 added bytes; the low module count does not
 make this a small fixture change. Its generated producer and candidate are reused
 by the custody, five-arm, and mobility checks, avoiding a third producer run.
 Historical independent byte fixtures remain unchanged.
