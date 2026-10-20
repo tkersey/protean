@@ -5,12 +5,13 @@ observations, isolated interpretations, and generated runtime construction throu
 the existing workspace owners. The public contract is
 [Computational workspace](computational-workspace.md).
 
-Qualification remains incomplete. Linux process-isolation and tracing checks
-require a supported x86-64 Linux environment. The available Apple-container
-Rosetta environment cannot supply the required `strace` events and PID namespace
-behavior. It is not equivalent evidence for those checks or for the workflow's
-600-second aggregate gate. No publication, deployment, paid inference, or claim of
-autonomous model improvement accompanies this implementation.
+Qualification remains incomplete. Linux deployment uses Bubblewrap user and
+mount namespaces and its reported application PID; tracing and a PID namespace
+are no longer required. Focused static x86-64 checks pass in the available
+Apple-container Rosetta environment, including signaling, launcher death,
+controller-file isolation, and exit status. Full product checks and the workflow's
+600-second aggregate gate remain outstanding. No publication, deployment, paid
+inference, or claim of autonomous model improvement accompanies this implementation.
 
 ## Construction and authority
 

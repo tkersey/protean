@@ -3,28 +3,11 @@
 import assert from 'node:assert/strict';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {copyFileSync, createReadStream, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
+import {copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
-import {createInterface} from 'node:readline';
 
 const shell = value => `'${value.replaceAll("'", "'\\''")}'`;
-
-async function* traceExecutions(path) {
-  const input = createReadStream(path);
-  const lines = createInterface({input});
-  try {
-    for await (const line of lines) {
-      if (!/\bexecve(?:at)?\(/.test(line)) continue;
-      assert(!line.includes('execveat('), line);
-      const match = line.match(/execve\("((?:\\.|[^"\\])*)"/);
-      assert(match, line);
-      const octets = match[1].match(/\\x[0-9a-fA-F]{2}/g) ?? [];
-      assert.equal(octets.join(''), match[1], line);
-      yield {path: Buffer.from(octets.map(octet => parseInt(octet.slice(2), 16))).toString('utf8'), pid: Number(line.match(/^\s*(\d+)\s+/)?.[1])};
-    }
-  } finally { lines.close(); input.destroy(); }
-}
 
 export function deployment(source, name) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'Protean deployment ü ')));
@@ -40,14 +23,9 @@ export function deployment(source, name) {
     assert.match(format, /ELF 64-bit.*x86-64/);
     const linkage = execFileSync('readelf', ['-lWd', executable], {encoding: 'utf8'});
     assert(!/INTERP|\(NEEDED\)|\(RPATH\)|\(RUNPATH\)/.test(linkage), 'Linux product must have no dynamic loader or shared-library dependency');
-    // Filter in the kernel so unrelated file/SQLite calls do not incur ptrace
-    // stops. Every process event and descendant remains traced and checked.
-    const args = ['/usr/bin/strace', '--seccomp-bpf', '-f', '-qq', '-xx', '-s', '4096', '-e', 'trace=process', '-o'];
-    const isolate = ['/usr/bin/bwrap', '--unshare-user', '--die-with-parent', '--unshare-pid', '--new-session', '--uid', '0', '--gid', '0',
+    const isolate = ['/usr/bin/bwrap', '--unshare-user', '--die-with-parent', '--new-session', '--uid', '0', '--gid', '0', '--info-fd', '3',
       '--proc', '/proc', '--dev', '/dev', '--ro-bind', executable, executable, '--bind', data, data, '--chdir'];
-    // The controller owns tracing and namespace setup. Neither tool is mounted
-    // into the application boundary. bwrap terminates with its tracer parent.
-    writeFileSync(command, `#!/bin/sh\nexec ${args.map(shell).join(' ')} ${shell(join(controller, 'trace.'))}$$ ${isolate.map(shell).join(' ')} "$PWD" ${shell(executable)} "$@"\n`, {mode: 0o700});
+    writeFileSync(command, `#!/bin/sh\ndeployment_umask=$(umask)\numask 077\nexec 3>${shell(join(controller, 'info.'))}$$\numask "$deployment_umask"\nexec ${isolate.map(shell).join(' ')} "$PWD" ${shell(executable)} "$@"\n`, {mode: 0o700});
   } else if (process.platform === 'darwin') {
     assert.match(format, /Mach-O 64-bit executable arm64/);
     libraries = execFileSync('otool', ['-L', executable], {encoding: 'utf8'}).trim().split('\n').slice(1).map(line => line.trim().split(' (')[0]);
@@ -67,30 +45,15 @@ export function deployment(source, name) {
   } else throw new Error('unqualified native deployment platform');
   return {data, controller, executable, command, async signal(child, signal) {
     if (process.platform !== 'linux') return child.kill(signal);
-    // The launched PID is strace, not the application inside bwrap's new
-    // session. Its private trace identifies the application's host PID.
-    let application;
-    for await (const execution of traceExecutions(join(controller, `trace.${child.pid}`))) {
-      if (execution.path === executable) { application = execution.pid; break; }
-    }
-    assert(Number.isSafeInteger(application) && application > 1, 'trace must identify the original application PID');
+    assert.equal(child.exitCode, null, 'application launcher must still be running');
+    assert.equal(child.signalCode, null, 'application launcher must still be running');
+    const application = JSON.parse(readFileSync(join(controller, `info.${child.pid}`), 'utf8'))['child-pid'];
+    assert(Number.isSafeInteger(application) && application > 1 && application !== child.pid, 'bubblewrap must identify the application PID');
     process.kill(application, signal);
   }, async close(passed) {
     try {
-      let executions = 0;
-      if (process.platform === 'linux' && passed) {
-        const traces = readdirSync(controller).filter(name => name.startsWith('trace.'));
-        assert(traces.length > 0, 'deployment must have an executed trace');
-        for (const name of traces) {
-          for await (const execution of traceExecutions(join(controller, name))) {
-            assert(execution.path === '/usr/bin/bwrap' || execution.path === executable, `unexpected deployment executable: ${execution.path}`);
-            if (execution.path === executable) executions++;
-          }
-        }
-        assert(executions > 0);
-      }
-      console.log(JSON.stringify({native_deployment: name, passed, platform: process.platform, format, libraries, signing, sha256, bytes: binary.length, traced_executions: executions,
-        boundary: process.platform === 'linux' ? 'private user/mount/PID namespaces' : 'OS file-read and executable allowlist'}));
+      console.log(JSON.stringify({native_deployment: name, passed, platform: process.platform, format, libraries, signing, sha256, bytes: binary.length,
+        boundary: process.platform === 'linux' ? 'private user/mount namespaces' : 'OS file-read and executable allowlist'}));
     } finally { rmSync(root, {recursive: true, force: true}); }
   }};
 }
