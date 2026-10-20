@@ -61,6 +61,44 @@ export function* runtimeTrace(subject, scenario) {
   yield ['stop', {reason: 'The runtime structure view does not establish the source claim. The investigation switched to source evidence without continuing the experiment.'}];
 }
 
+function* reconstructionTrace(subject) {
+  function* pages(name, tag, value) {
+    let text = '', offset = 0;
+    for (let i = 0; i < 256; i++) {
+      const page = observed(yield call(name, tag, {...value, page: {offset, maximum: 48 * 1024}}));
+      assert.equal(Number(page.offset), offset);
+      text += page.text;
+      if (page.eof) { assert.equal(Number(page.total_bytes), Buffer.byteLength(text)); return text; }
+      offset = Number(page.next_offset);
+    }
+    assert.fail('controller description exceeded paging bound');
+  }
+  const before = JSON.parse(yield* pages('program', 'describe', {section: 'current_controller'}));
+  assert.equal(before.controller_epoch, 0);
+  const source = yield* pages('context', 'expand', {reference: before.source});
+  subject.controllerSource = source;
+  const candidate = observed(yield call('program', 'build', {source: {tag: 'json_text', value: source}, source_kind: 'source_records', exposures: [], role: 'controller'}));
+  const converter = observed(yield call('program', 'build', {source: {tag: 'json_text', value: subject.controllerConverter}, source_kind: 'source_records', exposures: []}));
+  subject.reconstructionPrograms = [candidate.program, converter.program];
+  subject.adopting = true;
+  yield call('program', 'adopt', {successor: candidate.program, converter: converter.program,
+    expected_controller_epoch: subject.controllerControl.controller_epoch,
+    expected_handoff_identity: subject.controllerControl.expected_handoff_identity,
+    trial: {tag: 'none', value: {}},
+    reason: 'Resume the same authored method through a newly built controller artifact.'});
+  assert.equal(subject.controllerControl.controller_epoch, 1);
+  subject.adopting = false;
+  subject.restoreController = true;
+  yield ['ask', {question: 'Controller replacement is active. Restore this task before continuing the held child?'}];
+  assert(subject.controllerRestored);
+  const after = JSON.parse(yield* pages('program', 'describe', {section: 'current_controller'}));
+  assert.equal(after.controller_epoch, 1);
+  assert.deepEqual(after.program, candidate.program);
+  assert.notDeepEqual(after.binding.id, before.binding.id);
+  assert.equal(yield* pages('context', 'expand', {reference: after.source}), source);
+  subject.controllerReconstructed = true;
+}
+
 function* remoteControl(operation, command) {
   for (let attempt = 0; attempt < 32; attempt++) {
     const observation = observed(yield call('placement', 'control', {operation, command}));
@@ -256,8 +294,9 @@ function* mobilityTrace(subject, guestCut = false) {
     assert.equal(work.realization_revision, beforeSwitch.realization_revision + 1);
     assert.equal(work.runtime, 'packaged-generic');
     assert.deepEqual(work.port, beforeSwitch.port);
+    yield* reconstructionTrace(subject);
     subject.controllerMove = true;
-    observed(yield call('placement', 'move', {operation: 'move-mobility-controller', subject: {tag: 'controller', value: {}}, site: 'successor', custody_epoch: 0}));
+    observed(yield call('placement', 'move', {operation: 'move-mobility-controller', subject: {tag: 'controller', value: {}}, site: 'successor', custody_epoch: 1}));
     assert(subject.controllerMoved);
   }
   work = yield* command('cancel', {expected: expected(work), reason: 'The selected alternatives are acquired; close the retained parent scope.'});

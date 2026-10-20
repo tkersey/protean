@@ -186,6 +186,7 @@ fn eventFields(kind: state.EventType) []const EventField {
         .reconciled => &.{.{ .name = "reconciliation_id", .kind = .digest }},
         .workspace_read => &.{.{ .name = "occurrence_id", .kind = .digest }},
         .workspace, .workspace_progress => &.{.{ .name = "workspace_id", .kind = .digest }},
+        .controller => &.{ .{ .name = "operation", .kind = .digest }, .{ .name = "phase", .kind = .name }, .{ .name = "epoch", .kind = .counter } },
         .accepted, .input_accepted, .cancellation_requested, .parked, .resumed, .delivery_unknown, .completed, .failed, .cancelled => &.{},
     };
 }

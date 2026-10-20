@@ -178,6 +178,7 @@ pub fn build(b: *std.Build) void {
     const adaptive_definition = g.module("examples/adaptive/definition.zig");
     adaptive_definition.addImport("application_types", adaptive_types);
     const emitter_module = g.module("tools/native/emit.zig");
+    emitter_module.addImport("construction", g.module("runtime/native/program_construction.zig"));
     emitter_module.addImport("definition", adaptive_definition);
     emitter_module.addImport("application_types", adaptive_types);
     const adaptive_emitter = g.emitter("protean-assets", emitter_module);
@@ -353,7 +354,7 @@ pub fn build(b: *std.Build) void {
         const workspace_general = b.step("check-workspace-general", "Qualify workspace execution, inputs and provenance");
         const workspace_group = b.option(enum { execution, retention, history }, "workspace-group", "Select independent workspace qualification cases (default: all)");
         const workspace_general_tests = native_graph.testModuleFiltered(workspace_general, workspace_programs, if (workspace_group) |group| switch (group) {
-            .execution => &.{ "BUILD-", "WORK-06", "WORK-08", "exposure carries", "workspace commands", "CTX-01", "deep recursive workspace" },
+            .execution => &.{ "BUILD-", "WORK-C", "WORK-06", "WORK-08", "exposure carries", "workspace commands", "CTX-01", "deep recursive workspace" },
             .retention => &.{ "WORK-01", "AUT-07", "OWN-02" },
             .history => &.{ "collected history", "WORK-14", "delegated model interpretation" },
         } else &.{});
@@ -510,7 +511,8 @@ pub fn build(b: *std.Build) void {
         native_suite.addImport("adaptive_environment", adaptive_test_environment);
         native_suite.addAnonymousImport("adaptive_image", .{ .root_source_file = adaptive_image });
         native_suite.addAnonymousImport("adaptive_application", .{ .root_source_file = adaptive_application });
-        native_suite.addImport("native_asset_writer", native_graph.module("tools/native/emit.zig"));
+        const native_asset_writer = native_graph.module("tools/native/emit.zig");
+        native_suite.addImport("native_asset_writer", native_asset_writer);
         const adaptive_group = b.option(enum { capture, control }, "adaptive-owner-group", "Select independent adaptive owner qualification cases (default: all)");
         inline for (.{
             .{ "adaptive", "test/protean/native_adaptive_tests.zig" },

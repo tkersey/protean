@@ -86,12 +86,15 @@ pub fn digest(a: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     return a.dupe(u8, &std.fmt.bytesToHex(hash, .lower));
 }
 
+pub const SeedController = struct { source: []const u8, descriptor: []const u8 };
+
 pub const Application = struct {
     arena: std.heap.ArenaAllocator,
     metadata: json.Value,
     manifest: json.Value,
     manifest_id: []const u8,
     image_identity: [32]u8,
+    controller: ?SeedController = null,
     protocol_schema: json.Value = .null,
     protocol_schema_sha256: []const u8 = "",
     public_metadata: json.Value = .null,
@@ -99,9 +102,9 @@ pub const Application = struct {
     execution_mode: enum { offline, live } = .offline,
 
     pub fn init(comptime Types: type, a: std.mem.Allocator, assets: Assets, handlers: registry.Registry) !Application {
-        var arena = std.heap.ArenaAllocator.init(a);
-        errdefer arena.deinit();
-        const storage = arena.allocator();
+        var temporary = std.heap.ArenaAllocator.init(a);
+        defer temporary.deinit();
+        const storage = temporary.allocator();
         const metadata = try json.parseAsset(storage, assets.application, assets.application.len);
         const manifest = try json.parseAsset(storage, assets.manifest, assets.manifest.len);
         try sameField(metadata.value, "format", "agent-native-application/v1");
@@ -115,17 +118,20 @@ pub const Application = struct {
         try sameField(manifest.value, "state_format", std.fmt.comptimePrint("agent-native-state/{d}", .{@import("store.zig").format}));
         sameField(manifest.value, "program_sha256", try digest(storage, assets.image)) catch return error.ManifestProgramDigestMismatch;
         try sameField(manifest.value, "application_assets_sha256", try digest(storage, assets.application));
-        const admitted = try data.program_image.Admitted.decode(storage, assets.image);
+        const admitted = try data.program_image.Admitted.decode(a, assets.image);
         defer admitted.deinit();
         const image_identity = admitted.identity();
         try sameField(metadata.value, "program_identity", &std.fmt.bytesToHex(image_identity, .lower));
+        var validation_arena = std.heap.ArenaAllocator.init(a);
+        defer validation_arena.deinit();
+        const scratch = validation_arena.allocator();
         inline for (.{ .{ "input", Types.Input, Types.input_schema_id }, .{ "output", Types.Output, Types.output_schema_id }, .{ "failure", Types.Failure, Types.failure_schema_id }, .{ "answer", Types.Answer, Types.answer_schema_id }, .{ "message", Types.Message, Types.message_schema_id } }) |item| {
             const schema = json.get(metadata.value, item[0]) orelse return error.InvalidAssets;
             try sameField(schema, "schema_id", item[2]);
-            const bytes = try values.schemaBytes(item[1], storage);
-            try sameField(schema, "wire_sha256", try digest(storage, bytes));
-            const client = try json.parseAsset(storage, &values.schemas.ClientSchema(item[1]).value, values.schemas.ClientSchema(item[1]).value.len);
-            if (!std.mem.eql(u8, try json.canonical(storage, client.value), try json.canonical(storage, json.get(schema, "json") orelse return error.InvalidAssets)))
+            const bytes = try values.schemaBytes(item[1], scratch);
+            try sameField(schema, "wire_sha256", try digest(scratch, bytes));
+            const client = try json.parseAsset(scratch, &values.schemas.ClientSchema(item[1]).value, values.schemas.ClientSchema(item[1]).value.len);
+            if (!std.mem.eql(u8, try json.canonical(scratch, client.value), try json.canonical(scratch, json.get(schema, "json") orelse return error.InvalidAssets)))
                 return error.ClientJsonSchemaMismatch;
         }
         const capabilities = json.get(metadata.value, "capabilities") orelse return error.InvalidAssets;
@@ -139,23 +145,70 @@ pub const Application = struct {
             switch (entry.declaration.kind) {
                 .question => {
                     if (!std.mem.eql(u8, entry.declaration.answer_schema_id.?, Types.answer_schema_id) or
-                        !std.mem.eql(u8, entry.resume_schema, try values.schemaBytes(Types.Answer, storage))) return error.QuestionSchemaMismatch;
+                        !std.mem.eql(u8, entry.resume_schema, try values.schemaBytes(Types.Answer, scratch))) return error.QuestionSchemaMismatch;
                 },
                 .inbox => {
-                    if (!std.mem.eql(u8, entry.payload_schema, try values.schemaBytes(void, storage)) or
-                        !std.mem.eql(u8, entry.resume_schema, try values.schemaBytes(contracts.InboxReply(Types.Message), storage))) return error.InboxSchemaMismatch;
+                    if (!std.mem.eql(u8, entry.payload_schema, try values.schemaBytes(void, scratch)) or
+                        !std.mem.eql(u8, entry.resume_schema, try values.schemaBytes(contracts.InboxReply(Types.Message), scratch))) return error.InboxSchemaMismatch;
                 },
                 .leaf, .workspace => {},
             }
-            try validateCapability(storage, capabilities.array.items, entry);
+            try validateCapability(scratch, capabilities.array.items, entry);
         }
+        const controller: ?SeedController = if (json.get(metadata.value, "controller")) |item| if (item != .null) blk: {
+            if (comptime !@hasDecl(Types, "ControllerInput")) return error.InvalidAssets;
+            const encoded = try json.text(json.get(item, "descriptor_base64url") orelse return error.InvalidAssets);
+            const bytes = try scratch.alloc(u8, try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(encoded));
+            try std.base64.url_safe_no_pad.Decoder.decode(bytes, encoded);
+            var descriptor = try contracts.decodeOwned(contracts.controller.Descriptor, scratch, bytes);
+            defer descriptor.deinit();
+            if (!std.mem.eql(u8, descriptor.value.contract.bytes, contracts.controller.identity)) return error.InvalidAssets;
+            const program = admitted.program();
+            const entry = program.functions[@intCast(program.roots.entry)];
+            if (entry.inputs.len != 1) return error.InvalidAssets;
+            if (comptime @hasDecl(Types, "ControllerInput")) {
+                const input_schema = try data.schema.encodeOwned(scratch, program.schemas, entry.layout.slots[@intCast(entry.inputs[0])]);
+                if (!std.mem.eql(u8, input_schema, try values.schemaBytes(Types.ControllerInput, scratch))) return error.InvalidAssets;
+            }
+            for (descriptor.value.imports.items) |binding| {
+                const effect = for (program.effects) |effect| {
+                    if (std.mem.eql(u8, effect.identity, binding.identity.bytes)) break effect;
+                } else return error.InvalidAssets;
+                if (!std.mem.eql(u8, binding.payload.bytes, try data.schema.encodeOwned(scratch, program.schemas, effect.payload)) or
+                    !std.mem.eql(u8, binding.result.bytes, try data.schema.encodeOwned(scratch, program.schemas, effect.result))) return error.InvalidAssets;
+                const handler = for (handlers.entries) |candidate| {
+                    if (candidate.declaration.controller_import == binding.import) break candidate;
+                } else return error.InvalidAssets;
+                const payload = if (binding.import == .deliberate) program.schemas[@intCast(effect.payload)].product[0] else effect.payload;
+                if (!std.mem.eql(u8, handler.payload_schema, try data.schema.encodeOwned(scratch, program.schemas, payload)) or !std.mem.eql(u8, handler.resume_schema, binding.result.bytes)) return error.InvalidAssets;
+                if (binding.import == .deliberate) {
+                    const gate = for (program.effects) |candidate| {
+                        if (std.mem.eql(u8, candidate.identity, contracts.controller.handoff_identity)) break candidate;
+                    } else return error.InvalidAssets;
+                    if (!std.mem.eql(u8, (binding.public_result orelse return error.InvalidAssets).bytes, try data.schema.encodeOwned(scratch, program.schemas, gate.result)) or !std.mem.eql(u8, descriptor.value.handoff_payload.bytes, try data.schema.encodeOwned(scratch, program.schemas, gate.payload))) return error.InvalidAssets;
+                } else if (binding.public_result != null) return error.InvalidAssets;
+            }
+            break :blk .{ .source = try json.text(json.get(item, "source_records") orelse return error.InvalidAssets), .descriptor = try storage.dupe(u8, bytes) };
+        } else null else null;
         const protocol_schema = try @import("schemas.zig").document(storage, metadata.value, .{});
         const public_metadata = try publicMetadata(storage, metadata.value);
         const application_artifact = try Artifact.freeze(storage, public_metadata, "agent-native-discovery.application.v1");
         const protocol_artifact = try Artifact.freeze(storage, protocol_schema, "agent-host.protocol-schema.v2");
         const manifest_id = try digest(storage, assets.manifest);
         const protocol_digest = try storage.dupe(u8, &std.fmt.bytesToHex(protocol_artifact.sha256, .lower));
-        return .{ .arena = arena, .metadata = metadata.value, .manifest = manifest.value, .manifest_id = manifest_id, .image_identity = image_identity, .protocol_schema = protocol_schema, .protocol_schema_sha256 = protocol_digest, .public_metadata = public_metadata, .schema_artifacts = .{ application_artifact, protocol_artifact } };
+        var arena = std.heap.ArenaAllocator.init(a);
+        errdefer arena.deinit();
+        const retained = arena.allocator();
+        const retained_metadata = try json.copy(retained, metadata.value);
+        const retained_protocol = try json.copy(retained, protocol_schema);
+        const retained_manifest = try json.copy(retained, manifest.value);
+        const retained_public = try publicMetadata(retained, retained_metadata);
+        const retained_controller: ?SeedController = if (controller) |seed| .{ .source = try json.text(json.get(json.get(retained_metadata, "controller").?, "source_records").?), .descriptor = try retained.dupe(u8, seed.descriptor) } else null;
+        const retained_application_artifact: Artifact = .{ .bytes = try retained.dupe(u8, application_artifact.bytes), .sha256 = application_artifact.sha256, .schema_id = application_artifact.schema_id };
+        const retained_protocol_artifact: Artifact = .{ .bytes = try retained.dupe(u8, protocol_artifact.bytes), .sha256 = protocol_artifact.sha256, .schema_id = protocol_artifact.schema_id };
+        const retained_manifest_id = try retained.dupe(u8, manifest_id);
+        const retained_protocol_digest = try retained.dupe(u8, protocol_digest);
+        return .{ .arena = arena, .metadata = retained_metadata, .manifest = retained_manifest, .manifest_id = retained_manifest_id, .image_identity = image_identity, .controller = retained_controller, .protocol_schema = retained_protocol, .protocol_schema_sha256 = retained_protocol_digest, .public_metadata = retained_public, .schema_artifacts = .{ retained_application_artifact, retained_protocol_artifact } };
     }
     pub fn deinit(self: *Application) void {
         self.arena.deinit();

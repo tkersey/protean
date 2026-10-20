@@ -12,6 +12,7 @@ const executable = process.argv[2];
 const phases = [
   ...['ready', 'dispatched', 'invoked', 'acquired', 'captured', 'interpreted', 'settled', 'completed'].map(cut => `original-${cut}`),
   ...['admitted', 'dispatched', 'invoked', 'acquired', 'captured', 'interpreted', 'settled', 'completed'].map(cut => `lookup-${cut}`),
+  ...['ready', 'commit', 'seal', 'activated'].map(cut => `controller-${cut}`),
 ];
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'protean-recovery-crash-')));
 try {
@@ -38,10 +39,10 @@ try {
       assert(witness, `${phase}: no cut reached: ${code}/${signal}\n${stderr}`);
       assert.equal(signal, 'SIGKILL');
       const beforeInvocation = /-(ready|admitted|dispatched)$/.test(phase);
-      assert.deepEqual(invocations, beforeInvocation ? [] : [phase.split('-')[0]]);
+      assert.deepEqual(invocations, beforeInvocation || phase.startsWith('controller-') ? [] : [phase.split('-')[0]]);
       // Reopening twice also detects duplicate charges or recovery execution.
       for (let reopen = 0; reopen < 2; reopen++) {
-        const expected = reopen === 1 && /-(captured|interpreted|settled)$/.test(phase) ? `${phase.split('-')[0]}-completed` : phase;
+        const expected = reopen === 1 && phase.startsWith('controller-') ? 'controller-activated' : reopen === 1 && /-(captured|interpreted|settled)$/.test(phase) ? `${phase.split('-')[0]}-completed` : phase;
         const result = spawnSync(executable, [], {env: {...env, PROTEAN_CRASH_MODE: 'verify', PROTEAN_CRASH_PHASE: expected, PROTEAN_CRASH_WITNESS: JSON.stringify(witness)}, encoding: 'utf8', timeout: 20_000});
         assert.equal(result.status, 0, `${phase} reopen ${reopen}: ${result.error ?? result.stderr}`);
         assert.deepEqual(JSON.parse(result.stdout), {verified: expected});

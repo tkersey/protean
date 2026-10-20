@@ -6,7 +6,7 @@ import {decodeSchema, decodeValue, encodeValue} from '../support/values.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest();
 const key = reference => Buffer.from(reference[0]).toString('hex');
-const taskFields = ['id', 'application_id', 'input_schema_id', 'output_schema_id', 'failure_schema_id', 'message_schema_id', 'principal', 'tenant', 'profile_id', 'profile', 'resources', 'image', 'runtime_identity', 'input', 'checkpoint', 'outcome', 'outcome_kind', 'current_occurrence', 'revision', 'execution_revision', 'schedule', 'cancellation', 'cancellation_applied', 'blocker', 'result', 'client_result', 'result_artifact', 'event_floor', 'event_high', 'next_message', 'messages', 'inference_attempts', 'inference_request_bytes', 'inference_output_tokens', 'evidence_bytes'];
+const taskFields = ['id', 'application_id', 'input_schema_id', 'output_schema_id', 'failure_schema_id', 'message_schema_id', 'principal', 'tenant', 'profile_id', 'profile', 'resources', 'image', 'controller', 'controller_epoch', 'controller_interaction', 'controller_succession', 'runtime_identity', 'input', 'checkpoint', 'outcome', 'outcome_kind', 'current_occurrence', 'revision', 'execution_revision', 'schedule', 'cancellation', 'cancellation_applied', 'blocker', 'result', 'client_result', 'result_artifact', 'event_floor', 'event_high', 'next_message', 'messages', 'inference_attempts', 'inference_request_bytes', 'inference_output_tokens', 'evidence_bytes'];
 
 export function readArchive(bytes) {
   assert.equal(bytes.subarray(0, 8).toString(), 'AGNX0001');
@@ -43,7 +43,7 @@ export function readArchive(bytes) {
     return bytes;
   };
   const schemas = new Map(definitions.map(([name, reference]) => [name, decodeSchema(object(reference))]));
-  assert.deepEqual([...schemas.keys()], ['task', 'event', 'receipt', 'occurrence', 'question', 'message', 'artifact', 'capture', 'attempt', 'origin', 'reconciliation', 'workspace_program', 'workspace_work', 'workspace_value', 'workspace_view', 'workspace_port', 'workspace_port_reply', 'execution_route', 'workspace_wait', 'workspace_delegation', 'workspace_reply', 'workspace_runtime', 'placement_custody', 'placement_control', 'placement_action', 'placement_move', 'placement_succession', 'root_operation']);
+  assert.deepEqual([...schemas.keys()], ['task', 'event', 'receipt', 'occurrence', 'question', 'message', 'artifact', 'capture', 'attempt', 'origin', 'reconciliation', 'workspace_program', 'workspace_work', 'workspace_value', 'workspace_view', 'workspace_port', 'workspace_port_reply', 'execution_route', 'workspace_wait', 'workspace_delegation', 'workspace_reply', 'workspace_runtime', 'placement_custody', 'placement_control', 'placement_action', 'placement_move', 'placement_succession', 'root_operation', 'controller_binding', 'controller_interaction', 'controller_succession', 'controller_residual', 'placement_behavior', 'workspace_trial']);
   const taskValue = decodeValue(schemas.get('task'), object(taskReference));
   assert.equal(taskValue.length, taskFields.length);
   const task = Object.fromEntries(taskFields.map((name, index) => [name, taskValue[index]]));
@@ -139,7 +139,7 @@ function pruneObjects(archive) {
   };
   visit(archive.manifest.slice(3, 10));
   visit(archive.taskValue);
-  const kinds = ['occurrence', 'question', 'message', 'artifact', 'capture', 'attempt', 'origin', 'reconciliation', 'workspace_program', 'workspace_work', 'workspace_value', 'workspace_view', 'workspace_port', 'workspace_port_reply', 'execution_route', 'workspace_wait', 'workspace_delegation', 'workspace_reply', 'workspace_runtime', 'placement_custody', 'placement_control', 'placement_action', 'placement_move', 'placement_succession', 'root_operation'];
+  const kinds = ['occurrence', 'question', 'message', 'artifact', 'capture', 'attempt', 'origin', 'reconciliation', 'workspace_program', 'workspace_work', 'workspace_value', 'workspace_view', 'workspace_port', 'workspace_port_reply', 'execution_route', 'workspace_wait', 'workspace_delegation', 'workspace_reply', 'workspace_runtime', 'placement_custody', 'placement_control', 'placement_action', 'placement_move', 'placement_succession', 'root_operation', 'controller_binding', 'controller_interaction', 'controller_succession', 'controller_residual', 'placement_behavior', 'workspace_trial'];
   for (const [kind,, reference] of archive.manifest[6]) {
     const value = decodeValue(archive.schemas.get(kinds[kind]), archive.object(reference));
     visit(value);

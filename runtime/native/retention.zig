@@ -29,7 +29,7 @@ const Audit = struct {
     objects: std.AutoArrayHashMapUnmanaged(Digest, Object) = .empty,
     edges: std.AutoHashMapUnmanaged(Edge, void) = .empty,
     images: std.AutoHashMapUnmanaged(Digest, Digest) = .empty,
-    tasks: std.AutoHashMapUnmanaged(state.TaskId, struct { revision: u64, profile: Ref, body: Ref, image: Ref }) = .empty,
+    tasks: std.AutoHashMapUnmanaged(state.TaskId, struct { revision: u64, profile: Ref, body: Ref, image: Ref, controller: ?Digest }) = .empty,
     records: std.AutoArrayHashMapUnmanaged(Key, Ref) = .empty,
     recovery_receipts: std.AutoHashMapUnmanaged(Key, void) = .empty,
     statistics: Statistics = .{},
@@ -64,7 +64,9 @@ const Audit = struct {
         if (self.images.get(ref.digest)) |identity| return identity;
         // A saved request belongs to its task's canonical program, independently
         // of the launching executable. Raw object hashes are not program IDs.
-        var decoded = try data.program_image.decode(self.store.allocator, try self.body(ref));
+        const bytes = try self.store.object(self.store.allocator, ref, null);
+        defer self.store.allocator.free(bytes);
+        var decoded = try data.program_image.decode(self.store.allocator, bytes);
         defer decoded.deinit();
         try self.images.put(self.a, ref.digest, decoded.identity);
         return decoded.identity;
@@ -72,7 +74,7 @@ const Audit = struct {
     fn occurrenceImage(self: *Audit, saved: occurrence.Occurrence) !Digest {
         var route = try self.record(.execution_route, saved.task, saved.id);
         defer route.deinit();
-        if (!std.meta.eql(route.value.work, saved.work) or !std.meta.eql(route.value.task, saved.task) or !std.meta.eql(route.value.id, saved.id)) return error.CorruptState;
+        if (!std.meta.eql(route.value.work, saved.work) or !std.meta.eql(route.value.residual, saved.residual) or !std.meta.eql(route.value.task, saved.task) or !std.meta.eql(route.value.id, saved.id)) return error.CorruptState;
         var image = self.tasks.get(saved.task).?.image;
         if (saved.work) |id| {
             var work = try self.record(.workspace_work, saved.task, id);
@@ -81,6 +83,25 @@ const Audit = struct {
             defer program.deinit();
             image = program.value.description.image;
             if (!std.meta.eql(route.value.delegation, work.value.delegation)) return error.CorruptState;
+        } else if (route.value.controller) |id| {
+            var cursor = self.tasks.get(saved.task).?.controller;
+            var last_epoch: ?u64 = null;
+            image = found: {
+                while (cursor) |current| {
+                    var binding = try self.record(.controller_binding, saved.task, current);
+                    defer binding.deinit();
+                    if (last_epoch) |epoch| if (binding.value.epoch >= epoch) return error.CorruptState;
+                    if (std.meta.eql(current, id)) {
+                        var program = try self.record(.workspace_program, saved.task, try @import("workspace_state.zig").custodyId(self.a, saved.task, binding.value.program));
+                        defer program.deinit();
+                        if (program.value.description.controller == null or !std.meta.eql(program.value.description.image, binding.value.image) or !std.meta.eql(binding.value.program_identity, route.value.program_identity)) return error.CorruptState;
+                        break :found binding.value.image;
+                    }
+                    last_epoch = binding.value.epoch;
+                    cursor = binding.value.predecessor;
+                }
+                return error.CorruptState;
+            };
         }
         if (!std.meta.eql(image, route.value.image)) return error.CorruptState;
         const identity = try self.imageIdentity(image);
@@ -110,7 +131,7 @@ const Audit = struct {
             defer decoded.deinit();
             const task = decoded.value;
             if (!same(&task.id, &id) or task.revision != try rows.integer(1) or @intFromBool(task.terminal()) != try rows.integer(2)) return error.CorruptState;
-            try self.tasks.put(self.a, id, .{ .revision = task.revision, .profile = task.profile, .body = ref, .image = task.image });
+            try self.tasks.put(self.a, id, .{ .revision = task.revision, .profile = task.profile, .body = ref, .image = task.image, .controller = task.controller });
             try self.value(state.Task, ref, task);
         }
     }
@@ -264,7 +285,12 @@ const Audit = struct {
             switch (item.outcome) {
                 .pending => {
                     const saved = occurrence_value.value;
-                    if (saved.state != .unknown or !std.meta.eql(saved.state.unknown.id, item.attempt) or task.value.current_occurrence == null or !std.meta.eql(task.value.current_occurrence.?, item.occurrence)) return error.CorruptState;
+                    if (saved.state != .unknown or !std.meta.eql(saved.state.unknown.id, item.attempt)) return error.CorruptState;
+                    if (saved.residual) |id| {
+                        var residual = try self.record(.controller_residual, key.task, id);
+                        defer residual.deinit();
+                        if (!std.meta.eql(residual.value.current_occurrence, item.occurrence)) return error.CorruptState;
+                    } else if (task.value.current_occurrence == null or !std.meta.eql(task.value.current_occurrence.?, item.occurrence)) return error.CorruptState;
                     const owner_key: Key = .{ .kind = .occurrence, .task = key.task, .id = item.occurrence };
                     if ((try pending_owners.getOrPut(owner_key)).found_existing) return error.CorruptState;
                 },
@@ -294,7 +320,27 @@ const Audit = struct {
             if (item.provenance == .authentic or item.provenance == .authoritative) {
                 const evidence = try self.body(item.evidence orelse return error.CorruptState);
                 const input = registry.RecoveryInput.fromReconciliation(item, request.value.request_identity, entry.declaration.inference);
-                const finding = try self.store.project(registry.RecoveryFinding, self.a, self.handlers, .{ .task = key.task, .tenant = task.value.tenant.bytes, .profile = try self.body(item.profile), .application = image, .resources = item.resources.items }, struct {
+                var binding: registry.ProjectionBinding = .{ .task = key.task, .tenant = task.value.tenant.bytes, .profile = try self.body(item.profile), .application = try self.imageIdentity(task.value.image), .execution = image, .resources = item.resources.items };
+                var route = try self.record(.execution_route, key.task, item.occurrence);
+                defer route.deinit();
+                if (route.value.work) |id| {
+                    var work = try self.record(.workspace_work, key.task, id);
+                    defer work.deinit();
+                    if (work.value.trial) |trial_id| {
+                        var trial = try self.record(.workspace_trial, key.task, trial_id);
+                        defer trial.deinit();
+                        binding.trial = .{ .work = id, .view = trial.value.view };
+                    }
+                }
+                if (route.value.work == null and route.value.residual == null) if (route.value.interaction) |id| {
+                    var interaction = try self.record(.controller_interaction, key.task, id);
+                    defer interaction.deinit();
+                    var controller = try self.record(.controller_binding, key.task, interaction.value.controller);
+                    defer controller.deinit();
+                    if (!std.meta.eql(route.value.controller, controller.value.id) or !std.meta.eql(interaction.value.model, item.occurrence)) return error.CorruptState;
+                    binding.controller = .{ .binding = controller.value.id, .epoch = interaction.value.epoch, .program = controller.value.program_identity, .overlay = interaction.value.overlay };
+                };
+                const finding = try self.store.project(registry.RecoveryFinding, self.a, self.handlers, binding, struct {
                     handlers: registry.Registry,
                     input: registry.RecoveryInput,
                     evidence: []const u8,

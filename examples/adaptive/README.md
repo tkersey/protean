@@ -196,6 +196,7 @@ For example, the `tools` object can admit two compatible inputs:
 {
   "build": true,
   "run": true,
+  "reconstruct": false,
   "inputs": [
     {
       "id": "first",
@@ -246,7 +247,7 @@ and is a small working example, not a complete audit:
 Pass the recipe JSON as the string in this `program` action:
 
 ```json
-{"command":{"tag":"build","value":{"source":{"tag":"json_text","value":"RECIPE_JSON"},"source_kind":"component_recipe","exposures":[]}}}
+{"command":{"tag":"build","value":{"source":{"tag":"json_text","value":"RECIPE_JSON"},"source_kind":"component_recipe","exposures":[],"role":"computation"}}}
 ```
 
 A successful response is `admitted` and contains `observation.program`, actual
@@ -374,3 +375,20 @@ The [workspace acceptance map](../../docs/computational-workspace.md) identifies
 the source/native/owner witnesses and their limits. The optional
 [three-arm evaluation](../../tools/evaluation/README.md) records model efficacy
 only after explicitly authorized live runs and result adjudication.
+
+### Reconstruct the task controller
+
+Application 7 exposes the active controller through `program.describe` with
+`section: "current_controller"`; its source reference expands through `context`.
+Set `tools.reconstruct` to `true` to permit same-task adoption, keeping the existing
+build and run grants. New computation builds use `role: "computation"`; controller
+source builds use `role: "controller"`. Every `work.start` supplies `trial`, using
+`{"tag":"none","value":{}}` for ordinary computation.
+
+The protected model context supplies the current epoch and handoff identity.
+`program.adopt` selects a controller program and pure carry converter using those
+exact values. Its `trial` is `none` or a selected trial work reference. A successful
+handoff starts the successor; it does not return into the old controller. Failed
+preparation returns an ordinary diagnostic. Replacement and trials are optional.
+See [controller contracts and continuity](../../docs/computational-workspace.md#reconstructing-the-active-controller)
+for schemas, cleanup, provenance and historical-resume boundaries.

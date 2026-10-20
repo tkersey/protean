@@ -1405,7 +1405,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         phase = "suspend controller before child freeze";
         try std.testing.expectEqual(.progressed, try sender.pump(scratch));
         try std.testing.expect(sender.active != null);
-        try std.testing.expect(sender.active.?.work == null);
+        try std.testing.expect(sender.active.?.subject == .root);
         try std.testing.expect(sender.active.?.root_control != null);
     }
     _ = try sender.placementFreeze(scratch, subject, "destination", cut, @splat(14));
@@ -1421,7 +1421,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     }
     if (scenario == .work) {
         try std.testing.expect(sender.active != null);
-        try std.testing.expect(sender.active.?.work == null);
+        try std.testing.expect(sender.active.?.subject == .root);
         try std.testing.expect(sender.active.?.root_control != null);
     }
     if (scenario == .cancel_abort or scenario == .cancel_refused) {

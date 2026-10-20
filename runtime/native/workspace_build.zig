@@ -10,11 +10,13 @@ pub const Input = struct {
     kind: c.workspace.SourceKind,
     catalog: ?c.Bytes(null),
     exposures: c.Vector(c.workspace.Exposure, null),
+    controller: ?c.controller.Contract = null,
 };
 pub const Compiled = struct {
     image: c.Bytes(null),
     interface: c.tool_construction.Interface,
     ports: c.Vector(construction.PortInterface, null),
+    controller: ?c.controller.Descriptor = null,
     compiler_nanoseconds: u64 = 0,
 };
 pub const Output = union(enum) {
@@ -52,6 +54,7 @@ pub fn run(ctx: registry.Context, bytes: []const u8) ![]u8 {
         .image = .{ .bytes = built.image },
         .interface = built.interface,
         .ports = .{ .items = built.ports },
+        .controller = built.controller,
         .compiler_nanoseconds = elapsed(ctx.io, started),
     } });
 }
@@ -61,6 +64,10 @@ fn elapsed(io: std.Io, started: std.Io.Timestamp) u64 {
 }
 
 fn compile(ctx: registry.Context, input: Input, diagnostic: *construction.Diagnostic) !construction.Built {
+    if (input.controller) |contract| {
+        if (input.kind != .source_records or input.catalog != null or input.exposures.items.len != 0) return error.InvalidConstruction;
+        return construction.buildController(ctx.allocator, input.source.bytes, contract, ctx.cancellation, diagnostic);
+    }
     if (input.kind == .source_records) {
         if (input.catalog != null) return error.InvalidConstruction;
         return construction.buildExposed(ctx.allocator, input.source.bytes, input.exposures.items, ctx.cancellation, diagnostic);

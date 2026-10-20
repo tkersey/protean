@@ -75,7 +75,14 @@ snapshot copies can replay prior control and require environmental safeguards.
 
 ## Adaptive computational workspace
 
-The adaptive application 5 controller chooses `program`, `work`, and `context`
+The effective root is a task-owned controller binding. The packaged seed and
+source-built successors share the protected controller constructor. Pure carry
+conversion and inert boot precede an atomic authority transition; retired roots
+retain their original cleanup obligations. Same-site behavior and cross-site
+movement extend the same authority lineage. See the
+[controller contract](computational-workspace.md#reconstructing-the-active-controller).
+
+The adaptive application 7 controller chooses `program`, `work`, and `context`
 actions through the same captured offer/admission path as ordinary tools. It can
 finish without using them. A child's input type constrains a supplied answer;
 it does not constrain the next controller action. Neither status nor uncertainty
@@ -90,8 +97,8 @@ ordinary source handlers and packages for exposed ports; typed futures remain
 inside the whole program state. Alternative ports use admitted multi-shot
 resumptions. Exposure metadata alone cannot manufacture a reusable capability.
 
-The existing Service schedules `(task, work?)` subjects through one queue and
-one occurrence engine. Root and child occurrences bind different subjects even
+The existing Service schedules task roots, child work and retired-controller
+residuals through one queue and one occurrence engine. Their occurrences bind different subjects even
 when their request bytes match. Each child owns its exact program, typed input,
 Kosmos checkpoint, execution/control revisions, scheduling policy, and observed
 outcome. Immutable content identities do not confer task custody. No second

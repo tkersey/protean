@@ -45,13 +45,19 @@ pub fn capabilityMetadata(comptime declarations: anytype, a: std.mem.Allocator, 
     var used: [declarations.len]bool = @splat(false);
     for (program.effects) |effect| {
         if (!effect.external) continue;
-        const payload = try horos.data.schema.encodeOwned(a, program.schemas, effect.payload);
+        const controller = protean.contracts.controller;
+        if (std.mem.eql(u8, effect.identity, controller.boot_identity) or std.mem.eql(u8, effect.identity, controller.offer_identity) or std.mem.eql(u8, effect.identity, controller.handoff_identity)) continue;
+        const imported = if (std.mem.startsWith(u8, effect.identity, controller.effect_prefix)) std.meta.stringToEnum(controller.Import, effect.identity[controller.effect_prefix.len..]) else null;
+        const payload_schema = if (imported == .deliberate) program.schemas[@intCast(effect.payload)].product[0] else effect.payload;
+        const payload = try horos.data.schema.encodeOwned(a, program.schemas, payload_schema);
         const reply = try horos.data.schema.encodeOwned(a, program.schemas, effect.result);
         var role: ?[]const u8 = null;
+        var identity = effect.identity;
         inline for (declarations, 0..) |declaration, index| {
             const typed = @hasField(@TypeOf(declaration), "Payload");
             if (typed != @hasField(@TypeOf(declaration), "Reply")) @compileError("native capability requires both Payload and Reply");
-            if (std.mem.eql(u8, declaration.identity, effect.identity)) {
+            const controller_matches = if (@hasField(@TypeOf(declaration), "controller_import")) imported == @as(controller.Import, declaration.controller_import) else false;
+            if (std.mem.eql(u8, declaration.identity, effect.identity) or controller_matches) {
                 const matches = if (typed)
                     std.mem.eql(u8, payload, try schemaWire(declaration.Payload, a)) and std.mem.eql(u8, reply, try schemaWire(declaration.Reply, a))
                 else
@@ -59,15 +65,62 @@ pub fn capabilityMetadata(comptime declarations: anytype, a: std.mem.Allocator, 
                 if (matches) {
                     if (role) |prior| if (!std.mem.eql(u8, prior, declaration.resource_role)) return error.AmbiguousNativeCapability;
                     role = declaration.resource_role;
+                    identity = declaration.identity;
                     used[index] = true;
                 }
             }
         }
-        try result.append(a, .{ .identity = effect.identity, .resource_role = role orelse return error.UndeclaredNativeCapability, .payload_sha256 = try digest(a, payload), .resume_sha256 = try digest(a, reply) });
+        try result.append(a, .{ .identity = identity, .resource_role = role orelse return error.UndeclaredNativeCapability, .payload_sha256 = try digest(a, payload), .resume_sha256 = try digest(a, reply) });
     }
     if (result.items.len != declarations.len) return error.UnusedOrDuplicateCapability;
     for (used) |matched| if (!matched) return error.UnusedOrDuplicateCapability;
     return result.toOwnedSlice(a);
+}
+
+const ControllerMetadata = struct { source_records: []const u8, descriptor_base64url: []const u8 };
+const Emitted = struct { image: []const u8, controller: ?ControllerMetadata = null };
+fn emitProgram(comptime definition: type, a: std.mem.Allocator) !Emitted {
+    if (comptime @hasDecl(definition, "ControllerSystem")) {
+        const construction = @import("construction");
+        var builder = horos.source.Builder.init(a);
+        defer builder.deinit();
+        var registry = protean.admission.Registry.init(a);
+        defer registry.deinit();
+        const context = try protean.Context.init(&builder, &registry);
+        const module = try definition.ControllerSystem.Application.emit(context);
+        const source = try construction.encodeSource(a, module);
+        var signatures: std.ArrayList(protean.contracts.controller.Signature) = .empty;
+        for (module.effects) |effect| {
+            const prefix = protean.contracts.controller.import_prefix;
+            if (!std.mem.startsWith(u8, effect.identity, prefix)) continue;
+            const imported = std.meta.stringToEnum(protean.contracts.controller.Import, effect.identity[prefix.len..]) orelse return error.UnknownControllerImport;
+            const payload = if (imported == .deliberate) module.schemas[@intCast(effect.payload)].product[0] else effect.payload;
+            try signatures.append(a, .{
+                .import = imported,
+                .payload = .{ .bytes = try horos.data.schema.encodeOwned(a, module.schemas, payload) },
+                .result = .{ .bytes = try horos.data.schema.encodeOwned(a, module.schemas, effect.result) },
+                .native_result = if (imported == .deliberate) .{ .bytes = try horos.data.schema.encodeOwned(a, module.schemas, module.schemas[@intCast(effect.result)].product[0]) } else null,
+            });
+        }
+        const contract: protean.contracts.controller.Contract = .{
+            .result = .{ .bytes = try schemaWire(definition.ControllerSystem.Result, a) },
+            .failure = .{ .bytes = try schemaWire(definition.ControllerSystem.Failure, a) },
+            .imports = .{ .items = signatures.items },
+        };
+        var diagnostic: construction.Diagnostic = .{};
+        var built = construction.buildController(a, source, contract, null, &diagnostic) catch |err| {
+            std.log.err("controller construction {s}: phase={s}, function={?d}, term={?d}, value={?d}", .{ @errorName(err), @tagName(diagnostic.phase), diagnostic.source.function, diagnostic.source.term, diagnostic.source.value });
+            return err;
+        };
+        defer built.deinit();
+        const descriptor = try protean.contracts.encodeOwned(protean.contracts.controller.Descriptor, a, built.controller.?);
+        return .{ .image = try a.dupe(u8, built.image), .controller = .{ .source_records = source, .descriptor_base64url = try base64(a, descriptor) } };
+    }
+    var compiled = try protean.compile(a, definition.System);
+    defer compiled.deinit();
+    const image = try a.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
+    _ = try compiled.encode(a, image);
+    return .{ .image = image };
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -89,11 +142,10 @@ pub fn write(comptime definition: type, comptime types: type, init: std.process.
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    var compiled = try protean.compile(a, definition.System);
+    const emitted = try emitProgram(definition, a);
+    const image = emitted.image;
+    var compiled = try horos.data.program_image.decode(a, image);
     defer compiled.deinit();
-    const image = try a.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
-    _ = try compiled.encode(a, image);
-
     const capabilities = try capabilityMetadata(definition.capabilities, a, compiled.program);
     var resources: std.ArrayList(Resource) = .empty;
     inline for (definition.resources) |resource| {
@@ -120,6 +172,7 @@ pub fn write(comptime definition: type, comptime types: type, init: std.process.
         .message = try schema(types.Message, a, types.message_schema_id),
         .capabilities = capabilities,
         .resources = resources.items,
+        .controller = emitted.controller,
     };
     var writer = std.Io.Writer.Allocating.init(a);
     try std.json.Stringify.value(metadata, .{}, &writer.writer);

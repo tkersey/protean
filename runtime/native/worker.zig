@@ -55,6 +55,7 @@ pub const Worker = struct {
         const a = self.arena.allocator();
         var request = try data.invocation.decode(data.invocation.Request, a, self.work.request);
         defer request.deinit();
+        const payload = try self.work.entry.payload(a, request.value.binding.payload);
         if (self.work.recovery) |item| {
             var saved = try @import("protean_contracts").decodeOwned(@import("state.zig").Reconciliation, a, item.body);
             defer saved.deinit();
@@ -63,7 +64,7 @@ pub const Worker = struct {
                 if (self.cancellation.load(.acquire)) return .{ .rederived = .unavailable };
                 const adapter = self.work.entry.declaration.recovery orelse return .{ .failure = error.UnsupportedRecovery };
                 const rederive = adapter.rederive orelse return .{ .failure = error.UnsupportedRecovery };
-                const finding = rederive(ctx, registry.RecoveryInput.fromReconciliation(saved.value, request.value.request_identity, self.work.entry.declaration.inference), request.value.binding.payload, self.work.prepared) catch |err| return switch (err) {
+                const finding = rederive(ctx, registry.RecoveryInput.fromReconciliation(saved.value, request.value.request_identity, self.work.entry.declaration.inference), payload, self.work.prepared) catch |err| return switch (err) {
                     error.Canceled => .{ .rederived = .unavailable },
                     else => .{ .failure = err },
                 };
@@ -84,7 +85,7 @@ pub const Worker = struct {
             defer saved.deinit();
             const adapter = self.work.entry.declaration.recovery orelse return error.UnsupportedRecovery;
             const lookup = adapter.lookup orelse return error.UnsupportedRecovery;
-            return .{ .acquired = try lookup.acquire(ctx, registry.RecoveryInput.fromReconciliation(saved.value, request.value.request_identity, self.work.entry.declaration.inference), request.value.binding.payload, self.work.prepared) };
+            return .{ .acquired = try lookup.acquire(ctx, registry.RecoveryInput.fromReconciliation(saved.value, request.value.request_identity, self.work.entry.declaration.inference), payload, self.work.prepared) };
         }
         if (self.work.entry.declaration.capture) |adapter| {
             return switch (try adapter.acquire(ctx, self.work.prepared orelse return error.InvalidPreparedRequest)) {
@@ -96,7 +97,7 @@ pub const Worker = struct {
                 .unknown => |err| err,
             };
         }
-        return .{ .acquired = try self.work.entry.declaration.invoke.?(ctx, self.work.prepared orelse request.value.binding.payload) };
+        return .{ .acquired = try self.work.entry.declaration.invoke.?(ctx, self.work.prepared orelse payload) };
     }
     fn execute(self: *Worker) void {
         defer self.done.store(true, .release);

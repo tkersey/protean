@@ -45,6 +45,7 @@ export async function runtimePlacementFixture(app, configuration, trust, sourceS
   const controlSchema = readArchive(await readFile(probeArchive)).schemas.get('placement_control');
   for (const site of sites) {
     const client = new ProteanClient(app.command, flags(site), {cwd: app.data, env: {PATH: '/nonexistent'}});
+    client.child.stderr.on('data', bytes => process.stderr.write(bytes));
     try {
       await client.initialize();
       site.identity = await placementRequest(client, 'identify', {});

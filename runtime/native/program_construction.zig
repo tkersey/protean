@@ -7,6 +7,7 @@ const records = @import("source_records.zig");
 const preflight = @import("source_preflight.zig");
 const contracts = @import("protean_contracts");
 pub const driver = @import("workspace_driver.zig");
+pub const controller = @import("controller_construction.zig");
 
 pub const PortInterface = struct {
     identity: contracts.Utf8,
@@ -28,11 +29,16 @@ pub const Built = struct {
     image: []const u8,
     interface: contracts.tool_construction.Interface,
     ports: []const PortInterface = &.{},
+    controller: ?controller.Descriptor = null,
     pub fn deinit(self: *Built) void {
         self.arena.deinit();
         self.* = undefined;
     }
 };
+
+pub fn encodeSource(a: std.mem.Allocator, module: horos.source.Module) ![]u8 {
+    return records.encode(a, module);
+}
 
 pub const component_identity = "protean-component-recipe/1";
 
@@ -125,13 +131,21 @@ pub fn build(a: std.mem.Allocator, text: []const u8, cancellation: ?*const std.a
 }
 pub fn buildExposed(a: std.mem.Allocator, text: []const u8, exposures: []const contracts.workspace.Exposure, cancellation: ?*const std.atomic.Value(bool), diagnostic: *Diagnostic) !Built {
     diagnostic.* = .{};
-    return buildBody(a, text, exposures, cancellation, diagnostic) catch |err| {
+    return buildBody(a, text, exposures, null, cancellation, diagnostic) catch |err| {
         diagnostic.code = err;
         return err;
     };
 }
 
-fn buildBody(a: std.mem.Allocator, text: []const u8, exposures: []const contracts.workspace.Exposure, cancellation: ?*const std.atomic.Value(bool), diagnostic: *Diagnostic) !Built {
+pub fn buildController(a: std.mem.Allocator, text: []const u8, contract: controller.Contract, cancellation: ?*const std.atomic.Value(bool), diagnostic: *Diagnostic) !Built {
+    diagnostic.* = .{};
+    return buildBody(a, text, &.{}, contract, cancellation, diagnostic) catch |err| {
+        diagnostic.code = err;
+        return err;
+    };
+}
+
+fn buildBody(a: std.mem.Allocator, text: []const u8, exposures: []const contracts.workspace.Exposure, controller_contract: ?controller.Contract, cancellation: ?*const std.atomic.Value(bool), diagnostic: *Diagnostic) !Built {
     try canceled(cancellation);
     var document = try records.decode(a, text);
     defer document.deinit();
@@ -140,7 +154,11 @@ fn buildBody(a: std.mem.Allocator, text: []const u8, exposures: []const contract
     diagnostic.phase = .authority;
     var registry = protean.admission.Registry.init(a);
     defer registry.deinit();
-    for (document.module.effects, 0..) |effect, id| {
+    var controller_generated: ?controller.Generated = if (controller_contract) |contract| try controller.generate(a, document.module, contract) else null;
+    defer if (controller_generated) |*g| g.deinit();
+    if (controller_generated) |g| {
+        try g.register(&registry);
+    } else for (document.module.effects, 0..) |effect, id| {
         // Application/private identities are not a public generated-source API.
         // Generated internal effects carry no environmental authority.
         if (std.mem.startsWith(u8, effect.identity, "agent.") or std.mem.startsWith(u8, effect.identity, "protean.")) return error.ForbiddenEffect;
@@ -149,8 +167,8 @@ fn buildBody(a: std.mem.Allocator, text: []const u8, exposures: []const contract
     }
     var generated: ?driver.Generated = if (exposures.len != 0) try driver.generate(a, document.module, exposures) else null;
     defer if (generated) |*g| g.deinit();
-    const module = if (generated) |g| g.module else document.module;
-    for (document.module.effects.len..module.effects.len) |id| try registry.classify(id, .read);
+    const module = if (controller_generated) |g| g.module else if (generated) |g| g.module else document.module;
+    if (controller_generated == null) for (document.module.effects.len..module.effects.len) |id| try registry.classify(id, .read);
     if (generated) |g| try registry.speculate(g.body, g.controls);
     try protean.admission.verify(a, module, &registry);
     try canceled(cancellation);
@@ -181,7 +199,8 @@ fn buildBody(a: std.mem.Allocator, text: []const u8, exposures: []const contract
     _ = try compiled.encode(a, image);
     try canceled(cancellation);
     diagnostic.phase = .complete;
-    return .{ .arena = arena, .image = image, .interface = interface, .ports = ports };
+    const descriptor = if (controller_generated) |g| try g.describe(output, compiled.program) else null;
+    return .{ .arena = arena, .image = image, .interface = interface, .ports = ports, .controller = descriptor };
 }
 
 fn canceled(flag: ?*const std.atomic.Value(bool)) !void {

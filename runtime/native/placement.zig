@@ -147,6 +147,19 @@ pub const Action = struct {
 };
 pub const ActionRecord = struct { id: Digest, task: state.TaskId, action: Signed(Action) };
 pub const Succession = struct { id: Digest, task: state.TaskId, offer: Signed(Offer), decision: Signed(Decision) };
+pub const Behavior = struct { operation: Digest, task: state.TaskId, owner: Site, previous_epoch: u64, epoch: u64, predecessor: Digest, successor: Digest, event_cut: u64 };
+pub const BehaviorRecord = struct { id: Digest, task: state.TaskId, decision: Signed(Behavior) };
+pub const ControllerTransition = union(enum) {
+    move: Succession,
+    behavior: Signed(Behavior),
+
+    pub fn epoch(self: ControllerTransition) u64 {
+        return switch (self) {
+            .move => |value| value.decision.value.epoch,
+            .behavior => |value| value.value.epoch,
+        };
+    }
+};
 pub const Executor = struct { site: Site, epoch: u64 };
 pub const ControlResolution = union(enum) { report: Signed(Report), next: Succession };
 
@@ -222,15 +235,16 @@ pub const Request = union(enum) {
     report: struct { task: state.TaskId, control: Digest, report: Signed(Report) },
     follow_controller: struct { source: state.Name, destination: state.Name, offer: Signed(Offer), decision: Signed(Decision) },
     follow_controller_proof: struct { offer: Signed(Offer), decision: Signed(Decision) },
+    follow_controller_behavior: Signed(Behavior),
 };
 pub fn Signed(comptime T: type) type {
     return struct { value: T, signature: [64]u8 };
 }
 fn domain(comptime T: type) []const u8 {
-    return if (T == Offer) "protean-placement/1/offer\x00" else if (T == Decision) "protean-placement/1/decision\x00" else if (T == Control) "protean-placement/1/control\x00" else if (T == Report) "protean-placement/1/report\x00" else if (T == Hello) "protean-placement/1/hello\x00" else if (T == Action) "protean-placement/1/action\x00" else @compileError("not a signed placement message");
+    return if (T == Offer) "protean-placement/1/offer\x00" else if (T == Decision) "protean-placement/1/decision\x00" else if (T == Control) "protean-placement/1/control\x00" else if (T == Report) "protean-placement/1/report\x00" else if (T == Hello) "protean-placement/1/hello\x00" else if (T == Action) "protean-placement/1/action\x00" else if (T == Behavior) "protean-placement/1/behavior\x00" else @compileError("not a signed placement message");
 }
 fn signerOf(comptime T: type, value: T) Site {
-    return if (T == Offer) value.intent.source else if (T == Decision) value.destination else if (T == Control) value.controller else if (T == Hello) value.site else if (T == Action) value.owner else value.executor;
+    return if (T == Offer) value.intent.source else if (T == Decision) value.destination else if (T == Control) value.controller else if (T == Hello) value.site else if (T == Action or T == Behavior) value.owner else value.executor;
 }
 pub fn operationId(site: Site, task: state.TaskId, operation_name: []const u8, kind: enum { action, move }) Digest {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});

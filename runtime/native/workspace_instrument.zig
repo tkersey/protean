@@ -49,7 +49,8 @@ pub fn build(a: std.mem.Allocator, kind: Kind) !construction.Built {
         defer compiled.deinit();
         const image = try output.alloc(u8, try data.program_image.encodedLength(compiled.program));
         _ = try compiled.encode(a, image);
-        return .{ .arena = arena, .image = image, .interface = try construction.interfaceOf(output, compiled.program) };
+        const interface = try construction.interfaceOf(output, compiled.program);
+        return .{ .arena = arena, .image = image, .interface = interface };
     };
     unreachable;
 }

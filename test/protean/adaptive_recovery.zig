@@ -93,7 +93,7 @@ test "compiled catalog composes coverage and orphan grouping and reuses exact BP
     } });
     var invocation = try t.P.templateValue(Model, .{ .items = &.{} }, .{ .minimum_calls = 1, .maximum_calls = 1, .parallel_calls = false });
     invocation.tools = t.P.allDeclarations();
-    const arguments = try std.json.Stringify.valueAlloc(a, .{ .command = .{ .tag = "build", .value = .{ .source = .{ .tag = "json_text", .value = swaps }, .source_kind = "component_recipe", .exposures = .{} } } }, .{});
+    const arguments = try std.json.Stringify.valueAlloc(a, .{ .command = .{ .tag = "build", .value = .{ .source = .{ .tag = "json_text", .value = swaps }, .source_kind = "component_recipe", .exposures = .{}, .role = "computation" } } }, .{});
     const response = try std.json.Stringify.valueAlloc(a, .{.{ .type = "function_call", .status = "completed", .call_id = "large-recipe", .name = "program", .arguments = arguments }}, .{});
     const parsed = try native.json.parse(a, response, .{ .bytes = response.len, .tokens = response.len });
     const normalized = try native.responses.OutputNormalizer(t.P).normalize(a, invocation, parsed.value);
@@ -310,7 +310,9 @@ fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.d
             .selected = .{ .items = &.{10} },
         }} } },
     };
-    try dir.writeFile(io, .{ .sub_path = "config.json", .data = try native.json.canonical(a, try native.values.toJson(t.ConfigurationV3, a, config)) });
+    var config_json = try native.values.toJson(t.ConfigurationV3, a, config);
+    _ = config_json.object.getPtr("tools").?.object.swapRemove("reconstruct");
+    try dir.writeFile(io, .{ .sub_path = "config.json", .data = try native.json.canonical(a, config_json) });
     // Configuration admits local inputs normally. Provider acquisition is
     // forbidden by the test registry, so no TLS or network operation occurs.
     try dir.writeFile(io, .{ .sub_path = "unused-trust-root", .data = "unused by the synthetic provider" });
@@ -346,9 +348,8 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void
     };
     var handlers = try native.Registry.init(a, &declarations);
     defer handlers.deinit();
-    var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "workspace-unit", .image_identity = admitted_image.identity() };
+    var application = try native.discovery.Application.init(t, a, assets, handlers);
     defer application.deinit();
-    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var buffer: [4096]u8 = undefined;
@@ -412,7 +413,7 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void
                 try std.testing.expect(worker.result.? == .acquired);
                 // The capture carries actual compiled bytes, not a model result.
                 const BuildOutput = struct {
-                    const Compiled = struct { image: c.Bytes(null), interface: c.tool_construction.Interface, ports: c.Vector(native.program_construction.PortInterface, null), compiler_nanoseconds: u64 };
+                    const Compiled = struct { image: c.Bytes(null), interface: c.tool_construction.Interface, ports: c.Vector(native.program_construction.PortInterface, null), controller: ?c.controller.Descriptor, compiler_nanoseconds: u64 };
                     const Output = union(enum) { compiled: Compiled, rejected: struct { code: c.Utf8, phase: c.Utf8, function: ?u64, term: ?u64, value: ?u64, compiler_nanoseconds: u64 } };
                 };
                 var output = try c.decodeOwned(BuildOutput.Output, frame, worker.result.?.acquired);
@@ -517,16 +518,18 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
     const permanent = profile_arena.allocator();
     const image = @embedFile("adaptive_image");
     const metadata = @embedFile("adaptive_application");
-    const admitted_image = try horos.data.program_image.Admitted.decode(a, image);
-    defer admitted_image.deinit();
-    const manifest = try @import("native_test_support.zig").ownerManifest(permanent, image, admitted_image.identity(), metadata);
+    const image_identity = identity: {
+        const admitted_image = try horos.data.program_image.Admitted.decode(a, image);
+        defer admitted_image.deinit();
+        break :identity admitted_image.identity();
+    };
+    const manifest = try @import("native_test_support.zig").ownerManifest(permanent, image, image_identity, metadata);
     const assets: native.discovery.Assets = .{ .image = image, .application = metadata, .manifest = manifest };
-    var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "adaptive-unit", .image_identity = admitted_image.identity() };
-    defer application.deinit();
-    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
     const declarations = environment.handlers;
     var handlers = try native.Registry.init(a, &declarations);
     defer handlers.deinit();
+    var application = try native.discovery.Application.init(t, a, assets, handlers);
+    defer application.deinit();
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var buffer: [4096]u8 = undefined;
@@ -604,8 +607,9 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
             defer outcome.deinit();
             var request = try protocol.decode(protocol.Request, frame, outcome.value.requested.request);
             defer request.deinit();
-            if (std.mem.eql(u8, request.value.binding.semantic_identity, t.P.identity)) {
-                var adaptive = try protean.contracts.decodeOwned(t.P.AdaptiveRequest, frame, request.value.binding.payload);
+            if (std.mem.eql(u8, request.value.binding.semantic_identity, protean.contracts.controller.effect_prefix ++ "deliberate")) {
+                const entry = try handlers.resolve(request.value, application.image_identity);
+                var adaptive = try protean.contracts.decodeOwned(t.P.AdaptiveRequest, frame, try entry.payload(frame, request.value.binding.payload));
                 defer adaptive.deinit();
                 if (adaptive.value.plan.watermark == 8) {
                     try std.testing.expectEqual(8, model_calls);
@@ -634,8 +638,8 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                         pub fn run(this: @This(), ctx: native.registry.ProjectionContext) ![]u8 {
                             return this.adapter.prepare(ctx, this.payload);
                         }
-                    }{ .adapter = adapter, .payload = request.value.binding.payload };
-                    const binding: native.registry.ProjectionBinding = .{ .task = task, .tenant = profile.authority.tenant, .profile = profile.bytes, .application = application.image_identity, .resources = saved.value.resources.items };
+                    }{ .adapter = adapter, .payload = try work.entry.payload(frame, request.value.binding.payload) };
+                    const binding: native.registry.ProjectionBinding = .{ .task = task, .tenant = profile.authority.tenant, .profile = profile.bytes, .application = application.image_identity, .resources = saved.value.resources.items, .controller = work.controller_projection };
                     _ = try namespace.store.project([]u8, frame, handlers, binding, projection);
                     const cache = &namespace.store.context_cache;
                     cache.hits = 0;
@@ -972,7 +976,9 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                 defer capture.deinit();
                 try std.testing.expect(capture.value.projection == null);
                 const imported_archive: ?[]const u8 = if (recovery_probe == .imported) try std.fmt.allocPrint(permanent, "{s}/captured.agnx", .{buffer[0..length]}) else null;
-                if (imported_archive) |archive_path| _ = try service.exportCheckpoint(frame, task, archive_path);
+                if (imported_archive) |archive_path| {
+                    _ = try service.exportCheckpoint(frame, task, archive_path);
+                }
                 try service.close(frame);
                 service_live = false;
                 try namespace.close();

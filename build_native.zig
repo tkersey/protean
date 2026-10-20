@@ -1,7 +1,7 @@
 //! Build/environmental API. No target program executes while generating assets.
 const std = @import("std");
 /// One packaging constant supplies both the namespace reader and manifest.
-pub const state_format: u32 = 15;
+pub const state_format: u32 = 16;
 pub const sqlite_flags: []const []const u8 = &.{ "-std=c99", "-DSQLITE_THREADSAFE=1", "-DSQLITE_OMIT_LOAD_EXTENSION=1", "-DSQLITE_DQS=0", "-DSQLITE_DEFAULT_MEMSTATUS=1", "-DSQLITE_DEFAULT_FOREIGN_KEYS=1" };
 
 pub fn sqliteFlags(optimize: std.lang.Optimize) []const []const u8 {
@@ -162,6 +162,17 @@ fn generate(b: *std.Build, modules: Modules, source: Source) Assets {
             .{ .name = "application_types", .module = types },
         },
     });
+    const construction_module = b.createModule(.{
+        .root_source_file = modules.root.path(b, "runtime/native/program_construction.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "protean", .module = modules.protean },
+            .{ .name = "horos", .module = modules.horos },
+            .{ .name = "horos_data", .module = modules.data },
+            .{ .name = "protean_contracts", .module = modules.contracts },
+        },
+    });
     const emitter = b.addExecutable(.{
         .name = "protean-native-assets",
         .use_llvm = if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) false else null,
@@ -170,6 +181,7 @@ fn generate(b: *std.Build, modules: Modules, source: Source) Assets {
             .target = b.graph.host,
             .optimize = optimize,
             .imports = &.{
+                .{ .name = "construction", .module = construction_module },
                 .{ .name = "definition", .module = definition },
                 .{ .name = "application_types", .module = types },
                 .{ .name = "protean", .module = modules.protean },

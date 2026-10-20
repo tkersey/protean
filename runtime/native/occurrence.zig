@@ -28,14 +28,15 @@ pub const Occurrence = struct {
     state: State = .ready,
     request_object: @import("state.zig").Reference,
     work: ?Digest = null,
+    residual: ?Digest = null,
 };
-pub const Binding = struct { id: Digest, task: TaskId, work: ?Digest = null, request: Digest };
+pub const Binding = struct { id: Digest, task: TaskId, work: ?Digest = null, residual: ?Digest = null, request: Digest };
 
 fn equal(a: Digest, b: Digest) bool {
     return std.mem.eql(u8, &a, &b);
 }
 pub fn current(value: Occurrence, binding: Binding) Error!void {
-    if (!equal(value.id, binding.id) or !std.mem.eql(u8, &value.task, &binding.task) or !equal(value.request, binding.request) or !std.meta.eql(value.work, binding.work)) return error.StaleOccurrence;
+    if (!equal(value.id, binding.id) or !std.mem.eql(u8, &value.task, &binding.task) or !equal(value.request, binding.request) or !std.meta.eql(value.work, binding.work) or !std.meta.eql(value.residual, binding.residual) or (value.work != null and value.residual != null)) return error.StaleOccurrence;
 }
 
 pub fn dispatch(value: Occurrence, binding: Binding, attempt: Digest, cancellation_pending: bool, cleanup: bool) Error!Occurrence {

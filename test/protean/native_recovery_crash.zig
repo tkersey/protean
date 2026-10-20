@@ -38,6 +38,10 @@ fn stopAt(point: []const u8) !void {
     try emit(.{ .cut = phase, .witness = witness });
     while (true) try process_io.sleep(.fromSeconds(1), .awake);
 }
+fn stopReconstruction(point: []const u8, task: [16]u8, operation: [32]u8) !void {
+    witness = .{ .task = task, .occurrence = operation };
+    try stopAt(point);
+}
 fn prepare(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
     return ctx.allocator.dupe(u8, bytes);
 }
@@ -86,6 +90,12 @@ test "process-crash-controller-only" {
     defer arena.deinit();
     const a = arena.allocator();
     if (verifying) witness = (try std.json.parseFromSlice(Witness, a, env.getPosix("PROTEAN_CRASH_WITNESS") orelse return error.InvalidArguments, .{})).value;
+    if (std.mem.startsWith(u8, phase, "controller-")) {
+        try @import("workspace_programs.zig").reconstructionContinuity(.{ .path = path, .phase = phase, .verifying = verifying, .task = if (verifying) witness.task else @splat(0), .operation = if (verifying) witness.occurrence else @splat(0), .stop = stopReconstruction }, .round_trip);
+        try std.testing.expect(verifying);
+        try emit(.{ .verified = phase });
+        return;
+    }
     var compiled = try protean.compile(std.testing.allocator, protean.system(.{ .InitialArgs = u32, .Result = u32, .Failure = void, .application = fixtures.FairApplication }));
     defer compiled.deinit();
     const image = try a.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));

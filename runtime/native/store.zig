@@ -53,6 +53,7 @@ pub fn Record(comptime kind: []const u8) type {
         .workspace_program => @import("workspace_state.zig").Program,
         .workspace_runtime => @import("workspace_state.zig").Runtime,
         .workspace_work => @import("workspace_state.zig").Work,
+        .workspace_trial => @import("workspace_state.zig").Trial,
         .workspace_value => @import("workspace_state.zig").Value,
         .workspace_view => @import("workspace_state.zig").View,
         .workspace_port => @import("workspace_state.zig").Port,
@@ -68,6 +69,11 @@ pub fn Record(comptime kind: []const u8) type {
         .placement_succession => @import("placement.zig").Succession,
         .placement_snapshot => @import("placement.zig").Snapshot,
         .root_operation => state.RootOperation,
+        .controller_binding => state.ControllerBinding,
+        .controller_interaction => state.ControllerInteraction,
+        .controller_succession => state.ControllerSuccession,
+        .controller_residual => state.ControllerResidual,
+        .placement_behavior => @import("placement.zig").BehaviorRecord,
     };
 }
 pub const Store = struct {
@@ -208,6 +214,9 @@ pub const Store = struct {
             .profile = binding.profile,
             .application = binding.application,
             .resources = binding.resources,
+            .controller = binding.controller,
+            .trial = binding.trial,
+            .execution = binding.execution,
             .objects = .{ .source = &scope, .read_object = ProjectionScope.read, .native_scope = &scope },
         }));
         // Check and release even when the pure adapter failed. A malformed
@@ -270,6 +279,7 @@ pub const Store = struct {
             if (!std.meta.eql(ctx.task, scope.binding.task) or !std.mem.eql(u8, ctx.tenant, scope.binding.tenant) or
                 !std.mem.eql(u8, ctx.profile, scope.binding.profile) or ctx.application == null or
                 !std.meta.eql(ctx.application.?, scope.binding.application)) return error.InvalidContext;
+            if (!std.meta.eql(ctx.execution, scope.binding.execution) or !std.meta.eql(ctx.controller, scope.binding.controller) or !std.meta.eql(ctx.trial, scope.binding.trial)) return error.InvalidContext;
             if (scope.opened and store.sealed_generation == store.head.generation and
                 store.retention_epoch == scope.epoch and store.retention_image != null and
                 std.meta.eql(store.retention_image.?, scope.binding.application)) owner = store;

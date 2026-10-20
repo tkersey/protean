@@ -19,6 +19,7 @@ fn authorize(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
     // Descriptions and retained observations grant no new execution. Mutations
     // retain the user's explicit construction/execution permission separately.
     const command = request.value.action;
+    if (command == .program and command.program == .adopt) return error.ControllerHandoffRequired;
     var catalog: ?native.registry.ObjectReference = null;
     if (command == .program and command.program == .build) {
         const policy = try resources.policy(ctx);

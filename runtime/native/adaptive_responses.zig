@@ -186,6 +186,20 @@ pub fn Adapter(comptime P: type) type {
             return references.finish();
         }
 
+        pub fn offerGeneral(ctx: registry.ProjectionContext, bytes: []const u8, required: [P.declaration_count]bool) ![]u8 {
+            var request = try contracts.decodeOwned(P.AdaptiveRequest, ctx.allocator, bytes);
+            defer request.deinit();
+            const policy = try A.policy(ctx.allocator, ctx.profile);
+            var catalog = try A.catalog(ctx, policy);
+            defer catalog.deinit();
+            _ = try A.bind(ctx, policy, request.value, catalog.value);
+            for (required, policy.core_tools, policy.permitted_tools, 0..) |needed, defined, permitted, i| {
+                if (needed and defined and permitted) request.value.offered[i] = true;
+            }
+            request.value.invocation.selection.maximum_calls = 1;
+            return contracts.encodeOwned(P.AdaptiveRequest, ctx.allocator, request.value);
+        }
+
         pub fn prepare(ctx: registry.ProjectionContext, bytes: []const u8) ![]u8 {
             var request = try contracts.decodeOwned(P.AdaptiveRequest, ctx.allocator, bytes);
             defer request.deinit();
@@ -200,8 +214,41 @@ pub fn Adapter(comptime P: type) type {
         // Both consumers share one projection. The caller keeps decoded request
         // and catalog owners alive until it has consumed this borrowed view.
         fn project(ctx: registry.ProjectionContext, request: P.AdaptiveRequest, policy: A.Policy, selected: A.Selected, catalog: P.AdaptiveCatalog) !Projected {
-            const projected = try Context.render(ctx, request, policy, selected, catalog);
+            var projected = try Context.render(ctx, request, policy, selected, catalog);
             const a = ctx.allocator;
+            if (ctx.controller) |controller| {
+                const overlay = try ctx.object(controller.overlay, std.math.cast(usize, controller.overlay.bytes) orelse return error.Capacity);
+                defer a.free(overlay);
+                var parsed = try json.parse(a, overlay, .{ .bytes = overlay.len, .tokens = overlay.len, .members = overlay.len });
+                defer parsed.deinit();
+                inline for (.{ .{ "user", "user" }, .{ "control", "developer" } }) |part| {
+                    const text = try json.canonical(a, json.get(parsed.value, part[0]) orelse return error.InvalidControllerBinding);
+                    var message = json.object();
+                    try json.put(a, &message, "role", json.string(part[1]));
+                    var content: json.Value = .{ .array = .init(a) };
+                    var item = json.object();
+                    try json.put(a, &item, "type", json.string("input_text"));
+                    try json.put(a, &item, "text", json.string(text));
+                    try content.array.append(item);
+                    try json.put(a, &message, "content", content);
+                    try projected.input.array.append(message);
+                }
+            }
+            if (ctx.trial) |trial| {
+                const bytes = try ctx.object(trial.view, std.math.cast(usize, trial.view.bytes) orelse return error.Capacity);
+                defer a.free(bytes);
+                var view = try contracts.decodeOwned(contracts.controller.OwnerView, a, bytes);
+                defer view.deinit();
+                var trial_context = json.object();
+                try json.put(a, &trial_context, "role", json.string("isolated_controller_trial"));
+                try json.put(a, &trial_context, "authority", json.string("Root commands are proposals only. This trial cannot adopt a controller or change the live task."));
+                try json.put(a, &trial_context, "work", json.string(try a.dupe(u8, &std.fmt.bytesToHex(trial.work, .lower))));
+                try json.put(a, &trial_context, "frozen_task_view", try @import("values.zig").toJson(contracts.controller.OwnerView, a, view.value));
+                var message = json.object();
+                try json.put(a, &message, "role", json.string("developer"));
+                try json.put(a, &message, "content", json.string(try json.canonical(a, trial_context)));
+                try projected.input.array.append(message);
+            }
             var body = json.object();
             try json.put(a, &body, "model", json.string(selected.transport.model.bytes));
             try json.put(a, &body, "input", projected.input);

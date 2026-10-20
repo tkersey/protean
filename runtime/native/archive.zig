@@ -275,6 +275,7 @@ const Collector = struct {
 pub const Inspected = struct { task: contracts.Decoded(state.Task), objects: []state.Reference, current: ?occurrence.Occurrence };
 
 const AdmissionFact = struct {
+    request_digest: state.Digest,
     method: state.Method,
     receipt: state.Digest,
     question: ?state.Digest,
@@ -299,6 +300,7 @@ fn admissionMethod(kind: state.EventType) ?state.Method {
         .workspace => .workspace,
         .workspace_progress,
         .workspace_read,
+        .controller,
         .input_required,
         .message_consumed,
         .message_not_consumed,
@@ -326,6 +328,23 @@ fn validateEventFacts(store: *storage.Store, archive: state.Archive, task: state
         if (admission == null or admission.?.method != method) return error.InvalidArchive;
     }
     const expected: json.Value = switch (event.kind) {
+        .controller => blk: {
+            var id: state.Digest = undefined;
+            _ = std.fmt.hexToBytes(&id, data.object.get("operation").?.string) catch return error.InvalidArchive;
+            const reference = record(archive, .controller_succession, id) orelse return error.InvalidArchive;
+            var succession = try contracts.decodeOwned(state.ControllerSuccession, a, try store.object(a, reference, null));
+            defer succession.deinit();
+            if (succession.value.phase != .activated or succession.value.activation_event != event.seq) return error.InvalidArchive;
+            const predecessor = record(archive, .controller_binding, succession.value.predecessor) orelse return error.InvalidArchive;
+            var binding = try contracts.decodeOwned(state.ControllerBinding, a, try store.object(a, predecessor, null));
+            defer binding.deinit();
+            if ((succession.value.activated_epoch orelse return error.InvalidArchive) <= binding.value.epoch) return error.InvalidArchive;
+            var result = json.object();
+            try json.put(a, &result, "operation", json.string(try a.dupe(u8, &std.fmt.bytesToHex(id, .lower))));
+            try json.put(a, &result, "phase", json.string("activated"));
+            try json.put(a, &result, "epoch", json.string(try std.fmt.allocPrint(a, "{d}", .{succession.value.activated_epoch orelse return error.InvalidArchive})));
+            break :blk result;
+        },
         .reconciled => blk: {
             const id = admission.?.reconciliation orelse return error.InvalidArchive;
             const ref = record(archive, .reconciliation, id) orelse return error.InvalidArchive;
@@ -385,6 +404,20 @@ fn validateEventFacts(store: *storage.Store, archive: state.Archive, task: state
             const bytes = try store.object(a, reference, null);
             const origin = (try contracts.decodeOwned(state.Origin, a, bytes)).value;
             if (origin.source_revision != event.revision - 1) return error.InvalidArchive;
+            const request_bytes = if (origin.transfer) |transfer| blk: {
+                if (record(archive, .placement_succession, transfer) == null) return error.InvalidArchive;
+                const Request = struct { method: state.Method, archive: state.Digest, transfer: state.Digest };
+                break :blk try contracts.encodeOwned(Request, a, .{ .method = .import_checkpoint, .archive = id, .transfer = transfer });
+            } else blk: {
+                const Request = struct { method: state.Method, archive: state.Digest };
+                break :blk try contracts.encodeOwned(Request, a, .{ .method = .import_checkpoint, .archive = id });
+            };
+            var request_hash = std.crypto.hash.sha2.Sha256.init(.{});
+            request_hash.update("agent.native.operation.v1\x00");
+            request_hash.update(request_bytes);
+            var request_digest: state.Digest = undefined;
+            request_hash.final(&request_digest);
+            if (!std.meta.eql(admission.?.request_digest, request_digest)) return error.InvalidArchive;
             return null;
         },
         .workspace => {
@@ -491,6 +524,12 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
                     defer a.free(actual);
                     if (!same(wanted, actual)) return error.InvalidArchive;
                 }
+                if (comptime same(kind, "placement_behavior")) {
+                    const p = @import("placement.zig");
+                    const behavior = item.decision.value;
+                    try p.verify(p.Behavior, a, item.decision, behavior.owner);
+                    if (!std.meta.eql(item.id, behavior.operation) or !std.meta.eql(item.task, behavior.task) or behavior.epoch != try std.math.add(u64, behavior.previous_epoch, 1) or std.meta.eql(behavior.predecessor, behavior.successor)) return error.InvalidArchive;
+                }
                 if (comptime same(kind, "placement_succession")) {
                     const p = @import("placement.zig");
                     try p.verify(p.Offer, a, item.offer, item.offer.value.intent.source);
@@ -557,10 +596,10 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         // A cancellation requested after termination need not create intent.
         if (decoded.value.method == .cancel and !value.terminal() and value.cancellation == null) return error.InvalidArchive;
         switch (decoded.value.method) {
-            .submit, .respond, .message, .@"resume", .reconcile => last_nonterminal_revision = @max(last_nonterminal_revision, decoded.value.revision),
-            .cancel, .import_checkpoint, .workspace => {},
+            .submit, .respond, .message, .@"resume" => last_nonterminal_revision = @max(last_nonterminal_revision, decoded.value.revision),
+            .cancel, .import_checkpoint, .workspace, .reconcile => {},
         }
-        const fact: AdmissionFact = .{ .method = decoded.value.method, .receipt = row.body.digest, .question = decoded.value.question, .message = decoded.value.message, .reconciliation = decoded.value.reconciliation, .workspace = decoded.value.workspace };
+        const fact: AdmissionFact = .{ .request_digest = decoded.value.request_digest, .method = decoded.value.method, .receipt = row.body.digest, .question = decoded.value.question, .message = decoded.value.message, .reconciliation = decoded.value.reconciliation, .workspace = decoded.value.workspace };
         const entry = try admissions.getOrPut(decoded.value.revision);
         if (entry.found_existing and !std.meta.eql(entry.value_ptr.*, fact)) return error.InvalidArchive;
         entry.value_ptr.* = fact;
@@ -581,6 +620,10 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
             var recovery = try contracts.decodeOwned(state.Reconciliation, a, try store.object(a, ref, null));
             defer recovery.deinit();
             if (recovery.value.admission_revision != decoded.value.revision or !std.meta.eql(recovery.value.request_digest, decoded.value.request_digest) or !same(recovery.value.client_operation_id.bytes, decoded.value.client_operation_id.bytes)) return error.InvalidArchive;
+            const occurrence_ref = record(archive, .occurrence, recovery.value.occurrence) orelse return error.InvalidArchive;
+            var pending = try contracts.decodeOwned(occurrence.Occurrence, a, try store.object(a, occurrence_ref, null));
+            defer pending.deinit();
+            if (pending.value.residual == null) last_nonterminal_revision = @max(last_nonterminal_revision, decoded.value.revision);
         }
     }
     var next = value.event_floor;
@@ -626,6 +669,19 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
             },
             // These are the only publications that may follow termination.
             .cancellation_requested, .imported, .message_not_consumed, .workspace, .workspace_progress => {},
+            .reconciled => {
+                if (terminal != null) {
+                    const admission = admissions.get(row.revision) orelse return error.InvalidArchive;
+                    const reconciliation_id = admission.reconciliation orelse return error.InvalidArchive;
+                    const ref = record(archive, .reconciliation, reconciliation_id) orelse return error.InvalidArchive;
+                    var recovery = try contracts.decodeOwned(state.Reconciliation, a, try store.object(a, ref, null));
+                    defer recovery.deinit();
+                    const occurrence_ref = record(archive, .occurrence, recovery.value.occurrence) orelse return error.InvalidArchive;
+                    var pending = try contracts.decodeOwned(occurrence.Occurrence, a, try store.object(a, occurrence_ref, null));
+                    defer pending.deinit();
+                    if (pending.value.residual == null) return error.InvalidArchive;
+                } else nonterminal_event = true;
+            },
             else => {
                 if (terminal != null) return error.InvalidArchive;
                 nonterminal_event = true;

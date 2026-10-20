@@ -6,7 +6,7 @@ pub const tool_types = @import("tool_types.zig");
 pub const controls = protean.adaptive_controls;
 pub const model = protean.model_invocation;
 pub const application_id = "adaptive-agent";
-pub const application_version = "6.0.0";
+pub const application_version = "7.0.0";
 pub const input_schema_id = "adaptive-agent.input.v2";
 pub const output_schema_id = "adaptive-agent.output.v5";
 pub const failure_schema_id = "adaptive-agent.failure.v1";
@@ -117,6 +117,9 @@ pub const WorkRequest = struct {
 pub const WorkArtifact = struct { version: u8, task: [16]u8, policy: [32]u8, context: model.AdaptiveContextReference, call_id: P.CallId, request: @FieldType(WorkRequest, "action"), outcome: WorkOutcome, evidence: ?Evidence, model_text: P.ResultText };
 pub const WorkReply = struct { artifact: model.ArtifactReference, evidence: ?SourceEvidenceReference };
 pub const WorkspaceRequest = struct { context: model.AdaptiveContextReference, call_id: P.CallId, action: contracts.workspace.Command };
+pub const ControllerCarry = struct { bindings: PolicyView, state: State };
+pub const ControllerPrivate = union(enum) { initial: Input, @"resume": ControllerCarry };
+pub const ControllerInput = struct { anchor: contracts.controller.TaskAnchor, private: ControllerPrivate };
 pub const Programs = contracts.Vector(contracts.workspace.Ref, null);
 pub const WorkspaceResult = struct { reply: contracts.workspace.Reply, evidence_index: ?u64 };
 pub const ResultValue = union(enum) { inline_text: Summary, work: model.ArtifactReference, control: model.ArtifactReference, report_rejection: ReportRejection, workspace: WorkspaceResult };
@@ -174,6 +177,7 @@ pub const Preparation = struct {
     state: State,
     offered: [P.declaration_count]bool,
     control: ?ControlSubject,
+    retained_calls: model.RetainedCalls = .{ .items = &.{} },
 };
 pub const Ready = struct {
     request: P.AdaptiveRequest,
@@ -190,10 +194,10 @@ pub const Configuration = struct { workspace: contracts.Text(128), snapshot_root
 pub const DataRow = struct { id: u64, key: u64, value: u64, group: u64 };
 pub const DataRows = contracts.Vector(DataRow, null);
 pub const ToolInputConfig = struct { id: contracts.Text(64), description: contracts.Text(256), rows: DataRows, relation: DataRows, selected: tool_types.Keys };
-pub const ToolConfiguration = struct { build: bool, run: bool, inputs: contracts.Vector(ToolInputConfig, null) };
+pub const ToolConfiguration = struct { build: bool, run: bool, reconstruct: bool = false, inputs: contracts.Vector(ToolInputConfig, null) };
 pub const ConfigurationV3 = struct { schema: contracts.Text(64), adaptive: Configuration, tools: ?ToolConfiguration };
 pub const ToolInputReference = struct { id: contracts.Text(64), description: contracts.Text(256), object: model.ArtifactReference };
-pub const ToolPolicy = struct { build: bool, run: bool, catalog: model.ArtifactReference, inputs: contracts.Vector(ToolInputReference, null) };
+pub const ToolPolicy = struct { build: bool, run: bool, reconstruct: bool = false, catalog: model.ArtifactReference, inputs: contracts.Vector(ToolInputReference, null) };
 // Ordinary wire contracts accompany the emitted Horos image. External
 // inspection tools can decode them without an adaptive execution implementation.
 pub const support_types = .{

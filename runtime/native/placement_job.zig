@@ -4,7 +4,7 @@ const std = @import("std");
 const p = @import("placement.zig");
 const transport = @import("placement_transport.zig");
 const contracts = @import("protean_contracts");
-pub const Input = union(enum) { move: struct { offer: p.Signed(p.Offer), path: contracts.Utf8 }, withdraw: p.Signed(p.Offer), control: struct { message: p.Signed(p.Control), route: contracts.Vector(p.Succession, null), lineage: contracts.Vector(p.Succession, null) } };
+pub const Input = union(enum) { move: struct { offer: p.Signed(p.Offer), path: contracts.Utf8 }, withdraw: p.Signed(p.Offer), control: struct { message: p.Signed(p.Control), route: contracts.Vector(p.Succession, null), lineage: contracts.Vector(p.ControllerTransition, null) } };
 pub const Result = union(enum) { decision: p.Signed(p.Decision), report: []u8 };
 pub const Job = struct {
     allocator: std.mem.Allocator,
@@ -46,8 +46,11 @@ pub const Job = struct {
                 const control = selected.message;
                 const remote = try @import("values.zig").fromJson(?p.Custody, arena.allocator(), try connection.request(arena.allocator(), .{ .status = .{ .task = control.value.subject.task } })) orelse return error.InvalidTransfer;
                 for (selected.lineage.items) |succession| {
-                    if (succession.decision.value.epoch <= remote.epoch) continue;
-                    _ = try connection.request(arena.allocator(), .{ .follow_controller_proof = .{ .offer = succession.offer, .decision = succession.decision } });
+                    if (succession.epoch() <= remote.epoch) continue;
+                    switch (succession) {
+                        .move => |move| _ = try connection.request(arena.allocator(), .{ .follow_controller_proof = .{ .offer = move.offer, .decision = move.decision } }),
+                        .behavior => |behavior| _ = try connection.request(arena.allocator(), .{ .follow_controller_behavior = behavior }),
+                    }
                 }
                 const head = try p.routeHead(arena.allocator(), control.value, selected.route.items);
                 if (!std.meta.eql(head.site, self.peer.site)) return error.InvalidRemoteCommand;

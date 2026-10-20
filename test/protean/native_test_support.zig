@@ -20,10 +20,11 @@ pub fn ownerManifest(a: std.mem.Allocator, image: []const u8, identity: [32]u8, 
     const identity_hex = std.fmt.bytesToHex(identity, .lower);
     const assets_hex = std.fmt.bytesToHex(assets_digest, .lower);
     return std.json.Stringify.valueAlloc(a, .{
+        .format = "agent-native-build/v2",
         .native_host_contract = "unit-native-contract",
         .protocol = "agent-host/2.1",
         .client_mapping = "agent-client-values/1.1",
-        .state_format = "agent-native-state/15",
+        .state_format = "agent-native-state/16",
         .optimize = "safe",
         .program_sha256 = @as([]const u8, &image_hex),
         .program_identity = @as([]const u8, &identity_hex),
