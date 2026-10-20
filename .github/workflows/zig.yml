@@ -238,7 +238,7 @@ jobs:
           elif [ "${{ matrix.lane }}" = owner-adaptive ]; then
             run_compiled_tests native-owner-adaptive 2
           elif [ "${{ matrix.lane }}" = owner-adaptive-control ]; then
-            run_compiled_tests native-owner-adaptive 11
+            run_compiled_tests native-owner-adaptive 12
           elif [ "${{ matrix.lane }}" = owner-support ]; then
             zig build check-native-owner-support -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = workspace ]; then
