@@ -3824,7 +3824,7 @@ fn reconstructionModelMove(service: anytype, a: std.mem.Allocator, root: []const
     return error.MovedModelDidNotResume;
 }
 
-pub const ReconstructionCase = enum { round_trip, conversion_failure, conversion_schema, conversion_interrupt, instructions, cancellation, held_cleanup, recovery_cleanup, residual_read, residual_wait, residual_wait_park, residual_wait_complete, residual_mutation, residual_cancel, residual_custody, model_mobility, invalid_offer, operator, operator_unrearmed, operator_unrearmed_cancel, operator_failure, operator_failure_plain, operator_cancel };
+pub const ReconstructionCase = enum { round_trip, conversion_failure, conversion_schema, conversion_interrupt, instructions, cancellation, held_cleanup, recovery_cleanup, residual_read, residual_wait, residual_wait_park, residual_wait_complete, residual_mutation, residual_cancel, residual_custody, residual_outer, late_placement, model_mobility, invalid_offer, operator, operator_unrearmed, operator_unrearmed_cancel, operator_failure, operator_failure_plain, operator_cancel };
 
 test "WORK-C03 one task reconstructs a per-record method into an index and returns through current facts" {
     try reconstructionContinuity(null, .round_trip);
@@ -3832,7 +3832,7 @@ test "WORK-C03 one task reconstructs a per-record method into an index and retur
 
 test "WORK-C07 C08 C09 conversion and owner interleavings preserve the predecessor and residual obligations" {
     var failures: usize = 0;
-    for ([_]ReconstructionCase{ .conversion_failure, .conversion_schema, .conversion_interrupt, .instructions, .cancellation, .held_cleanup, .recovery_cleanup, .residual_read, .residual_wait, .residual_wait_park, .residual_wait_complete, .residual_mutation, .residual_cancel, .residual_custody, .model_mobility, .invalid_offer, .operator, .operator_unrearmed, .operator_unrearmed_cancel, .operator_failure, .operator_failure_plain, .operator_cancel }) |case| reconstructionContinuity(null, case) catch |err| {
+    for ([_]ReconstructionCase{ .conversion_failure, .conversion_schema, .conversion_interrupt, .instructions, .cancellation, .held_cleanup, .recovery_cleanup, .residual_read, .residual_wait, .residual_wait_park, .residual_wait_complete, .residual_mutation, .residual_cancel, .residual_custody, .residual_outer, .late_placement, .model_mobility, .invalid_offer, .operator, .operator_unrearmed, .operator_unrearmed_cancel, .operator_failure, .operator_failure_plain, .operator_cancel }) |case| reconstructionContinuity(null, case) catch |err| {
         std.debug.print("reconstruction {s}: {s}\n", .{ @tagName(case), @errorName(err) });
         if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
         failures += 1;
@@ -3870,7 +3870,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
     };
     var source_builder = source.Builder.init(a);
     defer source_builder.deinit();
-    const original_source = try native.source_records.encode(scratch, try Reconstruction.controllerWithCleanup(&source_builder, false, true, cleanup_command));
+    const original_source = try native.source_records.encode(scratch, try Reconstruction.controllerWithCleanup(&source_builder, false, true, cleanup_command, if (scenario == .residual_outer) 256 else 0));
     var diagnostic: native.program_construction.Diagnostic = .{};
     var original = native.program_construction.buildController(a, original_source, contract, null, &diagnostic) catch |err| {
         std.debug.print("fixture seed {s}: {s} function={?d} term={?d} value={?d}\n", .{ @errorName(err), @tagName(diagnostic.phase), diagnostic.source.function, diagnostic.source.term, diagnostic.source.value });
@@ -3969,7 +3969,31 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
         try std.testing.expectEqual(.observed, built.disposition);
         out.* = built.program.?;
     }
-    if (process == null and scenario == .round_trip) try reconstructionTrials(&service, scratch, task, a_ref, programs[0], programs[1]);
+    if (process == null and scenario == .round_trip) {
+        var candidate = try service.workspaceProgram(scratch, task, try nativeIdentity(programs[0]));
+        defer candidate.deinit();
+        var forged = initial_binding;
+        forged.program = candidate.value.artifact.digest;
+        forged.image = candidate.value.description.image;
+        var image = try data.program_image.decode(a, try namespace.store.object(scratch, forged.image, null));
+        defer image.deinit();
+        forged.program_identity = image.identity;
+        try namespace.store.begin();
+        defer namespace.store.rollback();
+        try namespace.store.putRecord(native.testing.state.ControllerBinding, "controller_binding", forged.id, task, forged);
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspace(scratch, task));
+        namespace.store.rollback();
+        var parent = try service.task(scratch, task);
+        defer parent.deinit();
+        var missing = parent.value;
+        missing.controller = null;
+        missing.revision += 1;
+        try namespace.store.begin();
+        try namespace.store.putTask(missing, parent.value.revision);
+        try std.testing.expectError(error.IncompatibleProfile, service.validateWorkspace(scratch, task));
+        namespace.store.rollback();
+        try reconstructionTrials(&service, scratch, task, a_ref, programs[0], programs[1]);
+    }
     stage = "child";
     var child_builder = source.Builder.init(a);
     defer child_builder.deinit();
@@ -3984,9 +4008,11 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
     var disclosure: u8 = 0;
     const placement_peer: native.placement.Peer = .{ .name = "unused-destination", .site = .{ .key = (try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(72))).public_key.toBytes(), .namespace = @splat(73) }, .native_build = profile.runtime_identity, .compatibility = try service.placementCompatibility(scratch, .{ .task = task }), .resource_binding = try profile.resourceIdentity(scratch, application.image_identity), .disclosure_policy = @splat(74), .context = &disclosure, .disclose = struct {
         fn check(_: *anyopaque, _: native.placement.Subject, _: []const native.testing.state.Reference) !void {}
-    }.check };
-    const placement: native.placement.Configuration = .{ .signing_key = placement_key, .peers = &.{placement_peer} };
-    if (process == null and (scenario == .round_trip or scenario == .residual_custody or operator)) service.profile.placement = &placement;
+    }.check, .channel = if (scenario == .late_placement or scenario == .conversion_interrupt) .{ .argv = &.{"/usr/bin/false"}, .remote_name = "source" } else null };
+    const transport_directory = if (scenario == .late_placement or scenario == .conversion_interrupt) try std.fmt.allocPrint(scratch, "{s}/transport", .{path_buffer[0..length]}) else null;
+    if (transport_directory) |directory| try std.Io.Dir.cwd().createDir(io, directory, .fromMode(0o700));
+    const placement: native.placement.Configuration = .{ .signing_key = placement_key, .peers = &.{placement_peer}, .transport_directory = transport_directory };
+    if (process == null and (scenario == .round_trip or scenario == .residual_custody or scenario == .conversion_interrupt or operator)) service.profile.placement = &placement;
     var first_work: ?native.tasks.Work = null;
     var calls: usize = 0;
     var epochs: usize = 0;
@@ -3996,12 +4022,15 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
     var child_parked = false;
     var held_residual: ?[32]u8 = null;
     var first_handoff: ?contracts.workspace.Adoption = null;
+    var first_succession: ?[32]u8 = null;
     var operator_params: ?native.json.Value = null;
     var last_event: u64 = initial.value.event_high;
     var last_attempts: u64 = 0;
     const amended_retry = process == null and scenario == .round_trip;
     const amended = amended_retry or operator;
     var retried = false;
+    var outer_cancel = false;
+    var outer_reply = false;
     stage = "execution";
     for (0..4096) |_| {
         var frame_arena = std.heap.ArenaAllocator.init(a);
@@ -4012,6 +4041,19 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
         try std.testing.expect(current.value.event_high >= last_event and current.value.inference_attempts >= last_attempts);
         last_event = current.value.event_high;
         last_attempts = current.value.inference_attempts;
+        if (scenario == .late_placement and current.value.controller_epoch == 1 and !interleaved) {
+            stage = "late placement admission";
+            try std.testing.expect(service.profile.placement == null);
+            service.profile.placement = &placement;
+            try std.testing.expect(try service.placementStatus(frame, .{ .task = task }) == null);
+            const moved = try service.workspaceCommand(frame, "first-placement-move", task, .{ .placement = .{ .move = .{ .subject = .{ .controller = .{} }, .site = .{ .bytes = placement_peer.name }, .operation = .{ .bytes = "late-controller-move" }, .custody_epoch = 1 } } });
+            if (moved.disposition != .observed) std.debug.print("late placement: {s}\n", .{moved.observation_json.bytes});
+            try std.testing.expectEqual(.observed, moved.disposition);
+            try std.testing.expectEqual(@as(u64, 1), (try service.placementStatus(frame, .{ .task = task })).?.epoch);
+            const withdrawn = try service.workspaceCommand(frame, "withdraw-first-placement", task, .{ .placement = .{ .withdraw = .{ .operation = .{ .bytes = "late-controller-move" } } } });
+            try std.testing.expectEqual(.observed, withdrawn.disposition);
+            interleaved = true;
+        }
         if (scenario == .invalid_offer and current.value.blocker != null) {
             try std.testing.expectEqual(.denied, current.value.blocker.?);
             try std.testing.expectEqual(@as(u64, 0), current.value.inference_attempts);
@@ -4046,6 +4088,15 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                     var conversion = try service.workspaceWork(frame, task, id);
                     defer conversion.deinit();
                     try std.testing.expect(!conversion.value.terminal());
+                    const subject: native.placement.Subject = .{ .task = task, .work = id };
+                    try std.testing.expectError(error.UnsettledController, service.placementFreeze(frame, subject, placement_peer.name, try service.placementCut(frame, subject), @splat(81)));
+                    const denied = try service.workspaceCommand(frame, "move-preparing-converter", task, .{ .placement = .{ .move = .{ .subject = .{ .work = try workspaceRef(frame, .work, id) }, .site = .{ .bytes = placement_peer.name }, .operation = .{ .bytes = "converter-move" }, .custody_epoch = 0 } } });
+                    try std.testing.expectEqual(.rejected, denied.disposition);
+                    if (std.mem.indexOf(u8, denied.observation_json.bytes, "UnsettledController") == null) std.debug.print("converter placement: {s}\n", .{denied.observation_json.bytes});
+                    try std.testing.expect(std.mem.indexOf(u8, denied.observation_json.bytes, "UnsettledController") != null);
+                    const independent: native.placement.Subject = .{ .task = task, .work = child_id };
+                    _ = try service.placementFreeze(frame, independent, placement_peer.name, try service.placementCut(frame, independent), @splat(82));
+                    try service.placementAbortUnsent(frame, independent, @splat(82));
                     _ = try service.workspaceControl(frame, "interrupt-divergent-converter", task, id, conversion.value.execution_revision, conversion.value.control_revision, .{ .cancel = .{ .bytes = "Interrupt divergent conversion" } });
                     interleaved = true;
                     continue;
@@ -4056,8 +4107,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
             .conversion_failure, .conversion_schema, .conversion_interrupt, .instructions, .cancellation, .operator_failure, .operator_failure_plain, .operator_cancel => true,
             else => false,
         }) if (first_handoff) |handoff| {
-            var id: [32]u8 = undefined;
-            _ = try std.fmt.hexToBytes(&id, handoff.expected_handoff_identity.bytes);
+            const id = first_succession.?;
             if (try namespace.store.recordBytes(frame, "controller_succession", id, task)) |bytes| {
                 const rejected = (try contracts.decodeOwned(native.testing.state.ControllerSuccession, frame, bytes)).value;
                 if (rejected.diagnostic != null) {
@@ -4083,6 +4133,28 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                         try std.testing.expectEqual(.parked, current.value.schedule);
                         for (0..8) |_| try std.testing.expect(try service.pump(frame) != .work);
                         _ = try service.exportCheckpoint(frame, task, try std.fmt.allocPrint(frame, "{s}/operator-failed.archive", .{path_buffer[0..length]}));
+                        if (scenario == .operator_failure_plain) {
+                            var retry_command = handoff;
+                            retry_command.reason = .{ .bytes = "A separate operator attempt at the same handoff" };
+                            var stopped = try service.task(frame, task);
+                            defer stopped.deinit();
+                            _ = try service.adoptController(frame, "separate-operator-retry", task, stopped.value.revision, retry_command);
+                            var retry = try service.task(frame, task);
+                            defer retry.deinit();
+                            const retry_id = retry.value.controller_succession.?;
+                            try std.testing.expect(!std.meta.eql(id, retry_id));
+                            try std.testing.expectEqualDeep(stopped.value.controller_interaction, retry.value.controller_interaction);
+                            for (0..128) |_| {
+                                _ = try service.pump(frame);
+                                var after = try service.task(frame, task);
+                                defer after.deinit();
+                                if (after.value.controller_succession == null) break;
+                            } else return error.OperatorRetryDidNotFinish;
+                            const retried_operation = (try contracts.decodeOwned(native.testing.state.ControllerSuccession, frame, (try namespace.store.recordBytes(frame, "controller_succession", retry_id, task)).?)).value;
+                            try std.testing.expectEqual(.failed, retried_operation.phase);
+                            try std.testing.expect(retried_operation.diagnostic != null);
+                            _ = try service.exportCheckpoint(frame, task, try std.fmt.allocPrint(frame, "{s}/operator-retried.archive", .{path_buffer[0..length]}));
+                        }
                         if (scenario == .operator_failure) _ = try service.message(frame, "after-failed-adoption", task, .{ .bytes = "Continue the original controller with current instructions." });
                         var stopped = try service.task(frame, task);
                         defer stopped.deinit();
@@ -4093,7 +4165,9 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                             if (progress != .work) continue;
                             try std.testing.expect(progress.work.entry.declaration.inference);
                             if (responses == 0) {
-                                try service.acquire(frame, progress.work, try contracts.encodeOwned(Reconstruction.Response, frame, .{ .next = {} }));
+                                var next_command = handoff;
+                                next_command.reason = .{ .bytes = "Retry from the captured model operation" };
+                                try service.acquire(frame, progress.work, try contracts.encodeOwned(Reconstruction.Response, frame, if (scenario == .operator_failure_plain) .{ .adopt = next_command } else .{ .next = {} }));
                                 responses += 1;
                             } else {
                                 try service.notSent(frame, progress.work);
@@ -4164,15 +4238,15 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
             try std.testing.expectEqualDeep(initial.value.input, current.value.input);
             try std.testing.expectEqualDeep(initial.value.image, current.value.image);
             if (process) |p| if (epochs == 1 and std.mem.eql(u8, p.phase, "controller-activated")) {
-                var id: [32]u8 = undefined;
-                _ = try std.fmt.hexToBytes(&id, first_handoff.?.expected_handoff_identity.bytes);
-                try p.stop(p.phase, task, id);
+                try p.stop(p.phase, task, first_succession.?);
             };
             try reconstructionSource(&service, frame, task, epochs, if (epochs == 1) programs[0] else a_ref, if (epochs == 1) indexed_source else original_source);
-            const replayed = try service.workspaceCommand(frame, "replay-after-epoch", task, .{ .program = .{ .adopt = first_handoff.? } });
-            try std.testing.expectEqual(.observed, replayed.disposition);
-            const observation = (try native.json.parse(frame, replayed.observation_json.bytes, .{})).value;
-            try std.testing.expectEqualStrings("activated", native.json.get(observation, "phase").?.string);
+            if (!operator) {
+                const replayed = try service.workspaceCommand(frame, "replay-after-epoch", task, .{ .program = .{ .adopt = first_handoff.? } });
+                try std.testing.expectEqual(.observed, replayed.disposition);
+                const observation = (try native.json.parse(frame, replayed.observation_json.bytes, .{})).value;
+                try std.testing.expectEqualStrings("activated", native.json.get(observation, "phase").?.string);
+            }
             if (epochs == 1) {
                 try std.testing.expectError(error.StaleOccurrence, service.acquire(frame, first_work.?, &.{}));
                 if (operator_params) |params| {
@@ -4180,10 +4254,14 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                     const replay = try client.call(frame, .@"task.adopt", params);
                     try std.testing.expect(replay.object.get("replayed").?.bool);
                     try std.testing.expectEqualStrings("1", replay.object.get("controller_epoch").?.string);
+                    var changed = (try native.json.parse(frame, try native.json.canonical(frame, params), .{})).value;
+                    var command = first_handoff.?;
+                    command.reason = .{ .bytes = "Different bytes for the same operator operation" };
+                    try native.json.put(frame, &changed, "adoption", try native.values.toJson(contracts.workspace.Adoption, frame, command));
+                    try std.testing.expectError(error.OperationConflict, client.call(frame, .@"task.adopt", changed));
                 }
                 if (cleanup_command != null) {
-                    var succession_id: [32]u8 = undefined;
-                    _ = try std.fmt.hexToBytes(&succession_id, first_handoff.?.expected_handoff_identity.bytes);
+                    const succession_id = first_succession.?;
                     const succession = (try contracts.decodeOwned(native.testing.state.ControllerSuccession, frame, (try namespace.store.recordBytes(frame, "controller_succession", succession_id, task)).?)).value;
                     const residual_id = succession.residual.?;
                     var woke = !residual_wait;
@@ -4259,8 +4337,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                     return;
                 }
                 if (scenario == .residual_custody) {
-                    var succession_id: [32]u8 = undefined;
-                    _ = try std.fmt.hexToBytes(&succession_id, first_handoff.?.expected_handoff_identity.bytes);
+                    const succession_id = first_succession.?;
                     const succession = (try contracts.decodeOwned(native.testing.state.ControllerSuccession, frame, (try namespace.store.recordBytes(frame, "controller_succession", succession_id, task)).?)).value;
                     const residual_id = succession.residual.?;
                     const residual = (try contracts.decodeOwned(native.testing.state.ControllerResidual, frame, (try namespace.store.recordBytes(frame, "controller_residual", residual_id, task)).?)).value;
@@ -4287,8 +4364,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                     return;
                 }
                 if (scenario == .residual_cancel or operator_unrearmed) {
-                    var succession_id: [32]u8 = undefined;
-                    _ = try std.fmt.hexToBytes(&succession_id, first_handoff.?.expected_handoff_identity.bytes);
+                    const succession_id = first_succession.?;
                     const succession = (try contracts.decodeOwned(native.testing.state.ControllerSuccession, frame, (try namespace.store.recordBytes(frame, "controller_succession", succession_id, task)).?)).value;
                     const residual_id = succession.residual.?;
                     var residual = (try contracts.decodeOwned(native.testing.state.ControllerResidual, frame, (try namespace.store.recordBytes(frame, "controller_residual", residual_id, task)).?)).value;
@@ -4327,8 +4403,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                     return;
                 }
                 if (scenario == .round_trip and process == null) {
-                    var succession_id: [32]u8 = undefined;
-                    _ = try std.fmt.hexToBytes(&succession_id, first_handoff.?.expected_handoff_identity.bytes);
+                    const succession_id = first_succession.?;
                     const succession = (try contracts.decodeOwned(native.testing.state.ControllerSuccession, frame, (try namespace.store.recordBytes(frame, "controller_succession", succession_id, task)).?)).value;
                     const residual = (try contracts.decodeOwned(native.testing.state.ControllerResidual, frame, (try namespace.store.recordBytes(frame, "controller_residual", succession.residual.?, task)).?)).value;
                     var expected: contracts.workspace.Expected = .{ .work = try workspaceRef(frame, .residual, residual.id), .execution_revision = residual.execution_revision, .control_revision = residual.control_revision };
@@ -4345,11 +4420,13 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                     try native.json.put(frame, &original_observation, "replayed", .{ .bool = true });
                     try std.testing.expectEqualStrings(try native.json.canonical(frame, original_observation), try native.json.canonical(frame, repeated_observation));
                 }
-                var stale = first_handoff.?;
-                stale.reason = .{ .bytes = "An unadmitted old command" };
-                const denied = try service.workspaceCommand(frame, "old-controller-command", task, .{ .program = .{ .adopt = stale } });
-                try std.testing.expectEqual(.rejected, denied.disposition);
-                try std.testing.expect(std.mem.indexOf(u8, denied.observation_json.bytes, "OperationConflict") != null);
+                if (!operator) {
+                    var stale = first_handoff.?;
+                    stale.reason = .{ .bytes = "An unadmitted old command" };
+                    const denied = try service.workspaceCommand(frame, "old-controller-command", task, .{ .program = .{ .adopt = stale } });
+                    try std.testing.expectEqual(.rejected, denied.disposition);
+                    try std.testing.expect(std.mem.indexOf(u8, denied.observation_json.bytes, "OperationConflict") != null);
+                }
                 _ = try service.message(frame, "reconstruction-amendment", task, .{ .bytes = "Recheck the exceptional record directly using current facts." });
                 const port = (try contracts.decodeOwned(native.workspace.Port, frame, try namespace.store.object(frame, child.value.current_port.?, null))).value;
                 _ = try service.workspaceInteract(frame, "late-child-answer", task, .{ .expected = .{ .work = try workspaceRef(frame, .work, child_id), .execution_revision = child.value.execution_revision, .control_revision = child.value.control_revision }, .port = try workspaceRef(frame, .port, port.id), .generation = port.generation, .command = .{ .resume_value = .{ .inline_json = .{ .schema = try workspaceRef(frame, .schema, port.interface.argument.digest), .json_text = .{ .bytes = "true" } } } } });
@@ -4370,6 +4447,27 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
         const step = service.pump(frame) catch |err| {
             std.debug.print("reconstruction pump {s} epoch={d} revision={d} outcome={s} calls={d} cleanup={d}\n", .{ @errorName(err), current.value.controller_epoch, current.value.revision, @tagName(current.value.outcome_kind), calls, cleanups });
             return err;
+        };
+        if (scenario == .residual_outer) if (service.active) |active| {
+            if (active.subject == .residual) if (active.root_control) |bytes| {
+                var control = try contracts.decodeOwned(data.invocation.Control, frame, bytes);
+                defer control.deinit();
+                const snapshot = (control.value == .cancel and !outer_cancel) or (control.value == .reply and !outer_reply);
+                if (snapshot) {
+                    _ = try service.placementCut(frame, .{ .task = task });
+                    const id = active.subject.residual;
+                    const residual = (try contracts.decodeOwned(native.testing.state.ControllerResidual, frame, (try namespace.store.recordBytes(frame, "controller_residual", id, task)).?)).value;
+                    try std.testing.expect(residual.outer_operation != null);
+                    const expected: contracts.workspace.Expected = .{ .work = try workspaceRef(frame, .residual, id), .execution_revision = residual.execution_revision, .control_revision = residual.control_revision };
+                    const parked = try service.workspaceCommand(frame, try std.fmt.allocPrint(frame, "outer-park-{s}", .{@tagName(control.value)}), task, .{ .work = .{ .park = expected } });
+                    try std.testing.expectEqual(.observed, parked.disposition);
+                    var next = expected;
+                    next.control_revision += 1;
+                    const resumed = try service.workspaceCommand(frame, try std.fmt.allocPrint(frame, "outer-advance-{s}", .{@tagName(control.value)}), task, .{ .work = .{ .advance = next } });
+                    try std.testing.expectEqual(.observed, resumed.disposition);
+                    if (control.value == .cancel) outer_cancel = true else outer_reply = true;
+                }
+            };
         };
         if (step != .work) continue;
         const work = step.work;
@@ -4397,7 +4495,10 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
             const response: Reconstruction.Response = if (calls < 2) blk: {
                 const id = current.value.controller_interaction.?;
                 const adoption: contracts.workspace.Adoption = .{ .successor = if (calls == 0) programs[0] else a_ref, .converter = programs[calls + 1], .expected_controller_epoch = current.value.controller_epoch, .expected_handoff_identity = .{ .bytes = try scratch.dupe(u8, &std.fmt.bytesToHex(id, .lower)) }, .reason = .{ .bytes = "Change the executable evidence traversal" } };
-                if (calls == 0) first_handoff = adoption;
+                if (calls == 0) {
+                    first_handoff = adoption;
+                    first_succession = id;
+                }
                 break :blk .{ .adopt = adoption };
             } else .{ .next = {} };
             if (calls == 0) first_work = work;
@@ -4430,11 +4531,15 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                 try native.json.put(scratch, &params, "adoption", try native.values.toJson(contracts.workspace.Adoption, scratch, command));
                 const adoption_result = try client.call(scratch, .@"task.adopt", params);
                 try std.testing.expect(!adoption_result.object.get("replayed").?.bool);
+                var preparing = try service.task(frame, task);
+                defer preparing.deinit();
+                first_succession = preparing.value.controller_succession.?;
+                try std.testing.expect(!std.meta.eql(first_succession.?, preparing.value.controller_interaction.?));
                 operator_params = params;
                 stage = "operator preparing export";
                 _ = try service.exportCheckpoint(frame, task, try std.fmt.allocPrint(frame, "{s}/operator-preparing.archive", .{path_buffer[0..length]}));
                 if (scenario == .operator) for (0..2) |variant| {
-                    const id = frozen.value.controller_interaction.?;
+                    const id = first_succession.?;
                     var altered = (try contracts.decodeOwned(native.testing.state.ControllerSuccession, frame, (try namespace.store.recordBytes(frame, "controller_succession", id, task)).?)).value;
                     if (variant == 0) {
                         const not_sent = altered.operator_admission.?.occurrence.state.not_sent;
@@ -4491,6 +4596,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
     try std.testing.expectEqual(@as(usize, 3), calls);
     try std.testing.expectEqual(@as(usize, 2), epochs);
     try std.testing.expectEqual(@as(usize, 2), cleanups);
+    if (scenario == .residual_outer) try std.testing.expect(outer_cancel and outer_reply);
     try std.testing.expect(!held);
     var final_task = try service.task(a, task);
     defer final_task.deinit();

@@ -274,9 +274,9 @@ pub const Reconstruction = struct {
         }
     };
     pub fn controller(b: *source.Builder, indexed: bool, cleanup: bool) !source.Module {
-        return controllerWithCleanup(b, indexed, cleanup, null);
+        return controllerWithCleanup(b, indexed, cleanup, null, 0);
     }
-    pub fn controllerWithCleanup(b: *source.Builder, indexed: bool, cleanup: bool, workspace_command: ?c.workspace.Command) !source.Module {
+    pub fn controllerWithCleanup(b: *source.Builder, indexed: bool, cleanup: bool, workspace_command: ?c.workspace.Command, cleanup_steps: usize) !source.Module {
         const e: E = .{ .b = b };
         const unit = try e.schema(void);
         const state_schema = if (indexed) try e.schema(Indexed) else try e.schema(Direct);
@@ -332,7 +332,10 @@ pub const Reconstruction = struct {
         const workspace_effect = if (workspace_command != null) try b.effect(.{ .identity = "controller/1/workspace", .payload = try e.schema(c.workspace.Command), .result = try e.schema(c.workspace.Reply), .external = false }) else null;
         const cleanup_effects = if (workspace_effect) |effect| try b.allocator().dupe(@TypeOf(dispose), &.{ dispose, effect }) else &.{dispose};
         const unwind = try b.declare(&.{info}, unit, cleanup_effects, &.{});
-        const disposed = try b.term(.{ .perform = .{ .effect = dispose, .payload = try e.number(7) } });
+        var cleanup_payload = try e.number(7);
+        for (0..cleanup_steps) |_| cleanup_payload = try b.primitive(try e.schema(u64), .integer_bit_xor, &.{ cleanup_payload, try e.number(1) }, 0);
+        const cleanup_call = try b.term(.{ .perform = .{ .effect = dispose, .payload = cleanup_payload } });
+        const disposed = if (cleanup_steps == 0) cleanup_call else try b.bind(try b.variable(unit), cleanup_call, try b.bind(try b.variable(try e.schema(u64)), try b.pure(cleanup_payload), try b.pure(try b.literal(.{ .schema = unit, .bytes = &.{} }))));
         try b.define(unwind, if (workspace_effect) |effect| try b.bind(try b.variable(try e.schema(c.workspace.Reply)), try b.term(.{ .perform = .{ .effect = effect, .payload = try b.literal(.{ .schema = try e.schema(c.workspace.Command), .bytes = try c.encodeOwned(c.workspace.Command, b.allocator(), workspace_command.?) }) } }), disposed) else disposed);
         const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{input}, .result = try e.schema(Output), .effects = &.{deliberate} } } });
         const cleanup_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{info}, .result = unit, .effects = cleanup_effects } } });

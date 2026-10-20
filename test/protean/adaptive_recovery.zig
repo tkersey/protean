@@ -201,15 +201,19 @@ test "adaptive malformed capture remains private and portable without claiming s
 }
 
 test "adaptive workspace interrupted pure build restarts without ambiguous delivery" {
-    try workspaceRecovery(true, false);
+    try workspaceRecovery(true, false, false);
 }
 
 test "adaptive workspace captured build imports and executes exact retained code and input" {
-    try workspaceRecovery(false, false);
+    try workspaceRecovery(false, false, false);
 }
 
 test "adaptive workspace AUT-02 AUT-03 BUILD-01 controller abandons a binary framing and executes novel source twice" {
-    try workspaceRecovery(false, true);
+    try workspaceRecovery(false, true, false);
+}
+
+test "adaptive workspace reconstructed controller cannot publish invented source evidence" {
+    try workspaceRecovery(false, false, true);
 }
 
 const ReframeTrace = struct {
@@ -285,7 +289,7 @@ const ReframeTrace = struct {
     }
 };
 
-fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.discovery.Assets, dir: std.Io.Dir, path: []const u8) !native.configuration.Admitted {
+fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.discovery.Assets, dir: std.Io.Dir, path: []const u8, reconstruct: bool) !native.configuration.Admitted {
     const base = try environment.configure(a, io, .{ .offline = true }, null, assets);
     const policy = try native.adaptive_responses.Admission(t.P).policy(a, base.bytes);
     try dir.createDir(io, "snapshot", .default_dir);
@@ -302,7 +306,7 @@ fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.d
             .initial_effort = .medium,
             .skills = .{ .items = &.{} },
         },
-        .tools = .{ .build = true, .run = true, .inputs = .{ .items = &.{.{
+        .tools = .{ .build = true, .run = true, .reconstruct = reconstruct, .inputs = .{ .items = &.{.{
             .id = .{ .bytes = "retained-table" },
             .description = .{ .bytes = "Immutable generated-tool input" },
             .rows = .{ .items = &.{.{ .id = 1, .key = 10, .value = 100, .group = 1 }} },
@@ -311,7 +315,7 @@ fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.d
         }} } },
     };
     var config_json = try native.values.toJson(t.ConfigurationV3, a, config);
-    _ = config_json.object.getPtr("tools").?.object.swapRemove("reconstruct");
+    if (!reconstruct) _ = config_json.object.getPtr("tools").?.object.swapRemove("reconstruct");
     try dir.writeFile(io, .{ .sub_path = "config.json", .data = try native.json.canonical(a, config_json) });
     // Configuration admits local inputs normally. Provider acquisition is
     // forbidden by the test registry, so no TLS or network operation occurs.
@@ -324,7 +328,7 @@ fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.d
     }, null, assets);
 }
 
-fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void {
+fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool, comptime output_origin: bool) !void {
     const c = protean.contracts;
     const wc = c.workspace;
     const a = std.testing.allocator;
@@ -354,7 +358,7 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void
     defer temporary.cleanup();
     var buffer: [4096]u8 = undefined;
     const directory = buffer[0..try temporary.dir.realPath(io, &buffer)];
-    const configured = try generatedToolConfiguration(permanent, io, assets, temporary.dir, directory);
+    const configured = try generatedToolConfiguration(permanent, io, assets, temporary.dir, directory, output_origin);
     var grants: [environment.handlers.len]native.registry.Grant = undefined;
     const profile: native.tasks.Profile = .{ .id = configured.id, .runtime_identity = @splat(73), .bytes = configured.bytes, .environment = configured.environment, .resources = configured.resources, .authority = .{ .grants = &grants, .principal = "adaptive-unit", .tenant = "local", .inference = true } };
     for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
@@ -453,6 +457,39 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void
         if (work.entry.declaration.inference) {
             var prepared = try c.decodeOwned(t.P.AdaptivePrepared, frame, work.prepared.?);
             defer prepared.deinit();
+            if (output_origin) {
+                try service.notSent(frame, work);
+                try installInventedOutput(&service, frame, task, prepared.value.request);
+                for (0..4096) |_| {
+                    _ = service.pump(frame) catch |err| {
+                        try std.testing.expectEqual(error.InvalidResultReference, err);
+                        break;
+                    };
+                } else return error.InventedOutputWasNotRejected;
+                try std.testing.expect(namespace.store.fenced);
+                try service.close(frame);
+                try namespace.close();
+                namespace = try native.Namespace.open(a, io, path);
+                service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
+                var retained = try service.task(frame, task);
+                defer retained.deinit();
+                try std.testing.expectEqual(@as(u64, 1), retained.value.controller_epoch);
+                try std.testing.expect(!retained.value.terminal());
+                try std.testing.expect(retained.value.client_result == null);
+                _ = try service.requestCancel(frame, "cancel-invented-output", task, "Invalid evidence was not published");
+                for (0..4096) |_| {
+                    _ = try service.pump(frame);
+                    var cancelled = try service.task(frame, task);
+                    defer cancelled.deinit();
+                    if (cancelled.value.terminal() and try service.taskCleanupComplete(frame, cancelled.value)) {
+                        try std.testing.expectEqual(.cancelled, cancelled.value.outcome_kind);
+                        try std.testing.expect(cancelled.value.client_result == null);
+                        _ = try service.exportCheckpoint(frame, task, try std.fmt.allocPrint(frame, "{s}/rejected-output.agnx", .{directory}));
+                        return;
+                    }
+                }
+                return error.RejectedOutputDidNotCancel;
+            }
             var observation: native.json.Value = .null;
             if (stage > 0) {
                 try std.testing.expectEqual(1, prepared.value.request.results.items.len);
@@ -507,6 +544,59 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void
         }
     }
     return error.WorkspaceRecoveryDidNotComplete;
+}
+
+fn installInventedOutput(service: *native.tasks.Service(t), a: std.mem.Allocator, task: [16]u8, request: t.P.AdaptiveRequest) !void {
+    const c = protean.contracts;
+    var parent = try service.task(a, task);
+    defer parent.deinit();
+    const interaction = (try c.decodeOwned(native.testing.state.ControllerInteraction, a, (try service.namespace.store.recordBytes(a, "controller_interaction", parent.value.controller_interaction.?, task)).?)).value;
+    const carry = (try c.decodeOwned(t.ControllerCarry, a, try service.namespace.store.object(a, interaction.carry, null))).value;
+    const output: t.Output = .{
+        .result = .{ .report = .{ .summary = .{ .bytes = "Invented evidence" }, .claims = .{ .items = &.{.{ .kind = .observation, .statement = .{ .bytes = "This source was acquired" }, .reasoning = .{ .bytes = "" }, .evidence_indices = .{ .items = &.{0} } }} }, .limitations = .{ .items = &.{} } } },
+        .evidence = .{ .items = &.{.{ .source = .{ .object = .{ .digest = @splat(194), .bytes = 12 }, .snapshot = @splat(195), .path = .{ .bytes = "unacquired.zig" }, .sha256 = .{ .bytes = &(@as([64]u8, @splat('a'))) }, .start = 0, .end = 12, .file_bytes = 12 } }} },
+        .programs = .{ .items = &.{} },
+        .control = carry.state.control,
+        .receipts = .{ .items = &.{} },
+        .model_calls = 1,
+        .work_calls = 0,
+    };
+    var programs: [2]c.workspace.Ref = undefined;
+    for (&programs, 0..) |*program, i| {
+        var b = horos.source.Builder.init(a);
+        defer b.deinit();
+        const boolean = try c.schema(bool, &b);
+        const failure = try c.schema(t.Failure, &b);
+        const module = if (i == 0) blk: {
+            const input = try b.schema(.{ .product = &.{ try c.schema(c.controller.TaskAnchor, &b), boolean } });
+            const unit = try c.schema(void, &b);
+            const payload = try b.schema(.{ .product = &.{ try c.schema(t.P.AdaptiveRequest, &b), unit } });
+            const reply = try c.schema(c.controller.Reply(t.P.AdaptiveResult), &b);
+            const deliberate = try b.effect(.{ .identity = "controller/1/deliberate", .payload = payload, .result = reply, .external = false });
+            const entry = try b.declare(&.{input}, try c.schema(t.Output, &b), &.{deliberate}, &.{});
+            const result = try b.pure(try b.literal(.{ .schema = try c.schema(t.Output, &b), .bytes = try c.encodeOwned(t.Output, a, output) }));
+            const request_value = try b.literal(.{ .schema = try c.schema(t.P.AdaptiveRequest, &b), .bytes = try c.encodeOwned(t.P.AdaptiveRequest, a, request) });
+            const call = try b.term(.{ .perform = .{ .effect = deliberate, .payload = try b.primitive(payload, .product, &.{ request_value, try b.constant(void, {}) }, 0) } });
+            try b.define(entry, try b.term(.{ .conditional = .{
+                .condition = try b.primitive(boolean, .field, &.{try b.reference(b.parameter(entry, 0))}, 1),
+                .when_true = try b.bind(try b.variable(reply), call, result),
+                .when_false = result,
+            } }));
+            break :blk b.module(entry, failure);
+        } else blk: {
+            const input = try b.schema(.{ .product = &.{ try c.schema(t.ControllerCarry, &b), try c.schema(c.controller.OwnerView, &b) } });
+            const entry = try b.declare(&.{input}, boolean, &.{}, &.{});
+            try b.define(entry, try b.pure(try b.constant(bool, false)));
+            break :blk b.module(entry, try c.schema(void, &b));
+        };
+        const built = try service.workspaceCommand(a, if (i == 0) "invented-controller" else "invented-converter", task, .{ .program = .{ .build = .{ .source = .{ .json_text = .{ .bytes = try native.source_records.encode(a, module) } }, .source_kind = .source_records, .exposures = .{ .items = &.{} }, .role = if (i == 0) .controller else .computation } } });
+        if (built.disposition != .observed) std.debug.print("invented output build {d}: {s}\n", .{ i, built.observation_json.bytes });
+        try std.testing.expectEqual(.observed, built.disposition);
+        program.* = built.program.?;
+    }
+    var current = try service.task(a, task);
+    defer current.deinit();
+    _ = try service.adoptController(a, "adopt-invented-output", task, current.value.revision, .{ .successor = programs[0], .converter = programs[1], .expected_controller_epoch = current.value.controller_epoch, .expected_handoff_identity = .{ .bytes = &std.fmt.bytesToHex(current.value.controller_interaction.?, .lower) }, .reason = .{ .bytes = "Exercise native output reference admission" } });
 }
 
 fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { none, imported, snapshot, provider, malformed }) !void {

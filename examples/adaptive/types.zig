@@ -168,6 +168,52 @@ pub const Output = struct {
     model_calls: u64,
     work_calls: u64,
 };
+pub fn validateOutput(admission: anytype, output: Output) !void {
+    const a = admission.allocator;
+    for (output.evidence.items) |ref| switch (ref) {
+        .source => |source| {
+            const bytes = try admission.projected(source.object, work_identity);
+            defer a.free(bytes);
+            var artifact = try contracts.decodeOwned(WorkArtifact, a, bytes);
+            defer artifact.deinit();
+            const value = artifact.value;
+            if (value.version != 2 or !std.meta.eql(value.task, admission.task) or !std.meta.eql(value.policy, admission.profile)) return error.InvalidResultReference;
+            const item = value.evidence orelse return error.InvalidResultReference;
+            const expected: SourceEvidenceReference = .{ .object = source.object, .snapshot = item.snapshot, .path = item.path, .sha256 = item.sha256, .start = item.start, .end = item.end, .file_bytes = item.file_bytes };
+            try requireOutputReference(SourceEvidenceReference, a, source, expected);
+        },
+        .workspace => |value| try admission.workspaceReference(value, .value),
+    };
+    for (output.programs.items) |program| try admission.workspaceReference(program, .program);
+    for (output.receipts.items) |ref| {
+        const bytes = try admission.projected(ref.object, prepare_identity);
+        defer a.free(bytes);
+        var artifact = try contracts.decodeOwned(ReceiptArtifact, a, bytes);
+        defer artifact.deinit();
+        const receipt = artifact.value.receipt;
+        if (!std.meta.eql(receipt.task, admission.task)) return error.InvalidResultReference;
+        const expected: ReceiptReference = .{ .object = ref.object, .previous_revision = receipt.previous_revision, .next_revision = receipt.next_revision, .disposition = receipt.disposition, .rejection = receipt.rejection, .next_profile = receipt.next_profile, .next_effort = receipt.next_effort, .context_epoch = receipt.context_epoch, .eviction_generation = receipt.eviction_generation };
+        try requireOutputReference(ReceiptReference, a, ref, expected);
+    }
+    if (output.result == .report) {
+        const report = output.result.report;
+        if (report.summary.bytes.len == 0 or report.claims.items.len == 0) return error.InvalidResultReference;
+        for (report.claims.items) |claim| {
+            if (claim.statement.bytes.len == 0 or (claim.kind != .observation and claim.reasoning.bytes.len == 0) or (claim.kind != .hypothesis and claim.evidence_indices.items.len == 0)) return error.InvalidResultReference;
+            for (claim.evidence_indices.items, 0..) |index, i| {
+                if (index >= output.evidence.items.len) return error.InvalidResultReference;
+                for (claim.evidence_indices.items[0..i]) |prior| if (prior == index) return error.InvalidResultReference;
+            }
+        }
+    }
+}
+fn requireOutputReference(comptime T: type, a: std.mem.Allocator, actual: T, expected: T) !void {
+    const left = try contracts.encodeOwned(T, a, actual);
+    defer a.free(left);
+    const right = try contracts.encodeOwned(T, a, expected);
+    defer a.free(right);
+    if (!std.mem.eql(u8, left, right)) return error.InvalidResultReference;
+}
 pub const ControlSubject = struct {
     call_id: P.CallId,
     reason: contracts.Text(256),
