@@ -552,7 +552,10 @@ pub fn cutObserver(b: *source.Builder, fails: bool) !source.Module {
     const sum = try b.value(.{ .schema = number, .expression = .{ .primitive = .{
         .opcode = .integer_add,
         .operands = &.{ before, revision },
-        .failures = &.{.{ .kind = .arithmetic_overflow, .value = try b.constant(void, {}) }},
+        .failures = &.{.{
+            .kind = .arithmetic_overflow,
+            .value = try b.failureLiteral(try b.constant(void, {})),
+        }},
     } } });
     const nodes = try data.schema.native.lower(data.schema.native.info([]const views.Node), b);
     const list = try b.primitive(nodes, .field, &.{cut}, 2);
@@ -638,7 +641,10 @@ pub fn outerCutObserver(b: *source.Builder) !source.Module {
     const sum = try b.value(.{ .schema = number, .expression = .{ .primitive = .{
         .opcode = .integer_add,
         .operands = &.{ before, cursor },
-        .failures = &.{.{ .kind = .arithmetic_overflow, .value = try b.constant(void, {}) }},
+        .failures = &.{.{
+            .kind = .arithmetic_overflow,
+            .value = try b.failureLiteral(try b.constant(void, {})),
+        }},
     } } });
     try b.define(entry, try b.pure(try b.primitive(output, .product, &.{ sum, cursor }, 0)));
     return b.module(entry, unit);

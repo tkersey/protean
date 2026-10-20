@@ -2010,7 +2010,7 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     try semanticGuestExecution(scratch, &service, parent.receipt.task, shared_program);
     phase = "guarded reply divergence and cleanup";
     try exerciseGuardReply(scratch, &service, parent.receipt.task);
-    phase = "runtime selection and import";
+    phase = "selected runtime realization";
     const started = try service.workspaceStart(scratch, "start", parent.receipt.task, alias_program.receipt.workspace.?, input, .{});
     const id = started.receipt.workspace.?;
     var before = try service.workspaceWork(a, parent.receipt.task, id);
@@ -2051,6 +2051,7 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
         } } });
         try std.testing.expectEqual(.rejected, denied.disposition);
     }
+    phase = "guest view materialization";
     const view_command: contracts.workspace.Command = .{ .context = .{ .materialize = .{
         .input = .{ .guest_view = .{ .expected = .{ .work = expected.work, .execution_revision = selected.value.execution_revision, .control_revision = selected.value.control_revision }, .realization_revision = selected.value.realization_revision, .nodes = .{ .all = .{} } } },
         .sources = .{ .items = &.{} },
@@ -2120,6 +2121,7 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     {
         // Feed the acquired view to an ordinary generated query. The input
         // materialization preserves its inspection ancestry through the result.
+        phase = "retention query build";
         const query_source = try native.program_construction.runtimeQuery(scratch, true);
         const query = try service.workspaceBuild(scratch, "retention-query", parent.receipt.task, query_source, &diagnostic);
         const query_id = query.receipt.workspace.?;
@@ -2153,6 +2155,7 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
             _ = try service.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "query-turn-{d}", .{turn}), parent.receipt.task, query_work_id, current.value.execution_revision, current.value.control_revision, .advance);
         }
     }
+    phase = "traced runtime selection";
     var after_view = try service.workspaceWork(a, parent.receipt.task, id);
     defer after_view.deinit();
     try std.testing.expectEqualDeep(selected.value.checkpoint, after_view.value.checkpoint);
@@ -2214,6 +2217,7 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
         }
         try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, parent.receipt.task, archive_index.records.items));
     }
+    phase = "outer cut suspension";
     var trace_before_pump = try service.workspaceWork(a, parent.receipt.task, traced_id);
     defer trace_before_pump.deinit();
     const pump_command: @FieldType(contracts.workspace.Work, "pump") = .{
@@ -2247,8 +2251,11 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
             .level = level,
         });
     }
+    phase = "observer multiple cuts";
     const observer = try observerWitness(&service, scratch, parent.receipt.task, shared_program, shared_input);
+    phase = "retention observer";
     try retentionObserverWitness(&service, scratch, parent.receipt.task, observer.selection);
+    phase = "archive export";
     const archive_path = try std.fmt.allocPrint(scratch, "{s}/runtime.par", .{path_buffer[0..length]});
     _ = try service.exportCheckpoint(scratch, parent.receipt.task, archive_path);
     try service.close(a);
@@ -2260,6 +2267,7 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     defer imported_namespace.close() catch unreachable;
     var imported = try native.tasks.Service(OwnerTypes).init(a, io, &imported_namespace, assets, &application, handlers, profile);
     defer imported.close(a) catch unreachable;
+    phase = "archive import";
     _ = try imported.importCheckpoint(scratch, "import", archive_path);
     var restored_trace = try imported.workspaceWork(a, parent.receipt.task, traced_id);
     defer restored_trace.deinit();
@@ -2293,6 +2301,7 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     try imported_namespace.close();
     imported_namespace = try native.Namespace.open(a, io, path);
     imported = try native.tasks.Service(OwnerTypes).init(a, io, &imported_namespace, assets, &application, handlers, profile);
+    phase = "observer replay after reopen";
     const observer_replay = try imported.workspaceObserve(scratch, "observe-second", parent.receipt.task, observer.selection);
     try std.testing.expect(observer_replay.replayed);
     try std.testing.expectEqualDeep(observer.receipt, observer_replay.receipt.id);

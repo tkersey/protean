@@ -65,3 +65,48 @@ The [evaluation runner](../tools/evaluation/README.md) supplies matched real-mod
 comparison conditions and retains unsuccessful work. Its semantic preflight
 prepares nine cases without inference. Independent model discovery and efficacy
 remain unmeasured.
+
+## Footprint
+
+The comparison bases are Horos `ae8ace5`, Kosmos `6c70d24`, and accepted Protean
+`2e40ce4`. Bytes count added and deleted test-source lines, including newlines,
+rather than only the net file-size difference.
+
+| Repository | Changed test files | Added bytes | Deleted bytes |
+|---|---:|---:|---:|
+| Horos | 3 | 26,035 | 0 |
+| Kosmos | 8 | 73,155 | 773 |
+| Protean | 11 | 160,385 | 5,088 |
+| Total | 22 | 259,575 | 5,861 |
+
+No test modules, directories, executables, or CI lanes were added. Protean's
+existing workspace execution count advances from 12 to 13. The largest extension
+is `workspace_runtime.zig` at 136,509 added bytes; the low module count does not
+make this a small fixture change. Its generated producer and candidate are reused
+by the custody, five-arm, and mobility checks, avoiding a third producer run.
+Historical independent byte fixtures remain unchanged.
+
+The packaged semantic core is 234,530 bytes, SHA-256
+`bc258c694c9bde928f21363a17f3b9efd9fd0b8407e8153c2b705755c64daeb2`.
+Generated candidates use `kosmos.semantic-artifact/3` and
+`kosmos.source-relation/1`; the existing artifact family remains `/2`.
+
+## Qualification results
+
+Commands use exact Zig 0.17.0 and Safe optimization on Apple silicon. Cold means
+fresh local and global compilation caches with authenticated dependency source
+packages available; warm reuses those caches and still executes the checks.
+Times measure the build/check commands, including compilation. They do not
+measure the Linux workflow's setup, archive transport, or aggregate elapsed gate.
+Every command has a 600-second watchdog.
+
+| Tree and command | Cold seconds | Warm seconds | Result |
+|---|---:|---:|---|
+| Horos `816d2d8`, `check check-package` | 198.309 | 105.816 | 266/266 steps, 932/932 tests |
+
+Horos reports 60 compiler steps: 60 executed cold, 49 executed and 11 cached
+warm. Its largest reported individual compiler RSS is 2 GB; this is not aggregate
+concurrent memory. Kosmos's committed TigerStyle ratchet passes at `35cb6ff`
+with 33 changed files, 5,423 changed lines, zero diagnostics, and 24 auditor tests.
+The focused disclosure and allocation/rollback regressions pass; they do not
+substitute for the outstanding full-tree and product qualification.
