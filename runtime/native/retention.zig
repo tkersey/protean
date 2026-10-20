@@ -338,7 +338,10 @@ const Audit = struct {
                     var controller = try self.record(.controller_binding, key.task, interaction.value.controller);
                     defer controller.deinit();
                     if (!std.meta.eql(route.value.controller, controller.value.id) or !std.meta.eql(interaction.value.model, item.occurrence)) return error.CorruptState;
-                    binding.controller = .{ .binding = controller.value.id, .epoch = interaction.value.epoch, .program = controller.value.program_identity, .overlay = interaction.value.overlay };
+                    var attempt = try self.record(.attempt, key.task, item.attempt);
+                    defer attempt.deinit();
+                    const context = attempt.value.controller_context orelse return error.CorruptState;
+                    binding.controller = .{ .binding = controller.value.id, .epoch = context.epoch, .program = controller.value.program_identity, .overlay = context.overlay };
                 };
                 const finding = try self.store.project(registry.RecoveryFinding, self.a, self.handlers, binding, struct {
                     handlers: registry.Registry,

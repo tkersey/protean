@@ -114,7 +114,7 @@ constant-memory guarantee for all retained state.
 
 ## Reconstructing the active controller
 
-Application 7 uses `protean-workspace/3` and native state writer 16. The packaged
+Application 7 uses `protean-workspace/3` and native state writer 17. The packaged
 seed is an ordinary controller artifact built through the same source constructor
 as later candidates. `program.describe` with `current_controller` pages the
 actual binding, epoch, program, source, interfaces and residual references.
@@ -146,6 +146,14 @@ uses a new forward conversion; it cannot restore old task facts. Receipt replay
 precedes current-epoch checks. Instruction or cancellation changes during
 preparation invalidate activation, while independent child progress remains.
 
+An operator can call `task.adopt` with a stable `client_operation_id`, `task_id`,
+`expected_revision` and the same `adoption` value. Task status exposes
+`controller_epoch` and `controller_handoff` for this request. The owner can force
+a park at a protected model or handoff request with valid carry and known delivery.
+Unknown or active dispatch and unavailable private-state translation block recovery.
+Conversion uses current owner facts; failed operator preparation leaves the old
+controller parked. Replaying the same operation returns its original admission.
+
 The superseded execution becomes a residual under its original image. It may
 only unwind qualified cleanup. Inspect residual references through `work.inspect`
 and use `work.park`, `advance` or `cancel` with their execution/control revisions.
@@ -159,6 +167,9 @@ remain unavailable. Optional live inference requires `live_inference: true` and
 the ordinary inference grant; actual calls are charged to the task. Trial
 adoptions remain proposals, trial outputs retain trial provenance, and synthetic
 answers never become acquired evidence. Trials cannot issue live root commands.
+Explicit trials progress through `work.advance` or `work.pump`; changing their
+continuation policy can admit owner scheduling. Each trial reply publishes its
+occurrence with the work observation, including before the next evaluator step.
 
 Behavioral succession and controller movement advance one authority lineage.
 Frozen movement excludes activation; preparation excludes a controller move.

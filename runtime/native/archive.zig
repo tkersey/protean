@@ -17,17 +17,23 @@ pub const Exported = struct { sha256: state.Digest, bytes: u64 };
 const Blob = struct { reference: state.Reference, bytes: []const u8 };
 const SchemaSet = struct { schemas: []const state.ArchiveSchema, blobs: []const Blob };
 
-fn schemaSet(a: std.mem.Allocator) !SchemaSet {
+fn schemaDefinition(comptime T: type, a: std.mem.Allocator, backing: std.mem.Allocator) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(backing);
+    defer arena.deinit();
+    return a.dupe(u8, try values.schemaBytes(T, arena.allocator()));
+}
+
+fn schemaSet(a: std.mem.Allocator, backing: std.mem.Allocator) !SchemaSet {
     var schemas: std.ArrayList(state.ArchiveSchema) = .empty;
     var blobs: std.ArrayList(Blob) = .empty;
     inline for (.{ .{ "task", state.Task }, .{ "event", state.Event }, .{ "receipt", state.Receipt } }) |entry| {
-        const bytes = try values.schemaBytes(entry[1], a);
+        const bytes = try schemaDefinition(entry[1], a, backing);
         const reference: state.Reference = .{ .digest = storage.digest(bytes), .bytes = bytes.len };
         try schemas.append(a, .{ .name = .{ .bytes = entry[0] }, .definition = reference });
         try blobs.append(a, .{ .reference = reference, .bytes = bytes });
     }
     inline for (@typeInfo(state.RecordKind).@"enum".field_names) |name| {
-        const bytes = try values.schemaBytes(storage.Record(name), a);
+        const bytes = try schemaDefinition(storage.Record(name), a, backing);
         const reference: state.Reference = .{ .digest = storage.digest(bytes), .bytes = bytes.len };
         try schemas.append(a, .{ .name = .{ .bytes = name }, .definition = reference });
         try blobs.append(a, .{ .reference = reference, .bytes = bytes });
@@ -298,6 +304,7 @@ fn admissionMethod(kind: state.EventType) ?state.Method {
         .imported => .import_checkpoint,
         .reconciled => .reconcile,
         .workspace => .workspace,
+        .controller_requested => .adopt,
         .workspace_progress,
         .workspace_read,
         .controller,
@@ -328,6 +335,29 @@ fn validateEventFacts(store: *storage.Store, archive: state.Archive, task: state
         if (admission == null or admission.?.method != method) return error.InvalidArchive;
     }
     const expected: json.Value = switch (event.kind) {
+        .controller_requested => blk: {
+            const operation_id = json.get(data, "operation") orelse return error.InvalidArchive;
+            if (operation_id != .string or operation_id.string.len != 64) return error.InvalidArchive;
+            var id: state.Digest = undefined;
+            _ = std.fmt.hexToBytes(&id, operation_id.string) catch return error.InvalidArchive;
+            const reference = record(archive, .controller_succession, id) orelse return error.InvalidArchive;
+            var succession = try contracts.decodeOwned(state.ControllerSuccession, a, try store.object(a, reference, null));
+            defer succession.deinit();
+            const operator = succession.value.operator_admission orelse return error.InvalidArchive;
+            if (operator.revision != event.revision or operator.event != event.seq or event.revision <= 1) return error.InvalidArchive;
+            var command = try contracts.decodeOwned(contracts.workspace.Adoption, a, try store.object(a, succession.value.command, null));
+            defer command.deinit();
+            const bytes = try contracts.encodeOwned(state.ControllerAdoptionRequest, a, .{ .task = task.id, .revision = event.revision - 1, .command = command.value });
+            var request_hash = std.crypto.hash.sha2.Sha256.init(.{});
+            request_hash.update("agent.native.operation.v1\x00");
+            request_hash.update(bytes);
+            var request_digest: state.Digest = undefined;
+            request_hash.final(&request_digest);
+            if (!std.meta.eql(request_digest, admission.?.request_digest)) return error.InvalidArchive;
+            var result = json.object();
+            try json.put(a, &result, "operation", json.string(try a.dupe(u8, &std.fmt.bytesToHex(id, .lower))));
+            break :blk result;
+        },
         .controller => blk: {
             var id: state.Digest = undefined;
             _ = std.fmt.hexToBytes(&id, data.object.get("operation").?.string) catch return error.InvalidArchive;
@@ -440,7 +470,7 @@ fn validateEventFacts(store: *storage.Store, archive: state.Archive, task: state
 /// additionally identifies its private acquired-reply digest. Unknown record
 /// kinds cannot disappear through an open-ended serialization fallback.
 pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archive, supplied_build: ?[]const u8) !Inspected {
-    const expected = try schemaSet(a);
+    const expected = try schemaSet(a, store.allocator);
     var supplied: std.ArrayList(Blob) = .empty;
     if (supplied_build) |bytes| {
         try supplied.append(a, .{ .reference = archive.build, .bytes = bytes });
@@ -596,7 +626,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         // A cancellation requested after termination need not create intent.
         if (decoded.value.method == .cancel and !value.terminal() and value.cancellation == null) return error.InvalidArchive;
         switch (decoded.value.method) {
-            .submit, .respond, .message, .@"resume" => last_nonterminal_revision = @max(last_nonterminal_revision, decoded.value.revision),
+            .submit, .respond, .message, .@"resume", .adopt => last_nonterminal_revision = @max(last_nonterminal_revision, decoded.value.revision),
             .cancel, .import_checkpoint, .workspace, .reconcile => {},
         }
         const fact: AdmissionFact = .{ .request_digest = decoded.value.request_digest, .method = decoded.value.method, .receipt = row.body.digest, .question = decoded.value.question, .message = decoded.value.message, .reconciliation = decoded.value.reconciliation, .workspace = decoded.value.workspace };
@@ -783,7 +813,7 @@ pub fn disclosureClosure(a: std.mem.Allocator, store: *storage.Store, task: stat
 /// A caller retaining it beyond the current store state must retain its edges.
 pub fn prepare(a: std.mem.Allocator, store: *storage.Store, task: state.TaskId, build: []const u8) !state.Archive {
     var manifest = try store.archiveIndex(a, task, .{ .digest = storage.digest(build), .bytes = build.len });
-    const definitions = try schemaSet(a);
+    const definitions = try schemaSet(a, store.allocator);
     manifest.schemas.items = definitions.schemas;
     var inspected = try inspect(a, store, manifest, build);
     defer inspected.task.deinit();
@@ -795,7 +825,7 @@ pub fn prepare(a: std.mem.Allocator, store: *storage.Store, task: state.TaskId, 
 /// build and schema bytes. All other objects already belong to the Store.
 pub fn retainAssets(a: std.mem.Allocator, store: *storage.Store, build: []const u8) !void {
     _ = try store.putObject(build);
-    const definitions = try schemaSet(a);
+    const definitions = try schemaSet(a, store.allocator);
     for (definitions.blobs) |blob| _ = try store.putObject(blob.bytes);
 }
 
@@ -826,7 +856,7 @@ fn writeManifest(a: std.mem.Allocator, io: std.Io, store: *storage.Store, manife
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const temporary = arena.allocator();
-    const definitions = try schemaSet(temporary);
+    const definitions = try schemaSet(temporary, store.allocator);
     const schema = try values.schemaBytes(state.Archive, temporary);
     const encoded = try contracts.encodeOwned(state.Archive, temporary, manifest);
     var total: u64 = 0;

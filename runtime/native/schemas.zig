@@ -118,6 +118,11 @@ fn typed(a: std.mem.Allocator, application: json.Value, name: []const u8) !json.
     return shape(a, &.{ .{ "schema_id", try constant(a, item.object.get("schema_id").?.string) }, .{ "value", item.object.get("json").? } }, &.{});
 }
 fn parameter(a: std.mem.Allocator, method: protocol.Method, key: []const u8, application: json.Value, limits: protocol.Limits) !json.Value {
+    if (method == .@"task.adopt" and std.mem.eql(u8, key, "adoption")) {
+        const bytes = try @import("values.zig").schemas.ClientSchema(@import("protean_contracts").workspace.Adoption).alloc(a);
+        defer a.free(bytes);
+        return (try json.parseAsset(a, bytes, bytes.len)).value;
+    }
     if (method == .placement and std.mem.eql(u8, key, "request")) {
         // Emit this large immutable schema once during discovery construction.
         // Parsing owns its strings, so the temporary bytes can be released.
@@ -187,6 +192,7 @@ fn eventFields(kind: state.EventType) []const EventField {
         .workspace_read => &.{.{ .name = "occurrence_id", .kind = .digest }},
         .workspace, .workspace_progress => &.{.{ .name = "workspace_id", .kind = .digest }},
         .controller => &.{ .{ .name = "operation", .kind = .digest }, .{ .name = "phase", .kind = .name }, .{ .name = "epoch", .kind = .counter } },
+        .controller_requested => &.{.{ .name = "operation", .kind = .digest }},
         .accepted, .input_accepted, .cancellation_requested, .parked, .resumed, .delivery_unknown, .completed, .failed, .cancelled => &.{},
     };
 }
@@ -305,6 +311,7 @@ pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.
     const availability = try shape(a, &.{ .{ "occurrence_id", digest }, .{ "attempt_id", digest }, .{ "mechanisms", try array(a, try enumSchema(state.RecoveryRequest, a), null) } }, &.{});
     snapshot = try extend(a, snapshot, &.{.{ "recovery", try nullable(a, availability) }}, &.{});
     snapshot = try extend(a, snapshot, &.{.{ "associated_work_disposed", boolean }}, &.{});
+    snapshot = try extend(a, snapshot, &.{ .{ "controller_epoch", count }, .{ "controller_handoff", try nullable(a, digest) } }, &.{});
     try json.put(a, &definitions, "snapshot", snapshot);
     const artifact = try shape(a, &.{ .{ "artifact_id", digest }, .{ "sha256", digest }, .{ "bytes", count }, .{ "media_type", try constant(a, "application/json") }, .{ "schema_id", try text(a, 1, 128) }, .{ "retention", try constant(a, "state-namespace") } }, &.{});
     var outcomes: std.array_list.Managed(json.Value) = .init(a);
@@ -351,7 +358,7 @@ pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.
     }
     try json.put(a, &task_result, "allOf", result_cases);
     try json.put(a, &definitions, "task.result.result", task_result);
-    inline for (.{ "task.submit", "task.message", "task.respond", "task.cancel", "task.resume", "task.reconcile" }) |name| {
+    inline for (.{ "task.submit", "task.message", "task.respond", "task.cancel", "task.resume", "task.reconcile", "task.adopt" }) |name| {
         var admitted = try extend(a, snapshot, &.{ .{ "receipt_id", digest }, .{ "receipt_revision", count }, .{ "replayed", boolean }, .{ "disposition", try enumSchema(state.Disposition, a) } }, &.{});
         if (comptime std.mem.eql(u8, name, "task.message")) admitted = try extend(a, admitted, &.{.{ "message_id", digest }}, &.{});
         if (comptime std.mem.eql(u8, name, "task.respond")) admitted = try extend(a, admitted, &.{.{ "question_id", digest }}, &.{});

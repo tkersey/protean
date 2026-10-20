@@ -506,6 +506,11 @@ pub fn Service(comptime Types: type) type {
             const tasks = try self.store().taskIds(a, false);
             defer a.free(tasks);
             for (tasks) |task_id| {
+                var authorized = self.task(a, task_id) catch |err| switch (err) {
+                    error.Denied => continue,
+                    else => return err,
+                };
+                defer authorized.deinit();
                 const ids = try self.controllerResidualIds(a, task_id);
                 defer a.free(ids);
                 for (ids) |id| {
@@ -2076,8 +2081,54 @@ pub fn Service(comptime Types: type) type {
                 self.compatible(parent.value) catch continue;
                 if (try self.settleWorkspaceOne(a, parent.value, controller)) return true;
                 if (!controller) continue;
+                if (try self.settleControllerResiduals(a, parent.value)) return true;
                 if (try self.rootCleanupRunnable(a, parent.value)) try self.runnableAdd(id);
                 if (parent.value.terminal() and try self.taskCleanupComplete(a, parent.value)) self.unclaim(id);
+            }
+            return false;
+        }
+
+        fn settleControllerResiduals(self: *Self, a: std.mem.Allocator, parent: state.Task) !bool {
+            const ids = try self.controllerResidualIds(a, parent.id);
+            defer a.free(ids);
+            for (ids) |id| {
+                var saved = try self.record(state.ControllerResidual, a, "controller_residual", id, parent.id);
+                defer saved.deinit();
+                const residual = saved.value;
+                if (residual.outcome_kind == .completed or residual.outcome_kind == .failed or residual.outcome_kind == .cancelled) continue;
+                if (residual.schedule != .parked) {
+                    try self.subjectAdd(.{ .task = parent.id, .residual = id });
+                } else if (parent.cancellation != null and try self.residualCancellationPending(a, parent.id, id)) {
+                    const operation_id = try std.fmt.allocPrint(a, "residual-cancel-{s}-{d}", .{ std.fmt.bytesToHex(id, .lower), residual.control_revision });
+                    defer a.free(operation_id);
+                    _ = self.controllerResidualControl(a, operation_id, parent.id, id, residual.execution_revision, residual.control_revision, .{ .cancel = parent.cancellation.? }) catch |err| switch (err) {
+                        error.UnsettledOccurrence => continue,
+                        else => return err,
+                    };
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        fn residualCancellationPending(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, id: state.Digest) !bool {
+            var query = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq DESC", &.{.{ .blob = &task_id }});
+            defer query.deinit();
+            const expected = std.fmt.bytesToHex(id, .lower);
+            while (try query.step() == .row) {
+                var saved = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+                defer saved.deinit();
+                if (saved.value.kind == .cancellation_requested) return true;
+                const ref = saved.value.workspace_command orelse continue;
+                const bytes = try self.store().object(a, ref, null);
+                defer a.free(bytes);
+                var command = try contracts.decodeOwned(workspace.PublicationCommand, a, bytes);
+                defer command.deinit();
+                if (command.value != .residual or (command.value.residual.command != .park and command.value.residual.command != .cancel)) continue;
+                var event_data = try json.parse(a, saved.value.data.bytes, .{});
+                defer event_data.deinit();
+                const identity = json.get(event_data.value, "workspace_id") orelse return error.CorruptState;
+                if (identity == .string and same(identity.string, &expected)) return false;
             }
             return false;
         }
@@ -2687,14 +2738,37 @@ pub fn Service(comptime Types: type) type {
             const operation_value = saved.value;
             var interaction = try self.record(state.ControllerInteraction, a, "controller_interaction", id, parent.id);
             defer interaction.deinit();
-            if (!std.meta.eql(operation_value.predecessor, interaction.value.controller) or !std.meta.eql(interaction.value.handoff, operation_value.handoff) or !std.meta.eql(operation_value.policy, interaction.value.policy) or operation_value.next_message < interaction.value.next_message or operation_value.next_message > parent.next_message or operation_value.event_cut < interaction.value.event_cut or operation_value.event_cut > parent.event_high) return error.InvalidArchive;
+            if (!std.meta.eql(operation_value.predecessor, interaction.value.controller) or !std.meta.eql(operation_value.policy, interaction.value.policy) or operation_value.next_message < interaction.value.next_message or operation_value.next_message > parent.next_message or operation_value.event_cut < interaction.value.event_cut or operation_value.event_cut > parent.event_high) return error.InvalidArchive;
             const predecessor = try self.controllerBinding(a, parent, operation_value.predecessor);
             var pending = try self.record(occurrence.Occurrence, a, "occurrence", operation_value.handoff, parent.id);
             defer pending.deinit();
             var request = try data.invocation.decode(data.invocation.Request, a, try self.store().object(a, pending.value.request_object, null));
             defer request.deinit();
-            const reply = try self.controllerReply(a, parent, pending.value, request.value);
-            const selected = (try self.controllerSelection(a, parent, reply[0 .. reply.len - 1])) orelse return error.InvalidArchive;
+            const selected = if (operation_value.operator_admission) |admission| blk: {
+                if (admission.revision <= 1 or admission.event != operation_value.event_cut + 1 or (!std.meta.eql(interaction.value.model, operation_value.handoff) and !std.meta.eql(interaction.value.handoff, operation_value.handoff))) return error.InvalidArchive;
+                if (admission.occurrence.state != .ready and admission.occurrence.state != .not_sent) return error.InvalidArchive;
+                if (!std.meta.eql(admission.occurrence.id, pending.value.id) or !std.meta.eql(admission.occurrence.task, parent.id) or admission.occurrence.work != null or admission.occurrence.residual != null or !std.meta.eql(admission.occurrence.request, pending.value.request) or !std.meta.eql(admission.occurrence.request_object, pending.value.request_object)) return error.InvalidArchive;
+                if (admission.occurrence.state == .not_sent) {
+                    var attempt = try self.record(state.Attempt, a, "attempt", admission.occurrence.state.not_sent.id, parent.id);
+                    defer attempt.deinit();
+                    if (!std.meta.eql(attempt.value.occurrence, pending.value.id)) return error.InvalidArchive;
+                }
+                const events = try self.store().eventsAfter(a, parent.id, admission.event - 1, 1);
+                if (events.len != 1) return error.InvalidArchive;
+                var event_value = try contracts.decodeOwned(state.Event, a, events[0]);
+                defer event_value.deinit();
+                if (event_value.value.kind != .controller_requested or event_value.value.seq != admission.event or event_value.value.revision != admission.revision) return error.InvalidArchive;
+                const event_data = (try json.parse(a, event_value.value.data.bytes, .{})).value;
+                const operation_id = json.get(event_data, "operation") orelse return error.InvalidArchive;
+                if (operation_id != .string or !same(operation_id.string, &std.fmt.bytesToHex(id, .lower))) return error.InvalidArchive;
+                var command_value = try contracts.decodeOwned(wc.Adoption, a, try self.store().object(a, operation_value.command, null));
+                defer command_value.deinit();
+                break :blk try values.fromJson(wc.Adoption, a, try values.toJson(wc.Adoption, a, command_value.value));
+            } else blk: {
+                if (!std.meta.eql(interaction.value.handoff, operation_value.handoff)) return error.InvalidArchive;
+                const reply = try self.controllerReply(a, parent, pending.value, request.value);
+                break :blk (try self.controllerSelection(a, parent, reply[0 .. reply.len - 1])) orelse return error.InvalidArchive;
+            };
             const command = try contracts.encodeOwned(wc.Adoption, a, selected);
             if (!std.meta.eql(operation_value.command, state.Reference{ .digest = storage.digest(command), .bytes = command.len })) return error.InvalidArchive;
             const preparing = operation_value.phase == .preparing or operation_value.phase == .ready;
@@ -2707,7 +2781,7 @@ pub fn Service(comptime Types: type) type {
             } else {
                 const successor_id = operation_value.successor orelse return error.InvalidArchive;
                 const converter_id = operation_value.converter orelse return error.InvalidArchive;
-                if (!std.meta.eql(successor_id, try wp.identity(selected.successor, .program)) or !std.meta.eql(converter_id, try wp.identity(selected.converter, .program)) or selected.expected_controller_epoch != interaction.value.epoch or !same(selected.expected_handoff_identity.bytes, &std.fmt.bytesToHex(id, .lower))) return error.InvalidArchive;
+                if (!std.meta.eql(successor_id, try wp.identity(selected.successor, .program)) or !std.meta.eql(converter_id, try wp.identity(selected.converter, .program)) or selected.expected_controller_epoch != try self.controllerEpochAt(a, parent, operation_value.event_cut) or !same(selected.expected_handoff_identity.bytes, &std.fmt.bytesToHex(id, .lower))) return error.InvalidArchive;
                 var successor = try self.workspaceProgram(a, parent.id, successor_id);
                 defer successor.deinit();
                 const descriptor = successor.value.description.controller orelse return error.InvalidArchive;
@@ -3109,10 +3183,13 @@ pub fn Service(comptime Types: type) type {
             var value = parent;
             value.revision = try std.math.add(u64, value.revision, 1);
             if (operation_value.diagnostic != null) value.controller_succession = null;
+            const parked = operation_value.diagnostic != null and operation_value.operator_admission != null and parent.cancellation == null;
+            if (parked) value.schedule = .parked;
             try self.store().begin();
             defer self.store().rollback();
             try self.store().putRecord(state.ControllerSuccession, "controller_succession", operation_value.id, value.id, operation_value);
             try self.persist(a, value, parent.revision, "controller.preparation", .preserve);
+            if (parked) self.runnableRemove(value.id);
             return .progressed;
         }
         fn controllerPreparationFailure(self: *Self, a: std.mem.Allocator, parent: state.Task, operation_value: state.ControllerSuccession, err: anyerror) !Step {
@@ -3336,11 +3413,11 @@ pub fn Service(comptime Types: type) type {
                 if (!same(fact.observation.bytes, try json.canonical(a, try self.renderWorkspaceWorkObservation(a, child, snapshot.occurrence, view.event_cut)))) return error.InvalidArchive;
             }
         }
-        fn admitControllerSuccession(self: *Self, a: std.mem.Allocator, parent: state.Task, interaction: state.ControllerInteraction, command: wc.Adoption) !struct { successor: state.Digest, converter: state.Digest, input: []u8, works: []workspace.WorkObservation } {
+        fn admitControllerSuccession(self: *Self, a: std.mem.Allocator, parent: state.Task, interaction: state.ControllerInteraction, command: wc.Adoption, operator: bool) !struct { successor: state.Digest, converter: state.Digest, input: []u8, works: []workspace.WorkObservation } {
             if (!try self.controllerPermission(a, parent)) return error.Unauthorized;
             _ = try self.controllerBinding(a, parent, interaction.controller);
-            if (command.expected_controller_epoch != parent.controller_epoch or interaction.epoch != parent.controller_epoch or !same(command.expected_handoff_identity.bytes, &std.fmt.bytesToHex(interaction.id, .lower)) or !std.meta.eql(parent.controller, interaction.controller)) return error.StaleController;
-            if (parent.next_message != interaction.next_message or !std.meta.eql(parent.profile, interaction.policy)) return error.StaleInstructions;
+            if (command.expected_controller_epoch != parent.controller_epoch or (!operator and interaction.epoch != parent.controller_epoch) or !same(command.expected_handoff_identity.bytes, &std.fmt.bytesToHex(interaction.id, .lower)) or !std.meta.eql(parent.controller, interaction.controller)) return error.StaleController;
+            if ((!operator and parent.next_message != interaction.next_message) or !std.meta.eql(parent.profile, interaction.policy)) return error.StaleInstructions;
             if (parent.cancellation != null) return error.Canceled;
             try self.requireCustody(a, parent.id, null);
             const successor_id = try wp.identity(command.successor, .program);
@@ -3397,7 +3474,7 @@ pub fn Service(comptime Types: type) type {
             defer freeControllerViewWorks(a, operation_value.view_works.items);
             var input: ?[]u8 = null;
             defer if (input) |bytes| a.free(bytes);
-            if (self.admitControllerSuccession(a, initial, interaction.value, command)) |admitted| {
+            if (self.admitControllerSuccession(a, initial, interaction.value, command, false)) |admitted| {
                 operation_value.successor = admitted.successor;
                 operation_value.converter = admitted.converter;
                 input = admitted.input;
@@ -3418,11 +3495,90 @@ pub fn Service(comptime Types: type) type {
             try self.persist(a, value, initial.revision, "controller.prepare", .preserve);
             return .progressed;
         }
+
+        fn controllerRecoveryCut(self: *Self, a: std.mem.Allocator, parent: state.Task) !state.ControllerInteraction {
+            if (parent.terminal() or parent.controller_succession != null or parent.cancellation != null) return error.ControllerRecoveryUnavailable;
+            if (self.active) |active| if (std.meta.eql(active.task, parent.id) and active.subject == .root and active.root_control != null) return error.ControllerRecoveryUnavailable;
+            var outer = try self.rootOperation(a, parent);
+            defer if (outer) |*saved| saved.deinit();
+            if (outer != null and outer.?.value.pending != null) return error.ControllerRecoveryUnavailable;
+            const current = parent.current_occurrence orelse return error.ControllerRecoveryUnavailable;
+            var pending = try self.record(occurrence.Occurrence, a, "occurrence", current, parent.id);
+            defer pending.deinit();
+            if (pending.value.state != .ready and pending.value.state != .not_sent) return error.UnsettledOccurrence;
+            _ = try self.occurrenceSubject(a, parent, pending.value);
+            var route = try self.record(workspace.ExecutionRoute, a, "execution_route", current, parent.id);
+            defer route.deinit();
+            const id = parent.controller_interaction orelse return error.ControllerRecoveryUnavailable;
+            if (!std.meta.eql(route.value.interaction, id)) return error.ControllerRecoveryUnavailable;
+            var saved = try self.record(state.ControllerInteraction, a, "controller_interaction", id, parent.id);
+            defer saved.deinit();
+            if (!std.meta.eql(saved.value.model, current) and !std.meta.eql(saved.value.handoff, current)) return error.ControllerRecoveryUnavailable;
+            if (std.meta.eql(saved.value.model, current) and saved.value.handoff != null) return error.ControllerRecoveryUnavailable;
+            return saved.value;
+        }
+
+        pub fn adoptController(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, expected_revision: u64, command: wc.Adoption) !Admission {
+            const request = try operation(state.ControllerAdoptionRequest, a, .{ .task = task_id, .revision = expected_revision, .command = command });
+            if (try self.replay(a, operation_id, request)) |prior| return prior;
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            try self.compatible(parent.value);
+            try self.requireCustody(a, task_id, null);
+            if (parent.value.revision != expected_revision) return error.StaleRevision;
+            const interaction = try self.controllerRecoveryCut(a, parent.value);
+            var pending = try self.record(occurrence.Occurrence, a, "occurrence", parent.value.current_occurrence.?, task_id);
+            defer pending.deinit();
+            if (try self.store().recordBytes(a, "controller_succession", interaction.id, task_id)) |bytes| {
+                a.free(bytes);
+                return error.OperationConflict;
+            }
+            const admitted = try self.admitControllerSuccession(a, parent.value, interaction, command, true);
+            defer a.free(admitted.input);
+            defer freeControllerViewWorks(a, admitted.works);
+            const encoded = try contracts.encodeOwned(wc.Adoption, a, command);
+            defer a.free(encoded);
+            const event_data = try std.fmt.allocPrint(a, "{{\"operation\":\"{s}\"}}", .{std.fmt.bytesToHex(interaction.id, .lower)});
+            defer a.free(event_data);
+            try self.ensureOwnershipCapacity(task_id);
+            try self.runnable.ensureUnusedCapacity(self.allocator, 1);
+            try self.retire(a);
+            var value = parent.value;
+            value.revision = try std.math.add(u64, value.revision, 1);
+            value.controller_succession = interaction.id;
+            value.schedule = .queued;
+            value.blocker = null;
+            try self.store().begin();
+            defer self.store().rollback();
+            try self.store().createRecord(state.ControllerSuccession, "controller_succession", interaction.id, task_id, .{
+                .id = interaction.id,
+                .task = task_id,
+                .command = try self.store().putObject(encoded),
+                .predecessor = interaction.controller,
+                .handoff = parent.value.current_occurrence.?,
+                .checkpoint = parent.value.checkpoint,
+                .outcome = parent.value.outcome,
+                .event_cut = parent.value.event_high,
+                .next_message = parent.value.next_message,
+                .policy = parent.value.profile,
+                .successor = admitted.successor,
+                .converter = admitted.converter,
+                .conversion_input = try self.store().putObject(admitted.input),
+                .view_works = .{ .items = admitted.works },
+                .phase = .preparing,
+                .operator_admission = .{ .revision = value.revision, .event = try std.math.add(u64, value.event_high, 1), .occurrence = pending.value },
+            });
+            try self.event(&value, .controller_requested, event_data);
+            const receipt_value = try self.receipt(a, .adopt, operation_id, request, value, .accepted, null, null);
+            try self.persist(a, value, expected_revision, "controller.operator-prepare", .acquire);
+            self.subjectAddAssumeCapacity(.{ .task = task_id });
+            return receipt_value;
+        }
         fn dispatchController(self: *Self, a: std.mem.Allocator, initial: state.Task, pending: occurrence.Occurrence, request: data.invocation.Request, subject: OccurrenceSubject) !Step {
-            var payload = try self.controllerReply(a, initial, pending, request);
+            var payload = self.controllerReply(a, initial, pending, request) catch |err| return self.blockControllerRequest(a, initial, pending, err);
             defer a.free(payload);
             if (same(request.binding.semantic_identity, contracts.controller.handoff_identity)) {
-                switch (try self.controllerHandoff(a, initial, pending, payload[0 .. payload.len - 1])) {
+                switch (self.controllerHandoff(a, initial, pending, payload[0 .. payload.len - 1]) catch |err| return self.blockControllerRequest(a, initial, pending, err)) {
                     .ordinary => {},
                     .progressed => return .progressed,
                     .diagnostic => |diagnostic| {
@@ -3479,6 +3635,15 @@ pub fn Service(comptime Types: type) type {
             return .progressed;
         }
 
+        fn blockControllerRequest(self: *Self, a: std.mem.Allocator, parent: state.Task, pending: occurrence.Occurrence, err: anyerror) !Step {
+            return switch (err) {
+                error.CorruptState, error.CorruptObject, error.StorageUnavailable => err,
+                error.OutOfMemory, error.Capacity => self.blockedOccurrence(a, parent, pending, .capacity),
+                error.Denied => self.blockedOccurrence(a, parent, pending, .denied),
+                else => self.blockedOccurrence(a, parent, pending, .incompatible_profile),
+            };
+        }
+
         fn refreshControllerOverlay(self: *Self, a: std.mem.Allocator, parent: state.Task, pending: occurrence.Occurrence) !bool {
             if (pending.work != null or pending.residual != null) return false;
             var route = try self.record(workspace.ExecutionRoute, a, "execution_route", pending.id, parent.id);
@@ -3487,9 +3652,9 @@ pub fn Service(comptime Types: type) type {
             var saved = try self.record(state.ControllerInteraction, a, "controller_interaction", id, parent.id);
             defer saved.deinit();
             if (!std.meta.eql(saved.value.model, pending.id) or !std.meta.eql(saved.value.controller, parent.controller orelse return error.InvalidControllerBinding)) return error.InvalidControllerBinding;
-            if (saved.value.next_message == parent.next_message) return false;
+            if (saved.value.next_message == parent.next_message and saved.value.epoch == parent.controller_epoch) return false;
             if (pending.state != .ready) return error.UnsettledOccurrence;
-            const overlay = try self.controllerOverlay(a, parent, saved.value.controller, id, parent.event_high, parent.next_message, saved.value.epoch);
+            const overlay = try self.controllerOverlay(a, parent, saved.value.controller, id, parent.event_high, parent.next_message, parent.controller_epoch);
             defer a.free(overlay);
             var value = parent;
             value.revision = try std.math.add(u64, parent.revision, 1);
@@ -3498,6 +3663,7 @@ pub fn Service(comptime Types: type) type {
             saved.value.overlay = try self.store().putObject(overlay);
             saved.value.next_message = parent.next_message;
             saved.value.event_cut = parent.event_high;
+            saved.value.epoch = parent.controller_epoch;
             try self.store().putRecord(state.ControllerInteraction, "controller_interaction", id, parent.id, saved.value);
             try self.persist(a, value, parent.revision, "controller.overlay", .preserve);
             return true;
@@ -3619,10 +3785,11 @@ pub fn Service(comptime Types: type) type {
             errdefer if (retained_prepared) |body| self.allocator.free(body);
             const retained_profile = try self.allocator.dupe(u8, self.profile.bytes);
             errdefer self.allocator.free(retained_profile);
-            const work: Work = .{ .owner_epoch = self.owner_epoch, .task = value.id, .subject_work = pending.work, .subject_residual = pending.residual, .occurrence = pending.id, .attempt = attempt, .request = retained, .prepared = retained_prepared, .profile = retained_profile, .entry = entry, .operation = operation_kind, .controller_projection = (try self.occurrenceProjectionBinding(a, initial, pending)).controller, .cleanup = subject.cleanup };
+            const controller_context = try self.currentControllerContext(a, initial, pending);
+            const work: Work = .{ .owner_epoch = self.owner_epoch, .task = value.id, .subject_work = pending.work, .subject_residual = pending.residual, .occurrence = pending.id, .attempt = attempt, .request = retained, .prepared = retained_prepared, .profile = retained_profile, .entry = entry, .operation = operation_kind, .controller_projection = (try self.projectionBindingAt(a, initial, pending, controller_context)).controller, .cleanup = subject.cleanup };
             try self.store().begin();
             defer self.store().rollback();
-            try self.store().createRecord(state.Attempt, "attempt", attempt, value.id, .{ .id = attempt, .task = value.id, .occurrence = pending.id, .request = try self.store().putObject(request_bytes), .profile = value.profile, .capability = try name(entry.declaration.identity), .operation = operation_kind, .inference = entry.declaration.inference, .prepared = if (prepared) |body| try self.store().putObject(body) else null });
+            try self.store().createRecord(state.Attempt, "attempt", attempt, value.id, .{ .id = attempt, .task = value.id, .occurrence = pending.id, .request = try self.store().putObject(request_bytes), .profile = value.profile, .capability = try name(entry.declaration.identity), .operation = operation_kind, .inference = entry.declaration.inference, .prepared = if (prepared) |body| try self.store().putObject(body) else null, .controller_context = controller_context });
             try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, value.id, pending);
             try self.effectSchedule(a, &value, pending, .active, null);
             try self.persist(a, value, initial.revision, "effect.dispatch", .preserve);
@@ -3636,8 +3803,35 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn occurrenceProjectionBinding(self: *Self, a: std.mem.Allocator, value: state.Task, pending: occurrence.Occurrence) !registry.ProjectionBinding {
+            const attempt_id: ?state.Digest = switch (pending.state) {
+                .dispatching, .unknown, .not_sent, .captured => |item| item.id,
+                .settled_reply => |item| item.attempt,
+                .admitted => |item| if (item == .reply) item.reply.attempt else null,
+                else => null,
+            };
+            if (attempt_id) |id| {
+                var attempt = try self.record(state.Attempt, a, "attempt", id, value.id);
+                defer attempt.deinit();
+                if (!std.meta.eql(attempt.value.occurrence, pending.id)) return error.CorruptState;
+                return self.projectionBindingAt(a, value, pending, attempt.value.controller_context);
+            }
+            return self.projectionBindingAt(a, value, pending, try self.currentControllerContext(a, value, pending));
+        }
+
+        fn currentControllerContext(self: *Self, a: std.mem.Allocator, value: state.Task, pending: occurrence.Occurrence) !?state.ControllerContext {
+            if (pending.work != null or pending.residual != null) return null;
+            var route = try self.record(workspace.ExecutionRoute, a, "execution_route", pending.id, value.id);
+            defer route.deinit();
+            const id = route.value.interaction orelse return null;
+            var interaction = try self.record(state.ControllerInteraction, a, "controller_interaction", id, value.id);
+            defer interaction.deinit();
+            return .{ .epoch = interaction.value.epoch, .event_cut = interaction.value.event_cut, .next_message = interaction.value.next_message, .overlay = interaction.value.overlay };
+        }
+
+        fn projectionBindingAt(self: *Self, a: std.mem.Allocator, value: state.Task, pending: occurrence.Occurrence, context: ?state.ControllerContext) !registry.ProjectionBinding {
             var binding = self.projectionBinding(value);
             binding.execution = try self.occurrenceImage(a, value, pending);
+            if ((pending.work != null or pending.residual != null) and context != null) return error.InvalidControllerBinding;
             if (pending.work) |id| {
                 var child = try self.workspaceWork(a, value.id, id);
                 defer child.deinit();
@@ -3656,8 +3850,13 @@ pub fn Service(comptime Types: type) type {
                 defer interaction.deinit();
                 if (!std.meta.eql(route.value.controller, interaction.value.controller) or !std.meta.eql(interaction.value.model, pending.id)) return error.InvalidControllerBinding;
                 const controller = try self.controllerBinding(a, value, interaction.value.controller);
-                binding.controller = .{ .binding = controller.id, .epoch = interaction.value.epoch, .program = controller.program_identity, .overlay = interaction.value.overlay };
-            }
+                const captured = context orelse return error.InvalidControllerBinding;
+                if (captured.next_message > value.next_message or !std.meta.eql(@as(?state.Digest, controller.id), try self.controllerAt(a, value, captured.event_cut)) or captured.epoch != try self.controllerEpochAt(a, value, captured.event_cut)) return error.InvalidControllerBinding;
+                const expected = try self.controllerOverlay(a, value, controller.id, id, captured.event_cut, captured.next_message, captured.epoch);
+                defer a.free(expected);
+                if (!std.meta.eql(captured.overlay, state.Reference{ .digest = storage.digest(expected), .bytes = expected.len })) return error.InvalidControllerBinding;
+                binding.controller = .{ .binding = controller.id, .epoch = captured.epoch, .program = controller.program_identity, .overlay = captured.overlay };
+            } else if (context != null) return error.InvalidControllerBinding;
             return binding;
         }
 
@@ -3991,6 +4190,7 @@ pub fn Service(comptime Types: type) type {
                     .import_checkpoint => .imported,
                     .reconcile => .reconciled,
                     .workspace => .accepted,
+                    .adopt => .accepted,
                 };
                 if (receipt_value.disposition != expected or (receipt_value.message != null) != (receipt_value.method == .message) or
                     (receipt_value.question != null) != (receipt_value.method == .respond)) return error.InvalidArchive;
@@ -4415,7 +4615,7 @@ pub fn Service(comptime Types: type) type {
                 defer request.deinit();
                 const entry = try self.handlers.resolve(request.value, try self.occurrenceImage(temporary, value, saved.value));
                 if (attempt.value.operation == .workspace_build) {
-                    if (entry.declaration.kind != .workspace or saved.value.work != null or attempt.value.inference or attempt.value.prepared == null or
+                    if (entry.declaration.kind != .workspace or saved.value.work != null or attempt.value.inference or attempt.value.prepared == null or attempt.value.controller_context != null or
                         !same(&request.value.request_identity, &saved.value.request) or !std.meta.eql(attempt.value.request, saved.value.request_object) or
                         !std.meta.eql(attempt.value.profile, value.profile) or !same(attempt.value.capability.bytes, entry.declaration.identity)) return error.InvalidArchive;
                     const authorized_bytes = try self.authorizeWorkspace(temporary, value, entry, request.value.binding.payload);
@@ -4429,9 +4629,17 @@ pub fn Service(comptime Types: type) type {
                 if (entry.declaration.kind != .leaf or !same(&request.value.request_identity, &saved.value.request) or
                     !std.meta.eql(attempt.value.request, saved.value.request_object) or !std.meta.eql(attempt.value.profile, value.profile) or !same(attempt.value.capability.bytes, entry.declaration.identity) or
                     attempt.value.inference != entry.declaration.inference or (attempt.value.prepared != null) != (entry.declaration.capture != null)) return error.InvalidArchive;
+                const attempt_binding = try self.projectionBindingAt(temporary, value, saved.value, attempt.value.controller_context);
                 if (entry.declaration.capture) |adapter| {
                     const prepared = try self.store().object(temporary, attempt.value.prepared.?, null);
-                    if (!same(prepared, try self.prepareProjection(temporary, value, saved.value, adapter, try entry.payload(temporary, request.value.binding.payload)))) return error.CorruptState;
+                    const replayed = try self.store().project([]u8, temporary, self.handlers, attempt_binding, struct {
+                        adapter: registry.CaptureAdapter,
+                        payload: []const u8,
+                        pub fn run(this: @This(), context: registry.ProjectionContext) ![]u8 {
+                            return this.adapter.prepare(context, this.payload);
+                        }
+                    }{ .adapter = adapter, .payload = try entry.payload(temporary, request.value.binding.payload) });
+                    if (!same(prepared, replayed)) return error.CorruptState;
                 }
             }
             var output_tokens: u64 = 0;
@@ -7232,11 +7440,11 @@ pub fn Service(comptime Types: type) type {
         fn delegatedControl(before: workspace.ControlObservation, has_outer: bool, policy: workspace.RunPolicy) workspace.ControlObservation {
             var after = before;
             after.policy = policy;
-            if (!has_outer and before.delivery == .not_sent and before.instrument) after.delivery = .ready;
+            if (!has_outer and before.delivery == .not_sent and (before.instrument or before.trial)) after.delivery = .ready;
             const cancel_ready = before.cancellation != null and !before.cancellation_applied and
                 (after.delivery == .ready or after.delivery == .awaiting or after.delivery == .not_sent);
             const runnable = has_outer or after.delivery == null or after.delivery == .settled_reply or after.delivery == .captured or
-                (after.delivery == .ready and before.instrument) or cancel_ready;
+                (after.delivery == .ready and (before.instrument or before.trial)) or cancel_ready;
             after.schedule = if (policy.continuation == .explicit_only) .parked else if (after.delivery == .dispatching) .active else if (runnable) .queued else .parked;
             return after;
         }
@@ -7513,7 +7721,7 @@ pub fn Service(comptime Types: type) type {
                 expected.cancellation = before.control.cancellation;
                 expected.blocker = before.control.blocker;
                 expected.schedule = before.control.schedule;
-                if (actual.instrument != before.control.instrument) return error.InvalidArchive;
+                if (actual.instrument != before.control.instrument or actual.trial != before.control.trial) return error.InvalidArchive;
                 if (item.execution_revision == before.execution_revision and (actual.outcome != before.control.outcome or actual.port != before.control.port or actual.cancellation_applied != before.control.cancellation_applied)) return error.InvalidArchive;
             } else {
                 if (item.execution_revision != 1 or item.control_revision != 1 or command == null) return error.InvalidArchive;
@@ -7540,6 +7748,11 @@ pub fn Service(comptime Types: type) type {
                         selection.base_quantum == 0 or selection.base_quantum > 1048576) return error.InvalidArchive;
                     if (execution_changed) {
                         expected.schedule = publicationSchedule(expected);
+                    } else if (before.outer_operation == null and trialControlReady(before.control)) {
+                        if (item.outer_operation != null or actual.delivery != .ready) return error.InvalidArchive;
+                        expected.delivery = .ready;
+                        expected.schedule = .queued;
+                        expected.blocker = null;
                     } else {
                         if (item.outer_operation == null or actual.delivery != before.control.delivery) return error.InvalidArchive;
                         expected.schedule = if (expected.cancellation != null or expected.policy.continuation == .owner_scheduled) .queued else .parked;
@@ -7568,11 +7781,16 @@ pub fn Service(comptime Types: type) type {
                     if (before.control.outcome == .completed or before.control.outcome == .failed or before.control.outcome == .cancelled) return error.InvalidArchive;
                     const advanced = item.execution_revision > before.execution_revision;
                     if (control.command == .advance) {
-                        if (item.control_revision != before.control_revision) return error.InvalidArchive;
-                        if (advanced) {
+                        if (!advanced and before.outer_operation == null and trialControlReady(before.control)) {
+                            if (item.control_revision -| before.control_revision != 1 or item.outer_operation != null or actual.delivery != .ready) return error.InvalidArchive;
+                            expected.delivery = .ready;
+                            expected.schedule = .queued;
+                            expected.blocker = null;
+                        } else if (advanced) {
+                            if (item.control_revision != before.control_revision) return error.InvalidArchive;
                             expected.schedule = publicationSchedule(expected);
                         } else {
-                            if (before.outer_operation == null or item.outer_operation == null or actual.delivery != before.control.delivery) return error.InvalidArchive;
+                            if (item.control_revision != before.control_revision or before.outer_operation == null or item.outer_operation == null or actual.delivery != before.control.delivery) return error.InvalidArchive;
                             expected.schedule = if (expected.cancellation != null or expected.policy.continuation == .owner_scheduled) .queued else .parked;
                         }
                     } else {
@@ -8252,7 +8470,7 @@ pub fn Service(comptime Types: type) type {
             self.compatible(parent) catch |err| switch (err) {
                 error.IncompatibleProfile => return false,
             };
-            for (self.runnable.items) |subject| if (subject.work == null and std.meta.eql(subject.task, parent.id)) return false;
+            for (self.runnable.items) |subject| if (std.meta.eql(subject, workspace.Subject{ .task = parent.id })) return false;
             const id = parent.current_occurrence orelse return false;
             const bytes = (try self.store().recordBytes(a, "workspace_wait", id, parent.id)) orelse return false;
             defer a.free(bytes);
@@ -9285,8 +9503,10 @@ pub fn Service(comptime Types: type) type {
         pub fn controllerContract(self: *Self, a: std.mem.Allocator) !contracts.controller.Contract {
             var imports: std.ArrayList(contracts.controller.Signature) = .empty;
             defer imports.deinit(a);
+            errdefer for (imports.items) |item| if (item.native_result != null) a.free(item.result.bytes);
             for (self.handlers.entries) |entry| if (entry.declaration.controller_import) |imported| {
-                try imports.append(a, .{
+                try imports.ensureUnusedCapacity(a, 1);
+                imports.appendAssumeCapacity(.{
                     .import = imported,
                     .payload = .{ .bytes = entry.payload_schema },
                     .result = .{ .bytes = if (imported == .deliberate) try construction.controller.replySchema(a, entry.resume_schema) else entry.resume_schema },
@@ -9552,6 +9772,19 @@ pub fn Service(comptime Types: type) type {
             defer descriptor.deinit();
             try data.schema.validateValue(a, descriptor.descriptor, input);
             if (trial != .none and (input.len < task_id.len or !same(input[0..task_id.len], &task_id))) return error.InvalidControllerTrial;
+            const responses = try a.alloc(std.meta.Elem(@FieldType(@FieldType(workspace.Trial, "responses"), "items")), if (trial == .synthetic) trial.synthetic.responses.items.len else 0);
+            defer a.free(responses);
+            for (if (trial == .synthetic) trial.synthetic.responses.items else &.{}, responses, 0..) |item, *out, i| {
+                const payload = try self.workspaceValueReference(a, task_id, item.payload);
+                const response = try self.workspaceValueReference(a, task_id, item.response);
+                for (responses[0..i]) |prior| {
+                    if (!same(item.identity.bytes, prior.identity.bytes)) continue;
+                    var prior_payload = try contracts.decodeOwned(workspace.ValueArtifact, a, try self.store().object(a, prior.payload, null));
+                    defer prior_payload.deinit();
+                    if (std.meta.eql(payload.schema, prior_payload.value.schema) and std.meta.eql(payload.value, prior_payload.value.value)) return error.AmbiguousTrialResponse;
+                }
+                out.* = .{ .identity = item.identity, .payload = payload.artifact, .response = response.artifact };
+            }
             const image = try self.store().object(a, artifact.value.description.image, null);
             defer a.free(image);
             try self.runnable.ensureUnusedCapacity(self.allocator, 1);
@@ -9588,19 +9821,6 @@ pub fn Service(comptime Types: type) type {
                 delegation_ref = try self.snapshotRecord(workspace.Delegation, a, "workspace_delegation", record_value.id, task_id);
             }
             const trial_ref: ?state.Digest = if (trial != .none) blk: {
-                const responses = try a.alloc(std.meta.Elem(@FieldType(@FieldType(workspace.Trial, "responses"), "items")), trial.synthetic.responses.items.len);
-                defer a.free(responses);
-                for (trial.synthetic.responses.items, responses, 0..) |item, *out, i| {
-                    const payload = try self.workspaceValueReference(a, task_id, item.payload);
-                    const response = try self.workspaceValueReference(a, task_id, item.response);
-                    for (responses[0..i]) |prior| {
-                        if (!same(item.identity.bytes, prior.identity.bytes)) continue;
-                        var prior_payload = try contracts.decodeOwned(workspace.ValueArtifact, a, try self.store().object(a, prior.payload, null));
-                        defer prior_payload.deinit();
-                        if (std.meta.eql(payload.schema, prior_payload.value.schema) and std.meta.eql(payload.value, prior_payload.value.value)) return error.AmbiguousTrialResponse;
-                    }
-                    out.* = .{ .identity = item.identity, .payload = payload.artifact, .response = response.artifact };
-                }
                 const view = try self.controllerView(a, parent.value);
                 defer a.free(view.bytes);
                 defer freeControllerViewWorks(a, view.works);
@@ -9908,12 +10128,12 @@ pub fn Service(comptime Types: type) type {
                     if (try self.controllerTrialAllowsLive(a, work, request.value)) return self.dispatch(a, parent, pending);
                     return self.blockedOccurrence(a, parent, pending, .unavailable_environment);
                 }
-                return err;
+                return self.blockControllerRequest(a, parent, pending, err);
             };
             defer a.free(payload);
             var schema = try data.schema.decode(a, request.value.binding.resume_schema);
             defer schema.deinit();
-            try data.schema.validateValue(a, schema.descriptor, payload);
+            data.schema.validateValue(a, schema.descriptor, payload) catch |err| return self.blockControllerRequest(a, parent, pending, err);
             const reply = try data.invocation.encodeOwned(data.invocation.Result, a, .{ .request_identity = pending.request, .value = payload });
             defer a.free(reply);
             const binding: occurrence.Binding = .{ .id = pending.id, .task = parent.id, .work = work.id, .request = pending.request };
@@ -9925,6 +10145,7 @@ pub fn Service(comptime Types: type) type {
             defer self.store().rollback();
             _ = try self.store().putObject(reply);
             try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, parent.id, acquired);
+            try self.effectSchedule(a, &value, acquired, .queued, null);
             try self.persist(a, value, parent.revision, "controller.trial-reply", .preserve);
             return .progressed;
         }
@@ -10009,8 +10230,35 @@ pub fn Service(comptime Types: type) type {
             defer work.deinit();
             if (work.value.terminal()) return error.InvalidState;
             if (self.workspaceParentStopped(parent.value) and work.value.cancellation == null) return error.InvalidState;
+            if (try self.queueControllerTrial(a, parent.value, work.value, operation_id, request, .{ .pump = command })) |admitted| return admitted;
             work.value.control_revision = try std.math.add(u64, work.value.control_revision, 1);
             return self.workspacePumpWork(a, parent.value, work.value, command.base_quantum, operation_id, request, .{ .pump = command });
+        }
+
+        fn trialControlReady(value: workspace.ControlObservation) bool {
+            return value.trial and !value.port and value.cancellation == null and (value.delivery == .ready or value.delivery == .not_sent);
+        }
+
+        fn queueControllerTrial(self: *Self, a: std.mem.Allocator, parent: state.Task, initial: workspace.Work, operation_id: []const u8, request: state.Digest, command: workspace.PublicationCommand) !?Admission {
+            if (initial.trial == null or initial.outer_operation != null) return null;
+            const id = initial.current_occurrence orelse return null;
+            var pending = try self.record(occurrence.Occurrence, a, "occurrence", id, parent.id);
+            defer pending.deinit();
+            if (!trialControlReady(workspace.ControlObservation.from(.{ .work = initial, .occurrence = pending.value }))) return null;
+            try self.requireCustody(a, parent.id, initial.id);
+            try self.runnable.ensureUnusedCapacity(self.allocator, 1);
+            var value = initial;
+            value.control_revision = try std.math.add(u64, value.control_revision, 1);
+            value.event_watermark = try std.math.add(u64, parent.event_high, 1);
+            value.schedule = .queued;
+            value.blocker = null;
+            try self.store().begin();
+            defer self.store().rollback();
+            if (pending.value.state == .not_sent) try self.store().putRecord(occurrence.Occurrence, "occurrence", id, parent.id, try occurrence.rearm(pending.value, .{ .id = id, .task = parent.id, .work = value.id, .request = pending.value.request }));
+            try self.store().putRecord(workspace.Work, "workspace_work", value.id, parent.id, value);
+            const admitted = try self.workspaceCommit(a, parent, operation_id, request, value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, parent.id), command);
+            self.subjectAddAssumeCapacity(.{ .task = parent.id, .work = value.id });
+            return admitted;
         }
 
         fn workspacePumpWork(self: *Self, a: std.mem.Allocator, parent: state.Task, initial: workspace.Work, base_quantum: u64, operation_id: ?[]const u8, request: state.Digest, command: ?workspace.PublicationCommand) !Admission {
@@ -10203,6 +10451,7 @@ pub fn Service(comptime Types: type) type {
                 return self.workspaceAdvance(a, parent.value, value, .{ .cancel = .{ .text = value.cancellation.?.bytes } }, operation_id, request, publication_command);
             }
             if (command == .advance) {
+                if (try self.queueControllerTrial(a, parent.value, value, operation_id, request, publication_command)) |admitted| return admitted;
                 if (value.current_occurrence) |id| {
                     var pending = try self.record(occurrence.Occurrence, a, "occurrence", id, task_id);
                     defer pending.deinit();

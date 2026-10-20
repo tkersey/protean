@@ -3561,10 +3561,32 @@ const ReconstructionModel = struct {
     fn permission(_: native.registry.ProjectionContext) !bool {
         return true;
     }
+    fn offer(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
+        var proposed = try contracts.decodeOwned(Reconstruction.Proposal, ctx.allocator, bytes);
+        defer proposed.deinit();
+        if (proposed.value.value == 4) return error.Denied;
+        return ctx.allocator.dupe(u8, bytes);
+    }
+    fn prepare(ctx: native.registry.ProjectionContext, payload: []const u8) ![]u8 {
+        return contracts.encodeOwned(struct { payload: contracts.Bytes(null), controller: ?native.registry.ControllerProjection, trial: ?native.registry.TrialProjection }, ctx.allocator, .{ .payload = .{ .bytes = payload }, .controller = ctx.controller, .trial = ctx.trial });
+    }
+    fn acquire(ctx: native.Context, _: []const u8) !native.registry.Acquisition {
+        return .{ .captured = try contracts.encodeOwned(Reconstruction.Response, ctx.allocator, .{ .next = {} }) };
+    }
+    fn interpret(ctx: native.registry.ProjectionContext, payload: []const u8, prepared: []const u8, response: []const u8) !native.registry.Projection {
+        const expected = try prepare(ctx, payload);
+        defer ctx.allocator.free(expected);
+        if (!std.mem.eql(u8, prepared, expected)) return error.InvalidProjection;
+        return .{ .reply = try ctx.allocator.dupe(u8, response) };
+    }
     fn declaration() native.Declaration {
         var model = native.registry.controllerImport(.deliberate, native.leaf(Reconstruction.Proposal, Reconstruction.Response, .{ .identity = "fixture.reconstruction.model", .resource_role = "inference", .inference = true }, invoke));
         model.controller_choice = selection;
         model.controller_permission = permission;
+        model.controller_offer = offer;
+        model.invoke = null;
+        model.background = true;
+        model.capture = .{ .dependencies = native.registry.opaqueProjection, .prepare = prepare, .acquire = acquire, .interpret = interpret };
         return model;
     }
 };
@@ -3629,9 +3651,24 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
         .{ .identity = .{ .bytes = contracts.controller.effect_prefix ++ "deliberate" }, .payload = payload, .response = response_ref },
         .{ .identity = .{ .bytes = contracts.controller.effect_prefix ++ "snapshot" }, .payload = cleanup_payload, .response = unit },
     };
-    for (0..3) |case| {
-        const input = try reconstructionValue(Reconstruction.Types.ControllerInput, service, a, task, try std.fmt.allocPrint(a, "trial-input-{d}", .{case}), .{ .anchor = .{ .task = task }, .private = .{ .initial = .{ .items = if (case == 1) &.{3} else &.{2} } } });
-        const started = try service.workspaceCommand(a, try std.fmt.allocPrint(a, "trial-start-{d}", .{case}), task, .{ .work = .{ .start = .{ .program = original, .input = .{ .reference = input }, .policy = .{ .stop = .terminal, .continuation = .owner_scheduled }, .trial = .{ .synthetic = .{ .responses = .{ .items = if (case == 2) responses[1..] else &responses }, .live_inference = case == 2 } } } } });
+    for (0..8) |case| {
+        errdefer std.debug.print("controller trial case {d}\n", .{case});
+        const input = try reconstructionValue(Reconstruction.Types.ControllerInput, service, a, task, try std.fmt.allocPrint(a, "trial-input-{d}", .{case}), .{ .anchor = .{ .task = task }, .private = .{ .initial = .{ .items = if (case == 1) &.{3} else if (case == 7) &.{4} else &.{2} } } });
+        if (case == 0) {
+            for (0..2) |invalid| {
+                var invalid_responses = [_]Response{ responses[0], responses[0] };
+                if (invalid == 1) invalid_responses[0].response = try workspaceRef(a, .value, @splat(83));
+                const rejected = try service.workspaceCommand(a, try std.fmt.allocPrint(a, "trial-invalid-{d}", .{invalid}), task, .{ .work = .{ .start = .{ .program = original, .input = .{ .reference = input }, .policy = .{}, .trial = .{ .synthetic = .{ .responses = .{ .items = &invalid_responses } } } } } });
+                try std.testing.expectEqual(.rejected, rejected.disposition);
+                try std.testing.expect(!service.namespace.store.fenced);
+                var available = try service.task(a, task);
+                available.deinit();
+            }
+        }
+        var selected_responses = responses;
+        if (case == 6) selected_responses[0].response = unit;
+        const explicit = case == 3 or case == 4 or case == 5;
+        const started = try service.workspaceCommand(a, try std.fmt.allocPrint(a, "trial-start-{d}", .{case}), task, .{ .work = .{ .start = .{ .program = original, .input = .{ .reference = input }, .policy = .{ .stop = .terminal, .continuation = if (explicit) .explicit_only else .owner_scheduled }, .trial = .{ .synthetic = .{ .responses = .{ .items = if (case == 2) selected_responses[1..] else &selected_responses }, .live_inference = case == 2 } } } } });
         try std.testing.expectEqual(.observed, started.disposition);
         const started_json = (try native.json.parse(a, started.observation_json.bytes, .{})).value;
         const work_ref = try native.values.fromJson(contracts.workspace.Ref, a, native.json.get(started_json, "work").?);
@@ -3640,7 +3677,7 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
             var work = try service.workspaceWork(a, task, id);
             defer work.deinit();
             if (work.value.terminal()) {
-                try std.testing.expect(case != 1);
+                try std.testing.expect(case != 1 and case != 6 and case != 7);
                 try std.testing.expectEqual(.completed, work.value.outcome_kind);
                 const result = (try contracts.decodeOwned(Reconstruction.Output, a, try service.namespace.store.object(a, work.value.result.?, null))).value;
                 try std.testing.expectEqualDeep(Reconstruction.Output{ .total = 2, .covered = 1, .instruction_cut = 1 }, result);
@@ -3651,11 +3688,12 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
                 try std.testing.expectEqualStrings(&std.fmt.bytesToHex(work.value.result_value.?.digest, .lower), retained.evidence.?.id.bytes);
                 break;
             }
-            if (work.value.blocker == .unavailable_environment) {
-                try std.testing.expectEqual(@as(usize, 1), case);
-                const inspected = try service.workspaceCommand(a, "trial-unavailable", task, .{ .work = .{ .inspect = .{ .work = work_ref } } });
+            if (work.value.blocker != null) {
+                try std.testing.expect(case == 1 or case == 6 or case == 7);
+                try std.testing.expectEqual(@as(?native.testing.state.Blocker, if (case == 1) .unavailable_environment else if (case == 7) .denied else .incompatible_profile), work.value.blocker);
+                const inspected = try service.workspaceCommand(a, try std.fmt.allocPrint(a, "trial-unavailable-{d}", .{case}), task, .{ .work = .{ .inspect = .{ .work = work_ref } } });
                 try std.testing.expect(std.mem.indexOf(u8, inspected.observation_json.bytes, "trial_proposal") != null);
-                _ = try service.workspaceControl(a, "trial-stop", task, id, work.value.execution_revision, work.value.control_revision, .{ .cancel = .{ .bytes = "No recorded answer for the changed input" } });
+                _ = try service.workspaceControl(a, try std.fmt.allocPrint(a, "trial-stop-{d}", .{case}), task, id, work.value.execution_revision, work.value.control_revision, .{ .cancel = .{ .bytes = "No usable trial answer" } });
                 for (0..32) |_| {
                     var stopped = try service.workspaceWork(a, task, id);
                     defer stopped.deinit();
@@ -3664,7 +3702,27 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
                 } else return error.TrialDidNotStop;
                 break;
             }
+            if (explicit and work.value.schedule == .parked) {
+                const operation_id = try std.fmt.allocPrint(a, "trial-explicit-{d}-{d}-{d}", .{ case, work.value.execution_revision, work.value.control_revision });
+                const expected: contracts.workspace.Expected = .{ .work = work_ref, .execution_revision = work.value.execution_revision, .control_revision = work.value.control_revision };
+                const command: contracts.workspace.Command = .{ .work = if (case == 4) .{ .pump = .{ .expected = expected, .base_quantum = 65536 } } else if (case == 5) .{ .delegate = .{ .expected = expected, .policy = .{ .stop = .terminal, .continuation = .owner_scheduled }, .interpretation = .{ .none = .{} } } } else .{ .advance = expected } };
+                const advanced = try service.workspaceCommand(a, operation_id, task, command);
+                try std.testing.expectEqual(.observed, advanced.disposition);
+                const replayed = try service.workspaceCommand(a, operation_id, task, command);
+                const observation = (try native.json.parse(a, replayed.observation_json.bytes, .{})).value;
+                try std.testing.expect(native.json.get(observation, "replayed").?.bool);
+                continue;
+            }
             const step = try service.pump(a);
+            if (case == 0) {
+                var after_step = try service.workspaceWork(a, task, id);
+                defer after_step.deinit();
+                if (after_step.value.current_occurrence) |occurrence_id| {
+                    const bytes = (try service.namespace.store.recordBytes(a, "occurrence", occurrence_id, task)).?;
+                    const pending = (try contracts.decodeOwned(native.testing.occurrence.Occurrence, a, bytes)).value;
+                    if (pending.state == .settled_reply) try service.validateWorkspace(a, task);
+                }
+            }
             if (step == .work) {
                 try std.testing.expectEqual(@as(usize, 2), case);
                 try std.testing.expectEqualDeep(id, step.work.subject_work.?);
@@ -3675,7 +3733,7 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
         defer after.deinit();
         try std.testing.expectEqualDeep(before.value.controller, after.value.controller);
         try std.testing.expectEqual(@as(u64, 0), after.value.controller_epoch);
-        try std.testing.expectEqual(@as(u64, if (case == 2) 1 else 0), after.value.inference_attempts);
+        try std.testing.expectEqual(@as(u64, if (case >= 2) 1 else 0), after.value.inference_attempts);
         try std.testing.expect(after.value.controller_succession == null);
     }
     var current = try service.task(a, task);
@@ -3691,17 +3749,88 @@ pub const ReconstructionProcess = struct {
     operation: [32]u8 = @splat(0),
     stop: *const fn ([]const u8, [16]u8, [32]u8) anyerror!void,
 };
-pub const ReconstructionCase = enum { round_trip, conversion_failure, conversion_schema, conversion_interrupt, instructions, cancellation, held_cleanup };
+fn reconstructionModelMove(service: anytype, a: std.mem.Allocator, root: []const u8, task: [16]u8, work: native.tasks.Work, destination_identity: [32]u8, service_open: *bool, namespace_open: *bool) !void {
+    const backing = std.testing.allocator;
+    try service.notSent(a, work);
+    const io = service.io;
+    const assets = service.assets;
+    const application = service.application;
+    const handlers = service.handlers;
+    const source_namespace = service.namespace;
+    const p = native.placement;
+    const source_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(81));
+    const destination_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(82));
+    var disclosure: u8 = 0;
+    const destination_peer: p.Peer = .{ .name = "destination", .site = .{ .key = destination_key.public_key.toBytes(), .namespace = destination_identity }, .native_build = service.profile.runtime_identity, .compatibility = try service.placementCompatibility(a, .{ .task = task }), .resource_binding = try service.profile.resourceIdentity(a, service.application.image_identity), .disclosure_policy = @splat(83), .context = &disclosure, .disclose = struct {
+        fn check(_: *anyopaque, _: p.Subject, _: []const native.testing.state.Reference) !void {}
+    }.check };
+    var source_peer = destination_peer;
+    source_peer.name = "source";
+    source_peer.site = .{ .key = source_key.public_key.toBytes(), .namespace = service.namespace.identity };
+    const source_config: p.Configuration = .{ .signing_key = source_key, .peers = &.{destination_peer} };
+    const destination_config: p.Configuration = .{ .signing_key = destination_key, .peers = &.{source_peer} };
+    const prior_placement = service.profile.placement;
+    defer if (service_open.*) {
+        service.profile.placement = prior_placement;
+    };
+    service.profile.placement = &source_config;
+    var profile = service.profile;
+    profile.placement = &destination_config;
+    const subject: p.Subject = .{ .task = task };
+    _ = try service.placementFreeze(a, subject, "destination", try service.placementCut(a, subject), @splat(84));
+    const path = try std.fmt.allocPrint(a, "{s}/model-move.archive", .{root});
+    const offer = try service.placementOffer(a, subject, "destination", path);
+    try service.close(backing);
+    service_open.* = false;
+    try source_namespace.close();
+    namespace_open.* = false;
+    var namespace = try native.Namespace.open(backing, io, try std.fmt.allocPrint(a, "{s}/model-destination", .{root}));
+    defer namespace.close() catch unreachable;
+    var destination = try @TypeOf(service.*).init(backing, io, &namespace, assets, application, handlers, profile);
+    defer destination.close(backing) catch unreachable;
+    const decision = try destination.placementAccept(a, "model-move", "source", offer, path);
+    try std.testing.expectEqual(.accepted, decision.value.verdict);
+    try std.testing.expect(try destination.pump(a) == .idle);
+    _ = try destination.message(a, "after-model-move", task, .{ .bytes = "Use the new controller authority and current instructions." });
+    var admitted = try destination.task(a, task);
+    defer admitted.deinit();
+    try std.testing.expectEqual(@as(u64, 1), admitted.value.controller_epoch);
+    _ = try destination.resumeTask(a, "resume-moved-model", task, admitted.value.revision);
+    for (0..64) |_| {
+        const step = try destination.pump(a);
+        if (step != .work) continue;
+        try destination.notSent(a, step.work);
+        try std.testing.expect(step.work.subject_work == null and step.work.subject_residual == null);
+        try std.testing.expect(step.work.entry.declaration.inference);
+        var current = try destination.task(a, task);
+        defer current.deinit();
+        const interaction = (try contracts.decodeOwned(native.testing.state.ControllerInteraction, a, (try namespace.store.recordBytes(a, "controller_interaction", current.value.controller_interaction.?, task)).?)).value;
+        try std.testing.expectEqual(current.value.controller_epoch, interaction.epoch);
+        try std.testing.expectEqual(current.value.next_message, interaction.next_message);
+        _ = try destination.exportCheckpoint(a, task, try std.fmt.allocPrint(a, "{s}/moved-model-refreshed.archive", .{root}));
+        return;
+    }
+    return error.MovedModelDidNotResume;
+}
+
+pub const ReconstructionCase = enum { round_trip, conversion_failure, conversion_schema, conversion_interrupt, instructions, cancellation, held_cleanup, residual_cancel, residual_custody, model_mobility, invalid_offer, operator, operator_failure, operator_cancel };
 
 test "WORK-C03 one task reconstructs a per-record method into an index and returns through current facts" {
     try reconstructionContinuity(null, .round_trip);
 }
 
 test "WORK-C07 C08 C09 conversion and owner interleavings preserve the predecessor and residual obligations" {
-    for ([_]ReconstructionCase{ .conversion_failure, .conversion_schema, .conversion_interrupt, .instructions, .cancellation, .held_cleanup }) |case| try reconstructionContinuity(null, case);
+    var failures: usize = 0;
+    for ([_]ReconstructionCase{ .conversion_failure, .conversion_schema, .conversion_interrupt, .instructions, .cancellation, .held_cleanup, .residual_cancel, .residual_custody, .model_mobility, .invalid_offer, .operator, .operator_failure, .operator_cancel }) |case| reconstructionContinuity(null, case) catch |err| {
+        std.debug.print("reconstruction {s}: {s}\n", .{ @tagName(case), @errorName(err) });
+        if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
+        failures += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 0), failures);
 }
 
 pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: ReconstructionCase) !void {
+    const operator = scenario == .operator or scenario == .operator_failure or scenario == .operator_cancel;
     var stage: []const u8 = "setup";
     errdefer std.debug.print("reconstruction {s} failure at {s}\n", .{ @tagName(scenario), stage });
     const a = std.testing.allocator;
@@ -3735,6 +3864,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
     defer application.deinit();
     const metadata = "{}";
     const manifest = try @import("native_test_support.zig").ownerManifest(scratch, original.image, admitted.identity(), metadata);
+    application.manifest = (try native.json.parse(scratch, manifest, .{})).value;
     const assets: native.discovery.Assets = .{ .image = original.image, .application = metadata, .manifest = manifest };
     var grants: [3]native.registry.Grant = undefined;
     const profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "controller-test", .authority = .{ .grants = &grants, .principal = "test", .tenant = "test", .inference = true } };
@@ -3744,10 +3874,27 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
     var path_buffer: [4096]u8 = undefined;
     const length = try temp.dir.realPath(io, &path_buffer);
     const path = if (process) |p| p.path else try std.fmt.allocPrint(scratch, "{s}/state", .{path_buffer[0..length]});
+    const destination_identity: ?[32]u8 = if (scenario == .model_mobility) identity: {
+        var destination = try native.Namespace.open(a, io, try std.fmt.allocPrint(scratch, "{s}/model-destination", .{path_buffer[0..length]}));
+        defer destination.close() catch unreachable;
+        break :identity destination.identity;
+    } else null;
     var namespace = try native.Namespace.open(a, io, path);
-    defer namespace.close() catch unreachable;
+    var namespace_open = true;
+    defer if (namespace_open) namespace.close() catch unreachable;
     var service = try native.tasks.Service(Reconstruction.Types).init(a, io, &namespace, assets, &application, handlers, profile);
-    defer service.close(a) catch unreachable;
+    var service_open = true;
+    defer if (service_open) service.close(a) catch unreachable;
+    var contract_allocator = std.testing.FailingAllocator.init(a, .{ .resize_fail_index = 0 });
+    if (process == null and scenario == .round_trip) try std.testing.checkAllAllocationFailures(contract_allocator.allocator(), struct {
+        fn run(allocator: std.mem.Allocator, owner: @TypeOf(&service)) !void {
+            const value = try owner.controllerContract(allocator);
+            defer allocator.free(value.result.bytes);
+            defer allocator.free(value.failure.bytes);
+            defer allocator.free(value.imports.items);
+            defer for (value.imports.items) |item| if (item.native_result != null) allocator.free(item.result.bytes);
+        }
+    }.run, .{&service});
     if (process) |p| if (p.verifying) {
         try std.testing.expectEqual(.idle, std.meta.activeTag(try service.pump(scratch)));
         var current = try service.task(scratch, p.task);
@@ -3782,7 +3929,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
         return;
     };
     stage = "submit";
-    const task = (try service.submit(scratch, "reconstruction-task", .{ .items = &.{ 2, 3, 107, 5 } })).receipt.task;
+    const task = (try service.submit(scratch, "reconstruction-task", .{ .items = if (scenario == .invalid_offer) &.{4} else &.{ 2, 3, 107, 5 } })).receipt.task;
     var initial = try service.task(a, task);
     defer initial.deinit();
     const initial_binding = (try contracts.decodeOwned(native.testing.state.ControllerBinding, scratch, (try namespace.store.recordBytes(scratch, "controller_binding", initial.value.controller.?, task)).?)).value;
@@ -3794,7 +3941,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
     for (&programs, 0..) |*out, i| {
         var b = source.Builder.init(a);
         defer b.deinit();
-        const variant: @typeInfo(@TypeOf(Reconstruction.converter)).@"fn".param_types[2].? = if (i == 1 and scenario == .conversion_failure) .fail else if (i == 1 and (scenario == .conversion_interrupt or scenario == .cancellation)) .diverge else .valid;
+        const variant: @typeInfo(@TypeOf(Reconstruction.converter)).@"fn".param_types[2].? = if (i == 1 and (scenario == .conversion_failure or scenario == .operator_failure)) .fail else if (i == 1 and (scenario == .conversion_interrupt or scenario == .cancellation or scenario == .operator_cancel)) .diverge else .valid;
         const module = if (i == 0) try Reconstruction.controller(&b, true, false) else try Reconstruction.converter(&b, i == 1 and scenario != .conversion_schema, variant);
         const text = try native.source_records.encode(scratch, module);
         if (i == 0) indexed_source = text;
@@ -3820,7 +3967,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
         fn check(_: *anyopaque, _: native.placement.Subject, _: []const native.testing.state.Reference) !void {}
     }.check };
     const placement: native.placement.Configuration = .{ .signing_key = placement_key, .peers = &.{placement_peer} };
-    if (process == null and scenario == .round_trip) service.profile.placement = &placement;
+    if (process == null and (scenario == .round_trip or scenario == .residual_custody or operator)) service.profile.placement = &placement;
     var first_work: ?native.tasks.Work = null;
     var calls: usize = 0;
     var epochs: usize = 0;
@@ -3830,8 +3977,12 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
     var child_parked = false;
     var held_residual: ?[32]u8 = null;
     var first_handoff: ?contracts.workspace.Adoption = null;
+    var operator_params: ?native.json.Value = null;
     var last_event: u64 = initial.value.event_high;
     var last_attempts: u64 = 0;
+    const amended_retry = process == null and scenario == .round_trip;
+    const amended = amended_retry or operator;
+    var retried = false;
     stage = "execution";
     for (0..4096) |_| {
         var frame_arena = std.heap.ArenaAllocator.init(a);
@@ -3842,6 +3993,14 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
         try std.testing.expect(current.value.event_high >= last_event and current.value.inference_attempts >= last_attempts);
         last_event = current.value.event_high;
         last_attempts = current.value.inference_attempts;
+        if (scenario == .invalid_offer and current.value.blocker != null) {
+            try std.testing.expectEqual(.denied, current.value.blocker.?);
+            try std.testing.expectEqual(@as(u64, 0), current.value.inference_attempts);
+            try std.testing.expect(!namespace.store.fenced);
+            _ = try service.submit(frame, "after-invalid-controller", .{ .items = &.{2} });
+            _ = try service.exportCheckpoint(frame, task, try std.fmt.allocPrint(frame, "{s}/invalid-offer.archive", .{path_buffer[0..length]}));
+            return;
+        }
         if (current.value.controller_succession) |operation_id| {
             const operation_value = (try contracts.decodeOwned(native.testing.state.ControllerSuccession, frame, (try namespace.store.recordBytes(frame, "controller_succession", operation_id, task)).?)).value;
             if (operation_value.phase == .preparing and !child_parked) {
@@ -3859,7 +4018,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                     interleaved = true;
                     continue;
                 }
-                if (scenario == .cancellation) {
+                if (scenario == .cancellation or scenario == .operator_cancel) {
                     _ = try service.requestCancel(frame, "cancel-during-preparation", task, "Stop before activation");
                     interleaved = true;
                     continue;
@@ -3885,9 +4044,14 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                     try std.testing.expect(current.value.controller_succession == null and rejected.converted == null and rejected.boot == null and rejected.residual == null);
                     try std.testing.expectEqual(@as(@TypeOf(rejected.phase), switch (scenario) {
                         .conversion_schema => .rejected,
-                        .instructions, .cancellation => .aborted,
+                        .instructions, .cancellation, .operator_cancel => .aborted,
                         else => .failed,
                     }), rejected.phase);
+                    if (scenario == .operator_failure) {
+                        try std.testing.expectEqual(.parked, current.value.schedule);
+                        for (0..8) |_| try std.testing.expect(try service.pump(frame) != .work);
+                        _ = try service.exportCheckpoint(frame, task, try std.fmt.allocPrint(frame, "{s}/operator-failed.archive", .{path_buffer[0..length]}));
+                    }
                     _ = try service.requestCancel(frame, "stop-rejected-controller", task, "Finish the rejected-controller fixture");
                     for (0..128) |_| {
                         var stopped = try service.task(frame, task);
@@ -3954,6 +4118,70 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
             try std.testing.expectEqualStrings("activated", native.json.get(observation, "phase").?.string);
             if (epochs == 1) {
                 try std.testing.expectError(error.StaleOccurrence, service.acquire(frame, first_work.?, &.{}));
+                if (operator_params) |params| {
+                    var client: native.client.Client(Reconstruction.Types) = .{ .service = &service };
+                    const replay = try client.call(frame, .@"task.adopt", params);
+                    try std.testing.expect(replay.object.get("replayed").?.bool);
+                    try std.testing.expectEqualStrings("1", replay.object.get("controller_epoch").?.string);
+                }
+                if (scenario == .residual_custody) {
+                    var succession_id: [32]u8 = undefined;
+                    _ = try std.fmt.hexToBytes(&succession_id, first_handoff.?.expected_handoff_identity.bytes);
+                    const succession = (try contracts.decodeOwned(native.testing.state.ControllerSuccession, frame, (try namespace.store.recordBytes(frame, "controller_succession", succession_id, task)).?)).value;
+                    const residual_id = succession.residual.?;
+                    const residual = (try contracts.decodeOwned(native.testing.state.ControllerResidual, frame, (try namespace.store.recordBytes(frame, "controller_residual", residual_id, task)).?)).value;
+                    try std.testing.expectEqual(.queued, residual.schedule);
+                    const subject: native.placement.Subject = .{ .task = task };
+                    const cut = try service.placementCut(frame, subject);
+                    _ = try service.placementFreeze(frame, subject, placement_peer.name, cut, @splat(77));
+                    for (0..16) |_| try std.testing.expect(try service.pump(frame) != .work);
+                    for (service.runnable.items) |queued| try std.testing.expect(!std.meta.eql(queued.residual, residual_id));
+                    try service.placementAbortUnsent(frame, subject, @splat(77));
+                    var observed: usize = 0;
+                    for (0..128) |_| {
+                        const progress = try service.pump(frame);
+                        if (progress == .work) {
+                            try std.testing.expectEqualDeep(residual_id, progress.work.subject_residual.?);
+                            try service.acquire(frame, progress.work, &.{});
+                            observed += 1;
+                        }
+                        const stopped = (try contracts.decodeOwned(native.testing.state.ControllerResidual, frame, (try namespace.store.recordBytes(frame, "controller_residual", residual_id, task)).?)).value;
+                        if (stopped.outcome_kind == .cancelled) break;
+                    } else return error.ResidualDidNotResume;
+                    try std.testing.expectEqual(@as(usize, 1), observed);
+                    _ = try service.exportCheckpoint(frame, task, try std.fmt.allocPrint(frame, "{s}/restored-residual.archive", .{path_buffer[0..length]}));
+                    return;
+                }
+                if (scenario == .residual_cancel) {
+                    var succession_id: [32]u8 = undefined;
+                    _ = try std.fmt.hexToBytes(&succession_id, first_handoff.?.expected_handoff_identity.bytes);
+                    const succession = (try contracts.decodeOwned(native.testing.state.ControllerSuccession, frame, (try namespace.store.recordBytes(frame, "controller_succession", succession_id, task)).?)).value;
+                    const residual_id = succession.residual.?;
+                    var residual = (try contracts.decodeOwned(native.testing.state.ControllerResidual, frame, (try namespace.store.recordBytes(frame, "controller_residual", residual_id, task)).?)).value;
+                    _ = try service.workspaceCommand(frame, "residual-before-cancel", task, .{ .work = .{ .park = .{ .work = try workspaceRef(frame, .residual, residual_id), .execution_revision = residual.execution_revision, .control_revision = residual.control_revision } } });
+                    _ = try service.requestCancel(frame, "cancel-before-explicit-park", task, "Cancel current and retained work");
+                    _ = try service.workspaceCommand(frame, "residual-after-cancel", task, .{ .work = .{ .park = .{ .work = try workspaceRef(frame, .residual, residual_id), .execution_revision = residual.execution_revision, .control_revision = residual.control_revision + 1 } } });
+                    for (0..32) |_| {
+                        const progress = try service.pump(frame);
+                        try std.testing.expect(progress != .work);
+                    }
+                    residual = (try contracts.decodeOwned(native.testing.state.ControllerResidual, frame, (try namespace.store.recordBytes(frame, "controller_residual", residual_id, task)).?)).value;
+                    try std.testing.expectEqual(.parked, residual.schedule);
+                    try std.testing.expect(!residual.cancellation_applied);
+                    _ = try service.requestCancel(frame, "cancel-after-explicit-park", task, "Continue retained cleanup");
+                    for (0..128) |_| {
+                        const progress = try service.pump(frame);
+                        if (progress == .work) {
+                            try std.testing.expectEqualDeep(residual_id, progress.work.subject_residual.?);
+                            try service.acquire(frame, progress.work, &.{});
+                        }
+                        var stopped = try service.task(frame, task);
+                        defer stopped.deinit();
+                        if (try service.taskCleanupComplete(frame, stopped.value)) break;
+                    } else return error.ResidualDidNotCancel;
+                    _ = try service.exportCheckpoint(frame, task, try std.fmt.allocPrint(frame, "{s}/cancelled-residual.archive", .{path_buffer[0..length]}));
+                    return;
+                }
                 if (scenario == .round_trip and process == null) {
                     var succession_id: [32]u8 = undefined;
                     _ = try std.fmt.hexToBytes(&succession_id, first_handoff.?.expected_handoff_identity.bytes);
@@ -3988,7 +4216,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
             try std.testing.expectEqual(.completed, current.value.outcome_kind);
             var output = try contracts.decodeOwned(Reconstruction.Output, frame, try namespace.store.object(frame, current.value.result.?, null));
             defer output.deinit();
-            try std.testing.expectEqualDeep(Reconstruction.Output{ .total = 117, .covered = 4, .instruction_cut = 2 }, output.value);
+            try std.testing.expectEqualDeep(Reconstruction.Output{ .total = 117, .covered = 4, .instruction_cut = if (amended) 3 else 2 }, output.value);
             if (scenario == .held_cleanup) {
                 try std.testing.expect(!try service.taskCleanupComplete(frame, current.value));
                 break;
@@ -4002,14 +4230,23 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
         if (step != .work) continue;
         const work = step.work;
         if (work.entry.declaration.inference) {
+            if (amended_retry and calls == 0 and !retried) {
+                try service.notSent(frame, work);
+                _ = try service.message(frame, "amend-before-retry", task, .{ .bytes = "Preserve this instruction when retrying the request." });
+                var stopped = try service.task(frame, task);
+                defer stopped.deinit();
+                _ = try service.resumeTask(frame, "retry-amended-model", task, stopped.value.revision);
+                retried = true;
+                continue;
+            }
             var request = try data.invocation.decode(data.invocation.Request, frame, work.request);
             defer request.deinit();
             var proposal = try contracts.decodeOwned(Reconstruction.Proposal, frame, try work.entry.payload(frame, request.value.binding.payload));
             defer proposal.deinit();
             const expected = [_]Reconstruction.Proposal{
                 .{ .position = 0, .value = 2, .total = 2, .covered = 1, .indexed = false, .instruction_cut = 1 },
-                .{ .position = 2, .value = 107, .total = 117, .covered = 4, .indexed = true, .instruction_cut = 1 },
-                .{ .position = 2, .value = 107, .total = 117, .covered = 4, .indexed = false, .instruction_cut = 2 },
+                .{ .position = 2, .value = 107, .total = 117, .covered = 4, .indexed = true, .instruction_cut = if (amended) 2 else 1 },
+                .{ .position = 2, .value = 107, .total = 117, .covered = 4, .indexed = false, .instruction_cut = if (amended) 3 else 2 },
             };
             try std.testing.expect(calls < expected.len);
             try std.testing.expectEqualDeep(expected[calls], proposal.value);
@@ -4020,6 +4257,68 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                 break :blk .{ .adopt = adoption };
             } else .{ .next = {} };
             if (calls == 0) first_work = work;
+            if (scenario == .model_mobility) {
+                try reconstructionModelMove(&service, frame, path_buffer[0..length], task, work, destination_identity.?, &service_open, &namespace_open);
+                return;
+            }
+            if (operator and calls == 0) {
+                stage = "operator admission";
+                const command = response.adopt;
+                var dispatched = try service.task(frame, task);
+                defer dispatched.deinit();
+                try std.testing.expectError(error.UnsettledOccurrence, service.adoptController(frame, "operator-while-dispatched", task, dispatched.value.revision, command));
+                try service.notSent(frame, work);
+                _ = try service.message(frame, "operator-current-instructions", task, .{ .bytes = "Recover using the current evidence and instructions." });
+                const subject: native.placement.Subject = .{ .task = task };
+                const cut = try service.placementCut(frame, subject);
+                _ = try service.placementFreeze(frame, subject, placement_peer.name, cut, @splat(78));
+                var frozen = try service.task(frame, task);
+                defer frozen.deinit();
+                try std.testing.expectError(error.CustodyNotLocal, service.adoptController(frame, "operator-without-custody", task, frozen.value.revision, command));
+                try service.placementAbortUnsent(frame, subject, @splat(78));
+                var client: native.client.Client(Reconstruction.Types) = .{ .service = &service };
+                var params = native.json.object();
+                try native.json.put(scratch, &params, "task_id", native.json.string(try scratch.dupe(u8, &std.fmt.bytesToHex(task, .lower))));
+                const status = try client.call(scratch, .@"task.status", params);
+                try std.testing.expectEqualStrings(command.expected_handoff_identity.bytes, status.object.get("controller_handoff").?.string);
+                try native.json.put(scratch, &params, "client_operation_id", native.json.string("operator-adopt"));
+                try native.json.put(scratch, &params, "expected_revision", status.object.get("revision").?);
+                try native.json.put(scratch, &params, "adoption", try native.values.toJson(contracts.workspace.Adoption, scratch, command));
+                const adoption_result = try client.call(scratch, .@"task.adopt", params);
+                try std.testing.expect(!adoption_result.object.get("replayed").?.bool);
+                operator_params = params;
+                stage = "operator preparing export";
+                _ = try service.exportCheckpoint(frame, task, try std.fmt.allocPrint(frame, "{s}/operator-preparing.archive", .{path_buffer[0..length]}));
+                if (scenario == .operator) for (0..2) |variant| {
+                    const id = frozen.value.controller_interaction.?;
+                    var altered = (try contracts.decodeOwned(native.testing.state.ControllerSuccession, frame, (try namespace.store.recordBytes(frame, "controller_succession", id, task)).?)).value;
+                    if (variant == 0) {
+                        const not_sent = altered.operator_admission.?.occurrence.state.not_sent;
+                        altered.operator_admission.?.occurrence.state = .{ .unknown = not_sent };
+                    } else altered.operator_admission.?.revision += 1;
+                    try namespace.store.begin();
+                    defer namespace.store.rollback();
+                    try namespace.store.putRecord(native.testing.state.ControllerSuccession, "controller_succession", id, task, altered);
+                    try std.testing.expectError(error.InvalidArchive, service.validateWorkspace(frame, task));
+                    namespace.store.rollback();
+                };
+                if (scenario == .operator) {
+                    stage = "operator reopen";
+                    const reopened_profile = service.profile;
+                    try service.close(a);
+                    service_open = false;
+                    service = try native.tasks.Service(Reconstruction.Types).init(a, io, &namespace, assets, &application, handlers, reopened_profile);
+                    service_open = true;
+                    try std.testing.expect(try service.pump(frame) == .idle);
+                    var reopened = try service.task(frame, task);
+                    defer reopened.deinit();
+                    try std.testing.expect(reopened.value.controller_succession != null);
+                    _ = try service.resumeTask(frame, "operator-resume-conversion", task, reopened.value.revision);
+                }
+                stage = "operator execution";
+                calls += 1;
+                continue;
+            }
             try service.acquire(frame, work, try contracts.encodeOwned(Reconstruction.Response, frame, response));
             if (calls == 0 and service.profile.placement != null) {
                 const root_subject: native.placement.Subject = .{ .task = task };
@@ -4052,8 +4351,16 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
     var final_task = try service.task(a, task);
     defer final_task.deinit();
     try std.testing.expect(final_task.value.terminal());
-    try std.testing.expectEqual(@as(u64, if (scenario == .round_trip) 4 else 3), final_task.value.inference_attempts);
+    try std.testing.expectEqual(@as(u64, if (amended_retry) 5 else 3), final_task.value.inference_attempts);
     if (held_residual) |id| {
+        for (0..2) |foreign_identity| {
+            var foreign_profile = profile;
+            if (foreign_identity == 0) foreign_profile.authority.principal = "foreign" else foreign_profile.authority.tenant = "foreign";
+            const head = namespace.store.head;
+            var foreign = try native.tasks.Service(Reconstruction.Types).init(a, io, &namespace, assets, &application, handlers, foreign_profile);
+            try foreign.close(a);
+            try std.testing.expectEqualDeep(head, namespace.store.head);
+        }
         const residual = (try contracts.decodeOwned(native.testing.state.ControllerResidual, scratch, (try namespace.store.recordBytes(scratch, "controller_residual", id, task)).?)).value;
         const expected: contracts.workspace.Expected = .{ .work = try workspaceRef(scratch, .residual, id), .execution_revision = residual.execution_revision, .control_revision = residual.control_revision };
         const refused = try service.workspaceCommand(scratch, "cannot-advance-unknown-cleanup", task, .{ .work = .{ .advance = expected } });

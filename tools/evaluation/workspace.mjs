@@ -87,7 +87,7 @@ export function workspaceMetrics(archive, application) {
     if (kind === 30) stats.controller_trials++;
     if (kind !== 27) continue;
     const succession = decodeValue(archive.schemas.get('controller_succession'), archive.object(reference));
-    assert.equal(succession.length, 22);
+    assert.equal(succession.length, 23);
     if (succession[17] === 2) stats.controller_adoptions++;
     if ([3, 4, 5, 6].includes(succession[17])) stats.rejected_adoptions++;
     if (succession[14].tag === 1) conversions.add(Buffer.from(succession[14].value).toString('hex'));

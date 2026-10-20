@@ -202,13 +202,11 @@ pub fn build(b: *std.Build) void {
     _ = g.testModule(check, g.module("test/authoring_tests.zig"));
     _ = g.testModule(check, g.module("src/test_root.zig"));
     const workspace_values = b.step("check-workspace-values", "Check runtime-schema workspace value projection");
-    _ = g.testModule(workspace_values, g.module("runtime/native/dynamic_values.zig"));
-    check.dependOn(workspace_values);
     const source_records = b.step("check-source-records", "Check the model-facing Horos source-record transport");
-    _ = g.testModule(source_records, g.module("runtime/native/source_records.zig"));
-    check.dependOn(source_records);
     const program_construction = b.step("check-program-construction", "Check untrusted general source construction");
     _ = g.testModule(program_construction, g.module("runtime/native/program_construction.zig"));
+    workspace_values.dependOn(program_construction);
+    source_records.dependOn(program_construction);
     check.dependOn(program_construction);
     const admitted = g.module("test/protean/admission.zig");
     admitted.addImport("admission", g.helper("admission"));

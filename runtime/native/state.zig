@@ -107,6 +107,13 @@ pub const ControllerSuccession = struct {
     activation_event: ?u64 = null,
     activated_epoch: ?u64 = null,
     residual: ?Digest = null,
+    operator_admission: ?struct { revision: u64, event: u64, occurrence: @import("occurrence.zig").Occurrence } = null,
+};
+pub const ControllerAdoptionRequest = struct {
+    method: Method = .adopt,
+    task: TaskId,
+    revision: u64,
+    command: contracts.workspace.Adoption,
 };
 pub const ControllerResidual = struct {
     id: Digest,
@@ -175,7 +182,7 @@ pub const Task = struct {
     }
 };
 
-pub const Method = enum { submit, message, respond, cancel, @"resume", import_checkpoint, reconcile, workspace };
+pub const Method = enum { submit, message, respond, cancel, @"resume", import_checkpoint, reconcile, workspace, adopt };
 pub const Disposition = enum { accepted, queued, answer_acquired, cancellation_requested, resumed, imported, reconciled };
 pub const Receipt = struct {
     id: Digest,
@@ -287,6 +294,7 @@ pub const EventType = enum {
     workspace_progress,
     workspace_read,
     controller,
+    controller_requested,
 };
 pub const Event = struct {
     task: TaskId,
@@ -326,6 +334,12 @@ pub const Artifact = struct {
 
 pub const CaptureDisposition = enum { complete, definitely_not_sent, unknown };
 pub const AttemptOperation = enum { environment, workspace_build };
+pub const ControllerContext = struct {
+    epoch: u64,
+    event_cut: u64,
+    next_message: u64,
+    overlay: Reference,
+};
 pub const Attempt = struct {
     id: Digest,
     task: TaskId,
@@ -336,6 +350,7 @@ pub const Attempt = struct {
     inference: bool,
     prepared: ?Reference = null,
     operation: AttemptOperation = .environment,
+    controller_context: ?ControllerContext = null,
 };
 pub const Capture = struct {
     task: TaskId,

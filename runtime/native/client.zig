@@ -75,6 +75,8 @@ pub fn Client(comptime Types: type) type {
             try json.put(a, &result, "profile_digest", try hexadecimal(a, task.profile.digest));
             try json.put(a, &result, "status", json.string(@tagName(try self.service.status(a, task))));
             try json.put(a, &result, "revision", try counter(a, task.revision));
+            try json.put(a, &result, "controller_epoch", try counter(a, task.controller_epoch));
+            try json.put(a, &result, "controller_handoff", if (task.controller_interaction) |handoff| try hexadecimal(a, handoff) else .null);
             try json.put(a, &result, "result_available", .{ .bool = task.terminal() });
             try json.put(a, &result, "associated_work_disposed", .{ .bool = try self.service.associatedWorkDisposed(a, id) });
             try json.put(a, &result, "earliest_available_seq", try counter(a, task.event_floor));
@@ -372,6 +374,7 @@ pub fn Client(comptime Types: type) type {
                 },
                 .@"task.cancel" => return self.admission(a, try self.service.requestCancel(a, try operationId(params), try identifier(16, try field(params, "task_id")), if (json.get(params, "reason")) |reason| try json.text(reason) else "client requested cancellation")),
                 .@"task.resume" => return self.admission(a, try self.service.resumeTask(a, try operationId(params), try identifier(16, try field(params, "task_id")), try json.decimal(u64, try field(params, "expected_revision")))),
+                .@"task.adopt" => return self.admission(a, try self.service.adoptController(a, try operationId(params), try identifier(16, try field(params, "task_id")), try json.decimal(u64, try field(params, "expected_revision")), try values.fromJson(contracts.workspace.Adoption, a, try field(params, "adoption")))),
                 .@"task.reconcile" => {
                     try protocol.closed(params, protocol.fields(method));
                     const recovery = try field(params, "recovery");

@@ -222,12 +222,12 @@ function* workspaceTrace(subject, scenario) {
 // Await every cleanup even when one group fails; no qualification is skipped.
 export async function verifyAdaptiveNative({app, applicationPath, group = 'all'}) {
   assert(['all', 'controls', 'workspace'].includes(group));
-  const groups = group === 'workspace' ? ['workspace'] : group === 'controls' ? ['controls', 'workspace-extra'] : ['controls', 'workspace', 'workspace-extra'];
+  const groups = group === 'workspace' ? ['workspace'] : group === 'controls' ? ['controls', 'workspace-extra', 'workspace-disabled'] : ['controls', 'workspace', 'workspace-extra', 'workspace-disabled'];
   const results = await Promise.allSettled(groups.map(async name => {
     const suite = name === 'controls' ? 'controls' : 'workspace';
     // The foreign-reference check needs a completed owner in the same store.
     // Reuse the shorter reverse trace for that setup, balancing the two groups.
-    const workspaceScenarios = name === 'workspace' ? ['tools-reuse'] : ['tools-reverse', 'tools-foreign', 'tools-disabled'];
+    const workspaceScenarios = name === 'workspace' ? ['tools-reuse'] : name === 'workspace-disabled' ? ['tools-disabled'] : ['tools-reverse', 'tools-foreign'];
     const data = join(app.data, name), controller = join(app.controller, name);
     await Promise.all([mkdir(data), mkdir(controller)]);
     const started = performance.now();
@@ -804,7 +804,15 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         assert.match(unknown.recovery.occurrence_id, /^[0-9a-f]{64}$/);
         assert.match(unknown.recovery.attempt_id, /^[0-9a-f]{64}$/);
         const description = await client.call('describe');
-        assert(description.methods.some(method => method.name === 'task.reconcile'));
+        const methods = [...description.methods];
+        for (let cursor = description.next_cursor; cursor !== null;) {
+          const page = await client.call('describe', {cursor});
+          methods.push(...page.methods);
+          assert(page.next_cursor === null || BigInt(page.next_cursor) > BigInt(cursor));
+          cursor = page.next_cursor;
+        }
+        assert(methods.some(method => method.name === 'task.reconcile'));
+        assert(methods.some(method => method.name === 'task.adopt'));
         const schemas = description.protocol_schema ?? JSON.parse((await artifact(null, description.protocol_schema_ref)).toString('utf8'));
         assert.equal(schemas.$defs['initialize.result'].properties.protocol_version.const, 'agent-host/2.1');
         assert.equal(schemas.$defs['task.reconcile.params'].additionalProperties, false);

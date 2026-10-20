@@ -208,6 +208,7 @@ fn canceled(flag: ?*const std.atomic.Value(bool)) !void {
 }
 
 test "general source builds through actual checked lowering and rejects private authority" {
+    _ = @import("dynamic_values.zig");
     const a = std.testing.allocator;
     var builder = horos.source.Builder.init(a);
     defer builder.deinit();
