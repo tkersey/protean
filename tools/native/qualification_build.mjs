@@ -36,7 +36,7 @@ if (operation === 'key') {
         (file.startsWith('tools/native/') && file.endsWith('.zig')) ||
         ((profile === 'product' || profile.startsWith('owner')) && file.startsWith('examples/adaptive/'))) files.add(file);
   }
-  const modules = new Set(['std', 'builtin', 'root', 'protean', 'contracts', 'protean_contracts', 'horos', 'horos_data', 'kosmos', 'protean_native', 'adaptive_report', 'adaptive_types', 'adaptive_environment', 'native_asset_writer', 'native_c', 'native_options', 'hash_abi', 'environment', 'application_types', 'definition', 'packaged_runtime', '_native_dependency_admission', '_protean_dependency_admission']);
+  const modules = new Set(['std', 'builtin', 'root', 'protean', 'contracts', 'protean_contracts', 'horos', 'horos_data', 'kosmos', 'protean_native', 'adaptive_report', 'adaptive_types', 'adaptive_environment', 'native_asset_writer', 'native_c', 'native_options', 'hash_abi', 'environment', 'application_types', 'definition', 'construction', 'packaged_runtime', '_native_dependency_admission', '_protean_dependency_admission']);
   const generated = new Set(['adaptive_image', 'adaptive_application', 'native_image', 'native_application', 'native_manifest']);
   const pending = [...files].filter(file => file.endsWith('.zig') && file.includes('/')), visited = new Set();
   if (testRoot) pending.push(`test/protean/${testRoot}`);

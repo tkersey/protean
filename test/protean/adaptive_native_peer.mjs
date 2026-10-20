@@ -742,7 +742,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       const deniedProfile = (await client.call('describe')).profile;
       const deniedTask = await client.call('task.submit', {client_operation_id: 'disabled-offer-submit', application_id: 'adaptive-agent', profile_id: deniedProfile.id,
         input: {schema_id: 'adaptive-agent.input.v2', value: {task: 'Reject inspection after its skill is deactivated.'}}});
-      const deniedResult = await until(() => client.call('task.result', {task_id: deniedTask.task_id}), value => value.ready);
+      const deniedResult = await until(() => client.call('task.result', {task_id: deniedTask.task_id}), value => value.ready, 4000);
       if (providerFailure) throw providerFailure;
       assert.equal(alternateIndex, 8); assert.equal(deniedResult.outcome.value.result.tag, 'no_result');
       assert.equal(deniedResult.outcome.value.model_calls, '8'); assert.equal(deniedResult.outcome.value.work_calls, '3');
