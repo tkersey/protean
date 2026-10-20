@@ -554,15 +554,16 @@ fn pumpDivergentGuard(
     return error.DivergenceNotDetected;
 }
 
-fn exerciseControllerRealization(a: std.mem.Allocator, service: anytype, task_id: native.testing.state.TaskId) !void {
+fn exerciseControllerRealization(
+    a: std.mem.Allocator,
+    service: anytype,
+    task_id: native.testing.state.TaskId,
+    document: []const u8,
+) !void {
     var stage: []const u8 = "build";
     errdefer std.debug.print("controller realization: {s}\n", .{stage});
     var original = try service.task(a, task_id);
     defer original.deinit();
-    var builder = source.Builder.init(a);
-    defer builder.deinit();
-    const document = try native.source_records.encode(a, try gcd(&builder));
-    defer a.free(document);
     var diagnostic: native.program_construction.Diagnostic = .{};
     const program = try service.workspaceBuild(a, "controller-runtime-build", task_id, document, &diagnostic);
     stage = "specialize";
@@ -1897,7 +1898,15 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     const io = std.testing.io;
     var root_builder = source.Builder.init(a);
     defer root_builder.deinit();
-    var root = try compile(a, &root_builder, try gcd(&root_builder));
+    const root_definition = try gcd(&root_builder);
+    const root_entry = &root_builder.functions.items[@intCast(root_definition.entry)];
+    for (0..32) |_| root_entry.body = try root_builder.term(.{
+        .yield_then = root_entry.body.?,
+    });
+    const root_module = root_builder.module(root_definition.entry, root_definition.failure);
+    const root_document = try native.source_records.encode(a, root_module);
+    defer a.free(root_document);
+    var root = try compile(a, &root_builder, root_module);
     defer root.deinit();
     const admitted = try data.program_image.Admitted.decode(a, root.image);
     defer admitted.deinit();
@@ -1940,7 +1949,7 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     var initial = try service.task(a, parent.receipt.task);
     defer initial.deinit();
     phase = "controller runtime selection";
-    try exerciseControllerRealization(scratch, &service, parent.receipt.task);
+    try exerciseControllerRealization(scratch, &service, parent.receipt.task, root_document);
     phase = "runtime source build";
     var builder = source.Builder.init(a);
     defer builder.deinit();
@@ -2401,6 +2410,19 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
         _ = try imported.pump(scratch);
     }
     try std.testing.expect(saw_pending_question and question_cancelled);
+    phase = "resume retained observer scheduling";
+    try std.testing.expectEqual(
+        null,
+        try observerSuccessor(&imported, scratch, parent.receipt.task, observer.scheduled.previous),
+    );
+    var parked_parent = try imported.task(scratch, parent.receipt.task);
+    defer parked_parent.deinit();
+    _ = try imported.resumeTask(
+        scratch,
+        "resume-observer-owner",
+        parent.receipt.task,
+        parked_parent.value.revision,
+    );
     try scheduledObserverWitness(&imported, scratch, parent.receipt.task, observer.scheduled);
     phase = "export completed cancellation history";
     _ = try imported.exportCheckpoint(scratch, parent.receipt.task, try std.fmt.allocPrint(scratch, "{s}/pending-cancellation.par", .{path_buffer[0..length]}));
