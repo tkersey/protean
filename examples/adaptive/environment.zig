@@ -14,16 +14,16 @@ pub const demo_input: t.Input = .{ .task = .{ .bytes = "Explain the fixture entr
 pub const demo_answer: t.Answer = .{ .message = .{ .bytes = "Focus on observable behavior." } };
 pub const State = struct { snapshot: native.repository.Snapshot, profile_identity: [32]u8, policy: t.P.AdaptivePolicy, catalog: t.P.AdaptiveCatalog, tools: ?t.ToolPolicy, initial: t.controls.State, provider: native.responses.Environment, offline: bool };
 pub const handlers = [_]native.Declaration{
-    native.leaf(void, t.Bindings, .{ .identity = t.bindings_identity, .resource_role = "snapshot" }, bindings),
-    context.declaration(),
-    work.declaration(),
-    work.inspectionDeclaration(),
-    workspace.declaration(),
+    native.registry.controllerImport(.task_view, native.leaf(void, t.Bindings, .{ .identity = t.bindings_identity, .resource_role = "snapshot" }, bindings)),
+    native.registry.controllerImport(.context, context.declaration()),
+    native.registry.controllerImport(.snapshot, work.declaration()),
+    native.registry.controllerImport(.inspect, work.inspectionDeclaration()),
+    native.registry.controllerImport(.workspace, workspace.declaration()),
     instrumentDeclaration(),
     native.workspace_instrument.declaration(.snapshot),
-    native.question(t.Question, t.Answer, .{ .identity = t.question_identity, .resource_role = "user", .answer_schema_id = t.answer_schema_id }, present),
-    native.inbox.declaration(t.Message),
-    providerDeclaration(),
+    native.registry.controllerImport(.question, native.question(t.Question, t.Answer, .{ .identity = t.question_identity, .resource_role = "user", .answer_schema_id = t.answer_schema_id }, present)),
+    native.registry.controllerImport(.inbox, native.inbox.declaration(t.Message)),
+    native.registry.controllerImport(.deliberate, providerDeclaration()),
 };
 fn state(ctx: native.Context) !*const State {
     const value: *const State = @ptrCast(@alignCast(ctx.environment orelse return error.MissingConfiguration));
@@ -53,7 +53,36 @@ fn present(ctx: native.Context, question: t.Question) !native.json.Value {
 fn providerDeclaration() native.Declaration {
     var value = Adapter.declaration();
     value.capture.?.acquire = acquire;
+    value.controller_offer = controllerOffer;
+    value.controller_choice = controllerChoice;
+    value.controller_permission = controllerPermission;
     return value;
+}
+fn controllerOffer(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
+    return Adapter.offerGeneral(ctx, bytes, t.toolMask(.{ "list", "read", "ask", "stop", "program", "work", "context", "placement" }));
+}
+fn controllerChoice(ctx: native.registry.ProjectionContext, bytes: []const u8) !?contracts.workspace.Adoption {
+    var response = try contracts.decodeOwned(t.P.AdaptiveResult, ctx.allocator, bytes);
+    defer response.deinit();
+    if (response.value.result != .output or response.value.replay_status != .complete) return null;
+    const replay = response.value.replay orelse return null;
+    var selected: ?contracts.workspace.Adoption = null;
+    var calls: usize = 0;
+    for (response.value.result.output.items.items) |item| {
+        if (item != .function_call) continue;
+        calls += 1;
+        const call = item.function_call;
+        if (call.decoded_action != .decoded) continue;
+        const action = call.decoded_action.decoded;
+        if (action != .program or action.program.command != .adopt) continue;
+        try work.admitAction(ctx, replay, call.call_id, action);
+        selected = action.program.command.adopt;
+    }
+    if (calls != 1 or selected == null) return null;
+    return try native.values.fromJson(contracts.workspace.Adoption, ctx.allocator, try native.values.toJson(contracts.workspace.Adoption, ctx.allocator, selected.?));
+}
+fn controllerPermission(ctx: native.registry.ProjectionContext) !bool {
+    return (try tool_resources.policy(ctx)).reconstruct;
 }
 fn instrumentDeclaration() native.Declaration {
     var value = native.workspace_instrument.declaration(.model);
@@ -141,7 +170,10 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
     var configuration_digest: ?[]const u8 = null;
     if (options.config_path) |path| {
         const bytes = try native.configuration.readFile(a, io, path, null, false);
-        const parsed = try native.json.parse(a, bytes, .{ .bytes = bytes.len, .tokens = bytes.len, .members = bytes.len });
+        var parsed = try native.json.parse(a, bytes, .{ .bytes = bytes.len, .tokens = bytes.len, .members = bytes.len });
+        if (parsed.value == .object) if (parsed.value.object.getPtr("tools")) |tools| {
+            if (tools.* == .object and !tools.object.contains("reconstruct")) try native.json.put(a, tools, "reconstruct", .{ .bool = false });
+        };
         const value = try native.values.fromJson(t.ConfigurationV3, a, parsed.value);
         if (!std.mem.eql(u8, value.schema.bytes, "adaptive-agent.configuration.v3")) return error.InvalidConfiguration;
         config = value.adaptive;
@@ -196,7 +228,7 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
                 try resources.append(a, bytes);
                 out.* = .{ .id = input.id, .description = input.description, .object = work.reference(bytes) };
             }
-            tool_policy = .{ .build = value.build, .run = value.run, .catalog = work.reference(components), .inputs = .{ .items = inputs } };
+            tool_policy = .{ .build = value.build, .run = value.run, .reconstruct = value.reconstruct, .catalog = work.reference(components), .inputs = .{ .items = inputs } };
         }
         const catalog = try contracts.encodeOwned(t.P.AdaptiveCatalog, a, .{ .skills = .{ .items = skills.items } });
         try resources.append(a, catalog);

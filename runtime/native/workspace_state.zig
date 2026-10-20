@@ -18,6 +18,7 @@ pub fn custodyId(a: std.mem.Allocator, task: state.TaskId, content: state.Digest
 pub const Subject = struct {
     task: state.TaskId,
     work: ?state.Digest = null,
+    residual: ?state.Digest = null,
 };
 /// Every occurrence has one immutable execution owner and exact image. This
 /// remains valid when the parent journal or the physical resident changes.
@@ -27,6 +28,10 @@ pub const ExecutionRoute = struct {
     work: ?state.Digest,
     image: state.Reference,
     program_identity: state.Digest,
+    controller: ?state.Digest = null,
+    controller_epoch: ?u64 = null,
+    interaction: ?state.Digest = null,
+    residual: ?state.Digest = null,
     port: ?state.Reference = null,
     delegation: ?state.Reference = null,
 };
@@ -45,7 +50,7 @@ pub const RunPolicy = contracts.workspace.Policy;
 /// Content identity excludes task custody. Interfaces are canonical Horos
 /// descriptors derived from the admitted image, not model-supplied assertions.
 pub const ProgramArtifact = struct {
-    version: u32 = 1,
+    version: u32 = 2,
     source: state.Reference,
     source_kind: enum { source_records, component_recipe, instrument_model, instrument_snapshot },
     construction_contract: state.Name,
@@ -57,6 +62,8 @@ pub const ProgramArtifact = struct {
     catalog: ?state.Reference = null,
     exposures: contracts.Vector(contracts.workspace.Exposure, null) = .{ .items = &.{} },
     ports: contracts.Vector(PortInterface, null) = .{ .items = &.{} },
+    controller: ?contracts.controller.Descriptor = null,
+    controller_schemas: contracts.Vector(state.Reference, null) = .{ .items = &.{} },
 };
 
 pub const PortInterface = struct {
@@ -117,10 +124,13 @@ pub const RuntimeTrace = struct {
 
 pub const OuterOperation = state.OuterOperation;
 
+pub const Trial = struct { id: state.Digest, task: state.TaskId, selection: contracts.workspace.Trial, view: state.Reference, view_works: contracts.Vector(WorkObservation, null), policy: state.Reference, responses: contracts.Vector(struct { identity: contracts.Utf8, payload: state.Reference, response: state.Reference }, null) };
+
 pub const Work = struct {
     version: u32 = 2,
     id: state.Digest,
     task: state.TaskId,
+    trial: ?state.Digest = null,
     origin_work: ?state.Digest = null,
     delegation: ?state.Reference = null,
     answer_value: ?state.Reference = null,
@@ -182,36 +192,39 @@ pub const ControlObservation = struct {
     cancellation_applied: bool,
     outcome: state.Outcome,
     instrument: bool,
+    trial: bool = false,
     port: bool,
     delivery: ?std.meta.Tag(@import("occurrence.zig").State),
 
     pub fn from(observed: WorkObservation) ControlObservation {
         const work = observed.work;
-        return .{ .policy = work.policy, .schedule = work.schedule, .blocker = work.blocker, .cancellation = work.cancellation, .cancellation_applied = work.cancellation_applied, .outcome = work.outcome_kind, .instrument = work.delegation != null, .port = work.current_port != null, .delivery = if (observed.occurrence) |pending| std.meta.activeTag(pending.state) else null };
+        return .{ .policy = work.policy, .schedule = work.schedule, .blocker = work.blocker, .cancellation = work.cancellation, .cancellation_applied = work.cancellation_applied, .outcome = work.outcome_kind, .instrument = work.delegation != null, .trial = work.trial != null, .port = work.current_port != null, .delivery = if (observed.occurrence) |pending| std.meta.activeTag(pending.state) else null };
     }
 };
 
-pub const StartRequest = struct { method: state.Method = .workspace, kind: Operation = .start, task: state.TaskId, program: state.Digest, input: contracts.Bytes(null), policy: RunPolicy, origin: ?state.Reference, runtime: ?state.Reference = null };
+pub const StartRequest = struct { method: state.Method = .workspace, kind: Operation = .start, task: state.TaskId, program: state.Digest, input: contracts.Bytes(null), policy: RunPolicy, origin: ?state.Reference, runtime: ?state.Reference = null, trial: contracts.workspace.Trial = .{ .none = .{} } };
 pub const SpecializeRequest = struct { method: state.Method = .workspace, kind: Operation = .specialize, task: state.TaskId, program: state.Digest, hooks: contracts.workspace.RuntimeHooks = .{} };
 pub const RealizeRequest = struct { method: state.Method = .workspace, kind: Operation = .realize, task: state.TaskId, work: state.Digest, execution: u64, control: u64, realization: u64, runtime: ?state.Reference };
 pub const CutRequest = struct { method: state.Method = .workspace, kind: Operation = .request_cut, task: state.TaskId, command: @FieldType(contracts.workspace.Work, "request_cut") };
 pub const PumpRequest = struct { method: state.Method = .workspace, kind: Operation = .pump, task: state.TaskId, command: @FieldType(contracts.workspace.Work, "pump") };
+pub const ResidualControlRequest = struct { method: state.Method = .workspace, task: state.TaskId, residual: state.Digest, execution: u64, control: u64, command: Command };
 pub const ControlRequest = struct { method: state.Method = .workspace, kind: Operation = .control, task: state.TaskId, work: state.Digest, execution: u64, control: u64, command: Command };
 pub const InteractionRequest = struct { kind: Operation = .interact, task: state.TaskId, interaction: @FieldType(contracts.workspace.Work, "interact") };
 pub const DelegationRequest = struct { task: state.TaskId, command: @FieldType(contracts.workspace.Work, "delegate") };
-pub const BuildRequest = struct { method: state.Method = .workspace, kind: Operation = .build, task: state.TaskId, source: contracts.Bytes(null), source_kind: contracts.workspace.SourceKind, catalog: ?state.Reference, exposures: contracts.Vector(contracts.workspace.Exposure, null) };
+pub const BuildRequest = struct { method: state.Method = .workspace, kind: Operation = .build, task: state.TaskId, source: contracts.Bytes(null), source_kind: contracts.workspace.SourceKind, catalog: ?state.Reference, exposures: contracts.Vector(contracts.workspace.Exposure, null), role: contracts.workspace.ProgramRole = .computation };
 pub const ContextRequest = struct { task: state.TaskId, command: contracts.workspace.Context, snapshot: ?state.Reference, input: ?state.Reference };
 
 /// The existing receipt binds these inputs by request digest. Start input bytes
 /// and identity already have immutable work custody, so do not copy them here.
 pub const PublicationCommand = union(enum) {
+    residual: struct { execution: u64, control: u64, command: Command },
     build,
     specialize: struct { program: state.Digest, hooks: contracts.workspace.RuntimeHooks = .{} },
     realize: struct { execution: u64, control: u64, realization: u64, runtime: ?state.Reference, source: state.Reference, target: state.Reference, dependencies: contracts.Vector(state.Reference, null) },
     request_cut: @FieldType(contracts.workspace.Work, "request_cut"),
     pump: @FieldType(contracts.workspace.Work, "pump"),
     context: struct { command: contracts.workspace.Context, snapshot: ?state.Reference, input: ?state.Reference },
-    start: struct { policy: RunPolicy, origin: bool, runtime: ?state.Reference = null },
+    start: struct { policy: RunPolicy, origin: bool, runtime: ?state.Reference = null, trial: contracts.workspace.Trial = .{ .none = .{} } },
     control: struct { execution: u64, control: u64, command: Command },
     interact: @FieldType(contracts.workspace.Work, "interact"),
     delegate: @FieldType(contracts.workspace.Work, "delegate"),
@@ -221,6 +234,8 @@ pub const PublicationCommand = union(enum) {
 /// Executable claims in each work are checked against its retained checkpoint.
 pub const ReadObservation = union(enum) {
     immutable,
+    controller: struct { binding: ?state.Digest, epoch: u64, residuals: contracts.Vector(state.Digest, null), event_watermark: u64 },
+    residual: struct { value: state.ControllerResidualObservation, event_watermark: u64 },
     works: struct {
         works: contracts.Vector(?WorkObservation, null),
         event_watermark: u64,
@@ -256,7 +271,7 @@ pub const ReplyObservation = struct {
 /// Epistemic origin is retained alongside canonical values. Equal payloads do
 /// not erase independent origins or convert a hypothesis into an acquisition.
 pub const Derivation = struct {
-    kind: enum { hypothesis, computation, acquisition, judgment, inspection },
+    kind: enum { hypothesis, computation, acquisition, judgment, inspection, trial },
     sources: contracts.Vector(state.Reference, null),
     program: ?state.Reference = null,
     work: ?state.Digest = null,

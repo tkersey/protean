@@ -1,9 +1,9 @@
 //! Model actions select ordinary Horos programs and native workspace operations.
 //! Text fields carry canonical runtime-schema JSON; they are never native code.
 const c = @import("contracts.zig");
-pub const identity = "protean-workspace/2";
+pub const identity = "protean-workspace/3";
 pub const Ref = struct {
-    kind: enum { program, work, port, value, schema, source, provenance, view, runtime },
+    kind: enum { program, work, port, value, schema, source, provenance, view, runtime, residual },
     id: c.Text(64),
 };
 pub const Page = struct { offset: u64 = 0, maximum: u32 = 16384 };
@@ -13,6 +13,7 @@ pub const ValueInput = union(enum) {
 };
 pub const SourceInput = union(enum) { json_text: c.Utf8, reference: Ref };
 pub const SourceKind = enum { source_records, component_recipe };
+pub const ProgramRole = enum { computation, controller };
 pub const NodeScope = union(enum) { all: struct {}, selected: c.Vector(u64, null) };
 pub const GuestViewSelection = struct { expected: Expected, realization_revision: u64, nodes: NodeScope };
 pub const Materialization = union(enum) { value: ValueInput, snapshot: struct { path: c.Utf8, offset: u64, maximum: u64 }, authorized_input: c.Utf8, guest_view: GuestViewSelection };
@@ -29,14 +30,24 @@ pub const Interpretation = union(enum) {
     model: struct { port: Ref, generation: u64, profile_id: c.Text(64), effort: c.Text(16), subproblem: c.Utf8, inputs: c.Vector(Ref, null) },
     snapshot: struct { port: Ref, generation: u64, path: c.Utf8, offset: u64, maximum: u64 },
 };
+pub const Adoption = struct {
+    successor: Ref,
+    converter: Ref,
+    expected_controller_epoch: u64,
+    expected_handoff_identity: c.Text(64),
+    trial: union(enum) { none: struct {}, selected: Ref } = .{ .none = .{} },
+    reason: c.Text(256),
+};
 pub const Program = union(enum) {
-    describe: struct { section: enum { source_records, values, components, examples, bindings, runtimes, retention_query, divergence_query, hypothetical_reply }, page: Page },
-    build: struct { source: SourceInput, source_kind: SourceKind, exposures: c.Vector(Exposure, null) },
+    describe: struct { section: enum { source_records, values, components, examples, bindings, runtimes, retention_query, divergence_query, hypothetical_reply, controller_contract, current_controller }, page: Page },
+    build: struct { source: SourceInput, source_kind: SourceKind, exposures: c.Vector(Exposure, null), role: ProgramRole = .computation },
     inspect: struct { program: Ref, page: Page },
     specialize: struct { program: Ref, hooks: RuntimeHooks = .{} },
+    adopt: Adoption,
 };
+pub const Trial = union(enum) { none: struct {}, synthetic: struct { responses: c.Vector(struct { identity: c.Utf8, payload: Ref, response: Ref }, null), live_inference: bool = false } };
 pub const Work = union(enum) {
-    start: struct { program: Ref, input: ValueInput, policy: Policy, runtime: RuntimeChoice = .{ .packaged = .{} } },
+    start: struct { program: Ref, input: ValueInput, policy: Policy, runtime: RuntimeChoice = .{ .packaged = .{} }, trial: Trial = .{ .none = .{} } },
     inspect: struct { work: Ref },
     advance: Expected,
     /// Bound physical evaluator progress without claiming a new guest cut.

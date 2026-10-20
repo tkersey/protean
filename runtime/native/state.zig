@@ -39,8 +39,8 @@ pub const Outcome = enum { progressed, yielded, requested, completed, failed, ca
 pub const Schedule = enum { queued, active, parked };
 pub const Status = enum { queued, running, waiting_input, parked, cancelling, blocked, unknown, completed, failed, cancelled };
 /// Portable task records. Source-local retention records are not archive kinds.
-pub const RecordKind = enum { occurrence, question, message, artifact, capture, attempt, origin, reconciliation, workspace_program, workspace_work, workspace_value, workspace_view, workspace_port, workspace_port_reply, execution_route, workspace_wait, workspace_delegation, workspace_reply, workspace_runtime, placement_custody, placement_control, placement_action, placement_move, placement_succession, root_operation };
-pub const Blocker = enum { missing_capability, denied, capacity, missing_artifact, incompatible_profile, unavailable_environment };
+pub const RecordKind = enum { occurrence, question, message, artifact, capture, attempt, origin, reconciliation, workspace_program, workspace_work, workspace_value, workspace_view, workspace_port, workspace_port_reply, execution_route, workspace_wait, workspace_delegation, workspace_reply, workspace_runtime, placement_custody, placement_control, placement_action, placement_move, placement_succession, root_operation, controller_binding, controller_interaction, controller_succession, controller_residual, placement_behavior, workspace_trial };
+pub const Blocker = enum { missing_capability, denied, capacity, missing_artifact, incompatible_profile, unavailable_environment, waiting_workspace };
 
 /// Physical controller progress is independent of the last published guest cut.
 /// This row is replaced on suspension and cleared atomically with the next cut.
@@ -58,6 +58,116 @@ pub const RootOperation = struct {
 };
 
 /// Growing task metadata retains immutable object identities without a count quota.
+pub const ControllerBinding = struct {
+    id: Digest,
+    task: TaskId,
+    epoch: u64,
+    activated_at: u64 = 1,
+    program: Digest,
+    image: Reference,
+    program_identity: Digest,
+    predecessor: ?Digest,
+};
+
+pub const ControllerInteraction = struct {
+    id: Digest,
+    task: TaskId,
+    controller: Digest,
+    epoch: u64,
+    offered: Reference,
+    carry: Reference,
+    carry_schema: Reference,
+    overlay: Reference,
+    event_cut: u64,
+    next_message: u64,
+    policy: Reference,
+    model: ?Digest = null,
+    handoff: ?Digest = null,
+};
+pub const ControllerSuccession = struct {
+    id: Digest,
+    task: TaskId,
+    command: Reference,
+    predecessor: Digest,
+    handoff: Digest,
+    checkpoint: Reference,
+    outcome: Reference,
+    event_cut: u64,
+    next_message: u64,
+    policy: Reference,
+    successor: ?Digest = null,
+    converter: ?Digest = null,
+    conversion_input: ?Reference = null,
+    view_works: contracts.Vector(@import("workspace_state.zig").WorkObservation, null) = .{ .items = &.{} },
+    conversion_work: ?Digest = null,
+    converted: ?Reference = null,
+    boot: ?struct { checkpoint: Reference, outcome: Reference } = null,
+    phase: enum { preparing, ready, activated, rejected, aborted, blocked, failed },
+    diagnostic: ?contracts.controller.Diagnostic = null,
+    activation_event: ?u64 = null,
+    activated_epoch: ?u64 = null,
+    residual: ?Digest = null,
+    operator_admission: ?struct { revision: u64, event: u64, occurrence: @import("occurrence.zig").Occurrence } = null,
+};
+pub const ControllerAdoptionRequest = struct {
+    method: Method = .adopt,
+    task: TaskId,
+    revision: u64,
+    command: contracts.workspace.Adoption,
+};
+pub const ControllerResidual = struct {
+    id: Digest,
+    task: TaskId,
+    controller: Digest,
+    succession: Digest,
+    initial_checkpoint: Reference,
+    checkpoint: Reference,
+    outcome: Reference,
+    outcome_kind: Outcome,
+    current_occurrence: ?Digest,
+    execution_revision: u64,
+    control_revision: u64 = 1,
+    cancellation_applied: bool = false,
+    schedule: Schedule = .queued,
+    blocker: ?Blocker = null,
+    outer_operation: ?OuterOperation = null,
+};
+
+pub const ControllerResidualObservation = struct {
+    id: Digest,
+    task: TaskId,
+    controller: Digest,
+    succession: Digest,
+    initial_checkpoint: Reference,
+    checkpoint: Reference,
+    outcome: Reference,
+    outcome_kind: Outcome,
+    current_occurrence: ?Digest,
+    execution_revision: u64,
+    control_revision: u64,
+    cancellation_applied: bool,
+    schedule: Schedule,
+    blocker: ?Blocker,
+
+    pub fn from(value: ControllerResidual) ControllerResidualObservation {
+        var result: ControllerResidualObservation = undefined;
+        inline for (@typeInfo(ControllerResidualObservation).@"struct".field_names) |field| @field(result, field) = @field(value, field);
+        return result;
+    }
+
+    pub fn retained(value: ControllerResidualObservation) ControllerResidual {
+        var result: ControllerResidual = undefined;
+        inline for (@typeInfo(ControllerResidualObservation).@"struct".field_names) |field| @field(result, field) = @field(value, field);
+        result.outer_operation = null;
+        return result;
+    }
+};
+
+pub const ResidualPublication = struct {
+    value: ControllerResidualObservation,
+    occurrence: ?@import("occurrence.zig").Occurrence,
+};
+
 pub const Task = struct {
     id: TaskId,
     application_id: Name,
@@ -71,6 +181,10 @@ pub const Task = struct {
     profile: Reference,
     resources: contracts.Vector(Reference, null) = .{ .items = &.{} },
     image: Reference,
+    controller: ?Digest = null,
+    controller_epoch: u64 = 0,
+    controller_interaction: ?Digest = null,
+    controller_succession: ?Digest = null,
     runtime_identity: Digest,
     input: Reference,
     checkpoint: Reference,
@@ -103,7 +217,7 @@ pub const Task = struct {
     }
 };
 
-pub const Method = enum { submit, message, respond, cancel, @"resume", import_checkpoint, reconcile, workspace };
+pub const Method = enum { submit, message, respond, cancel, @"resume", import_checkpoint, reconcile, workspace, adopt };
 pub const Disposition = enum { accepted, queued, answer_acquired, cancellation_requested, resumed, imported, reconciled };
 pub const Receipt = struct {
     id: Digest,
@@ -214,6 +328,8 @@ pub const EventType = enum {
     workspace,
     workspace_progress,
     workspace_read,
+    controller,
+    controller_requested,
 };
 pub const Event = struct {
     task: TaskId,
@@ -227,6 +343,7 @@ pub const Event = struct {
     /// Snapshots still require checkpoint, occurrence, and provenance validation.
     workspace_publications: contracts.Vector(WorkPublication, null) = .{ .items = &.{} },
     workspace_command: ?Reference = null,
+    residual_publications: contracts.Vector(ResidualPublication, null) = .{ .items = &.{} },
 };
 
 pub const WorkPublication = struct {
@@ -253,6 +370,12 @@ pub const Artifact = struct {
 
 pub const CaptureDisposition = enum { complete, definitely_not_sent, unknown };
 pub const AttemptOperation = enum { environment, workspace_build };
+pub const ControllerContext = struct {
+    epoch: u64,
+    event_cut: u64,
+    next_message: u64,
+    overlay: Reference,
+};
 pub const Attempt = struct {
     id: Digest,
     task: TaskId,
@@ -263,6 +386,7 @@ pub const Attempt = struct {
     inference: bool,
     prepared: ?Reference = null,
     operation: AttemptOperation = .environment,
+    controller_context: ?ControllerContext = null,
 };
 pub const Capture = struct {
     task: TaskId,
@@ -393,7 +517,7 @@ pub fn visitWorkspaceReceipt(a: std.mem.Allocator, store: anytype, receipt: Rece
     const bytes = try store.object(a, ref, null);
     defer a.free(bytes);
     const w = @import("workspace_state.zig");
-    inline for (.{ .{ .program, w.ProgramArtifact }, .{ .work, w.WorkObservation }, .{ .value, w.ValueArtifact }, .{ .view, w.ViewArtifact }, .{ .runtime, w.Runtime } }) |entry| {
+    inline for (.{ .{ .program, w.ProgramArtifact }, .{ .work, w.WorkObservation }, .{ .value, w.ValueArtifact }, .{ .view, w.ViewArtifact }, .{ .runtime, w.Runtime }, .{ .residual, ControllerResidual } }) |entry| {
         if (kind == entry[0]) {
             const T = entry[1];
             var decoded = try contracts.decodeOwned(T, a, bytes);
@@ -404,6 +528,8 @@ pub fn visitWorkspaceReceipt(a: std.mem.Allocator, store: anytype, receipt: Rece
                 if (decoded.value.occurrence) |pending| {
                     if (!std.meta.eql(work.current_occurrence, pending.id) or !std.meta.eql(pending.task, work.task) or !std.meta.eql(pending.work, work.id)) return error.CorruptState;
                 } else if (work.current_occurrence != null) return error.CorruptState;
+            } else if (T == ControllerResidual) {
+                if (!std.meta.eql(decoded.value.id, id) or !std.meta.eql(decoded.value.task, receipt.task)) return error.CorruptState;
             } else if (T == w.Runtime) {
                 if (!std.meta.eql(decoded.value.artifact.digest, id) or !std.meta.eql(decoded.value.task, receipt.task)) return error.CorruptState;
             } else if (!std.meta.eql(ref.digest, id)) return error.CorruptState;
@@ -430,6 +556,7 @@ pub const Origin = struct {
     build: Reference,
     native_identity: Digest,
     source_revision: u64,
+    transfer: ?Digest = null,
 };
 
 /// Environmental archive metadata uses the existing ordinary Protean codec.

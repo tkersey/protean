@@ -66,7 +66,8 @@ pub const AdaptiveContextReference = struct {
 /// A controller-selected view replaces preceding research exchanges. The
 /// reference is data, never object access authority; its actual material enters
 /// through the paired workspace result at selected_at.
-pub const ResearchSelection = struct { view: contracts.workspace.Ref, selected_at: u64 };
+pub const RetainedCalls = contracts.Vector(contracts.Text(128), null);
+pub const ResearchSelection = struct { view: contracts.workspace.Ref, selected_at: u64, retained_calls: RetainedCalls = .{ .items = &.{} } };
 /// Authored classification of paired call/results during research replacement.
 /// Human input and other operative controls must survive a selected data view.
 pub const ContextRetention = enum { research, control };

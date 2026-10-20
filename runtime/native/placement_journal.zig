@@ -76,19 +76,26 @@ fn requireCompatibleIntent(store: *storage.Store, a: std.mem.Allocator, intent: 
     }
 }
 
-pub fn controllerLineage(store: *storage.Store, a: std.mem.Allocator, task: state.TaskId) ![]p.Succession {
-    var list: std.ArrayList(p.Succession) = .empty;
+pub fn controllerLineage(store: *storage.Store, a: std.mem.Allocator, task: state.TaskId) ![]p.ControllerTransition {
+    var list: std.ArrayList(p.ControllerTransition) = .empty;
     errdefer list.deinit(a);
     var rows = try store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.kind='placement_succession' AND r.task=?", &.{.{ .blob = &task }});
     defer rows.deinit();
     while (try rows.step() == .row) {
         var saved = try contracts.decodeOwned(p.Succession, a, try rows.bytes(0));
         defer saved.deinit();
-        if (saved.value.offer.value.intent.subject.work == null) try list.append(a, saved.value);
+        if (saved.value.offer.value.intent.subject.work == null) try list.append(a, .{ .move = saved.value });
     }
-    std.mem.sort(p.Succession, list.items, {}, struct {
-        fn less(_: void, lhs: p.Succession, rhs: p.Succession) bool {
-            return lhs.decision.value.epoch < rhs.decision.value.epoch;
+    var behaviors = try store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.kind='placement_behavior' AND r.task=?", &.{.{ .blob = &task }});
+    defer behaviors.deinit();
+    while (try behaviors.step() == .row) {
+        var saved = try contracts.decodeOwned(p.BehaviorRecord, a, try behaviors.bytes(0));
+        defer saved.deinit();
+        try list.append(a, .{ .behavior = saved.value.decision });
+    }
+    std.mem.sort(p.ControllerTransition, list.items, {}, struct {
+        fn less(_: void, lhs: p.ControllerTransition, rhs: p.ControllerTransition) bool {
+            return lhs.epoch() < rhs.epoch();
         }
     }.less);
     return list.toOwnedSlice(a);

@@ -161,6 +161,14 @@ pub fn Projection(comptime P: type) type {
             hash.update(&storage.digest(audience));
             hash.update(&catalog_digest);
             if (ctx.application) |application| hash.update(&application);
+            if (ctx.controller) |controller| {
+                hash.update(&controller.binding);
+                hash.update(&controller.program);
+            }
+            if (ctx.trial) |trial| {
+                hash.update(&trial.work);
+                hash.update(&trial.view.digest);
+            }
             var bound: [32]u8 = undefined;
             hash.final(&bound);
             return .{ .validator = &validator_identity, .binding = bound, .reference = storage.digest(encoded) };
@@ -538,7 +546,8 @@ pub fn Projection(comptime P: type) type {
         /// Remove completed research exchanges as pairs. Current policy, all
         /// user messages, skill bodies and declarations remain independently
         /// owned. Opaque reasoning is invalid after its evidence prefix changes.
-        fn selectResearch(a: std.mem.Allocator, history: *json.Value, origins: *std.ArrayList(P.ContextOrigin), selected_at: u64) !void {
+        fn selectResearch(a: std.mem.Allocator, history: *json.Value, origins: *std.ArrayList(P.ContextOrigin), selection: @typeInfo(@FieldType(@FieldType(P.AdaptiveRequest, "plan"), "research")).optional.child, protected_controller: bool) !void {
+            const selected_at = selection.selected_at;
             var calls: std.StringHashMap(bool) = .init(a);
             defer calls.deinit();
             var kept = list(a);
@@ -547,9 +556,12 @@ pub fn Projection(comptime P: type) type {
                 var item = value;
                 var retain = true;
                 if (kind(item, "function_call")) {
-                    // Rejected undeclared calls remain valid replay history.
-                    // Only authored declarations can grant control retention.
-                    const control = if (declarationOrdinal(try json.text(try field(item, "name")))) |index| P.retained_control_calls[index] else false;
+                    const name = try json.text(try field(item, "name"));
+                    var control = if (protected_controller) false else if (declarationOrdinal(name)) |index| P.retained_control_calls[index] else false;
+                    for (selection.retained_calls.items) |retained| if (equal(name, retained.bytes)) {
+                        control = true;
+                        break;
+                    };
                     retain = control or origin.watermark >= selected_at - 1;
                     const id = try json.text(try field(item, "call_id"));
                     if (calls.contains(id)) return error.CallPairMismatch;
@@ -614,7 +626,7 @@ pub fn Projection(comptime P: type) type {
                 try settle(a, &history, request, selected.profile.explicit_cache);
                 try fillOrigins(a, &origins, history.array.items.len, request.plan.watermark);
                 if (!same_epoch) {
-                    if (changed_view) try selectResearch(a, &history, &origins, request.plan.research.?.selected_at);
+                    if (changed_view) try selectResearch(a, &history, &origins, request.plan.research.?, ctx.controller != null);
                     try revise(ctx, &history, &origins, old, request, catalog, selected.profile.explicit_cache);
                     new_start = 0;
                     while (new_start < origins.items.len and origins.items[new_start].watermark < request.plan.watermark) new_start += 1;

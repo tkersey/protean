@@ -35,12 +35,22 @@ pub const ReadView = struct {
     }
 };
 
+pub const ControllerProjection = struct {
+    binding: state.Digest,
+    epoch: u64,
+    program: state.Digest,
+    overlay: state.Reference,
+};
+pub const TrialProjection = struct { work: state.Digest, view: state.Reference };
 pub const ProjectionBinding = struct {
     task: state.TaskId,
     tenant: []const u8,
     profile: []const u8,
     application: state.Digest,
     resources: []const ObjectReference = &.{},
+    controller: ?ControllerProjection = null,
+    trial: ?TrialProjection = null,
+    execution: ?state.Digest = null,
 };
 
 /// Pure projection inputs: immutable objects and frozen task bindings, with no
@@ -52,6 +62,9 @@ pub const ProjectionContext = struct {
     profile: []const u8,
     application: ?state.Digest = null,
     resources: []const ObjectReference = &.{},
+    controller: ?ControllerProjection = null,
+    trial: ?TrialProjection = null,
+    execution: ?state.Digest = null,
     objects: ReadView,
 
     pub fn object(self: ProjectionContext, ref: state.Reference, limit: usize) ![]u8 {
@@ -231,6 +244,10 @@ pub const Declaration = struct {
     kind: Kind,
     /// Registered for owner-created workspace images, not the root image.
     workspace_only: bool = false,
+    controller_import: ?contracts.controller.Import = null,
+    controller_offer: ?*const fn (ProjectionContext, []const u8) anyerror![]u8 = null,
+    controller_choice: ?*const fn (ProjectionContext, []const u8) anyerror!?contracts.workspace.Adoption = null,
+    controller_permission: ?*const fn (ProjectionContext) anyerror!bool = null,
     inference: bool = false,
     /// Only this adapter's committed projection objects are public task data.
     /// Raw captures, prepared requests and other adapters' objects stay private.
@@ -253,7 +270,27 @@ pub const Entry = struct {
     declaration: Declaration,
     payload_schema: []const u8,
     resume_schema: []const u8,
+    controller_envelope: bool = false,
+
+    pub fn payload(self: Entry, a: std.mem.Allocator, bytes: []const u8) ![]const u8 {
+        if (!self.controller_envelope) return bytes;
+        var schema = try data.schema.decode(a, self.payload_schema);
+        defer schema.deinit();
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const facts = try data.admission.schemas(scratch, schema.descriptor.types);
+        var reader: data.wire.Reader = .{ .input = bytes };
+        _ = try data.admission.readValue(scratch, schema.descriptor.types, facts, schema.descriptor.root, &reader);
+        return bytes[0..reader.position];
+    }
 };
+
+pub fn controllerImport(imported: contracts.controller.Import, declaration: Declaration) Declaration {
+    var bound = declaration;
+    bound.controller_import = imported;
+    return bound;
+}
 
 fn sameBinding(entry: Entry, identity: []const u8, payload: []const u8, resume_schema: []const u8) bool {
     return std.mem.eql(u8, entry.declaration.identity, identity) and std.mem.eql(u8, entry.payload_schema, payload) and std.mem.eql(u8, entry.resume_schema, resume_schema);
@@ -287,6 +324,7 @@ pub const Registry = struct {
             // selector. Indistinguishable bindings must never depend on order.
             for (entries[0..i]) |prior| {
                 if (sameBinding(prior, declaration.identity, entry.payload_schema, entry.resume_schema)) return error.DuplicateCapability;
+                if (declaration.controller_import != null and prior.declaration.controller_import == declaration.controller_import) return error.DuplicateCapability;
             }
         }
         return .{ .arena = arena, .entries = entries };
@@ -312,6 +350,29 @@ pub const Registry = struct {
     /// this path to consume a saved reply without requiring a new spend grant.
     pub fn resolve(self: Registry, request: data.invocation.Request, image_identity: [32]u8) !Entry {
         if (!std.mem.eql(u8, &request.binding.program_identity, &image_identity)) return error.Denied;
+        if (std.mem.startsWith(u8, request.binding.semantic_identity, contracts.controller.effect_prefix)) {
+            const imported = std.meta.stringToEnum(contracts.controller.Import, request.binding.semantic_identity[contracts.controller.effect_prefix.len..]) orelse return error.MissingCapability;
+            for (self.entries) |entry| {
+                if (entry.declaration.controller_import != imported) continue;
+                if (!std.mem.eql(u8, entry.resume_schema, request.binding.resume_schema)) return error.CapabilitySchemaMismatch;
+                if (imported != .deliberate) {
+                    if (!std.mem.eql(u8, entry.payload_schema, request.binding.payload_schema)) return error.CapabilitySchemaMismatch;
+                    return entry;
+                }
+                const a = self.arena.child_allocator;
+                var schema = try data.schema.decode(a, request.binding.payload_schema);
+                defer schema.deinit();
+                const root = schema.descriptor.types[@intCast(schema.descriptor.root)];
+                if (root != .product or root.product.len != 2) return error.CapabilitySchemaMismatch;
+                const payload_schema = try data.schema.encodeOwned(a, schema.descriptor.types, root.product[0]);
+                defer a.free(payload_schema);
+                if (!std.mem.eql(u8, entry.payload_schema, payload_schema)) return error.CapabilitySchemaMismatch;
+                var bound = entry;
+                bound.controller_envelope = true;
+                return bound;
+            }
+            return error.MissingCapability;
+        }
         var known_identity = false;
         for (self.entries) |entry| {
             if (!std.mem.eql(u8, request.binding.semantic_identity, entry.declaration.identity)) continue;
@@ -330,7 +391,7 @@ pub const Registry = struct {
         return self.recover(true, ctx, input, evidence);
     }
     fn recover(self: Registry, comptime lookup: bool, ctx: ProjectionContext, input: RecoveryInput, evidence: ?[]const u8) !(if (lookup) RecoveryFinding else void) {
-        const image = ctx.application orelse return error.InvalidRecovery;
+        const image = ctx.execution orelse ctx.application orelse return error.InvalidRecovery;
         if (!std.meta.eql(ctx.task, input.task) or input.profile.bytes != ctx.profile.len or
             !std.meta.eql(input.profile.digest, @import("store.zig").digest(ctx.profile)) or
             !std.meta.eql(ctx.resources.len, input.resources.len)) return error.InvalidRecovery;
@@ -347,7 +408,7 @@ pub const Registry = struct {
         defer if (prepared) |bytes| ctx.allocator.free(bytes);
         if (entry.declaration.capture) |capture| {
             const original = prepared orelse return error.InvalidRecovery;
-            const derived = try capture.prepare(ctx, request.value.binding.payload);
+            const derived = try capture.prepare(ctx, try entry.payload(ctx.allocator, request.value.binding.payload));
             defer ctx.allocator.free(derived);
             if (!std.mem.eql(u8, original, derived)) return error.InvalidPreparedRequest;
         } else if (prepared != null) return error.InvalidRecovery;

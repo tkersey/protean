@@ -118,6 +118,11 @@ fn typed(a: std.mem.Allocator, application: json.Value, name: []const u8) !json.
     return shape(a, &.{ .{ "schema_id", try constant(a, item.object.get("schema_id").?.string) }, .{ "value", item.object.get("json").? } }, &.{});
 }
 fn parameter(a: std.mem.Allocator, method: protocol.Method, key: []const u8, application: json.Value, limits: protocol.Limits) !json.Value {
+    if (method == .@"task.adopt" and std.mem.eql(u8, key, "adoption")) {
+        const bytes = try @import("values.zig").schemas.ClientSchema(@import("protean_contracts").workspace.Adoption).alloc(a);
+        defer a.free(bytes);
+        return (try json.parseAsset(a, bytes, bytes.len)).value;
+    }
     if (method == .placement and std.mem.eql(u8, key, "request")) {
         // Emit this large immutable schema once during discovery construction.
         // Parsing owns its strings, so the temporary bytes can be released.
@@ -126,7 +131,7 @@ fn parameter(a: std.mem.Allocator, method: protocol.Method, key: []const u8, app
         return (try json.parseAsset(a, bytes, bytes.len)).value;
     }
     if (std.mem.eql(u8, key, "task_id") or std.mem.eql(u8, key, "subscription_id")) return reference(a, "id128");
-    if (std.mem.eql(u8, key, "question_id") or std.mem.eql(u8, key, "request_digest") or std.mem.eql(u8, key, "artifact_id") or std.mem.eql(u8, key, "occurrence_id") or std.mem.eql(u8, key, "attempt_id")) return reference(a, "digest");
+    if (std.mem.eql(u8, key, "question_id") or std.mem.eql(u8, key, "request_digest") or std.mem.eql(u8, key, "artifact_id") or std.mem.eql(u8, key, "occurrence_id") or std.mem.eql(u8, key, "attempt_id") or std.mem.eql(u8, key, "residual_id")) return reference(a, "digest");
     if (std.mem.eql(u8, key, "recovery")) return shape(a, &.{.{ "mechanism", try enumSchema(state.RecoveryRequest, a) }}, &.{});
     if (std.mem.eql(u8, key, "question_revision") or std.mem.eql(u8, key, "expected_revision") or std.mem.eql(u8, key, "after_seq") or std.mem.eql(u8, key, "offset")) return reference(a, "counter");
     if (std.mem.eql(u8, key, "input") or std.mem.eql(u8, key, "answer") or std.mem.eql(u8, key, "message")) return typed(a, application, key);
@@ -181,11 +186,13 @@ fn eventFields(kind: state.EventType) []const EventField {
     return switch (kind) {
         .input_required => &.{ .{ .name = "question_id", .kind = .digest }, .{ .name = "question_revision", .kind = .counter }, .{ .name = "request_digest", .kind = .digest }, .{ .name = "answer_schema_id", .kind = .name }, .{ .name = "prompt", .kind = .prompt, .optional = true }, .{ .name = "prompt_ref", .kind = .prompt_ref, .optional = true } },
         .message_queued, .message_consumed, .message_not_consumed => &.{ .{ .name = "message_id", .kind = .digest }, .{ .name = "ordinal", .kind = .counter }, .{ .name = "disposition", .kind = .disposition } },
-        .blocked => &.{.{ .name = "delivery", .kind = .delivery, .optional = true }},
+        .blocked => &.{ .{ .name = "delivery", .kind = .delivery, .optional = true }, .{ .name = "reason", .kind = .name, .optional = true } },
         .imported => &.{.{ .name = "archive_sha256", .kind = .digest }},
         .reconciled => &.{.{ .name = "reconciliation_id", .kind = .digest }},
         .workspace_read => &.{.{ .name = "occurrence_id", .kind = .digest }},
         .workspace, .workspace_progress => &.{.{ .name = "workspace_id", .kind = .digest }},
+        .controller => &.{ .{ .name = "operation", .kind = .digest }, .{ .name = "phase", .kind = .name }, .{ .name = "epoch", .kind = .counter } },
+        .controller_requested => &.{.{ .name = "operation", .kind = .digest }},
         .accepted, .input_accepted, .cancellation_requested, .parked, .resumed, .delivery_unknown, .completed, .failed, .cancelled => &.{},
     };
 }
@@ -304,6 +311,7 @@ pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.
     const availability = try shape(a, &.{ .{ "occurrence_id", digest }, .{ "attempt_id", digest }, .{ "mechanisms", try array(a, try enumSchema(state.RecoveryRequest, a), null) } }, &.{});
     snapshot = try extend(a, snapshot, &.{.{ "recovery", try nullable(a, availability) }}, &.{});
     snapshot = try extend(a, snapshot, &.{.{ "associated_work_disposed", boolean }}, &.{});
+    snapshot = try extend(a, snapshot, &.{ .{ "controller_epoch", count }, .{ "controller_handoff", try nullable(a, digest) } }, &.{});
     try json.put(a, &definitions, "snapshot", snapshot);
     const artifact = try shape(a, &.{ .{ "artifact_id", digest }, .{ "sha256", digest }, .{ "bytes", count }, .{ "media_type", try constant(a, "application/json") }, .{ "schema_id", try text(a, 1, 128) }, .{ "retention", try constant(a, "state-namespace") } }, &.{});
     var outcomes: std.array_list.Managed(json.Value) = .init(a);
@@ -350,7 +358,7 @@ pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.
     }
     try json.put(a, &task_result, "allOf", result_cases);
     try json.put(a, &definitions, "task.result.result", task_result);
-    inline for (.{ "task.submit", "task.message", "task.respond", "task.cancel", "task.resume", "task.reconcile" }) |name| {
+    inline for (.{ "task.submit", "task.message", "task.respond", "task.cancel", "task.resume", "task.reconcile", "task.adopt" }) |name| {
         var admitted = try extend(a, snapshot, &.{ .{ "receipt_id", digest }, .{ "receipt_revision", count }, .{ "replayed", boolean }, .{ "disposition", try enumSchema(state.Disposition, a) } }, &.{});
         if (comptime std.mem.eql(u8, name, "task.message")) admitted = try extend(a, admitted, &.{.{ "message_id", digest }}, &.{});
         if (comptime std.mem.eql(u8, name, "task.respond")) admitted = try extend(a, admitted, &.{.{ "question_id", digest }}, &.{});
@@ -393,7 +401,7 @@ pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.
         try json.put(a, &definitions, name ++ ".request", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "id", try reference(a, "rpc_id") }, .{ "method", try constant(a, name) }, .{ "params", params } }, &.{}));
     }
     try json.put(a, &definitions, "ping.result", try shape(a, &.{.{ "server_instance_id", id }}, &.{}));
-    try json.put(a, &definitions, "task.status.result", snapshot);
+    try json.put(a, &definitions, "task.status.result", try extend(a, snapshot, &.{.{ "residual_id", digest }}, &.{"residual_id"}));
     try json.put(a, &definitions, "task.unsubscribe.result", empty);
     try json.put(a, &definitions, "shutdown.result", try shape(a, &.{ .{ "mode", try enumeration(a, &.{ "park", "cancel" }) }, .{ "accepted", try literal(a, "{\"const\":true}") } }, &.{}));
     try json.put(a, &definitions, "task.events.result", try shape(a, &.{ .{ "events", try array(a, event, limits.event_page) }, .{ "earliest_available_seq", count }, .{ "high_water_seq", count }, .{ "next_after_seq", count }, .{ "has_more", boolean } }, &.{}));

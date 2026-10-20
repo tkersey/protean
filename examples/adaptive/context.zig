@@ -35,7 +35,7 @@ pub fn instructions(a: std.mem.Allocator, policy: P.AdaptivePolicy, catalog: P.A
     for (skills, catalog.skills.items) |*out, entry| out.* = .{ .id = entry.id, .version = entry.version, .description = entry.description };
     const Catalog = struct { profiles: contracts.Vector(Profile, null), skills: contracts.Vector(Skill, null) };
     const metadata = try native.json.canonical(a, try native.values.toJson(Catalog, a, .{ .profiles = .{ .items = profiles }, .skills = .{ .items = skills } }));
-    const text = try std.fmt.allocPrint(a, "{s}\nApproved catalog:\n{s}", .{ @embedFile("instructions.txt"), metadata });
+    const text = try std.fmt.allocPrint(a, "Approved catalog:\n{s}", .{metadata});
     return .{ .bytes = text };
 }
 
@@ -189,23 +189,14 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
     for (&offered, input.offered, policy.permitted_tools) |*allowed, requested, permitted| allowed.* = allowed.* and requested and permitted;
     var declarations: std.ArrayList(P.ToolDeclaration) = .empty;
     for (materialized, P.allDeclarations().items) |defined, item| if (defined) try declarations.append(a, item);
-    var messages = input.state.messages;
-    if (input.state.replay) |prior| if (prior.eviction_generation != control.eviction_generation and input.state.programs.items.len != 0) {
-        var retained: native.json.Value = .{ .array = .init(a) };
-        for (input.state.programs.items) |ref| try retained.array.append(try native.values.toJson(contracts.workspace.Ref, a, ref));
-        const text_value = try std.fmt.allocPrint(a, "Retained workspace program references after instruction eviction: {s}. These references carry no authority; work.start checks the current grants and input. Evidence indexes remain stable.", .{try native.json.canonical(a, retained)});
-        const items = try a.alloc(t.P.Message, messages.items.len + 1);
-        @memcpy(items[0..messages.items.len], messages.items);
-        items[messages.items.len] = .{ .role = .developer, .content = .{ .bytes = text_value } };
-        messages = .{ .items = items };
-    };
+    const messages = input.state.messages;
     const request: P.AdaptiveRequest = .{
         .policy = digest(ctx.profile),
         .selection = control.selection,
         .materialized = materialized,
         .offered = offered,
         .results = results,
-        .plan = .{ .epoch = control.epoch, .reason = control.epoch_reason, .watermark = if (input.state.replay) |ref| ref.watermark else 0, .eviction_generation = control.eviction_generation, .prior = input.state.replay, .catalog = policy.catalog, .skills = control.skills, .research = if (input.state.selected_view) |view| .{ .view = view, .selected_at = input.state.selected_view_at } else null },
+        .plan = .{ .epoch = control.epoch, .reason = control.epoch_reason, .watermark = if (input.state.replay) |ref| ref.watermark else 0, .eviction_generation = control.eviction_generation, .prior = input.state.replay, .catalog = policy.catalog, .skills = control.skills, .research = if (input.state.selected_view) |view| .{ .view = view, .selected_at = input.state.selected_view_at, .retained_calls = input.retained_calls } else null },
         .invocation = .{
             .protocol = .{ .bytes = t.model.protocol_identity },
             .model = .{ .bytes = selected.model.bytes },

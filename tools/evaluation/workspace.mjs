@@ -16,6 +16,10 @@ const arms = {
   pure: 'You may construct general pure programs and use their completed results as tools. Build with no exposed ports, start with terminal/owner_scheduled policy, wait for completion and collect the results. Work actions are limited to start, wait and collect, including when sent through placement.control. Do not materialize guest_view, use retained intermediate observations, or branch. Ordinary tools remain available.',
   retained: 'You may use ordinary tools and the full computational workspace. Whether to construct, retain, expose ports, branch or delegate is your choice.',
 };
+const reconstructionArms = {
+  retained: 'Use ordinary tools and the retained computational workspace. Controller replacement is unavailable in this comparison arm.',
+  reconstruction: 'You may inspect the active controller, build a controller from general source, optionally try it, and adopt it through a pure carry conversion. Choose whether reconstruction helps this task. Ordinary tools, existing work and choosing no replacement remain available.',
+};
 const runtimeArms = {
   ordinary: arms.ordinary,
   generic: 'You may use ordinary tools and the full retained computational workspace with the packaged generic runtime. Do not specialize a program, select another runtime, switch realization, or materialize a guest_view. This condition leaves ordinary evidence access and guest execution available.',
@@ -75,8 +79,19 @@ export function workspaceMetrics(archive, application) {
   const occurrences = new Map(archive.manifest[6].filter(([kind]) => kind === 0).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('occurrence'), archive.object(ref))]));
   const stats = {controller: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, delegated: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, builds: 0, rejected_builds: 0, compiler_nanoseconds: 0, native_publication_nanoseconds: 0, checkpoint_publications: 0, current_checkpoint_bytes: 0, work_items: 0, result_bytes: 0, actions: [],
     runtime_specializations_requested: 0, runtime_switches_requested: 0, guest_views_requested: 0,
+    controller_adoptions: 0, rejected_adoptions: 0, controller_trials: 0, conversion_publication_nanoseconds: 0,
     admitted_runtimes: 0, distinct_runtime_artifact_bytes: 0, distinct_current_runtime_capsule_bytes: 0,
     runtime_specialization_nanoseconds: null, runtime_validation_nanoseconds: null};
+  const conversions = new Set();
+  for (const [kind,, reference] of archive.manifest[6]) {
+    if (kind === 30) stats.controller_trials++;
+    if (kind !== 27) continue;
+    const succession = decodeValue(archive.schemas.get('controller_succession'), archive.object(reference));
+    assert.equal(succession.length, 23);
+    if (succession[17] === 2) stats.controller_adoptions++;
+    if ([3, 4, 5, 6].includes(succession[17])) stats.rejected_adoptions++;
+    if (succession[14].tag === 1) conversions.add(Buffer.from(succession[14].value).toString('hex'));
+  }
   const runtimeArtifacts = new Map();
   const runtimeCapsules = new Map();
   const actions = [];
@@ -154,13 +169,14 @@ export function workspaceMetrics(archive, application) {
       // Version 2 Work: the schema is carried in the archive; positions are this
       // evaluator's explicit versioned interpretation, not imported authority.
       assert.equal(work[0], 2);
-      assert.equal(work.length, 34);
-      stats.work_items++; stats.native_publication_nanoseconds += Number(work[33]);
-      stats.checkpoint_publications += Number(work[19]);
-      stats.current_checkpoint_bytes += Number(work[16][1]);
-      for (const ref of [work[10].tag === 1 ? work[10].value : null, work[11].tag === 1 ? work[11].value[1] : null, work[12].tag === 1 ? work[12].value[0] : null])
+      assert.equal(work.length, 35);
+      stats.work_items++; stats.native_publication_nanoseconds += Number(work[34]);
+      if (conversions.has(Buffer.from(work[1]).toString('hex'))) stats.conversion_publication_nanoseconds += Number(work[34]);
+      stats.checkpoint_publications += Number(work[20]);
+      stats.current_checkpoint_bytes += Number(work[17][1]);
+      for (const ref of [work[11].tag === 1 ? work[11].value : null, work[12].tag === 1 ? work[12].value[1] : null, work[13].tag === 1 ? work[13].value[0] : null])
         if (ref) runtimeCapsules.set(Buffer.from(ref[0]).toString('hex'), Number(ref[1]));
-      if (work[27].tag === 1) stats.result_bytes += Number(work[27].value[1]);
+      if (work[28].tag === 1) stats.result_bytes += Number(work[28].value[1]);
     }
     if (kind !== 4) continue;
     const attempt = attempts.get(Buffer.from(id).toString('hex'));
@@ -259,8 +275,8 @@ if (mode === 'prepare') {
   const config = JSON.parse(await readFile(configFile, 'utf8'));
   assert.equal(config.schema, 'adaptive-agent.configuration.v3');
   const suite = option(args, '--suite', 'workspace');
-  assert(['workspace', 'runtime'].includes(suite), 'Choose workspace or runtime evaluation.');
-  const selectedArms = suite === 'runtime' ? runtimeArms : arms;
+  assert(['workspace', 'runtime', 'reconstruction'].includes(suite), 'Choose workspace, runtime or reconstruction evaluation.');
+  const selectedArms = suite === 'runtime' ? runtimeArms : suite === 'reconstruction' ? reconstructionArms : arms;
   const repetitions = Number(option(args, '--repetitions', '1')), seconds = Number(option(args, '--seconds', '600'));
   assert(Number.isSafeInteger(repetitions) && repetitions > 0 && Number.isSafeInteger(seconds) && seconds > 0);
   const profile = config.adaptive.profiles.find(p => p.id === config.adaptive.initial_profile); assert(profile);
@@ -298,7 +314,7 @@ if (mode === 'prepare') {
     const evidence_sha256 = hash(json(evidence));
     for (let repetition = 0; repetition < repetitions; repetition++) for (const [arm, instruction] of Object.entries(selectedArms)) {
       const id = `${family.id}-${repetition}-${arm}`, configPath = join(directory, `${id}.json`);
-      const selected = {...frozen, adaptive: {...frozen.adaptive, snapshot_root: snapshot}, tools: {build: arm !== 'ordinary', run: arm !== 'ordinary', inputs: family.inputs}};
+      const selected = {...frozen, adaptive: {...frozen.adaptive, snapshot_root: snapshot}, tools: {build: arm !== 'ordinary', run: arm !== 'ordinary', reconstruct: arm === 'reconstruction', inputs: family.inputs}};
       await writeFile(configPath, json(selected));
       plan.cases.push({id, family: family.id, arm, repetition, config: configPath, config_sha256: hash(json(selected)), evidence, evidence_sha256, snapshot, prompt: `${family.prompt}\n\nEvaluation capability condition: ${instruction}`, expected: join(directory,family.id,'expected.json'), expected_sha256});
     }

@@ -93,7 +93,7 @@ test "compiled catalog composes coverage and orphan grouping and reuses exact BP
     } });
     var invocation = try t.P.templateValue(Model, .{ .items = &.{} }, .{ .minimum_calls = 1, .maximum_calls = 1, .parallel_calls = false });
     invocation.tools = t.P.allDeclarations();
-    const arguments = try std.json.Stringify.valueAlloc(a, .{ .command = .{ .tag = "build", .value = .{ .source = .{ .tag = "json_text", .value = swaps }, .source_kind = "component_recipe", .exposures = .{} } } }, .{});
+    const arguments = try std.json.Stringify.valueAlloc(a, .{ .command = .{ .tag = "build", .value = .{ .source = .{ .tag = "json_text", .value = swaps }, .source_kind = "component_recipe", .exposures = .{}, .role = "computation" } } }, .{});
     const response = try std.json.Stringify.valueAlloc(a, .{.{ .type = "function_call", .status = "completed", .call_id = "large-recipe", .name = "program", .arguments = arguments }}, .{});
     const parsed = try native.json.parse(a, response, .{ .bytes = response.len, .tokens = response.len });
     const normalized = try native.responses.OutputNormalizer(t.P).normalize(a, invocation, parsed.value);
@@ -201,16 +201,22 @@ test "adaptive malformed capture remains private and portable without claiming s
 }
 
 test "adaptive workspace interrupted pure build restarts without ambiguous delivery" {
-    try workspaceRecovery(true, false);
+    try workspaceRecovery(true, false, .none);
 }
 
 test "adaptive workspace captured build imports and executes exact retained code and input" {
-    try workspaceRecovery(false, false);
+    try workspaceRecovery(false, false, .none);
 }
 
 test "adaptive workspace AUT-02 AUT-03 BUILD-01 controller abandons a binary framing and executes novel source twice" {
-    try workspaceRecovery(false, true);
+    try workspaceRecovery(false, true, .none);
 }
+
+test "adaptive workspace reconstructed controller cannot publish invalid output" {
+    for ([_]OutputCheck{ .origin, .citation, .foreign_value, .foreign_program, .malformed, .origin_outer }) |check| try workspaceRecovery(false, false, check);
+}
+
+const OutputCheck = enum { none, origin, citation, foreign_value, foreign_program, malformed, origin_outer };
 
 const ReframeTrace = struct {
     const wc = protean.contracts.workspace;
@@ -285,7 +291,7 @@ const ReframeTrace = struct {
     }
 };
 
-fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.discovery.Assets, dir: std.Io.Dir, path: []const u8) !native.configuration.Admitted {
+fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.discovery.Assets, dir: std.Io.Dir, path: []const u8, reconstruct: bool) !native.configuration.Admitted {
     const base = try environment.configure(a, io, .{ .offline = true }, null, assets);
     const policy = try native.adaptive_responses.Admission(t.P).policy(a, base.bytes);
     try dir.createDir(io, "snapshot", .default_dir);
@@ -302,7 +308,7 @@ fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.d
             .initial_effort = .medium,
             .skills = .{ .items = &.{} },
         },
-        .tools = .{ .build = true, .run = true, .inputs = .{ .items = &.{.{
+        .tools = .{ .build = true, .run = true, .reconstruct = reconstruct, .inputs = .{ .items = &.{.{
             .id = .{ .bytes = "retained-table" },
             .description = .{ .bytes = "Immutable generated-tool input" },
             .rows = .{ .items = &.{.{ .id = 1, .key = 10, .value = 100, .group = 1 }} },
@@ -310,7 +316,9 @@ fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.d
             .selected = .{ .items = &.{10} },
         }} } },
     };
-    try dir.writeFile(io, .{ .sub_path = "config.json", .data = try native.json.canonical(a, try native.values.toJson(t.ConfigurationV3, a, config)) });
+    var config_json = try native.values.toJson(t.ConfigurationV3, a, config);
+    if (!reconstruct) _ = config_json.object.getPtr("tools").?.object.swapRemove("reconstruct");
+    try dir.writeFile(io, .{ .sub_path = "config.json", .data = try native.json.canonical(a, config_json) });
     // Configuration admits local inputs normally. Provider acquisition is
     // forbidden by the test registry, so no TLS or network operation occurs.
     try dir.writeFile(io, .{ .sub_path = "unused-trust-root", .data = "unused by the synthetic provider" });
@@ -322,7 +330,7 @@ fn generatedToolConfiguration(a: std.mem.Allocator, io: std.Io, assets: native.d
     }, null, assets);
 }
 
-fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void {
+fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool, output_check: OutputCheck) !void {
     const c = protean.contracts;
     const wc = c.workspace;
     const a = std.testing.allocator;
@@ -346,14 +354,13 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void
     };
     var handlers = try native.Registry.init(a, &declarations);
     defer handlers.deinit();
-    var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "workspace-unit", .image_identity = admitted_image.identity() };
+    var application = try native.discovery.Application.init(t, a, assets, handlers);
     defer application.deinit();
-    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var buffer: [4096]u8 = undefined;
     const directory = buffer[0..try temporary.dir.realPath(io, &buffer)];
-    const configured = try generatedToolConfiguration(permanent, io, assets, temporary.dir, directory);
+    const configured = try generatedToolConfiguration(permanent, io, assets, temporary.dir, directory, output_check != .none);
     var grants: [environment.handlers.len]native.registry.Grant = undefined;
     const profile: native.tasks.Profile = .{ .id = configured.id, .runtime_identity = @splat(73), .bytes = configured.bytes, .environment = configured.environment, .resources = configured.resources, .authority = .{ .grants = &grants, .principal = "adaptive-unit", .tenant = "local", .inference = true } };
     for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
@@ -412,7 +419,7 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void
                 try std.testing.expect(worker.result.? == .acquired);
                 // The capture carries actual compiled bytes, not a model result.
                 const BuildOutput = struct {
-                    const Compiled = struct { image: c.Bytes(null), interface: c.tool_construction.Interface, ports: c.Vector(native.program_construction.PortInterface, null), compiler_nanoseconds: u64 };
+                    const Compiled = struct { image: c.Bytes(null), interface: c.tool_construction.Interface, ports: c.Vector(native.program_construction.PortInterface, null), controller: ?c.controller.Descriptor, compiler_nanoseconds: u64 };
                     const Output = union(enum) { compiled: Compiled, rejected: struct { code: c.Utf8, phase: c.Utf8, function: ?u64, term: ?u64, value: ?u64, compiler_nanoseconds: u64 } };
                 };
                 var output = try c.decodeOwned(BuildOutput.Output, frame, worker.result.?.acquired);
@@ -452,6 +459,159 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void
         if (work.entry.declaration.inference) {
             var prepared = try c.decodeOwned(t.P.AdaptivePrepared, frame, work.prepared.?);
             defer prepared.deinit();
+            if (output_check != .none) {
+                var output_stage: []const u8 = "install";
+                errdefer std.debug.print("invalid output {s} failed at {s}\n", .{ @tagName(output_check), output_stage });
+                try service.notSent(frame, work);
+                try installInvalidOutput(&service, frame, task, prepared.value.request, output_check);
+                var accepted: ?native.testing.state.Task = null;
+                var acquired: ?native.testing.occurrence.Occurrence = null;
+                var preserved_acquisition: ?native.testing.occurrence.Occurrence = null;
+                var cleanup: ?native.testing.state.ControllerResidual = null;
+                var captured_outer = false;
+                var model_replies: usize = 0;
+                for (0..4096) |_| {
+                    var before = try service.task(frame, task);
+                    defer before.deinit();
+                    if (before.value.controller_epoch == 1 and cleanup == null) {
+                        var query = try namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='controller_residual'", &.{.{ .blob = &task }});
+                        defer query.deinit();
+                        try std.testing.expect(try query.step() == .row);
+                        const residual = (try c.decodeOwned(native.testing.state.ControllerResidual, frame, try query.bytes(0))).value;
+                        try std.testing.expect(residual.outcome_kind != .cancelled);
+                        const parked = try service.workspaceCommand(frame, "park-output-predecessor-cleanup", task, .{ .work = .{ .park = .{ .work = .{ .kind = .residual, .id = .{ .bytes = try std.fmt.allocPrint(frame, "{s}", .{std.fmt.bytesToHex(residual.id, .lower)}) } }, .execution_revision = residual.execution_revision, .control_revision = residual.control_revision } } });
+                        if (parked.disposition != .observed) std.debug.print("invalid output {s} cleanup park: {s}\n", .{ @tagName(output_check), parked.observation_json.bytes });
+                        try std.testing.expectEqual(.observed, parked.disposition);
+                        cleanup = (try c.decodeOwned(native.testing.state.ControllerResidual, frame, (try namespace.store.recordBytes(frame, "controller_residual", residual.id, task)).?)).value;
+                    }
+                    if (before.value.controller_epoch == 1) if (before.value.current_occurrence) |id| {
+                        const pending = (try c.decodeOwned(native.testing.occurrence.Occurrence, frame, (try namespace.store.recordBytes(frame, "occurrence", id, task)).?)).value;
+                        if (pending.state == .settled_reply) {
+                            acquired = pending;
+                            if (output_check == .origin_outer and !captured_outer) {
+                                const request = (try protocol.decode(protocol.Request, frame, try namespace.store.object(frame, pending.request_object, null))).value;
+                                if (std.mem.eql(u8, request.binding.semantic_identity, c.controller.handoff_identity)) {
+                                    output_stage = "retain acquired handoff operation";
+                                    try std.testing.expect(service.active != null);
+                                    const active = &service.active.?;
+                                    try std.testing.expect(active.subject == .root and std.meta.eql(active.task, task));
+                                    try std.testing.expect(active.root_control == null and !active.root_cut_ready);
+                                    try std.testing.expectEqual(before.value.execution_revision, active.execution_revision);
+                                    const control: protocol.Control = .{ .reply = try namespace.store.object(frame, try namespace.store.objectReference(pending.state.settled_reply.reply, null), null) };
+                                    const encoded = try c.encodeOwned(protocol.Control, service.allocator, control);
+                                    active.driver.beginAdvance(control, 256) catch |err| {
+                                        service.allocator.free(encoded);
+                                        return err;
+                                    };
+                                    active.root_control = encoded;
+                                    active.root_quantum = 256;
+                                    _ = try service.placementCut(frame, .{ .task = task });
+                                    captured_outer = true;
+                                }
+                            }
+                        }
+                    };
+                    accepted = before.value;
+                    var pending_before = false;
+                    if (acquired) |saved| {
+                        preserved_acquisition = (try c.decodeOwned(native.testing.occurrence.Occurrence, frame, (try namespace.store.recordBytes(frame, "occurrence", saved.id, task)).?)).value;
+                        var query = try namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='root_operation'", &.{.{ .blob = &task }});
+                        defer query.deinit();
+                        if (try query.step() == .row) {
+                            const operation = (try c.decodeOwned(native.testing.state.RootOperation, frame, try query.bytes(0))).value;
+                            pending_before = operation.pending != null;
+                            if (pending_before) try std.testing.expectEqual(before.value.execution_revision, operation.execution_revision);
+                        }
+                    }
+                    output_stage = "advance invalid result";
+                    const progress = try service.pump(frame);
+                    if (progress == .work) {
+                        try std.testing.expectEqualDeep(task, progress.work.task);
+                        try std.testing.expect(progress.work.entry.declaration.inference);
+                        try std.testing.expectEqual(@as(usize, 0), model_replies);
+                        const response = try std.json.Stringify.valueAlloc(frame, .{ .status = "completed", .@"error" = @as(?u8, null), .output = .{.{ .type = "function_call", .status = "completed", .call_id = "invalid-output-stop", .name = "stop", .arguments = "{\"reason\":\"Return the reconstructed controller result.\"}" }} }, .{});
+                        try service.acquire(frame, progress.work, try c.encodeOwned(native.responses.Raw, frame, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = response } }));
+                        model_replies += 1;
+                    }
+                    var rejected = try service.task(frame, task);
+                    defer rejected.deinit();
+                    if (rejected.value.blocker == .denied) {
+                        output_stage = "rejected authoritative cut";
+                        try std.testing.expectEqual(.parked, rejected.value.schedule);
+                        try std.testing.expect(!rejected.value.terminal() and !namespace.store.fenced);
+                        try std.testing.expect(accepted != null and acquired != null and cleanup != null);
+                        try std.testing.expectEqual(@as(usize, 1), model_replies);
+                        try std.testing.expectEqual(output_check == .origin_outer, captured_outer);
+                        try std.testing.expectEqual(output_check == .origin_outer, pending_before);
+                        try std.testing.expectEqual(accepted.?.execution_revision, rejected.value.execution_revision);
+                        try std.testing.expectEqualDeep(accepted.?.checkpoint, rejected.value.checkpoint);
+                        try std.testing.expectEqualDeep(accepted.?.outcome, rejected.value.outcome);
+                        try std.testing.expectEqualDeep(accepted.?.current_occurrence, rejected.value.current_occurrence);
+                        try std.testing.expect(rejected.value.result == null and rejected.value.client_result == null);
+                        try std.testing.expectEqualDeep(preserved_acquisition.?, (try c.decodeOwned(native.testing.occurrence.Occurrence, frame, (try namespace.store.recordBytes(frame, "occurrence", acquired.?.id, task)).?)).value);
+                        try std.testing.expectEqualDeep(cleanup.?, (try c.decodeOwned(native.testing.state.ControllerResidual, frame, (try namespace.store.recordBytes(frame, "controller_residual", cleanup.?.id, task)).?)).value);
+                        try std.testing.expect(!try service.taskCleanupComplete(frame, rejected.value));
+                        {
+                            var query = try namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='root_operation'", &.{.{ .blob = &task }});
+                            defer query.deinit();
+                            try std.testing.expect(try query.step() == .row);
+                            const operation = (try c.decodeOwned(native.testing.state.RootOperation, frame, try query.bytes(0))).value;
+                            try std.testing.expect(operation.pending == null);
+                            try std.testing.expectEqual(rejected.value.execution_revision, operation.execution_revision);
+                        }
+                        var query = try namespace.store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq=?", &.{ .{ .blob = &task }, .{ .integer = @intCast(rejected.value.event_high) } });
+                        defer query.deinit();
+                        try std.testing.expect(try query.step() == .row);
+                        const event = (try c.decodeOwned(native.testing.state.Event, frame, try query.bytes(0))).value;
+                        try std.testing.expectEqual(.blocked, event.kind);
+                        try std.testing.expectEqualStrings("InvalidResultReference", (try native.json.parse(frame, event.data.bytes, .{})).value.object.get("reason").?.string);
+                        break;
+                    }
+                } else return error.InventedOutputWasNotRejected;
+                output_stage = "blocked export";
+                var client: native.client.Client(t) = .{ .service = &service };
+                var params = native.json.object();
+                try native.json.put(frame, &params, "task_id", native.json.string(try std.fmt.allocPrint(frame, "{s}", .{std.fmt.bytesToHex(task, .lower)})));
+                try std.testing.expect(!(try client.call(frame, .@"task.result", params)).object.get("ready").?.bool);
+                const independent = try service.submit(frame, "unrelated-after-invalid-output", .{ .task = .{ .bytes = "An unrelated task remains admissible." } });
+                try std.testing.expectEqual(.accepted, independent.receipt.disposition);
+                _ = try service.requestCancel(frame, "cancel-unrelated-output-task", independent.receipt.task, "No provider work is needed");
+                try service.validateWorkspace(frame, task);
+                _ = try service.exportCheckpoint(frame, task, try std.fmt.allocPrint(frame, "{s}/blocked-output.agnx", .{directory}));
+                try service.close(frame);
+                try namespace.close();
+                output_stage = "blocked reopen";
+                namespace = try native.Namespace.open(a, io, path);
+                service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
+                var retained = try service.task(frame, task);
+                defer retained.deinit();
+                try std.testing.expectEqual(@as(u64, 1), retained.value.controller_epoch);
+                try std.testing.expect(!retained.value.terminal());
+                try std.testing.expectEqual(.denied, retained.value.blocker.?);
+                try std.testing.expect(retained.value.result == null and retained.value.client_result == null);
+                try std.testing.expectEqualDeep(accepted.?.checkpoint, retained.value.checkpoint);
+                try std.testing.expectEqual(accepted.?.execution_revision, retained.value.execution_revision);
+                try std.testing.expectEqualDeep(preserved_acquisition.?, (try c.decodeOwned(native.testing.occurrence.Occurrence, frame, (try namespace.store.recordBytes(frame, "occurrence", acquired.?.id, task)).?)).value);
+                try service.validateWorkspace(frame, task);
+                output_stage = "cancel rejected result";
+                _ = try service.requestCancel(frame, "cancel-invented-output", task, "Invalid evidence was not published");
+                for (0..4096) |_| {
+                    try std.testing.expect(try service.pump(frame) != .work);
+                    var cancelled = try service.task(frame, task);
+                    defer cancelled.deinit();
+                    if (cancelled.value.terminal() and try service.taskCleanupComplete(frame, cancelled.value)) {
+                        try std.testing.expectEqual(.cancelled, cancelled.value.outcome_kind);
+                        try std.testing.expect(cancelled.value.client_result == null);
+                        try std.testing.expectEqual(retained.value.inference_attempts, cancelled.value.inference_attempts);
+                        const consumed = (try c.decodeOwned(native.testing.occurrence.Occurrence, frame, (try namespace.store.recordBytes(frame, "occurrence", acquired.?.id, task)).?)).value;
+                        try std.testing.expect(consumed.state == .admitted and consumed.state.admitted == .reply);
+                        try std.testing.expectEqualDeep(acquired.?.state.settled_reply, consumed.state.admitted.reply);
+                        _ = try service.exportCheckpoint(frame, task, try std.fmt.allocPrint(frame, "{s}/rejected-output.agnx", .{directory}));
+                        return;
+                    }
+                }
+                return error.RejectedOutputDidNotCancel;
+            }
             var observation: native.json.Value = .null;
             if (stage > 0) {
                 try std.testing.expectEqual(1, prepared.value.request.results.items.len);
@@ -508,6 +668,89 @@ fn workspaceRecovery(comptime interrupted: bool, comptime reframing: bool) !void
     return error.WorkspaceRecoveryDidNotComplete;
 }
 
+fn installInvalidOutput(service: *native.tasks.Service(t), a: std.mem.Allocator, task: [16]u8, request: t.P.AdaptiveRequest, check: OutputCheck) !void {
+    const c = protean.contracts;
+    const uncited = check == .citation;
+    var parent = try service.task(a, task);
+    defer parent.deinit();
+    const interaction = (try c.decodeOwned(native.testing.state.ControllerInteraction, a, (try service.namespace.store.recordBytes(a, "controller_interaction", parent.value.controller_interaction.?, task)).?)).value;
+    const carry = (try c.decodeOwned(t.ControllerCarry, a, try service.namespace.store.object(a, interaction.carry, null))).value;
+    var output: t.Output = .{
+        .result = .{ .report = .{ .summary = .{ .bytes = "Unsubstantiated result" }, .claims = .{ .items = &.{.{ .kind = if (uncited) .hypothesis else .observation, .statement = .{ .bytes = "The source might establish this claim" }, .reasoning = .{ .bytes = if (uncited) "A hypothesis without any cited claim" else "" }, .evidence_indices = .{ .items = if (uncited) &.{} else &.{0} } }} }, .limitations = .{ .items = &.{} } } },
+        .evidence = .{ .items = if (uncited) &.{} else &.{.{ .source = .{ .object = .{ .digest = @splat(194), .bytes = 12 }, .snapshot = @splat(195), .path = .{ .bytes = "unacquired.zig" }, .sha256 = .{ .bytes = &(@as([64]u8, @splat('a'))) }, .start = 0, .end = 12, .file_bytes = 12 } }} },
+        .programs = .{ .items = &.{} },
+        .control = carry.state.control,
+        .receipts = .{ .items = &.{} },
+        .model_calls = 1,
+        .work_calls = 0,
+    };
+    if (check == .foreign_value or check == .foreign_program) {
+        const foreign = (try service.submit(a, "foreign-output-owner", .{ .task = .{ .bytes = "Own the output reference without sharing it." } })).receipt.task;
+        var b = horos.source.Builder.init(a);
+        defer b.deinit();
+        const boolean = try c.schema(bool, &b);
+        const entry = try b.declare(&.{boolean}, boolean, &.{}, &.{});
+        try b.define(entry, try b.pure(try b.reference(b.parameter(entry, 0))));
+        const built = try service.workspaceCommand(a, "foreign-output-program", foreign, .{ .program = .{ .build = .{ .source = .{ .json_text = .{ .bytes = try native.source_records.encode(a, b.module(entry, try c.schema(void, &b))) } }, .source_kind = .source_records, .exposures = .{ .items = &.{} } } } });
+        if (built.disposition != .observed) std.debug.print("invalid output {s} foreign program: {s}\n", .{ @tagName(check), built.observation_json.bytes });
+        try std.testing.expectEqual(.observed, built.disposition);
+        const reference = if (check == .foreign_value) blk: {
+            const observation = (try native.json.parse(a, built.observation_json.bytes, .{})).value;
+            const schema = try native.values.fromJson(c.workspace.Ref, a, observation.object.get("input_schema").?);
+            const materialized = try service.workspaceCommand(a, "foreign-output-value", foreign, .{ .context = .{ .materialize = .{ .input = .{ .value = .{ .inline_json = .{ .schema = schema, .json_text = .{ .bytes = "true" } } } }, .sources = .{ .items = &.{} } } } });
+            if (materialized.disposition != .observed) std.debug.print("invalid output {s} foreign value: {s}\n", .{ @tagName(check), materialized.observation_json.bytes });
+            try std.testing.expectEqual(.observed, materialized.disposition);
+            break :blk materialized.evidence.?;
+        } else built.program.?;
+        if (check == .foreign_value) {
+            output.evidence = .{ .items = try a.dupe(t.EvidenceReference, &.{.{ .workspace = reference }}) };
+        } else {
+            output.result = .{ .no_result = .{ .bytes = "A program reference requires its owning task." } };
+            output.evidence = .{ .items = &.{} };
+            output.programs = .{ .items = try a.dupe(c.workspace.Ref, &.{reference}) };
+        }
+        _ = try service.requestCancel(a, "cancel-foreign-output-owner", foreign, "Keep the reference without executing its owner");
+    } else if (check == .malformed) {
+        output.evidence = .{ .items = &.{.{ .workspace = .{ .kind = .value, .id = .{ .bytes = "not-a-digest" } } }} };
+    }
+    var programs: [2]c.workspace.Ref = undefined;
+    for (&programs, 0..) |*program, i| {
+        var b = horos.source.Builder.init(a);
+        defer b.deinit();
+        const boolean = try c.schema(bool, &b);
+        const failure = try c.schema(t.Failure, &b);
+        const module = if (i == 0) blk: {
+            const input = try b.schema(.{ .product = &.{ try c.schema(c.controller.TaskAnchor, &b), boolean } });
+            const unit = try c.schema(void, &b);
+            const payload = try b.schema(.{ .product = &.{ try c.schema(t.P.AdaptiveRequest, &b), unit } });
+            const reply = try c.schema(c.controller.Reply(t.P.AdaptiveResult), &b);
+            const deliberate = try b.effect(.{ .identity = "controller/1/deliberate", .payload = payload, .result = reply, .external = false });
+            const entry = try b.declare(&.{input}, try c.schema(t.Output, &b), &.{deliberate}, &.{});
+            const result = try b.pure(try b.literal(.{ .schema = try c.schema(t.Output, &b), .bytes = try c.encodeOwned(t.Output, a, output) }));
+            const request_value = try b.literal(.{ .schema = try c.schema(t.P.AdaptiveRequest, &b), .bytes = try c.encodeOwned(t.P.AdaptiveRequest, a, request) });
+            const call = try b.term(.{ .perform = .{ .effect = deliberate, .payload = try b.primitive(payload, .product, &.{ request_value, try b.constant(void, {}) }, 0) } });
+            try b.define(entry, try b.term(.{ .conditional = .{
+                .condition = try b.primitive(boolean, .field, &.{try b.reference(b.parameter(entry, 0))}, 1),
+                .when_true = try b.bind(try b.variable(reply), call, result),
+                .when_false = result,
+            } }));
+            break :blk b.module(entry, failure);
+        } else blk: {
+            const input = try b.schema(.{ .product = &.{ try c.schema(t.ControllerCarry, &b), try c.schema(c.controller.OwnerView, &b) } });
+            const entry = try b.declare(&.{input}, boolean, &.{}, &.{});
+            try b.define(entry, try b.pure(try b.constant(bool, true)));
+            break :blk b.module(entry, try c.schema(void, &b));
+        };
+        const built = try service.workspaceCommand(a, if (i == 0) "invented-controller" else "invented-converter", task, .{ .program = .{ .build = .{ .source = .{ .json_text = .{ .bytes = try native.source_records.encode(a, module) } }, .source_kind = .source_records, .exposures = .{ .items = &.{} }, .role = if (i == 0) .controller else .computation } } });
+        if (built.disposition != .observed) std.debug.print("invented output build {d}: {s}\n", .{ i, built.observation_json.bytes });
+        try std.testing.expectEqual(.observed, built.disposition);
+        program.* = built.program.?;
+    }
+    var current = try service.task(a, task);
+    defer current.deinit();
+    _ = try service.adoptController(a, "adopt-invented-output", task, current.value.revision, .{ .successor = programs[0], .converter = programs[1], .expected_controller_epoch = current.value.controller_epoch, .expected_handoff_identity = .{ .bytes = &std.fmt.bytesToHex(current.value.controller_interaction.?, .lower) }, .reason = .{ .bytes = "Exercise native output reference admission" } });
+}
+
 fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { none, imported, snapshot, provider, malformed }) !void {
     var budget: kosmos.AllocationBudget = .{ .parent = std.testing.allocator, .limit = 64 * 1024 * 1024 };
     const a = budget.allocator();
@@ -517,16 +760,18 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
     const permanent = profile_arena.allocator();
     const image = @embedFile("adaptive_image");
     const metadata = @embedFile("adaptive_application");
-    const admitted_image = try horos.data.program_image.Admitted.decode(a, image);
-    defer admitted_image.deinit();
-    const manifest = try @import("native_test_support.zig").ownerManifest(permanent, image, admitted_image.identity(), metadata);
+    const image_identity = identity: {
+        const admitted_image = try horos.data.program_image.Admitted.decode(a, image);
+        defer admitted_image.deinit();
+        break :identity admitted_image.identity();
+    };
+    const manifest = try @import("native_test_support.zig").ownerManifest(permanent, image, image_identity, metadata);
     const assets: native.discovery.Assets = .{ .image = image, .application = metadata, .manifest = manifest };
-    var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "adaptive-unit", .image_identity = admitted_image.identity() };
-    defer application.deinit();
-    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
     const declarations = environment.handlers;
     var handlers = try native.Registry.init(a, &declarations);
     defer handlers.deinit();
+    var application = try native.discovery.Application.init(t, a, assets, handlers);
+    defer application.deinit();
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var buffer: [4096]u8 = undefined;
@@ -604,8 +849,9 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
             defer outcome.deinit();
             var request = try protocol.decode(protocol.Request, frame, outcome.value.requested.request);
             defer request.deinit();
-            if (std.mem.eql(u8, request.value.binding.semantic_identity, t.P.identity)) {
-                var adaptive = try protean.contracts.decodeOwned(t.P.AdaptiveRequest, frame, request.value.binding.payload);
+            if (std.mem.eql(u8, request.value.binding.semantic_identity, protean.contracts.controller.effect_prefix ++ "deliberate")) {
+                const entry = try handlers.resolve(request.value, application.image_identity);
+                var adaptive = try protean.contracts.decodeOwned(t.P.AdaptiveRequest, frame, try entry.payload(frame, request.value.binding.payload));
                 defer adaptive.deinit();
                 if (adaptive.value.plan.watermark == 8) {
                     try std.testing.expectEqual(8, model_calls);
@@ -634,8 +880,8 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                         pub fn run(this: @This(), ctx: native.registry.ProjectionContext) ![]u8 {
                             return this.adapter.prepare(ctx, this.payload);
                         }
-                    }{ .adapter = adapter, .payload = request.value.binding.payload };
-                    const binding: native.registry.ProjectionBinding = .{ .task = task, .tenant = profile.authority.tenant, .profile = profile.bytes, .application = application.image_identity, .resources = saved.value.resources.items };
+                    }{ .adapter = adapter, .payload = try work.entry.payload(frame, request.value.binding.payload) };
+                    const binding: native.registry.ProjectionBinding = .{ .task = task, .tenant = profile.authority.tenant, .profile = profile.bytes, .application = application.image_identity, .resources = saved.value.resources.items, .controller = work.controller_projection };
                     _ = try namespace.store.project([]u8, frame, handlers, binding, projection);
                     const cache = &namespace.store.context_cache;
                     cache.hits = 0;
@@ -972,7 +1218,9 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                 defer capture.deinit();
                 try std.testing.expect(capture.value.projection == null);
                 const imported_archive: ?[]const u8 = if (recovery_probe == .imported) try std.fmt.allocPrint(permanent, "{s}/captured.agnx", .{buffer[0..length]}) else null;
-                if (imported_archive) |archive_path| _ = try service.exportCheckpoint(frame, task, archive_path);
+                if (imported_archive) |archive_path| {
+                    _ = try service.exportCheckpoint(frame, task, archive_path);
+                }
                 try service.close(frame);
                 service_live = false;
                 try namespace.close();

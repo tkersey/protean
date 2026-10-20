@@ -115,3 +115,19 @@ This prints compiler arena/time, native time including process startup, WASM
 time, checkpoint counts/bytes, and zero inference calls for the generated cases.
 It reuses Horos's source oracle and Kosmos's retained embedding. These bounded
 microbenchmarks do not predict end-to-end model efficiency.
+
+## Reconstruction discretion comparison
+
+Use the same runner with `prepare --suite reconstruction`. It prepares the same
+three workload families with matched retained-workspace and reconstruction arms.
+Only the latter enables `tools.reconstruct`; neither prompt requires a replacement
+or a trial. The source/controller build and carry-conversion tools are ordinary
+workspace actions. Preparation makes no provider calls.
+
+The archive metrics count activated and rejected/aborted controller proposals,
+trial work, and conversion publication time separately. Total compiler time,
+inference costs, elapsed time and retained bytes still include unsuccessful
+attempts. Judge task correctness, evidence coverage, unnecessary reconstruction
+and recovery from misleading assumptions against the frozen expected answers.
+Admission, successful activation and scripted demonstrations do not establish
+improvement. Live efficacy is unmeasured until an authorized run is adjudicated.

@@ -6,7 +6,7 @@ pub const tool_types = @import("tool_types.zig");
 pub const controls = protean.adaptive_controls;
 pub const model = protean.model_invocation;
 pub const application_id = "adaptive-agent";
-pub const application_version = "6.0.0";
+pub const application_version = "7.0.0";
 pub const input_schema_id = "adaptive-agent.input.v2";
 pub const output_schema_id = "adaptive-agent.output.v5";
 pub const failure_schema_id = "adaptive-agent.failure.v1";
@@ -117,6 +117,9 @@ pub const WorkRequest = struct {
 pub const WorkArtifact = struct { version: u8, task: [16]u8, policy: [32]u8, context: model.AdaptiveContextReference, call_id: P.CallId, request: @FieldType(WorkRequest, "action"), outcome: WorkOutcome, evidence: ?Evidence, model_text: P.ResultText };
 pub const WorkReply = struct { artifact: model.ArtifactReference, evidence: ?SourceEvidenceReference };
 pub const WorkspaceRequest = struct { context: model.AdaptiveContextReference, call_id: P.CallId, action: contracts.workspace.Command };
+pub const ControllerCarry = struct { bindings: PolicyView, state: State };
+pub const ControllerPrivate = union(enum) { initial: Input, @"resume": ControllerCarry };
+pub const ControllerInput = struct { anchor: contracts.controller.TaskAnchor, private: ControllerPrivate };
 pub const Programs = contracts.Vector(contracts.workspace.Ref, null);
 pub const WorkspaceResult = struct { reply: contracts.workspace.Reply, evidence_index: ?u64 };
 pub const ResultValue = union(enum) { inline_text: Summary, work: model.ArtifactReference, control: model.ArtifactReference, report_rejection: ReportRejection, workspace: WorkspaceResult };
@@ -165,6 +168,55 @@ pub const Output = struct {
     model_calls: u64,
     work_calls: u64,
 };
+pub fn validateOutput(admission: anytype, output: Output) !void {
+    const a = admission.allocator;
+    for (output.evidence.items) |ref| switch (ref) {
+        .source => |source| {
+            const bytes = try admission.projected(source.object, work_identity);
+            defer a.free(bytes);
+            var artifact = try contracts.decodeOwned(WorkArtifact, a, bytes);
+            defer artifact.deinit();
+            const value = artifact.value;
+            if (value.version != 2 or !std.meta.eql(value.task, admission.task) or !std.meta.eql(value.policy, admission.profile)) return error.InvalidResultReference;
+            const item = value.evidence orelse return error.InvalidResultReference;
+            const expected: SourceEvidenceReference = .{ .object = source.object, .snapshot = item.snapshot, .path = item.path, .sha256 = item.sha256, .start = item.start, .end = item.end, .file_bytes = item.file_bytes };
+            try requireOutputReference(SourceEvidenceReference, a, source, expected);
+        },
+        .workspace => |value| try admission.workspaceReference(value, .value),
+    };
+    for (output.programs.items) |program| try admission.workspaceReference(program, .program);
+    for (output.receipts.items) |ref| {
+        const bytes = try admission.projected(ref.object, prepare_identity);
+        defer a.free(bytes);
+        var artifact = try contracts.decodeOwned(ReceiptArtifact, a, bytes);
+        defer artifact.deinit();
+        const receipt = artifact.value.receipt;
+        if (!std.meta.eql(receipt.task, admission.task)) return error.InvalidResultReference;
+        const expected: ReceiptReference = .{ .object = ref.object, .previous_revision = receipt.previous_revision, .next_revision = receipt.next_revision, .disposition = receipt.disposition, .rejection = receipt.rejection, .next_profile = receipt.next_profile, .next_effort = receipt.next_effort, .context_epoch = receipt.context_epoch, .eviction_generation = receipt.eviction_generation };
+        try requireOutputReference(ReceiptReference, a, ref, expected);
+    }
+    if (output.result == .report) {
+        const report = output.result.report;
+        if (report.summary.bytes.len == 0 or report.claims.items.len == 0) return error.InvalidResultReference;
+        var cited = false;
+        for (report.claims.items) |claim| {
+            if (claim.statement.bytes.len == 0 or (claim.kind != .observation and claim.reasoning.bytes.len == 0) or (claim.kind != .hypothesis and claim.evidence_indices.items.len == 0)) return error.InvalidResultReference;
+            cited = cited or claim.evidence_indices.items.len != 0;
+            for (claim.evidence_indices.items, 0..) |index, i| {
+                if (index >= output.evidence.items.len) return error.InvalidResultReference;
+                for (claim.evidence_indices.items[0..i]) |prior| if (prior == index) return error.InvalidResultReference;
+            }
+        }
+        if (!cited) return error.InvalidResultReference;
+    }
+}
+fn requireOutputReference(comptime T: type, a: std.mem.Allocator, actual: T, expected: T) !void {
+    const left = try contracts.encodeOwned(T, a, actual);
+    defer a.free(left);
+    const right = try contracts.encodeOwned(T, a, expected);
+    defer a.free(right);
+    if (!std.mem.eql(u8, left, right)) return error.InvalidResultReference;
+}
 pub const ControlSubject = struct {
     call_id: P.CallId,
     reason: contracts.Text(256),
@@ -174,6 +226,7 @@ pub const Preparation = struct {
     state: State,
     offered: [P.declaration_count]bool,
     control: ?ControlSubject,
+    retained_calls: model.RetainedCalls = .{ .items = &.{} },
 };
 pub const Ready = struct {
     request: P.AdaptiveRequest,
@@ -190,10 +243,10 @@ pub const Configuration = struct { workspace: contracts.Text(128), snapshot_root
 pub const DataRow = struct { id: u64, key: u64, value: u64, group: u64 };
 pub const DataRows = contracts.Vector(DataRow, null);
 pub const ToolInputConfig = struct { id: contracts.Text(64), description: contracts.Text(256), rows: DataRows, relation: DataRows, selected: tool_types.Keys };
-pub const ToolConfiguration = struct { build: bool, run: bool, inputs: contracts.Vector(ToolInputConfig, null) };
+pub const ToolConfiguration = struct { build: bool, run: bool, reconstruct: bool = false, inputs: contracts.Vector(ToolInputConfig, null) };
 pub const ConfigurationV3 = struct { schema: contracts.Text(64), adaptive: Configuration, tools: ?ToolConfiguration };
 pub const ToolInputReference = struct { id: contracts.Text(64), description: contracts.Text(256), object: model.ArtifactReference };
-pub const ToolPolicy = struct { build: bool, run: bool, catalog: model.ArtifactReference, inputs: contracts.Vector(ToolInputReference, null) };
+pub const ToolPolicy = struct { build: bool, run: bool, reconstruct: bool = false, catalog: model.ArtifactReference, inputs: contracts.Vector(ToolInputReference, null) };
 // Ordinary wire contracts accompany the emitted Horos image. External
 // inspection tools can decode them without an adaptive execution implementation.
 pub const support_types = .{

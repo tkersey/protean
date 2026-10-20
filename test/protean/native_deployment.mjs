@@ -69,14 +69,12 @@ export function deployment(source, name) {
     if (process.platform !== 'linux') return child.kill(signal);
     // The launched PID is strace, not the application inside bwrap's new
     // session. Its private trace identifies the application's host PID.
-    const observed = new Set();
+    let application;
     for await (const execution of traceExecutions(join(controller, `trace.${child.pid}`))) {
-      if (execution.path === executable) observed.add(execution.pid);
+      if (execution.path === executable) { application = execution.pid; break; }
     }
-    const pids = [...observed];
-    assert.equal(pids.length, 1, 'one application process in this launch trace');
-    assert(Number.isSafeInteger(pids[0]) && pids[0] > 1, 'trace must identify the application PID');
-    process.kill(pids[0], signal);
+    assert(Number.isSafeInteger(application) && application > 1, 'trace must identify the original application PID');
+    process.kill(application, signal);
   }, async close(passed) {
     try {
       let executions = 0;

@@ -42,6 +42,7 @@ test "chunked adaptive projection preserves history and appends without prefixes
 }
 test "research replacement preserves authored human-answer call pairs" {
     try Fixture(TestProfile(true)).preservation(true);
+    try Fixture(CurrentProfile).preservation(true);
 }
 test "owned adaptive projection reuses checked ancestry in one integrity epoch" {
     try Fixture(CurrentProfile).scaling(true);
@@ -311,6 +312,7 @@ fn Fixture(comptime P: type) type {
                 request.plan.epoch += 1;
                 request.plan.reason = .view_change;
                 request.plan.research = .{ .view = .{ .kind = .view, .id = .{ .bytes = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef" } }, .selected_at = request.plan.watermark };
+                if (!P.retained_control_calls[1]) request.plan.research.?.retained_calls = .{ .items = &.{.{ .bytes = "inspect" }} };
                 const selected = try native.json.canonical(a, try http(a, try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, request))));
                 try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, selected, "call-2"));
                 try std.testing.expect(std.mem.indexOf(u8, selected, "HUMAN-CLARIFICATION") != null);

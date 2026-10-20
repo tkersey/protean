@@ -88,7 +88,7 @@ fn Connection(comptime Types: type) type {
                 return protocol.response(a, request.id, result);
             }
             if (!self.initialized) return protocol.failure(a, request.id, .ProtocolState, "correct_request");
-            if (self.shutdown != null and (request.method == .@"task.submit" or request.method == .@"task.message" or request.method == .@"task.resume" or request.method == .@"task.respond" or request.method == .@"task.reconcile" or request.method == .placement))
+            if (self.shutdown != null and (request.method == .@"task.submit" or request.method == .@"task.message" or request.method == .@"task.resume" or request.method == .@"task.respond" or request.method == .@"task.reconcile" or request.method == .@"task.adopt" or request.method == .placement))
                 return protocol.failure(a, request.id, .StateConflict, failureRecovery(.StateConflict));
             switch (request.method) {
                 .shutdown => {
@@ -174,12 +174,12 @@ fn failureKind(err: anyerror) protocol.Kind {
         error.Denied, error.UnknownTask, error.NotFound => .NotFound,
         error.OperationConflict => .OperationConflict,
         error.CustodyNotLocal, error.CustodyNotRemote, error.StaleCustody, error.StaleController, error.UnsettledRemoteControl => .StateConflict,
-        error.DisclosureDenied, error.KeyOwnerMismatch, error.SignatureVerificationFailed => .Denied,
+        error.Unauthorized, error.DisclosureDenied, error.KeyOwnerMismatch, error.SignatureVerificationFailed => .Denied,
         error.StaleInteraction, error.QuestionMismatch, error.StaleOccurrence => .StaleInteraction,
         error.AnswerConflict => .AnswerConflict,
         error.CursorExpired => .CursorExpired,
         error.Capacity, error.OutOfMemory, error.Overloaded => .Overloaded,
-        error.TerminalTask, error.StaleRevision, error.UnsettledOccurrence, error.IncompatibleProfile, error.UnsupportedStateFormat, error.ShuttingDown, error.NonPortable, error.NonEmptyNamespace, error.AlreadyExists => .StateConflict,
+        error.TerminalTask, error.StaleRevision, error.UnsettledOccurrence, error.IncompatibleProfile, error.UnsupportedStateFormat, error.ShuttingDown, error.NonPortable, error.NonEmptyNamespace, error.AlreadyExists, error.ControllerRecoveryUnavailable, error.StaleInstructions, error.Canceled, error.ControllerConversionSchemaMismatch, error.ImpureControllerConversion, error.ControllerResultSchemaMismatch, error.IncompatibleControllerTrial => .StateConflict,
         error.MissingArtifact, error.ArtifactUnavailable => .ArtifactUnavailable,
         error.UnsupportedCapability => .UnsupportedCapability,
         error.StorageUnavailable, error.CorruptState => .StorageUnavailable,

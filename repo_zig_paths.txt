@@ -17,6 +17,7 @@ runtime/native/adaptive_responses.zig
 runtime/native/archive.zig
 runtime/native/client.zig
 runtime/native/configuration.zig
+runtime/native/controller_construction.zig
 runtime/native/demo.zig
 runtime/native/discovery.zig
 runtime/native/driver.zig
@@ -70,6 +71,7 @@ src/catalogs.zig
 src/clarification.zig
 src/compiled_tool.zig
 src/contracts.zig
+src/controller_contracts.zig
 src/conversation.zig
 src/decision.zig
 src/deliberation.zig

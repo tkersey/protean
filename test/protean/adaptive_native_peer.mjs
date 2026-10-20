@@ -208,7 +208,8 @@ function* workspaceTrace(subject, scenario) {
   yield skill('deactivate', 4);
   yield skill('unload', 5);
   assert(subject.offered.has('work') && subject.offered.has('program'));
-  assert(strings(subject.body.input).some(text => text.includes('Retained workspace program references') && text.includes(subject.program.id)));
+  const builtCall = subject.body.input.find(item => item.type === 'function_call' && item.name === 'program' && JSON.parse(item.arguments).command.tag === 'build' && subject.body.input.some(output => output.type === 'function_call_output' && output.call_id === item.call_id && strings(output).some(text => text.includes(subject.program.id))));
+  assert(builtCall, 'the source-selected program build and its retained reference survive view selection, restart, and instruction eviction');
   const secondInput = yield* materialize(subject.inputs[1].id);
   for (let n = 0; n < 11; n++) yield* run(n % 2 ? firstInput : secondInput, n % 2 ? [['1','1'],['2','2'],['3','3'],['4','4']] : [['80','1']]);
   yield ['report', {summary: 'The same admitted program continued auditing both inputs after restart.', claims: [
@@ -221,12 +222,12 @@ function* workspaceTrace(subject, scenario) {
 // Await every cleanup even when one group fails; no qualification is skipped.
 export async function verifyAdaptiveNative({app, applicationPath, group = 'all'}) {
   assert(['all', 'controls', 'workspace'].includes(group));
-  const groups = group === 'workspace' ? ['workspace'] : group === 'controls' ? ['controls', 'workspace-extra'] : ['controls', 'workspace', 'workspace-extra'];
+  const groups = group === 'workspace' ? ['workspace'] : group === 'controls' ? ['controls', 'workspace-extra', 'workspace-disabled'] : ['controls', 'workspace', 'workspace-extra', 'workspace-disabled'];
   const results = await Promise.allSettled(groups.map(async name => {
     const suite = name === 'controls' ? 'controls' : 'workspace';
     // The foreign-reference check needs a completed owner in the same store.
     // Reuse the shorter reverse trace for that setup, balancing the two groups.
-    const workspaceScenarios = name === 'workspace' ? ['tools-reuse'] : ['tools-reverse', 'tools-foreign', 'tools-disabled'];
+    const workspaceScenarios = name === 'workspace' ? ['tools-reuse'] : name === 'workspace-disabled' ? ['tools-disabled'] : ['tools-reverse', 'tools-foreign'];
     const data = join(app.data, name), controller = join(app.controller, name);
     await Promise.all([mkdir(data), mkdir(controller)]);
     const started = performance.now();
@@ -344,6 +345,15 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         const index = alternateIndex++, subject = toolSubject;
         subject.calls = index; subject.body = body;
         subject.offered = new Set(body.tool_choice.tools.map(tool => tool.name));
+        subject.controllerControl = strings(body.input).map(text => { try { return JSON.parse(text); } catch { return null; } }).find(value => value?.expected_handoff_identity);
+        assert(subject.controllerControl);
+        if (subject.controllerSource && !subject.controllerConverter) {
+          const path = join(app.controller, 'controller-source.json');
+          await writeFile(path, subject.controllerSource);
+          const converted = await execute(sourcePeer, ['controller-converter', path], {encoding: 'utf8', maxBuffer: 16 << 20});
+          assert.equal(converted.status, 0, converted.stderr);
+          subject.controllerConverter = converted.stdout;
+        }
         let previous;
         if (index === 0) {
           const marker = 'Authorized typed Table inputs: ', text = strings(body.input).find(text => text.includes(marker));
@@ -352,9 +362,11 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           subject.trace = scenario.startsWith('tools-runtime-') ? runtimeTrace(subject, scenario) : workspaceTrace(subject, scenario);
         } else {
           const result = body.input.find(item => item.type === 'function_call_output' && item.call_id === `tools-${index - 1}`);
-          assert(result, `missing paired output ${index - 1}`);
+          assert(result || subject.adopting, `missing paired output ${index - 1}`);
+          if (result) {
           const text = typeof result.output === 'string' ? result.output : result.output[0].text;
           try { previous = JSON.parse(text); } catch { previous = text; }
+          }
         }
         if (subject.findClone && previous?.observation?.outer_operation) {
           const capsule = previous.observation.outer_operation;
@@ -383,6 +395,8 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         const next = subject.trace.next(previous);
         assert(!next.done, 'the recorded scenario must finish through a real controller action');
         const call = next.value;
+        if (call[0] === 'program' && call[1].command.tag === 'build') call[1].command.value.role ??= 'computation';
+        if (call[0] === 'work' && call[1].command.tag === 'start') call[1].command.value.trial ??= {tag: 'none', value: {}};
         if (suite === 'runtime') console.error(JSON.stringify({runtime_fixture: scenario, model_call: index, action: call[0], command: call[1]?.command?.tag ?? null}));
         // Let the actual transport settle before issuing the model's custody
         // observation. Poll only the public, read-only status operation while
@@ -672,7 +686,18 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           const events = chunks.reverse().flat();
           assert.equal(BigInt(events.length), eventCount);
           assert(events.every(([, origin]) => origin[0] <= plan[2]), 'history origins cannot claim future exposure');
-          const committedInput = requests[index].body.input.filter(item => !(item.role === 'developer' && item.content?.length === 1 && transientBodies.includes(item.content[0]?.text)));
+          const interactions = archive.manifest[6].filter(([kind]) => kind === 26).map(([, , ref]) => decodeValue(archive.schemas.get('controller_interaction'), archive.object(ref)))
+            .filter(value => value[11].tag === 1 && Buffer.from(value[11].value).equals(Buffer.from(attempt[2])));
+          assert.equal(interactions.length, 1);
+          const interaction = interactions[0], overlay = JSON.parse(archive.object(interaction[7]));
+          const protectedInput = requests[index].body.input.slice(-2);
+          assert.deepEqual(protectedInput.map(item => item.role), ['user', 'developer']);
+          assert.deepEqual(protectedInput.map(item => JSON.parse(item.content[0].text)), [overlay.user, overlay.control]);
+          assert.equal(overlay.control.task, Buffer.from(archive.task.id).toString('hex'));
+          assert.equal(overlay.control.controller_epoch, Number(interaction[3]));
+          assert.equal(overlay.control.expected_handoff_identity, Buffer.from(interaction[0]).toString('hex'));
+          assert.equal(overlay.control.policy_identity, hash(frozenProfileBytes));
+          const committedInput = requests[index].body.input.slice(0, -2).filter(item => !(item.role === 'developer' && item.content?.length === 1 && transientBodies.includes(item.content[0]?.text)));
           assert.deepEqual(events.map(([item]) => JSON.parse(Buffer.from(item).toString('utf8'))), [...committedInput, ...fixture[index].output], 'ordered replay appends original output without retaining transient injection');
           captureRows.push({request, http: requests[index].body});
           providerProjections++;
@@ -717,7 +742,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       const deniedProfile = (await client.call('describe')).profile;
       const deniedTask = await client.call('task.submit', {client_operation_id: 'disabled-offer-submit', application_id: 'adaptive-agent', profile_id: deniedProfile.id,
         input: {schema_id: 'adaptive-agent.input.v2', value: {task: 'Reject inspection after its skill is deactivated.'}}});
-      const deniedResult = await until(() => client.call('task.result', {task_id: deniedTask.task_id}), value => value.ready);
+      const deniedResult = await until(() => client.call('task.result', {task_id: deniedTask.task_id}), value => value.ready, 4000);
       if (providerFailure) throw providerFailure;
       assert.equal(alternateIndex, 8); assert.equal(deniedResult.outcome.value.result.tag, 'no_result');
       assert.equal(deniedResult.outcome.value.model_calls, '8'); assert.equal(deniedResult.outcome.value.work_calls, '3');
@@ -779,7 +804,15 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         assert.match(unknown.recovery.occurrence_id, /^[0-9a-f]{64}$/);
         assert.match(unknown.recovery.attempt_id, /^[0-9a-f]{64}$/);
         const description = await client.call('describe');
-        assert(description.methods.some(method => method.name === 'task.reconcile'));
+        const methods = [...description.methods];
+        for (let cursor = description.next_cursor; cursor !== null;) {
+          const page = await client.call('describe', {cursor});
+          methods.push(...page.methods);
+          assert(page.next_cursor === null || BigInt(page.next_cursor) > BigInt(cursor));
+          cursor = page.next_cursor;
+        }
+        assert(methods.some(method => method.name === 'task.reconcile'));
+        assert(methods.some(method => method.name === 'task.adopt'));
         const schemas = description.protocol_schema ?? JSON.parse((await artifact(null, description.protocol_schema_ref)).toString('utf8'));
         assert.equal(schemas.$defs['initialize.result'].properties.protocol_version.const, 'agent-host/2.1');
         assert.equal(schemas.$defs['task.reconcile.params'].additionalProperties, false);
@@ -864,6 +897,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       if (suite === 'runtime') console.error(JSON.stringify({runtime_fixture: name, stage: 'launch'}));
       scenario = name; alternateIndex = 0;
       toolSubject = {recipe: name === 'tools-reverse' ? reverseRecipe : coverageRecipe, foreign: retainedProgram};
+      if (name === 'tools-runtime-mobility') toolSubject.packagedControllerSource = asset.controller.source_records;
       if (['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name)) {
         assert(sourcePeer, 'the mobility scenario requires its Horos source emitter');
         const emitted = await execute(sourcePeer, ['mobility'], {encoding: 'utf8', maxBuffer: 16 << 20});
@@ -877,7 +911,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       const selectedInputs = name === 'tools-runtime-specialized' ? [
         ...inputs, {...inputs[0], id: 'batch', description: 'Sixteen source records retain exact batch cardinality and order.', rows: Array.from({length: 16}, (_, i) => row(2000 + i, 10, 100, 1))},
       ] : inputs;
-      await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: ['tools-reuse', 'tools-reverse'].includes(name) ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, inputs: selectedInputs}}));
+      await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: ['tools-reuse', 'tools-reverse'].includes(name) ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, reconstruct: name === 'tools-runtime-mobility', inputs: selectedInputs}}));
       const placement = ['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name) ? await runtimePlacementFixture(app, selectedConfig, trust, selectedState) : null;
       toolSubject.placement = placement;
       // Each scenario selects its own initial directory. A prior controller
@@ -938,6 +972,21 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           answer: {schema_id: waiting.question.answer_schema_id, value: {message: 'Continue on the second admitted input with the same generated program.'}}});
       }
       const result = await until(async () => {
+        if (toolSubject.restoreController && !toolSubject.controllerRestored) {
+          const status = await client.call('task.status', {task_id: task.task_id});
+          if (status.question) {
+            const question = status.question;
+            await app.signal(client.child, 'SIGKILL'); await client.closed; client = null;
+            await launch(['--config', selectedConfig], selectedState);
+            const restored = await client.call('task.status', {task_id: task.task_id});
+            assert.deepEqual(restored.question, question);
+            toolSubject.controllerRestored = true;
+            await client.call('task.resume', {client_operation_id: 'reconstructed-resume', task_id: task.task_id, expected_revision: restored.revision});
+            await client.call('task.respond', {client_operation_id: 'reconstructed-answer', task_id: task.task_id, question_id: question.question_id,
+              question_revision: question.question_revision, request_digest: question.request_digest,
+              answer: {schema_id: question.answer_schema_id, value: {message: 'Continue with the retained child after restoring the active controller.'}}});
+          }
+        }
         if (placement && toolSubject.controllerMove && !toolSubject.controllerMoved) {
           const subject = {task: [...Buffer.from(task.task_id, 'hex')], work: null};
           const custody = await placementRequest(client, 'status', subject);
@@ -957,7 +1006,8 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
             await launch(['--config', selectedConfig], selectedState);
             const accepted = await placementRequest(client, 'status', subject);
             assert.equal(accepted.phase, 'local');
-            assert.equal(accepted.epoch, '1');
+            assert.equal(accepted.epoch, '2');
+            assert(toolSubject.controllerReconstructed);
             const cut = await placementRequest(client, 'cut', subject);
             toolSubject.controllerMoved = true;
             await client.call('task.resume', {client_operation_id: 'resume-moved-controller', task_id: task.task_id, expected_revision: cut.control});
@@ -986,7 +1036,8 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         }
       } else if (name.startsWith('tools-runtime-')) {
         assert.equal(result.outcome.value.result.tag, 'no_result');
-        assert.equal(result.outcome.value.programs.length, name === 'tools-runtime-ordinary' ? 0 : name === 'tools-runtime-guest-mobility' ? 2 : 1);
+        assert.equal(result.outcome.value.programs.length, name === 'tools-runtime-ordinary' ? 0 : name === 'tools-runtime-guest-mobility' ? 2 : name === 'tools-runtime-mobility' ? 3 : 1);
+        if (name === 'tools-runtime-mobility') assert.deepEqual(result.outcome.value.programs, [toolSubject.program, ...toolSubject.reconstructionPrograms]);
         if (name === 'tools-runtime-ordinary') assert(!toolSubject.actions.some(action => ['program', 'work', 'context', 'placement'].includes(action.name)));
         if (name === 'tools-runtime-specialized') {
           assert.equal(toolSubject.results.length, 3);
@@ -995,6 +1046,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         if (['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name)) {
           assert(name === 'tools-runtime-mobility' ? toolSubject.outer && toolSubject.controllerMoved : toolSubject.guestCut);
           assert(toolSubject.cleanupComplete);
+          assert.equal(result.associated_work_disposed, true);
           if (name === 'tools-runtime-guest-mobility') assert(toolSubject.retention?.path.length > 0);
           assert.deepEqual(toolSubject.branchValues, name === 'tools-runtime-guest-mobility' ? ['126', '136'] : ['376']);
           assert.equal(hash(await readFile(app.executable)), placement.binary);
@@ -1030,13 +1082,15 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         target: toolSubject.retention.target, path_edges: toolSubject.retention.path.length,
         result: toolSubject.retention.result,
       };
-      assert.deepEqual(await client.close(), {code: 0, signal: null}); client = null;
+      const closed = await client.close(); client = null;
+      assert.deepEqual(closed, {code: 0, signal: null});
       if (name.startsWith('tools-runtime-')) {
         const bundle = join(app.data, `${name}.bundle`);
         await invoke('export-checkpoint', '--state-dir', selectedState, '--task-id', task.task_id, '--output', bundle);
         const archiveBytes = await readFile(bundle);
         const accountedActions = toolSubject.actions;
-        const metrics = workspaceMetrics(readArchive(archiveBytes), JSON.parse(await readFile(applicationPath, 'utf8')));
+        const archived = readArchive(archiveBytes);
+        const metrics = workspaceMetrics(archived, JSON.parse(await readFile(applicationPath, 'utf8')));
         assert.equal(metrics.runtime_specializations_requested, accountedActions.filter(action => action.name === 'program' && action.arguments.command.tag === 'specialize').length);
         assert.equal(metrics.runtime_switches_requested, accountedActions.filter(action => (action.name === 'work' && action.arguments.command.tag === 'realize') || (action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize')).length);
         if (name === 'tools-runtime-guest-mobility') {
@@ -1045,6 +1099,21 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           assert.equal(new Set(switches.map(action => action.arguments.command.value.operation)).size, 1);
         }
         if (name === 'tools-runtime-mobility') {
+          const sourceReference = toolSubject.controllerSourceReference;
+          assert.equal(sourceReference.kind, 'source');
+          const sourceBytes = archived.object([Buffer.from(sourceReference.id, 'hex'), BigInt(Buffer.byteLength(toolSubject.controllerSource))]);
+          assert.equal(sourceBytes.toString('utf8'), toolSubject.controllerSource);
+          assert.equal(metrics.controller_adoptions, 1);
+          assert.equal(metrics.rejected_adoptions, 0);
+          assert(metrics.compiler_nanoseconds > 0);
+          assert(metrics.conversion_publication_nanoseconds > 0);
+          toolRuns.at(-1).reconstruction_accounting = {
+            adoptions: metrics.controller_adoptions,
+            rejected_adoptions: metrics.rejected_adoptions,
+            trials: metrics.controller_trials,
+            compiler_nanoseconds: metrics.compiler_nanoseconds,
+            conversion_publication_nanoseconds: metrics.conversion_publication_nanoseconds,
+          };
           const transported = metrics.actions.filter(action => action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize');
           assert(transported.length > 0);
           assert.equal(armViolations('generic', transported).length, transported.length);

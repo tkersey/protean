@@ -40,7 +40,7 @@ identity; behavioral comparison never substitutes foreign request digests.
 
 ## Retention, effects and context
 
-The existing Service queue schedules `(task, work?)`. A work record binds the
+The existing Service queue schedules roots, child work, controller preparation and retired-controller cleanup under one task. A work record binds the
 program/input, Kosmos checkpoint, execution/control revisions and run policy.
 The existing occurrence engine binds external delivery to that exact subject.
 An optional driver port exposes a typed command, not a raw stack or settlement
@@ -111,6 +111,79 @@ Provenance expansion folds source references into the requested byte range,
 preserving their order and multiplicity without retaining the full expanded JSON.
 It still loads and validates the stored provenance metadata; paging is not a
 constant-memory guarantee for all retained state.
+
+## Reconstructing the active controller
+
+Application 7 uses `protean-workspace/3` and native state writer 17. The packaged
+seed is an ordinary controller artifact built through the same source constructor
+as later candidates. `program.describe` with `current_controller` pages the
+actual binding, epoch, program, source, interfaces and residual references.
+`context.expand` reads that exact source. `controller_contract` describes the
+host's admitted imports and stable task result/failure interface.
+
+`program.build` accepts `role: "controller"` for general source records. Its entry
+is `[TaskAnchor, Private]`; the controller chooses an exportable `Private` and
+carry schema. Internal `controller/1/` imports bind existing owner services.
+The deliberate import accepts `[proposal, carry]` and returns a response plus an
+optional owner diagnostic. Construction checks exact schemas and authority,
+then inserts the protected offer/model/handoff bridge and inert boot boundary.
+Raw private imports, external effects and nonexportable carry are rejected.
+The model can choose other evidence or reconstruction while child work waits.
+Invalid output evidence or citations park only that task at its last published
+cut with an `InvalidResultReference` diagnostic. Its acquired replies and cleanup
+remain owned, cancellation remains available, and unrelated tasks can continue.
+
+Enable `tools.reconstruct` alongside the existing build/run permissions to allow
+activation. `program.adopt` names the successor and a pure converter, the
+`expected_controller_epoch` and `expected_handoff_identity` from the protected
+request overlay, an optional trial selection, and a reason. The converter takes
+`[carry, OwnerView]` and returns the successor's private input. OwnerView freezes
+the real task input, ordered user amendments and published child observations.
+A trial reference is supporting information; it never replaces conversion.
+
+Only the owner commits activation. The new checkpoint reaches construction-owned
+`boot_ready` before receiving live authority. A transaction changes the binding
+and advances the controller epoch once. Task identity, original inputs, child
+identities, evidence, costs and event history remain. A later return to old code
+uses a new forward conversion; it cannot restore old task facts. Receipt replay
+precedes current-epoch checks. Instruction or cancellation changes during
+preparation invalidate activation, while independent child progress remains.
+
+An operator can call `task.adopt` with a stable `client_operation_id`, `task_id`,
+`expected_revision` and the same `adoption` value. Task status exposes
+`controller_epoch` and `controller_handoff` for this request. The owner can force
+a park at a protected model or handoff request with valid carry and known delivery.
+Unknown or active dispatch and unavailable private-state translation block recovery.
+Conversion uses current owner facts; failed operator preparation leaves the old
+controller parked. Replaying the same operation returns its original admission.
+
+The superseded execution becomes a residual under its original image. It may
+only unwind qualified cleanup. Inspect residual references through `work.inspect`
+and use `work.park`, `advance` or `cancel` with their execution/control revisions.
+Retained observations preserve the published cleanup state at their event cut.
+Unknown delivery remains unresolved and cannot be reinterpreted as completion.
+Root completion does not imply that residual cleanup is complete. The existing
+reconciliation API handles an unknown residual occurrence using its real binding.
+
+A controller `work.start` requires an explicit `trial` binding. Synthetic bindings
+name exact typed payload/response pairs and a frozen task view. Unseen requests
+remain unavailable. Optional live inference requires `live_inference: true` and
+the ordinary inference grant; actual calls are charged to the task. Trial
+adoptions remain proposals, trial outputs retain trial provenance, and synthetic
+answers never become acquired evidence. Trials cannot issue live root commands.
+Explicit trials progress through `work.advance` or `work.pump`; changing their
+continuation policy can admit owner scheduling. Each trial reply publishes its
+occurrence with the work observation, including before the next evaluator step.
+An explicit trial parks after that host reply; a fresh `advance` or bounded `pump`
+consumes it. Host settlement does not grant an additional evaluator quantum.
+
+Behavioral succession and controller movement advance one authority lineage.
+Frozen movement excludes activation; preparation excludes a controller move.
+Signed behavioral transitions precede later remote commands through the existing
+peer path. Child custody and evaluator realization revisions remain independent.
+BPI3, PST3, ERQ3, ERS3 and PKO3 retain their existing meanings. Old tasks require
+their original executable and namespace contract; upgrading the installed binary
+does not rewrite their checkpoints. No live-model improvement is claimed.
 
 ## Acceptance witnesses
 
@@ -272,6 +345,11 @@ is distinguished from concrete execution where it supplies the argument.
 
 | Obligations | Executed witness / owning mechanism |
 |---|---|
+| C01–C06 | The shared A → B → A fixture builds general source, changes private representation and traversal, preserves the held child and amendment, and checks active source, protected offers, stale authority and receipt replay. |
+| C07–C09 | Variants of that fixture reject failed, malformed and interrupted conversion, invalidate stale instruction/cancellation cuts, and retain completed or unresolved predecessor cleanup under its original binding. |
+| C10 | The existing crash harness kills and reopens the same succession before activation, at commit uncertainty and after publication; the operation and controller epoch remain singular. |
+| C11 | The shared continuity fixture runs isolated trials, rejects unseen request pairs and authority escalation, and checks distinct trial provenance. |
+| C12 | The packaged runtime mobility trace builds and adopts a controller, survives a process kill, reads the active source, then transfers that controller and finishes its existing remote child's cleanup. |
 | AUT-01, AUT-02, AUT-03, AUT-09 | Existing ordinary offline demo and `adaptive_recovery.zig` reframing trace through actual prepared model offers; report/stop parks unfinished work. |
 | AUT-04, AUT-06, AUT-08 | `workspace_programs.zig` delegates a 300-element recursive computation; a variant with no yields or ports is parked/cancelled at native quantum boundaries. |
 | AUT-05, AUT-10, OWN-01 | Pure and port execution use an empty environmental registry; source/native traces finish or wait without model dispatch or mandatory alternatives. |

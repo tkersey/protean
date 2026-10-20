@@ -20,6 +20,27 @@ pub fn main(init: std.process.Init) !void {
         const module = try @import("runtime_mobility_source.zig").build(&builder);
         const transport = try native.source_records.encode(a, module);
         try output.interface.writeAll(try std.json.Stringify.valueAlloc(a, .{ .transport = transport }, .{}));
+    } else if (std.mem.eql(u8, mode, "controller-converter")) {
+        const source_path = args.next() orelse return error.MissingSource;
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, source_path, a, .unlimited);
+        var original = try native.source_records.decode(a, bytes);
+        defer original.deinit();
+        const module = original.module;
+        const entry = module.functions[@intCast(module.entry)];
+        const input = module.variables[@intCast(entry.parameters[0])];
+        var schema = try @import("horos_data").schema.canonicalize(a, module.schemas, module.schemas[@intCast(input)].product[1]);
+        defer schema.deinit();
+        const private = schema.descriptor.root;
+        const carry = schema.descriptor.types[@intCast(private)].sum[1];
+        var builder = horos.source.Builder.init(a);
+        defer builder.deinit();
+        try builder.schemas.appendSlice(builder.allocator(), schema.descriptor.types);
+        const view = try @import("protean_contracts").schema(@import("protean_contracts").controller.OwnerView, &builder);
+        const converter_input = try builder.schema(.{ .product = &.{ carry, view } });
+        const converter = try builder.declare(&.{converter_input}, private, &.{}, &.{});
+        const retained = try builder.primitive(carry, .field, &.{try builder.reference(builder.parameter(converter, 0))}, 0);
+        try builder.define(converter, try builder.pure(try builder.primitive(private, .variant, &.{retained}, 1)));
+        try output.interface.writeAll(try native.source_records.encode(a, builder.module(converter, try builder.scalar(void))));
     } else if (std.mem.eql(u8, mode, "capsule-artifact")) {
         const capsule_path = args.next() orelse return error.MissingCapsule;
         const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, capsule_path, a, .unlimited);

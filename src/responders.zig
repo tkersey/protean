@@ -13,12 +13,33 @@ pub fn ModelFunction(comptime P: type, comptime Request: type, comptime Result: 
     return typed.Function(typed.Signature(native.Fields(&.{ "request", "offered" }, &.{ typed.Shape(Request), typed.Shape([P.declaration_count]bool) }), typed.Shape(Result)));
 }
 
+pub fn ControllerRequest(comptime P: type, comptime Carry: type) type {
+    return struct { request: P.AdaptiveRequest, carry: Carry };
+}
+pub fn ObservedFunction(comptime P: type, comptime batch: bool, comptime Carry: ?type) type {
+    if (Carry) |C| return typed.Function(typed.Signature(native.Fields(&.{ "request", "offered", "carry" }, &.{ typed.Shape(P.AdaptiveRequest), typed.Shape([P.declaration_count]bool), typed.Shape(C) }), typed.Shape(ModelObservation(P, batch))));
+    return ModelFunction(P, P.AdaptiveRequest, ModelObservation(P, batch));
+}
+pub fn controllerModelOperation(comptime P: type, comptime Carry: type, c: authoring.Context) !*const typed.Operation(typed.OperationSignature(typed.Shape(ControllerRequest(P, Carry)), typed.Shape(@import("protean_contracts").controller.Reply(P.AdaptiveResult)), native.Fields(&.{}, &.{}))) {
+    const b = c.builder;
+    const instance = try b.specialization(Id, "protean.controller.model/v1", .{ @intFromPtr(c.author), @typeName(P), @typeName(Carry) });
+    const effect = if (instance.cached) |id| id else try instance.finish(b, try b.effect(.{
+        .identity = @import("protean_contracts").controller.import_prefix ++ "deliberate",
+        .payload = try typed.interop.schemaId(c.author, try c.schema(ControllerRequest(P, Carry))),
+        .result = try typed.interop.schemaId(c.author, try c.schema(@import("protean_contracts").controller.Reply(P.AdaptiveResult))),
+        .external = true,
+    }));
+    try c.registry.classify(effect, .model);
+    return typed.interop.externalOperation(c.author, effect, try c.schema(ControllerRequest(P, Carry)), try c.schema(@import("protean_contracts").controller.Reply(P.AdaptiveResult)));
+}
+
 /// Normalized metadata is untrusted external evidence. Its adjacent admission
 /// result is candidate data, never a grant or an executable operation.
 pub fn ModelObservation(comptime P: type, comptime batch: bool) type {
     return struct {
         normalized: P.AdaptiveResult,
         interpretation: if (batch) P.BatchInterpretation else P.Interpretation,
+        diagnostic: ?@import("protean_contracts").controller.Diagnostic,
     };
 }
 
@@ -48,19 +69,29 @@ pub fn defineModel(comptime P: type, c: authoring.Context, failure: anytype, com
 }
 
 pub fn defineModelObserved(comptime P: type, c: authoring.Context, failure: anytype, comptime batch: bool) !*const ModelFunction(P, P.AdaptiveRequest, ModelObservation(P, batch)) {
+    return defineObserved(P, c, failure, batch, null);
+}
+pub fn defineControllerModelObserved(comptime P: type, comptime Carry: type, c: authoring.Context, failure: anytype, comptime batch: bool) !*const ObservedFunction(P, batch, Carry) {
+    return defineObserved(P, c, failure, batch, Carry);
+}
+fn defineObserved(comptime P: type, c: authoring.Context, failure: anytype, comptime batch: bool, comptime Carry: ?type) !*const ObservedFunction(P, batch, Carry) {
     const b = c.builder;
     const t = c.author;
-    const effect = try P.declare(b);
-    try c.registry.classify(effect, .model);
-    const operation = try typed.interop.externalOperation(t, effect, try c.schema(P.AdaptiveRequest), try c.schema(P.AdaptiveResult));
+    const operation = if (Carry) |C| try controllerModelOperation(P, C, c) else blk: {
+        const effect = try P.declare(b);
+        try c.registry.classify(effect, .model);
+        break :blk try typed.interop.externalOperation(t, effect, try c.schema(P.AdaptiveRequest), try c.schema(P.AdaptiveResult));
+    };
+    const effect = try typed.interop.operationId(t, operation);
     const fault = try typed.interop.literalFailure(t, failure);
     const instance = try b.specialization(Id, "agent.model.observed-responder/v6", .{ @intFromPtr(t), @typeName(P), effect, try typed.interop.failureLiteralId(t, fault), batch });
-    const signature = try t.callable(.{ .request = try c.schema(P.AdaptiveRequest), .offered = try c.schema([P.declaration_count]bool) }, try c.schema(ModelObservation(P, batch)), .{operation}, .{ .use = .reusable });
+    const parameters = if (Carry) |C| .{ .request = try c.schema(P.AdaptiveRequest), .offered = try c.schema([P.declaration_count]bool), .carry = try c.schema(C) } else .{ .request = try c.schema(P.AdaptiveRequest), .offered = try c.schema([P.declaration_count]bool) };
+    const signature = try t.callable(parameters, try c.schema(ModelObservation(P, batch)), .{operation}, .{ .use = .reusable });
     if (instance.cached) |cached| return typed.interop.refineFunction(t, try typed.interop.declaredFunction(t, cached), signature);
     const interpreter = if (batch) try P.interpretAll(c) else try P.interpreter(c);
     const handle = try t.functionFor("observed model response", signature);
     const function = try typed.interop.functionId(t, handle);
-    const g = Generator(P, batch, @TypeOf(fault), @TypeOf(failure)){ .context = c, .typed_context = t, .handle = handle, .function = function, .fault = fault, .failure = failure };
+    const g = Generator(P, batch, Carry, @TypeOf(fault), @TypeOf(failure)){ .context = c, .typed_context = t, .handle = handle, .function = function, .fault = fault, .failure = failure };
     try t.define(handle, try g.emitBody(operation, interpreter));
     _ = try instance.finish(b, function);
     return handle;
@@ -96,11 +127,11 @@ pub fn invokeModelObserved(
     } });
 }
 
-fn Generator(comptime P: type, comptime batch: bool, comptime Fault: type, comptime Failure: type) type {
+fn Generator(comptime P: type, comptime batch: bool, comptime Carry: ?type, comptime Fault: type, comptime Failure: type) type {
     return struct {
         context: authoring.Context,
         typed_context: *typed.Context,
-        handle: *const ModelFunction(P, P.AdaptiveRequest, ModelObservation(P, batch)),
+        handle: *const ObservedFunction(P, batch, Carry),
         function: Id,
         fault: Fault,
         failure: Failure,
@@ -124,9 +155,11 @@ fn Generator(comptime P: type, comptime batch: bool, comptime Fault: type, compt
             try g.checkTemplate(root, template, selection);
             const invocation = try g.request(root, template, tools);
             const payload = try root.update(envelope, .{ .invocation = invocation, .offered = offered });
-            const site = try typed.interop.performSite(root, operation, payload);
+            const bound = if (Carry) |C| try root.product(try g.context.schema(ControllerRequest(P, C)), .{ .request = payload, .carry = try root.parameter("carry") }) else payload;
+            const site = try typed.interop.performSite(root, operation, bound);
             try g.context.registry.protectSite(g.function, site.term, try typed.interop.operationId(g.typed_context, operation));
-            const observation = site.value;
+            const observation = if (Carry != null) try root.field(site.value, "response") else site.value;
+            const diagnostic = if (Carry != null) try root.field(site.value, "diagnostic") else try g.context.literal(?@import("protean_contracts").controller.Diagnostic, null);
             const normalized = try root.field(observation, "result");
             const interpreted = try root.call(interpreter, .{ .result = normalized, .offered = offered, .selection = selection });
             const admitted = blk: {
@@ -136,7 +169,7 @@ fn Generator(comptime P: type, comptime batch: bool, comptime Fault: type, compt
                 const status = try root.field(observation, "replay_status");
                 break :blk try root.conditional(try root.equal(try root.enumTag(status), try root.constant(u32, @backingInt(@import("model_invocation.zig").ReplayStatus.complete))), try good.ret(interpreted), try lost.ret(try g.context.literal(Interpretation, .{ .rejected = .unsupported })));
             };
-            return root.ret(try root.product(try g.context.schema(ModelObservation(P, batch)), .{ .normalized = observation, .interpretation = admitted }));
+            return root.ret(try root.product(try g.context.schema(ModelObservation(P, batch)), .{ .normalized = observation, .interpretation = admitted, .diagnostic = diagnostic }));
         }
         fn member(_: G, body: anytype, set: V([P.declaration_count]bool), index: usize) !V(bool) {
             const item = try body.sequenceGet(set, try body.constant(u64, index));
