@@ -2444,7 +2444,13 @@ fn pureRecovery(scenario: PureRecoveryCase) !void {
                 try std.testing.expect(try copy.pump(frame) == .idle);
             }
             namespace = try native.Namespace.open(a, io, path);
-            service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+            var bootstrap = profile;
+            bootstrap.bytes = "bootstrap-before-frozen-inputs";
+            service = try native.tasks.Service(FairTypes).init(a, io, &namespace, assets, &application, handlers, bootstrap);
+            var readable = try service.task(frame, original.task);
+            defer readable.deinit();
+            try std.testing.expectEqual(.unknown, try service.status(frame, readable.value));
+            service.profile = profile;
         }
         var stopped = try service.reconciliation(frame, original.task, admitted.receipt.reconciliation.?);
         defer stopped.deinit();

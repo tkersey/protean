@@ -699,18 +699,29 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
             },
             // These are the only publications that may follow termination.
             .cancellation_requested, .imported, .message_not_consumed, .workspace, .workspace_progress => {},
-            .reconciled => {
-                if (terminal != null) {
+            .reconciled, .workspace_read => {
+                const occurrence_id = if (decoded.value.kind == .reconciled) id: {
                     const admission = admissions.get(row.revision) orelse return error.InvalidArchive;
                     const reconciliation_id = admission.reconciliation orelse return error.InvalidArchive;
                     const ref = record(archive, .reconciliation, reconciliation_id) orelse return error.InvalidArchive;
                     var recovery = try contracts.decodeOwned(state.Reconciliation, a, try store.object(a, ref, null));
                     defer recovery.deinit();
-                    const occurrence_ref = record(archive, .occurrence, recovery.value.occurrence) orelse return error.InvalidArchive;
-                    var pending = try contracts.decodeOwned(occurrence.Occurrence, a, try store.object(a, occurrence_ref, null));
-                    defer pending.deinit();
-                    if (pending.value.residual == null) return error.InvalidArchive;
-                } else nonterminal_event = true;
+                    break :id recovery.value.occurrence;
+                } else id: {
+                    var data = try json.parse(a, decoded.value.data.bytes, .{});
+                    defer data.deinit();
+                    const text = try json.text(json.get(data.value, "occurrence_id") orelse return error.InvalidArchive);
+                    var id: state.Digest = undefined;
+                    _ = std.fmt.hexToBytes(&id, text) catch return error.InvalidArchive;
+                    break :id id;
+                };
+                const occurrence_ref = record(archive, .occurrence, occurrence_id) orelse return error.InvalidArchive;
+                var pending = try contracts.decodeOwned(occurrence.Occurrence, a, try store.object(a, occurrence_ref, null));
+                defer pending.deinit();
+                if (pending.value.residual == null) {
+                    if (terminal != null) return error.InvalidArchive;
+                    nonterminal_event = true;
+                }
             },
             else => {
                 if (terminal != null) return error.InvalidArchive;

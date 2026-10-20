@@ -40,7 +40,7 @@ pub const Schedule = enum { queued, active, parked };
 pub const Status = enum { queued, running, waiting_input, parked, cancelling, blocked, unknown, completed, failed, cancelled };
 /// Portable task records. Source-local retention records are not archive kinds.
 pub const RecordKind = enum { occurrence, question, message, artifact, capture, attempt, origin, reconciliation, workspace_program, workspace_work, workspace_value, workspace_view, workspace_port, workspace_port_reply, execution_route, workspace_wait, workspace_delegation, workspace_reply, workspace_runtime, placement_custody, placement_control, placement_action, placement_move, placement_succession, root_operation, controller_binding, controller_interaction, controller_succession, controller_residual, placement_behavior, workspace_trial };
-pub const Blocker = enum { missing_capability, denied, capacity, missing_artifact, incompatible_profile, unavailable_environment };
+pub const Blocker = enum { missing_capability, denied, capacity, missing_artifact, incompatible_profile, unavailable_environment, waiting_workspace };
 
 /// Physical controller progress is independent of the last published guest cut.
 /// This row is replaced on suspension and cleared atomically with the next cut.

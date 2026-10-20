@@ -131,7 +131,7 @@ fn parameter(a: std.mem.Allocator, method: protocol.Method, key: []const u8, app
         return (try json.parseAsset(a, bytes, bytes.len)).value;
     }
     if (std.mem.eql(u8, key, "task_id") or std.mem.eql(u8, key, "subscription_id")) return reference(a, "id128");
-    if (std.mem.eql(u8, key, "question_id") or std.mem.eql(u8, key, "request_digest") or std.mem.eql(u8, key, "artifact_id") or std.mem.eql(u8, key, "occurrence_id") or std.mem.eql(u8, key, "attempt_id")) return reference(a, "digest");
+    if (std.mem.eql(u8, key, "question_id") or std.mem.eql(u8, key, "request_digest") or std.mem.eql(u8, key, "artifact_id") or std.mem.eql(u8, key, "occurrence_id") or std.mem.eql(u8, key, "attempt_id") or std.mem.eql(u8, key, "residual_id")) return reference(a, "digest");
     if (std.mem.eql(u8, key, "recovery")) return shape(a, &.{.{ "mechanism", try enumSchema(state.RecoveryRequest, a) }}, &.{});
     if (std.mem.eql(u8, key, "question_revision") or std.mem.eql(u8, key, "expected_revision") or std.mem.eql(u8, key, "after_seq") or std.mem.eql(u8, key, "offset")) return reference(a, "counter");
     if (std.mem.eql(u8, key, "input") or std.mem.eql(u8, key, "answer") or std.mem.eql(u8, key, "message")) return typed(a, application, key);
@@ -401,7 +401,7 @@ pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.
         try json.put(a, &definitions, name ++ ".request", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "id", try reference(a, "rpc_id") }, .{ "method", try constant(a, name) }, .{ "params", params } }, &.{}));
     }
     try json.put(a, &definitions, "ping.result", try shape(a, &.{.{ "server_instance_id", id }}, &.{}));
-    try json.put(a, &definitions, "task.status.result", snapshot);
+    try json.put(a, &definitions, "task.status.result", try extend(a, snapshot, &.{.{ "residual_id", digest }}, &.{"residual_id"}));
     try json.put(a, &definitions, "task.unsubscribe.result", empty);
     try json.put(a, &definitions, "shutdown.result", try shape(a, &.{ .{ "mode", try enumeration(a, &.{ "park", "cancel" }) }, .{ "accepted", try literal(a, "{\"const\":true}") } }, &.{}));
     try json.put(a, &definitions, "task.events.result", try shape(a, &.{ .{ "events", try array(a, event, limits.event_page) }, .{ "earliest_available_seq", count }, .{ "high_water_seq", count }, .{ "next_after_seq", count }, .{ "has_more", boolean } }, &.{}));

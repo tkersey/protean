@@ -261,6 +261,13 @@ reconciliation and reports its current `pending`, `unresolved`, `capture_admitte
 `reply_settled`, or `not_sent` status. Capture admission alone does not establish
 a typed reply. Replay the unchanged operation to read its current status.
 
+For retired-controller cleanup, pass its `residual_id` to `task.status` to select
+that residual's recovery observation, including after the task has completed.
+The residual identities are available through current-controller description and
+`work.inspect`. The returned task revision and original occurrence/attempt IDs
+feed the same `task.reconcile` command. An empty mechanisms list reports that this
+host has no available recovery mechanism for that occurrence.
+
 Pure recovery is compiled for frozen snapshot operations and admitted generated
 tools. Admission validates the original bindings and seals a pending reconciliation
 before scheduling computation on the existing worker. The callback receives owned

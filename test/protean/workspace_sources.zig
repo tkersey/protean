@@ -274,6 +274,9 @@ pub const Reconstruction = struct {
         }
     };
     pub fn controller(b: *source.Builder, indexed: bool, cleanup: bool) !source.Module {
+        return controllerWithCleanup(b, indexed, cleanup, null);
+    }
+    pub fn controllerWithCleanup(b: *source.Builder, indexed: bool, cleanup: bool, workspace_command: ?c.workspace.Command) !source.Module {
         const e: E = .{ .b = b };
         const unit = try e.schema(void);
         const state_schema = if (indexed) try e.schema(Indexed) else try e.schema(Direct);
@@ -326,11 +329,15 @@ pub const Reconstruction = struct {
         if (!cleanup) return b.module(body, unit);
         const info = try @import("horos").library.cleanup.exitInfo(b, unit);
         const dispose = try b.effect(.{ .identity = "controller/1/snapshot", .payload = try e.schema(u64), .result = unit, .external = false });
-        const unwind = try b.declare(&.{info}, unit, &.{dispose}, &.{});
-        try b.define(unwind, try b.term(.{ .perform = .{ .effect = dispose, .payload = try e.number(7) } }));
+        const workspace_effect = if (workspace_command != null) try b.effect(.{ .identity = "controller/1/workspace", .payload = try e.schema(c.workspace.Command), .result = try e.schema(c.workspace.Reply), .external = false }) else null;
+        const cleanup_effects = if (workspace_effect) |effect| try b.allocator().dupe(@TypeOf(dispose), &.{ dispose, effect }) else &.{dispose};
+        const unwind = try b.declare(&.{info}, unit, cleanup_effects, &.{});
+        const disposed = try b.term(.{ .perform = .{ .effect = dispose, .payload = try e.number(7) } });
+        try b.define(unwind, if (workspace_effect) |effect| try b.bind(try b.variable(try e.schema(c.workspace.Reply)), try b.term(.{ .perform = .{ .effect = effect, .payload = try b.literal(.{ .schema = try e.schema(c.workspace.Command), .bytes = try c.encodeOwned(c.workspace.Command, b.allocator(), workspace_command.?) }) } }), disposed) else disposed);
         const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{input}, .result = try e.schema(Output), .effects = &.{deliberate} } } });
-        const cleanup_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{info}, .result = unit, .effects = &.{dispose} } } });
-        const entry = try b.declare(&.{input}, try e.schema(Output), &.{ deliberate, dispose }, &.{});
+        const cleanup_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{info}, .result = unit, .effects = cleanup_effects } } });
+        const effects = if (workspace_effect) |effect| try b.allocator().dupe(@TypeOf(dispose), &.{ deliberate, dispose, effect }) else &.{ deliberate, dispose };
+        const entry = try b.declare(&.{input}, try e.schema(Output), effects, &.{});
         try b.define(entry, try b.term(.{ .protect = .{ .body = try b.lambda(body, body_type), .cleanup = try b.lambda(unwind, cleanup_type), .arguments = &.{try b.reference(b.parameter(entry, 0))} } }));
         return b.module(entry, unit);
     }

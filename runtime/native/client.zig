@@ -65,6 +65,10 @@ pub fn Client(comptime Types: type) type {
         batch: bool = false,
 
         fn snapshot(self: *Self, a: std.mem.Allocator, id: state.TaskId) !json.Value {
+            return self.subjectSnapshot(a, id, null);
+        }
+
+        fn subjectSnapshot(self: *Self, a: std.mem.Allocator, id: state.TaskId, residual: ?state.Digest) !json.Value {
             var decoded = try self.service.task(a, id);
             defer decoded.deinit();
             const task = decoded.value;
@@ -110,7 +114,8 @@ pub fn Client(comptime Types: type) type {
             try json.put(a, &result, "pending_messages", .{ .array = messages });
             try json.put(a, &result, "pending_messages_truncated", .{ .bool = messages.items.len != task.messages.items.len });
             var recovery: json.Value = .null;
-            if (try self.service.recoveryAvailability(a, id)) |available| {
+            if (residual) |selected| try json.put(a, &result, "residual_id", try hexadecimal(a, selected));
+            if (try self.service.subjectRecoveryAvailability(a, id, residual)) |available| {
                 recovery = json.object();
                 try json.put(a, &recovery, "occurrence_id", try hexadecimal(a, available.occurrence));
                 try json.put(a, &recovery, "attempt_id", try hexadecimal(a, available.attempt));
@@ -382,7 +387,7 @@ pub fn Client(comptime Types: type) type {
                     const mechanism = std.meta.stringToEnum(state.RecoveryRequest, try json.text(try field(recovery, "mechanism"))) orelse return error.InvalidParams;
                     return self.admission(a, try self.service.reconcile(a, try operationId(params), try identifier(16, try field(params, "task_id")), try json.decimal(u64, try field(params, "expected_revision")), try identifier(32, try field(params, "occurrence_id")), try identifier(32, try field(params, "attempt_id")), mechanism));
                 },
-                .@"task.status" => return self.snapshot(a, try identifier(16, try field(params, "task_id"))),
+                .@"task.status" => return self.subjectSnapshot(a, try identifier(16, try field(params, "task_id")), if (json.get(params, "residual_id")) |id| try identifier(32, id) else null),
                 .@"task.result" => return self.taskResult(a, try identifier(16, try field(params, "task_id"))),
                 .@"task.events" => {
                     const limit = if (json.get(params, "limit")) |limit| try json.numberInteger(u32, if (limit == .number_string) limit.number_string else return error.InvalidParams) else @as(u32, 16);
