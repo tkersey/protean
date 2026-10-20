@@ -882,8 +882,11 @@ fn generatedFromProducer(
     guard_input: ?[]const u8,
     expected_layout: bool,
 ) !GeneratedRuntime {
+    var phase: []const u8 = "producer execution";
+    errdefer std.debug.print("generated runtime {s}: {s}\n", .{ label, phase });
     const construction_started = std.Io.Clock.awake.now(std.testing.io);
     const result = try runTransformer(a, service, task, producer, ancestor, label, expected_layout);
+    phase = "candidate construction";
     const derived = try service.workspaceCommand(
         a,
         try std.fmt.allocPrint(a, "{s}-derive", .{label}),
@@ -896,7 +899,9 @@ fn generatedFromProducer(
     );
     const candidate = try semanticReference(a, derived, "candidate");
     const construction_ns = std.math.cast(u64, @max(0, std.Io.Clock.awake.now(std.testing.io).nanoseconds - construction_started.nanoseconds)) orelse std.math.maxInt(u64);
+    phase = "reference guard";
     if (guard_input) |input| try exerciseGuard(a, service, task, program, input, candidate);
+    phase = "independent validation";
     const validation_started = std.Io.Clock.awake.now(std.testing.io);
     const validated = try service.workspaceCommand(
         a,
@@ -908,6 +913,7 @@ fn generatedFromProducer(
     const validation_ns = std.math.cast(u64, @max(0, std.Io.Clock.awake.now(std.testing.io).nanoseconds - validation_started.nanoseconds)) orelse std.math.maxInt(u64);
     if (ancestor == .runtime)
         try std.testing.expect(!std.meta.eql(try nativeIdentity(ancestor.runtime), try nativeIdentity(runtime)));
+    phase = "helper correspondence";
     try helperCorrespondence(a, service, task, ancestor, runtime, expected_layout);
     return .{
         .candidate = candidate,
@@ -1012,23 +1018,22 @@ fn wrongCutAccounting(a: std.mem.Allocator, module: source.Module) !source.Modul
             break module.schemas[@intCast(effect.payload)].sum[0];
     } else return error.MissingServiceBridge;
     const word = module.schemas[@intCast(cut)].product[1];
-    const constants = try a.alloc(data.program.Literal, module.constants.len + 1);
-    @memcpy(constants[0..module.constants.len], module.constants);
-    constants[module.constants.len] = .{ .schema = word, .bytes = &@as([8]u8, @splat(0)) };
-    const values = try a.alloc(source.ast.Value, module.values.len + 1);
-    @memcpy(values[0..module.values.len], module.values);
-    values[module.values.len] = .{
-        .schema = word,
-        .expression = .{ .literal = module.constants.len },
-    };
+    const zero: Id = for (module.values, 0..) |value, id| {
+        if (value.schema != word or value.expression != .literal) continue;
+        const literal = module.constants[@intCast(value.expression.literal)];
+        if (std.mem.eql(u8, literal.bytes, &@as([8]u8, @splat(0))))
+            break @intCast(id);
+    } else return error.MissingAccountingZero;
+    const values = try a.dupe(source.ast.Value, module.values);
     var changed: usize = 0;
-    for (values[0..module.values.len]) |*value| {
+    for (values, 0..) |*value, id| {
         if (value.schema != cut or value.expression != .primitive) continue;
         var primitive = value.expression.primitive;
         if (primitive.opcode != .product) continue;
+        try std.testing.expect(zero < id);
         try std.testing.expectEqual(@as(usize, 3), primitive.operands.len);
         const operands = try a.dupe(Id, primitive.operands);
-        operands[1] = module.values.len;
+        operands[1] = zero;
         primitive.operands = operands;
         value.expression = .{ .primitive = primitive };
         changed += 1;
@@ -1036,7 +1041,6 @@ fn wrongCutAccounting(a: std.mem.Allocator, module: source.Module) !source.Modul
     try std.testing.expect(changed != 0);
     var result = module;
     result.values = values;
-    result.constants = constants;
     return result;
 }
 
@@ -1075,7 +1079,10 @@ fn exerciseWrongCandidate(
     ancestor: contracts.workspace.SemanticTarget,
     produced: contracts.workspace.Ref,
 ) !void {
+    var phase: []const u8 = "divergent source construction";
+    errdefer std.debug.print("wrong candidate: {s}\n", .{phase});
     const proposal = try divergentProposal(a, service, task, produced);
+    phase = "structurally valid candidate derivation";
     const response = try service.workspaceCommand(a, "generated-wrong-derive", task, .{
         .program = .{ .derive = .{
             .ancestor = ancestor,
@@ -1084,6 +1091,7 @@ fn exerciseWrongCandidate(
         } },
     });
     const candidate = try semanticReference(a, response, "candidate");
+    phase = "independent rejection";
     const rejected = try service.workspaceCommand(a, "generated-wrong-validate", task, .{
         .program = .{ .validate = .{ .candidate = candidate } },
     });
@@ -1092,6 +1100,7 @@ fn exerciseWrongCandidate(
     defer parsed.deinit();
     try std.testing.expectEqualStrings("rejected", parsed.value.object.get("validation").?.string);
     try std.testing.expect(!parsed.value.object.contains("runtime"));
+    phase = "guard divergence";
     try exerciseDivergentGuard(a, service, task, program, input, candidate);
 }
 
