@@ -1089,6 +1089,17 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           assert.equal(new Set(switches.map(action => action.arguments.command.value.operation)).size, 1);
         }
         if (name === 'tools-runtime-mobility') {
+          assert.equal(metrics.controller_adoptions, 1);
+          assert.equal(metrics.rejected_adoptions, 0);
+          assert(metrics.compiler_nanoseconds > 0);
+          assert(metrics.conversion_publication_nanoseconds > 0);
+          toolRuns.at(-1).reconstruction_accounting = {
+            adoptions: metrics.controller_adoptions,
+            rejected_adoptions: metrics.rejected_adoptions,
+            trials: metrics.controller_trials,
+            compiler_nanoseconds: metrics.compiler_nanoseconds,
+            conversion_publication_nanoseconds: metrics.conversion_publication_nanoseconds,
+          };
           const transported = metrics.actions.filter(action => action.name === 'placement' && action.arguments.command.tag === 'control' && action.arguments.command.value.command.tag === 'realize');
           assert(transported.length > 0);
           assert.equal(armViolations('generic', transported).length, transported.length);
