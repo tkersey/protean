@@ -70,7 +70,9 @@ jobs:
           mkdir -p .zig-cache/tmp
           lane="${{ matrix.lane }}"
           packages=()
-          command -v rg >/dev/null || packages+=(ripgrep)
+          if [ -z "${{ matrix.compiled_profile }}" ] || [ "${{ matrix.compiled_profile }}" = product ]; then
+            command -v rg >/dev/null || packages+=(ripgrep)
+          fi
           if [[ "$lane" == native* ]] || [[ "$lane" == runtime* ]] || [ "$lane" = downstream ]; then
             test -x /usr/bin/bwrap || packages+=(bubblewrap)
             test -x /usr/bin/strace || packages+=(strace)
@@ -218,7 +220,7 @@ jobs:
           run_compiled_tests() {
             local log="$RUNNER_TEMP/$1-tests.log"
             "$RUNNER_TEMP/protean-qualification/verification/$1" 2>&1 | tee "$log"
-            rg -Fxq "All $2 tests passed." "$log"
+            grep -Fxq "All $2 tests passed." "$log"
           }
           if [ "${{ matrix.lane }}" = authoring ]; then
             zig build check-protean check-native-https \
