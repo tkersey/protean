@@ -72,6 +72,8 @@ pub fn expectContextOutputBound(service: anytype, a: std.mem.Allocator, task: na
     var manifest_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
     const index = try store.archiveIndex(a, task, .{ .digest = manifest_digest, .bytes = service.assets.manifest.len });
+    var compiler_facts = try service.prepareWorkspaceValidation(task);
+    defer compiler_facts.deinit();
     try store.begin();
     defer store.rollback();
     var operations = try store.database.prepare("SELECT p.id,o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?", &.{.{ .blob = &task }});
@@ -113,7 +115,7 @@ pub fn expectContextOutputBound(service: anytype, a: std.mem.Allocator, task: na
     }
     // All substituted objects remain legitimate task-owned artifacts; receipt,
     // event and optional acquired reply have coherent content hashes.
-    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(a, task, index.records.items));
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, task, index.records.items, &compiler_facts));
 }
 
 pub fn nativeIdentity(ref: contracts.workspace.Ref) ![32]u8 {

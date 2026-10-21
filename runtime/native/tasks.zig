@@ -175,11 +175,276 @@ pub fn Service(comptime Types: type) type {
         placement_pending: std.ArrayList(struct { task: state.TaskId, id: state.Digest, kind: PlacementKind }) = .empty,
         placement_job: ?struct { task: state.TaskId, id: state.Digest, kind: PlacementKind, job: *@import("placement_job.zig").Job } = null,
         checked_workspace_programs: std.AutoHashMapUnmanaged(state.Digest, u64) = .empty,
-        checked_workspace_runtimes: std.AutoHashMapUnmanaged(state.Digest, u64) = .empty,
+        checked_workspace_runtimes: std.AutoHashMapUnmanaged(CompilerFact, u64) = .empty,
         runtime_cache: ?struct { epoch: u64, artifact: kosmos.RuntimeArtifact } = null,
+        compiler_facts: ?*CompilerFacts = null,
         // Import may use ordinary mutation projections only through an existing
         // matching receipt. Missing receipts must never execute a new mutation.
         workspace_replay: ?struct { replayed: bool, records: []const state.ArchiveRecord } = null,
+
+        const CompilerFact = struct {
+            kind: enum { program, candidate, runtime, output },
+            input: state.Reference,
+            output: state.Reference,
+            context: state.Digest = @splat(0),
+        };
+
+        pub const CompilerFacts = struct {
+            allocator: std.mem.Allocator,
+            entries: std.AutoHashMapUnmanaged(CompilerFact, void) = .empty,
+            sources: std.AutoHashMapUnmanaged(state.Digest, []u8) = .empty,
+            values: std.AutoHashMapUnmanaged(state.Digest, construction.SemanticValue) = .empty,
+
+            pub fn deinit(facts: *CompilerFacts) void {
+                var sources = facts.sources.valueIterator();
+                while (sources.next()) |bytes| facts.allocator.free(bytes.*);
+                facts.sources.deinit(facts.allocator);
+                var semantic_values = facts.values.valueIterator();
+                while (semantic_values.next()) |value| {
+                    facts.allocator.free(value.schema);
+                    facts.allocator.free(value.value);
+                }
+                facts.values.deinit(facts.allocator);
+                facts.entries.deinit(facts.allocator);
+            }
+        };
+
+        const SemanticRendering = union(enum) {
+            source: struct { guest: state.Reference, section: wc.SemanticSection, page: wc.Page },
+            value: struct { module: wc.SemanticModule, references: bool },
+        };
+
+        fn semanticRenderingKey(a: std.mem.Allocator, runtime: *const kosmos.RuntimeArtifact, selection: SemanticRendering) !state.Digest {
+            const runtime_bytes = try runtime.encode(a);
+            defer a.free(runtime_bytes);
+            const Key = struct { runtime: state.Reference, selection: SemanticRendering };
+            const bytes = try contracts.encodeOwned(Key, a, .{ .runtime = compilerReference(runtime_bytes), .selection = selection });
+            defer a.free(bytes);
+            return storage.digest(bytes);
+        }
+
+        fn renderSemanticSource(self: *Self, a: std.mem.Allocator, runtime: *const kosmos.RuntimeArtifact, guest: state.Reference, section: wc.SemanticSection, page: wc.Page) !json.Value {
+            const key = try semanticRenderingKey(a, runtime, .{ .source = .{ .guest = guest, .section = section, .page = page } });
+            if (self.compiler_facts) |facts| if (facts.sources.get(key)) |bytes| {
+                return std.json.parseFromSliceLeaky(json.Value, a, bytes, .{ .allocate = .alloc_always, .parse_numbers = false });
+            };
+            if (self.store().transaction) return error.CompilerPreparationRequired;
+            const result = try construction.semanticSource(a, runtime, guest, section, page);
+            if (self.compiler_facts) |facts| {
+                const bytes = try json.canonical(facts.allocator, result);
+                errdefer facts.allocator.free(bytes);
+                try facts.sources.put(facts.allocator, key, bytes);
+            }
+            return result;
+        }
+
+        fn renderSemanticValue(self: *Self, a: std.mem.Allocator, runtime: *const kosmos.RuntimeArtifact, module: wc.SemanticModule, references: bool) !construction.SemanticValue {
+            const key = try semanticRenderingKey(a, runtime, .{ .value = .{ .module = module, .references = references } });
+            if (self.compiler_facts) |facts| if (facts.values.get(key)) |value| {
+                const schema = try a.dupe(u8, value.schema);
+                errdefer a.free(schema);
+                return .{ .schema = schema, .value = try a.dupe(u8, value.value) };
+            };
+            if (self.store().transaction) return error.CompilerPreparationRequired;
+            const result = try construction.semanticModuleValue(a, runtime, module, references);
+            errdefer {
+                a.free(result.schema);
+                a.free(result.value);
+            }
+            if (self.compiler_facts) |facts| {
+                const schema = try facts.allocator.dupe(u8, result.schema);
+                errdefer facts.allocator.free(schema);
+                const value = try facts.allocator.dupe(u8, result.value);
+                errdefer facts.allocator.free(value);
+                try facts.values.put(facts.allocator, key, .{ .schema = schema, .value = value });
+            }
+            return result;
+        }
+
+        fn compilerFact(self: *Self, fact: CompilerFact) !bool {
+            if (self.compiler_facts) |facts| if (facts.entries.contains(fact)) return true;
+            if (self.store().transaction) return error.CompilerPreparationRequired;
+            return false;
+        }
+
+        fn retainCompilerFact(self: *Self, fact: CompilerFact) !void {
+            if (self.compiler_facts) |facts| try facts.entries.put(facts.allocator, fact, {});
+        }
+
+        fn compilerReference(bytes: []const u8) state.Reference {
+            return .{ .digest = storage.digest(bytes), .bytes = bytes.len };
+        }
+
+        fn prepareSemanticRead(self: *Self, a: std.mem.Allocator, manifest: state.Archive, source: anytype, parent: state.Task, selection: @FieldType(wc.InspectionTarget, "semantic_source"), page: wc.Page, basis: workspace.ReadObservation) !void {
+            var runtime: ?state.Reference = null;
+            var guest: state.Reference = undefined;
+            switch (selection.subject) {
+                .runtime => |selected| {
+                    const key = try workspace.custodyId(a, parent.id, try wp.identity(selected, .runtime));
+                    const ref = archive_api.record(manifest, .workspace_runtime, key) orelse return error.InvalidArchive;
+                    var saved = try contracts.decodeOwned(workspace.Runtime, a, try source.object(a, ref, null));
+                    defer saved.deinit();
+                    runtime = saved.value.artifact;
+                    const program_key = try workspace.custodyId(a, parent.id, saved.value.program);
+                    const program_ref = archive_api.record(manifest, .workspace_program, program_key) orelse return error.InvalidArchive;
+                    var program = try contracts.decodeOwned(workspace.Program, a, try source.object(a, program_ref, null));
+                    defer program.deinit();
+                    guest = program.value.description.image;
+                },
+                .work => {
+                    if (basis != .works or basis.works.works.items.len == 0) return error.InvalidArchive;
+                    const observed = basis.works.works.items[0] orelse return error.InvalidArchive;
+                    runtime = observed.work.runtime;
+                    const key = try workspace.custodyId(a, parent.id, observed.work.program);
+                    const ref = archive_api.record(manifest, .workspace_program, key) orelse return error.InvalidArchive;
+                    var program = try contracts.decodeOwned(workspace.Program, a, try source.object(a, ref, null));
+                    defer program.deinit();
+                    guest = program.value.description.image;
+                },
+                .controller => {
+                    if (basis != .controller) return error.InvalidArchive;
+                    runtime = basis.controller.runtime;
+                    guest = parent.image;
+                    if (basis.controller.binding) |id| {
+                        const ref = archive_api.record(manifest, .controller_binding, id) orelse return error.InvalidArchive;
+                        var binding = try contracts.decodeOwned(state.ControllerBinding, a, try source.object(a, ref, null));
+                        defer binding.deinit();
+                        guest = binding.value.image;
+                    }
+                },
+            }
+            var admitted = if (runtime) |ref|
+                try kosmos.RuntimeArtifact.init(a, try source.object(a, ref, null), ref.digest)
+            else
+                try self.program.retainRuntime();
+            defer admitted.deinit();
+            _ = try self.renderSemanticSource(a, &admitted, guest, selection.section, page);
+        }
+
+        fn prepareSemanticRenderings(self: *Self, manifest: state.Archive, source: anytype) !void {
+            for (manifest.records.items) |row| {
+                if (row.kind != .workspace_value and row.kind != .workspace_reply) continue;
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const bytes = try source.object(a, row.body, null);
+                if (row.kind == .workspace_value) {
+                    var saved = try contracts.decodeOwned(workspace.Value, a, bytes);
+                    defer saved.deinit();
+                    const origin = saved.value.derivation.semantic_source orelse continue;
+                    var admitted = try kosmos.RuntimeArtifact.init(a, try source.object(a, origin.runtime, null), origin.runtime.digest);
+                    defer admitted.deinit();
+                    const rendered = try self.renderSemanticValue(a, &admitted, origin.selection.module, origin.selection.references);
+                    a.free(rendered.schema);
+                    a.free(rendered.value);
+                    continue;
+                }
+                var saved = try contracts.decodeOwned(workspace.ReplyObservation, a, bytes);
+                defer saved.deinit();
+                if (saved.value.evidence != .read) continue;
+                var request = try data.invocation.decode(data.invocation.Request, a, try source.object(a, saved.value.request, null));
+                defer request.deinit();
+                const entry = try self.handlers.resolve(request.value, request.value.binding.program_identity);
+                const authorize = entry.declaration.workspace orelse return error.InvalidArchive;
+                var parent = try contracts.decodeOwned(state.Task, a, try source.object(a, manifest.task, null));
+                defer parent.deinit();
+                const read = struct {
+                    fn object(context: *anyopaque, allocator: std.mem.Allocator, ref: state.Reference, limit: usize) ![]u8 {
+                        const selected: @TypeOf(source) = @ptrCast(@alignCast(context));
+                        return selected.object(allocator, ref, limit);
+                    }
+                }.object;
+                const authorized_bytes = try authorize(.{
+                    .allocator = a,
+                    .task = parent.value.id,
+                    .tenant = parent.value.tenant.bytes,
+                    .profile = self.profile.bytes,
+                    .application = self.application.image_identity,
+                    .resources = parent.value.resources.items,
+                    .objects = .validating(source, read),
+                }, request.value.binding.payload);
+                var authorized = try contracts.decodeOwned(workspace.Authorized, a, authorized_bytes);
+                defer authorized.deinit();
+                const command = authorized.value.command;
+                if (command != .program or command.program != .inspect or command.program.inspect.target != .semantic_source) continue;
+                try self.prepareSemanticRead(a, manifest, source, parent.value, command.program.inspect.target.semantic_source, command.program.inspect.page, saved.value.evidence.read);
+            }
+        }
+
+        fn prepareCompilerFacts(self: *Self, manifest: state.Archive, source: anytype) !void {
+            if (self.store().transaction or self.compiler_facts == null) return error.InvalidState;
+            for (manifest.records.items) |row| {
+                if (row.kind != .workspace_runtime) continue;
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                var saved = try contracts.decodeOwned(workspace.Runtime, a, try source.object(a, row.body, null));
+                defer saved.deinit();
+                if (saved.value.validation) |validation| try self.requireSemanticPolicy(validation.root, validation.checker.bytes);
+            }
+            for (manifest.events.items) |row| {
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                var event_value = try contracts.decodeOwned(state.Event, a, try source.object(a, row.body, null));
+                defer event_value.deinit();
+                const reference = event_value.value.workspace_command orelse continue;
+                var command = try contracts.decodeOwned(workspace.PublicationCommand, a, try source.object(a, reference, null));
+                defer command.deinit();
+                if (command.value != .semantic) continue;
+                const selected = command.value.semantic;
+                try self.validateCompilerOutput(a, event_value.value.task, try source.object(a, selected.input, null), try source.object(a, selected.output, null));
+            }
+            for (manifest.records.items) |row| {
+                if (row.kind != .capture) continue;
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                var captured = try contracts.decodeOwned(state.Capture, a, try source.object(a, row.body, null));
+                defer captured.deinit();
+                const output = captured.value.response orelse continue;
+                const attempt_ref = archive_api.record(manifest, .attempt, row.id) orelse return error.InvalidArchive;
+                var attempt = try contracts.decodeOwned(state.Attempt, a, try source.object(a, attempt_ref, null));
+                defer attempt.deinit();
+                if (attempt.value.operation != .workspace_build) continue;
+                try self.validateCompilerOutput(a, attempt.value.task, try source.object(a, captured.value.request, null), try source.object(a, output, null));
+            }
+            for (manifest.records.items) |row| {
+                if (row.kind != .workspace_program and row.kind != .workspace_candidate and row.kind != .workspace_runtime) continue;
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const bytes = try source.object(a, row.body, null);
+                switch (row.kind) {
+                    .workspace_program => {
+                        var saved = try contracts.decodeOwned(workspace.Program, a, bytes);
+                        defer saved.deinit();
+                        if (comptime @TypeOf(source) == *storage.Store) {
+                            if (self.checked_workspace_programs.get(saved.value.artifact.digest) == self.store().integrity_epoch) continue;
+                        }
+                        try self.validateProgramCompiler(a, saved.value, source);
+                    },
+                    .workspace_candidate => {
+                        var saved = try contracts.decodeOwned(workspace.Candidate, a, bytes);
+                        defer saved.deinit();
+                        try self.validateCandidateCompiler(a, saved.value, source);
+                    },
+                    .workspace_runtime => {
+                        var saved = try contracts.decodeOwned(workspace.Runtime, a, bytes);
+                        defer saved.deinit();
+                        if (comptime @TypeOf(source) == *storage.Store) {
+                            if (self.checked_workspace_runtimes.get(try runtimeCompilerFact(a, saved.value.artifact, saved.value.validation)) == self.store().integrity_epoch) continue;
+                        }
+                        const code = try source.object(a, saved.value.artifact, null);
+                        var admitted = try kosmos.RuntimeArtifact.init(a, code, saved.value.artifact.digest);
+                        defer admitted.deinit();
+                        try self.validateRuntimeCompiler(a, saved.value.artifact, saved.value.validation, &admitted, source);
+                    },
+                    else => unreachable,
+                }
+            }
+            try self.prepareSemanticRenderings(manifest, source);
+        }
 
         pub fn init(a: std.mem.Allocator, io: std.Io, namespace: *Namespace, assets: discovery.Assets, application: *const discovery.Application, handlers: registry.Registry, profile: Profile) !Self {
             try profile.validate();
@@ -6050,6 +6315,17 @@ pub fn Service(comptime Types: type) type {
             // Retire before publication. If retirement fails, nothing has been
             // offered and the sole source retains its prior ownership.
             if (self.active) |active| if (std.meta.eql(active.task, subject.task) and ((active.subject != .work and subject.work == null) or (active.subject == .work and std.meta.eql(@as(?state.Digest, active.subject.work), subject.work)))) try self.retire(a);
+            var compiler_facts: CompilerFacts = .{ .allocator = self.allocator };
+            defer compiler_facts.deinit();
+            const prior_compiler_facts = self.compiler_facts;
+            if (self.compiler_facts == null) self.compiler_facts = &compiler_facts;
+            defer self.compiler_facts = prior_compiler_facts;
+            {
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const manifest = try self.store().archiveIndex(arena.allocator(), subject.task, compilerReference(self.assets.manifest));
+                try self.prepareCompilerFacts(manifest, self.store());
+            }
             try self.store().begin();
             defer self.store().rollback();
             // Enabling placement on an existing local task first records its
@@ -6205,6 +6481,11 @@ pub fn Service(comptime Types: type) type {
         pub fn exportCheckpoint(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, path: []const u8) !archive_api.Exported {
             try self.archiveAccess();
             try self.retire(a);
+            var compiler_facts: CompilerFacts = .{ .allocator = self.allocator };
+            defer compiler_facts.deinit();
+            const prior_compiler_facts = self.compiler_facts;
+            if (self.compiler_facts == null) self.compiler_facts = &compiler_facts;
+            defer self.compiler_facts = prior_compiler_facts;
             _ = try self.store().auditRetention(self.handlers, self.application.image_identity);
             var value = try self.task(a, task_id);
             defer value.deinit();
@@ -6279,6 +6560,12 @@ pub fn Service(comptime Types: type) type {
             var tasks_present = try self.store().database.prepare("SELECT 1 FROM tasks LIMIT 1", &.{});
             defer tasks_present.deinit();
             if (try tasks_present.step() == .row) return error.NonEmptyNamespace;
+            var compiler_facts: CompilerFacts = .{ .allocator = self.allocator };
+            defer compiler_facts.deinit();
+            const prior_compiler_facts = self.compiler_facts;
+            if (self.compiler_facts == null) self.compiler_facts = &compiler_facts;
+            defer self.compiler_facts = prior_compiler_facts;
+            try self.prepareCompilerFacts(reader.manifest.value, &reader);
             try self.store().begin();
             defer self.store().rollback();
             try reader.acquire(self.store());
@@ -7101,14 +7388,6 @@ pub fn Service(comptime Types: type) type {
             candidate: workspace.Candidate,
         ) !void {
             const d = candidate.description;
-            const ancestor_bytes = try self.store().object(a, d.ancestor, null);
-            defer a.free(ancestor_bytes);
-            var ancestor = try kosmos.RuntimeArtifact.init(a, ancestor_bytes, d.ancestor.digest);
-            defer ancestor.deinit();
-            const guest_bytes = try self.store().object(a, d.guest, null);
-            defer a.free(guest_bytes);
-            const guest = try data.program_image.Admitted.decode(a, guest_bytes);
-            defer guest.deinit();
             const proposal_bytes = try self.store().object(a, d.proposal, null);
             defer a.free(proposal_bytes);
             if (d.producer) |producer| {
@@ -7116,6 +7395,26 @@ pub fn Service(comptime Types: type) type {
                 defer a.free(expected);
                 if (!same(proposal_bytes, expected)) return error.InvalidCandidate;
             }
+            try self.validateCandidateCompiler(a, candidate, self.store());
+        }
+
+        fn validateCandidateCompiler(self: *Self, a: std.mem.Allocator, candidate: workspace.Candidate, source: anytype) !void {
+            const d = candidate.description;
+            const descriptor = try contracts.encodeOwned(workspace.CandidateArtifact, a, d);
+            defer a.free(descriptor);
+            if (!std.meta.eql(candidate.artifact, compilerReference(descriptor))) return error.InvalidCandidate;
+            const fact: CompilerFact = .{ .kind = .candidate, .input = candidate.artifact, .output = d.code };
+            if (try self.compilerFact(fact)) return;
+            const ancestor_bytes = try source.object(a, d.ancestor, null);
+            defer a.free(ancestor_bytes);
+            var ancestor = try kosmos.RuntimeArtifact.init(a, ancestor_bytes, d.ancestor.digest);
+            defer ancestor.deinit();
+            const guest_bytes = try source.object(a, d.guest, null);
+            defer a.free(guest_bytes);
+            const guest = try data.program_image.Admitted.decode(a, guest_bytes);
+            defer guest.deinit();
+            const proposal_bytes = try source.object(a, d.proposal, null);
+            defer a.free(proposal_bytes);
             var document = try @import("source_records.zig").decodeRecord(
                 construction.CandidateDocument,
                 a,
@@ -7135,6 +7434,7 @@ pub fn Service(comptime Types: type) type {
                 .digest = storage.digest(code),
                 .bytes = code.len,
             })) return error.InvalidCandidate;
+            try self.retainCompilerFact(fact);
         }
 
         fn workspaceCandidateObservation(
@@ -7180,7 +7480,7 @@ pub fn Service(comptime Types: type) type {
         ) !json.Value {
             var resolved = try self.semanticRuntime(a, task_id, selection.subject, basis);
             defer resolved.deinit();
-            var result = try construction.semanticSource(
+            var result = try self.renderSemanticSource(
                 a,
                 &resolved.admitted,
                 resolved.guest,
@@ -8104,7 +8404,7 @@ pub fn Service(comptime Types: type) type {
             defer admitted.deinit();
             const runtime = try admitted.encode(a);
             errdefer a.free(runtime);
-            const derived = try construction.semanticModuleValue(
+            const derived = try self.renderSemanticValue(
                 a,
                 &admitted,
                 selection.module,
@@ -8146,7 +8446,7 @@ pub fn Service(comptime Types: type) type {
             defer a.free(bytes);
             var retained = try kosmos.RuntimeArtifact.init(a, bytes, origin.runtime.digest);
             defer retained.deinit();
-            return construction.semanticModuleValue(
+            return self.renderSemanticValue(
                 a,
                 &retained,
                 origin.selection.module,
@@ -10197,11 +10497,14 @@ pub fn Service(comptime Types: type) type {
             input: []const u8,
             output: []const u8,
         ) !void {
+            const fact: CompilerFact = .{ .kind = .output, .input = compilerReference(input), .output = compilerReference(output) };
+            if (try self.compilerFact(fact)) return;
             var actual = try contracts.decodeOwned(build_job.Output, a, output);
             defer actual.deinit();
             if (actual.value == .validation) switch (actual.value.validation.outcome) {
                 .resource_exhausted, .interrupted, .unavailable_dependency => {
                     if (actual.value.validation.code.bytes.len == 0) return error.InvalidArchive;
+                    try self.retainCompilerFact(fact);
                     return;
                 },
                 else => {},
@@ -10229,6 +10532,24 @@ pub fn Service(comptime Types: type) type {
             const actual_value = try contracts.encodeOwned(build_job.Output, a, actual.value);
             defer a.free(actual_value);
             if (!same(expected_value, actual_value)) return error.InvalidArchive;
+            try self.retainCompilerFact(fact);
+            var frozen = try contracts.decodeOwned(build_job.Input, a, input);
+            defer frozen.deinit();
+            if (frozen.value == .derive and actual.value == .derived) {
+                const description = semanticCandidateDescription(frozen.value.derive, actual.value.derived.artifact.bytes);
+                const bytes = try contracts.encodeOwned(workspace.CandidateArtifact, a, description);
+                defer a.free(bytes);
+                try self.retainCompilerFact(.{ .kind = .candidate, .input = compilerReference(bytes), .output = description.code });
+            } else if (frozen.value == .validate and actual.value == .validation and actual.value.validation.outcome == .validated) {
+                const selected = frozen.value.validate;
+                try self.retainCompilerFact(try runtimeCompilerFact(a, compilerReference(selected.candidate.bytes), .{
+                    .candidate = selected.candidate_ref,
+                    .ancestor = compilerReference(selected.ancestor.bytes),
+                    .guest = selected.guest,
+                    .root = selected.root,
+                    .checker = selected.checker,
+                }));
+            }
         }
 
         fn workspaceSemanticCommand(
@@ -10250,6 +10571,7 @@ pub fn Service(comptime Types: type) type {
             const input_bytes = try self.workspacePrepareSemanticBuild(a, parent.value, command, null);
             defer a.free(input_bytes);
             const task_name = std.fmt.bytesToHex(task_id, .lower);
+            if (self.store().transaction) return error.CompilerPreparationRequired;
             const output_bytes = try build_job.run(.{
                 .allocator = a,
                 .io = self.io,
@@ -10746,12 +11068,35 @@ pub fn Service(comptime Types: type) type {
             }
         };
 
-        fn retainValidatedRuntime(self: *Self, admitted: *const kosmos.RuntimeArtifact) !void {
+        fn retainValidatedRuntime(self: *Self, admitted: *const kosmos.RuntimeArtifact, fact: CompilerFact) !void {
             var retained = try admitted.clone();
             errdefer retained.deinit();
-            try self.checked_workspace_runtimes.put(self.allocator, admitted.identity, self.store().integrity_epoch);
+            try self.checked_workspace_runtimes.put(self.allocator, fact, self.store().integrity_epoch);
             if (self.runtime_cache) |*cached| cached.artifact.deinit();
             self.runtime_cache = .{ .epoch = self.store().integrity_epoch, .artifact = retained };
+        }
+
+        fn runtimeCompilerFact(a: std.mem.Allocator, reference: state.Reference, validation: ?workspace.ValidationFact) !CompilerFact {
+            const bytes = try contracts.encodeOwned(?workspace.ValidationFact, a, validation);
+            defer a.free(bytes);
+            return .{ .kind = .runtime, .input = reference, .output = if (validation) |fact| fact.ancestor else .{ .digest = @splat(0), .bytes = 0 }, .context = storage.digest(bytes) };
+        }
+
+        fn validateRuntimeCompiler(self: *Self, a: std.mem.Allocator, reference: state.Reference, validation: ?workspace.ValidationFact, admitted: *const kosmos.RuntimeArtifact, source: anytype) !void {
+            const fact = try runtimeCompilerFact(a, reference, validation);
+            if (try self.compilerFact(fact)) return;
+            if (admitted.content.value.lineage != null) {
+                const declared = validation orelse return error.InvalidRuntime;
+                const bytes = try source.object(a, declared.ancestor, null);
+                defer a.free(bytes);
+                var ancestor = try kosmos.RuntimeArtifact.init(a, bytes, declared.ancestor.digest);
+                defer ancestor.deinit();
+                try kosmos.RuntimeCompiler.validateAgainst(a, admitted, &ancestor);
+            } else {
+                if (validation != null) return error.InvalidRuntime;
+                try kosmos.RuntimeCompiler.validate(a, admitted);
+            }
+            try self.retainCompilerFact(fact);
         }
 
         fn workspaceRuntime(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, digest: state.Digest, program_id: ?state.Digest) !SelectedRuntime {
@@ -10781,14 +11126,14 @@ pub fn Service(comptime Types: type) type {
             errdefer admitted.deinit();
             const bound = admitted.content.value.guest orelse return error.InvalidRuntime;
             if (!std.mem.eql(u8, &bound, &guest.identity()) or !same(admitted.content.value.manifest.compiler.horos_package, @import("native_options").horos_identity)) return error.InvalidRuntime;
+            const fact = try runtimeCompilerFact(a, saved.value.artifact, saved.value.validation);
             if (admitted.content.value.lineage != null) {
                 try self.validateDerivedRuntime(a, saved.value, &admitted);
-            } else if (saved.value.validation != null) return error.InvalidRuntime else if (self.checked_workspace_runtimes.get(digest) != self.store().integrity_epoch) {
-                // Validation owns and releases its large temporary arenas.
-                // A caller's response arena may intentionally ignore free.
-                try kosmos.RuntimeCompiler.validate(self.allocator, &admitted);
+            } else if (saved.value.validation != null) return error.InvalidRuntime;
+            if (self.checked_workspace_runtimes.get(fact) != self.store().integrity_epoch) {
+                try self.validateRuntimeCompiler(self.allocator, saved.value.artifact, saved.value.validation, &admitted, self.store());
             }
-            try self.retainValidatedRuntime(&admitted);
+            try self.retainValidatedRuntime(&admitted, fact);
             return .{ .record = saved, .admitted = admitted };
         }
 
@@ -10809,17 +11154,7 @@ pub fn Service(comptime Types: type) type {
                 !std.meta.eql(d.ancestor, fact.ancestor) or !std.meta.eql(d.root, fact.root) or
                 !std.meta.eql(d.guest, fact.guest) or !same(d.checker.bytes, fact.checker.bytes))
                 return error.InvalidRuntime;
-            if (self.checked_workspace_runtimes.get(admitted.identity) ==
-                self.store().integrity_epoch) return;
-            const bytes = try self.store().object(a, fact.ancestor, null);
-            defer a.free(bytes);
-            var ancestor = try kosmos.RuntimeArtifact.init(
-                self.allocator,
-                bytes,
-                fact.ancestor.digest,
-            );
-            defer ancestor.deinit();
-            try kosmos.RuntimeCompiler.validateAgainst(self.allocator, admitted, &ancestor);
+            if (!std.meta.eql(admitted.identity, value.artifact.digest)) return error.InvalidRuntime;
         }
 
         fn workspaceRuntimeObservation(self: *Self, a: std.mem.Allocator, saved: workspace.Runtime) !json.Value {
@@ -10864,12 +11199,13 @@ pub fn Service(comptime Types: type) type {
             // Compiler and proof scratch ends before the next phase. Keeping it
             // in the caller's response arena retains completed work, including
             // independently decoded proofs, until that entire request ends.
+            if (self.store().transaction) return error.CompilerPreparationRequired;
             const bytes = try kosmos.RuntimeCompiler.compile(self.allocator, .{ .guest = guest, .horos_package = @import("native_options").horos_identity, .hooks = .{ .control = hooks.control, .storage = hooks.storage } });
             defer self.allocator.free(bytes);
             var admitted = try kosmos.RuntimeArtifact.init(self.allocator, bytes, storage.digest(bytes));
             defer admitted.deinit();
-            try kosmos.RuntimeCompiler.validate(self.allocator, &admitted);
-            try self.retainValidatedRuntime(&admitted);
+            try self.validateRuntimeCompiler(self.allocator, compilerReference(bytes), null, &admitted, self.store());
+            try self.retainValidatedRuntime(&admitted, try runtimeCompilerFact(a, compilerReference(bytes), null));
             try self.store().begin();
             defer self.store().rollback();
             const artifact = try self.store().putObject(bytes);
@@ -11784,7 +12120,15 @@ pub fn Service(comptime Types: type) type {
 
         fn validateWorkspaceProgram(self: *Self, a: std.mem.Allocator, saved: workspace.Program) !void {
             if (self.checked_workspace_programs.get(saved.artifact.digest)) |epoch| if (epoch == self.store().integrity_epoch) return;
+            try self.validateProgramCompiler(a, saved, self.store());
+            try self.checked_workspace_programs.put(self.allocator, saved.artifact.digest, self.store().integrity_epoch);
+        }
+
+        fn validateProgramCompiler(self: *Self, a: std.mem.Allocator, saved: workspace.Program, objects: anytype) !void {
             const artifact = saved.description;
+            const artifact_bytes = try contracts.encodeOwned(workspace.ProgramArtifact, a, artifact);
+            defer a.free(artifact_bytes);
+            if (!std.meta.eql(saved.artifact, compilerReference(artifact_bytes))) return error.InvalidArchive;
             const contract = if (artifact.controller != null) contracts.controller.identity else switch (artifact.source_kind) {
                 .source_records => @import("source_records.zig").identity,
                 .component_recipe => construction.component_identity,
@@ -11811,14 +12155,22 @@ pub fn Service(comptime Types: type) type {
                             if (pair[0].bytes != schema.len or !std.meta.eql(pair[0].digest, storage.digest(schema))) return error.CorruptState;
                         }
                     } else return error.CorruptState;
-                    try self.checked_workspace_programs.put(self.allocator, saved.artifact.digest, self.store().integrity_epoch);
                     return;
                 }
             }
-            const source = try self.store().object(a, artifact.source, null);
+            const context: state.Digest = if (artifact.controller != null) blk: {
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const scratch = arena.allocator();
+                const frozen_contract = try self.controllerContract(scratch);
+                break :blk storage.digest(try contracts.encodeOwned(contracts.controller.Contract, scratch, frozen_contract));
+            } else @splat(0);
+            const fact: CompilerFact = .{ .kind = .program, .input = saved.artifact, .output = artifact.image, .context = context };
+            if (try self.compilerFact(fact)) return;
+            const source = try objects.object(a, artifact.source, null);
             defer a.free(source);
             var diagnostic: construction.Diagnostic = .{};
-            var built = try self.workspaceCompile(self.allocator, source, artifact.source_kind, artifact.catalog, artifact.exposures.items, if (artifact.controller != null) .controller else .computation, &diagnostic);
+            var built = try self.workspaceCompileFrom(self.allocator, source, artifact.source_kind, artifact.catalog, artifact.exposures.items, if (artifact.controller != null) .controller else .computation, &diagnostic, objects);
             defer built.deinit();
             inline for (.{ .{ artifact.image, built.image }, .{ artifact.input_schema, built.interface.input.bytes }, .{ artifact.result_schema, built.interface.output.bytes }, .{ artifact.failure_schema, built.interface.failure.bytes } }) |pair| {
                 if (pair[0].bytes != pair[1].len or !std.meta.eql(pair[0].digest, storage.digest(pair[1]))) return error.CorruptState;
@@ -11837,7 +12189,7 @@ pub fn Service(comptime Types: type) type {
             const declared_controller = try contracts.encodeOwned(?contracts.controller.Descriptor, a, artifact.controller);
             defer a.free(declared_controller);
             if (!same(actual_controller, declared_controller)) return error.CorruptState;
-            try self.checked_workspace_programs.put(self.allocator, saved.artifact.digest, self.store().integrity_epoch);
+            try self.retainCompilerFact(fact);
         }
 
         pub fn workspaceWork(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: state.Digest) !contracts.Decoded(workspace.Work) {
@@ -11921,7 +12273,33 @@ pub fn Service(comptime Types: type) type {
             } else if (value.model != null or value.inputs.items.len != 0 or value.snapshot == null) return error.InvalidArchive;
         }
 
+        pub fn prepareWorkspaceValidation(self: *Self, task_id: state.TaskId) !CompilerFacts {
+            if (self.store().transaction) return error.InvalidState;
+            var facts: CompilerFacts = .{ .allocator = self.allocator };
+            errdefer facts.deinit();
+            const prior = self.compiler_facts;
+            self.compiler_facts = &facts;
+            defer self.compiler_facts = prior;
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const manifest = try self.store().archiveIndex(arena.allocator(), task_id, compilerReference(self.assets.manifest));
+            try self.prepareCompilerFacts(manifest, self.store());
+            return facts;
+        }
+
+        pub fn validateWorkspaceRecordsPrepared(self: *Self, allocator: std.mem.Allocator, task_id: state.TaskId, records: []const state.ArchiveRecord, facts: *CompilerFacts) !void {
+            const prior = self.compiler_facts;
+            self.compiler_facts = facts;
+            defer self.compiler_facts = prior;
+            try self.validateWorkspaceRecords(allocator, task_id, records);
+        }
+
         pub fn validateWorkspaceRecords(self: *Self, allocator: std.mem.Allocator, task_id: state.TaskId, records: []const state.ArchiveRecord) !void {
+            var compiler_facts: CompilerFacts = .{ .allocator = self.allocator };
+            defer compiler_facts.deinit();
+            const prior_compiler_facts = self.compiler_facts;
+            if (self.compiler_facts == null) self.compiler_facts = &compiler_facts;
+            defer self.compiler_facts = prior_compiler_facts;
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             const a = arena.allocator();
@@ -12473,6 +12851,12 @@ pub fn Service(comptime Types: type) type {
             };
         }
         fn workspaceCompile(self: *Self, a: std.mem.Allocator, source: []const u8, kind: @FieldType(workspace.ProgramArtifact, "source_kind"), catalog: ?state.Reference, exposures: []const wc.Exposure, role: wc.ProgramRole, diagnostic: *construction.Diagnostic) !construction.Built {
+            if (self.store().transaction) return error.CompilerPreparationRequired;
+            return self.workspaceCompileFrom(a, source, kind, catalog, exposures, role, diagnostic, self.store());
+        }
+
+        fn workspaceCompileFrom(self: *Self, a: std.mem.Allocator, source: []const u8, kind: @FieldType(workspace.ProgramArtifact, "source_kind"), catalog: ?state.Reference, exposures: []const wc.Exposure, role: wc.ProgramRole, diagnostic: *construction.Diagnostic, objects: anytype) !construction.Built {
+            if (self.store().transaction) return error.CompilerPreparationRequired;
             if (role == .controller) {
                 if (kind != .source_records or catalog != null or exposures.len != 0) return error.InvalidConstruction;
                 const contract = try self.controllerContract(a);
@@ -12495,7 +12879,7 @@ pub fn Service(comptime Types: type) type {
             if (exposures.len != 0) return error.InvalidExposure;
             diagnostic.phase = .authority;
             const ref = catalog orelse return error.UnavailableCatalog;
-            const bytes = try self.store().object(a, ref, null);
+            const bytes = try objects.object(a, ref, null);
             defer a.free(bytes);
             diagnostic.phase = .compilation;
             const built = try construction.buildComponent(a, bytes, source);

@@ -580,6 +580,8 @@ fn expectWorkInputHistoryBound(service: anytype, a: std.mem.Allocator, task: nat
     var manifest_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
     const index = try store.archiveIndex(a, task, .{ .digest = manifest_digest, .bytes = service.assets.manifest.len });
+    var compiler_facts = try service.prepareWorkspaceValidation(task);
+    defer compiler_facts.deinit();
     try store.begin();
     defer store.rollback();
     work.value.inputs.items = inputs;
@@ -610,7 +612,7 @@ fn expectWorkInputHistoryBound(service: anytype, a: std.mem.Allocator, task: nat
         changed += 1;
     }
     try std.testing.expect(changed != 0);
-    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(a, task, index.records.items));
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, task, index.records.items, &compiler_facts));
 }
 
 fn expectWorkInputProvenanceBound(service: anytype, a: std.mem.Allocator, task: native.testing.state.TaskId, work_id: [32]u8) !void {
@@ -638,7 +640,9 @@ fn expectWorkInputProvenanceBound(service: anytype, a: std.mem.Allocator, task: 
     var manifest_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
     const index = try store.archiveIndex(a, task, .{ .digest = manifest_digest, .bytes = service.assets.manifest.len });
-    try service.validateWorkspaceRecords(a, task, index.records.items);
+    var compiler_facts = try service.prepareWorkspaceValidation(task);
+    defer compiler_facts.deinit();
+    try service.validateWorkspaceRecordsPrepared(a, task, index.records.items, &compiler_facts);
     try store.begin();
     defer store.rollback();
     const replacement = try store.putObject(artifact_bytes);
@@ -676,7 +680,7 @@ fn expectWorkInputProvenanceBound(service: anytype, a: std.mem.Allocator, task: 
         }
     }
     try std.testing.expect(changed != 0);
-    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(a, task, index.records.items));
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, task, index.records.items, &compiler_facts));
 }
 
 fn expectWorkCancellationReasonBound(service: anytype, a: std.mem.Allocator, child: native.workspace.Work) !void {
@@ -693,6 +697,8 @@ fn expectWorkCancellationReasonBound(service: anytype, a: std.mem.Allocator, chi
     var cursor = graph.state.roots.exit orelse return error.MissingCancellation;
     while (nodes[@intCast(cursor.id)].record.exit.outer) |outer| cursor = outer;
     nodes[@intCast(cursor.id)].record.exit.cancellation = .{ .text = "different kernel reason" };
+    var compiler_facts = try service.prepareWorkspaceValidation(child.task);
+    defer compiler_facts.deinit();
     try store.begin();
     defer store.rollback();
     var forged = child;
@@ -727,7 +733,7 @@ fn expectWorkCancellationReasonBound(service: anytype, a: std.mem.Allocator, chi
     try std.testing.expect(changed != 0);
     // Native reason, command, event control facts and operation identity stay
     // unchanged; only the kernel checkpoint and its content references differ.
-    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(a, child.task, index.records.items));
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, child.task, index.records.items, &compiler_facts));
 }
 
 fn expectInteractionReplyBound(service: anytype, a: std.mem.Allocator, task: native.testing.state.TaskId, operation_id: []const u8) !void {
@@ -735,6 +741,8 @@ fn expectInteractionReplyBound(service: anytype, a: std.mem.Allocator, task: nat
     var manifest_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
     const index = try store.archiveIndex(a, task, .{ .digest = manifest_digest, .bytes = service.assets.manifest.len });
+    var compiler_facts = try service.prepareWorkspaceValidation(task);
+    defer compiler_facts.deinit();
     try store.begin();
     defer store.rollback();
     var operations = try store.database.prepare("SELECT p.id,o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?", &.{.{ .blob = &task }});
@@ -766,7 +774,7 @@ fn expectInteractionReplyBound(service: anytype, a: std.mem.Allocator, task: nat
     try std.testing.expect(changed);
     // Both 10 and 20 are valid inputs of the same work. Neither membership nor
     // a coherent request digest ties this command to its actual acquired reply.
-    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(a, task, index.records.items));
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, task, index.records.items, &compiler_facts));
 }
 
 fn expectProgramProgressIsDerived(service: anytype, a: std.mem.Allocator, task_id: native.testing.state.TaskId) !void {
@@ -785,7 +793,9 @@ fn expectProgramProgressIsDerived(service: anytype, a: std.mem.Allocator, task_i
     var manifest_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
     const index = try store.archiveIndex(a, task_id, .{ .digest = manifest_digest, .bytes = service.assets.manifest.len });
-    try service.validateWorkspaceRecords(a, task_id, index.records.items);
+    var compiler_facts = try service.prepareWorkspaceValidation(task_id);
+    defer compiler_facts.deinit();
+    try service.validateWorkspaceRecordsPrepared(a, task_id, index.records.items, &compiler_facts);
     // Neither successful compilation nor delegation authorizes an independent
     // program claim in the journal, even when its object digest is recomputed.
     try store.begin();
@@ -796,7 +806,7 @@ fn expectProgramProgressIsDerived(service: anytype, a: std.mem.Allocator, task_i
     forged.data.bytes = "{\"workspace_id\":\"0000000000000000000000000000000000000000000000000000000000000000\"}";
     const reference = try store.putObject(try contracts.encodeOwned(native.testing.state.Event, a, forged));
     try store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &reference.digest }, .{ .blob = &task_id }, .{ .integer = @intCast(forged.seq) } });
-    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(a, task_id, index.records.items));
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, task_id, index.records.items, &compiler_facts));
     try std.testing.expect(!bare_progress);
 }
 
@@ -1295,18 +1305,20 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     var manifest_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(assets.manifest, &manifest_digest, .{});
     const archive_index = try namespace.store.archiveIndex(scratch, parent.receipt.task, .{ .digest = manifest_digest, .bytes = assets.manifest.len });
+    var compiler_facts = try service.prepareWorkspaceValidation(parent.receipt.task);
+    defer compiler_facts.deinit();
     try namespace.store.begin();
     var forged = interactive_completed.value;
     forged.port_generation += 1;
     try namespace.store.putRecord(native.workspace.Work, "workspace_work", forged.id, forged.task, forged);
-    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, parent.receipt.task, archive_index.records.items));
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(scratch, parent.receipt.task, archive_index.records.items, &compiler_facts));
     namespace.store.rollback();
     try namespace.store.begin();
     forged = interactive_completed.value;
     forged.cancellation = .{ .bytes = "forged applied cancellation" };
     forged.cancellation_applied = true;
     try namespace.store.putRecord(native.workspace.Work, "workspace_work", forged.id, forged.task, forged);
-    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, parent.receipt.task, archive_index.records.items));
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(scratch, parent.receipt.task, archive_index.records.items, &compiler_facts));
     namespace.store.rollback();
 
     const cancel_started = try service.workspaceStart(scratch, "cancel-after-answer-start", parent.receipt.task, program_id, interactive_input, .{});
@@ -1654,6 +1666,8 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(assets.manifest, &digest, .{});
         const mutation_index = try namespace.store.archiveIndex(scratch, mutation_parent.receipt.task, .{ .digest = digest, .bytes = assets.manifest.len });
+        var compiler_facts = try service.prepareWorkspaceValidation(settled.task);
+        defer compiler_facts.deinit();
         try namespace.store.begin();
         evidence.evidence = .{ .rejected = .{ .stage = .operation, .code = .{ .bytes = "Denied" } } };
         const forged = try namespace.store.putObject(try contracts.encodeOwned(native.workspace.ReplyObservation, scratch, evidence));
@@ -1664,7 +1678,7 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
         var forged_occurrence = settled;
         forged_occurrence.state.settled_reply.reply = (try namespace.store.putObject(bound)).digest;
         try namespace.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", settled.id, settled.task, forged_occurrence);
-        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, settled.task, mutation_index.records.items));
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(scratch, settled.task, mutation_index.records.items, &compiler_facts));
         namespace.store.rollback();
         try service.validateWorkspace(scratch, settled.task);
     }
@@ -1690,6 +1704,8 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
     const index = try namespace.store.archiveIndex(scratch, read_parent.receipt.task, .{ .digest = manifest_digest, .bytes = assets.manifest.len });
     // Rehashing an independently changed acquired reply must not turn it into
     // the result of the retained read. Test before the root consumes the reply.
+    var read_compiler_facts = try service.prepareWorkspaceValidation(read_parent.receipt.task);
+    defer read_compiler_facts.deinit();
     for (0..2) |variant| {
         try namespace.store.begin();
         const fake: contracts.workspace.Reply = .{
@@ -1702,7 +1718,7 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
         var forged_reply = original;
         forged_reply.state.settled_reply.reply = (try namespace.store.putObject(bound)).digest;
         try namespace.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", original.id, original.task, forged_reply);
-        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, original.task, index.records.items));
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(scratch, original.task, index.records.items, &read_compiler_facts));
         namespace.store.rollback();
     }
     const other = try service.submit(scratch, "other-task", command);
@@ -2225,6 +2241,8 @@ fn expectInstrumentAnswerBound(service: anytype, a: std.mem.Allocator, child: na
     defer original_result.deinit();
     var original_answer = try contracts.decodeOwned(native.workspace.ValueArtifact, a, try store.object(a, child.answer_value.?, null));
     defer original_answer.deinit();
+    var compiler_facts = try service.prepareWorkspaceValidation(child.task);
+    defer compiler_facts.deinit();
     for (0..3) |variant| {
         try store.begin();
         defer store.rollback();
@@ -2297,7 +2315,7 @@ fn expectInstrumentAnswerBound(service: anytype, a: std.mem.Allocator, child: na
         event_value.workspace_publications.items = publications;
         const event_ref = try store.putObject(try contracts.encodeOwned(native.testing.state.Event, a, event_value));
         try store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &event_ref.digest }, .{ .blob = &child.task }, .{ .integer = @intCast(child.event_watermark) } });
-        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(a, child.task, records.items));
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, child.task, records.items, &compiler_facts));
     }
 }
 
@@ -2477,6 +2495,8 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                     var manifest_digest: [32]u8 = undefined;
                     std.crypto.hash.sha2.Sha256.hash(manifest, &manifest_digest, .{});
                     const archive_index = try namespace.store.archiveIndex(scratch, parent.receipt.task, .{ .digest = manifest_digest, .bytes = manifest.len });
+                    var compiler_facts = try service.prepareWorkspaceValidation(parent.receipt.task);
+                    defer compiler_facts.deinit();
                     try namespace.store.begin();
                     defer namespace.store.rollback();
                     var events = try namespace.store.database.prepare("SELECT seq,o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY seq DESC", &.{.{ .blob = &parent.receipt.task }});
@@ -2495,7 +2515,7 @@ test "OWN-02 OWN-05 OWN-10 delegated typed answers use distinct real occurrences
                     }
                     try std.testing.expect(changed);
                     try namespace.store.putRecord(native.workspace.Work, "workspace_work", target_id, parent.receipt.task, target.value);
-                    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, parent.receipt.task, archive_index.records.items));
+                    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(scratch, parent.receipt.task, archive_index.records.items, &compiler_facts));
                 }
                 if (scenario == .revoked and instrument_id != null) {
                     var current = try service.workspaceWork(scratch, parent.receipt.task, target_id);
@@ -3237,6 +3257,8 @@ test "collected history rejects rehashed result substitution and false absence" 
         // Before root consumption, preserve the successful read journal entry
         // while coherently rewriting both retained evidence and acquired reply.
         const read_index = try namespace.store.archiveIndex(scratch, original.task, .{ .digest = manifest_digest, .bytes = manifest.len });
+        var read_compiler_facts = try service.prepareWorkspaceValidation(original.task);
+        defer read_compiler_facts.deinit();
         try namespace.store.begin();
         var evidence = try contracts.decodeOwned(native.workspace.ReplyObservation, scratch, original_evidence);
         evidence.value.evidence = .{ .rejected = .{ .stage = .operation, .code = .{ .bytes = "Denied" } } };
@@ -3248,7 +3270,7 @@ test "collected history rejects rehashed result substitution and false absence" 
         var forged_occurrence = original;
         forged_occurrence.state.settled_reply.reply = (try namespace.store.putObject(bound)).digest;
         try namespace.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", original.id, original.task, forged_occurrence);
-        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, original.task, read_index.records.items));
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(scratch, original.task, read_index.records.items, &read_compiler_facts));
         namespace.store.rollback();
         try service.validateWorkspace(scratch, original.task);
     }
@@ -3260,6 +3282,8 @@ test "collected history rejects rehashed result substitution and false absence" 
             // The response kind cannot opt an admitted work command out of its
             // proof by presenting a genuine program artifact instead.
             const archive_index = try namespace.store.archiveIndex(scratch, parent.receipt.task, .{ .digest = manifest_digest, .bytes = manifest.len });
+            var kind_compiler_facts = try service.prepareWorkspaceValidation(parent.receipt.task);
+            defer kind_compiler_facts.deinit();
             try namespace.store.begin();
             defer namespace.store.rollback();
             var changed_receipt = parked.receipt;
@@ -3278,7 +3302,7 @@ test "collected history rejects rehashed result substitution and false absence" 
             const event_ref = try namespace.store.putObject(try contracts.encodeOwned(native.testing.state.Event, scratch, event_value.value));
             try namespace.store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &event_ref.digest }, .{ .blob = &parent.receipt.task }, .{ .integer = try event_query.integer(0) } });
             try namespace.store.putRecord(native.workspace.Work, "workspace_work", slow.value.id, parent.receipt.task, slow.value);
-            try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, parent.receipt.task, archive_index.records.items));
+            try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(scratch, parent.receipt.task, archive_index.records.items, &kind_compiler_facts));
         }
         slow.deinit();
         slow = try service.workspaceWork(scratch, parent.receipt.task, slow_start.receipt.workspace.?);
@@ -3299,6 +3323,8 @@ test "collected history rejects rehashed result substitution and false absence" 
     const index = try namespace.store.archiveIndex(scratch, original.task, .{ .digest = manifest_digest, .bytes = manifest.len });
     // Display data and retained publication facts must name the same work.
     // Rehashing a swapped/erased display ID cannot alter historical scope.
+    var history_compiler_facts = try service.prepareWorkspaceValidation(original.task);
+    defer history_compiler_facts.deinit();
     for ([_]native.testing.state.EventType{ .workspace, .workspace_progress }) |kind| {
         try namespace.store.begin();
         var event_query = try namespace.store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq", &.{.{ .blob = &original.task }});
@@ -3314,7 +3340,7 @@ test "collected history rejects rehashed result substitution and false absence" 
         }
         event_query.deinit();
         try std.testing.expect(changed);
-        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, original.task, index.records.items));
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(scratch, original.task, index.records.items, &history_compiler_facts));
         namespace.store.rollback();
     }
     for (0..9) |variant| {
@@ -3407,7 +3433,7 @@ test "collected history rejects rehashed result substitution and false absence" 
             else => return error.UnexpectedReadState,
         }
         try namespace.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", original.id, original.task, forged_occurrence);
-        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, original.task, index.records.items));
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(scratch, original.task, index.records.items, &history_compiler_facts));
         namespace.store.rollback();
     }
     // A direct native operation receipt is replayable even without a root
@@ -3434,7 +3460,7 @@ test "collected history rejects rehashed result substitution and false absence" 
         }
         receipt_query.deinit();
         try std.testing.expect(changed);
-        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, original.task, index.records.items));
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(scratch, original.task, index.records.items, &history_compiler_facts));
         namespace.store.rollback();
     }
     // Later publications do not rewrite the earlier collection or invalidate
@@ -3450,6 +3476,8 @@ test "collected history rejects rehashed result substitution and false absence" 
     try std.testing.expectEqualStrings("judgment", judgment_json.object.get("derivation").?.object.get("kind").?.string);
     try service.validateWorkspace(scratch, parent.receipt.task);
     const before_forgery = try namespace.store.archiveIndex(scratch, original.task, .{ .digest = manifest_digest, .bytes = manifest.len });
+    var final_compiler_facts = try service.prepareWorkspaceValidation(original.task);
+    defer final_compiler_facts.deinit();
     for (0..2) |variant| {
         try namespace.store.begin();
         var forged = hypothesis_record.?;
@@ -3465,7 +3493,7 @@ test "collected history rejects rehashed result substitution and false absence" 
         const records = try scratch.alloc(native.testing.state.ArchiveRecord, before_forgery.records.items.len + 1);
         @memcpy(records[0..before_forgery.records.items.len], before_forgery.records.items);
         records[records.len - 1] = .{ .kind = .workspace_value, .id = forged.id, .body = try namespace.store.putObject(try contracts.encodeOwned(native.workspace.Value, scratch, forged)) };
-        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, original.task, records));
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(scratch, original.task, records, &final_compiler_facts));
         const inspected = try service.workspaceCommand(scratch, "forged-derivation", original.task, .{ .context = .{ .expand = .{ .reference = try workspaceRef(scratch, .value, forged.artifact.digest), .page = .{} } } });
         try std.testing.expectEqual(.rejected, inspected.disposition);
         namespace.store.rollback();

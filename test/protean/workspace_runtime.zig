@@ -155,6 +155,7 @@ fn cancelGuardWitness(
     try std.testing.expect(cancelled.value.guard == null);
     try std.testing.expect(cancelled.value.cancellation != null);
     try std.testing.expect(cancelled.value.execution_revision > initial.execution_revision);
+    try sharedCancel(a, service, initial.task, initial.id, "guard-witness");
 }
 
 fn pumpGuardWitness(
@@ -524,6 +525,7 @@ fn exerciseDivergentGuard(
     try std.testing.expect(cancelled.value.guard == null);
     try std.testing.expect(cancelled.value.cancellation_applied);
     try std.testing.expect(cancelled.value.execution_revision > before.value.execution_revision);
+    try sharedCancel(a, service, task, id, "divergent-witness");
 }
 
 fn pumpDivergentGuard(
@@ -1441,7 +1443,7 @@ fn sharedCancel(a: std.mem.Allocator, service: anytype, task: native.testing.sta
             try std.testing.expect(work.value.guard == null);
             return;
         }
-        _ = try service.workspaceControl(a, try std.fmt.allocPrint(a, "shared-{s}-cleanup-{d}", .{ label, turn }), task, id, work.value.execution_revision, work.value.control_revision, if (turn == 0)
+        _ = try service.workspaceControl(a, try std.fmt.allocPrint(a, "shared-{s}-cleanup-{d}", .{ label, turn }), task, id, work.value.execution_revision, work.value.control_revision, if (turn == 0 and work.value.cancellation == null)
             .{ .cancel = .{ .bytes = "shared comparison complete" } }
         else
             .advance);
@@ -1810,6 +1812,7 @@ fn exerciseGenerated(
     defer returned.deinit();
     try std.testing.expectEqualDeep(advanced.value.checkpoint, returned.value.checkpoint);
     try std.testing.expect(returned.value.runtime == null);
+    try sharedCancel(a, service, task, id, "generated-retained");
     return generated;
 }
 
@@ -2222,6 +2225,8 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
         var manifest_digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(assets.manifest, &manifest_digest, .{});
         const archive_index = try namespace.store.archiveIndex(scratch, parent.receipt.task, .{ .digest = manifest_digest, .bytes = assets.manifest.len });
+        var compiler_facts = try service.prepareWorkspaceValidation(parent.receipt.task);
+        defer compiler_facts.deinit();
         try namespace.store.begin();
         defer namespace.store.rollback();
         var traced = try service.workspaceWork(a, parent.receipt.task, traced_id);
@@ -2250,7 +2255,7 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
             const changed_receipt = try namespace.store.putObject(try contracts.encodeOwned(native.testing.state.Receipt, scratch, receipt.value));
             try namespace.store.database.run("UPDATE operations SET receipt=? WHERE id=?", &.{ .{ .blob = &changed_receipt.digest }, .{ .text = try receipts.bytes(0) } });
         }
-        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(scratch, parent.receipt.task, archive_index.records.items));
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(scratch, parent.receipt.task, archive_index.records.items, &compiler_facts));
     }
     phase = "outer cut suspension";
     var trace_before_pump = try service.workspaceWork(a, parent.receipt.task, traced_id);
@@ -2691,6 +2696,8 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             ancestor,
             specialization_ns,
         );
+        phase = "verify temporary construction work disposal";
+        try std.testing.expect(try sender.associatedWorkDisposed(scratch, parent.receipt.task));
         break :blk derived;
     } else null;
     const runtime = if (generated) |derived| derived.runtime else ancestor;
@@ -4082,12 +4089,15 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             var successor = try native.tasks.Service(OwnerTypes).init(a, io, &successor_namespace, assets, &application, handlers, successor_profile);
             defer successor.close(a) catch unreachable;
             try successor.placementApplyReport(scratch, subject.task, p.controlId(cleanup_control.value), cleanup_report);
+            attack_index = iteration;
+            phase = "initial remote disposal state";
             if (iteration == 0) {
                 try std.testing.expect(!try successor.associatedWorkDisposed(scratch, subject.task));
                 _ = try successor.requestCancel(scratch, "cancel-with-remote-work", subject.task, "controller stopped");
                 const replayed_control = try successor.placementControl(scratch, "new-controller-inspect", subject.task, .{ .inspect = .{ .work = work_ref } });
                 try std.testing.expectEqualSlices(u8, try contracts.encodeOwned(p.Signed(p.Control), scratch, successor_control.value), replayed_control);
             }
+            phase = "acknowledge explicit remote park";
             if (cleanup_report.value.work_state.?.explicitly_parked and !resumed_after_park) {
                 try std.testing.expect(parked_once);
                 _ = try successor.pump(scratch);
@@ -4102,6 +4112,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
                 _ = try successor.requestCancel(scratch, "fresh-cancel-after-remote-park", subject.task, "controller stopped");
                 resumed_after_park = true;
             }
+            phase = "finish controller after remote disposal";
             if (try successor.associatedWorkDisposed(scratch, subject.task)) {
                 for (0..512) |_| {
                     _ = try successor.pump(scratch);
@@ -4115,6 +4126,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
                 }
                 break;
             }
+            phase = "schedule remote cleanup control";
             try std.testing.expect(try successor.pump(scratch) != .work);
             var query = try successor_namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='placement_control'", &.{.{ .blob = &subject.task }});
             defer query.deinit();
@@ -4127,6 +4139,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
                     break;
                 }
             }
+            phase = "locate scheduled remote cleanup";
             try std.testing.expect(found);
         }
         {
@@ -4138,12 +4151,14 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             const bytes = try executor.placementExecuteControl(scratch, "successor", cleanup_control);
             const decoded_report = try contracts.decodeOwned(p.Signed(p.Report), scratch, bytes);
             cleanup_report = decoded_report.value;
+            phase = "check remote observer stop report";
             if (at_source) {
                 try std.testing.expectEqualDeep(try nativeIdentity(remote_observer.work), cleanup_control.value.subject.work.?);
                 const stopping = cleanup_control.value.command == .stop_observing;
                 try std.testing.expectEqual(!stopping, cleanup_report.value.work_state.?.observer_active);
                 observer_stopped = observer_stopped or stopping;
             }
+            phase = "check remote cleanup disposition";
             if (cleanup_report.value.reply.disposition == .rejected) {
                 try std.testing.expect(parked_once and !resumed_after_park);
                 try std.testing.expect(cleanup_control.value.command == .pump);
@@ -4157,8 +4172,11 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             }
         }
     }
+    phase = "verify remote disposal completion";
     try std.testing.expect(disposed);
+    phase = "verify remote park and resume";
     try std.testing.expect(parked_once and resumed_after_park);
+    phase = "verify remote observer stopped";
     try std.testing.expect(observer_stopped);
 }
 

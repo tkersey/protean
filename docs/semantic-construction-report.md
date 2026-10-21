@@ -44,6 +44,12 @@ arbitrary candidate equivalence. Existing reply custody and cancellation own
 settlement and cleanup. Active guards and observer subscriptions must be removed
 before the unsupported mobility cases.
 
+Import and placement freeze prepare exact compiler facts from immutable inputs
+before opening their Store transaction. Retained semantic-source reads and values
+also prepare their exact rendering, including source slicing. The transaction
+still checks current policy, provenance, custody, and history; a missing prepared
+compiler result rejects before compilation.
+
 The implementation rebases onto accepted controller reconstruction
 `2e40ce45d0f4b9b2ee81838386d5f1e0693ea228`. Package/host 7.0.0, application 8.0.0,
 workspace contract 4, and native state format 18 retain historical executable
@@ -84,12 +90,12 @@ rather than only the net file-size difference.
 |---|---:|---:|---:|
 | Horos | 3 | 26,035 | 0 |
 | Kosmos | 8 | 76,091 | 773 |
-| Protean | 13 | 172,228 | 15,399 |
-| Total | 24 | 274,354 | 16,172 |
+| Protean | 13 | 178,776 | 18,127 |
+| Total | 24 | 280,902 | 18,900 |
 
 No test modules, directories, executables, or CI lanes were added. Protean's
 existing workspace execution count advances from 12 to 13. The largest extension
-is `workspace_runtime.zig` at 146,996 added bytes; the low module count does not
+is `workspace_runtime.zig` at 148,596 added bytes; the low module count does not
 make this a small fixture change. Its generated producer and candidate are reused
 by the custody, five-arm, and mobility checks, avoiding a third producer run.
 Historical independent byte fixtures remain unchanged.
@@ -98,6 +104,8 @@ Copied-custody forgeries run in the existing onward-transfer scenario with its
 smaller guest. Their assertions exercise common import normalization and custody
 gates. The generated scenario retains exact artifact closure, disclosure and
 semantic-trust rejection, signed acceptance, replay, restart, and cleanup.
+Construction and guard helpers finish their temporary work before the mobility
+scenario begins, with terminal cancellation and disposal assertions.
 
 The packaged semantic core is 234,530 bytes, SHA-256
 `fedc7ddb03284b65bb28ab6fdb390b3e7b5db1129ff0eaa502da6237dc3f4af8`.
@@ -131,3 +139,6 @@ Kosmos reports 12 compiler steps, all executed cold and cached warm, with a larg
 individual compiler RSS of 4 GB. Its full check includes 9,570 independent source
 agreement observations, Chromium and Firefox worker transfer, and extracted
 package operation. Protean's full-tree and product qualification remains outstanding.
+Serial review has identified unresolved Horos admission, ownership, resource
+accounting, and source-inventory defects. The native test results above do not
+qualify that inventory check or establish review completion.
