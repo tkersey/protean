@@ -44,6 +44,72 @@ test "BUILD-S01 unused semantic bridge declarations grant no construction author
     try std.testing.expectEqual(.authority, diagnostic.phase);
 }
 
+test "BUILD-S02 pure slices execute captured raw computation through native construction" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const pair = try b.schema(.{ .product = &.{ word, word } });
+    const computation = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{},
+        .result = pair,
+        .capture_bound = &.{word},
+    } } });
+    const bridge = try b.effect(.{
+        .identity = "kosmos.semantic-service/1",
+        .payload = unit,
+        .result = unit,
+        .external = true,
+    });
+    const generator = try b.declare(&.{ word, word }, computation, &.{bridge}, &.{});
+    const target = try b.declare(&.{}, pair, &.{}, &.{});
+    const first = try b.reference(b.parameter(generator, 0));
+    const second = try b.reference(b.parameter(generator, 1));
+    try b.define(target, try b.pure(try b.primitive(pair, .product, &.{ first, second }, 0)));
+    try b.define(generator, try b.bind(try b.variable(unit), try b.term(.{ .perform = .{
+        .effect = bridge,
+        .payload = try b.constant(void, {}),
+    } }), try b.pure(try b.lambda(target, computation))));
+    const entry = try b.declare(&.{}, pair, &.{}, &.{});
+    const raw = try b.primitive(computation, .computation, &.{
+        try b.constant(u64, 11),
+        try b.constant(u64, 29),
+    }, 0);
+    try b.define(entry, try b.term(.{ .apply = .{ .computation = raw, .arguments = &.{} } }));
+    var selected = try source.slice.extract(a, b.module(entry, unit), .{
+        .entry = entry,
+        .require_pure = true,
+    });
+    defer selected.deinit();
+    try std.testing.expectEqual(@as(?Id, null), selected.maps.functions[@intCast(generator)]);
+    try std.testing.expectEqual(@as(usize, 0), selected.module().effects.len);
+    const text = try native.source_records.encode(a, selected.module());
+    defer a.free(text);
+    var diagnostic: native.program_construction.Diagnostic = .{};
+    var built = try native.program_construction.build(a, text, null, &diagnostic);
+    defer built.deinit();
+    try std.testing.expectEqual(.complete, diagnostic.phase);
+    var prepared = try kosmos.Prepared.init(a, built.image);
+    defer prepared.deinit();
+    const input = try contracts.encodeOwned(void, a, {});
+    defer a.free(input);
+    var session = try kosmos.Session.start(a, &prepared, input);
+    defer session.deinit();
+    while (true) switch (try session.run(8)) {
+        .progressed => {},
+        .yielded => try session.resumeYield(),
+        .completed => |value| {
+            var result = try contracts.decodeOwned(struct { u64, u64 }, a, try session.bytes(&value));
+            defer result.deinit();
+            try std.testing.expectEqual(@as(u64, 11), result.value[0]);
+            try std.testing.expectEqual(@as(u64, 29), result.value[1]);
+            break;
+        },
+        else => return error.UnexpectedOutcome,
+    };
+}
+
 test "BUILD-C02 controller construction binds exact imports and publishes inert boot before carry" {
     const a = std.testing.allocator;
     const construction = native.program_construction;

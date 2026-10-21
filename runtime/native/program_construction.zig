@@ -333,6 +333,8 @@ fn buildBody(a: std.mem.Allocator, text: []const u8, exposures: []const contract
     const module = if (controller_generated) |g| g.module else if (generated) |g| g.module else document.module;
     if (controller_generated == null) for (document.module.effects.len..module.effects.len) |id| try registry.classify(id, .read);
     if (generated) |g| try registry.speculate(g.body, g.controls);
+    if (controller_generated != null or generated != null)
+        try preserveConstructors(a, document.module, module);
     try protean.admission.verify(a, module, &registry);
     try canceled(cancellation);
     diagnostic.phase = .compilation;
@@ -364,6 +366,20 @@ fn buildBody(a: std.mem.Allocator, text: []const u8, exposures: []const contract
     diagnostic.phase = .complete;
     const descriptor = if (controller_generated) |g| try g.describe(output, compiled.program) else null;
     return .{ .arena = arena, .image = image, .interface = interface, .ports = ports, .controller = descriptor };
+}
+
+fn preserveConstructors(a: std.mem.Allocator, before: horos.source.Module, after: horos.source.Module) !void {
+    const constructors = horos.source.constructor_bindings;
+    for (before.values) |value| {
+        if (constructors.raw(value) == null) continue;
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var work: u64 = std.math.maxInt(u64);
+        const old = try constructors.admit(a, arena.allocator(), before, &work);
+        const new = try constructors.admit(a, arena.allocator(), after, &work);
+        try constructors.validate(before, old, new, .{}, &work);
+        return;
+    }
 }
 
 fn rejectSemanticBridge(module: horos.source.Module) !void {

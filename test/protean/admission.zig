@@ -485,6 +485,57 @@ test "ordinary source cannot forge a lowered computation constructor" {
     try std.testing.expectError(error.UnprovenComputationOrigin, f.check());
 }
 
+test "raw computation does not inherit private lambda site authority" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const target = try f.b.declare(&.{}, f.unit, &.{}, &.{});
+    try f.b.define(target, try f.pure());
+    try f.registry.privateFunction(target);
+    const lambda = try f.lambda(target);
+    const computation = f.b.values.items[@intCast(lambda)].schema;
+    const generator = try f.b.declare(&.{}, computation, &.{}, &.{});
+    try f.b.define(generator, try f.b.pure(lambda));
+    try f.registry.allowPrivateLambda(generator, lambda, target);
+    const raw = try f.b.primitive(computation, .computation, &.{}, 0);
+    try f.b.define(f.entry, try f.b.term(.{ .apply = .{
+        .computation = raw,
+        .arguments = &.{},
+    } }));
+    try f.horosCompile();
+    try std.testing.expectError(error.PrivateFunctionBypass, f.check());
+}
+
+test "speculative retained raw computation inspects hidden handled effects" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.definePureRoot();
+    const unknown = try f.effect("test.hidden.raw", null);
+    const unsafe_body = try handledBody(&f, unknown, &.{unknown});
+    try f.b.define(unsafe_body, try performHandled(&f, unsafe_body, unknown));
+    const hidden = try f.b.declare(&.{}, f.unit, &.{}, &.{});
+    try f.b.define(hidden, try localHandler(&f, unknown, unsafe_body, false));
+    const lambda = try f.lambda(hidden);
+    const computation = f.b.values.items[@intCast(lambda)].schema;
+    const generator = try f.b.declare(&.{}, computation, &.{}, &.{});
+    try f.b.define(generator, try f.b.pure(lambda));
+    var work: u64 = std.math.maxInt(u64);
+    const bindings = try bnd.source.constructor_bindings.admit(
+        allocator,
+        f.b.allocator(),
+        f.b.module(f.entry, f.unit),
+        &work,
+    );
+    const constructor: Id = for (bindings, 0..) |binding, id| {
+        if (binding.function == hidden) break id;
+    } else return error.MissingConstructor;
+    const raw = try f.b.primitive(computation, .computation, &.{}, constructor);
+    const retained = try f.b.variable(computation);
+    try f.b.define(f.entry, try f.b.bind(retained, try f.b.pure(raw), try f.pure()));
+    try f.horosCompile();
+    try f.registry.speculate(f.entry, &.{});
+    try std.testing.expectError(error.SpeculativeEffect, f.check());
+}
+
 test "multi computation lambda cannot omit speculative admission" {
     var f = try Fixture.init();
     defer f.deinit();
