@@ -963,14 +963,12 @@ fn producerPrimitiveGuard(
 
 fn producerMatch(b: *source.Builder, value: Id, tag: usize, variable: Id, yes: Id, no: Id) !Id {
     const schema = b.values.items[@intCast(value)].schema;
-    const variants = b.schemas.items[@intCast(schema)].sum;
-    const Case = std.meta.Elem(@FieldType(@FieldType(source.ast.Term, "match_sum"), "cases"));
-    const cases = try b.allocator().alloc(Case, variants.len);
-    for (variants, cases, 0..) |payload, *case, i| case.* = .{
-        .variable = if (i == tag) variable else try b.variable(payload),
-        .body = if (i == tag) yes else no,
-    };
-    return b.term(.{ .match_sum = .{ .value = value, .cases = cases } });
+    const selected = try b.variable(schema);
+    const reference = try b.reference(selected);
+    const actual = try b.primitive(try b.scalar(u64), .variant_tag, &.{reference}, 0);
+    const condition = try producerEquals(b, actual, try b.constant(u64, tag));
+    const matched = try b.bind(variable, try b.pure(try producerPayload(b, reference, tag)), yes);
+    return b.bind(selected, try b.pure(value), try producerWhen(b, condition, matched, no));
 }
 
 fn producerWhen(b: *source.Builder, condition: Id, yes: Id, no: Id) !Id {
