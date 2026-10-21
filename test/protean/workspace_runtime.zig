@@ -856,6 +856,16 @@ fn runTransformer(
     );
     const input = try semanticReference(a, materialized, "value");
     if (expected_layout) try semanticContextWitness(a, service, task, input, label);
+    const preparation_started = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
+    const producer_id = try nativeIdentity(program);
+    const specialized = try service.workspaceSpecialize(
+        a,
+        try std.fmt.allocPrint(a, "transformer-runtime-{s}", .{program.id.bytes}),
+        task,
+        producer_id,
+    );
+    const runtime = try workspaceRef(a, .runtime, specialized.receipt.workspace.?);
+    std.debug.print("generated transformer {s}: preparation_ms={d}\n", .{ label, std.Io.Clock.awake.now(std.testing.io).toMilliseconds() - preparation_started });
     const started_ms = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
     const started = try service.workspaceCommand(
         a,
@@ -864,6 +874,7 @@ fn runTransformer(
         .{ .work = .{ .start = .{
             .program = program,
             .input = .{ .reference = input },
+            .runtime = .{ .selected = runtime },
             .policy = .{ .stop = .terminal },
         } } },
     );
