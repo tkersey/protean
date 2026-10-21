@@ -662,7 +662,7 @@ fn transformerDocument(b: *source.Builder) !source.Module {
     const selected = try b.reference(selected_variable);
     const argument = try layoutInput(b, module, references, selected, argument_schema);
     const proposal = try b.variable(function.result);
-    const candidate = try scalarCandidate(b, transform, try b.reference(proposal), output);
+    const candidate = try scalarCandidate(b, transform, try b.reference(proposal), references, output);
     const transformed = try b.bind(proposal, try b.term(.{ .call = .{
         .function = layout,
         .arguments = &.{argument},
@@ -701,34 +701,20 @@ const ProducerPrimitive = @FieldType(ProducerExpression, "primitive");
 
 fn producerFold(b: *source.Builder) !source.Module {
     const module_schema = try contracts.schema(source.Module, b);
-    const values_schema = try contracts.schema([]const source.ast.Value, b);
+    const users_schema = try contracts.schema([]const []const source.relation.Relocation.Reference, b);
     const output = try contracts.schema(kosmos.RuntimeCompiler.RecordProposal, b);
     const integer = try b.scalar(u64);
-    const scan = try b.declare(&.{ module_schema, values_schema, integer }, output, &.{}, &.{});
-    try producerFoldScan(b, scan);
-    const input = try contracts.schema(kosmos.RuntimeTransformation.Input, b);
-    const entry = try b.declare(&.{input}, output, &.{}, &.{});
-    const argument = try b.reference(b.parameter(entry, 0));
-    const module_variable = try b.variable(module_schema);
-    const module = try b.reference(module_variable);
-    const call = try b.term(.{ .call = .{ .function = scan, .arguments = &.{
-        module,
-        try producerField(b, module, std.meta.fieldIndex(source.Module, "values").?),
-        try producerField(b, argument, 1),
-    } } });
-    try b.define(entry, try b.bind(
-        module_variable,
-        try b.pure(try producerField(b, argument, 0)),
-        call,
-    ));
-    return b.module(entry, try b.scalar(void));
+    const schemas = try b.declare(&.{ module_schema, users_schema, integer }, output, &.{}, &.{});
+    const candidates = try b.declare(&.{
+        module_schema, users_schema, integer, integer,
+    }, output, &.{}, &.{});
+    try producerFoldSchemas(b, schemas, candidates);
+    try producerFoldCandidates(b, schemas, candidates);
+    return b.module(schemas, try b.scalar(void));
 }
 
-fn producerFoldScan(b: *source.Builder, scan: Id) !void {
-    const module = try b.reference(b.parameter(scan, 0));
-    const values = try b.reference(b.parameter(scan, 1));
-    const index = try b.reference(b.parameter(scan, 2));
-    const next = try b.value(.{ .schema = try b.scalar(u64), .expression = .{ .primitive = .{
+fn producerNext(b: *source.Builder, index: Id) !Id {
+    return b.value(.{ .schema = try b.scalar(u64), .expression = .{ .primitive = .{
         .opcode = .integer_add,
         .operands = &.{ index, try b.constant(u64, 1) },
         .failures = &.{.{
@@ -736,9 +722,61 @@ fn producerFoldScan(b: *source.Builder, scan: Id) !void {
             .value = try b.failureLiteral(try b.constant(void, {})),
         }},
     } } });
+}
+
+fn producerFoldSchemas(b: *source.Builder, scan: Id, candidates: Id) !void {
+    const module = try b.reference(b.parameter(scan, 0));
+    const users = try b.reference(b.parameter(scan, 1));
+    const index = try b.reference(b.parameter(scan, 2));
     const miss = try b.term(.{ .call = .{
         .function = scan,
-        .arguments = &.{ module, values, next },
+        .arguments = &.{ module, users, try producerNext(b, index) },
+    } });
+    const schema_variable = try b.variable(try contracts.schema(data.program.Schema, b));
+    const fields_variable = try b.variable(try contracts.schema([]const Id, b));
+    const selected = try b.term(.{ .call = .{
+        .function = candidates,
+        .arguments = &.{ module, users, index, try b.constant(u64, 0) },
+    } });
+    const product = try producerMatch(
+        b,
+        try b.reference(schema_variable),
+        std.meta.fieldIndex(data.program.Schema, "product").?,
+        fields_variable,
+        try producerWhen(b, try producerEquals(
+            b,
+            try producerLength(b, try b.reference(fields_variable)),
+            try b.constant(u64, 2),
+        ), selected, miss),
+        miss,
+    );
+    const schemas = try producerField(b, module, std.meta.fieldIndex(source.Module, "schemas").?);
+    const optional_schema = try b.schema(.{ .sum = &.{
+        try b.scalar(void), try contracts.schema(data.program.Schema, b),
+    } });
+    try b.define(scan, try producerMatch(
+        b,
+        try b.primitive(optional_schema, .sequence_get, &.{ schemas, index }, 0),
+        1,
+        schema_variable,
+        product,
+        try b.term(.{ .fail = try b.constant(void, {}) }),
+    ));
+}
+
+fn producerFoldCandidates(b: *source.Builder, schemas: Id, scan: Id) !void {
+    const module = try b.reference(b.parameter(scan, 0));
+    const users = try b.reference(b.parameter(scan, 1));
+    const schema_index = try b.reference(b.parameter(scan, 2));
+    const cursor = try b.reference(b.parameter(scan, 3));
+    const refs = try producerRequired(b, users, schema_index);
+    const ref_variable = try b.variable(try contracts.schema(source.relation.Relocation.Reference, b));
+    const ref = try b.reference(ref_variable);
+    const index = try producerField(b, ref, 1);
+    const values = try producerField(b, module, std.meta.fieldIndex(source.Module, "values").?);
+    const miss = try b.term(.{ .call = .{
+        .function = scan,
+        .arguments = &.{ module, users, schema_index, try producerNext(b, cursor) },
     } });
     const row_variable = try b.variable(try contracts.schema(source.ast.Value, b));
     const row = try b.reference(row_variable);
@@ -761,17 +799,27 @@ fn producerFoldScan(b: *source.Builder, scan: Id) !void {
         try producerPrimitiveGuard(b, primitive, .product, 2, candidate, miss),
         miss,
     );
-    const optional_row = try b.schema(.{ .sum = &.{
+    const kind = try b.primitive(try b.scalar(u32), .enum_tag, &.{try producerField(b, ref, 0)}, 0);
+    const value = try producerWhen(b, try producerEquals(
+        b,
+        kind,
+        try b.constant(u32, @backingInt(source.relation.Relocation.Kind.value)),
+    ), try b.bind(row_variable, try b.pure(try producerRequired(b, values, index)), selected), miss);
+    const exhausted = try b.term(.{ .call = .{
+        .function = schemas,
+        .arguments = &.{ module, users, try producerNext(b, schema_index) },
+    } });
+    const optional_ref = try b.schema(.{ .sum = &.{
         try b.scalar(void),
-        b.values.items[@intCast(row)].schema,
+        b.values.items[@intCast(ref)].schema,
     } });
     try b.define(scan, try producerMatch(
         b,
-        try b.primitive(optional_row, .sequence_get, &.{ values, index }, 0),
+        try b.primitive(optional_ref, .sequence_get, &.{ refs, cursor }, 0),
         1,
-        row_variable,
-        selected,
-        try b.term(.{ .fail = try b.constant(void, {}) }),
+        ref_variable,
+        value,
+        exhausted,
     ));
 }
 
@@ -1037,12 +1085,18 @@ fn layoutInput(b: *source.Builder, module: Id, references: Id, result: Id, schem
     return b.primitive(schema, .product, &.{ module, layout, references }, 0);
 }
 
-fn scalarCandidate(b: *source.Builder, scalar: source.Module, proposal: Id, output: Id) !Id {
+fn scalarCandidate(
+    b: *source.Builder,
+    scalar: source.Module,
+    proposal: Id,
+    references: Id,
+    output: Id,
+) !Id {
     const function = b.functions.items[@intCast(scalar.entry)];
-    const input = b.variables.items[@intCast(function.parameters[0])];
-    const argument = try b.primitive(input, .product, &.{
-        try producerField(b, proposal, 0), try b.constant(u64, 0), try b.constant(u64, 1),
-    }, 0);
+    const users = try producerRequired(b, try producerField(b, references, 1), try b.constant(
+        u64,
+        @backingInt(source.relation.Relocation.Kind.schema),
+    ));
     const result = try b.variable(function.result);
     const returned = try b.reference(result);
     const steps = try producerField(b, proposal, 1);
@@ -1055,7 +1109,7 @@ fn scalarCandidate(b: *source.Builder, scalar: source.Module, proposal: Id, outp
     const document = try b.primitive(output, .product, &.{ try b.constant(u32, 1), final }, 0);
     return b.bind(result, try b.term(.{ .call = .{
         .function = scalar.entry,
-        .arguments = &.{argument},
+        .arguments = &.{ try producerField(b, proposal, 0), users, try b.constant(u64, 0) },
     } }), try b.pure(document));
 }
 
