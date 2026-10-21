@@ -633,7 +633,6 @@ const GeneratedRuntime = struct {
     candidate: contracts.workspace.Ref,
     runtime: contracts.workspace.Ref,
     producer: contracts.workspace.Ref,
-    producer_runtime: contracts.workspace.RuntimeChoice,
     result: contracts.workspace.Ref,
     construction_ns: u64,
     validation_ns: u64,
@@ -963,12 +962,14 @@ fn producerPrimitiveGuard(
 
 fn producerMatch(b: *source.Builder, value: Id, tag: usize, variable: Id, yes: Id, no: Id) !Id {
     const schema = b.values.items[@intCast(value)].schema;
-    const selected = try b.variable(schema);
-    const reference = try b.reference(selected);
-    const actual = try b.primitive(try b.scalar(u64), .variant_tag, &.{reference}, 0);
-    const condition = try producerEquals(b, actual, try b.constant(u64, tag));
-    const matched = try b.bind(variable, try b.pure(try producerPayload(b, reference, tag)), yes);
-    return b.bind(selected, try b.pure(value), try producerWhen(b, condition, matched, no));
+    const variants = b.schemas.items[@intCast(schema)].sum;
+    const Case = std.meta.Elem(@FieldType(@FieldType(source.ast.Term, "match_sum"), "cases"));
+    const cases = try b.allocator().alloc(Case, variants.len);
+    for (variants, cases, 0..) |payload, *case, i| case.* = .{
+        .variable = if (i == tag) variable else try b.variable(payload),
+        .body = if (i == tag) yes else no,
+    };
+    return b.term(.{ .match_sum = .{ .value = value, .cases = cases } });
 }
 
 fn producerWhen(b: *source.Builder, condition: Id, yes: Id, no: Id) !Id {
@@ -1145,7 +1146,6 @@ fn runTransformer(
     service: anytype,
     task: native.testing.state.TaskId,
     program: contracts.workspace.Ref,
-    runtime: contracts.workspace.RuntimeChoice,
     ancestor: contracts.workspace.SemanticTarget,
     label: []const u8,
     expected_layout: bool,
@@ -1173,7 +1173,7 @@ fn runTransformer(
         .{ .work = .{ .start = .{
             .program = program,
             .input = .{ .reference = input },
-            .runtime = runtime,
+            .runtime = .{ .packaged = .{} },
             .policy = .{ .stop = .terminal },
         } } },
     );
@@ -1253,40 +1253,19 @@ fn generatedRuntime(
     );
     const producer = try workspaceRef(a, .program, built.receipt.workspace.?);
     const producer_build_ns = sharedElapsed(producer_started);
-    const preparation_started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
-    const producer_runtime = try prepareTransformer(a, service, task, producer, label);
-    const preparation_ns = sharedElapsed(preparation_started);
-    var generated = try generatedFromProducer(a, service, task, program, ancestor, producer, producer_runtime, label, guard_input, true);
-    generated.construction_ns += preparation_ns;
+    var generated = try generatedFromProducer(
+        a,
+        service,
+        task,
+        program,
+        ancestor,
+        producer,
+        label,
+        guard_input,
+        true,
+    );
     generated.producer_build_ns = producer_build_ns;
     return generated;
-}
-
-fn prepareTransformer(
-    a: std.mem.Allocator,
-    service: anytype,
-    task: native.testing.state.TaskId,
-    producer: contracts.workspace.Ref,
-    label: []const u8,
-) !contracts.workspace.RuntimeChoice {
-    var request = std.heap.ArenaAllocator.init(service.allocator);
-    defer request.deinit();
-    const scratch = request.allocator();
-    const started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
-    const specialized = service.workspaceSpecialize(
-        scratch,
-        try std.fmt.allocPrint(scratch, "{s}-producer-runtime", .{label}),
-        task,
-        try nativeIdentity(producer),
-    ) catch |err| switch (err) {
-        error.SpecializationLimit => {
-            std.debug.print("generated transformer {s}: backend=packaged specialization_limit preparation_ns={d}\n", .{ label, sharedElapsed(started) });
-            return .{ .packaged = .{} };
-        },
-        else => return err,
-    };
-    std.debug.print("generated transformer {s}: backend=specialized preparation_ns={d}\n", .{ label, sharedElapsed(started) });
-    return .{ .selected = try workspaceRef(a, .runtime, specialized.receipt.workspace.?) };
 }
 
 fn generatedFromProducer(
@@ -1296,7 +1275,6 @@ fn generatedFromProducer(
     program: native.testing.state.Digest,
     ancestor: contracts.workspace.SemanticTarget,
     producer: contracts.workspace.Ref,
-    producer_runtime: contracts.workspace.RuntimeChoice,
     label: []const u8,
     guard_input: ?[]const u8,
     expected_layout: bool,
@@ -1304,7 +1282,7 @@ fn generatedFromProducer(
     var phase: []const u8 = "producer execution";
     errdefer std.debug.print("generated runtime {s}: {s}\n", .{ label, phase });
     const construction_started = std.Io.Clock.awake.now(std.testing.io);
-    const result = try runTransformer(a, service, task, producer, producer_runtime, ancestor, label, expected_layout);
+    const result = try runTransformer(a, service, task, producer, ancestor, label, expected_layout);
     phase = "candidate construction";
     const derived = try service.workspaceCommand(
         a,
@@ -1338,7 +1316,6 @@ fn generatedFromProducer(
         .candidate = candidate,
         .runtime = runtime,
         .producer = producer,
-        .producer_runtime = producer_runtime,
         .result = result.result,
         .construction_ns = construction_ns,
         .validation_ns = validation_ns,
@@ -1881,6 +1858,11 @@ fn sharedCancel(a: std.mem.Allocator, service: anytype, task: native.testing.sta
         if (work.value.terminal()) {
             try std.testing.expectEqual(.cancelled, work.value.outcome_kind);
             try std.testing.expect(work.value.guard == null);
+            const bytes = try service.namespace.store.object(a, work.value.outcome, null);
+            defer a.free(bytes);
+            var outcome = try data.invocation.decode(data.invocation.Outcome, a, bytes);
+            defer outcome.deinit();
+            try std.testing.expect(native.tasks.cleanupComplete(outcome.value));
             return;
         }
         _ = try service.workspaceControl(a, try std.fmt.allocPrint(a, "shared-{s}-cleanup-{d}", .{ label, turn }), task, id, work.value.execution_revision, work.value.control_revision, if (turn == 0 and work.value.cancellation == null)
@@ -1978,6 +1960,36 @@ fn sharedComparison(
             result.trace_bytes,                result.guard_reference_ns,                    result.guard_candidate_ns,              result.guard_capsule_bytes,
         });
     }
+}
+
+fn sharedSuccessorComparison(
+    a: std.mem.Allocator,
+    meter: *kosmos.AllocationBudget,
+    service: anytype,
+    task: native.testing.state.TaskId,
+    program: native.testing.state.Digest,
+    generated: GeneratedRuntime,
+) !void {
+    const started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    const specialized = try service.workspaceSpecialize(a, "specialize", task, program);
+    const specialization_ns = sharedElapsed(started);
+    const previous_roots = service.profile.semantic_construction.?.roots;
+    const roots = [_][32]u8{
+        previous_roots[0],
+        kosmos.RuntimeCompiler.approvedRootIdentity(&service.runtime_cache.?.artifact),
+    };
+    service.profile.semantic_construction.?.roots = &roots;
+    defer service.profile.semantic_construction.?.roots = previous_roots;
+    try sharedComparison(
+        a,
+        meter,
+        service,
+        task,
+        program,
+        generated,
+        try workspaceRef(a, .runtime, specialized.receipt.workspace.?),
+        specialization_ns,
+    );
 }
 
 fn interpretationProgram(
@@ -2202,7 +2214,6 @@ fn exerciseGenerated(
         program,
         .{ .runtime = generated.runtime },
         generated.producer,
-        generated.producer_runtime,
         "generated-reused",
         null,
         false,
@@ -3135,14 +3146,17 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         try semanticGuestProgram(scratch, &sender, parent.receipt.task, "placement-semantic-guest")
     else
         program.receipt.workspace.?;
-    const specialization_started = std.Io.Clock.awake.now(io).nanoseconds;
-    const specialized = try sender.workspaceSpecialize(scratch, "specialize", parent.receipt.task, selected_program);
-    const specialization_ns = sharedElapsed(specialization_started);
-    const ancestor = try workspaceRef(scratch, .runtime, specialized.receipt.workspace.?);
+    const specialized: ?native.tasks.Admission = if (scenario == .work)
+        null
+    else
+        try sender.workspaceSpecialize(scratch, "specialize", parent.receipt.task, selected_program);
+    const ancestor = if (specialized) |item|
+        try workspaceRef(scratch, .runtime, item.receipt.workspace.?)
+    else
+        null;
     var packaged_runtime = try sender.program.retainRuntime();
     defer packaged_runtime.deinit();
     const semantic_roots = [_][32]u8{
-        kosmos.RuntimeCompiler.approvedRootIdentity(&sender.runtime_cache.?.artifact),
         kosmos.RuntimeCompiler.approvedRootIdentity(&packaged_runtime),
     };
     const generated: ?GeneratedRuntime = if (scenario == .work) blk: {
@@ -3168,31 +3182,17 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             inline for (.{ "candidate", "runtime", "producer", "result" }) |field| {
                 @field(retained, field).id.bytes = try scratch.dupe(u8, @field(retained, field).id.bytes);
             }
-            if (retained.producer_runtime == .selected) {
-                retained.producer_runtime.selected.id.bytes = try scratch.dupe(u8, retained.producer_runtime.selected.id.bytes);
-            }
             construction_live = meter.live;
             break :construction retained;
         };
         std.debug.print("semantic placement: construction backing before_release={d} after_release={d}\n", .{ construction_live, meter.live });
-        phase = "shared guest five-arm continuation comparison";
-        try sharedComparison(
-            scratch,
-            &meter,
-            &sender,
-            parent.receipt.task,
-            selected_program,
-            derived,
-            ancestor,
-            specialization_ns,
-        );
         phase = "verify temporary construction work disposal";
         std.debug.print("semantic placement: disposal at {d}ms\n", .{sharedElapsed(placement_started) / std.time.ns_per_ms});
         try std.testing.expect(try sender.associatedWorkDisposed(scratch, parent.receipt.task));
         break :blk derived;
     } else null;
     if (scenario == .work) sender.compiler_facts = &sender_compiler_facts;
-    const runtime = if (generated) |derived| derived.runtime else ancestor;
+    const runtime = if (generated) |derived| derived.runtime else ancestor.?;
     const input = if (scenario == .work)
         try contracts.encodeOwned(@import("workspace_sources.zig").SemanticGuestInput, scratch, .{ .yields = 64, .seed = 100 })
     else blk: {
@@ -3617,7 +3617,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         try std.testing.expectEqualDeep(program.receipt, replayed_build.receipt);
         const replayed_specialization = try sender.workspaceSpecialize(scratch, "specialize", parent.receipt.task, program.receipt.workspace.?);
         try std.testing.expect(replayed_specialization.replayed);
-        try std.testing.expectEqualDeep(specialized.receipt, replayed_specialization.receipt);
+        try std.testing.expectEqualDeep(specialized.?.receipt, replayed_specialization.receipt);
         const replayed_start = try sender.workspaceCommand(scratch, "start", parent.receipt.task, start_command);
         try std.testing.expectEqual(.observed, replayed_start.disposition);
         const replayed_start_value = (try native.json.parseAsset(scratch, replayed_start.observation_json.bytes, replayed_start.observation_json.bytes.len)).value;
@@ -4613,6 +4613,17 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             phase = "initial remote disposal state";
             if (iteration == 0) {
                 try std.testing.expect(!try successor.associatedWorkDisposed(scratch, subject.task));
+                if (generated) |derived| {
+                    phase = "shared guest five-arm continuation comparison";
+                    try sharedSuccessorComparison(
+                        scratch,
+                        &meter,
+                        &successor,
+                        subject.task,
+                        selected_program,
+                        derived,
+                    );
+                }
                 _ = try successor.requestCancel(scratch, "cancel-with-remote-work", subject.task, "controller stopped");
                 const replayed_control = try successor.placementControl(scratch, "new-controller-inspect", subject.task, .{ .inspect = .{ .work = work_ref } });
                 try std.testing.expectEqualSlices(u8, try contracts.encodeOwned(p.Signed(p.Control), scratch, successor_control.value), replayed_control);
