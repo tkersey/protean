@@ -1335,7 +1335,14 @@ const SharedArmResult = struct {
     checkpoints: [3]native.testing.state.Reference = undefined,
     outcomes: [3]native.testing.state.Reference = undefined,
     guest_work: u64 = 0,
+    owner_restart_ns: u64 = 0,
+    first_continuation_including_reconstruction_ns: u64 = 0,
+    remaining_continuation_ns: u64 = 0,
     continuation_ns: u64 = 0,
+    requested_backing_live_baseline: usize = 0,
+    requested_backing_peak: usize = 0,
+    requested_backing_live_end: usize = 0,
+    requested_backing_peak_above_baseline: usize = 0,
     checkpoint_ns: u64 = 0,
     inspection_ns: u64 = 0,
     checkpoint_bytes: u64 = 0,
@@ -1443,7 +1450,7 @@ fn sharedPublicationCosts(a: std.mem.Allocator, service: anytype, work: native.w
     result.inspection_bytes = inspected.observation_json.bytes.len;
 }
 
-fn sharedArm(a: std.mem.Allocator, service: anytype, task: native.testing.state.TaskId, program: native.testing.state.Digest, input: []const u8, arm: SharedArm) !SharedArmResult {
+fn sharedArm(a: std.mem.Allocator, meter: *kosmos.AllocationBudget, service: anytype, task: native.testing.state.TaskId, program: native.testing.state.Digest, input: []const u8, arm: SharedArm) !SharedArmResult {
     const started = try service.workspaceStart(a, try std.fmt.allocPrint(a, "shared-{s}-start", .{arm.label}), task, program, input, .{});
     const id = started.receipt.workspace.?;
     var initial = try service.workspaceWork(a, task, id);
@@ -1468,16 +1475,43 @@ fn sharedArm(a: std.mem.Allocator, service: anytype, task: native.testing.state.
     var pending = try guardReplyOccurrence(a, service, selected.value);
     defer pending.deinit();
     result.reply = pending.value.state.settled_reply.reply;
+    {
+        var settled = try service.workspaceWork(a, task, id);
+        defer settled.deinit();
+        const restart_started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+        try restartGuardOwner(a, service);
+        result.owner_restart_ns = sharedElapsed(restart_started);
+        var reopened = try service.workspaceWork(a, task, id);
+        defer reopened.deinit();
+        try std.testing.expectEqualDeep(settled.value.checkpoint, reopened.value.checkpoint);
+        try std.testing.expectEqual(settled.value.execution_revision, reopened.value.execution_revision);
+        try std.testing.expectEqual(settled.value.control_revision, reopened.value.control_revision);
+        try std.testing.expectEqual(settled.value.realization_revision, reopened.value.realization_revision);
+        try std.testing.expectEqualDeep(settled.value.runtime, reopened.value.runtime);
+        try std.testing.expectEqualDeep(settled.value.runtime_capsule, reopened.value.runtime_capsule);
+        try std.testing.expectEqualDeep(settled.value.guard, reopened.value.guard);
+        try std.testing.expectEqualDeep(settled.value.current_occurrence, reopened.value.current_occurrence);
+        var reopened_pending = try guardReplyOccurrence(a, service, reopened.value);
+        defer reopened_pending.deinit();
+        try std.testing.expectEqualDeep(pending.value.state.settled_reply, reopened_pending.value.state.settled_reply);
+    }
+    meter.resetObservation();
+    result.requested_backing_live_baseline = meter.live;
     for (0..3) |cut| {
         var before = try service.workspaceWork(a, task, id);
         defer before.deinit();
         const continuation_started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
         try sharedAdvance(a, service, before.value, arm, cut);
-        result.continuation_ns +|= sharedElapsed(continuation_started);
+        const continuation_ns = sharedElapsed(continuation_started);
+        result.continuation_ns +|= continuation_ns;
+        if (cut == 0) result.first_continuation_including_reconstruction_ns = continuation_ns else result.remaining_continuation_ns +|= continuation_ns;
         var after = try service.workspaceWork(a, task, id);
         defer after.deinit();
         try sharedCut(a, service, after.value, cut, &result);
     }
+    result.requested_backing_peak = meter.peak;
+    result.requested_backing_live_end = meter.live;
+    result.requested_backing_peak_above_baseline = meter.peak - result.requested_backing_live_baseline;
     var final = try service.workspaceWork(a, task, id);
     defer final.deinit();
     try sharedPublicationCosts(a, service, final.value, arm.label, &result);
@@ -1554,6 +1588,7 @@ fn sharedCompare(a: std.mem.Allocator, service: anytype, expected: SharedArmResu
 
 fn sharedComparison(
     a: std.mem.Allocator,
+    meter: *kosmos.AllocationBudget,
     service: anytype,
     task: native.testing.state.TaskId,
     program: native.testing.state.Digest,
@@ -1573,16 +1608,19 @@ fn sharedComparison(
         .{ .label = "instrumented", .runtime = try workspaceRef(a, .runtime, instrumented.receipt.workspace.?), .construction_validation_ns = instrumentation_ns },
         .{ .label = "guarded", .candidate = generated.candidate },
     };
-    std.debug.print("shared comparison: scope=three-cuts-from-identical-retained-request controls=true,resume_yield,resume_yield expected=yielded,yielded,prefix101 includes=continuation-and-persistence excludes=initialization-selection-reply-acquisition-cleanup requested_memory=unmeasured generated_construction_ns={d} generated_validation_ns={d} producer_build_ns={any} guard_agreement=finite-only byte_counts=logical-references-not-deduplicated-footprint\n", .{ generated.construction_ns, generated.validation_ns, generated.producer_build_ns });
+    std.debug.print("shared comparison: scope=three-cuts-from-identical-retained-request-after-owner-restart controls=true,resume_yield,resume_yield expected=yielded,yielded,prefix101 includes=continuation-and-persistence excludes=initialization-selection-reply-acquisition-cleanup reconstruction=first-continuation-including-execution-and-publication-not-isolated-restore requested_memory=root-requested-Zig-backing-bytes memory_scope=three-cuts-and-cut-assertions memory_baseline=retained-owners-and-arenas memory_excludes=restart-publication-costs-cleanup-artifact-comparison-C-SQLite-OS-RSS allocator_resize_remap=disabled timing=instrumented-no-speedup-claim generated_construction_ns={d} generated_validation_ns={d} producer_build_ns={any} guard_agreement=finite-only byte_counts=logical-references-not-deduplicated-footprint\n", .{ generated.construction_ns, generated.validation_ns, generated.producer_build_ns });
     var baseline: ?SharedArmResult = null;
     for (arms) |arm| {
-        const result = try sharedArm(a, service, task, program, input, arm);
+        const result = try sharedArm(a, meter, service, task, program, input, arm);
         if (baseline) |expected| try sharedCompare(a, service, expected, result) else baseline = result;
         const costs = try sharedArtifactCosts(a, service, task, arm);
-        std.debug.print("shared arm={s} construction_validation_ns={any} continuation_ns={d} guest_work={d} checkpoint_publication_ns={d} inspection_ns={d} artifact_bytes={d} evidence_bytes={d} candidate_proposal_bytes={d} published_guest_checkpoint_bytes={d} published_outcome_bytes={d} retained_capsule_bytes={d} inspection_bytes={d} trace_bytes={d} guard_reference_ns={d} guard_candidate_ns={d} guard_capsule_bytes={d}\n", .{
-            arm.label,               arm.construction_validation_ns, result.continuation_ns,    result.guest_work,         result.checkpoint_ns,       result.inspection_ns,
-            costs.artifact,          costs.evidence,                 costs.proposal,            result.checkpoint_bytes,   result.outcome_bytes,       result.capsule_bytes,
-            result.inspection_bytes, result.trace_bytes,             result.guard_reference_ns, result.guard_candidate_ns, result.guard_capsule_bytes,
+        std.debug.print("shared arm={s} construction_validation_ns={any} owner_restart_ns={d} first_continuation_including_reconstruction_ns={d} remaining_continuation_ns={d} continuation_ns={d} requested_backing_live_baseline={d} requested_backing_peak={d} requested_backing_live_end={d} requested_backing_peak_above_baseline={d} guest_work={d} checkpoint_publication_ns={d} inspection_ns={d} artifact_bytes={d} evidence_bytes={d} candidate_proposal_bytes={d} published_guest_checkpoint_bytes={d} published_outcome_bytes={d} retained_capsule_bytes={d} inspection_bytes={d} trace_bytes={d} guard_reference_ns={d} guard_candidate_ns={d} guard_capsule_bytes={d}\n", .{
+            arm.label,                         arm.construction_validation_ns,               result.owner_restart_ns,                result.first_continuation_including_reconstruction_ns,
+            result.remaining_continuation_ns,  result.continuation_ns,                       result.requested_backing_live_baseline, result.requested_backing_peak,
+            result.requested_backing_live_end, result.requested_backing_peak_above_baseline, result.guest_work,                      result.checkpoint_ns,
+            result.inspection_ns,              costs.artifact,                               costs.evidence,                         costs.proposal,
+            result.checkpoint_bytes,           result.outcome_bytes,                         result.capsule_bytes,                   result.inspection_bytes,
+            result.trace_bytes,                result.guard_reference_ns,                    result.guard_candidate_ns,              result.guard_capsule_bytes,
         });
     }
 }
@@ -2651,7 +2689,8 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     var phase: []const u8 = "setup";
     var attack_index: usize = 0;
     errdefer std.debug.print("placement {s}: {s} ({d})\n", .{ @tagName(scenario), phase, attack_index });
-    const a = std.testing.allocator;
+    var meter: kosmos.AllocationBudget = .{ .parent = std.testing.allocator, .limit = std.math.maxInt(usize) };
+    const a = if (scenario == .work) meter.allocator() else std.testing.allocator;
     const io = std.testing.io;
     const p = native.placement;
     var root_builder = source.Builder.init(a);
@@ -2753,6 +2792,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         phase = "shared guest five-arm continuation comparison";
         try sharedComparison(
             scratch,
+            &meter,
             &sender,
             parent.receipt.task,
             selected_program,
