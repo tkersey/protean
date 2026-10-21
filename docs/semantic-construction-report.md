@@ -101,20 +101,20 @@ measure of test implementation size.
 |---|---:|---:|---:|
 | Horos | 13 | 75,111 | 213 |
 | Kosmos | 8 | 76,883 | 773 |
-| Protean | 19 | 201,073 | 18,101 |
-| Total | 40 | 353,067 | 19,087 |
+| Protean | 20 | 203,615 | 18,317 |
+| Total | 41 | 355,609 | 19,303 |
 
 The count includes inline test blocks and existing test-root imports in Horos
 and Protean production modules.
 
 The complete changed Zig source, including production code and all test helpers,
 adds/deletes 312,030/63,209 bytes in Horos, 231,040/16,904 bytes in Kosmos, and
-492,444/57,584 bytes in Protean. These totals expose helper code omitted by the
+497,462/57,594 bytes in Protean. These totals expose helper code omitted by the
 test-block breakdown; they do not attribute all source growth to tests.
 
 No test modules, directories, executables, or CI lanes were added. Protean's
 existing workspace execution count advances from 12 to 14. The largest extension
-is `workspace_runtime.zig` at 156,257 added bytes; the low module count does not
+is `workspace_runtime.zig` at 158,428 added bytes; the low module count does not
 make this a small fixture change. Its generated producer and candidate are reused
 by the custody, five-arm, and mobility checks, avoiding a third producer run.
 Historical independent byte fixtures remain unchanged.
