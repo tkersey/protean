@@ -1993,7 +1993,19 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     var specialization_request = std.heap.FixedBufferAllocator.init(specialization_request_memory);
     phase = "runtime specialization";
     const specialized = try service.workspaceSpecializeWithHooks(specialization_request.allocator(), "specialize", parent.receipt.task, program.receipt.workspace.?, .{ .control = true, .storage = true });
-    try std.testing.expectEqual(namespace.store.integrity_epoch, service.checked_workspace_runtimes.get(specialized.receipt.workspace.?).?);
+    var specialized_observation = try contracts.decodeOwned(native.workspace.Runtime, scratch, try namespace.store.object(scratch, specialized.receipt.workspace_observation.?, null));
+    defer specialized_observation.deinit();
+    try std.testing.expect(specialized_observation.value.validation == null);
+    const validation_bytes = try contracts.encodeOwned(?native.workspace.ValidationFact, scratch, null);
+    var validation_context: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(validation_bytes, &validation_context, .{});
+    const runtime_fact = .{
+        .kind = .runtime,
+        .input = specialized_observation.value.artifact,
+        .output = @as(native.testing.state.Reference, .{ .digest = @splat(0), .bytes = 0 }),
+        .context = validation_context,
+    };
+    try std.testing.expectEqual(namespace.store.integrity_epoch, service.checked_workspace_runtimes.get(runtime_fact).?);
     try std.testing.expectEqualDeep(specialized.receipt.workspace.?, service.runtime_cache.?.artifact.identity);
     try std.testing.expectEqual(namespace.store.integrity_epoch, service.runtime_cache.?.epoch);
     const duplicate = try service.workspaceSpecializeWithHooks(scratch, "specialize", parent.receipt.task, program.receipt.workspace.?, .{ .control = true, .storage = true });
@@ -2064,7 +2076,7 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
         _ = try service.workspaceRealize(commit_guard.allocator(), "select", parent.receipt.task, selection);
         try std.testing.expectEqual(@as(usize, 0), commit_guard.rejected);
     }
-    try std.testing.expectEqual(namespace.store.integrity_epoch, service.checked_workspace_runtimes.get(specialized.receipt.workspace.?).?);
+    try std.testing.expectEqual(namespace.store.integrity_epoch, service.checked_workspace_runtimes.get(runtime_fact).?);
     try std.testing.expectEqual(namespace.store.integrity_epoch, service.runtime_cache.?.epoch);
     try std.testing.expect(previous_runtime.core != service.runtime_cache.?.artifact.core);
     const replay = try service.workspaceRealize(scratch, "select", parent.receipt.task, selection);

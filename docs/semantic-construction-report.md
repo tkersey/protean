@@ -90,12 +90,12 @@ rather than only the net file-size difference.
 |---|---:|---:|---:|
 | Horos | 3 | 26,035 | 0 |
 | Kosmos | 8 | 76,091 | 773 |
-| Protean | 13 | 178,776 | 18,127 |
-| Total | 24 | 280,902 | 18,900 |
+| Protean | 13 | 183,661 | 20,697 |
+| Total | 24 | 285,787 | 21,470 |
 
 No test modules, directories, executables, or CI lanes were added. Protean's
 existing workspace execution count advances from 12 to 13. The largest extension
-is `workspace_runtime.zig` at 148,596 added bytes; the low module count does not
+is `workspace_runtime.zig` at 149,631 added bytes; the low module count does not
 make this a small fixture change. Its generated producer and candidate are reused
 by the custody, five-arm, and mobility checks, avoiding a third producer run.
 Historical independent byte fixtures remain unchanged.
@@ -142,3 +142,38 @@ package operation. Protean's full-tree and product qualification remains outstan
 Serial review has identified unresolved Horos admission, ownership, resource
 accounting, and source-inventory defects. The native test results above do not
 qualify that inventory check or establish review completion.
+
+Protean custody at `5c2c6b5` passes all five tests in 482.140 seconds:
+125.400 seconds building after an exact-key miss and 353.116 seconds executing.
+The compiler reused four existing artifacts and compiled the affected test root.
+The captured-read extension leaves this custody input key unchanged; the later
+selection-only cache assertion changes no custody scenario or production code.
+The test process reports 8,833,171,456 bytes maximum resident memory and
+12,869,024,264 bytes peak memory footprint; these are distinct measurements.
+
+The shared witness's two generated-producer executions take 98.743 and 42.571
+seconds, using 26,031 and 20,268 guest transitions respectively. The first
+construction takes 99.867 seconds, its independent validation 0.780 seconds,
+and producer compilation 0.007 seconds. These single local samples include
+ordinary generated execution and publication; they do not predict model efficacy.
+
+| Arm | Three-cut continuation ms | Publication ms | Artifact bytes | Evidence bytes |
+|---|---:|---:|---:|---:|
+| Generic | 33.483 | 7.901 | 234,530 | 50,635 |
+| Built-in specialized | 50.517 | 47.058 | 26,986,920 | 23,337,881 |
+| Generated validated | 36.968 | 8.568 | 625,054 | 440,856 |
+| Instrumented | 177.703 | 47.771 | 26,988,453 | 23,339,190 |
+| Reference guarded | 474.887 | 8.565 | 859,584 | 491,491 |
+
+All five arms execute 21 guest transitions and publish the same 550 logical guest
+checkpoint bytes across the selected cuts. The guarded measurement includes
+24.716 ms reference execution, 17.412 ms candidate execution, and 20,214 retained
+guard-capsule bytes. These samples do not establish an execution speedup or a
+break-even repetition count for the generated candidate.
+
+Workspace execution at `29da7d1` passes 13/13 tests in 198.914 seconds
+(149.662 seconds build, 45.648 seconds tests, exact-key miss). This includes
+captured semantic summary and pure-slice reads, prepared transaction replay, and
+rejection of rehashed replies. Onward succession passes 4/4 in 232.472 seconds
+(121.052 seconds build, 109.526 seconds tests, exact-key miss), including the
+copied-custody forgery cases.
