@@ -127,7 +127,7 @@ const Audit = struct {
         while (try rows.step() == .row) {
             const id = try fixed(16, try rows.bytes(0));
             const ref = try self.indexed(try rows.bytes(3));
-            var decoded = try contracts.decodeOwned(state.Task, self.a, try self.body(ref));
+            var decoded = try contracts.decodeOwned(state.Task, self.store.allocator, try self.body(ref));
             defer decoded.deinit();
             const task = decoded.value;
             if (!same(&task.id, &id) or task.revision != try rows.integer(1) or @intFromBool(task.terminal()) != try rows.integer(2)) return error.CorruptState;
@@ -148,7 +148,7 @@ const Audit = struct {
             inline for (@typeInfo(storage.RecordKind).@"enum".field_names) |name| {
                 if (kind == @field(storage.RecordKind, name)) {
                     const T = storage.Record(name);
-                    var decoded = try contracts.decodeOwned(T, self.a, try self.body(ref));
+                    var decoded = try contracts.decodeOwned(T, self.store.allocator, try self.body(ref));
                     defer decoded.deinit();
                     const item = decoded.value;
                     const bound_task = if (T == state.Artifact) item.task orelse return error.CorruptState else item.task;
@@ -168,7 +168,7 @@ const Audit = struct {
                 const task = try fixed(16, try rows.bytes(0));
                 const owner = self.tasks.get(task) orelse return error.CorruptState;
                 const ref = try self.indexed(try rows.bytes(3));
-                var decoded = try contracts.decodeOwned(state.Event, self.a, try self.body(ref));
+                var decoded = try contracts.decodeOwned(state.Event, self.store.allocator, try self.body(ref));
                 defer decoded.deinit();
                 const event = decoded.value;
                 if (!same(&event.task, &task) or event.seq != try rows.integer(1) or event.revision != try rows.integer(2) or event.revision > owner.revision) return error.CorruptState;
@@ -184,7 +184,7 @@ const Audit = struct {
                 const owner = self.tasks.get(task) orelse return error.CorruptState;
                 const request = try fixed(32, try rows.bytes(1));
                 const ref = try self.indexed(try rows.bytes(2));
-                var decoded = try contracts.decodeOwned(state.Receipt, self.a, try self.body(ref));
+                var decoded = try contracts.decodeOwned(state.Receipt, self.store.allocator, try self.body(ref));
                 defer decoded.deinit();
                 const receipt = decoded.value;
                 if (!same(&receipt.task, &task) or !same(&receipt.request_digest, &request) or receipt.revision > owner.revision) return error.CorruptState;
@@ -205,7 +205,7 @@ const Audit = struct {
     }
     fn record(self: *Audit, comptime kind: storage.RecordKind, task: state.TaskId, id: Digest) !contracts.Decoded(storage.Record(@tagName(kind))) {
         const ref = self.records.get(.{ .kind = kind, .task = task, .id = id }) orelse return error.CorruptState;
-        return contracts.decodeOwned(storage.Record(@tagName(kind)), self.a, try self.body(ref));
+        return contracts.decodeOwned(storage.Record(@tagName(kind)), self.store.allocator, try self.body(ref));
     }
     fn projections(self: *Audit) !void {
         for (self.records.keys()) |key| {
@@ -222,7 +222,7 @@ const Audit = struct {
             if (!same(&attempt.value.occurrence, &capture.occurrence) or attempt.value.prepared == null or
                 !std.meta.eql(attempt.value.prepared.?, capture.request) or !std.meta.eql(attempt.value.profile, owner.profile) or
                 !std.meta.eql(attempt.value.request, saved.value.request_object)) return error.CorruptState;
-            var request = try data.invocation.decode(data.invocation.Request, self.a, try self.body(attempt.value.request));
+            var request = try data.invocation.decode(data.invocation.Request, self.store.allocator, try self.body(attempt.value.request));
             defer request.deinit();
             if (!same(&request.value.request_identity, &saved.value.request)) return error.CorruptState;
             const entry = try self.handlers.resolve(request.value, try self.occurrenceImage(saved.value));
@@ -262,7 +262,7 @@ const Audit = struct {
             defer decoded.deinit();
             const item = decoded.value;
             const owner = self.tasks.get(key.task).?;
-            var task = try contracts.decodeOwned(state.Task, self.a, try self.body(owner.body));
+            var task = try contracts.decodeOwned(state.Task, self.store.allocator, try self.body(owner.body));
             defer task.deinit();
             if (item.admission_revision > owner.revision or !std.meta.eql(item.profile, owner.profile) or item.resources.items.len != task.value.resources.items.len) return error.CorruptState;
             for (item.resources.items, task.value.resources.items) |actual, expected| if (!std.meta.eql(actual, expected)) return error.CorruptState;
@@ -270,7 +270,7 @@ const Audit = struct {
             var occurrence_value = try self.record(.occurrence, key.task, item.occurrence);
             defer occurrence_value.deinit();
             if (!std.meta.eql(occurrence_value.value.request_object, item.request)) return error.CorruptState;
-            var request = try data.invocation.decode(data.invocation.Request, self.a, try self.body(item.request));
+            var request = try data.invocation.decode(data.invocation.Request, self.store.allocator, try self.body(item.request));
             defer request.deinit();
             if (!std.meta.eql(request.value.request_identity, occurrence_value.value.request)) return error.CorruptState;
             const image = try self.occurrenceImage(occurrence_value.value);

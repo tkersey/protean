@@ -874,22 +874,25 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                 maximum_prepared = @max(maximum_prepared, work.prepared.?.len);
                 if (recovery_probe == .imported and restarted and work.entry.declaration.inference) {
                     errdefer service.unknown(frame, work) catch {};
+                    var probe_arena = std.heap.ArenaAllocator.init(scratch.allocator());
+                    defer probe_arena.deinit();
+                    const probe = probe_arena.allocator();
                     const projection = struct {
                         adapter: native.registry.CaptureAdapter,
                         payload: []const u8,
                         pub fn run(this: @This(), ctx: native.registry.ProjectionContext) ![]u8 {
                             return this.adapter.prepare(ctx, this.payload);
                         }
-                    }{ .adapter = adapter, .payload = try work.entry.payload(frame, request.value.binding.payload) };
+                    }{ .adapter = adapter, .payload = try work.entry.payload(probe, request.value.binding.payload) };
                     const binding: native.registry.ProjectionBinding = .{ .task = task, .tenant = profile.authority.tenant, .profile = profile.bytes, .application = application.image_identity, .resources = saved.value.resources.items, .controller = work.controller_projection };
-                    _ = try namespace.store.project([]u8, frame, handlers, binding, projection);
+                    _ = try namespace.store.project([]u8, probe, handlers, binding, projection);
                     const cache = &namespace.store.context_cache;
                     cache.hits = 0;
                     cache.misses = 0;
                     cache.ancestry_bytes = 0;
                     cache.object_reads = 0;
                     cache.object_bytes = 0;
-                    const repeated = try namespace.store.project([]u8, frame, handlers, binding, projection);
+                    const repeated = try namespace.store.project([]u8, probe, handlers, binding, projection);
                     try std.testing.expectEqualSlices(u8, work.prepared.?, repeated);
                     std.debug.print("same-service import model_calls={d} hits={d} misses={d} ancestry_bytes={d} reads={d} bytes={d}\n", .{ model_calls, cache.hits, cache.misses, cache.ancestry_bytes, cache.object_reads, cache.object_bytes });
                     try std.testing.expectEqual(@as(u64, 1), cache.hits);
@@ -899,7 +902,7 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
                 if (work.entry.declaration.inference and model_calls == 8) {
                     var prepared = try protean.contracts.decodeOwned(t.P.AdaptivePrepared, frame, work.prepared.?);
                     defer prepared.deinit();
-                    const rendered = try native.json.parse(frame, prepared.value.body.bytes, .{});
+                    const rendered = try native.json.parseAsset(frame, prepared.value.body.bytes, prepared.value.body.bytes.len);
                     var task_count: usize = 0;
                     var followup_count: usize = 0;
                     for (rendered.value.object.get("input").?.array.items) |item| {

@@ -5181,7 +5181,9 @@ pub fn Service(comptime Types: type) type {
                 const attempt_binding = try self.projectionBindingAt(temporary, value, saved.value, attempt.value.controller_context);
                 if (entry.declaration.capture) |adapter| {
                     const prepared = try self.store().object(temporary, attempt.value.prepared.?, null);
-                    const replayed = try self.store().project([]u8, temporary, self.handlers, attempt_binding, struct {
+                    var replay_arena = std.heap.ArenaAllocator.init(self.allocator);
+                    defer replay_arena.deinit();
+                    const replayed = try self.store().project([]u8, replay_arena.allocator(), self.handlers, attempt_binding, struct {
                         adapter: registry.CaptureAdapter,
                         payload: []const u8,
                         pub fn run(this: @This(), context: registry.ProjectionContext) ![]u8 {
@@ -5238,7 +5240,9 @@ pub fn Service(comptime Types: type) type {
                 const adapter = entry.declaration.capture orelse return error.IncompatibleProfile;
                 const rendered = try self.store().object(temporary, capture_value.request, null);
                 const response = try self.store().object(temporary, capture_value.response.?, null);
-                const result = try self.interpretProjection(temporary, value, saved.value, adapter, try entry.payload(temporary, request.value.binding.payload), rendered, response);
+                var interpretation_arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer interpretation_arena.deinit();
+                const result = try self.interpretProjection(interpretation_arena.allocator(), value, saved.value, adapter, try entry.payload(temporary, request.value.binding.payload), rendered, response);
                 if (result.objects.len != projection.objects.items.len or result.output_tokens != projection.output_tokens) return error.CorruptState;
                 for (result.objects, projection.objects.items) |object, reference| {
                     if (object.len != reference.bytes or !same(&storage.digest(object), &reference.digest)) return error.CorruptState;
@@ -6569,7 +6573,12 @@ pub fn Service(comptime Types: type) type {
             try self.store().begin();
             defer self.store().rollback();
             try reader.acquire(self.store());
-            var inspected = try archive_api.inspect(a, self.store(), reader.manifest.value, null);
+            var inspected = inspected: {
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const result = try archive_api.inspect(arena.allocator(), self.store(), reader.manifest.value, null);
+                break :inspected .{ .task = result.task, .current = result.current };
+            };
             defer inspected.task.deinit();
             var value = inspected.task.value;
             if (!same(value.principal.bytes, self.profile.authority.principal) or !same(value.tenant.bytes, self.profile.authority.tenant)) return error.Denied;
