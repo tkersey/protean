@@ -1683,43 +1683,68 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
         try service.validateWorkspace(scratch, settled.task);
     }
 
-    const read_parent = try service.submit(scratch, "read-observation", .{ .program = .{ .describe = .{ .section = .source_records, .page = .{} } } });
-    var read_occurrence: ?native.testing.occurrence.Occurrence = null;
-    for (0..32) |_| {
-        _ = try service.pump(scratch);
-        var query = try namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='occurrence'", &.{.{ .blob = &read_parent.receipt.task }});
-        defer query.deinit();
-        if (try query.step() != .row) continue;
-        var pending = try contracts.decodeOwned(native.testing.occurrence.Occurrence, a, try query.bytes(0));
-        defer pending.deinit();
-        if (pending.value.state == .settled_reply) {
-            read_occurrence = pending.value;
-            break;
+    var read_runtime = try service.program.retainRuntime();
+    defer read_runtime.deinit();
+    var read_source = try kosmos.RuntimeCompiler.exportSource(a, &read_runtime);
+    defer read_source.deinit();
+    const read_controller: contracts.workspace.SemanticTarget = .{ .controller = .{
+        .cut = .{ .epoch = 0, .execution_revision = 1 },
+    } };
+    const read_commands = [_]contracts.workspace.Command{
+        .{ .program = .{ .describe = .{ .section = .source_records, .page = .{} } } },
+        .{ .program = .{ .inspect = .{
+            .target = .{ .semantic_source = .{ .subject = read_controller, .section = .{ .summary = .{} } } },
+            .page = .{ .maximum = 128 },
+        } } },
+        .{ .program = .{ .inspect = .{
+            .target = .{ .semantic_source = .{ .subject = read_controller, .section = .{ .slice = .{ .function = read_source.value.generic_pure_entries[0].function } } } },
+            .page = .{ .maximum = 128 },
+        } } },
+    };
+    for (read_commands, 0..) |read_command, read_case| {
+        const operation = try std.fmt.allocPrint(scratch, "read-observation-{d}", .{read_case});
+        const read_parent = try service.submit(scratch, operation, read_command);
+        var read_occurrence: ?native.testing.occurrence.Occurrence = null;
+        for (0..32) |_| {
+            _ = try service.pump(scratch);
+            var query = try namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='occurrence'", &.{.{ .blob = &read_parent.receipt.task }});
+            defer query.deinit();
+            if (try query.step() != .row) continue;
+            var pending = try contracts.decodeOwned(native.testing.occurrence.Occurrence, a, try query.bytes(0));
+            defer pending.deinit();
+            if (pending.value.state == .settled_reply) {
+                read_occurrence = pending.value;
+                break;
+            }
         }
-    }
-    const original = read_occurrence orelse return error.MissingReadObservation;
-    try service.validateWorkspace(scratch, read_parent.receipt.task);
-    var manifest_digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(assets.manifest, &manifest_digest, .{});
-    const index = try namespace.store.archiveIndex(scratch, read_parent.receipt.task, .{ .digest = manifest_digest, .bytes = assets.manifest.len });
-    // Rehashing an independently changed acquired reply must not turn it into
-    // the result of the retained read. Test before the root consumes the reply.
-    var read_compiler_facts = try service.prepareWorkspaceValidation(read_parent.receipt.task);
-    defer read_compiler_facts.deinit();
-    for (0..2) |variant| {
+        const original = read_occurrence orelse return error.MissingReadObservation;
+        try service.validateWorkspace(scratch, read_parent.receipt.task);
+        var manifest_digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(assets.manifest, &manifest_digest, .{});
+        const index = try namespace.store.archiveIndex(scratch, read_parent.receipt.task, .{ .digest = manifest_digest, .bytes = assets.manifest.len });
+        var read_compiler_facts = try service.prepareWorkspaceValidation(read_parent.receipt.task);
+        defer read_compiler_facts.deinit();
+        const observed_bytes = (try namespace.store.recordBytes(scratch, "workspace_reply", original.id, original.task)).?;
+        const observed_reply = (try contracts.decodeOwned(native.workspace.ReplyObservation, scratch, observed_bytes)).value;
+        try std.testing.expect(observed_reply.evidence == .read);
         try namespace.store.begin();
-        const fake: contracts.workspace.Reply = .{
-            .disposition = .observed,
-            .observation_json = .{ .bytes = if (variant == 0) "{\"text\":\"fabricated schema\"}" else "{}" },
-            .selected_view = if (variant == 1) .{ .kind = .view, .id = .{ .bytes = &(@as([64]u8, @splat('0'))) } } else null,
-        };
-        const payload = try contracts.encodeOwned(contracts.workspace.Reply, scratch, fake);
-        const bound = try data.invocation.encodeOwned(data.invocation.Result, scratch, .{ .request_identity = original.request, .value = payload });
-        var forged_reply = original;
-        forged_reply.state.settled_reply.reply = (try namespace.store.putObject(bound)).digest;
-        try namespace.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", original.id, original.task, forged_reply);
-        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(scratch, original.task, index.records.items, &read_compiler_facts));
+        try service.validateWorkspaceRecordsPrepared(scratch, original.task, index.records.items, &read_compiler_facts);
         namespace.store.rollback();
+        for (0..2) |variant| {
+            try namespace.store.begin();
+            const fake: contracts.workspace.Reply = .{
+                .disposition = .observed,
+                .observation_json = .{ .bytes = if (variant == 0) "{\"text\":\"fabricated schema\"}" else "{}" },
+                .selected_view = if (variant == 1) .{ .kind = .view, .id = .{ .bytes = &(@as([64]u8, @splat('0'))) } } else null,
+            };
+            const payload = try contracts.encodeOwned(contracts.workspace.Reply, scratch, fake);
+            const bound = try data.invocation.encodeOwned(data.invocation.Result, scratch, .{ .request_identity = original.request, .value = payload });
+            var forged_reply = original;
+            forged_reply.state.settled_reply.reply = (try namespace.store.putObject(bound)).digest;
+            try namespace.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", original.id, original.task, forged_reply);
+            try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(scratch, original.task, index.records.items, &read_compiler_facts));
+            namespace.store.rollback();
+        }
     }
     const other = try service.submit(scratch, "other-task", command);
     const forbidden = try service.workspaceCommand(scratch, "cross-task-source", other.receipt.task, .{ .context = .{ .expand = .{ .reference = source_ref, .page = .{} } } });
