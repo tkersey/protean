@@ -2623,7 +2623,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     const destination_path = try std.fmt.allocPrint(scratch, "{s}/destination", .{path_buffer[0..length]});
     const successor_path = try std.fmt.allocPrint(scratch, "{s}/successor", .{path_buffer[0..length]});
     var untrusted_namespaces: [3]@FieldType(p.Site, "namespace") = undefined;
-    if (scenario == .work) for (&untrusted_namespaces, 0..) |*identity, attack| {
+    if (scenario == .onward) for (&untrusted_namespaces, 0..) |*identity, attack| {
         var empty = try native.Namespace.open(a, io, try std.fmt.allocPrint(scratch, "{s}/untrusted-{d}", .{ path_buffer[0..length], attack }));
         identity.* = empty.identity;
         try empty.close();
@@ -3600,9 +3600,9 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     try std.testing.expectError(error.Denied, offerPlacement(&sender, subject, "destination", archive_path));
     sender.profile.authority.disclosure = true;
     try std.testing.expectError(error.InvalidTransfer, sender.placementAbortUnsent(scratch, subject, @splat(14)));
-    if (scenario == .work) {
+    if (scenario == .work or scenario == .onward) try sender.park(scratch);
+    if (scenario == .onward) {
         phase = "untrusted copied custody";
-        try sender.park(scratch);
         const controller: p.Subject = .{ .task = subject.task };
         const controller_cut = try sender.placementCut(scratch, controller);
         for (0..3) |attack| {
@@ -3632,7 +3632,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     sender_open = false;
     try source_namespace.close();
     source_open = false;
-    if (scenario == .work) {
+    if (scenario == .onward) {
         const controller: p.Subject = .{ .task = subject.task };
         for (0..3) |attack| {
             phase = "untrusted custody import";
@@ -3660,7 +3660,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             try std.testing.expectError(error.CustodyNotLocal, copied.requestCancel(scratch, "untrusted-cancel", subject.task, "stop"));
         }
     }
-    {
+    if (scenario == .onward) {
         // Ordinary archive import is a data copy. Even a configured native
         // service cannot acquire this task or work merely by possessing it.
         const copied_path = try std.fmt.allocPrint(scratch, "{s}/copied", .{path_buffer[0..length]});
