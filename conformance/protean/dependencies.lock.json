@@ -3,39 +3,39 @@
   "status": "development-integration",
   "boundary": {
     "repository": "tkersey/horos",
-    "commit": "cd256c1d5a32d6f73c885fa7eddda3b5e196b0ed",
-    "gitTree": "a00dc2514ec4d1aaa072eac0bdaaa5e0846d3143",
+    "commit": "a0b0b2565daf40e433a420963e91b0c475df3697",
+    "gitTree": "17bec3afcb4cf5bd93368555bc9f84aa611984f7",
     "version": "6.1.0",
     "source": {
-      "inventorySha256": "7645e3d32ef5489f87173df3bf6117a302ab28abad3c592cccd4ff23424b1541",
+      "inventorySha256": "eb0d2c5f67b426aebcc3b8a51ce4f97306c13651abfc1face4f3e0f9fa800bfe",
       "entries": 436,
-      "bytes": 9907267
+      "bytes": 9914486
     },
     "archive": {
-      "url": "https://github.com/tkersey/horos/archive/cd256c1d5a32d6f73c885fa7eddda3b5e196b0ed.tar.gz",
-      "sha256": "a47057ee5137dadd08798abdf51b34f496f1d153e5f445a52b963eaf9b7e02e8",
-      "bytes": 1771052,
-      "origin": "Local git archive of the exact committed tree; transport bytes are locally retained, not authenticated as a GitHub archive."
+      "url": "https://github.com/tkersey/horos/archive/a0b0b2565daf40e433a420963e91b0c475df3697.tar.gz",
+      "sha256": "8387f14cc54b2dc13b24af61c9345c0bf04c18261f7f40d3c55f24518761a5bc",
+      "bytes": 1801400,
+      "origin": "GitHub archive of the exact feature-branch commit; extracted source inventory matches the committed source."
     },
-    "authentication": "Committed local development source and archive authenticated; remote availability is not asserted.",
+    "authentication": "Published feature-branch head and downloaded GitHub archive authenticated against the committed source inventory.",
     "package": {
-      "zigHash": "horos-6.1.0-flclaHNqTwCG48hkpsZu5ksk5lbWmky0QXocK2TSP6Uc",
+      "zigHash": "horos-6.1.0-flclaKaGTwDDoq-WAR59ylSnTaUqm0la4UGvbvQovZvX",
       "defaultProfile": "zig-managed",
       "profiles": {
         "zig-managed": {
-          "inventorySha256": "d2ee9e7e4839b16558c82072fcaf8083343b84a705c26091f3b4239e1e385d12",
+          "inventorySha256": "61b01f4d9ad8f961a92fbde8966ed631cfe2607c4567d252306ba320fc2f5e96",
           "entries": 412,
-          "bytes": 5204595
+          "bytes": 5211814
         },
         "archive-extracted": {
-          "inventorySha256": "d2ee9e7e4839b16558c82072fcaf8083343b84a705c26091f3b4239e1e385d12",
+          "inventorySha256": "61b01f4d9ad8f961a92fbde8966ed631cfe2607c4567d252306ba320fc2f5e96",
           "entries": 412,
-          "bytes": 5204595
+          "bytes": 5211814
         }
       },
       "archive": {
-        "sha256": "081ab5161c1aba0d554e7d326c2cb022c57895fc623e43ad07c001ea87a79478",
-        "bytes": 1001255
+        "sha256": "4438ff8b4cc804f2b77d52e1d381e579e110b25786b272ace61727d547eff936",
+        "bytes": 1002660
       }
     },
     "api": {
@@ -97,21 +97,21 @@
   },
   "world": {
     "repository": "tkersey/kosmos",
-    "commit": "8392e18ab78349f81b8a3d9b83e2f2399fae6dd5",
-    "gitTree": "97d8ba4203e587ff10ff8d6681ce5c4cb6e8a1ae",
+    "commit": "814aa999d155e0c0c1943a21cca743701c3c7a49",
+    "gitTree": "3bc1a5cc7f4949334905674d59b557a2592c7d1f",
     "version": "9.1.0",
     "source": {
-      "inventorySha256": "54a04d2b87bad258f7f726342f3cbba5ca5aa8ebca78b9c54b88428f74a0b60c",
+      "inventorySha256": "7956837a7175330e0987aea52adc8247e9fc9a52244b145c51211386e2eb997a",
       "entries": 214,
       "bytes": 3244463
     },
     "archive": {
-      "url": "https://github.com/tkersey/kosmos/archive/8392e18ab78349f81b8a3d9b83e2f2399fae6dd5.tar.gz",
-      "sha256": "d1775825b632e54bc03cad4455b65ac72aaa6e539e98a0fc433bb49215bf3da6",
-      "bytes": 711900,
-      "origin": "Local git archive of the exact committed tree; transport bytes are locally retained, not authenticated as a GitHub archive."
+      "url": "https://github.com/tkersey/kosmos/archive/814aa999d155e0c0c1943a21cca743701c3c7a49.tar.gz",
+      "sha256": "52deea6e8043f465de5cc311499331e19fb433cf26bbc86fad63348ba5da76ff",
+      "bytes": 718976,
+      "origin": "GitHub archive of the exact feature-branch commit; extracted source inventory matches the committed source."
     },
-    "authentication": "Committed local development source and archive authenticated; remote availability is not asserted."
+    "authentication": "Published feature-branch head and downloaded GitHub archive authenticated against the committed source inventory."
   },
   "toolchain": {
     "zig": {
@@ -127,10 +127,10 @@
     "pullRequests": []
   },
   "limitations": [
-    "Local committed integration only; dependency commits and local archive bytes have not been published. The recorded GitHub URLs identify the intended commits but remote transport remains unqualified.",
+    "Feature branches and exact dependency archives are published for qualification; no release or merge is implied.",
     "Controlled-provider qualification does not establish live-provider availability or model quality; existing saved tasks retain their original executable and image bindings."
   ],
   "notes": [
-    "Source overrides and retained local commit archives provide the exact dependency tuple for local qualification."
+    "Exact GitHub source archives are authenticated against the committed source inventories; native dependency setup independently verifies transport and extracted contents."
   ]
 }
