@@ -3729,6 +3729,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     destination_open = true;
     receiver = try native.tasks.Service(OwnerTypes).init(a, io, &destination_namespace, assets, &application, handlers, resumed_profile);
     receiver_open = true;
+    phase = "replay destination acceptance";
     try std.testing.expectEqualDeep(accepted, try acceptPlacement(&receiver, "recovered-acceptance", "source", offer, archive_path));
     var imported_work = try receiver.workspaceWork(a, subject.task, work_id);
     defer imported_work.deinit();
@@ -3745,6 +3746,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         try std.testing.expectEqualDeep(compatibility, try receiver.placementCompatibility(scratch, subject));
         try inspectGeneratedArchive(scratch, &receiver, subject.task, derived);
     }
+    phase = "continue imported evaluator";
     _ = try receiver.workspacePump(scratch, "continue-outer", subject.task, .{ .expected = .{ .work = work_ref, .execution_revision = imported_work.value.execution_revision, .control_revision = imported_work.value.control_revision }, .base_quantum = 1 });
     var continued = try receiver.workspaceWork(a, subject.task, work_id);
     defer continued.deinit();
@@ -3781,6 +3783,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         try std.testing.expectError(error.Denied, sender.placementControl(scratch, "remote-inspect", subject.task, .{ .inspect = .{ .work = work_ref } }));
         try std.testing.expectEqualDeep(before, source_namespace.store.head);
     }
+    phase = "remote controller inspection";
     const control_bytes = try sender.placementControl(scratch, "remote-inspect", subject.task, .{ .inspect = .{ .work = work_ref } });
     var control = try contracts.decodeOwned(p.Signed(p.Control), scratch, control_bytes);
     defer control.deinit();
@@ -3983,6 +3986,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     // Advance the controller after its worker was exported. The worker has
     // never received this controller checkpoint, and a succession proof must
     // not require that private object to be retained locally.
+    phase = "advance controller after export";
     _ = try sender.resumeTask(scratch, "advance-controller-after-export", subject.task, controller_cut.control);
     var advanced_controller = controller_cut;
     for (0..64) |_| {
@@ -3992,12 +3996,14 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     }
     try std.testing.expect(advanced_controller.execution > controller_cut.execution);
     try std.testing.expect(!std.meta.eql(controller_cut.checkpoint, advanced_controller.checkpoint));
+    phase = "prepare observer for controller transfer";
     const observed_source = try sender.workspaceStart(scratch, "placement-terminal-source", subject.task, program.receipt.workspace.?, &.{0}, .{});
     try observerCompleted(&sender, scratch, subject.task, observed_source.receipt.workspace.?);
     const remote_observer = try placementObserver(&sender, scratch, subject.task, program.receipt.workspace.?, observed_source.receipt.workspace.?, false);
     advanced_controller = try sender.placementCut(scratch, controller_subject);
     source_peers[1].compatibility = try sender.placementCompatibility(scratch, controller_subject);
     successor_peers[1].compatibility = source_peers[1].compatibility;
+    phase = "transfer controller";
     _ = try freezePlacement(&sender, controller_subject, "successor", advanced_controller, @splat(16));
     const controller_archive = try std.fmt.allocPrint(scratch, "{s}/controller.par", .{path_buffer[0..length]});
     const controller_offer = try offerPlacement(&sender, controller_subject, "successor", controller_archive);
@@ -4066,6 +4072,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     var parked_once = false;
     var observer_stopped = false;
     var resumed_after_park = false;
+    phase = "cancel remote work and observer";
     for (0..512) |iteration| {
         {
             successor_namespace = try native.Namespace.open(a, io, successor_path);
