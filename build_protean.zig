@@ -367,12 +367,6 @@ pub fn build(b: *std.Build) void {
         workspace_runtime_module.addImport("protean_native", checked_environment);
         const workspace_runtime_checks = b.step("check-workspace-runtime", "Qualify runtime selection and bilateral workspace custody");
         const runtime_workspace_group = b.option(enum { selection, custody, succession }, "runtime-workspace-group", "Select independent runtime workspace qualification cases (default: all)");
-        if (runtime_workspace_group) |group| {
-            if (group == .selection) {
-                workspace_runtime_module.strip = false;
-                workspace_runtime_module.error_tracing = true;
-            }
-        }
         const workspace_runtime_tests = native_graph.testModuleFiltered(workspace_runtime_checks, workspace_runtime_module, if (runtime_workspace_group) |group| switch (group) {
             .selection => &.{ "runtime selection", "terminal parent cancellation", "scheduler bounds" },
             .custody => &.{ "native placement carries", "frozen controller" },

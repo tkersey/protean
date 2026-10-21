@@ -256,8 +256,15 @@ workspace-history validation, after interpretation, divergence, restart and
 cancellation checks succeed. The owners executable compiles in eight minutes
 with a reported `4G` peak compiler RSS, leaving insufficient time for execution;
 removing its unused asset dependency does not establish a sufficient speedup.
-The selection partition now retains symbols and Safe error tracing to locate the
-remaining allocation failure. All assertions and resource limits remain intact.
+Run [39598587843](https://github.com/tkersey/protean/actions/runs/39598587843)
+crashes the Zig compiler when selection-partition symbols and Safe error tracing
+are enabled. Those diagnostic settings are removed; failure messages now identify
+the validation phase directly. The allocation failure remains unresolved.
+All assertions and resource limits remain intact.
+Compiler-cache fallback now prefers the same qualification lane before other
+lanes, preserving more potentially reusable native compilation work after a lock
+change. This does not change the exact input checks for compiled executables;
+its effect on total qualification time is not yet measured.
 
 Horos `893b964a` passed those checks but its completed review epoch accepted
 allocation-budget, validation-work, and raw-constructor preservation findings.

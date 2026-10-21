@@ -67,9 +67,9 @@ jobs:
           key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.compiled_profile == 'product' && 'native' || (matrix.lane == 'runtime-outer' && 'runtime-guest' || matrix.lane) }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.compiled_profile == 'product' && 'native' || (matrix.lane == 'runtime-outer' && 'runtime-guest' || matrix.lane) }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
+            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.compiled_profile == 'product' && 'native' || (matrix.lane == 'runtime-outer' && 'runtime-guest' || matrix.lane) }}-
             zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-runtime-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
             zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ (matrix.lane == 'runtime-outer' || matrix.lane == 'runtime-guest') && 'correspondence' || 'authoring' }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
-            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.compiled_profile == 'product' && 'native' || (matrix.lane == 'runtime-outer' && 'runtime-guest' || matrix.lane) }}-
             zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-
       - name: Prepare compiler scratch and native isolation tools
         run: |

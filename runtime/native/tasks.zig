@@ -11523,6 +11523,8 @@ pub fn Service(comptime Types: type) type {
             snapshot: workspace.WorkObservation,
             records: []const state.ArchiveRecord,
         ) !void {
+            var phase: []const u8 = "candidate";
+            errdefer std.debug.print("guard snapshot: {s}\n", .{phase});
             const work = snapshot.work;
             const guard = work.guard orelse return error.InvalidArchive;
             if (work.outer_operation != null or work.cancellation != null)
@@ -11546,6 +11548,7 @@ pub fn Service(comptime Types: type) type {
             )) return error.InvalidArchive;
             if (guard.initialized and guard.continuation == null) return error.InvalidArchive;
             if (guard.continuation != null) {
+                phase = "candidate continuation";
                 var candidate_execution = try self.workspaceGuardExperiment(a, work);
                 defer candidate_execution.deinit();
                 if (guard.initialized != (candidate_execution.stage == .advanced))
@@ -11553,7 +11556,9 @@ pub fn Service(comptime Types: type) type {
                 if (guard.disposition == .agreed and
                     candidate_execution.phase != .ready) return error.InvalidArchive;
             }
+            phase = "reference";
             try self.validateGuardReference(a, work);
+            phase = "pending control";
             if (guard.pending_control) |ref| {
                 const bytes = try self.store().object(a, ref, null);
                 defer a.free(bytes);
@@ -12265,12 +12270,15 @@ pub fn Service(comptime Types: type) type {
         }
 
         pub fn validateWorkspace(self: *Self, allocator: std.mem.Allocator, task_id: state.TaskId) !void {
+            var phase: []const u8 = "task and archive index";
+            errdefer std.debug.print("workspace validation: {s}\n", .{phase});
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             const a = arena.allocator();
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             const index = try self.store().archiveIndex(a, task_id, .{ .digest = storage.digest(self.assets.manifest), .bytes = self.assets.manifest.len });
+            phase = "records";
             try self.validateWorkspaceRecords(a, task_id, index.records.items);
         }
         fn validateDelegation(self: *Self, a: std.mem.Allocator, parent: state.Task, row: state.ArchiveRecord, records: []const state.ArchiveRecord) !void {
@@ -12351,6 +12359,8 @@ pub fn Service(comptime Types: type) type {
         }
 
         pub fn validateWorkspaceRecords(self: *Self, allocator: std.mem.Allocator, task_id: state.TaskId, records: []const state.ArchiveRecord) !void {
+            var phase: []const u8 = "task";
+            errdefer std.debug.print("workspace records: {s}\n", .{phase});
             var compiler_facts: CompilerFacts = .{ .allocator = self.allocator };
             defer compiler_facts.deinit();
             const prior_compiler_facts = self.compiler_facts;
@@ -12361,7 +12371,9 @@ pub fn Service(comptime Types: type) type {
             const a = arena.allocator();
             var parent = try self.task(a, task_id);
             defer parent.deinit();
+            phase = "occurrence provenance";
             try self.validateOccurrenceProvenance(a, parent.value, records);
+            phase = "record bodies";
             try self.validateWorkspaceRecordBodies(a, task_id, records);
         }
 
@@ -12369,6 +12381,8 @@ pub fn Service(comptime Types: type) type {
         // replaying captured projections. Keep that ordering without checking
         // the complete occurrence history a second time here.
         fn validateWorkspaceRecordBodies(self: *Self, allocator: std.mem.Allocator, task_id: state.TaskId, records: []const state.ArchiveRecord) !void {
+            var phase: []const u8 = "task and controller";
+            errdefer std.debug.print("workspace record bodies: {s}\n", .{phase});
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             const a = arena.allocator();
@@ -12380,7 +12394,9 @@ pub fn Service(comptime Types: type) type {
             const runtime_cut = try self.controllerRuntimeAt(a, parent.value, parent.value.event_high);
             if (!std.meta.eql(runtime_cut.runtime, parent.value.controller_runtime) or
                 runtime_cut.realization_revision != parent.value.realization_revision) return error.InvalidArchive;
+            phase = "publications";
             try self.validateWorkspacePublications(a, parent.value, records);
+            phase = "receipts";
             if (parent.value.controller_epoch != try self.controllerEpochAt(a, parent.value, parent.value.event_high)) return error.InvalidArchive;
             var receipts = try self.store().database.prepare("SELECT o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?", &.{.{ .blob = &task_id }});
             defer receipts.deinit();
@@ -12409,6 +12425,7 @@ pub fn Service(comptime Types: type) type {
                 try self.validateHistoricalOccurrence(frame, observed.value);
             }
             var controller_ids: std.AutoHashMap(state.Digest, void) = .init(a);
+            phase = "controller bindings";
             var controller_cursor = parent.value.controller;
             var controller_epoch: ?u64 = null;
             var controller_activation: ?u64 = null;
@@ -12453,6 +12470,7 @@ pub fn Service(comptime Types: type) type {
                 var record_arena = std.heap.ArenaAllocator.init(self.allocator);
                 defer record_arena.deinit();
                 const frame = record_arena.allocator();
+                phase = @tagName(row.kind);
                 switch (row.kind) {
                     .controller_succession => try self.validateControllerSuccession(self.allocator, parent.value, row.id, records),
                     .controller_residual => try self.validateControllerResidual(self.allocator, parent.value, row.id, records),
@@ -12695,9 +12713,13 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn validateWorkspaceWorkSnapshotBody(self: *Self, a: std.mem.Allocator, parent: state.Task, snapshot: workspace.WorkObservation, records: []const state.ArchiveRecord, checked: *SnapshotValidation) anyerror!void {
+            var phase: []const u8 = "publication";
+            errdefer std.debug.print("work snapshot: {s}\n", .{phase});
             const value = snapshot.work;
             try self.validateWorkspacePublication(a, parent.id, snapshot);
+            phase = "guard";
             if (value.guard != null) try self.validateGuardSnapshot(a, snapshot, records);
+            phase = "current work and observer";
             // A checkpoint certifies execution, not native custody facts. Those
             // facts either remain immutable or grow monotonically in the owner.
             var current = try self.workspaceWork(a, parent.id, value.id);
@@ -12710,12 +12732,14 @@ pub fn Service(comptime Types: type) type {
                 if (@field(value, field) > @field(current.value, field)) return error.InvalidArchive;
             if (value.realization_revision == current.value.realization_revision and !std.meta.eql(value.runtime, current.value.runtime)) return error.InvalidArchive;
             if (value.runtime) |ref| {
+                phase = "selected runtime";
                 var selected = try self.workspaceRuntime(a, parent.id, ref.digest, value.program);
                 defer selected.deinit();
                 if (!std.meta.eql(ref, selected.record.value.artifact)) return error.InvalidArchive;
                 try requireArchiveRecord(records, .workspace_runtime, selected.record.value.id);
             }
             if (value.outer_operation) |pending| {
+                phase = "outer operation";
                 try self.validatePublishedCapsuleTrace(a, value, pending.capsule, value.runtime, null, pending);
                 const capsule_bytes = try self.store().object(a, pending.capsule, null);
                 defer a.free(capsule_bytes);
@@ -12725,6 +12749,7 @@ pub fn Service(comptime Types: type) type {
                 for (dependencies, pending.dependencies.items) |wanted, actual| if (!std.meta.eql(wanted, actual)) return error.InvalidArchive;
             }
             if (value.runtime_capsule) |ref| {
+                phase = "runtime capsule";
                 if (value.outer_operation) |pending| {
                     if (!std.meta.eql(ref, pending.capsule)) return error.InvalidArchive;
                 } else try self.validatePublishedCapsule(a, value, ref, value.runtime);
@@ -12736,6 +12761,7 @@ pub fn Service(comptime Types: type) type {
                 for (dependencies, value.runtime_dependencies.items) |wanted, actual| if (!std.meta.eql(wanted, actual)) return error.InvalidArchive;
             } else if (value.runtime_dependencies.items.len != 0) return error.InvalidArchive;
             if (value.runtime_trace) |trace| {
+                phase = "runtime trace";
                 try self.validatePublishedCapsuleTrace(a, value, trace.capsule, value.runtime, trace.output, null);
                 const bytes = try self.store().object(a, trace.capsule, null);
                 defer a.free(bytes);
@@ -12744,6 +12770,7 @@ pub fn Service(comptime Types: type) type {
                 if (dependencies.len != trace.dependencies.items.len) return error.InvalidArchive;
                 for (dependencies, trace.dependencies.items) |wanted, actual| if (!std.meta.eql(wanted, actual)) return error.InvalidArchive;
             }
+            phase = "inputs";
             try self.validateWorkspaceInputs(a, value);
             inline for (.{ "result", "result_value", "answer_value", "instrument_occurrence" }) |field| {
                 if (@field(value, field) != null and !std.meta.eql(@field(value, field), @field(current.value, field))) return error.InvalidArchive;
