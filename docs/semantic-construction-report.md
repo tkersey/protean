@@ -249,6 +249,16 @@ Removing those imports from its copied module table eliminates that unrelated
 build dependency while retaining all 69 owner tests. Its timing effect remains
 unmeasured until the next qualification run.
 
+Run [39596725355](https://github.com/tkersey/protean/actions/runs/39596725355)
+passes nine lanes, including both repaired Zig fixture roots; one fails and nine
+reach their job limits. The guarded-reply failure is now localized to final
+workspace-history validation, after interpretation, divergence, restart and
+cancellation checks succeed. The owners executable compiles in eight minutes
+with a reported `4G` peak compiler RSS, leaving insufficient time for execution;
+removing its unused asset dependency does not establish a sufficient speedup.
+The selection partition now retains symbols and Safe error tracing to locate the
+remaining allocation failure. All assertions and resource limits remain intact.
+
 Horos `893b964a` passed those checks but its completed review epoch accepted
 allocation-budget, validation-work, and raw-constructor preservation findings.
 Successor `cd256c1d` passes full native, WASM and package qualification. Decoded ownership
