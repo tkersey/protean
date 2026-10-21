@@ -266,6 +266,14 @@ lanes, preserving more potentially reusable native compilation work after a lock
 change. This does not change the exact input checks for compiled executables;
 its effect on total qualification time is not yet measured.
 
+Run [39600322600](https://github.com/tkersey/protean/actions/runs/39600322600)
+passes the owners lane, including all 69 tests. Selection still fails with
+`OutOfMemory`, now localized to semantic publication 72 during history validation.
+Semantic publication validation now owns its temporary arena, and compiler-output
+validation allocates through the service allocator so existing cleanup releases
+intermediates. Independent checks and retained fact identities are unchanged.
+The repair's effect remains unqualified until the successor run completes.
+
 Horos `893b964a` passed those checks but its completed review epoch accepted
 allocation-budget, validation-work, and raw-constructor preservation findings.
 Successor `cd256c1d` passes full native, WASM and package qualification. Decoded ownership

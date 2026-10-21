@@ -393,7 +393,7 @@ pub fn Service(comptime Types: type) type {
                 defer command.deinit();
                 if (command.value != .semantic) continue;
                 const selected = command.value.semantic;
-                try self.validateCompilerOutput(a, event_value.value.task, try source.object(a, selected.input, null), try source.object(a, selected.output, null));
+                try self.validateCompilerOutput(event_value.value.task, try source.object(a, selected.input, null), try source.object(a, selected.output, null));
             }
             for (manifest.records.items) |row| {
                 if (row.kind != .capture) continue;
@@ -407,7 +407,7 @@ pub fn Service(comptime Types: type) type {
                 var attempt = try contracts.decodeOwned(state.Attempt, a, try source.object(a, attempt_ref, null));
                 defer attempt.deinit();
                 if (attempt.value.operation != .workspace_build) continue;
-                try self.validateCompilerOutput(a, attempt.value.task, try source.object(a, captured.value.request, null), try source.object(a, output, null));
+                try self.validateCompilerOutput(attempt.value.task, try source.object(a, captured.value.request, null), try source.object(a, output, null));
             }
             for (manifest.records.items) |row| {
                 if (row.kind != .workspace_program and row.kind != .workspace_candidate and row.kind != .workspace_runtime) continue;
@@ -5264,7 +5264,7 @@ pub fn Service(comptime Types: type) type {
             if (attempt.operation != .workspace_build or raw.disposition != .complete or raw.response == null or raw.reconciliation != null) return error.InvalidArchive;
             const prepared = try self.store().object(a, raw.request, null);
             const response = try self.store().object(a, raw.response.?, null);
-            try self.validateCompilerOutput(a, parent.id, prepared, response);
+            try self.validateCompilerOutput(parent.id, prepared, response);
             const projection = raw.projection orelse return;
             if (projection.objects.items.len != 0 or projection.output_tokens != null) return error.InvalidArchive;
             const acquired = switch (pending.state) {
@@ -9200,7 +9200,7 @@ pub fn Service(comptime Types: type) type {
                     .expected = selection,
                 }),
                 .semantic => |selected| blk: {
-                    try self.validateSemanticPublication(a, parent, selected, admission, records);
+                    try self.validateSemanticPublication(parent, selected, admission, records);
                     break :blk try operation(workspace.SemanticRequest, a, .{
                         .task = parent.id,
                         .command = selected.command,
@@ -10507,17 +10507,22 @@ pub fn Service(comptime Types: type) type {
 
         fn validateSemanticPublication(
             self: *Self,
-            a: std.mem.Allocator,
             parent: state.Task,
             selected: @FieldType(workspace.PublicationCommand, "semantic"),
             admission: WorkspaceAdmission,
             records: []const state.ArchiveRecord,
         ) !void {
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var phase: []const u8 = "input";
+            errdefer std.debug.print("semantic publication: {s}\n", .{phase});
             const input_bytes = try self.store().object(a, selected.input, null);
             defer a.free(input_bytes);
             var input = try contracts.decodeOwned(build_job.Input, a, input_bytes);
             defer input.deinit();
             try self.validateSemanticInput(a, parent, selected.command, input.value, records);
+            phase = "frozen input";
             const frozen = try self.workspacePrepareSemanticBuild(
                 a,
                 parent,
@@ -10528,7 +10533,9 @@ pub fn Service(comptime Types: type) type {
             if (!same(frozen, input_bytes)) return error.InvalidArchive;
             const output_bytes = try self.store().object(a, selected.output, null);
             defer a.free(output_bytes);
-            try self.validateCompilerOutput(a, parent.id, input_bytes, output_bytes);
+            phase = "compiler output";
+            try self.validateCompilerOutput(parent.id, input_bytes, output_bytes);
+            phase = "retained observation";
             var output = try contracts.decodeOwned(build_job.Output, a, output_bytes);
             defer output.deinit();
             const observed = try self.retainedSemanticObservation(
@@ -10550,13 +10557,13 @@ pub fn Service(comptime Types: type) type {
 
         fn validateCompilerOutput(
             self: *Self,
-            a: std.mem.Allocator,
             task_id: state.TaskId,
             input: []const u8,
             output: []const u8,
         ) !void {
             const fact: CompilerFact = .{ .kind = .output, .input = compilerReference(input), .output = compilerReference(output) };
             if (try self.compilerFact(fact)) return;
+            const a = self.allocator;
             var actual = try contracts.decodeOwned(build_job.Output, a, output);
             defer actual.deinit();
             if (actual.value == .validation) switch (actual.value.validation.outcome) {
