@@ -3060,7 +3060,7 @@ fn acceptPlacement(
     return service.placementAccept(arena.allocator(), operation, peer, offer, path);
 }
 
-fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward, cancel_abort, cancel_refused, root_cancel_abort, root_cancel_refused, local_ack, remote_ack }) !void {
+fn placementCase(scenario: enum { work, queued, root, preoffer, onward, cancel_abort, cancel_refused, root_cancel_abort, root_cancel_refused, local_ack, remote_ack }) !void {
     const placement_started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
     var phase: []const u8 = "setup";
     var attack_index: usize = 0;
