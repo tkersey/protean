@@ -224,6 +224,15 @@ source 423, session ownership 415, source-second 412, consumer 364,
 source regressions 258, and specialization 248 seconds. The largest individual
 reported compiler RSS is `4G`; this is not aggregate concurrent memory.
 
+Protean run [39593643203](https://github.com/tkersey/protean/actions/runs/39593643203)
+rejects the dependency lock before native compilation: the recorded Zig-managed
+package profile incorrectly reused the archive-extracted profile. Zig 0.17 marks
+the two shebang scripts executable when materializing the package. A fresh
+`zig build --fetch` establishes the distinct managed inventory; correcting that
+one profile makes both forms pass the unchanged native verifier. All three
+dependency-admission tests pass, including mode, content, link, and corrupt
+transport rejection. The failed run supplies no product qualification credit.
+
 Horos `893b964a` passed those checks but its completed review epoch accepted
 allocation-budget, validation-work, and raw-constructor preservation findings.
 Successor `cd256c1d` passes full native, WASM and package qualification. Decoded ownership

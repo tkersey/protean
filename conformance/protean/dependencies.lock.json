@@ -23,7 +23,7 @@
       "defaultProfile": "zig-managed",
       "profiles": {
         "zig-managed": {
-          "inventorySha256": "ee0c480c53e02013f7e88bf46a9bd428ec98544aece7b865a347636049199a8b",
+          "inventorySha256": "fe02c3858477f5170312e656de4ccc7050843f67f31d51cb84e03ae10d2edc43",
           "entries": 412,
           "bytes": 5225268
         },
