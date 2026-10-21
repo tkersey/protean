@@ -207,13 +207,22 @@ source-example, cleanup-scope, and borrow-return host compilation, removing two
 compiler invocations while preserving separate executions and every assertion.
 The affected native `check-semantics` root passes 145/145 steps and 327/327 tests
 in 93.444 seconds, including all 24 borrow-return cases and 47 source fixtures.
-Committed TigerStyle passes all 34 auditor tests. Full GitHub qualification is
-[run 39592178897](https://github.com/tkersey/horos/actions/runs/39592178897);
-its terminal result remains outstanding.
+Committed TigerStyle passes all 34 auditor tests. Full GitHub qualification
+[39592178897](https://github.com/tkersey/horos/actions/runs/39592178897)
+passes all four jobs. Contracts pass 262/262 steps and 963/963 tests in a
+462-second build and a 491-second job; independent installation passes in a
+383-second job. The workflow finishes in 541 seconds. Its two lanes report
+59 successful compiler steps, with a largest individual reported RSS of `2G`;
+this is not aggregate concurrent memory.
 Kosmos `e2646f15` pins that Horos commit. Regeneration passes 7/7 steps in
 81.416 seconds, preserving the authored semantic source identity; its committed
-TigerStyle ratchet passes 24 tests with zero diagnostics. Its full successor
-qualification is [run 39592549573](https://github.com/tkersey/kosmos/actions/runs/39592549573).
+TigerStyle ratchet passes 24 tests with zero diagnostics. Full successor
+qualification [39592549573](https://github.com/tkersey/kosmos/actions/runs/39592549573)
+passes all 12 jobs and its aggregate gate at 469 seconds. Runtime lane times,
+including setup and finalization, are: native 462, sessions 447, portable 440,
+source 423, session ownership 415, source-second 412, consumer 364,
+source regressions 258, and specialization 248 seconds. The largest individual
+reported compiler RSS is `4G`; this is not aggregate concurrent memory.
 
 Horos `893b964a` passed those checks but its completed review epoch accepted
 allocation-budget, validation-work, and raw-constructor preservation findings.
