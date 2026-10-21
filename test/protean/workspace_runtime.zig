@@ -641,7 +641,7 @@ const GeneratedRuntime = struct {
 };
 
 fn transformerDocument(b: *source.Builder) !source.Module {
-    const transform = try producerProjection(b);
+    const transform = try producerFold(b);
     const layout = try kosmos.RuntimeTransformation.indexedLayout(b);
     const function = b.functions.items[@intCast(layout)];
     const argument_schema = b.variables.items[@intCast(function.parameters[0])];
@@ -700,15 +700,13 @@ fn transformerDocument(b: *source.Builder) !source.Module {
 const ProducerExpression = @FieldType(source.ast.Value, "expression");
 const ProducerPrimitive = @FieldType(ProducerExpression, "primitive");
 
-fn producerProjection(b: *source.Builder) !source.Module {
+fn producerFold(b: *source.Builder) !source.Module {
     const module_schema = try contracts.schema(source.Module, b);
     const values_schema = try contracts.schema([]const source.ast.Value, b);
     const output = try contracts.schema(kosmos.RuntimeCompiler.RecordProposal, b);
     const integer = try b.scalar(u64);
-    const total = try b.declare(&.{ values_schema, integer }, try b.scalar(bool), &.{}, &.{});
     const scan = try b.declare(&.{ module_schema, values_schema, integer }, output, &.{}, &.{});
-    try producerProjectionTotal(b, total);
-    try producerProjectionScan(b, scan, total);
+    try producerFoldScan(b, scan);
     const input = try contracts.schema(kosmos.RuntimeTransformation.Input, b);
     const entry = try b.declare(&.{input}, output, &.{}, &.{});
     const argument = try b.reference(b.parameter(entry, 0));
@@ -727,48 +725,7 @@ fn producerProjection(b: *source.Builder) !source.Module {
     return b.module(entry, try b.scalar(void));
 }
 
-fn producerProjectionTotal(b: *source.Builder, function: Id) !void {
-    const values = try b.reference(b.parameter(function, 0));
-    const index = try b.reference(b.parameter(function, 1));
-    const row_variable = try b.variable(try contracts.schema(source.ast.Value, b));
-    const row = try b.reference(row_variable);
-    const expression = try producerField(b, row, 1);
-    const primitive_variable = try b.variable(try contracts.schema(ProducerPrimitive, b));
-    const primitive = try b.reference(primitive_variable);
-    const operands = try producerField(b, primitive, 1);
-    const operand = try producerRequired(b, operands, try b.constant(u64, 0));
-    const child = try producerField(b, try producerRequired(b, values, operand), 1);
-    const yes = try b.pure(try b.constant(bool, true));
-    const no = try b.pure(try b.constant(bool, false));
-    const child_variable = try producerWhen(b, try producerTag(
-        b,
-        child,
-        std.meta.fieldIndex(ProducerExpression, "variable").?,
-    ), yes, no);
-    const field = try producerPrimitiveGuard(b, primitive, .field, 1, child_variable, no);
-    const matched = try producerMatch(
-        b,
-        expression,
-        std.meta.fieldIndex(ProducerExpression, "primitive").?,
-        primitive_variable,
-        field,
-        no,
-    );
-    var body = matched;
-    inline for (.{ "variable", "literal" }) |name| body = try producerWhen(
-        b,
-        try producerTag(b, expression, std.meta.fieldIndex(ProducerExpression, name).?),
-        yes,
-        body,
-    );
-    try b.define(function, try b.bind(
-        row_variable,
-        try b.pure(try producerRequired(b, values, index)),
-        body,
-    ));
-}
-
-fn producerProjectionScan(b: *source.Builder, scan: Id, total: Id) !void {
+fn producerFoldScan(b: *source.Builder, scan: Id) !void {
     const module = try b.reference(b.parameter(scan, 0));
     const values = try b.reference(b.parameter(scan, 1));
     const index = try b.reference(b.parameter(scan, 2));
@@ -788,26 +745,21 @@ fn producerProjectionScan(b: *source.Builder, scan: Id, total: Id) !void {
     const row = try b.reference(row_variable);
     const primitive_variable = try b.variable(try contracts.schema(ProducerPrimitive, b));
     const primitive = try b.reference(primitive_variable);
-    const candidate = try producerProjectionConstructor(
+    const candidate = try producerFoldOperands(
         b,
         module,
         values,
         index,
+        row,
         primitive,
-        total,
         miss,
     );
-    const coordinate = try producerWhen(b, try producerEquals(
-        b,
-        try producerField(b, primitive, 2),
-        try b.constant(u64, 2),
-    ), candidate, miss);
     const selected = try producerMatch(
         b,
         try producerField(b, row, 1),
         std.meta.fieldIndex(ProducerExpression, "primitive").?,
         primitive_variable,
-        try producerPrimitiveGuard(b, primitive, .field, 1, coordinate, miss),
+        try producerPrimitiveGuard(b, primitive, .product, 2, candidate, miss),
         miss,
     );
     const read = try b.bind(
@@ -823,55 +775,127 @@ fn producerProjectionScan(b: *source.Builder, scan: Id, total: Id) !void {
     ), read, try b.term(.{ .fail = try b.constant(void, {}) })));
 }
 
-fn producerProjectionConstructor(
+fn producerFoldOperands(
     b: *source.Builder,
     module: Id,
     values: Id,
     index: Id,
-    projection: Id,
-    total: Id,
+    row: Id,
+    primitive: Id,
     miss: Id,
 ) !Id {
-    const operand = try producerRequired(
-        b,
-        try producerField(b, projection, 1),
-        try b.constant(u64, 0),
-    );
-    const row_variable = try b.variable(try contracts.schema(source.ast.Value, b));
-    const primitive_variable = try b.variable(try contracts.schema(ProducerPrimitive, b));
-    const primitive = try b.reference(primitive_variable);
+    const constants_schema = try contracts.schema([]const data.program.Literal, b);
+    const constants_variable = try b.variable(constants_schema);
+    const constants = try b.reference(constants_variable);
     const operands = try producerField(b, primitive, 1);
-    const replacement = try producerRequired(b, values, try producerRequired(
-        b,
-        operands,
-        try b.constant(u64, 2),
-    ));
-    var body = try producerProjectionProposal(b, module, values, index, replacement);
-    for (0..4) |offset| {
-        const valid = try b.variable(try b.scalar(bool));
-        const call = try b.term(.{ .call = .{ .function = total, .arguments = &.{
-            values,
-            try producerRequired(b, operands, try b.constant(u64, 3 - offset)),
-        } } });
-        body = try b.bind(valid, call, try producerWhen(b, try b.reference(valid), body, miss));
+    var literals: [2]Id = undefined;
+    var references: [2]Id = undefined;
+    for (&literals, &references) |*literal, *reference| {
+        literal.* = try b.variable(try contracts.schema(data.program.Literal, b));
+        reference.* = try b.reference(literal.*);
     }
-    const matched = try producerMatch(
+    var body = try producerFoldProposal(
         b,
-        try producerField(b, try b.reference(row_variable), 1),
-        std.meta.fieldIndex(ProducerExpression, "primitive").?,
-        primitive_variable,
-        try producerPrimitiveGuard(b, primitive, .product, 4, body, miss),
-        miss,
+        module,
+        values,
+        constants,
+        index,
+        try producerField(b, row, 0),
+        references,
     );
-    return b.bind(row_variable, try b.pure(try producerRequired(b, values, operand)), matched);
+    for (0..2) |offset| {
+        const position = 1 - offset;
+        const literal_id = try b.variable(try b.scalar(u64));
+        const operand = try producerRequired(b, values, try producerRequired(
+            b,
+            operands,
+            try b.constant(u64, position),
+        ));
+        const checked = try producerFoldLiteralGuard(b, module, references[position], body, miss);
+        const read = try b.bind(literals[position], try b.pure(try producerRequired(
+            b,
+            constants,
+            try b.reference(literal_id),
+        )), checked);
+        body = try producerMatch(
+            b,
+            try producerField(b, operand, 1),
+            std.meta.fieldIndex(ProducerExpression, "literal").?,
+            literal_id,
+            read,
+            miss,
+        );
+    }
+    return b.bind(constants_variable, try b.pure(try producerField(
+        b,
+        module,
+        std.meta.fieldIndex(source.Module, "constants").?,
+    )), body);
 }
 
-fn producerProjectionProposal(
+fn producerFoldLiteralGuard(
+    b: *source.Builder,
+    module: Id,
+    literal: Id,
+    yes: Id,
+    no: Id,
+) !Id {
+    const schemas = try producerField(b, module, std.meta.fieldIndex(source.Module, "schemas").?);
+    const shape = try producerRequired(b, schemas, try producerField(b, literal, 0));
+    const size = try b.primitive(try b.scalar(u64), .blob_length, &.{
+        try producerField(b, literal, 1),
+    }, 0);
+    return producerWhen(b, try producerTag(
+        b,
+        shape,
+        std.meta.fieldIndex(data.program.Schema, "u64").?,
+    ), try producerWhen(b, try producerEquals(b, size, try b.constant(u64, 8)), yes, no), no);
+}
+
+fn producerFoldProposal(
+    b: *source.Builder,
+    module: Id,
+    values: Id,
+    constants: Id,
+    index: Id,
+    schema: Id,
+    literals: [2]Id,
+) !Id {
+    const bytes = try b.value(.{ .schema = try b.schema(.bytes), .expression = .{ .primitive = .{
+        .opcode = .blob_concat,
+        .operands = &.{
+            try producerField(b, literals[0], 1), try producerField(b, literals[1], 1),
+        },
+        .failures = &.{.{
+            .kind = .capacity_exceeded,
+            .value = try b.failureLiteral(try b.constant(void, {})),
+        }},
+    } } });
+    const literal = try b.primitive(try contracts.schema(data.program.Literal, b), .product, &.{
+        schema, bytes,
+    }, 0);
+    const changed_constants = try b.primitive(
+        b.values.items[@intCast(constants)].schema,
+        .sequence_append,
+        &.{ constants, literal },
+        0,
+    );
+    const expression = try b.primitive(try contracts.schema(ProducerExpression, b), .variant, &.{
+        try producerLength(b, constants),
+    }, std.meta.fieldIndex(ProducerExpression, "literal").?);
+    const replacement = try b.primitive(try contracts.schema(source.ast.Value, b), .product, &.{
+        schema, expression,
+    }, 0);
+    return producerFoldModule(b, module, values, index, replacement, changed_constants);
+}
+
+fn producerFoldModule(
     b: *source.Builder,
     module: Id,
     values: Id,
     index: Id,
     replacement: Id,
+    constants: Id,
 ) !Id {
     const changed_values = try b.value(.{
         .schema = b.values.items[@intCast(values)].schema,
@@ -887,16 +911,16 @@ fn producerProjectionProposal(
     const module_schema = b.values.items[@intCast(module)].schema;
     const fields = b.schemas.items[@intCast(module_schema)].product;
     const changed_fields = try b.allocator().alloc(Id, fields.len);
-    const values_index = std.meta.fieldIndex(source.Module, "values").?;
-    for (changed_fields, 0..) |*field, i| field.* = if (i == values_index)
-        changed_values
-    else
-        try producerField(b, module, i);
+    for (changed_fields, 0..) |*field, i| field.* = switch (i) {
+        std.meta.fieldIndex(source.Module, "values").? => changed_values,
+        std.meta.fieldIndex(source.Module, "constants").? => constants,
+        else => try producerField(b, module, i),
+    };
     const selected_variable = try b.variable(module_schema);
     const selected = try b.reference(selected_variable);
     const scalar = try b.primitive(try contracts.schema(source.relation.Scalar, b), .product, &.{
         index,
-        try producerLiteral(b, @FieldType(source.relation.Scalar, "rule"), .projection),
+        try producerLiteral(b, @FieldType(source.relation.Scalar, "rule"), .fold),
     }, 0);
     const rule = try b.primitive(try contracts.schema(source.relation.RecordRule, b), .variant, &.{
         scalar,
