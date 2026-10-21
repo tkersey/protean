@@ -14527,6 +14527,8 @@ pub fn Service(comptime Types: type) type {
             a: std.mem.Allocator,
             work: workspace.Work,
         ) !kosmos.RuntimeExperiment.Experiment {
+            var phase: []const u8 = "program";
+            errdefer std.debug.print("guard experiment: {s}\n", .{phase});
             const guard = work.guard orelse return error.GuardUnavailable;
             var program = try self.workspaceProgram(a, work.task, work.program);
             defer program.deinit();
@@ -14534,13 +14536,17 @@ pub fn Service(comptime Types: type) type {
             defer a.free(image);
             const code = try self.store().object(a, guard.code, null);
             defer a.free(code);
+            phase = "candidate artifact admission";
             var candidate = try kosmos.RuntimeArtifact.init(a, code, guard.code.digest);
             defer candidate.deinit();
+            phase = "continuation bytes";
             const ref = guard.continuation orelse work.checkpoint;
             const bytes = try self.store().object(a, ref, null);
             defer a.free(bytes);
+            phase = "continuation restore";
             if (guard.continuation != null)
                 return kosmos.RuntimeExperiment.Experiment.restore(a, image, &candidate, bytes);
+            phase = "initial experiment";
             return kosmos.RuntimeExperiment.Experiment.init(a, image, &candidate, bytes);
         }
 
