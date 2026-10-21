@@ -9167,6 +9167,7 @@ pub fn Service(comptime Types: type) type {
         // Validate the receipt's operation before interpreting any declared
         // publication. Neither the receipt kind nor an empty list can bypass it.
         fn validateWorkspaceAdmission(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, command: workspace.PublicationCommand, admission: WorkspaceAdmission, records: []const state.ArchiveRecord) !void {
+            errdefer std.debug.print("workspace admission: {s} at {d}\n", .{ @tagName(command), event_value.seq });
             const items = event_value.workspace_publications.items;
             const kind: @FieldType(wc.Ref, "kind") = switch (command) {
                 .build => .program,
@@ -9806,6 +9807,7 @@ pub fn Service(comptime Types: type) type {
                 var saved = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
                 defer saved.deinit();
                 const event_value = saved.value;
+                errdefer std.debug.print("workspace publication: {s} at {d}\n", .{ @tagName(event_value.kind), event_value.seq });
                 var command: ?contracts.Decoded(workspace.PublicationCommand) = null;
                 defer if (command) |*decoded| decoded.deinit();
                 const admission = if (event_value.kind == .workspace) admissions.fetchRemove(event_value.revision) else null;
