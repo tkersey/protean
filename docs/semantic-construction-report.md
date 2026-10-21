@@ -1,15 +1,16 @@
 # Model-directed semantic construction
 
-This local implementation extends exact semantic-source inspection, authorized
+This implementation extends exact semantic-source inspection, authorized
 observations, isolated interpretations, and generated runtime construction through
 the existing workspace owners. The public contract is
 [Computational workspace](computational-workspace.md).
 
-Qualification remains incomplete. Required Linux qualification runs on native
-Ubuntu x86-64 GitHub Actions runners with Zig 0.17.0. The deployment harness
+Qualification evidence is scoped to the commits and commands below. Required
+Linux qualification runs on native Ubuntu x86-64 GitHub Actions runners with
+Zig 0.17.0. The deployment harness
 retains execution tracing and Bubblewrap user, mount, and PID namespaces.
-Local Rosetta probes do not substitute for those checks. Full product checks
-and the workflow's 600-second aggregate gate remain outstanding. The library
+Local Rosetta probes do not substitute for those checks. Product qualification
+requires all existing lanes and the workflow's 600-second aggregate gate. The library
 feature branches are published for GitHub qualification. No deployment, paid
 inference, or claim of autonomous model improvement accompanies this implementation.
 
@@ -75,11 +76,13 @@ the first candidate's source and exercises the same generated program.
 
 The five execution arms are generic, built-in specialized, generated validated,
 instrumented, and reference guarded. They start at the same retained request and
-measure three matching cuts. Construction and validation are separate from
-continuation, publication, and inspection. Logical artifact/reference byte counts
-are not deduplicated disk footprint. Requested memory remains unmeasured where
-the output says so. No break-even or universal speedup follows from these finite
-measurements.
+measure three matching cuts after restarting the owner. Construction and
+validation are separate from continuation, publication, and inspection. The first
+continuation includes reconstruction, execution, and publication; it is not an
+isolated restore measurement. Requested Zig backing allocation is measured from
+a retained baseline, separately from RSS. Logical artifact/reference byte counts
+are not deduplicated disk footprint. No break-even or universal speedup follows
+from these finite measurements.
 
 The [evaluation runner](../tools/evaluation/README.md) supplies matched real-model
 comparison conditions and retains unsuccessful work. Its semantic preflight
@@ -96,22 +99,22 @@ measure of test implementation size.
 
 | Repository | Changed test files | Added bytes | Deleted bytes |
 |---|---:|---:|---:|
-| Horos | 11 | 66,537 | 112 |
+| Horos | 12 | 74,613 | 112 |
 | Kosmos | 8 | 76,883 | 773 |
-| Protean | 19 | 197,443 | 18,064 |
-| Total | 38 | 340,863 | 18,949 |
+| Protean | 19 | 201,073 | 18,101 |
+| Total | 39 | 352,569 | 18,986 |
 
 The count includes inline test blocks and existing test-root imports in Horos
 and Protean production modules.
 
 The complete changed Zig source, including production code and all test helpers,
-adds/deletes 296,472/61,105 bytes in Horos, 231,040/16,904 bytes in Kosmos, and
-488,814/57,547 bytes in Protean. These totals expose helper code omitted by the
+adds/deletes 311,005/62,040 bytes in Horos, 231,040/16,904 bytes in Kosmos, and
+492,444/57,584 bytes in Protean. These totals expose helper code omitted by the
 test-block breakdown; they do not attribute all source growth to tests.
 
 No test modules, directories, executables, or CI lanes were added. Protean's
 existing workspace execution count advances from 12 to 14. The largest extension
-is `workspace_runtime.zig` at 152,627 added bytes; the low module count does not
+is `workspace_runtime.zig` at 156,257 added bytes; the low module count does not
 make this a small fixture change. Its generated producer and candidate are reused
 by the custody, five-arm, and mobility checks, avoiding a third producer run.
 Historical independent byte fixtures remain unchanged.
@@ -124,7 +127,7 @@ Construction and guard helpers finish their temporary work before the mobility
 scenario begins, with terminal cancellation and disposal assertions.
 
 The packaged semantic core is 234,530 bytes, SHA-256
-`a52cb0f18b69a8884bbe93ab2c5d75d7c7a6aa3d8883d21f2d473ab616c14c10`.
+`e96dddfb306773c1e7b1bed69f84c6a01aa135158b4388f9b668be2fb4ee5420`.
 Generated candidates use `kosmos.semantic-artifact/3` and
 `kosmos.source-relation/1`; the existing artifact family remains `/2`.
 
@@ -140,10 +143,29 @@ Every command has a 600-second watchdog.
 Qualification now reuses matching artifacts under the existing input-aware cache
 key and rebuilds on a miss. Selected tests always execute. Earlier cold and warm
 measurements describe their original inputs; further paired runs are not required.
-Protean's latest custody qualification uses commit `1d3885a9` with Horos
-`a97e41aa` and Kosmos `67d0b71c`. The other native results below precede the
+Protean's latest successful custody qualification uses commit `1d3885a9` with
+Horos `a97e41aa` and Kosmos `67d0b71c`. A later check at `22862f1e`, with Horos
+`a0b0b256` and Kosmos `814aa999`, passes four of five tests; the semantic guest's
+built-in specialization exhausts its unchanged 8-million-unit production allowance
+before independent validation starts. The other native results below precede the
 context-preparation repair and require qualification against the final tuple.
 Commit `bcfca656` restores the original Linux deployment assertions.
+
+The subsequent diagnostic identifies repeated immutable decoding in production
+and incorrectly combined allowance domains in validation. Horos `7b74f14c`
+caches successful reads separately in producer and checker, and separates
+semantic evaluation from full relation-validation accounting. All validation
+still executes; the relation's global allowance also bounds evaluator work.
+Canonical normalization retains its separate semantic allowance. Numeric limits
+and evaluator allocation precharges are unchanged.
+
+The focused Safe suite passes 49/49 tests. A direct-code diagnostic using the
+committed Protean `952805d6` custody test and Horos `7b74f14c` passes the complete
+shared case in 450.713 seconds, including five-arm restart/memory measurements
+and subsequent custody assertions. Production uses 4,412,818 of 8,000,000 units;
+the independent checker starts with an empty cache and uses 4,317,402 units.
+Canonical normalization uses two units of its separate allowance. This diagnostic
+does not replace native dependency authentication or complete GitHub qualification.
 
 | Historical tree and command | Cold seconds | Warm seconds | Result |
 |---|---:|---:|---|
@@ -155,7 +177,7 @@ Commit `bcfca656` restores the original Linux deployment assertions.
 | Horos `a0b0b256`, `check check-package` | 144.568 | 266/266 steps, 957/957 tests |
 | Kosmos `814aa999`, `check` | 471.775 | 69/69 steps, 329/329 tests |
 
-Horos's committed TigerStyle audit passes all 322 files and 123,157 lines with
+Horos `7b74f14c` passes committed TigerStyle over all 322 files and 123,509 lines with
 zero diagnostics and 34 auditor tests. Kosmos's committed ratchet passes 35
 changed files and 5,789 changed lines with zero diagnostics and 24 auditor tests.
 The largest individual compiler RSS reported by the current Horos and Kosmos
@@ -164,6 +186,20 @@ neither is aggregate concurrent memory. Horos reports 60 successful compiler
 steps. Kosmos reports 12 successful compiler steps.
 Kosmos's full check includes 9,570 independent source-agreement observations,
 Chromium and Firefox worker transfer, and extracted package operation.
+
+The first GitHub qualification attempts do not qualify the tuple. Horos run
+[39583208331](https://github.com/tkersey/horos/actions/runs/39583208331) reports
+957/957 tests passing but exceeds the contracts job's 600-second limit before a
+successful terminal disposition. Its manifest-specific cache lookup missed an
+available cache for the same OS, architecture, and Zig version; commit `0f1ad7b`
+adds that fallback while retaining input invalidation and all checks. Kosmos run
+[39583211391](https://github.com/tkersey/kosmos/actions/runs/39583211391) completes
+all runtime tests, then fails because the ownership lane still expects 16 tests
+instead of the 17 present in the source and executed transcript. Commit `07390d2`
+updates the exact-count check. Successor qualification runs are
+[Horos `7b74f14c`](https://github.com/tkersey/horos/actions/runs/39590017927) and
+[Kosmos `ae24d765`](https://github.com/tkersey/kosmos/actions/runs/39590383509);
+their terminal results, not the earlier attempts, decide library qualification.
 
 Horos `893b964a` passed those checks but its completed review epoch accepted
 allocation-budget, validation-work, and raw-constructor preservation findings.
@@ -244,25 +280,45 @@ The committed test process reports 13,165,297,664 bytes maximum resident memory
 and 13,166,820,640 bytes peak memory footprint. These are whole-process measurements,
 distinct from the bounded requested-memory owner checks above.
 
-The shared witness's two generated-producer executions take 97.576 and 43.652
-seconds, using 26,031 and 20,268 guest transitions respectively. The first
-construction takes 99.074 seconds, its independent validation 0.794 seconds,
-and producer compilation 0.007 seconds. These single local samples include
-ordinary generated execution and publication; they do not predict model efficacy.
+In the `7b74f14c`/`952805d6` direct-code diagnostic, the shared witness's two
+generated-producer executions take 97.186 and 43.189 seconds, using 26,031 and
+20,268 guest transitions respectively. The first construction takes 98.688
+seconds, independent validation 0.670 seconds, and producer compilation 0.007
+seconds. Built-in specialization plus validation takes 10.268 seconds;
+instrumented construction plus validation takes 10.565 seconds. These single
+local samples include ordinary generated execution and publication; they do not
+predict model efficacy.
 
 | Arm | Three-cut continuation ms | Publication ms | Artifact bytes | Evidence bytes |
 |---|---:|---:|---:|---:|
-| Generic | 33.009 | 8.256 | 234,530 | 50,635 |
-| Built-in specialized | 50.382 | 46.711 | 26,986,920 | 23,337,881 |
-| Generated validated | 36.801 | 8.689 | 625,054 | 440,856 |
-| Instrumented | 178.232 | 47.860 | 26,988,453 | 23,339,190 |
-| Reference guarded | 478.744 | 8.741 | 859,584 | 491,491 |
+| Generic | 40.796 | 7.942 | 234,530 | 50,635 |
+| Built-in specialized | 3,930.086 | 45.861 | 26,986,920 | 23,337,881 |
+| Generated validated | 710.421 | 8.769 | 625,054 | 440,856 |
+| Instrumented | 4,068.777 | 48.538 | 26,988,453 | 23,339,190 |
+| Reference guarded | 490.519 | 8.696 | 859,584 | 491,491 |
+
+All arms begin continuation with 32,990,697,962 requested backing bytes retained
+by preparation, owners, and arenas. Memory observations cover the three cuts and
+their assertions, excluding owner restart, the later publication-cost probe,
+cleanup, artifact comparison, C/SQLite allocations, OS memory, and RSS. The
+instrumentation disables allocator resize/remap; its timings do not establish a
+speedup over uninstrumented runs.
+
+| Arm | Owner restart ms | First continuation including reconstruction ms | Peak backing bytes | Peak above baseline bytes | Live end bytes |
+|---|---:|---:|---:|---:|---:|
+| Generic | 295.250 | 16.675 | 32,991,593,685 | 895,723 | 32,991,007,086 |
+| Built-in specialized | 299.404 | 3,889.305 | 39,815,995,828 | 6,825,297,866 | 33,123,178,562 |
+| Generated validated | 296.598 | 686.261 | 34,011,913,024 | 1,021,215,062 | 32,998,178,223 |
+| Instrumented | 299.641 | 3,945.698 | 39,645,001,846 | 6,654,303,884 | 33,123,186,028 |
+| Reference guarded | 300.308 | 230.676 | 32,991,415,599 | 717,637 | 32,991,007,745 |
 
 All five arms execute 21 guest transitions and publish the same 550 logical guest
 checkpoint bytes across the selected cuts. The guarded measurement includes
-25.240 ms reference execution, 18.308 ms candidate execution, and 20,214 retained
-guard-capsule bytes. These samples do not establish an execution speedup or a
-break-even repetition count for the generated candidate.
+27.656 ms reference execution, 17.897 ms candidate execution, and 20,214 retained
+guard-capsule bytes. Its candidate proposal occupies 5,764,322 logical bytes.
+Instrumentation retains 389 trace bytes across these cuts. These samples do not
+establish an execution speedup or a break-even repetition count for the generated
+candidate.
 
 Workspace execution at `29da7d1` passes 13/13 tests in 198.914 seconds
 (149.662 seconds build, 45.648 seconds tests, exact-key miss). This includes
