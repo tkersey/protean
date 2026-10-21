@@ -1098,15 +1098,18 @@ fn finishTransformer(
     const id = try nativeIdentity(work);
     var guest_work: u64 = 0;
     for (0..4096) |turn| {
-        var current = try service.workspaceWork(a, task, id);
+        var request = std.heap.ArenaAllocator.init(service.allocator);
+        defer request.deinit();
+        const scratch = request.allocator();
+        var current = try service.workspaceWork(scratch, task, id);
         defer current.deinit();
         guest_work += current.value.guest_work;
         if (current.value.terminal()) {
             try std.testing.expectEqual(.completed, current.value.outcome_kind);
-            const bytes = try service.namespace.store.object(a, current.value.result.?, null);
+            const bytes = try service.namespace.store.object(scratch, current.value.result.?, null);
             var result = try contracts.decodeOwned(
                 native.program_construction.CandidateDocument,
-                a,
+                scratch,
                 bytes,
             );
             defer result.deinit();
@@ -1127,8 +1130,8 @@ fn finishTransformer(
             return workspaceRef(a, .value, current.value.result_value.?.digest);
         }
         _ = try service.workspaceControl(
-            a,
-            try std.fmt.allocPrint(a, "{s}-transform-{d}", .{ label, turn }),
+            scratch,
+            try std.fmt.allocPrint(scratch, "{s}-transform-{d}", .{ label, turn }),
             task,
             id,
             current.value.execution_revision,
@@ -3152,13 +3155,28 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         };
         sender.profile.semantic_construction = profile.semantic_construction;
         phase = "generated transformation and retained runtime continuation";
-        const derived = try exerciseGenerated(
-            scratch,
-            &sender,
-            parent.receipt.task,
-            selected_program,
-            try contracts.encodeOwned(@import("workspace_sources.zig").SemanticGuestInput, scratch, .{ .yields = 64, .seed = 100 }),
-        );
+        var construction_live: usize = 0;
+        const derived = construction: {
+            var request = std.heap.ArenaAllocator.init(sender.allocator);
+            defer request.deinit();
+            const construction_allocator = request.allocator();
+            var retained = try exerciseGenerated(
+                construction_allocator,
+                &sender,
+                parent.receipt.task,
+                selected_program,
+                try contracts.encodeOwned(@import("workspace_sources.zig").SemanticGuestInput, construction_allocator, .{ .yields = 64, .seed = 100 }),
+            );
+            inline for (.{ "candidate", "runtime", "producer", "result" }) |field| {
+                @field(retained, field).id.bytes = try scratch.dupe(u8, @field(retained, field).id.bytes);
+            }
+            if (retained.producer_runtime == .selected) {
+                retained.producer_runtime.selected.id.bytes = try scratch.dupe(u8, retained.producer_runtime.selected.id.bytes);
+            }
+            construction_live = meter.live;
+            break :construction retained;
+        };
+        std.debug.print("semantic placement: construction backing before_release={d} after_release={d}\n", .{ construction_live, meter.live });
         phase = "shared guest five-arm continuation comparison";
         try sharedComparison(
             scratch,
