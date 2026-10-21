@@ -1999,7 +1999,8 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     const validation_bytes = try contracts.encodeOwned(?native.workspace.ValidationFact, scratch, null);
     var validation_context: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(validation_bytes, &validation_context, .{});
-    const runtime_fact = .{
+    const RuntimeFact = @FieldType(@TypeOf(service.checked_workspace_runtimes).KV, "key");
+    const runtime_fact: RuntimeFact = .{
         .kind = .runtime,
         .input = specialized_observation.value.artifact,
         .output = @as(native.testing.state.Reference, .{ .digest = @splat(0), .bytes = 0 }),
