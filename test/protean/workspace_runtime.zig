@@ -3150,7 +3150,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         null
     else
         try sender.workspaceSpecialize(scratch, "specialize", parent.receipt.task, selected_program);
-    const ancestor = if (specialized) |item|
+    const ancestor: ?contracts.workspace.Ref = if (specialized) |item|
         try workspaceRef(scratch, .runtime, item.receipt.workspace.?)
     else
         null;
