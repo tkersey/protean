@@ -761,17 +761,18 @@ fn producerFoldScan(b: *source.Builder, scan: Id) !void {
         try producerPrimitiveGuard(b, primitive, .product, 2, candidate, miss),
         miss,
     );
-    const read = try b.bind(
+    const optional_row = try b.schema(.{ .sum = &.{
+        try b.scalar(void),
+        b.values.items[@intCast(row)].schema,
+    } });
+    try b.define(scan, try producerMatch(
+        b,
+        try b.primitive(optional_row, .sequence_get, &.{ values, index }, 0),
+        1,
         row_variable,
-        try b.pure(try producerRequired(b, values, index)),
         selected,
-    );
-    try b.define(scan, try producerWhen(b, try b.primitive(
-        try b.scalar(bool),
-        .less,
-        &.{ index, try producerLength(b, values) },
-        0,
-    ), read, try b.term(.{ .fail = try b.constant(void, {}) })));
+        try b.term(.{ .fail = try b.constant(void, {}) }),
+    ));
 }
 
 fn producerFoldOperands(
@@ -3060,7 +3061,7 @@ fn acceptPlacement(
     return service.placementAccept(arena.allocator(), operation, peer, offer, path);
 }
 
-fn placementCase(scenario: enum { work, queued, root, preoffer, onward, cancel_abort, cancel_refused, root_cancel_abort, root_cancel_refused, local_ack, remote_ack }) !void {
+fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward, cancel_abort, cancel_refused, root_cancel_abort, root_cancel_refused, local_ack, remote_ack }) !void {
     const placement_started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
     var phase: []const u8 = "setup";
     var attack_index: usize = 0;
