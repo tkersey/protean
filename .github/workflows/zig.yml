@@ -83,6 +83,7 @@ jobs:
           command -v rg >/dev/null || packages+=(ripgrep)
           if [[ "$lane" == native* ]] || [[ "$lane" == runtime* ]] || [ "$lane" = downstream ]; then
             test -x /usr/bin/bwrap || packages+=(bubblewrap)
+            test -x /usr/bin/strace || packages+=(strace)
           fi
           if [ "${#packages[@]}" -gt 0 ]; then
             if [ -f /etc/apt/apt-mirrors.txt ]; then
