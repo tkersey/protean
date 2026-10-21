@@ -6819,6 +6819,13 @@ pub fn Service(comptime Types: type) type {
         fn workspaceCommandFrom(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, admitted: workspace.Authorized, basis: ?workspace.ReadObservation) !wc.Reply {
             try self.allowed();
             const command = admitted.command;
+            var compiler_facts: CompilerFacts = .{ .allocator = self.allocator };
+            defer compiler_facts.deinit();
+            const prior_compiler_facts = self.compiler_facts;
+            if (command == .context and
+                (command.context == .materialize or command.context == .select) and
+                self.compiler_facts == null) self.compiler_facts = &compiler_facts;
+            defer self.compiler_facts = prior_compiler_facts;
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatible(parent.value);
@@ -8089,26 +8096,34 @@ pub fn Service(comptime Types: type) type {
                 if (same(try query.bytes(1), "workspace_value")) {
                     var value = try self.record(workspace.Value, a, "workspace_value", key[0..32].*, task_id);
                     defer value.deinit();
+                    const declared = if (ref.kind == .schema) value.value.description.schema else value.value.description.provenance;
+                    if (!std.meta.eql(declared.digest, id)) continue;
                     const checked = try self.workspaceValueReference(a, task_id, try wp.reference(a, .value, value.value.artifact.digest));
                     const candidate = if (ref.kind == .schema) checked.schema else checked.provenance;
                     if (std.meta.eql(candidate.digest, id)) return candidate;
                 } else if (ref.kind == .schema) {
                     var saved = try self.record(workspace.Program, a, "workspace_program", key[0..32].*, task_id);
                     defer saved.deinit();
+                    if (workspaceProgramDescriptor(saved.value.description, id) == null) continue;
                     var program = try self.workspaceProgram(a, task_id, saved.value.artifact.digest);
                     defer program.deinit();
-                    inline for (.{ "input_schema", "result_schema", "failure_schema" }) |field| {
-                        const candidate = @field(program.value.description, field);
-                        if (std.meta.eql(candidate.digest, id)) return candidate;
-                    }
-                    for (program.value.description.controller_schemas.items) |candidate| if (std.meta.eql(candidate.digest, id)) return candidate;
-                    for (program.value.description.ports.items) |port| inline for (.{ "argument", "observation", "payload", "command" }) |field| {
-                        const candidate = @field(port, field);
-                        if (std.meta.eql(candidate.digest, id)) return candidate;
-                    };
+                    if (workspaceProgramDescriptor(program.value.description, id)) |candidate| return candidate;
                 }
             }
             return error.ArtifactUnavailable;
+        }
+
+        fn workspaceProgramDescriptor(program: workspace.ProgramArtifact, id: state.Digest) ?state.Reference {
+            inline for (.{ "input_schema", "result_schema", "failure_schema" }) |field| {
+                const candidate = @field(program, field);
+                if (std.meta.eql(candidate.digest, id)) return candidate;
+            }
+            for (program.controller_schemas.items) |candidate| if (std.meta.eql(candidate.digest, id)) return candidate;
+            for (program.ports.items) |port| inline for (.{ "argument", "observation", "payload", "command" }) |field| {
+                const candidate = @field(port, field);
+                if (std.meta.eql(candidate.digest, id)) return candidate;
+            };
+            return null;
         }
 
         fn workspaceDerivationObservation(self: *Self, a: std.mem.Allocator, derivation: workspace.Derivation) !json.Value {
@@ -8265,6 +8280,12 @@ pub fn Service(comptime Types: type) type {
             if (try self.replay(a, operation_id, request)) |prior| return prior;
             try self.requireCustody(a, task_id, null);
             if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
+            var compiler_facts: CompilerFacts = .{ .allocator = self.allocator };
+            defer compiler_facts.deinit();
+            const prior_compiler_facts = self.compiler_facts;
+            if (self.compiler_facts == null) self.compiler_facts = &compiler_facts;
+            defer self.compiler_facts = prior_compiler_facts;
+            try self.prepareWorkspaceContext(a, task_id, command);
             var semantic = if (command == .materialize and
                 command.materialize.input == .semantic_source)
                 try self.prepareSemanticValue(a, parent.value, command.materialize.input.semantic_source)
@@ -8374,6 +8395,32 @@ pub fn Service(comptime Types: type) type {
                 else => return error.InvalidState,
             };
             return self.workspaceCommit(a, parent.value, operation_id, request, artifact.digest, kind, artifact, .{ .context = .{ .command = command, .snapshot = snapshot, .input = input } });
+        }
+
+        fn prepareWorkspaceContext(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, command: wc.Context) !void {
+            switch (command) {
+                .materialize => |materialize| switch (materialize.input) {
+                    .value => |input| {
+                        for (materialize.sources.items) |ref| _ = try self.workspaceValueReference(a, task_id, ref);
+                        switch (input) {
+                            .reference => |ref| _ = try self.workspaceValueReference(a, task_id, ref),
+                            .inline_json => |value| _ = try self.workspaceOwnedDescriptor(a, task_id, value.schema),
+                        }
+                    },
+                    .guest_view => |selection| {
+                        if (materialize.sources.items.len != 0) return error.InvalidMaterialization;
+                        const observed = try self.freezeWorkspaceWork(a, task_id, selection.expected.work, false);
+                        try inspectionSelection(observed.work, selection);
+                        var prepared = try self.inspectionRuntime(a, observed.work);
+                        prepared.deinit();
+                    },
+                    .snapshot, .authorized_input, .semantic_source => {},
+                },
+                .select => |selection| for (selection.values.items) |ref| {
+                    _ = try self.workspaceValueReference(a, task_id, ref);
+                },
+                else => return error.InvalidState,
+            }
         }
 
         const PreparedSemanticValue = struct {

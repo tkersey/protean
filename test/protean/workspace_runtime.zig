@@ -759,11 +759,13 @@ fn semanticReference(
         std.debug.print("missing semantic {s}: {s}\n", .{ field, response.observation_json.bytes });
         return error.MissingSemanticReference;
     };
-    return native.values.fromJson(
+    var reference = try native.values.fromJson(
         contracts.workspace.Ref,
         a,
         value,
     );
+    reference.id.bytes = try a.dupe(u8, reference.id.bytes);
+    return reference;
 }
 
 fn finishTransformer(
@@ -841,6 +843,7 @@ fn runTransformer(
         } } },
     );
     const input = try semanticReference(a, materialized, "value");
+    if (expected_layout) try semanticContextWitness(a, service, task, input, label);
     const started_ms = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
     const started = try service.workspaceCommand(
         a,
@@ -854,6 +857,54 @@ fn runTransformer(
     );
     const work = try semanticReference(a, started, "work");
     return .{ .work = work, .result = try finishTransformer(a, service, task, work, label, started_ms, expected_layout) };
+}
+
+fn semanticContextWitness(
+    a: std.mem.Allocator,
+    service: anytype,
+    task: native.testing.state.TaskId,
+    input: contracts.workspace.Ref,
+    label: []const u8,
+) !void {
+    try std.testing.expect(service.compiler_facts == null);
+    try std.testing.expectError(error.MissingArtifact, service.namespace.store.objectReference(@splat(0), null));
+    {
+        var facts: @TypeOf(service.*).CompilerFacts = .{ .allocator = a };
+        defer facts.deinit();
+        service.compiler_facts = &facts;
+        defer service.compiler_facts = null;
+        const rejected = try service.workspaceCommand(a, try std.fmt.allocPrint(a, "{s}-missing-schema", .{label}), task, .{
+            .context = .{ .materialize = .{
+                .input = .{ .value = .{ .inline_json = .{
+                    .schema = try workspaceRef(a, .schema, @splat(0)),
+                    .json_text = .{ .bytes = "null" },
+                } } },
+                .sources = .{ .items = &.{} },
+            } },
+        });
+        try std.testing.expectEqual(.rejected, rejected.disposition);
+        var parsed = try native.json.parse(a, rejected.observation_json.bytes, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("ArtifactUnavailable", parsed.value.object.get("error").?.string);
+        try std.testing.expectEqual(@as(usize, 0), facts.entries.count());
+        try std.testing.expectEqual(@as(usize, 0), facts.sources.count());
+        try std.testing.expectEqual(@as(usize, 0), facts.values.count());
+    }
+    const materialized = try service.workspaceCommand(a, try std.fmt.allocPrint(a, "{s}-source-reference", .{label}), task, .{
+        .context = .{ .materialize = .{
+            .input = .{ .value = .{ .reference = input } },
+            .sources = .{ .items = &.{} },
+        } },
+    });
+    try std.testing.expectEqual(.observed, materialized.disposition);
+    try std.testing.expectEqualDeep(input, materialized.evidence.?);
+    try std.testing.expect(service.compiler_facts == null);
+    const selected = try service.workspaceCommand(a, try std.fmt.allocPrint(a, "{s}-source-selection", .{label}), task, .{
+        .context = .{ .select = .{ .values = .{ .items = &.{input} } } },
+    });
+    try std.testing.expectEqual(.observed, selected.disposition);
+    try std.testing.expect(selected.selected_view != null);
+    try std.testing.expect(service.compiler_facts == null);
 }
 
 fn generatedRuntime(
@@ -2783,6 +2834,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     const successor_config: p.Configuration = .{ .signing_key = successor_key, .peers = &successor_peers };
     sender.profile.placement = &source_config;
     if (scenario == .work) {
+        phase = "prepare placement observer";
         const observer = try placementObserver(&sender, scratch, subject.task, selected_program, work_id, true);
         const observer_subject: p.Subject = .{ .task = subject.task, .work = try nativeIdentity(observer.work) };
         const controller: p.Subject = .{ .task = subject.task };
@@ -4308,10 +4360,14 @@ fn observerAccumulator(
             .sources = .{ .items = &.{} },
         } },
     });
+    if (materialized.disposition != .observed)
+        std.debug.print("observer accumulator rejection: {s}\n", .{materialized.observation_json.bytes});
     try std.testing.expectEqual(.observed, materialized.disposition);
     var observed = try native.json.parse(a, materialized.observation_json.bytes, .{});
     defer observed.deinit();
-    return native.values.fromJson(contracts.workspace.Ref, a, observed.value.object.get("value").?);
+    var reference = try native.values.fromJson(contracts.workspace.Ref, a, observed.value.object.get("value").?);
+    reference.id.bytes = try a.dupe(u8, reference.id.bytes);
+    return reference;
 }
 
 fn observerWitness(
