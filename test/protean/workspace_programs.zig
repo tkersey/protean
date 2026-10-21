@@ -71,7 +71,7 @@ test "BUILD-S02 pure slices execute captured raw computation through native cons
         .effect = bridge,
         .payload = try b.constant(void, {}),
     } }), try b.pure(try b.lambda(target, computation))));
-    const entry = try b.declare(&.{}, pair, &.{}, &.{});
+    const entry = try b.declare(&.{unit}, pair, &.{}, &.{});
     const raw = try b.primitive(computation, .computation, &.{
         try b.constant(u64, 11),
         try b.constant(u64, 29),

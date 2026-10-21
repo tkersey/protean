@@ -233,6 +233,22 @@ one profile makes both forms pass the unchanged native verifier. All three
 dependency-admission tests pass, including mode, content, link, and corrupt
 transport rejection. The failed run supplies no product qualification credit.
 
+Protean run [39594520804](https://github.com/tkersey/protean/actions/runs/39594520804)
+clears package admission but does not qualify the tuple. Eight qualification lanes
+pass, six fail, and five reach their job limit; the terminal aggregate gate fails.
+The control lane encounters a SQLite download DNS failure. The runtime and
+runtime-guest scripted requests omit the new explicit guest-view fields. The
+pure-slice fixture has a zero-input entry where native construction requires one
+input, and the speculative raw-computation fixture attempts to define its root
+twice. Those fixture repairs preserve the original success and rejection
+assertions. Runtime selection separately returns `OutOfMemory` within guarded
+reply testing; more precise phase diagnostics are required before selecting a
+resource correction. None of these failures is waived by the library passes.
+The owners build also includes two unused generated adaptive-asset imports.
+Removing those imports from its copied module table eliminates that unrelated
+build dependency while retaining all 69 owner tests. Its timing effect remains
+unmeasured until the next qualification run.
+
 Horos `893b964a` passed those checks but its completed review epoch accepted
 allocation-budget, validation-work, and raw-constructor preservation findings.
 Successor `cd256c1d` passes full native, WASM and package qualification. Decoded ownership

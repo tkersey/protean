@@ -519,6 +519,11 @@ pub fn build(b: *std.Build) void {
             const suite = b.allocator.create(std.Build.Module) catch @panic("out of memory");
             suite.init(b, .{ .existing = native_suite });
             suite.root_source_file = b.path(group[1]);
+            if (comptime std.mem.eql(u8, group[0], "tasks")) {
+                suite.import_table = suite.import_table.clone(b.allocator) catch @panic("out of memory");
+                _ = suite.import_table.swapRemove("adaptive_image");
+                _ = suite.import_table.swapRemove("adaptive_application");
+            }
             const checks = b.step("check-native-owner-" ++ group[0], "Qualify native " ++ group[0] ++ " contracts");
             const filters: []const []const u8 = if (comptime std.mem.eql(u8, group[0], "adaptive")) if (adaptive_group) |selected| switch (selected) {
                 .capture => &.{ "adaptive copied capture", "adaptive report correction" },

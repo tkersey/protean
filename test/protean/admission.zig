@@ -530,9 +530,10 @@ test "speculative retained raw computation inspects hidden handled effects" {
     } else return error.MissingConstructor;
     const raw = try f.b.primitive(computation, .computation, &.{}, constructor);
     const retained = try f.b.variable(computation);
-    try f.b.define(f.entry, try f.b.bind(retained, try f.b.pure(raw), try f.pure()));
+    const speculative = try f.b.declare(&.{}, f.unit, &.{}, &.{});
+    try f.b.define(speculative, try f.b.bind(retained, try f.b.pure(raw), try f.pure()));
     try f.horosCompile();
-    try f.registry.speculate(f.entry, &.{});
+    try f.registry.speculate(speculative, &.{});
     try std.testing.expectError(error.SpeculativeEffect, f.check());
 }
 

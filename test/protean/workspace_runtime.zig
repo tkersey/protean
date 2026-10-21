@@ -428,13 +428,17 @@ fn finishGuardReplyCancellation(a: std.mem.Allocator, service: anytype, initial:
 }
 
 fn exerciseGuardReply(a: std.mem.Allocator, service: anytype, task: native.testing.state.TaskId) !void {
+    var phase: []const u8 = "guest construction";
+    errdefer std.debug.print("guard reply: {s}\n", .{phase});
     const program = try semanticGuestProgram(a, service, task, "guard-reply-build");
     const input = try contracts.encodeOwned(@import("workspace_sources.zig").SemanticGuestInput, a, .{ .yields = 0, .seed = 100 });
     const started = try service.workspaceStart(a, "guard-reply-start", task, program, input, .{});
     var before = try service.workspaceWork(a, task, started.receipt.workspace.?);
     defer before.deinit();
     try std.testing.expectEqual(.requested, before.value.outcome_kind);
+    phase = "isolated interpretation";
     try semanticGuestInterpretation(a, service, before.value);
+    phase = "reply acquisition";
     const count = try guardReplyCount(service, task);
     const interaction = try acquireGuardReply(a, service, before.value);
     var answered = try service.workspaceWork(a, task, before.value.id);
@@ -449,15 +453,21 @@ fn exerciseGuardReply(a: std.mem.Allocator, service: anytype, task: native.testi
     const policy = service.profile.semantic_construction;
     defer service.profile.semantic_construction = policy;
     service.profile.semantic_construction = .{ .roots = &roots, .checkers = &.{kosmos.RuntimeCompiler.checker_identity}, .guard = true };
+    phase = "candidate derivation";
     const candidate = try guardReplyCandidate(a, service, answered.value, &artifact);
+    phase = "guard admission";
     _ = try service.workspaceGuard(a, "guard-reply-enable", task, .{ .guard = .{
         .expected = .{ .work = try workspaceRef(a, .work, answered.value.id), .execution_revision = answered.value.execution_revision, .control_revision = answered.value.control_revision },
         .realization_revision = answered.value.realization_revision,
         .candidate = candidate,
     } });
+    phase = "guarded reply execution";
     try pumpWrongReply(a, service, answered.value, acquired);
+    phase = "independent state comparison";
     try assertWrongReplyState(a, service, answered.value, acquired.reply);
+    phase = "owner restart";
     try restartGuardOwner(a, service);
+    phase = "reply replay and cancellation";
     try std.testing.expect((try service.workspaceInteract(a, "guard-reply-capture", task, interaction)).replayed);
     try std.testing.expectEqual(count + 1, try guardReplyCount(service, task));
     try finishGuardReplyCancellation(a, service, answered.value, acquired);
@@ -465,6 +475,7 @@ fn exerciseGuardReply(a: std.mem.Allocator, service: anytype, task: native.testi
     try std.testing.expectEqual(count + 1, try guardReplyCount(service, task));
     const retained = (try service.namespace.store.recordBytes(a, "workspace_port_reply", acquired.attempt, task)).?;
     try std.testing.expectEqualSlices(u8, capture, retained);
+    phase = "complete workspace validation";
     try service.validateWorkspace(a, task);
 }
 
@@ -1692,6 +1703,8 @@ fn runInterpretation(
 }
 
 fn semanticGuestInterpretation(a: std.mem.Allocator, service: anytype, original: native.workspace.Work) !void {
+    var phase: []const u8 = "guest snapshot";
+    errdefer std.debug.print("semantic interpretation: {s}\n", .{phase});
     var program = try service.workspaceProgram(a, original.task, original.program);
     defer program.deinit();
     const image = try service.namespace.store.object(a, program.value.description.image, null);
@@ -1700,6 +1713,7 @@ fn semanticGuestInterpretation(a: std.mem.Allocator, service: anytype, original:
     defer guest.deinit();
     var snapshot = try semanticGuestSnapshot(a, service, original);
     defer snapshot.deinit();
+    phase = "initial program construction";
     const analysis = try interpretationProgram(
         a,
         service,
@@ -1708,16 +1722,21 @@ fn semanticGuestInterpretation(a: std.mem.Allocator, service: anytype, original:
         snapshot.value.snapshot.?,
         "semantic-interpretation-build",
     );
+    phase = "missing assumption execution";
     var unfinished = try runInterpretation(a, service, original.task, analysis, &.{}, "semantic-interpretation-missing");
     defer unfinished.deinit();
     try std.testing.expectEqual(.missing_assumption, unfinished.value.stopping);
     try std.testing.expectEqual(@as(u64, 0), unfinished.value.applied);
     try std.testing.expectEqualDeep(guest.identity(), unfinished.value.guest);
+    phase = "resumed program construction";
     const resumed = try interpretationProgram(a, service, original.task, guest, unfinished.value.state, "semantic-interpretation-resume-build");
+    phase = "true assumption execution";
     var positive = try runInterpretation(a, service, original.task, resumed, &.{&.{1}}, "semantic-interpretation-true");
     defer positive.deinit();
+    phase = "false assumption execution";
     var negative = try runInterpretation(a, service, original.task, resumed, &.{&.{0}}, "semantic-interpretation-false");
     defer negative.deinit();
+    phase = "branch provenance and original state";
     for ([_]kosmos.RuntimeAnalysis.InterpretationOutput{ positive.value, negative.value }) |result| {
         try std.testing.expectEqual(.yielded, result.stopping);
         try std.testing.expectEqual(@as(u64, 1), result.applied);
