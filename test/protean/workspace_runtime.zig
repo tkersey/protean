@@ -811,12 +811,11 @@ fn producerFoldOperands(
             operands,
             try b.constant(u64, position),
         ));
-        const checked = try producerFoldLiteralGuard(b, module, references[position], body, miss);
         const read = try b.bind(literals[position], try b.pure(try producerRequired(
             b,
             constants,
             try b.reference(literal_id),
-        )), checked);
+        )), body);
         body = try producerMatch(
             b,
             try producerField(b, operand, 1),
@@ -831,25 +830,6 @@ fn producerFoldOperands(
         module,
         std.meta.fieldIndex(source.Module, "constants").?,
     )), body);
-}
-
-fn producerFoldLiteralGuard(
-    b: *source.Builder,
-    module: Id,
-    literal: Id,
-    yes: Id,
-    no: Id,
-) !Id {
-    const schemas = try producerField(b, module, std.meta.fieldIndex(source.Module, "schemas").?);
-    const shape = try producerRequired(b, schemas, try producerField(b, literal, 0));
-    const size = try b.primitive(try b.scalar(u64), .blob_length, &.{
-        try producerField(b, literal, 1),
-    }, 0);
-    return producerWhen(b, try producerTag(
-        b,
-        shape,
-        std.meta.fieldIndex(data.program.Schema, "u64").?,
-    ), try producerWhen(b, try producerEquals(b, size, try b.constant(u64, 8)), yes, no), no);
 }
 
 fn producerFoldProposal(
@@ -1003,11 +983,6 @@ fn producerWhen(b: *source.Builder, condition: Id, yes: Id, no: Id) !Id {
 
 fn producerEquals(b: *source.Builder, left: Id, right: Id) !Id {
     return b.primitive(try b.scalar(bool), .equal, &.{ left, right }, 0);
-}
-
-fn producerTag(b: *source.Builder, value: Id, tag: u64) !Id {
-    const actual = try b.primitive(try b.scalar(u64), .variant_tag, &.{value}, 0);
-    return producerEquals(b, actual, try b.constant(u64, tag));
 }
 
 fn producerLength(b: *source.Builder, value: Id) !Id {
@@ -3136,6 +3111,12 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     var source_namespace = try native.Namespace.open(a, io, source_path);
     var source_open = true;
     defer if (source_open) source_namespace.close() catch unreachable;
+    var sender_compiler_facts: native.tasks.Service(OwnerTypes).CompilerFacts = .{ .allocator = a };
+    defer sender_compiler_facts.deinit();
+    var receiver_compiler_facts: native.tasks.Service(OwnerTypes).CompilerFacts = .{ .allocator = a };
+    defer receiver_compiler_facts.deinit();
+    var controller_compiler_facts: native.tasks.Service(OwnerTypes).CompilerFacts = .{ .allocator = a };
+    defer controller_compiler_facts.deinit();
     var sender = try native.tasks.Service(OwnerTypes).init(a, io, &source_namespace, assets, &application, handlers, profile);
     var sender_open = true;
     defer if (sender_open) sender.close(a) catch unreachable;
@@ -3194,6 +3175,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         try std.testing.expect(try sender.associatedWorkDisposed(scratch, parent.receipt.task));
         break :blk derived;
     } else null;
+    if (scenario == .work) sender.compiler_facts = &sender_compiler_facts;
     const runtime = if (generated) |derived| derived.runtime else ancestor;
     const input = if (scenario == .work)
         try contracts.encodeOwned(@import("workspace_sources.zig").SemanticGuestInput, scratch, .{ .yields = 64, .seed = 100 })
@@ -4140,6 +4122,8 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     sender_open = false;
     try source_namespace.close();
     source_open = false;
+    sender_compiler_facts.deinit();
+    sender_compiler_facts = .{ .allocator = a };
     if (scenario == .onward) {
         const controller: p.Subject = .{ .task = subject.task };
         for (0..3) |attack| {
@@ -4190,6 +4174,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     resumed_profile.placement = &destination_config;
     receiver = try native.tasks.Service(OwnerTypes).init(a, io, &destination_namespace, assets, &application, handlers, resumed_profile);
     receiver_open = true;
+    if (scenario == .work) receiver.compiler_facts = &receiver_compiler_facts;
     // Refusing one transfer is durable history, not task occupancy.
     var unrelated_offer = offer.value;
     unrelated_offer.intent.transfer = @splat(99);
@@ -4224,6 +4209,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     }
     const accepted = try acceptPlacement(&receiver, "accept", "source", offer, archive_path);
     try std.testing.expectEqual(.accepted, accepted.value.verdict);
+    if (scenario == .work) std.debug.print("semantic placement: child accepted at {d}ms\n", .{sharedElapsed(placement_started) / std.time.ns_per_ms});
     try std.testing.expectEqualDeep(prior_refusal, try receiver.placementRefuse(scratch, "source", unrelated_signed, .withdrawn));
     try std.testing.expectEqualDeep(accepted, try acceptPlacement(&receiver, "accept-again", "source", offer, archive_path));
     try std.testing.expectEqualDeep(accepted, try receiver.placementRefuse(scratch, "source", offer, .withdrawn));
@@ -4232,6 +4218,8 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     try std.testing.expectError(error.CustodyNotLocal, receiver.resumeTask(scratch, "copied-controller", subject.task, 1));
     try receiver.close(a);
     receiver_open = false;
+    receiver_compiler_facts.deinit();
+    receiver_compiler_facts = .{ .allocator = a };
     try destination_namespace.close();
     destination_open = false;
     destination_namespace = try native.Namespace.open(a, io, destination_path);
@@ -4239,6 +4227,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     receiver = try native.tasks.Service(OwnerTypes).init(a, io, &destination_namespace, assets, &application, handlers, resumed_profile);
     receiver_open = true;
     phase = "replay destination acceptance";
+    try std.testing.expect(receiver.compiler_facts == null);
     try std.testing.expectEqualDeep(accepted, try acceptPlacement(&receiver, "recovered-acceptance", "source", offer, archive_path));
     var imported_work = try receiver.workspaceWork(a, subject.task, work_id);
     defer imported_work.deinit();
@@ -4261,6 +4250,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     defer continued.deinit();
     try std.testing.expect(!std.meta.eql(continued.value.outer_operation.?.capsule, imported_work.value.outer_operation.?.capsule));
     try std.testing.expectEqual(imported_work.value.execution_revision, continued.value.execution_revision);
+    if (scenario == .work) std.debug.print("semantic placement: cold restart continued at {d}ms\n", .{sharedElapsed(placement_started) / std.time.ns_per_ms});
     try receiver.close(a);
     receiver_open = false;
     try destination_namespace.close();
@@ -4348,6 +4338,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     source_open = true;
     sender = try native.tasks.Service(OwnerTypes).init(a, io, &source_namespace, assets, &application, handlers, source_profile);
     sender_open = true;
+    if (scenario == .work) sender.compiler_facts = &controller_compiler_facts;
     try sender.placementApplyReport(scratch, subject.task, p.controlId(control.value.value), report.value);
     try sender.placementApplyReport(scratch, subject.task, p.controlId(control.value.value), report.value);
     if (scenario == .onward) {
@@ -4513,27 +4504,34 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     source_peers[1].compatibility = try sender.placementCompatibility(scratch, controller_subject);
     successor_peers[1].compatibility = source_peers[1].compatibility;
     phase = "transfer controller";
+    if (scenario == .work) std.debug.print("semantic placement: transfer controller at {d}ms\n", .{sharedElapsed(placement_started) / std.time.ns_per_ms});
     _ = try freezePlacement(&sender, controller_subject, "successor", advanced_controller, @splat(16));
     const controller_archive = try std.fmt.allocPrint(scratch, "{s}/controller.par", .{path_buffer[0..length]});
     const controller_offer = try offerPlacement(&sender, controller_subject, "successor", controller_archive);
     try sender.close(a);
     sender_open = false;
+    controller_compiler_facts.deinit();
+    controller_compiler_facts = .{ .allocator = a };
     try source_namespace.close();
     source_open = false;
     var controller_decision: p.Signed(p.Decision) = undefined;
     var successor_control: contracts.Decoded(p.Signed(p.Control)) = undefined;
     {
+        var compiler_facts: native.tasks.Service(OwnerTypes).CompilerFacts = .{ .allocator = a };
+        defer compiler_facts.deinit();
         successor_namespace = try native.Namespace.open(a, io, successor_path);
         defer successor_namespace.close() catch unreachable;
         var successor_profile = profile;
         successor_profile.placement = &successor_config;
         var successor = try native.tasks.Service(OwnerTypes).init(a, io, &successor_namespace, assets, &application, handlers, successor_profile);
         defer successor.close(a) catch unreachable;
+        if (scenario == .work) successor.compiler_facts = &compiler_facts;
         controller_decision = try acceptPlacement(&successor, "accept-controller", "source", controller_offer, controller_archive);
         try std.testing.expectEqual(.local, (try successor.placementStatus(scratch, controller_subject)).?.phase);
         try std.testing.expectEqual(.away, (try successor.placementStatus(scratch, subject)).?.phase);
         successor_control = try contracts.decodeOwned(p.Signed(p.Control), scratch, try successor.placementControl(scratch, "new-controller-inspect", subject.task, .{ .inspect = .{ .work = work_ref } }));
     }
+    if (scenario == .work) std.debug.print("semantic placement: controller accepted at {d}ms\n", .{sharedElapsed(placement_started) / std.time.ns_per_ms});
     defer successor_control.deinit();
     {
         var retained_namespace = try native.Namespace.open(a, io, source_path);
@@ -4582,14 +4580,18 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     var observer_stopped = false;
     var resumed_after_park = false;
     phase = "cancel remote work and observer";
+    if (scenario == .work) std.debug.print("semantic placement: remote cleanup at {d}ms\n", .{sharedElapsed(placement_started) / std.time.ns_per_ms});
     for (0..512) |iteration| {
         {
+            var compiler_facts: native.tasks.Service(OwnerTypes).CompilerFacts = .{ .allocator = a };
+            defer compiler_facts.deinit();
             successor_namespace = try native.Namespace.open(a, io, successor_path);
             defer successor_namespace.close() catch unreachable;
             var successor_profile = profile;
             successor_profile.placement = &successor_config;
             var successor = try native.tasks.Service(OwnerTypes).init(a, io, &successor_namespace, assets, &application, handlers, successor_profile);
             defer successor.close(a) catch unreachable;
+            if (scenario == .work) successor.compiler_facts = &compiler_facts;
             try successor.placementApplyReport(scratch, subject.task, p.controlId(cleanup_control.value), cleanup_report);
             attack_index = iteration;
             phase = "initial remote disposal state";
@@ -4645,11 +4647,14 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             try std.testing.expect(found);
         }
         {
+            var compiler_facts: native.tasks.Service(OwnerTypes).CompilerFacts = .{ .allocator = a };
+            defer compiler_facts.deinit();
             const at_source = std.meta.eql(cleanup_control.value.executor, source_site);
             var executor_namespace = try native.Namespace.open(a, io, if (at_source) source_path else destination_path);
             defer executor_namespace.close() catch unreachable;
             var executor = try native.tasks.Service(OwnerTypes).init(a, io, &executor_namespace, assets, &application, handlers, if (at_source) source_profile else resumed_profile);
             defer executor.close(a) catch unreachable;
+            if (scenario == .work) executor.compiler_facts = &compiler_facts;
             const bytes = try executor.placementExecuteControl(scratch, "successor", cleanup_control);
             const decoded_report = try contracts.decodeOwned(p.Signed(p.Report), scratch, bytes);
             cleanup_report = decoded_report.value;
@@ -4676,6 +4681,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     }
     phase = "verify remote disposal completion";
     try std.testing.expect(disposed);
+    if (scenario == .work) std.debug.print("semantic placement: remote cleanup completed at {d}ms\n", .{sharedElapsed(placement_started) / std.time.ns_per_ms});
     phase = "verify remote park and resume";
     try std.testing.expect(parked_once and resumed_after_park);
     phase = "verify remote observer stopped";
