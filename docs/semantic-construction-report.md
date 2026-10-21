@@ -84,12 +84,12 @@ rather than only the net file-size difference.
 |---|---:|---:|---:|
 | Horos | 3 | 26,035 | 0 |
 | Kosmos | 8 | 76,091 | 773 |
-| Protean | 13 | 163,797 | 8,340 |
-| Total | 24 | 265,923 | 9,113 |
+| Protean | 13 | 163,855 | 8,340 |
+| Total | 24 | 265,981 | 9,113 |
 
 No test modules, directories, executables, or CI lanes were added. Protean's
 existing workspace execution count advances from 12 to 13. The largest extension
-is `workspace_runtime.zig` at 138,565 added bytes; the low module count does not
+is `workspace_runtime.zig` at 138,623 added bytes; the low module count does not
 make this a small fixture change. Its generated producer and candidate are reused
 by the custody, five-arm, and mobility checks, avoiding a third producer run.
 Historical independent byte fixtures remain unchanged.
@@ -111,10 +111,13 @@ Every command has a 600-second watchdog.
 | Tree and command | Cold seconds | Warm seconds | Result |
 |---|---:|---:|---|
 | Horos `816d2d8`, `check check-package` | 198.309 | 105.816 | 266/266 steps, 932/932 tests |
+| Kosmos `acf8d71`, `check` | 527.043 | 340.761 | 69/69 steps, 329/329 tests |
 
 Horos reports 60 compiler steps: 60 executed cold, 49 executed and 11 cached
 warm. Its largest reported individual compiler RSS is 2 GB; this is not aggregate
 concurrent memory. Kosmos's committed TigerStyle ratchet passes at `acf8d71`
 with 35 changed files, 5,762 changed lines, zero diagnostics, and 24 auditor tests.
-The focused disclosure and allocation/rollback regressions pass; they do not
-substitute for the outstanding full-tree and product qualification.
+Kosmos reports 12 compiler steps, all executed cold and cached warm, with a largest
+individual compiler RSS of 4 GB. Its full check includes 9,570 independent source
+agreement observations, Chromium and Firefox worker transfer, and extracted
+package operation. Protean's full-tree and product qualification remains outstanding.

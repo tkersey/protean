@@ -1499,10 +1499,15 @@ fn sharedCompare(a: std.mem.Allocator, service: anytype, expected: SharedArmResu
     }
 }
 
-fn sharedComparison(a: std.mem.Allocator, service: anytype, task: native.testing.state.TaskId, program: native.testing.state.Digest, generated: GeneratedRuntime) !void {
-    const specialization_started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
-    const specialized = try service.workspaceSpecialize(a, "shared-specialize", task, program);
-    const specialization_ns = sharedElapsed(specialization_started);
+fn sharedComparison(
+    a: std.mem.Allocator,
+    service: anytype,
+    task: native.testing.state.TaskId,
+    program: native.testing.state.Digest,
+    generated: GeneratedRuntime,
+    specialized: contracts.workspace.Ref,
+    specialization_ns: u64,
+) !void {
     const instrumentation_started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
     const instrumented = try service.workspaceSpecializeWithHooks(a, "shared-instrument", task, program, .{ .control = true, .storage = true });
     const instrumentation_ns = sharedElapsed(instrumentation_started);
@@ -1510,7 +1515,7 @@ fn sharedComparison(a: std.mem.Allocator, service: anytype, task: native.testing
     defer a.free(input);
     const arms = [_]SharedArm{
         .{ .label = "generic" },
-        .{ .label = "specialized", .runtime = try workspaceRef(a, .runtime, specialized.receipt.workspace.?), .construction_validation_ns = specialization_ns },
+        .{ .label = "specialized", .runtime = specialized, .construction_validation_ns = specialization_ns },
         .{ .label = "generated", .runtime = generated.runtime },
         .{ .label = "instrumented", .runtime = try workspaceRef(a, .runtime, instrumented.receipt.workspace.?), .construction_validation_ns = instrumentation_ns },
         .{ .label = "guarded", .candidate = generated.candidate },
@@ -2616,7 +2621,9 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         try semanticGuestProgram(scratch, &sender, parent.receipt.task, "placement-semantic-guest")
     else
         program.receipt.workspace.?;
+    const specialization_started = std.Io.Clock.awake.now(io).nanoseconds;
     const specialized = try sender.workspaceSpecialize(scratch, "specialize", parent.receipt.task, selected_program);
+    const specialization_ns = sharedElapsed(specialization_started);
     const ancestor = try workspaceRef(scratch, .runtime, specialized.receipt.workspace.?);
     var packaged_runtime = try sender.program.retainRuntime();
     defer packaged_runtime.deinit();
@@ -2640,7 +2647,15 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             try contracts.encodeOwned(@import("workspace_sources.zig").SemanticGuestInput, scratch, .{ .yields = 64, .seed = 100 }),
         );
         phase = "shared guest five-arm continuation comparison";
-        try sharedComparison(scratch, &sender, parent.receipt.task, selected_program, derived);
+        try sharedComparison(
+            scratch,
+            &sender,
+            parent.receipt.task,
+            selected_program,
+            derived,
+            ancestor,
+            specialization_ns,
+        );
         break :blk derived;
     } else null;
     const runtime = if (generated) |derived| derived.runtime else ancestor;
