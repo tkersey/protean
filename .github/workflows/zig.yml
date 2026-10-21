@@ -1,4 +1,5 @@
 name: Zig 0.17 qualification
+run-name: ${{ inputs.diagnostic_lane && inputs.diagnostic_lane != 'all' && format('Diagnostic {0}', inputs.diagnostic_lane) || 'Full qualification' }}
 on:
   pull_request:
   push:
@@ -9,6 +10,11 @@ on:
         description: Restore dependency and compiler artifacts (disable for a cold run)
         type: boolean
         default: true
+      diagnostic_lane:
+        description: Run one existing lane for diagnosis; only all qualifies the complete product
+        type: choice
+        default: all
+        options: [all, owners, workspace-custody]
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -21,23 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [authoring, owners, owner-adaptive, owner-adaptive-control, owner-support, workspace, workspace-retention, workspace-history, workspace-runtime, workspace-custody, workspace-succession, correspondence, native, native-workspace, native-placement, runtime, runtime-outer, runtime-guest, downstream]
-        include:
-          - {lane: owners, compiled_profile: owners}
-          - {lane: owner-adaptive, compiled_profile: owner-adaptive}
-          - {lane: owner-adaptive-control, compiled_profile: owner-adaptive-control}
-          - {lane: workspace, compiled_profile: workspace}
-          - {lane: workspace-retention, compiled_profile: workspace-retention}
-          - {lane: workspace-history, compiled_profile: workspace-history}
-          - {lane: workspace-runtime, compiled_profile: workspace-runtime}
-          - {lane: workspace-custody, compiled_profile: workspace-custody}
-          - {lane: workspace-succession, compiled_profile: workspace-succession}
-          - {lane: native, compiled_profile: product}
-          - {lane: native-workspace, product_consumer: true}
-          - {lane: native-placement, compiled_profile: product}
-          - {lane: runtime, product_consumer: true}
-          - {lane: runtime-outer, product_consumer: true}
-          - {lane: runtime-guest, product_consumer: true}
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'workspace-custody' && '[{"lane":"workspace-custody","compiled_profile":"workspace-custody"}]' || '[{"lane":"authoring"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive","compiled_profile":"owner-adaptive"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control"},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"workspace-runtime","compiled_profile":"workspace-runtime"},{"lane":"workspace-custody","compiled_profile":"workspace-custody"},{"lane":"workspace-succession","compiled_profile":"workspace-succession"},{"lane":"correspondence"},{"lane":"native","compiled_profile":"product"},{"lane":"native-workspace","product_consumer":true},{"lane":"native-placement","compiled_profile":"product"},{"lane":"runtime","product_consumer":true},{"lane":"runtime-outer","product_consumer":true},{"lane":"runtime-guest","product_consumer":true},{"lane":"downstream"}]') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -414,8 +404,13 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           QUALIFICATION: ${{ needs.qualify.result }}
+          DIAGNOSTIC_LANE: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane || 'all' }}
         run: |
           test "$QUALIFICATION" = success
+          if [ "$DIAGNOSTIC_LANE" != all ]; then
+            echo 'A diagnostic lane does not establish complete qualification.'
+            exit 1
+          fi
           # JSON/hash comparison uses the runner's Node; product checks pin 26.9.0.
           node --version
           node --input-type=module <<'JS'
