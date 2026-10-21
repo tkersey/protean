@@ -369,8 +369,16 @@ pub fn build(b: *std.Build) void {
         const runtime_workspace_group = b.option(enum { selection, custody, succession }, "runtime-workspace-group", "Select independent runtime workspace qualification cases (default: all)");
         const workspace_runtime_tests = native_graph.testModuleFiltered(workspace_runtime_checks, workspace_runtime_module, if (runtime_workspace_group) |group| switch (group) {
             .selection => &.{ "runtime selection", "terminal parent cancellation", "scheduler bounds" },
-            .custody => &.{ "native placement carries", "frozen controller" },
-            .succession => &.{ "delayed controls", "controller succession precedes", "controller succession preserves" },
+            .custody => &.{
+                "native placement carries a suspended evaluator with exclusive per-work custody",
+            },
+            .succession => &.{
+                "delayed controls",
+                "controller succession precedes",
+                "controller succession preserves",
+                "native placement carries the current cut",
+                "frozen controller",
+            },
         } else &.{});
         b.step("build-workspace-runtime-check", "Build the retained runtime workspace test executable")
             .dependOn(&b.addInstallArtifact(workspace_runtime_tests, .{

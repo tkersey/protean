@@ -242,9 +242,9 @@ jobs:
           elif [ "${{ matrix.lane }}" = workspace-runtime ]; then
             run_compiled_tests workspace-runtime 4
           elif [ "${{ matrix.lane }}" = workspace-custody ]; then
-            run_compiled_tests workspace-runtime 5
+            run_compiled_tests workspace-runtime 1
           elif [ "${{ matrix.lane }}" = workspace-succession ]; then
-            run_compiled_tests workspace-runtime 4
+            run_compiled_tests workspace-runtime 8
           elif [ "${{ matrix.lane }}" = correspondence ]; then
             zig build check-workspace-semantics -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = downstream ]; then
