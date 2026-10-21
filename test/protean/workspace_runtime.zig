@@ -808,13 +808,14 @@ fn finishTransformer(
             const steps = result.value.proposal.steps;
             try std.testing.expect(steps[steps.len - 1].rule == .scalar);
             if (expected_layout) try std.testing.expect(steps[0].rule == .product_layout);
-            std.debug.print("generated transformer {s}: input={d} result={d} guest_work={d} publications={d} elapsed_ms={d}\n", .{
+            std.debug.print("generated transformer {s}: input={d} result={d} guest_work={d} publications={d} elapsed_ms={d} native_publication_ns={d}\n", .{
                 label,
                 current.value.input.bytes,
                 current.value.result.?.bytes,
                 guest_work,
                 turn + 1,
                 std.Io.Clock.awake.now(std.testing.io).toMilliseconds() - started_ms,
+                current.value.native_publication_nanoseconds,
             });
             return workspaceRef(a, .value, current.value.result_value.?.digest);
         }
@@ -2705,6 +2706,7 @@ fn acceptPlacement(
 }
 
 fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward, cancel_abort, cancel_refused, root_cancel_abort, root_cancel_refused, local_ack, remote_ack }) !void {
+    const placement_started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
     var phase: []const u8 = "setup";
     var attack_index: usize = 0;
     errdefer std.debug.print("placement {s}: {s} ({d})\n", .{ @tagName(scenario), phase, attack_index });
@@ -2820,6 +2822,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             specialization_ns,
         );
         phase = "verify temporary construction work disposal";
+        std.debug.print("semantic placement: disposal at {d}ms\n", .{sharedElapsed(placement_started) / std.time.ns_per_ms});
         try std.testing.expect(try sender.associatedWorkDisposed(scratch, parent.receipt.task));
         break :blk derived;
     } else null;
@@ -2847,6 +2850,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         .policy = if (scenario == .root) .{ .stop = .terminal, .continuation = .owner_scheduled } else .{},
         .runtime = .{ .selected = runtime },
     } } };
+    if (scenario == .work) std.debug.print("semantic placement: start selected work at {d}ms\n", .{sharedElapsed(placement_started) / std.time.ns_per_ms});
     const started = try sender.workspaceCommand(scratch, "start", parent.receipt.task, start_command);
     try std.testing.expectEqual(.observed, started.disposition);
     const start_observation = (try native.json.parseAsset(scratch, started.observation_json.bytes, started.observation_json.bytes.len)).value;
@@ -3566,6 +3570,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     }
     if (scenario == .work) {
         phase = "suspend controller before child freeze";
+        std.debug.print("semantic placement: suspend controller at {d}ms\n", .{sharedElapsed(placement_started) / std.time.ns_per_ms});
         var controller = try sender.task(scratch, subject.task);
         defer controller.deinit();
         _ = try sender.resumeTask(
@@ -3579,6 +3584,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         try std.testing.expect(sender.active.?.subject == .root);
         try std.testing.expect(sender.active.?.root_control != null);
     }
+    if (scenario == .work) std.debug.print("semantic placement: freeze child at {d}ms\n", .{sharedElapsed(placement_started) / std.time.ns_per_ms});
     _ = try freezePlacement(&sender, subject, "destination", cut, @splat(14));
     inline for (.{ "principal", "tenant" }) |field| {
         const authority = sender.profile.authority;
@@ -3698,15 +3704,18 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     // Leave the complete file without a published offer, as an interrupted
     // writer can. The retry must validate and durably reuse that exact file.
     disclosure.deny_runtime = true;
+    if (scenario == .work) std.debug.print("semantic placement: denied runtime offer at {d}ms\n", .{sharedElapsed(placement_started) / std.time.ns_per_ms});
     try std.testing.expectError(error.DisclosureDenied, offerPlacement(&sender, subject, "destination", archive_path));
     try std.testing.expect((try sender.placementStatus(scratch, subject)).?.offer == null);
     disclosure.deny_runtime = false;
     if (generated) |derived| {
         disclosure.denied_dependency = try nativeIdentity(derived.candidate);
+        std.debug.print("semantic placement: denied candidate offer at {d}ms\n", .{sharedElapsed(placement_started) / std.time.ns_per_ms});
         try std.testing.expectError(error.DisclosureDenied, offerPlacement(&sender, subject, "destination", archive_path));
         try std.testing.expect((try sender.placementStatus(scratch, subject)).?.offer == null);
         disclosure.denied_dependency = null;
     }
+    if (scenario == .work) std.debug.print("semantic placement: offer retry at {d}ms\n", .{sharedElapsed(placement_started) / std.time.ns_per_ms});
     const offer = try offerPlacement(&sender, subject, "destination", archive_path);
     inline for (.{ "principal", "tenant" }) |field| {
         const authority = sender.profile.authority;
@@ -3807,6 +3816,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     }
     destination_namespace = try native.Namespace.open(a, io, destination_path);
     phase = "accept child";
+    if (scenario == .work) std.debug.print("semantic placement: accept child at {d}ms\n", .{sharedElapsed(placement_started) / std.time.ns_per_ms});
     destination_open = true;
     var resumed_profile = profile;
     resumed_profile.placement = &destination_config;

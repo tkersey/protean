@@ -272,7 +272,19 @@ passes the owners lane, including all 69 tests. Selection still fails with
 Semantic publication validation now owns its temporary arena, and compiler-output
 validation allocates through the service allocator so existing cleanup releases
 intermediates. Independent checks and retained fact identities are unchanged.
-The repair's effect remains unqualified until the successor run completes.
+Run [39602114293](https://github.com/tkersey/protean/actions/runs/39602114293)
+at `2f1c32b9` passes all four selection tests on both attempts, including complete
+workspace-history validation. Attempt two passes 17 of 19 qualification lanes;
+owners compilation and custody execution exceed ten minutes. The changed owners
+executable has no completed cache entry, so both attempts restore the same older
+compiler snapshot. An owners-only Linux x86-64 native-backend experiment preserves
+Safe mode and all 69 tests; its compatibility and build-plus-execution cost remain
+unqualified. Native C compilation and the other test backends are unchanged.
+
+Kosmos `1dd83c37` stabilizes its Zig tool path so the explicitly inherited `PATH`
+does not vary dependency-extraction and downstream compiler cache identities.
+The updated dependency archive is authenticated against its committed source.
+Current qualification is pending; no timing improvement is claimed yet.
 
 Horos `893b964a` passed those checks but its completed review epoch accepted
 allocation-budget, validation-work, and raw-constructor preservation findings.

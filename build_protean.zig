@@ -530,6 +530,10 @@ pub fn build(b: *std.Build) void {
                 .control => &.{ "authored inference", "authored skill", "authored report", "report model arguments", "compiled catalog", "adaptive snapshot", "adaptive provider", "adaptive malformed", "adaptive workspace" },
             } else &.{} else &.{};
             const tests = native_graph.testModuleFiltered(checks, suite, filters);
+            if (comptime std.mem.eql(u8, group[0], "tasks")) {
+                if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64)
+                    tests.use_llvm = false;
+            }
             b.step("build-native-owner-" ++ group[0] ++ "-check", "Build the retained native " ++ group[0] ++ " test executable")
                 .dependOn(&b.addInstallArtifact(tests, .{
                 .dest_dir = .{ .override = .{ .custom = "verification" } },
