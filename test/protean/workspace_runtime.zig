@@ -2543,6 +2543,41 @@ fn placementObserver(
     return .{ .work = try workspaceRef(a, .work, complete.value.id), .execution_revision = complete.value.execution_revision, .control_revision = complete.value.control_revision };
 }
 
+fn freezePlacement(
+    service: anytype,
+    subject: native.placement.Subject,
+    peer: []const u8,
+    cut: native.placement.Cut,
+    transfer: native.testing.state.Digest,
+) !native.placement.Intent {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    return service.placementFreeze(arena.allocator(), subject, peer, cut, transfer);
+}
+
+fn offerPlacement(
+    service: anytype,
+    subject: native.placement.Subject,
+    peer: []const u8,
+    path: []const u8,
+) !native.placement.Signed(native.placement.Offer) {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    return service.placementOffer(arena.allocator(), subject, peer, path);
+}
+
+fn acceptPlacement(
+    service: anytype,
+    operation: []const u8,
+    peer: []const u8,
+    offer: native.placement.Signed(native.placement.Offer),
+    path: []const u8,
+) !native.placement.Signed(native.placement.Decision) {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    return service.placementAccept(arena.allocator(), operation, peer, offer, path);
+}
+
 fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward, cancel_abort, cancel_refused, root_cancel_abort, root_cancel_refused, local_ack, remote_ack }) !void {
     var phase: []const u8 = "setup";
     var attack_index: usize = 0;
@@ -2732,9 +2767,9 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         const observer_subject: p.Subject = .{ .task = subject.task, .work = try nativeIdentity(observer.work) };
         const controller: p.Subject = .{ .task = subject.task };
         const before = source_namespace.store.head;
-        try std.testing.expectError(error.ActiveObserverMobilityUnsupported, sender.placementFreeze(scratch, subject, "destination", cut, @splat(101)));
-        try std.testing.expectError(error.ActiveObserverMobilityUnsupported, sender.placementFreeze(scratch, observer_subject, "destination", try sender.placementCut(scratch, observer_subject), @splat(102)));
-        try std.testing.expectError(error.ScheduledObserverMobilityUnsupported, sender.placementFreeze(scratch, controller, "successor", try sender.placementCut(scratch, controller), @splat(103)));
+        try std.testing.expectError(error.ActiveObserverMobilityUnsupported, freezePlacement(&sender, subject, "destination", cut, @splat(101)));
+        try std.testing.expectError(error.ActiveObserverMobilityUnsupported, freezePlacement(&sender, observer_subject, "destination", try sender.placementCut(scratch, observer_subject), @splat(102)));
+        try std.testing.expectError(error.ScheduledObserverMobilityUnsupported, freezePlacement(&sender, controller, "successor", try sender.placementCut(scratch, controller), @splat(103)));
         try std.testing.expectEqualDeep(before, source_namespace.store.head);
         _ = try sender.workspaceStopObserving(scratch, "placement-observer-stop", subject.task, observer);
         _ = try sender.placementCompatibility(scratch, observer_subject);
@@ -2747,9 +2782,9 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         var ack_successor_profile = profile;
         ack_successor_profile.placement = &successor_config;
         if (scenario == .remote_ack) {
-            _ = try sender.placementFreeze(scratch, subject, "destination", cut, @splat(74));
+            _ = try freezePlacement(&sender, subject, "destination", cut, @splat(74));
             const work_archive = try std.fmt.allocPrint(scratch, "{s}/ack-work.par", .{path_buffer[0..length]});
-            const work_offer = try sender.placementOffer(scratch, subject, "destination", work_archive);
+            const work_offer = try offerPlacement(&sender, subject, "destination", work_archive);
             try sender.close(a);
             sender_open = false;
             try source_namespace.close();
@@ -2760,7 +2795,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
                 defer ns.close() catch unreachable;
                 var executor = try native.tasks.Service(OwnerTypes).init(a, io, &ns, assets, &application, handlers, ack_destination_profile);
                 defer executor.close(a) catch unreachable;
-                work_decision = try executor.placementAccept(scratch, "ack-work", "source", work_offer, work_archive);
+                work_decision = try acceptPlacement(&executor, "ack-work", "source", work_offer, work_archive);
             }
             source_namespace = try native.Namespace.open(a, io, source_path);
             source_open = true;
@@ -2813,9 +2848,9 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         defer parent_before_move.deinit();
         try std.testing.expect(!parent_before_move.value.terminal());
         const controller: p.Subject = .{ .task = subject.task };
-        _ = try sender.placementFreeze(scratch, controller, "successor", try sender.placementCut(scratch, controller), @splat(75));
+        _ = try freezePlacement(&sender, controller, "successor", try sender.placementCut(scratch, controller), @splat(75));
         const controller_archive = try std.fmt.allocPrint(scratch, "{s}/ack-controller.par", .{path_buffer[0..length]});
-        const controller_offer = try sender.placementOffer(scratch, controller, "successor", controller_archive);
+        const controller_offer = try offerPlacement(&sender, controller, "successor", controller_archive);
         try sender.close(a);
         sender_open = false;
         try source_namespace.close();
@@ -2827,7 +2862,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             defer ns.close() catch unreachable;
             var successor = try native.tasks.Service(OwnerTypes).init(a, io, &ns, assets, &application, handlers, ack_successor_profile);
             defer successor.close(a) catch unreachable;
-            decision = try successor.placementAccept(scratch, "ack-controller", "source", controller_offer, controller_archive);
+            decision = try acceptPlacement(&successor, "ack-controller", "source", controller_offer, controller_archive);
             inspection = (try contracts.decodeOwned(p.Signed(p.Control), scratch, try successor.placementControl(scratch, "ack-inspect", subject.task, .{ .inspect = .{ .work = work_ref } }))).value;
         }
         {
@@ -2873,11 +2908,11 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         phase = "settle local child while cancelling controller is frozen";
         const controller: p.Subject = .{ .task = subject.task };
         _ = try sender.requestCancel(scratch, "cancel-controller", subject.task, "stop");
-        _ = try sender.placementFreeze(scratch, controller, "destination", try sender.placementCut(scratch, controller), @splat(71));
+        _ = try freezePlacement(&sender, controller, "destination", try sender.placementCut(scratch, controller), @splat(71));
         var refusal: ?p.Signed(p.Decision) = null;
         if (scenario == .root_cancel_refused) {
             const frozen_path = try std.fmt.allocPrint(scratch, "{s}/cancelled-controller.par", .{path_buffer[0..length]});
-            const frozen_offer = try sender.placementOffer(scratch, controller, "destination", frozen_path);
+            const frozen_offer = try offerPlacement(&sender, controller, "destination", frozen_path);
             refusal = try p.sign(p.Decision, scratch, destination_key, .{ .transfer = frozen_offer.value.intent.transfer, .offer_digest = try p.digest(p.Offer, scratch, frozen_offer.value), .source = source_site, .destination = destination_site, .epoch = frozen_offer.value.intent.epoch + 1, .verdict = .{ .refused = .withdrawn } });
         }
         _ = try sender.workspaceControl(scratch, "settle-controller-child", subject.task, work_id, cut.execution, cut.control, .{ .cancel = .{ .bytes = "stop" } });
@@ -2913,11 +2948,11 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         phase = "cancel shutdown observes a restored uncancelled controller";
         const shutdown_root = try sender.submit(scratch, "shutdown-controller", .{ 25, 5 });
         const shutdown_subject: p.Subject = .{ .task = shutdown_root.receipt.task };
-        _ = try sender.placementFreeze(scratch, shutdown_subject, "destination", try sender.placementCut(scratch, shutdown_subject), @splat(72));
+        _ = try freezePlacement(&sender, shutdown_subject, "destination", try sender.placementCut(scratch, shutdown_subject), @splat(72));
         refusal = null;
         if (scenario == .root_cancel_refused) {
             const frozen_path = try std.fmt.allocPrint(scratch, "{s}/shutdown-controller.par", .{path_buffer[0..length]});
-            const frozen_offer = try sender.placementOffer(scratch, shutdown_subject, "destination", frozen_path);
+            const frozen_offer = try offerPlacement(&sender, shutdown_subject, "destination", frozen_path);
             refusal = try p.sign(p.Decision, scratch, destination_key, .{ .transfer = frozen_offer.value.intent.transfer, .offer_digest = try p.digest(p.Offer, scratch, frozen_offer.value), .source = source_site, .destination = destination_site, .epoch = frozen_offer.value.intent.epoch + 1, .verdict = .{ .refused = .withdrawn } });
         }
         try sender.cancelOwned(scratch, "shutdown-probe", "stop");
@@ -2978,11 +3013,11 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             if (parked == 1) _ = try sender.workspaceControl(scratch, try std.fmt.allocPrint(scratch, "{s}-park", .{operation}), subject.task, child_id, cancelling.value.execution_revision, cancelling.value.control_revision, .park);
             const child_subject: p.Subject = .{ .task = subject.task, .work = child_id };
             const transfer: [32]u8 = @splat(@intCast(90 + parked));
-            _ = try sender.placementFreeze(scratch, child_subject, "destination", try sender.placementCut(scratch, child_subject), transfer);
+            _ = try freezePlacement(&sender, child_subject, "destination", try sender.placementCut(scratch, child_subject), transfer);
             var refusal: ?p.Signed(p.Decision) = null;
             if (scenario == .cancel_refused) {
                 const child_archive = try std.fmt.allocPrint(scratch, "{s}/{s}.par", .{ path_buffer[0..length], operation });
-                const child_offer = try sender.placementOffer(scratch, child_subject, "destination", child_archive);
+                const child_offer = try offerPlacement(&sender, child_subject, "destination", child_archive);
                 refusal = try p.sign(p.Decision, scratch, destination_key, .{ .transfer = transfer, .offer_digest = try p.digest(p.Offer, scratch, child_offer.value), .source = source_site, .destination = destination_site, .epoch = child_offer.value.intent.epoch + 1, .verdict = .{ .refused = .withdrawn } });
             }
             if (refusal) |decision| try sender.placementApplyDecision(scratch, child_subject, decision) else try sender.placementAbortUnsent(scratch, child_subject, transfer);
@@ -3015,11 +3050,11 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             _ = try sender.requestCancel(scratch, try std.fmt.allocPrint(scratch, "{s}-cancel", .{operation}), root_subject.task, "stop");
             const root_cut = try sender.placementCut(scratch, root_subject);
             const transfer: [32]u8 = @splat(@intCast(80 + parked));
-            _ = try sender.placementFreeze(scratch, root_subject, "destination", root_cut, transfer);
+            _ = try freezePlacement(&sender, root_subject, "destination", root_cut, transfer);
             var refusal: ?p.Signed(p.Decision) = null;
             if (scenario == .cancel_refused) {
                 const root_archive = try std.fmt.allocPrint(scratch, "{s}/{s}.par", .{ path_buffer[0..length], operation });
-                const root_offer = try sender.placementOffer(scratch, root_subject, "destination", root_archive);
+                const root_offer = try offerPlacement(&sender, root_subject, "destination", root_archive);
                 refusal = try p.sign(p.Decision, scratch, destination_key, .{ .transfer = transfer, .offer_digest = try p.digest(p.Offer, scratch, root_offer.value), .source = source_site, .destination = destination_site, .epoch = root_offer.value.intent.epoch + 1, .verdict = .{ .refused = .withdrawn } });
             }
             if (parked == 1) try sender.park(scratch);
@@ -3070,10 +3105,10 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     try std.testing.expectEqual(.observed, retry_withdrawn.disposition);
     source_peers[0].channel = null;
     if (scenario == .root or scenario == .preoffer) {
-        if (scenario == .preoffer) _ = try sender.placementFreeze(scratch, subject, "destination", cut, @splat(14));
+        if (scenario == .preoffer) _ = try freezePlacement(&sender, subject, "destination", cut, @splat(14));
         const controller: p.Subject = .{ .task = subject.task };
         const controller_cut = try sender.placementCut(scratch, controller);
-        _ = try sender.placementFreeze(scratch, controller, "successor", controller_cut, @splat(98));
+        _ = try freezePlacement(&sender, controller, "successor", controller_cut, @splat(98));
         const frozen_head = source_namespace.store.head;
         const frozen_runnable = try scratch.dupe(native.workspace.Subject, sender.runnable.items);
         const replayed_build = try sender.workspaceBuild(scratch, "build", parent.receipt.task, document, &diagnostic);
@@ -3115,7 +3150,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         defer progressed_parent.deinit();
         if (scenario == .root) try std.testing.expect(progressed_parent.value.revision > controller_cut.control);
         const snapshot_path = try std.fmt.allocPrint(scratch, "{s}/frozen-controller.par", .{path_buffer[0..length]});
-        const snapshot_offer = try sender.placementOffer(scratch, controller, "successor", snapshot_path);
+        const snapshot_offer = try offerPlacement(&sender, controller, "successor", snapshot_path);
         try std.testing.expectEqualDeep(controller_cut, snapshot_offer.value.intent.cut);
         try sender.close(a);
         sender_open = false;
@@ -3131,20 +3166,22 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             copy_profile.placement = &source_config;
             var copied = try native.tasks.Service(OwnerTypes).init(a, io, &copy_namespace, assets, &application, handlers, copy_profile);
             defer copied.close(a) catch unreachable;
-            _ = try copied.importCheckpoint(scratch, "copy-frozen", snapshot_path);
+            var archive_arena = std.heap.ArenaAllocator.init(a);
+            defer archive_arena.deinit();
+            _ = try copied.importCheckpoint(archive_arena.allocator(), "copy-frozen", snapshot_path);
             const copied_head = copy_namespace.store.head;
             const copied_receipt = try copied.workspaceBuild(scratch, "build", parent.receipt.task, document, &diagnostic);
             try std.testing.expect(copied_receipt.replayed);
             try std.testing.expectEqualDeep(program.receipt, copied_receipt.receipt);
             try std.testing.expectError(error.CustodyNotLocal, copied.workspaceBuild(scratch, "copied-new-build", parent.receipt.task, document, &diagnostic));
             try std.testing.expectEqualDeep(copied_head, copy_namespace.store.head);
-            try std.testing.expectError(error.InvalidTransfer, copied.placementOffer(scratch, controller, "successor", snapshot_path));
+            try std.testing.expectError(error.InvalidTransfer, offerPlacement(&copied, controller, "successor", snapshot_path));
         }
         var snapshot_namespace = try native.Namespace.open(a, io, successor_path);
         var snapshot_profile = profile;
         snapshot_profile.placement = &successor_config;
         var snapshot_receiver = try native.tasks.Service(OwnerTypes).init(a, io, &snapshot_namespace, assets, &application, handlers, snapshot_profile);
-        const decision = try snapshot_receiver.placementAccept(scratch, "accept-frozen-controller", "source", snapshot_offer, snapshot_path);
+        const decision = try acceptPlacement(&snapshot_receiver, "accept-frozen-controller", "source", snapshot_offer, snapshot_path);
         try std.testing.expectEqual(.local, (try snapshot_receiver.placementStatus(scratch, controller)).?.phase);
         try std.testing.expectEqual(.away, (try snapshot_receiver.placementStatus(scratch, subject)).?.phase);
         try snapshot_receiver.close(a);
@@ -3328,7 +3365,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         }
         if (scenario == .preoffer) {
             const child_path = try std.fmt.allocPrint(scratch, "{s}/child-after-controller.par", .{path_buffer[0..length]});
-            const child_offer = try sender.placementOffer(scratch, subject, "destination", child_path);
+            const child_offer = try offerPlacement(&sender, subject, "destination", child_path);
             try sender.close(a);
             sender_open = false;
             try source_namespace.close();
@@ -3341,7 +3378,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
                 child_profile.placement = &destination_config;
                 var child_owner = try native.tasks.Service(OwnerTypes).init(a, io, &destination_namespace, assets, &application, handlers, child_profile);
                 defer child_owner.close(a) catch unreachable;
-                child_decision = try child_owner.placementAccept(scratch, "accept-child-after-controller", "source", child_offer, child_path);
+                child_decision = try acceptPlacement(&child_owner, "accept-child-after-controller", "source", child_offer, child_path);
             }
             source_namespace = try native.Namespace.open(a, io, source_path);
             source_open = true;
@@ -3411,7 +3448,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         try std.testing.expect(sender.active.?.subject == .root);
         try std.testing.expect(sender.active.?.root_control != null);
     }
-    _ = try sender.placementFreeze(scratch, subject, "destination", cut, @splat(14));
+    _ = try freezePlacement(&sender, subject, "destination", cut, @splat(14));
     inline for (.{ "principal", "tenant" }) |field| {
         const authority = sender.profile.authority;
         defer sender.profile.authority = authority;
@@ -3419,7 +3456,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         @field(sender.profile.authority, field) = "foreign";
         try std.testing.expectError(error.Denied, sender.task(scratch, subject.task));
         try std.testing.expectError(error.Denied, sender.placementAbortUnsent(scratch, subject, @splat(14)));
-        try std.testing.expectError(error.Denied, sender.placementFreeze(scratch, subject, "destination", cut, @splat(14)));
+        try std.testing.expectError(error.Denied, freezePlacement(&sender, subject, "destination", cut, @splat(14)));
         try std.testing.expectEqualDeep(before, source_namespace.store.head);
     }
     if (scenario == .work) {
@@ -3431,7 +3468,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         var refused: ?p.Signed(p.Decision) = null;
         if (scenario == .cancel_refused) {
             const refused_path = try std.fmt.allocPrint(scratch, "{s}/refused.par", .{path_buffer[0..length]});
-            const refused_offer = try sender.placementOffer(scratch, subject, "destination", refused_path);
+            const refused_offer = try offerPlacement(&sender, subject, "destination", refused_path);
             refused = try p.sign(p.Decision, scratch, destination_key, .{ .transfer = refused_offer.value.intent.transfer, .offer_digest = try p.digest(p.Offer, scratch, refused_offer.value), .source = source_site, .destination = destination_site, .epoch = refused_offer.value.intent.epoch + 1, .verdict = .{ .refused = .withdrawn } });
         }
         _ = try sender.requestCancel(scratch, "cancel-with-frozen-work", subject.task, "stop");
@@ -3472,15 +3509,15 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             const changed_cut = try sender.placementCut(scratch, subject);
             try std.testing.expect(!std.meta.eql(cut, changed_cut));
             const released_head = source_namespace.store.head;
-            try std.testing.expectError(error.OperationConflict, sender.placementFreeze(scratch, subject, "destination", changed_cut, @splat(14)));
+            try std.testing.expectError(error.OperationConflict, freezePlacement(&sender, subject, "destination", changed_cut, @splat(14)));
             try std.testing.expectEqualDeep(released_head, source_namespace.store.head);
             try std.testing.expectEqual(.local, (try sender.placementStatus(scratch, subject)).?.phase);
             phase = "fresh transfer after rejected identity reuse";
-            const fresh_intent = try sender.placementFreeze(scratch, subject, "destination", changed_cut, @splat(17));
-            try std.testing.expectEqualDeep(fresh_intent, try sender.placementFreeze(scratch, subject, "destination", changed_cut, @splat(17)));
+            const fresh_intent = try freezePlacement(&sender, subject, "destination", changed_cut, @splat(17));
+            try std.testing.expectEqualDeep(fresh_intent, try freezePlacement(&sender, subject, "destination", changed_cut, @splat(17)));
             const other_subject: p.Subject = .{ .task = subject.task };
             const other_cut = try sender.placementCut(scratch, other_subject);
-            try std.testing.expectError(error.OperationConflict, sender.placementFreeze(scratch, other_subject, "destination", other_cut, @splat(17)));
+            try std.testing.expectError(error.OperationConflict, freezePlacement(&sender, other_subject, "destination", other_cut, @splat(17)));
             try std.testing.expectEqual(.local, (try sender.placementStatus(scratch, other_subject)).?.phase);
             try std.testing.expectEqual(.frozen, (try sender.placementStatus(scratch, subject)).?.phase);
             var conflicting_intent = fresh_intent;
@@ -3491,9 +3528,9 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             try std.testing.expectError(error.OperationConflict, sender.placementRefuse(scratch, "destination", conflicting_offer, .withdrawn));
             try std.testing.expectEqualDeep(frozen_head, source_namespace.store.head);
             try sender.placementAbortUnsent(scratch, subject, @splat(17));
-            try std.testing.expectEqualDeep(fresh_intent, try sender.placementFreeze(scratch, subject, "destination", changed_cut, @splat(17)));
+            try std.testing.expectEqualDeep(fresh_intent, try freezePlacement(&sender, subject, "destination", changed_cut, @splat(17)));
             const fresh_path = try std.fmt.allocPrint(scratch, "{s}/refused-again.par", .{path_buffer[0..length]});
-            const fresh_offer = try sender.placementOffer(scratch, subject, "destination", fresh_path);
+            const fresh_offer = try offerPlacement(&sender, subject, "destination", fresh_path);
             const fresh_refusal = try p.sign(p.Decision, scratch, destination_key, .{ .transfer = fresh_offer.value.intent.transfer, .offer_digest = try p.digest(p.Offer, scratch, fresh_offer.value), .source = source_site, .destination = destination_site, .epoch = fresh_offer.value.intent.epoch + 1, .verdict = .{ .refused = .withdrawn } });
             try sender.placementApplyDecision(scratch, subject, fresh_refusal);
             phase = "reopen retained transfer decisions";
@@ -3508,10 +3545,10 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             sender = try native.tasks.Service(OwnerTypes).init(a, io, &source_namespace, assets, &application, handlers, reopened_profile);
             sender_open = true;
             phase = "reject old transfer identity after restart";
-            try std.testing.expectError(error.OperationConflict, sender.placementFreeze(scratch, subject, "destination", changed_cut, @splat(14)));
+            try std.testing.expectError(error.OperationConflict, freezePlacement(&sender, subject, "destination", changed_cut, @splat(14)));
             const controller: p.Subject = .{ .task = subject.task };
             const controller_cut = try sender.placementCut(scratch, controller);
-            try std.testing.expectError(error.OperationConflict, sender.placementFreeze(scratch, controller, "destination", controller_cut, @splat(14)));
+            try std.testing.expectError(error.OperationConflict, freezePlacement(&sender, controller, "destination", controller_cut, @splat(14)));
             try std.testing.expectEqual(.local, (try sender.placementStatus(scratch, controller)).?.phase);
             try std.testing.expect(!try sender.shutdownIncomplete(scratch));
         }
@@ -3524,43 +3561,43 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         defer sender.profile.authority = authority;
         const before = source_namespace.store.head;
         @field(sender.profile.authority, field) = "foreign";
-        try std.testing.expectError(error.Denied, sender.placementOffer(scratch, subject, "destination", archive_path));
+        try std.testing.expectError(error.Denied, offerPlacement(&sender, subject, "destination", archive_path));
         try std.testing.expectEqualDeep(before, source_namespace.store.head);
     }
     // Leave the complete file without a published offer, as an interrupted
     // writer can. The retry must validate and durably reuse that exact file.
     disclosure.deny_runtime = true;
-    try std.testing.expectError(error.DisclosureDenied, sender.placementOffer(scratch, subject, "destination", archive_path));
+    try std.testing.expectError(error.DisclosureDenied, offerPlacement(&sender, subject, "destination", archive_path));
     try std.testing.expect((try sender.placementStatus(scratch, subject)).?.offer == null);
     disclosure.deny_runtime = false;
     if (generated) |derived| {
         disclosure.denied_dependency = try nativeIdentity(derived.candidate);
-        try std.testing.expectError(error.DisclosureDenied, sender.placementOffer(scratch, subject, "destination", archive_path));
+        try std.testing.expectError(error.DisclosureDenied, offerPlacement(&sender, subject, "destination", archive_path));
         try std.testing.expect((try sender.placementStatus(scratch, subject)).?.offer == null);
         disclosure.denied_dependency = null;
     }
-    const offer = try sender.placementOffer(scratch, subject, "destination", archive_path);
+    const offer = try offerPlacement(&sender, subject, "destination", archive_path);
     inline for (.{ "principal", "tenant" }) |field| {
         const authority = sender.profile.authority;
         defer sender.profile.authority = authority;
         const before = source_namespace.store.head;
         @field(sender.profile.authority, field) = "foreign";
-        try std.testing.expectError(error.Denied, sender.placementOffer(scratch, subject, "destination", archive_path));
+        try std.testing.expectError(error.Denied, offerPlacement(&sender, subject, "destination", archive_path));
         try std.testing.expectEqualDeep(before, source_namespace.store.head);
     }
     try std.testing.expect(disclosure.saw_runtime);
     disclosure.deny_runtime = true;
-    try std.testing.expectError(error.DisclosureDenied, sender.placementOffer(scratch, subject, "destination", archive_path));
+    try std.testing.expectError(error.DisclosureDenied, offerPlacement(&sender, subject, "destination", archive_path));
     disclosure.deny_runtime = false;
-    try std.testing.expectEqualDeep(offer, try sender.placementOffer(scratch, subject, "destination", archive_path));
+    try std.testing.expectEqualDeep(offer, try offerPlacement(&sender, subject, "destination", archive_path));
     source_peers[0].disclosure_policy[0] ^= 1;
-    try std.testing.expectError(error.IncompatibleProfile, sender.placementOffer(scratch, subject, "destination", archive_path));
+    try std.testing.expectError(error.IncompatibleProfile, offerPlacement(&sender, subject, "destination", archive_path));
     source_peers[0].disclosure_policy[0] ^= 1;
     sender.profile.runtime_identity[0] ^= 1;
-    try std.testing.expectError(error.IncompatibleProfile, sender.placementOffer(scratch, subject, "destination", archive_path));
+    try std.testing.expectError(error.IncompatibleProfile, offerPlacement(&sender, subject, "destination", archive_path));
     sender.profile.runtime_identity[0] ^= 1;
     sender.profile.authority.disclosure = false;
-    try std.testing.expectError(error.Denied, sender.placementOffer(scratch, subject, "destination", archive_path));
+    try std.testing.expectError(error.Denied, offerPlacement(&sender, subject, "destination", archive_path));
     sender.profile.authority.disclosure = true;
     try std.testing.expectError(error.InvalidTransfer, sender.placementAbortUnsent(scratch, subject, @splat(14)));
     if (scenario == .work) {
@@ -3582,7 +3619,9 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
                     const forged = try p.Custody.initial(controller, copied_site).freeze(copied_site, .{ .transfer = @splat(71), .subject = controller, .source = copied_site, .destination = source_site, .source_native = profile.runtime_identity, .destination_native = profile.runtime_identity, .epoch = 0, .cut = controller_cut, .compatibility = compatibility, .resources = resources, .disclosure = @splat(13) });
                     try source_namespace.store.putRecord(p.Custody, "placement_custody", forged.id, forged.task, forged);
                 }
-                _ = sender.exportCheckpoint(scratch, subject.task, attacked_archive) catch |err| {
+                var archive_arena = std.heap.ArenaAllocator.init(a);
+                defer archive_arena.deinit();
+                _ = sender.exportCheckpoint(archive_arena.allocator(), subject.task, attacked_archive) catch |err| {
                     std.debug.print("untrusted archive export {d}: {s}\n", .{ attack, @errorName(err) });
                     return err;
                 };
@@ -3607,7 +3646,9 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             if (attack != 0) copied_profile.placement = &copied_config;
             var copied = try native.tasks.Service(OwnerTypes).init(a, io, &copied_namespace, assets, &application, handlers, copied_profile);
             defer copied.close(a) catch unreachable;
-            _ = copied.importCheckpoint(scratch, "untrusted-copy", attacked_archive) catch |err| {
+            var archive_arena = std.heap.ArenaAllocator.init(a);
+            defer archive_arena.deinit();
+            _ = copied.importCheckpoint(archive_arena.allocator(), "untrusted-copy", attacked_archive) catch |err| {
                 std.debug.print("untrusted archive import {d}: {s}\n", .{ attack, @errorName(err) });
                 return err;
             };
@@ -3627,7 +3668,9 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         defer copied_namespace.close() catch unreachable;
         var copied = try native.tasks.Service(OwnerTypes).init(a, io, &copied_namespace, assets, &application, handlers, profile);
         defer copied.close(a) catch unreachable;
-        _ = try copied.importCheckpoint(scratch, "copy", archive_path);
+        var archive_arena = std.heap.ArenaAllocator.init(a);
+        defer archive_arena.deinit();
+        _ = try copied.importCheckpoint(archive_arena.allocator(), "copy", archive_path);
         try std.testing.expectError(error.CustodyNotLocal, copied.workspacePump(scratch, "copy-cannot-run", subject.task, .{ .expected = .{ .work = work_ref, .execution_revision = cut.execution, .control_revision = cut.control }, .base_quantum = 1 }));
         try std.testing.expectError(error.CustodyNotLocal, copied.resumeTask(scratch, "copy-cannot-control", subject.task, 1));
     }
@@ -3646,15 +3689,15 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     try std.testing.expect(prior_refusal.value.verdict == .refused);
     const receiver_head = destination_namespace.store.head;
     receiver.profile.authority.disclosure = false;
-    try std.testing.expectError(error.Denied, receiver.placementAccept(scratch, "accept", "source", offer, archive_path));
+    try std.testing.expectError(error.Denied, acceptPlacement(&receiver, "accept", "source", offer, archive_path));
     try std.testing.expectEqualDeep(receiver_head, destination_namespace.store.head);
     receiver.profile.authority.disclosure = true;
     destination_peers[0].compatibility.admission[0] ^= 1;
-    try std.testing.expectError(error.IncompatibleProfile, receiver.placementAccept(scratch, "accept", "source", offer, archive_path));
+    try std.testing.expectError(error.IncompatibleProfile, acceptPlacement(&receiver, "accept", "source", offer, archive_path));
     try std.testing.expectEqualDeep(receiver_head, destination_namespace.store.head);
     destination_peers[0].compatibility.admission[0] ^= 1;
     disclosure.deny_runtime = true;
-    try std.testing.expectError(error.DisclosureDenied, receiver.placementAccept(scratch, "accept", "source", offer, archive_path));
+    try std.testing.expectError(error.DisclosureDenied, acceptPlacement(&receiver, "accept", "source", offer, archive_path));
     try std.testing.expectEqualDeep(receiver_head, destination_namespace.store.head);
     disclosure.deny_runtime = false;
     if (generated != null) {
@@ -3662,18 +3705,18 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         defer receiver.profile.semantic_construction = allowed_policy;
         const wrong_roots = [_][32]u8{@splat(97)};
         receiver.profile.semantic_construction.?.roots = &wrong_roots;
-        try std.testing.expectError(error.SemanticPolicyDenied, receiver.placementAccept(scratch, "accept", "source", offer, archive_path));
+        try std.testing.expectError(error.SemanticPolicyDenied, acceptPlacement(&receiver, "accept", "source", offer, archive_path));
         try std.testing.expectEqualDeep(receiver_head, destination_namespace.store.head);
         receiver.profile.semantic_construction = allowed_policy;
         receiver.profile.semantic_construction.?.checkers = &.{"different-checker"};
-        try std.testing.expectError(error.SemanticPolicyDenied, receiver.placementAccept(scratch, "accept", "source", offer, archive_path));
+        try std.testing.expectError(error.SemanticPolicyDenied, acceptPlacement(&receiver, "accept", "source", offer, archive_path));
         try std.testing.expectEqualDeep(receiver_head, destination_namespace.store.head);
-        try std.testing.expect((try receiver.placementStatus(scratch, subject)) == null);
+        try std.testing.expectError(error.UnknownTask, receiver.placementStatus(scratch, subject));
     }
-    const accepted = try receiver.placementAccept(scratch, "accept", "source", offer, archive_path);
+    const accepted = try acceptPlacement(&receiver, "accept", "source", offer, archive_path);
     try std.testing.expectEqual(.accepted, accepted.value.verdict);
     try std.testing.expectEqualDeep(prior_refusal, try receiver.placementRefuse(scratch, "source", unrelated_signed, .withdrawn));
-    try std.testing.expectEqualDeep(accepted, try receiver.placementAccept(scratch, "accept-again", "source", offer, archive_path));
+    try std.testing.expectEqualDeep(accepted, try acceptPlacement(&receiver, "accept-again", "source", offer, archive_path));
     try std.testing.expectEqualDeep(accepted, try receiver.placementRefuse(scratch, "source", offer, .withdrawn));
     // Lose the acceptance reply and restart the destination. Only its work is
     // executable; its copied controller remains at the original namespace.
@@ -3686,7 +3729,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     destination_open = true;
     receiver = try native.tasks.Service(OwnerTypes).init(a, io, &destination_namespace, assets, &application, handlers, resumed_profile);
     receiver_open = true;
-    try std.testing.expectEqualDeep(accepted, try receiver.placementAccept(scratch, "recovered-acceptance", "source", offer, archive_path));
+    try std.testing.expectEqualDeep(accepted, try acceptPlacement(&receiver, "recovered-acceptance", "source", offer, archive_path));
     var imported_work = try receiver.workspaceWork(a, subject.task, work_id);
     defer imported_work.deinit();
     try std.testing.expectEqualDeep(cut.outer, p.ObjectIdentity.optional(imported_work.value.outer_operation.?.capsule));
@@ -3753,7 +3796,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     try std.testing.expectError(error.OperationConflict, sender.placementControl(scratch, "remote-inspect", subject.task, .{ .park = .{ .work = work_ref, .execution_revision = cut.execution, .control_revision = cut.control } }));
     const controller_subject: p.Subject = .{ .task = subject.task };
     const controller_cut = try sender.placementCut(scratch, controller_subject);
-    try std.testing.expectError(error.UnsettledRemoteControl, sender.placementFreeze(scratch, controller_subject, "successor", controller_cut, @splat(16)));
+    try std.testing.expectError(error.UnsettledRemoteControl, freezePlacement(&sender, controller_subject, "successor", controller_cut, @splat(16)));
     try sender.close(a);
     sender_open = false;
     try source_namespace.close();
@@ -3808,9 +3851,9 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         receiver = try native.tasks.Service(OwnerTypes).init(a, io, &destination_namespace, assets, &application, handlers, resumed_profile);
         receiver_open = true;
         const next_cut = try receiver.placementCut(scratch, subject);
-        _ = try receiver.placementFreeze(scratch, subject, "successor", next_cut, @splat(71));
+        _ = try freezePlacement(&receiver, subject, "successor", next_cut, @splat(71));
         const next_path = try std.fmt.allocPrint(scratch, "{s}/onward.par", .{path_buffer[0..length]});
-        const next_offer = try receiver.placementOffer(scratch, subject, "successor", next_path);
+        const next_offer = try offerPlacement(&receiver, subject, "successor", next_path);
         try receiver.close(a);
         receiver_open = false;
         try destination_namespace.close();
@@ -3823,7 +3866,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             successor_profile.placement = &successor_config;
             var successor = try native.tasks.Service(OwnerTypes).init(a, io, &successor_namespace, assets, &application, handlers, successor_profile);
             defer successor.close(a) catch unreachable;
-            next_decision = try successor.placementAccept(scratch, "accept-onward", "destination", next_offer, next_path);
+            next_decision = try acceptPlacement(&successor, "accept-onward", "destination", next_offer, next_path);
         }
         destination_namespace = try native.Namespace.open(a, io, destination_path);
         destination_open = true;
@@ -3955,9 +3998,9 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     advanced_controller = try sender.placementCut(scratch, controller_subject);
     source_peers[1].compatibility = try sender.placementCompatibility(scratch, controller_subject);
     successor_peers[1].compatibility = source_peers[1].compatibility;
-    _ = try sender.placementFreeze(scratch, controller_subject, "successor", advanced_controller, @splat(16));
+    _ = try freezePlacement(&sender, controller_subject, "successor", advanced_controller, @splat(16));
     const controller_archive = try std.fmt.allocPrint(scratch, "{s}/controller.par", .{path_buffer[0..length]});
-    const controller_offer = try sender.placementOffer(scratch, controller_subject, "successor", controller_archive);
+    const controller_offer = try offerPlacement(&sender, controller_subject, "successor", controller_archive);
     try sender.close(a);
     sender_open = false;
     try source_namespace.close();
@@ -3971,7 +4014,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
         successor_profile.placement = &successor_config;
         var successor = try native.tasks.Service(OwnerTypes).init(a, io, &successor_namespace, assets, &application, handlers, successor_profile);
         defer successor.close(a) catch unreachable;
-        controller_decision = try successor.placementAccept(scratch, "accept-controller", "source", controller_offer, controller_archive);
+        controller_decision = try acceptPlacement(&successor, "accept-controller", "source", controller_offer, controller_archive);
         try std.testing.expectEqual(.local, (try successor.placementStatus(scratch, controller_subject)).?.phase);
         try std.testing.expectEqual(.away, (try successor.placementStatus(scratch, subject)).?.phase);
         successor_control = try contracts.decodeOwned(p.Signed(p.Control), scratch, try successor.placementControl(scratch, "new-controller-inspect", subject.task, .{ .inspect = .{ .work = work_ref } }));

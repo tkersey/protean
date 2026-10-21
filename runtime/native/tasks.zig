@@ -3634,8 +3634,8 @@ pub fn Service(comptime Types: type) type {
             return .{ .works = snapshots, .bytes = try contracts.encodeOwned(contracts.controller.OwnerView, allocator, .{ .task = parent.id, .event_cut = parent.event_high, .next_message = parent.next_message, .policy = parent.profile.digest, .input_schema = .{ .bytes = try values.schemaBytes(Types.Input, a) }, .input = .{ .bytes = try self.store().object(a, parent.input, null) }, .messages = .{ .items = messages }, .works = .{ .items = works } }) };
         }
         fn validateControllerView(self: *Self, a: std.mem.Allocator, parent: state.Task, view: contracts.controller.OwnerView, snapshots: []const workspace.WorkObservation, records: []const state.ArchiveRecord) anyerror!void {
-            var checked: SnapshotValidation = .empty;
-            defer checked.deinit(a);
+            var checked: SnapshotValidation = .{ .allocator = a };
+            defer checked.deinit();
             return self.validateControllerViewIn(a, parent, view, snapshots, records, &checked);
         }
         fn validateControllerViewIn(self: *Self, a: std.mem.Allocator, parent: state.Task, view: contracts.controller.OwnerView, snapshots: []const workspace.WorkObservation, records: []const state.ArchiveRecord, checked: *SnapshotValidation) anyerror!void {
@@ -3661,7 +3661,7 @@ pub fn Service(comptime Types: type) type {
             for (ids, view.works.items, snapshots) |id, fact, snapshot| {
                 const child = snapshot.work;
                 if (!std.meta.eql(id, try wp.identity(fact.work, .work)) or !std.meta.eql(id, child.id) or fact.execution_revision != child.execution_revision or fact.control_revision != child.control_revision or fact.event_watermark != child.event_watermark or child.event_watermark != try self.workspacePublicationAt(a, parent.id, id, view.event_cut)) return error.InvalidArchive;
-                try self.validateWorkspaceWorkSnapshotIn(a, parent, snapshot, records, checked);
+                try self.validateWorkspaceWorkSnapshotIn(parent, snapshot, records, checked);
                 try self.validateHistoricalOccurrence(a, snapshot);
                 if (!same(fact.observation.bytes, try json.canonical(a, try self.renderWorkspaceWorkObservation(a, child, snapshot.occurrence, view.event_cut)))) return error.InvalidArchive;
             }
@@ -8178,8 +8178,8 @@ pub fn Service(comptime Types: type) type {
                     return error.InvalidArchive;
                 }
                 const fact: SnapshotValidation.Key = .{ .kind = .semantic_source, .task = task_id, .identity = id };
-                const facts = if (checked) |context| if (context.semantic_sources) &context.facts else null else null;
-                if (facts == null or !facts.?.contains(fact)) {
+                const facts = if (checked) |context| if (context.semantic_sources) context else null else null;
+                if (facts == null or !facts.?.facts.contains(fact)) {
                     const derived = try self.semanticValueBytes(a, task_id, origin);
                     defer a.free(derived.schema);
                     defer a.free(derived.value);
@@ -8190,7 +8190,7 @@ pub fn Service(comptime Types: type) type {
                         .digest = storage.digest(derived.value),
                         .bytes = derived.value.len,
                     })) return error.InvalidArchive;
-                    if (facts) |validated| try validated.put(a, fact, .checked);
+                    if (facts) |validated| try validated.facts.put(validated.allocator, fact, .checked);
                 }
             } else if (saved.value.derivation.inspection) |origin| {
                 const d = saved.value.derivation;
@@ -9652,8 +9652,8 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn validateWorkspaceRead(self: *Self, a: std.mem.Allocator, parent: state.Task, command: wc.Command, basis: workspace.ReadObservation, records: []const state.ArchiveRecord) !void {
-            var checked: SnapshotValidation = .empty;
-            defer checked.deinit(a);
+            var checked: SnapshotValidation = .{ .allocator = a };
+            defer checked.deinit();
             return self.validateWorkspaceReadIn(a, parent, command, basis, records, &checked);
         }
 
@@ -9776,7 +9776,7 @@ pub fn Service(comptime Types: type) type {
                         };
                         if (!std.meta.eql(snapshot.work.id, id) or snapshot.work.event_watermark > watermark) return error.InvalidArchive;
                         try requireArchiveRecord(records, .workspace_work, id);
-                        try self.validateWorkspaceWorkSnapshotIn(a, parent, snapshot, records, checked);
+                        try self.validateWorkspaceWorkSnapshotIn(parent, snapshot, records, checked);
                         if (snapshot.work.event_watermark != try self.workspacePublicationAt(a, parent.id, id, watermark)) return error.InvalidArchive;
                         try self.validateHistoricalOccurrence(a, snapshot);
                     }
@@ -11938,8 +11938,8 @@ pub fn Service(comptime Types: type) type {
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var checked: SnapshotValidation = .{ .semantic_sources = true };
-            defer checked.deinit(a);
+            var checked: SnapshotValidation = .{ .allocator = a, .semantic_sources = true };
+            defer checked.deinit();
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatibleApplication(parent.value);
@@ -11951,33 +11951,39 @@ pub fn Service(comptime Types: type) type {
             var receipts = try self.store().database.prepare("SELECT o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?", &.{.{ .blob = &task_id }});
             defer receipts.deinit();
             while (try receipts.step() == .row) {
-                var receipt_value = try contracts.decodeOwned(state.Receipt, a, try receipts.bytes(0));
+                var receipt_arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer receipt_arena.deinit();
+                const frame = receipt_arena.allocator();
+                var receipt_value = try contracts.decodeOwned(state.Receipt, frame, try receipts.bytes(0));
                 defer receipt_value.deinit();
                 if (receipt_value.value.method == .workspace and receipt_value.value.workspace_kind == .residual) {
-                    var residual = try contracts.decodeOwned(state.ControllerResidual, a, try self.store().object(a, receipt_value.value.workspace_observation orelse return error.InvalidArchive, null));
+                    var residual = try contracts.decodeOwned(state.ControllerResidual, frame, try self.store().object(frame, receipt_value.value.workspace_observation orelse return error.InvalidArchive, null));
                     defer residual.deinit();
                     if (!std.meta.eql(receipt_value.value.workspace, residual.value.id) or !std.meta.eql(residual.value.task, task_id)) return error.InvalidArchive;
-                    try self.validateResidualObservation(a, .from(residual.value));
-                    if (residual.value.outer_operation) |pending| _ = try self.validateControllerOperation(a, parent.value, pending, residual.value, true);
+                    try self.validateResidualObservation(frame, .from(residual.value));
+                    if (residual.value.outer_operation) |pending| _ = try self.validateControllerOperation(frame, parent.value, pending, residual.value, true);
                     continue;
                 }
                 if (receipt_value.value.method != .workspace or receipt_value.value.workspace_kind != .work) continue;
-                var observed = try contracts.decodeOwned(workspace.WorkObservation, a, try self.store().object(a, receipt_value.value.workspace_observation orelse return error.InvalidArchive, null));
+                var observed = try contracts.decodeOwned(workspace.WorkObservation, frame, try self.store().object(frame, receipt_value.value.workspace_observation orelse return error.InvalidArchive, null));
                 defer observed.deinit();
                 if (!std.meta.eql(receipt_value.value.task, task_id) or !std.meta.eql(receipt_value.value.workspace orelse return error.InvalidArchive, observed.value.work.id)) return error.InvalidArchive;
                 var publication = try self.store().database.prepare("SELECT revision FROM events WHERE task=? AND seq=?", &.{ .{ .blob = &task_id }, .{ .integer = std.math.cast(i64, observed.value.work.event_watermark) orelse return error.InvalidArchive } });
                 defer publication.deinit();
                 if (try publication.step() != .row or try publication.integer(0) != std.math.cast(i64, receipt_value.value.revision) orelse return error.InvalidArchive) return error.InvalidArchive;
-                try self.validateWorkspaceWorkSnapshotIn(a, parent.value, observed.value, records, &checked);
-                try self.validateHistoricalOccurrence(a, observed.value);
+                try self.validateWorkspaceWorkSnapshotIn(parent.value, observed.value, records, &checked);
+                try self.validateHistoricalOccurrence(frame, observed.value);
             }
             var controller_ids: std.AutoHashMap(state.Digest, void) = .init(a);
             var controller_cursor = parent.value.controller;
             var controller_epoch: ?u64 = null;
             var controller_activation: ?u64 = null;
             while (controller_cursor) |id| {
+                var binding_arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer binding_arena.deinit();
+                const frame = binding_arena.allocator();
                 try requireArchiveRecord(records, .controller_binding, id);
-                const binding = try self.controllerBinding(a, parent.value, id);
+                const binding = try self.controllerBinding(frame, parent.value, id);
                 if (controller_epoch) |epoch| if (binding.epoch >= epoch) return error.InvalidArchive;
                 if (binding.activated_at == 0 or binding.activated_at > parent.value.event_high) return error.InvalidArchive;
                 if (controller_activation) |at| if (binding.activated_at >= at) return error.InvalidArchive;
@@ -11986,13 +11992,13 @@ pub fn Service(comptime Types: type) type {
                 if (binding.predecessor != null) {
                     var matching: usize = 0;
                     for (records) |row| if (row.kind == .controller_succession) {
-                        var operation_value = try self.record(state.ControllerSuccession, a, "controller_succession", row.id, task_id);
+                        var operation_value = try self.record(state.ControllerSuccession, frame, "controller_succession", row.id, task_id);
                         defer operation_value.deinit();
                         if (operation_value.value.phase == .activated and operation_value.value.activation_event == binding.activated_at and operation_value.value.activated_epoch == binding.epoch and std.meta.eql(operation_value.value.predecessor, binding.predecessor.?) and std.meta.eql(operation_value.value.successor, binding.program)) matching += 1;
                     };
                     if (matching != 1) return error.InvalidArchive;
                 }
-                var image = try data.program_image.decode(self.allocator, try self.store().object(a, binding.image, null));
+                var image = try data.program_image.decode(self.allocator, try self.store().object(frame, binding.image, null));
                 defer image.deinit();
                 if (!std.meta.eql(image.identity, binding.program_identity)) return error.InvalidArchive;
                 try controller_ids.put(id, {});
@@ -12009,150 +12015,158 @@ pub fn Service(comptime Types: type) type {
             }
             const Generation = struct { work: state.Digest, generation: u64 };
             var generations: std.AutoHashMap(Generation, void) = .init(a);
-            for (records) |row| switch (row.kind) {
-                .controller_succession => try self.validateControllerSuccession(self.allocator, parent.value, row.id, records),
-                .controller_residual => try self.validateControllerResidual(self.allocator, parent.value, row.id, records),
-                .workspace_trial => {
-                    var work = try self.workspaceWork(a, task_id, row.id);
-                    defer work.deinit();
-                    if (!std.meta.eql(work.value.trial, row.id)) return error.InvalidArchive;
-                },
-                .controller_interaction => try self.validateControllerInteraction(self.allocator, parent.value, row.id, records),
-                .root_operation => {
-                    var saved = try self.record(state.RootOperation, a, "root_operation", row.id, task_id);
-                    defer saved.deinit();
-                    _ = try self.validateRootOperation(a, parent.value, saved.value);
-                },
-                .workspace_runtime => {
-                    var record_value = try self.record(workspace.Runtime, a, "workspace_runtime", row.id, task_id);
-                    defer record_value.deinit();
-                    var admitted = try self.workspaceRuntime(a, task_id, record_value.value.artifact.digest, record_value.value.program);
-                    defer admitted.deinit();
-                },
-                .workspace_candidate => {
-                    var saved = try self.record(workspace.Candidate, a, "workspace_candidate", row.id, task_id);
-                    defer saved.deinit();
-                    var candidate = try self.workspaceCandidate(a, task_id, saved.value.artifact.digest);
-                    defer candidate.deinit();
-                    try self.validateCandidateProduction(a, candidate.value);
-                },
-                .workspace_program => {
-                    var record_value = try self.record(workspace.Program, a, "workspace_program", row.id, task_id);
-                    defer record_value.deinit();
-                    var admitted = try self.workspaceProgram(a, task_id, record_value.value.artifact.digest);
-                    defer admitted.deinit();
-                },
-                .workspace_value => {
-                    var record_value = try self.record(workspace.Value, a, "workspace_value", row.id, task_id);
-                    defer record_value.deinit();
-                    const admitted = try self.workspaceValueReferenceIn(a, task_id, try wp.reference(a, .value, record_value.value.artifact.digest), &checked);
-                    const descriptor_bytes = try self.store().object(a, admitted.schema, null);
-                    var descriptor = try data.schema.decode(a, descriptor_bytes);
-                    defer descriptor.deinit();
-                    try data.schema.validateValue(a, descriptor.descriptor, try self.store().object(a, admitted.value, null));
-                    for (record_value.value.derivation.sources.items) |ref| {
-                        const source = try self.workspaceValueReferenceIn(a, task_id, try wp.reference(a, .value, ref.digest), &checked);
-                        if (!std.meta.eql(source.artifact, ref)) return error.InvalidArchive;
-                    }
-                    const derivation = record_value.value.derivation;
-                    if (derivation.inspection) |origin| try self.validateWorkspaceWorkSnapshotIn(a, parent.value, origin.observation, records, &checked);
-                    if (derivation.semantic_source) |origin| {
-                        const request: wc.Command = .{ .program = .{ .inspect = .{
-                            .target = .{ .semantic_source = .{
-                                .subject = origin.selection.subject,
-                                .section = .{ .summary = .{} },
-                            } },
-                            .page = .{},
-                        } } };
-                        try self.validateWorkspaceReadIn(a, parent.value, request, origin.basis, records, &checked);
-                    }
-                    if (derivation.kind == .computation or derivation.kind == .trial) {
-                        var work = try self.workspaceWork(a, task_id, derivation.work orelse return error.InvalidArchive);
+            for (records) |row| {
+                var record_arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer record_arena.deinit();
+                const frame = record_arena.allocator();
+                switch (row.kind) {
+                    .controller_succession => try self.validateControllerSuccession(self.allocator, parent.value, row.id, records),
+                    .controller_residual => try self.validateControllerResidual(self.allocator, parent.value, row.id, records),
+                    .workspace_trial => {
+                        var work = try self.workspaceWork(frame, task_id, row.id);
                         defer work.deinit();
-                        var program = try self.workspaceProgram(a, task_id, work.value.program);
-                        defer program.deinit();
-                        if ((derivation.kind == .trial) != (work.value.trial != null)) return error.InvalidArchive;
-                        if (work.value.result_value == null or !std.meta.eql(work.value.result_value.?, admitted.artifact) or
-                            work.value.result == null or !std.meta.eql(work.value.result.?, admitted.value) or
-                            derivation.program == null or !std.meta.eql(derivation.program.?, program.value.artifact) or
-                            !std.meta.eql(admitted.schema, program.value.description.result_schema) or
-                            derivation.sources.items.len != work.value.inputs.items.len + 1 or work.value.input_value == null or
-                            !std.meta.eql(derivation.sources.items[0], work.value.input_value.?)) return error.InvalidArchive;
-                        for (derivation.sources.items[1..], work.value.inputs.items) |left, right| if (!std.meta.eql(left, right)) return error.InvalidArchive;
-                    } else if (derivation.delegation != null) {
-                        try self.validateDelegatedValue(a, task_id, record_value.value);
-                    } else if (derivation.program != null or derivation.work != null or derivation.capture != null) return error.InvalidArchive;
-                },
-                .workspace_view => {
-                    var record_value = try self.record(workspace.View, a, "workspace_view", row.id, task_id);
-                    defer record_value.deinit();
-                    _ = try self.workspaceViewObservation(a, task_id, record_value.value.artifact.digest, .{ .maximum = 1 });
-                },
-                .workspace_port => {
-                    var port = try self.record(workspace.Port, a, "workspace_port", row.id, task_id);
-                    defer port.deinit();
-                    try requireArchiveRecord(records, .occurrence, port.value.occurrence);
-                    var route = try self.record(workspace.ExecutionRoute, a, "execution_route", port.value.occurrence, task_id);
-                    defer route.deinit();
-                    if (route.value.port == null or !std.meta.eql(route.value.port.?, row.body)) return error.InvalidArchive;
-                    const entry = try generations.getOrPut(.{ .work = port.value.work, .generation = port.value.generation });
-                    if (entry.found_existing) return error.InvalidArchive;
-                },
-                .workspace_port_reply => {
-                    var answer = try self.record(workspace.PortReply, a, "workspace_port_reply", row.id, task_id);
-                    defer answer.deinit();
-                    var port = try contracts.decodeOwned(workspace.Port, a, try self.store().object(a, answer.value.port, null));
-                    defer port.deinit();
-                    var pending = try self.record(occurrence.Occurrence, a, "occurrence", port.value.occurrence, task_id);
-                    defer pending.deinit();
-                    const acquired = switch (pending.value.state) {
-                        .settled_reply => |reply| reply,
-                        .admitted => |admitted| if (admitted == .reply) admitted.reply else return error.InvalidArchive,
-                        else => return error.InvalidArchive,
-                    };
-                    if (!std.meta.eql(acquired.attempt, row.id) or !std.meta.eql(acquired.reply, answer.value.reply.digest)) return error.InvalidArchive;
-                },
-                .execution_route => {
-                    try requireArchiveRecord(records, .occurrence, row.id);
-                },
-                .workspace_reply => {
-                    try requireArchiveRecord(records, .occurrence, row.id);
-                    var pending = try self.record(occurrence.Occurrence, a, "occurrence", row.id, task_id);
-                    defer pending.deinit();
-                    if (pending.value.work != null or !(pending.value.state == .settled_reply or (pending.value.state == .admitted and pending.value.state.admitted == .reply))) return error.InvalidArchive;
-                },
-                .workspace_delegation => try self.validateDelegation(a, parent.value, row, records),
-                .workspace_wait => {
-                    var wait = try self.record(workspace.Wait, a, "workspace_wait", row.id, task_id);
-                    defer wait.deinit();
-                    try requireArchiveRecord(records, .occurrence, wait.value.id);
-                    var pending = try self.record(occurrence.Occurrence, a, "occurrence", wait.value.id, task_id);
-                    defer pending.deinit();
-                    if (pending.value.work != null or !std.meta.eql(wait.value.request, pending.value.request_object)) return error.InvalidArchive;
-                    var request = try data.invocation.decode(data.invocation.Request, a, try self.store().object(a, wait.value.request, null));
-                    defer request.deinit();
-                    const entry = try self.handlers.resolve(request.value, try self.occurrenceImage(a, parent.value, pending.value));
-                    if (entry.declaration.kind != .workspace) return error.InvalidArchive;
-                    var authorized = try contracts.decodeOwned(workspace.Authorized, a, try self.authorizeWorkspaceOccurrence(a, parent.value, pending.value, entry, request.value.binding.payload));
-                    defer authorized.deinit();
-                    if (authorized.value.command != .work or authorized.value.command.work != .wait) return error.InvalidArchive;
-                    const expected = try contracts.encodeOwned(@TypeOf(wait.value.selection), a, authorized.value.command.work.wait);
-                    const actual = try contracts.encodeOwned(@TypeOf(wait.value.selection), a, wait.value.selection);
-                    if (!same(actual, expected)) return error.InvalidArchive;
-                    for (wait.value.selection.works.items) |ref| {
-                        var work = try self.workspaceWork(a, task_id, try wp.identity(ref, .work));
-                        work.deinit();
-                    }
-                },
-                else => {},
-            };
+                        if (!std.meta.eql(work.value.trial, row.id)) return error.InvalidArchive;
+                    },
+                    .controller_interaction => try self.validateControllerInteraction(self.allocator, parent.value, row.id, records),
+                    .root_operation => {
+                        var saved = try self.record(state.RootOperation, frame, "root_operation", row.id, task_id);
+                        defer saved.deinit();
+                        _ = try self.validateRootOperation(frame, parent.value, saved.value);
+                    },
+                    .workspace_runtime => {
+                        var record_value = try self.record(workspace.Runtime, frame, "workspace_runtime", row.id, task_id);
+                        defer record_value.deinit();
+                        var admitted = try self.workspaceRuntime(frame, task_id, record_value.value.artifact.digest, record_value.value.program);
+                        defer admitted.deinit();
+                    },
+                    .workspace_candidate => {
+                        var saved = try self.record(workspace.Candidate, frame, "workspace_candidate", row.id, task_id);
+                        defer saved.deinit();
+                        var candidate = try self.workspaceCandidate(frame, task_id, saved.value.artifact.digest);
+                        defer candidate.deinit();
+                        try self.validateCandidateProduction(frame, candidate.value);
+                    },
+                    .workspace_program => {
+                        var record_value = try self.record(workspace.Program, frame, "workspace_program", row.id, task_id);
+                        defer record_value.deinit();
+                        var admitted = try self.workspaceProgram(frame, task_id, record_value.value.artifact.digest);
+                        defer admitted.deinit();
+                    },
+                    .workspace_value => {
+                        var record_value = try self.record(workspace.Value, frame, "workspace_value", row.id, task_id);
+                        defer record_value.deinit();
+                        const admitted = try self.workspaceValueReferenceIn(frame, task_id, try wp.reference(frame, .value, record_value.value.artifact.digest), &checked);
+                        const descriptor_bytes = try self.store().object(frame, admitted.schema, null);
+                        var descriptor = try data.schema.decode(frame, descriptor_bytes);
+                        defer descriptor.deinit();
+                        try data.schema.validateValue(frame, descriptor.descriptor, try self.store().object(frame, admitted.value, null));
+                        for (record_value.value.derivation.sources.items) |ref| {
+                            const source = try self.workspaceValueReferenceIn(frame, task_id, try wp.reference(frame, .value, ref.digest), &checked);
+                            if (!std.meta.eql(source.artifact, ref)) return error.InvalidArchive;
+                        }
+                        const derivation = record_value.value.derivation;
+                        if (derivation.inspection) |origin| try self.validateWorkspaceWorkSnapshotIn(parent.value, origin.observation, records, &checked);
+                        if (derivation.semantic_source) |origin| {
+                            const request: wc.Command = .{ .program = .{ .inspect = .{
+                                .target = .{ .semantic_source = .{
+                                    .subject = origin.selection.subject,
+                                    .section = .{ .summary = .{} },
+                                } },
+                                .page = .{},
+                            } } };
+                            try self.validateWorkspaceReadIn(frame, parent.value, request, origin.basis, records, &checked);
+                        }
+                        if (derivation.kind == .computation or derivation.kind == .trial) {
+                            var work = try self.workspaceWork(frame, task_id, derivation.work orelse return error.InvalidArchive);
+                            defer work.deinit();
+                            var program = try self.workspaceProgram(frame, task_id, work.value.program);
+                            defer program.deinit();
+                            if ((derivation.kind == .trial) != (work.value.trial != null)) return error.InvalidArchive;
+                            if (work.value.result_value == null or !std.meta.eql(work.value.result_value.?, admitted.artifact) or
+                                work.value.result == null or !std.meta.eql(work.value.result.?, admitted.value) or
+                                derivation.program == null or !std.meta.eql(derivation.program.?, program.value.artifact) or
+                                !std.meta.eql(admitted.schema, program.value.description.result_schema) or
+                                derivation.sources.items.len != work.value.inputs.items.len + 1 or work.value.input_value == null or
+                                !std.meta.eql(derivation.sources.items[0], work.value.input_value.?)) return error.InvalidArchive;
+                            for (derivation.sources.items[1..], work.value.inputs.items) |left, right| if (!std.meta.eql(left, right)) return error.InvalidArchive;
+                        } else if (derivation.delegation != null) {
+                            try self.validateDelegatedValue(frame, task_id, record_value.value);
+                        } else if (derivation.program != null or derivation.work != null or derivation.capture != null) return error.InvalidArchive;
+                    },
+                    .workspace_view => {
+                        var record_value = try self.record(workspace.View, frame, "workspace_view", row.id, task_id);
+                        defer record_value.deinit();
+                        _ = try self.workspaceViewObservation(frame, task_id, record_value.value.artifact.digest, .{ .maximum = 1 });
+                    },
+                    .workspace_port => {
+                        var port = try self.record(workspace.Port, frame, "workspace_port", row.id, task_id);
+                        defer port.deinit();
+                        try requireArchiveRecord(records, .occurrence, port.value.occurrence);
+                        var route = try self.record(workspace.ExecutionRoute, frame, "execution_route", port.value.occurrence, task_id);
+                        defer route.deinit();
+                        if (route.value.port == null or !std.meta.eql(route.value.port.?, row.body)) return error.InvalidArchive;
+                        const entry = try generations.getOrPut(.{ .work = port.value.work, .generation = port.value.generation });
+                        if (entry.found_existing) return error.InvalidArchive;
+                    },
+                    .workspace_port_reply => {
+                        var answer = try self.record(workspace.PortReply, frame, "workspace_port_reply", row.id, task_id);
+                        defer answer.deinit();
+                        var port = try contracts.decodeOwned(workspace.Port, frame, try self.store().object(frame, answer.value.port, null));
+                        defer port.deinit();
+                        var pending = try self.record(occurrence.Occurrence, frame, "occurrence", port.value.occurrence, task_id);
+                        defer pending.deinit();
+                        const acquired = switch (pending.value.state) {
+                            .settled_reply => |reply| reply,
+                            .admitted => |admitted| if (admitted == .reply) admitted.reply else return error.InvalidArchive,
+                            else => return error.InvalidArchive,
+                        };
+                        if (!std.meta.eql(acquired.attempt, row.id) or !std.meta.eql(acquired.reply, answer.value.reply.digest)) return error.InvalidArchive;
+                    },
+                    .execution_route => {
+                        try requireArchiveRecord(records, .occurrence, row.id);
+                    },
+                    .workspace_reply => {
+                        try requireArchiveRecord(records, .occurrence, row.id);
+                        var pending = try self.record(occurrence.Occurrence, frame, "occurrence", row.id, task_id);
+                        defer pending.deinit();
+                        if (pending.value.work != null or !(pending.value.state == .settled_reply or (pending.value.state == .admitted and pending.value.state.admitted == .reply))) return error.InvalidArchive;
+                    },
+                    .workspace_delegation => try self.validateDelegation(frame, parent.value, row, records),
+                    .workspace_wait => {
+                        var wait = try self.record(workspace.Wait, frame, "workspace_wait", row.id, task_id);
+                        defer wait.deinit();
+                        try requireArchiveRecord(records, .occurrence, wait.value.id);
+                        var pending = try self.record(occurrence.Occurrence, frame, "occurrence", wait.value.id, task_id);
+                        defer pending.deinit();
+                        if (pending.value.work != null or !std.meta.eql(wait.value.request, pending.value.request_object)) return error.InvalidArchive;
+                        var request = try data.invocation.decode(data.invocation.Request, frame, try self.store().object(frame, wait.value.request, null));
+                        defer request.deinit();
+                        const entry = try self.handlers.resolve(request.value, try self.occurrenceImage(frame, parent.value, pending.value));
+                        if (entry.declaration.kind != .workspace) return error.InvalidArchive;
+                        var authorized = try contracts.decodeOwned(workspace.Authorized, frame, try self.authorizeWorkspaceOccurrence(frame, parent.value, pending.value, entry, request.value.binding.payload));
+                        defer authorized.deinit();
+                        if (authorized.value.command != .work or authorized.value.command.work != .wait) return error.InvalidArchive;
+                        const expected = try contracts.encodeOwned(@TypeOf(wait.value.selection), frame, authorized.value.command.work.wait);
+                        const actual = try contracts.encodeOwned(@TypeOf(wait.value.selection), frame, wait.value.selection);
+                        if (!same(actual, expected)) return error.InvalidArchive;
+                        for (wait.value.selection.works.items) |ref| {
+                            var work = try self.workspaceWork(frame, task_id, try wp.identity(ref, .work));
+                            work.deinit();
+                        }
+                    },
+                    else => {},
+                }
+            }
             for (records) |row| {
                 if (row.kind != .workspace_work) continue;
-                var saved = try self.workspaceWork(a, task_id, row.id);
+                var work_arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer work_arena.deinit();
+                const frame = work_arena.allocator();
+                var saved = try self.workspaceWork(frame, task_id, row.id);
                 defer saved.deinit();
                 const value = saved.value;
                 for (0..std.math.cast(usize, value.port_generation) orelse return error.InvalidArchive) |i| if (!generations.contains(.{ .work = value.id, .generation = i + 1 })) return error.InvalidArchive;
-                try self.validateWorkspaceWorkSnapshotIn(a, parent.value, try self.freezeWorkspaceWork(a, task_id, try wp.reference(a, .work, value.id), true), records, &checked);
+                try self.validateWorkspaceWorkSnapshotIn(parent.value, try self.freezeWorkspaceWork(frame, task_id, try wp.reference(frame, .work, value.id), true), records, &checked);
             }
         }
 
@@ -12212,9 +12226,9 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn validateWorkspaceWorkSnapshot(self: *Self, a: std.mem.Allocator, parent: state.Task, snapshot: workspace.WorkObservation, records: []const state.ArchiveRecord) !void {
-            var checked: SnapshotValidation = .empty;
-            defer checked.deinit(a);
-            return self.validateWorkspaceWorkSnapshotIn(a, parent, snapshot, records, &checked);
+            var checked: SnapshotValidation = .{ .allocator = a };
+            defer checked.deinit();
+            return self.validateWorkspaceWorkSnapshotIn(parent, snapshot, records, &checked);
         }
 
         const SnapshotValidation = struct {
@@ -12223,21 +12237,24 @@ pub fn Service(comptime Types: type) type {
                 task: state.TaskId,
                 identity: state.Digest,
             };
-            const empty: SnapshotValidation = .{};
+            allocator: std.mem.Allocator,
             facts: std.AutoHashMapUnmanaged(Key, enum { visiting, checked }) = .empty,
             semantic_sources: bool = false,
 
-            fn deinit(self: *SnapshotValidation, a: std.mem.Allocator) void {
-                self.facts.deinit(a);
+            fn deinit(self: *SnapshotValidation) void {
+                self.facts.deinit(self.allocator);
             }
         };
 
-        fn validateWorkspaceWorkSnapshotIn(self: *Self, a: std.mem.Allocator, parent: state.Task, snapshot: workspace.WorkObservation, records: []const state.ArchiveRecord, checked: *SnapshotValidation) anyerror!void {
+        fn validateWorkspaceWorkSnapshotIn(self: *Self, parent: state.Task, snapshot: workspace.WorkObservation, records: []const state.ArchiveRecord, checked: *SnapshotValidation) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
             const bytes = try contracts.encodeOwned(workspace.WorkObservation, a, snapshot);
             defer a.free(bytes);
             const key: SnapshotValidation.Key = .{ .kind = .snapshot, .task = parent.id, .identity = storage.digest(bytes) };
             if (checked.facts.get(key)) |prior| return if (prior == .checked) {} else error.InvalidArchive;
-            try checked.facts.put(a, key, .visiting);
+            try checked.facts.put(checked.allocator, key, .visiting);
             errdefer _ = checked.facts.remove(key);
             try self.validateWorkspaceWorkSnapshotBody(a, parent, snapshot, records, checked);
             checked.facts.getPtr(key).?.* = .checked;

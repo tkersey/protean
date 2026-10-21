@@ -84,12 +84,12 @@ rather than only the net file-size difference.
 |---|---:|---:|---:|
 | Horos | 3 | 26,035 | 0 |
 | Kosmos | 8 | 76,091 | 773 |
-| Protean | 13 | 163,855 | 8,340 |
-| Total | 24 | 265,981 | 9,113 |
+| Protean | 13 | 171,975 | 15,219 |
+| Total | 24 | 274,101 | 15,992 |
 
 No test modules, directories, executables, or CI lanes were added. Protean's
 existing workspace execution count advances from 12 to 13. The largest extension
-is `workspace_runtime.zig` at 138,623 added bytes; the low module count does not
+is `workspace_runtime.zig` at 146,743 added bytes; the low module count does not
 make this a small fixture change. Its generated producer and candidate are reused
 by the custody, five-arm, and mobility checks, avoiding a third producer run.
 Historical independent byte fixtures remain unchanged.
@@ -107,6 +107,11 @@ packages available; warm reuses those caches and still executes the checks.
 Times measure the build/check commands, including compilation. They do not
 measure the Linux workflow's setup, archive transport, or aggregate elapsed gate.
 Every command has a 600-second watchdog.
+
+Qualification now reuses matching artifacts under the existing input-aware cache
+key and rebuilds on a miss. Selected tests always execute. The completed cold and
+warm measurements below remain applicable evidence; further paired runs are not
+required.
 
 | Tree and command | Cold seconds | Warm seconds | Result |
 |---|---:|---:|---|
