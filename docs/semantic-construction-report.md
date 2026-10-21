@@ -99,16 +99,16 @@ measure of test implementation size.
 
 | Repository | Changed test files | Added bytes | Deleted bytes |
 |---|---:|---:|---:|
-| Horos | 12 | 74,613 | 112 |
+| Horos | 13 | 75,111 | 213 |
 | Kosmos | 8 | 76,883 | 773 |
 | Protean | 19 | 201,073 | 18,101 |
-| Total | 39 | 352,569 | 18,986 |
+| Total | 40 | 353,067 | 19,087 |
 
 The count includes inline test blocks and existing test-root imports in Horos
 and Protean production modules.
 
 The complete changed Zig source, including production code and all test helpers,
-adds/deletes 311,005/62,040 bytes in Horos, 231,040/16,904 bytes in Kosmos, and
+adds/deletes 312,030/63,209 bytes in Horos, 231,040/16,904 bytes in Kosmos, and
 492,444/57,584 bytes in Protean. These totals expose helper code omitted by the
 test-block breakdown; they do not attribute all source growth to tests.
 
@@ -127,7 +127,7 @@ Construction and guard helpers finish their temporary work before the mobility
 scenario begins, with terminal cancellation and disposal assertions.
 
 The packaged semantic core is 234,530 bytes, SHA-256
-`e96dddfb306773c1e7b1bed69f84c6a01aa135158b4388f9b668be2fb4ee5420`.
+`86eef3bbf344465fee0f1c7297184d6d451263cba5294deb6e780a15aa7c783d`.
 Generated candidates use `kosmos.semantic-artifact/3` and
 `kosmos.source-relation/1`; the existing artifact family remains `/2`.
 
@@ -180,7 +180,7 @@ does not replace native dependency authentication or complete GitHub qualificati
 Horos `7b74f14c` passes committed TigerStyle over all 322 files and 123,509 lines with
 zero diagnostics and 34 auditor tests. Kosmos's committed ratchet passes 35
 changed files and 5,789 changed lines with zero diagnostics and 24 auditor tests.
-The largest individual compiler RSS reported by the current Horos and Kosmos
+The largest individual compiler RSS reported by the listed macOS Horos and Kosmos
 checks is `3G` and `4G` respectively in the build summary's rounded units;
 neither is aggregate concurrent memory. Horos reports 60 successful compiler
 steps. Kosmos reports 12 successful compiler steps.
@@ -196,10 +196,24 @@ adds that fallback while retaining input invalidation and all checks. Kosmos run
 [39583211391](https://github.com/tkersey/kosmos/actions/runs/39583211391) completes
 all runtime tests, then fails because the ownership lane still expects 16 tests
 instead of the 17 present in the source and executed transcript. Commit `07390d2`
-updates the exact-count check. Successor qualification runs are
-[Horos `7b74f14c`](https://github.com/tkersey/horos/actions/runs/39590017927) and
-[Kosmos `ae24d765`](https://github.com/tkersey/kosmos/actions/runs/39590383509);
-their terminal results, not the earlier attempts, decide library qualification.
+updates the exact-count check.
+[Kosmos `ae24d765`](https://github.com/tkersey/kosmos/actions/runs/39590383509)
+passes all 12 jobs, including its aggregate gate at 546 seconds. Its longest
+runtime lane is session ownership at 538 seconds including setup and finalization.
+[Horos `7b74f14c`](https://github.com/tkersey/horos/actions/runs/39590017927)
+restores the compatible cache but still times out after 589.6 seconds in the
+contracts build; source and installation pass. Commit `9c36b1b` shares the
+source-example, cleanup-scope, and borrow-return host compilation, removing two
+compiler invocations while preserving separate executions and every assertion.
+The affected native `check-semantics` root passes 145/145 steps and 327/327 tests
+in 93.444 seconds, including all 24 borrow-return cases and 47 source fixtures.
+Committed TigerStyle passes all 34 auditor tests. Full GitHub qualification is
+[run 39592178897](https://github.com/tkersey/horos/actions/runs/39592178897);
+its terminal result remains outstanding.
+Kosmos `e2646f15` pins that Horos commit. Regeneration passes 7/7 steps in
+81.416 seconds, preserving the authored semantic source identity; its committed
+TigerStyle ratchet passes 24 tests with zero diagnostics. Its full successor
+qualification is [run 39592549573](https://github.com/tkersey/kosmos/actions/runs/39592549573).
 
 Horos `893b964a` passed those checks but its completed review epoch accepted
 allocation-budget, validation-work, and raw-constructor preservation findings.
