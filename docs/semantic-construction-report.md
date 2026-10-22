@@ -146,6 +146,18 @@ runner variation remains material. The `native_publication_nanoseconds` counter
 covers evaluator execution and checkpoint preparation before the Store commit,
 not database publication alone.
 
+The full [Linux run on `f6eccd0`](https://github.com/tkersey/protean/actions/runs/39847471873)
+passed 14 lanes; five reached the watchdog after rebuilding missing compilation
+inputs. The [same-input retry](https://github.com/tkersey/protean/actions/runs/39849417003)
+passed 18 lanes, including custody in 504 seconds, but downstream exhausted its
+nine-minute fixture budget during the installed demo. The earlier downstream
+job passed in 595 seconds. Neither full run qualifies the product. Downstream
+now restores the native lane's locked transport archives, then independently
+authenticates and extracts them into fresh scratch. Phase timings report to
+stderr; source export, independent consumer build, executable isolation, both
+identity-tamper checks and the offline demo remain selected. The existing lane
+can be selected for diagnosis; all 19 lanes and the aggregate gate remain required.
+
 The earlier [Linux qualification](https://github.com/tkersey/protean/actions/runs/39722835930)
 of Protean `00ac21f` with Kosmos `508d76b` did not pass. Ten lanes completed successfully; nine hit the
 ten-minute watchdog, and the final gate failed. Input-keyed caches were restored,

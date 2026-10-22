@@ -10,7 +10,7 @@ on:
         description: Run one existing lane for diagnosis; only all qualifies the complete product
         type: choice
         default: all
-        options: [all, owners, workspace-custody]
+        options: [all, owners, workspace-custody, downstream]
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'workspace-custody' && '[{"lane":"workspace-custody","compiled_profile":"workspace-custody"}]' || '[{"lane":"authoring"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive","compiled_profile":"owner-adaptive"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control"},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"workspace-runtime","compiled_profile":"workspace-runtime"},{"lane":"workspace-custody","compiled_profile":"workspace-custody"},{"lane":"workspace-succession","compiled_profile":"workspace-succession"},{"lane":"correspondence"},{"lane":"native","compiled_profile":"product"},{"lane":"native-workspace","product_consumer":true},{"lane":"native-placement","compiled_profile":"product"},{"lane":"runtime","product_consumer":true},{"lane":"runtime-outer","product_consumer":true},{"lane":"runtime-guest","product_consumer":true},{"lane":"downstream"}]') }}
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'workspace-custody' && '[{"lane":"workspace-custody","compiled_profile":"workspace-custody"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'downstream' && '[{"lane":"downstream"}]' || '[{"lane":"authoring"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive","compiled_profile":"owner-adaptive"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control"},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"workspace-runtime","compiled_profile":"workspace-runtime"},{"lane":"workspace-custody","compiled_profile":"workspace-custody"},{"lane":"workspace-succession","compiled_profile":"workspace-succession"},{"lane":"correspondence"},{"lane":"native","compiled_profile":"product"},{"lane":"native-workspace","product_consumer":true},{"lane":"native-placement","compiled_profile":"product"},{"lane":"runtime","product_consumer":true},{"lane":"runtime-outer","product_consumer":true},{"lane":"runtime-guest","product_consumer":true},{"lane":"downstream"}]') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -95,7 +95,7 @@ jobs:
           path: |
             .protean-native/inputs/*.tar.gz
             .protean-native/inputs/*.zip
-          key: protean-native-archives-v2-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}
+          key: protean-native-archives-v2-${{ matrix.lane == 'downstream' && 'native' || matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}
       - name: Authenticate and provision selected native inputs
         if: ${{ !matrix.product_consumer && matrix.lane != 'downstream' }}
         run: |
