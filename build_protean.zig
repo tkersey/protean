@@ -380,6 +380,8 @@ pub fn build(b: *std.Build) void {
                 "frozen controller",
             },
         } else &.{});
+        if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64 and
+            runtime_workspace_group == .custody) workspace_runtime_tests.use_llvm = false;
         b.step("build-workspace-runtime-check", "Build the retained runtime workspace test executable")
             .dependOn(&b.addInstallArtifact(workspace_runtime_tests, .{
             .dest_dir = .{ .override = .{ .custom = "verification" } },
