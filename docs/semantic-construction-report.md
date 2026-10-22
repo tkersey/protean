@@ -121,15 +121,17 @@ and typed replies derived from the retained service projection without invoking
 candidate recovery helpers outside the bounded pump. Kosmos review convergence
 remains incomplete.
 
-Protean `00ac21f` passes native macOS Safe custody qualification: 18/18 build
-steps and the complete retained scenario in 326.77 seconds. Both generated
+Protean `49093e8` passes native macOS Safe custody qualification: 18/18 build
+steps and the complete retained scenario in 329.51 seconds. Both generated
 productions, independent validation, retained activation, all five comparison
-arms, restart, transfer and cleanup execute. The build summary reports 3 GiB
-compiler RSS and 8 GiB test RSS; the command reports 8,909,209,600 bytes maximum
-RSS. This single sample does not establish a performance or memory regression.
+arms, restart, transfer and cleanup execute. The command performs one uncached
+Zig test compilation; its other compiler steps reuse matching inputs. The build
+summary reports 3 GiB compiler RSS and 5 GiB test RSS; the command reports
+5,604,671,488 bytes maximum RSS. This single sample does not establish a
+performance or memory improvement.
 
-The [Linux qualification](https://github.com/tkersey/protean/actions/runs/39722835930)
-of that same tuple did not pass. Ten lanes completed successfully; nine hit the
+The earlier [Linux qualification](https://github.com/tkersey/protean/actions/runs/39722835930)
+of Protean `00ac21f` with Kosmos `508d76b` did not pass. Ten lanes completed successfully; nine hit the
 ten-minute watchdog, and the final gate failed. Input-keyed caches were restored,
 changed compilation inputs rebuilt, and selected checks executed. Several
 compiled profiles required 356–438 seconds before execution. The custody lane
@@ -141,12 +143,12 @@ The preceding [Linux result](https://github.com/tkersey/protean/actions/runs/397
 of Protean `1ef675e` with Kosmos `d6ad695` passed all 19 lanes and the aggregate
 gate in 558 seconds, with a 549-second longest job. It does not discharge the
 current failed qualification. The current Kosmos fixes and exact dependency pin
-are integrated. Product qualification on this new tuple, final measurements and
-Kosmos/Protean reviews remain outstanding. The earlier results do not qualify the
-new tuple.
+are integrated. Native Linux product qualification on this new tuple and
+Kosmos/Protean reviews remain outstanding. The earlier Linux results do not
+qualify the new tuple.
 
 An isolated native-backend [custody probe](https://github.com/tkersey/protean/actions/runs/39724478116)
-on the same source workload shortened its build stage to 77 seconds, but execution
+on the earlier `00ac21f` source workload shortened its build stage to 77 seconds, but execution
 remained incomplete after 489 seconds and the job timed out. The probe kept Safe
 mode, all assertions, both generated productions and the existing lane. It is
 rejected as a qualification fix; the delivered build retains LLVM. Different
@@ -187,7 +189,7 @@ applies to this entire mapping.
 | AC-12 | Existing controller/runtime intersection: current root epochs govern targeting and unrelated succession preserves existing work lineage. |
 | AC-13 | Protean custody/placement: validated dependencies travel through one existing peer path; trust, disclosure and unsupported guard modes reject. |
 | AC-14 | Existing Store and workspace replay/import tests: duplicate and stale operations cannot create execution ownership or checker authority. |
-| AC-15 | Existing native workflows, package consumers and this report: unchanged assertions, 600-second job/aggregate ceilings and disclosed costs. Final measurements remain pending. |
+| AC-15 | Existing native workflows, package consumers and this report: unchanged assertions, 600-second job/aggregate ceilings and disclosed costs. Current local measurements are below; native Linux qualification remains pending. |
 | AC-16 | Existing native operation and evaluation runner: ordinary tools remain available, comparison preflight is runnable and paid inference is excluded. |
 
 ## Footprint
@@ -200,12 +202,12 @@ measure; the complete Zig totals below expose that additional source growth.
 | Repository | Changed test files | Added bytes | Deleted bytes |
 |---|---:|---:|---:|
 | Horos | 14 | 122,144 | 213 |
-| Kosmos | 10 | 105,826 | 953 |
+| Kosmos | 11 | 119,417 | 1,104 |
 | Protean | 20 | 221,852 | 18,412 |
-| Total | 44 | 449,822 | 19,578 |
+| Total | 45 | 463,413 | 19,729 |
 
 Complete changed Zig source adds/deletes 376,845/66,889 bytes in Horos,
-270,911/18,049 in Kosmos, and 516,120/57,890 in Protean. No test modules,
+289,006/19,518 in Kosmos, and 516,120/57,890 in Protean. No test modules,
 directories, executables, CI lanes or checked-in trace banks were added. The
 largest test-file extension is Protean's existing `workspace_runtime.zig`:
 176,665 added and 9,125 deleted bytes. Its two generated productions are reused
@@ -220,46 +222,46 @@ Generated candidates use `kosmos.semantic-artifact/3` and
 
 ## Cost measurements
 
-The following single native macOS sample uses Protean `00ac21f`, Horos
-`966970f` and Kosmos `508d76b` with the shared witness. It is separate from the
-failed Linux qualification and does not discharge that platform's resource gate.
-The generated producer executes on 1,302,123 and 1,302,127-byte source inputs,
-returning 1,780,927 and 1,187,281 bytes in 64.037 and 19.268 seconds. Both outputs
-undergo independent validation. Their executions perform 6,774 and 1,020 guest
-transitions, preserving the same 256-transition quantum.
+The following single native macOS sample uses Protean `49093e8`, Horos
+`966970f` and Kosmos `98f9347` with the shared witness. It does not discharge
+native Linux qualification. The generated producer executes on 1,302,123 and
+1,302,127-byte source inputs, returning 1,780,927 and 1,187,281 bytes in 65.166
+and 18.854 seconds. Both outputs undergo independent validation. Their executions
+perform 6,774 and 1,020 guest transitions, preserving the same 256-transition
+quantum.
 
-First-candidate construction takes 65.585 seconds, independent validation 0.691
+First-candidate construction takes 66.924 seconds, independent validation 0.748
 seconds and producer build 0.006 seconds. Built-in specialization plus validation
-takes 10.806 seconds; instrumentation plus validation takes 10.714 seconds.
+takes 10.823 seconds; instrumentation plus validation takes 10.782 seconds.
 These are instrumented finite observations, not model efficacy or speedup claims.
 
 | Arm | Three-cut continuation ms | Publication ms | Artifact bytes | Evidence bytes |
 |---|---:|---:|---:|---:|
-| Generic | 41.965 | 8.158 | 236,038 | 50,916 |
-| Built-in specialized | 4,062.343 | 45.915 | 27,101,761 | 23,446,975 |
-| Generated validated | 716.796 | 8.816 | 640,945 | 455,516 |
-| Instrumented | 4,186.829 | 51.122 | 27,103,410 | 23,448,401 |
-| Reference guarded | 504.193 | 8.380 | 876,983 | 506,432 |
+| Generic | 41.543 | 8.347 | 236,038 | 50,916 |
+| Built-in specialized | 4,070.860 | 46.713 | 27,101,761 | 23,446,975 |
+| Generated validated | 716.397 | 9.231 | 640,945 | 455,516 |
+| Instrumented | 4,213.608 | 49.125 | 27,103,410 | 23,448,401 |
+| Reference guarded | 514.084 | 9.134 | 876,983 | 506,432 |
 
 All five arms perform 21 guest transitions and publish 550 logical guest
 checkpoint bytes. Instrumentation retains 389 trace bytes. The guarded arm
-spends 28.245 ms in reference execution and 18.548 ms in candidate execution;
+spends 28.104 ms in reference execution and 17.918 ms in candidate execution;
 its guard capsule is 20,214 bytes and its candidate proposal is 5,813,200 logical
 bytes. These logical sizes do not measure deduplicated retained disk space.
 
 | Arm | Owner restart ms | First continuation including reconstruction ms | Peak above backing baseline bytes | Live backing at end bytes |
 |---|---:|---:|---:|---:|
-| Generic | 141.488 | 15.480 | 895,723 | 1,742,012,652 |
-| Built-in specialized | 142.832 | 4,024.734 | 4,282,660,366 | 1,874,546,516 |
-| Generated validated | 144.008 | 691.332 | 1,027,581,250 | 1,749,248,916 |
-| Instrumented | 143.966 | 4,063.403 | 4,388,117,898 | 1,874,554,006 |
-| Reference guarded | 142.988 | 236.719 | 717,637 | 3,038,930,769 |
+| Generic | 146.622 | 15.753 | 898,795 | 2,179,724,804 |
+| Built-in specialized | 144.846 | 4,031.284 | 4,282,660,366 | 2,312,258,668 |
+| Generated validated | 146.547 | 690.735 | 1,027,581,250 | 2,186,961,068 |
+| Instrumented | 149.051 | 4,087.156 | 4,388,117,898 | 2,312,266,158 |
+| Reference guarded | 145.497 | 240.249 | 1,780,841,257 | 3,959,847,035 |
 
-The requested Zig backing baseline is 1,741,703,528 bytes for the first four
-arms and 3,038,620,986 bytes for the guarded arm, retained by preparation, owners
-and arenas at each measured entry. Peak above each baseline is the maximum additional
-requested backing during the three cuts and their assertions. The instrumentation
-disables allocator resize/remap and excludes owner restart, later publication
-probes, cleanup, artifact comparison, C/SQLite allocations, OS memory and RSS.
-First continuation includes reconstruction, execution and publication; it is not
-an isolated restore measurement. No break-even count follows from these samples.
+The requested Zig backing baseline is 2,179,413,632 bytes for all five arms,
+retained by preparation, owners and arenas at each measured entry. Peak above
+each baseline is the maximum additional requested backing during the three cuts
+and their assertions. The instrumentation disables allocator resize/remap and
+excludes owner restart, later publication probes, cleanup, artifact comparison,
+C/SQLite allocations, OS memory and RSS. First continuation includes
+reconstruction, execution and publication; it is not an isolated restore
+measurement. No break-even count follows from these samples.
