@@ -113,24 +113,30 @@ steps. [Native Linux qualification](https://github.com/tkersey/kosmos/actions/ru
 passes all 12 jobs, with 539 seconds at the aggregate budget gate and 533 seconds
 in the longest job. Its two source partitions cover all 47 fixtures and 9,570
 observations. The local aggregate command reached its 600-second watchdog after
-completing the foreign-boundary checks; native/package completion is being run
-separately using the existing compiler cache.
+completing the foreign-boundary checks. Native/package completion then passed
+58/58 steps and 332/332 tests in 270.16 seconds using the existing compiler cache.
 
-Protean's final-tuple custody check passes 18/18 steps and its full retained
+Protean's current-tuple custody check passes 18/18 steps and its full retained
 scenario in 426.08 seconds on native Apple silicon with Zig 0.17.0 Safe. The test
 executes both generated productions, independent validation, retained activation,
 all five comparison arms, restart, transfer and cleanup. Three compiler steps
 built, two reused cached outputs, and one C translation ran. The build summary
 reports approximately 3 GiB compiler RSS and 5 GiB test RSS; the complete command
-reports 5,123,850,240 bytes maximum RSS. Final complete Linux qualification,
-cold/warm measurements and Kosmos/Protean serial review convergence remain outstanding.
-No earlier timing or check on a different dependency tuple discharges those gates.
+reports 5,123,850,240 bytes maximum RSS. The
+[Linux qualification](https://github.com/tkersey/protean/actions/runs/39704069650)
+of Protean `1ef675e` with this dependency tuple passes all 19 lanes and the
+aggregate gate in 558 seconds, with a 549-second
+longest job. Confirmed Kosmos review findings still require repair, a dependency
+refresh, affected qualification and Kosmos/Protean review convergence.
+No check on a different dependency tuple discharges those remaining gates.
 
 Compiled qualification artifacts bind their complete source, dependency lock,
 toolchain, target, environment and recipe. Every selected test still executes on
-a cache hit. Cold runs disable cache restoration while retaining successfully
-completed exact-input artifacts for a later measured warm run. This report is outside the recognized source/import closure of every
-compiled profile; a documentation update alone preserves those compilation inputs.
+a cache hit. Qualification uses one cache policy: restore matching artifacts and
+rebuild missing or invalid entries. There are no separate cold/warm runs or
+manual cache-disable switch. This report is outside the recognized source/import
+closure of every compiled profile; a documentation update alone preserves those
+compilation inputs.
 Product delivery envelopes separately bind the current commit and workflow run.
 
 ## Acceptance coverage
@@ -189,8 +195,9 @@ Generated candidates use `kosmos.semantic-artifact/3` and
 
 ## Cost measurements
 
-Final-tuple Linux cold/warm measurements remain pending. The following single
-native macOS sample uses the final dependency tuple and current shared witness.
+The Linux result above uses exact cached compilation inputs and executes every
+selected test. The following single native macOS sample uses that same dependency
+tuple and shared witness; it precedes the outstanding Kosmos review repairs.
 The generated producer executes on 1,302,123 and 1,302,127-byte source inputs,
 returning 1,780,927 and 1,187,281 bytes in 65.931 and 20.085 seconds. Both outputs
 undergo independent validation. Their executions perform 6,774 and 1,020 guest
