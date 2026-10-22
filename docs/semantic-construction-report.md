@@ -9,7 +9,7 @@ Qualification evidence is scoped to the commits and commands below. Required
 Linux qualification runs on native Ubuntu x86-64 GitHub Actions runners with
 Zig 0.17.0. The deployment harness
 retains execution tracing and Bubblewrap user, mount, and PID namespaces.
-Local Rosetta probes do not substitute for those checks. Product qualification
+Product qualification
 requires all existing lanes and the workflow's 600-second aggregate gate. The library
 feature branches are published for GitHub qualification. No deployment, paid
 inference, or claim of autonomous model improvement accompanies this implementation.
@@ -89,325 +89,144 @@ comparison conditions and retains unsuccessful work. Its semantic preflight
 prepares nine cases without inference. Independent model discovery and efficacy
 remain unmeasured.
 
+## Integrated inputs and qualification
+
+The final dependency tuple selects Horos
+`966970f81e4df3889a1cd4ef1f276fa109557a4b` and Kosmos
+`d6ad695ae74b02c9188d4f04291147a43d3b83a6`. Their published GitHub archives were
+independently downloaded and matched against the complete committed source
+inventories. Native dependency setup authenticates those same inputs.
+The Protean implementation is based on accepted controller reconstruction
+`2e40ce45d0f4b9b2ee81838386d5f1e0693ea228`.
+
+Horos's exact-head [native Linux qualification](https://github.com/tkersey/horos/actions/runs/39687967793)
+passes all required jobs, 988 tests, independent source/WASM comparisons and
+installation checks. The workflow took 581 seconds; its longest job took 572.
+Native macOS Safe `check check-package` passes 264/264 steps and 988/988 tests in
+137.92 seconds. Committed TigerStyle and all 28 required serial reviews pass.
+These reviews cover the finite implementation; they do not prove arbitrary
+program equivalence.
+
+Kosmos's exact-head committed TigerStyle passes 37 changed files, 6,409 changed
+lines and 24 auditor self-tests. Independent source regeneration passes 7/7
+steps. [Native Linux qualification](https://github.com/tkersey/kosmos/actions/runs/39701175126)
+passes all 12 jobs, with 539 seconds at the aggregate budget gate and 533 seconds
+in the longest job. Its two source partitions cover all 47 fixtures and 9,570
+observations. The local aggregate command reached its 600-second watchdog after
+completing the foreign-boundary checks; native/package completion is being run
+separately using the existing compiler cache.
+
+Protean's final-tuple custody check passes 18/18 steps and its full retained
+scenario in 426.08 seconds on native Apple silicon with Zig 0.17.0 Safe. The test
+executes both generated productions, independent validation, retained activation,
+all five comparison arms, restart, transfer and cleanup. Three compiler steps
+built, two reused cached outputs, and one C translation ran. The build summary
+reports approximately 3 GiB compiler RSS and 5 GiB test RSS; the complete command
+reports 5,123,850,240 bytes maximum RSS. Final complete Linux qualification,
+cold/warm measurements and Kosmos/Protean serial review convergence remain outstanding.
+No earlier timing or check on a different dependency tuple discharges those gates.
+
+Compiled qualification artifacts bind their complete source, dependency lock,
+toolchain, target, environment and recipe. Every selected test still executes on
+a cache hit. Cold runs disable cache restoration while retaining successfully
+completed exact-input artifacts for a later measured warm run. This report is outside the recognized source/import closure of every
+compiled profile; a documentation update alone preserves those compilation inputs.
+Product delivery envelopes separately bind the current commit and workflow run.
+
+## Acceptance coverage
+
+The acceptance obligations extend the existing roots; they do not create new
+lanes or one test module per obligation. The final qualification status above
+applies to this entire mapping.
+
+| Obligation | Existing deciding owner and observation |
+|---|---|
+| AC-01 | Kosmos driver and Protean workspace inspection: selected source, helpers, derivation and paging retain exact identities. |
+| AC-02 | Kosmos views and Protean context materialization: denied values remain omitted and partial disclosure retains its scope. |
+| AC-03 | Protean workspace/event witnesses: authored observer folds retain cursors, report gaps and survive restart without duplicate folding. |
+| AC-04 | Kosmos analysis and Protean shared construction: multiple assumptions and resumable branches have no live acquisition authority. |
+| AC-05 | Protean custody: the same ordinary generated producer executes twice on distinct source inputs and produces independently checked candidates. |
+| AC-06 | Horos source/recovery and Kosmos driver/specialization: valid scalar, helper and private-layout changes execute through recovery. |
+| AC-07 | The same source/candidate witnesses reject well-typed wrong edits, roots, scopes, helpers, layouts and anchors, including exhausted checks. |
+| AC-08 | Kosmos realization and Protean runtime selection: retained guest switching and switch-back preserve requests, state, identities and cleanup. |
+| AC-09 | Kosmos capsule tests: unfinished execution requires its exact realization and helpers, separately from a portable guest cut. |
+| AC-10 | Protean guarded execution: reference ownership blocks a well-shaped divergent successor before external dispatch; agreement remains finite evidence. |
+| AC-11 | Existing occurrence, recovery and cancellation roots: acquired replies settle once and candidate failure cannot prevent reference cleanup. |
+| AC-12 | Existing controller/runtime intersection: current root epochs govern targeting and unrelated succession preserves existing work lineage. |
+| AC-13 | Protean custody/placement: validated dependencies travel through one existing peer path; trust, disclosure and unsupported guard modes reject. |
+| AC-14 | Existing Store and workspace replay/import tests: duplicate and stale operations cannot create execution ownership or checker authority. |
+| AC-15 | Existing native workflows, package consumers and this report: unchanged assertions, 600-second job/aggregate ceilings and disclosed costs. Final measurements remain pending. |
+| AC-16 | Existing native operation and evaluation runner: ordinary tools remain available, comparison preflight is runnable and paid inference is excluded. |
+
 ## Footprint
 
 The comparison bases are Horos `ae8ace5`, Kosmos `6c70d24`, and accepted Protean
-`2e40ce4`. This table counts added and deleted source lines, including newlines,
-in dedicated test files and inline test blocks, rather than net file-size change.
-It excludes test-only helpers outside those blocks and is therefore a partial
-measure of test implementation size.
+`2e40ce4`. Added/deleted byte counts include newlines in dedicated test files and
+inline test blocks. Helpers outside those blocks are excluded from this test-only
+measure; the complete Zig totals below expose that additional source growth.
 
 | Repository | Changed test files | Added bytes | Deleted bytes |
 |---|---:|---:|---:|
-| Horos | 13 | 75,111 | 213 |
-| Kosmos | 8 | 76,883 | 773 |
-| Protean | 20 | 203,615 | 18,317 |
-| Total | 41 | 355,609 | 19,303 |
+| Horos | 14 | 122,144 | 213 |
+| Kosmos | 9 | 92,362 | 953 |
+| Protean | 20 | 221,852 | 18,412 |
+| Total | 43 | 436,358 | 19,578 |
 
-The count includes inline test blocks and existing test-root imports in Horos
-and Protean production modules.
+Complete changed Zig source adds/deletes 376,845/66,889 bytes in Horos,
+255,404/18,011 in Kosmos, and 516,120/57,890 in Protean. No test modules,
+directories, executables, CI lanes or checked-in trace banks were added. The
+largest test-file extension is Protean's existing `workspace_runtime.zig`:
+176,665 added and 9,125 deleted bytes. Its two generated productions are reused
+by activation, five-arm measurements, recovery and mobility. Historical
+independent byte fixtures remain unchanged.
 
-The complete changed Zig source, including production code and all test helpers,
-adds/deletes 312,030/63,209 bytes in Horos, 231,040/16,904 bytes in Kosmos, and
-497,462/57,594 bytes in Protean. These totals expose helper code omitted by the
-test-block breakdown; they do not attribute all source growth to tests.
-
-No test modules, directories, executables, or CI lanes were added. Protean's
-existing workspace execution count advances from 12 to 14. The largest extension
-is `workspace_runtime.zig` at 158,428 added bytes; the low module count does not
-make this a small fixture change. Its generated producer and candidate are reused
-by the custody, five-arm, and mobility checks, avoiding a third producer run.
-Historical independent byte fixtures remain unchanged.
-
-Copied-custody forgeries run in the existing onward-transfer scenario with its
-smaller guest. Their assertions exercise common import normalization and custody
-gates. The generated scenario retains exact artifact closure, disclosure and
-semantic-trust rejection, signed acceptance, replay, restart, and cleanup.
-Construction and guard helpers finish their temporary work before the mobility
-scenario begins, with terminal cancellation and disposal assertions.
-
-The packaged semantic core is 234,530 bytes, SHA-256
-`86eef3bbf344465fee0f1c7297184d6d451263cba5294deb6e780a15aa7c783d`.
+The packaged semantic core is 236,038 bytes, SHA-256
+`66b9dabd1f738dfff7412039b6f961f7e683777a3b292b6abf9c722722b7ef4b`.
+Final regeneration changes only the embedded Horos package identity relative to
+the preceding core; executable, recovery and evidence bytes are identical.
 Generated candidates use `kosmos.semantic-artifact/3` and
-`kosmos.source-relation/1`; the existing artifact family remains `/2`.
+`kosmos.source-relation/1`; historical artifacts retain their existing family.
 
-## Qualification results
+## Cost measurements
 
-Commands use exact Zig 0.17.0 and Safe optimization on Apple silicon. Cold means
-fresh local and global compilation caches with authenticated dependency source
-packages available; warm reuses those caches and still executes the checks.
-Times measure the build/check commands, including compilation. They do not
-measure the Linux workflow's setup, archive transport, or aggregate elapsed gate.
-Every command has a 600-second watchdog.
+Final-tuple Linux cold/warm measurements remain pending. The following single
+native macOS sample uses the final dependency tuple and current shared witness.
+The generated producer executes on 1,302,123 and 1,302,127-byte source inputs,
+returning 1,780,927 and 1,187,281 bytes in 65.931 and 20.085 seconds. Both outputs
+undergo independent validation. Their executions perform 6,774 and 1,020 guest
+transitions, preserving the same 256-transition quantum.
 
-Qualification now reuses matching artifacts under the existing input-aware cache
-key and rebuilds on a miss. Selected tests always execute. Earlier cold and warm
-measurements describe their original inputs; further paired runs are not required.
-Protean's latest successful custody qualification uses commit `1d3885a9` with
-Horos `a97e41aa` and Kosmos `67d0b71c`. A later check at `22862f1e`, with Horos
-`a0b0b256` and Kosmos `814aa999`, passes four of five tests; the semantic guest's
-built-in specialization exhausts its unchanged 8-million-unit production allowance
-before independent validation starts. The other native results below precede the
-context-preparation repair and require qualification against the final tuple.
-Commit `bcfca656` restores the original Linux deployment assertions.
-
-The subsequent diagnostic identifies repeated immutable decoding in production
-and incorrectly combined allowance domains in validation. Horos `7b74f14c`
-caches successful reads separately in producer and checker, and separates
-semantic evaluation from full relation-validation accounting. All validation
-still executes; the relation's global allowance also bounds evaluator work.
-Canonical normalization retains its separate semantic allowance. Numeric limits
-and evaluator allocation precharges are unchanged.
-
-The focused Safe suite passes 49/49 tests. A direct-code diagnostic using the
-committed Protean `952805d6` custody test and Horos `7b74f14c` passes the complete
-shared case in 450.713 seconds, including five-arm restart/memory measurements
-and subsequent custody assertions. Production uses 4,412,818 of 8,000,000 units;
-the independent checker starts with an empty cache and uses 4,317,402 units.
-Canonical normalization uses two units of its separate allowance. This diagnostic
-does not replace native dependency authentication or complete GitHub qualification.
-
-| Historical tree and command | Cold seconds | Warm seconds | Result |
-|---|---:|---:|---|
-| Horos `816d2d8`, `check check-package` | 198.309 | 105.816 | 266/266 steps, 932/932 tests |
-| Kosmos `acf8d71`, `check` | 527.043 | 340.761 | 69/69 steps, 329/329 tests |
-
-| Library tree and command | Seconds | Result |
-|---|---:|---|
-| Horos `a0b0b256`, `check check-package` | 144.568 | 266/266 steps, 957/957 tests |
-| Kosmos `814aa999`, `check` | 471.775 | 69/69 steps, 329/329 tests |
-
-Horos `7b74f14c` passes committed TigerStyle over all 322 files and 123,509 lines with
-zero diagnostics and 34 auditor tests. Kosmos's committed ratchet passes 35
-changed files and 5,789 changed lines with zero diagnostics and 24 auditor tests.
-The largest individual compiler RSS reported by the listed macOS Horos and Kosmos
-checks is `3G` and `4G` respectively in the build summary's rounded units;
-neither is aggregate concurrent memory. Horos reports 60 successful compiler
-steps. Kosmos reports 12 successful compiler steps.
-Kosmos's full check includes 9,570 independent source-agreement observations,
-Chromium and Firefox worker transfer, and extracted package operation.
-
-The first GitHub qualification attempts do not qualify the tuple. Horos run
-[39583208331](https://github.com/tkersey/horos/actions/runs/39583208331) reports
-957/957 tests passing but exceeds the contracts job's 600-second limit before a
-successful terminal disposition. Its manifest-specific cache lookup missed an
-available cache for the same OS, architecture, and Zig version; commit `0f1ad7b`
-adds that fallback while retaining input invalidation and all checks. Kosmos run
-[39583211391](https://github.com/tkersey/kosmos/actions/runs/39583211391) completes
-all runtime tests, then fails because the ownership lane still expects 16 tests
-instead of the 17 present in the source and executed transcript. Commit `07390d2`
-updates the exact-count check.
-[Kosmos `ae24d765`](https://github.com/tkersey/kosmos/actions/runs/39590383509)
-passes all 12 jobs, including its aggregate gate at 546 seconds. Its longest
-runtime lane is session ownership at 538 seconds including setup and finalization.
-[Horos `7b74f14c`](https://github.com/tkersey/horos/actions/runs/39590017927)
-restores the compatible cache but still times out after 589.6 seconds in the
-contracts build; source and installation pass. Commit `9c36b1b` shares the
-source-example, cleanup-scope, and borrow-return host compilation, removing two
-compiler invocations while preserving separate executions and every assertion.
-The affected native `check-semantics` root passes 145/145 steps and 327/327 tests
-in 93.444 seconds, including all 24 borrow-return cases and 47 source fixtures.
-Committed TigerStyle passes all 34 auditor tests. Full GitHub qualification
-[39592178897](https://github.com/tkersey/horos/actions/runs/39592178897)
-passes all four jobs. Contracts pass 262/262 steps and 963/963 tests in a
-462-second build and a 491-second job; independent installation passes in a
-383-second job. The workflow finishes in 541 seconds. Its two lanes report
-59 successful compiler steps, with a largest individual reported RSS of `2G`;
-this is not aggregate concurrent memory.
-Kosmos `e2646f15` pins that Horos commit. Regeneration passes 7/7 steps in
-81.416 seconds, preserving the authored semantic source identity; its committed
-TigerStyle ratchet passes 24 tests with zero diagnostics. Full successor
-qualification [39592549573](https://github.com/tkersey/kosmos/actions/runs/39592549573)
-passes all 12 jobs and its aggregate gate at 469 seconds. Runtime lane times,
-including setup and finalization, are: native 462, sessions 447, portable 440,
-source 423, session ownership 415, source-second 412, consumer 364,
-source regressions 258, and specialization 248 seconds. The largest individual
-reported compiler RSS is `4G`; this is not aggregate concurrent memory.
-
-Protean run [39593643203](https://github.com/tkersey/protean/actions/runs/39593643203)
-rejects the dependency lock before native compilation: the recorded Zig-managed
-package profile incorrectly reused the archive-extracted profile. Zig 0.17 marks
-the two shebang scripts executable when materializing the package. A fresh
-`zig build --fetch` establishes the distinct managed inventory; correcting that
-one profile makes both forms pass the unchanged native verifier. All three
-dependency-admission tests pass, including mode, content, link, and corrupt
-transport rejection. The failed run supplies no product qualification credit.
-
-Protean run [39594520804](https://github.com/tkersey/protean/actions/runs/39594520804)
-clears package admission but does not qualify the tuple. Eight qualification lanes
-pass, six fail, and five reach their job limit; the terminal aggregate gate fails.
-The control lane encounters a SQLite download DNS failure. The runtime and
-runtime-guest scripted requests omit the new explicit guest-view fields. The
-pure-slice fixture has a zero-input entry where native construction requires one
-input, and the speculative raw-computation fixture attempts to define its root
-twice. Those fixture repairs preserve the original success and rejection
-assertions. Runtime selection separately returns `OutOfMemory` within guarded
-reply testing; more precise phase diagnostics are required before selecting a
-resource correction. None of these failures is waived by the library passes.
-The owners build also includes two unused generated adaptive-asset imports.
-Removing those imports from its copied module table eliminates that unrelated
-build dependency while retaining all 69 owner tests. Its timing effect remains
-unmeasured until the next qualification run.
-
-Run [39596725355](https://github.com/tkersey/protean/actions/runs/39596725355)
-passes nine lanes, including both repaired Zig fixture roots; one fails and nine
-reach their job limits. The guarded-reply failure is now localized to final
-workspace-history validation, after interpretation, divergence, restart and
-cancellation checks succeed. The owners executable compiles in eight minutes
-with a reported `4G` peak compiler RSS, leaving insufficient time for execution;
-removing its unused asset dependency does not establish a sufficient speedup.
-Run [39598587843](https://github.com/tkersey/protean/actions/runs/39598587843)
-crashes the Zig compiler when selection-partition symbols and Safe error tracing
-are enabled. Those diagnostic settings are removed; failure messages now identify
-the validation phase directly. The allocation failure remains unresolved.
-All assertions and resource limits remain intact.
-Compiler-cache fallback now prefers the same qualification lane before other
-lanes, preserving more potentially reusable native compilation work after a lock
-change. This does not change the exact input checks for compiled executables;
-its effect on total qualification time is not yet measured.
-
-Run [39600322600](https://github.com/tkersey/protean/actions/runs/39600322600)
-passes the owners lane, including all 69 tests. Selection still fails with
-`OutOfMemory`, now localized to semantic publication 72 during history validation.
-Semantic publication validation now owns its temporary arena, and compiler-output
-validation allocates through the service allocator so existing cleanup releases
-intermediates. Independent checks and retained fact identities are unchanged.
-Run [39602114293](https://github.com/tkersey/protean/actions/runs/39602114293)
-at `2f1c32b9` passes all four selection tests on both attempts, including complete
-workspace-history validation. Attempt two passes 17 of 19 qualification lanes;
-owners compilation and custody execution exceed ten minutes. The changed owners
-executable has no completed cache entry, so both attempts restore the same older
-compiler snapshot. An owners-only Linux x86-64 native-backend experiment preserves
-Safe mode and all 69 tests; its compatibility and build-plus-execution cost remain
-unqualified. Native C compilation and the other test backends are unchanged.
-
-Kosmos `1dd83c37` stabilizes its Zig tool path so the explicitly inherited `PATH`
-does not vary dependency-extraction and downstream compiler cache identities.
-The updated dependency archive is authenticated against its committed source.
-Current qualification is pending; no timing improvement is claimed yet.
-
-Horos `893b964a` passed those checks but its completed review epoch accepted
-allocation-budget, validation-work, and raw-constructor preservation findings.
-Successor `cd256c1d` passes full native, WASM and package qualification. Decoded ownership
-now shares one allocation budget; source emission and mandatory target admission
-share the relation's work allowance, before optional optimization. Constructor
-bindings retain the actual function, schema, and ordered capture origins.
-Relocation transports raw constructor indices, and pure slices generate ordinary
-registration helpers when the original registration function is pruned.
-Focused native tests cover identity and permuted relocation, scalar rebinding
-rejection, supplied capture ordering, bridge removal, and allocation failure.
-Full Kosmos integration against the preceding Horos commit exposed an
-admission charge incorrectly consuming the specialization-local work allowance.
-The repair separates that allowance from the relation-wide budget. Focused scalar
-and actual generic specialization pass with the unchanged 8-million local and
-64-million relation limits. The actual generic record requires 2,046,542 bytes of
-owned allocations: the previously ineffective 1-million-byte test allowance now
-rejects, and the existing production 64-million-byte allowance passes.
-
-Fresh Horos review remains outstanding. Historical Kosmos `8392e18a` packages the
-preceding Horos source; regeneration passes 7/7 steps in 81.266 seconds. Its full check
-finishes in 473.606 seconds with 327/329 tests passing. The two driver failures
-exhaust the relation budget in composed transformations; all 28 specialization
-tests and foreign checks pass. A focused trace attributes 9,608,508 work units
-per generic admission to repeatedly clearing and scanning the entire block catalog
-for function-local borrow queries, plus 1,170,924 units to requirement lookup.
-Horos `a0b0b256` indexes blocks by owning function and requirement rows by their
-exact entry/position key. Focused ownership tests pass 32/32, including allocation
-failures, retry, interleaved function blocks, and retained reachability snapshots.
-Both previously failing Kosmos drivers pass with the unchanged relation limits.
-On the same generic source, mandatory admission falls from 13,049,598 to
-2,317,832 charged work units, an 82.24% reduction. The focused integration run
-passes 5/5 tests in 123.439 seconds, including the scratch measurement. Full
-Horos qualification passes 266/266 steps and 957/957 tests in 144.568 seconds;
-the committed style audit passes.
-Kosmos `814aa999` packages Horos `a0b0b256`; artifact regeneration passes 7/7
-steps in 80.998 seconds. Full qualification passes 69/69 steps and 329/329 tests
-in 471.775 seconds, including all 39 driver and 28 specialization tests. Its
-committed style audit also passes.
-Protean now resolves raw closures to their actual function during private
-and speculative authority checks. Its constructor-preservation and executable
-pure-slice changes are committed in `4773f20c`; the dependency lock now selects
-Horos `a0b0b256` and Kosmos `814aa999`. Commit `298cb97` includes the fourteenth
-execution test in CI. Final
-native integration tests, product checks and Linux qualification remain
-outstanding; library checks do not establish them.
-
-Protean's prior native checks at `6d1b7064`, before the context repair, are:
-
-| Existing qualification root | Seconds | Result |
-|---|---:|---|
-| Adaptive captured-response owner | 84.375 | 2/2 tests, compiled-artifact hit |
-| Adaptive control owner | 231.915 | 12/12 tests, miss |
-| Native task owners | 277.693 | 69/69 tests, miss |
-| Native support | 140.229 | 22/22 steps, 80/80 tests |
-| Workspace execution | 208.289 | 13/13 tests, miss |
-| Workspace retention | 249.353 | 3/3 tests, miss |
-| Workspace history | 217.919 | 3/3 tests, miss |
-| Runtime selection | 262.797 | 4/4 tests, miss |
-| Runtime succession | 244.637 | 4/4 tests, miss |
-| Authoring and native HTTPS | 108.995 | 46/46 steps, 144/144 tests |
-
-Native support also completes 20 process crashes and 40 reopens, with zero
-original-effect reinvocations and zero automatic lookups. Its build reports
-three new and four cached compiler steps; authoring and HTTPS reports 14 new
-and five cached steps. Every cache-hit row still executes its selected tests.
-Captured-response replay and archive import remain within the existing 64 MiB
-requested-memory limit: the measured execution peak is 66,942,368 bytes.
-Export passes its existing 32 MiB limit; a separate export peak was not measured.
-
-Protean custody at committed `1d3885a9` passes all five tests in 362.198 seconds,
-including 359.173 seconds executing an authenticated compiled-artifact hit.
-The same source bytes first passed in 495.144 seconds after a miss: 129.600 seconds
-building and 362.321 seconds executing. The regression exhausts descriptor lookup
-with an absent schema and proves that unrelated compiler-fact caches stay empty;
-valid semantic-value reuse and selection succeed without preinstalled facts.
-The committed test process reports 13,165,297,664 bytes maximum resident memory
-and 13,166,820,640 bytes peak memory footprint. These are whole-process measurements,
-distinct from the bounded requested-memory owner checks above.
-
-In the `7b74f14c`/`952805d6` direct-code diagnostic, the shared witness's two
-generated-producer executions take 97.186 and 43.189 seconds, using 26,031 and
-20,268 guest transitions respectively. The first construction takes 98.688
-seconds, independent validation 0.670 seconds, and producer compilation 0.007
-seconds. Built-in specialization plus validation takes 10.268 seconds;
-instrumented construction plus validation takes 10.565 seconds. These single
-local samples include ordinary generated execution and publication; they do not
-predict model efficacy.
+First-candidate construction takes 67.504 seconds, independent validation 0.702
+seconds and producer build 0.006 seconds. Built-in specialization plus validation
+takes 11.933 seconds; instrumentation plus validation takes 11.120 seconds.
+These are instrumented finite observations, not model efficacy or speedup claims.
 
 | Arm | Three-cut continuation ms | Publication ms | Artifact bytes | Evidence bytes |
 |---|---:|---:|---:|---:|
-| Generic | 40.796 | 7.942 | 234,530 | 50,635 |
-| Built-in specialized | 3,930.086 | 45.861 | 26,986,920 | 23,337,881 |
-| Generated validated | 710.421 | 8.769 | 625,054 | 440,856 |
-| Instrumented | 4,068.777 | 48.538 | 26,988,453 | 23,339,190 |
-| Reference guarded | 490.519 | 8.696 | 859,584 | 491,491 |
+| Generic | 41.439 | 8.164 | 236,038 | 50,916 |
+| Built-in specialized | 4,153.299 | 49.077 | 27,101,761 | 23,446,975 |
+| Generated validated | 795.950 | 9.923 | 640,945 | 455,516 |
+| Instrumented | 4,580.261 | 49.314 | 27,103,410 | 23,448,401 |
+| Reference guarded | 519.466 | 8.711 | 876,983 | 506,432 |
 
-All arms begin continuation with 32,990,697,962 requested backing bytes retained
-by preparation, owners, and arenas. Memory observations cover the three cuts and
-their assertions, excluding owner restart, the later publication-cost probe,
-cleanup, artifact comparison, C/SQLite allocations, OS memory, and RSS. The
-instrumentation disables allocator resize/remap; its timings do not establish a
-speedup over uninstrumented runs.
+All five arms perform 21 guest transitions and publish 550 logical guest
+checkpoint bytes. Instrumentation retains 389 trace bytes. The guarded arm
+spends 28.842 ms in reference execution and 18.772 ms in candidate execution;
+its guard capsule is 20,214 bytes and its candidate proposal is 5,813,200 logical
+bytes. These logical sizes do not measure deduplicated retained disk space.
 
-| Arm | Owner restart ms | First continuation including reconstruction ms | Peak backing bytes | Peak above baseline bytes | Live end bytes |
-|---|---:|---:|---:|---:|---:|
-| Generic | 295.250 | 16.675 | 32,991,593,685 | 895,723 | 32,991,007,086 |
-| Built-in specialized | 299.404 | 3,889.305 | 39,815,995,828 | 6,825,297,866 | 33,123,178,562 |
-| Generated validated | 296.598 | 686.261 | 34,011,913,024 | 1,021,215,062 | 32,998,178,223 |
-| Instrumented | 299.641 | 3,945.698 | 39,645,001,846 | 6,654,303,884 | 33,123,186,028 |
-| Reference guarded | 300.308 | 230.676 | 32,991,415,599 | 717,637 | 32,991,007,745 |
+| Arm | Owner restart ms | First continuation including reconstruction ms | Peak above backing baseline bytes | Live backing at end bytes |
+|---|---:|---:|---:|---:|
+| Generic | 151.217 | 15.822 | 895,723 | 2,179,647,110 |
+| Built-in specialized | 151.557 | 4,112.264 | 4,282,660,366 | 2,312,180,974 |
+| Generated validated | 150.520 | 766.549 | 1,027,581,250 | 2,186,883,374 |
+| Instrumented | 156.643 | 4,453.889 | 4,388,117,898 | 2,312,188,464 |
+| Reference guarded | 159.880 | 242.997 | 1,780,489,499 | 3,959,419,631 |
 
-All five arms execute 21 guest transitions and publish the same 550 logical guest
-checkpoint bytes across the selected cuts. The guarded measurement includes
-27.656 ms reference execution, 17.897 ms candidate execution, and 20,214 retained
-guard-capsule bytes. Its candidate proposal occupies 5,764,322 logical bytes.
-Instrumentation retains 389 trace bytes across these cuts. These samples do not
-establish an execution speedup or a break-even repetition count for the generated
-candidate.
-
-Workspace execution at `29da7d1` passes 13/13 tests in 198.914 seconds
-(149.662 seconds build, 45.648 seconds tests, exact-key miss). This includes
-captured semantic summary and pure-slice reads, prepared transaction replay, and
-rejection of rehashed replies. Onward succession passes 4/4 in 232.472 seconds
-(121.052 seconds build, 109.526 seconds tests, exact-key miss), including the
-copied-custody forgery cases.
+The shared backing baseline is 2,179,337,986 requested Zig bytes retained by
+preparation, owners and arenas. Peak above baseline is the maximum additional
+requested backing during the three cuts and their assertions. The instrumentation
+disables allocator resize/remap and excludes owner restart, later publication
+probes, cleanup, artifact comparison, C/SQLite allocations, OS memory and RSS.
+First continuation includes reconstruction, execution and publication; it is not
+an isolated restore measurement. No break-even count follows from these samples.

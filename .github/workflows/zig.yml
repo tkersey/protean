@@ -171,7 +171,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Save completed compiled qualification inputs
-        if: matrix.compiled_profile && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.compiled.outputs.valid != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache)
+        if: matrix.compiled_profile && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.compiled.outputs.valid != 'true'
         continue-on-error: true
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
@@ -179,7 +179,7 @@ jobs:
           key: ${{ steps.deployment_inputs.outputs.key }}
       - name: Retain completed compiler work before deployment
         id: build_cache_size
-        if: matrix.compiled_profile && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.compiled.outputs.valid != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache)
+        if: matrix.compiled_profile && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.compiled.outputs.valid != 'true'
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
@@ -373,7 +373,7 @@ jobs:
           retention-days: 14
       - name: Admit a complete bounded cache snapshot
         id: cache_size
-        if: ${{ !cancelled() && !matrix.product_consumer && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.compiled.outputs.valid != 'true' && steps.build_cache_size.outputs.save != 'true' && (github.event_name != 'workflow_dispatch' || inputs.compiler-cache) }}
+        if: ${{ !cancelled() && !matrix.product_consumer && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.compiled.outputs.valid != 'true' && steps.build_cache_size.outputs.save != 'true' }}
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
