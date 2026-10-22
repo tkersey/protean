@@ -93,7 +93,7 @@ remain unmeasured.
 
 The final dependency tuple selects Horos
 `966970f81e4df3889a1cd4ef1f276fa109557a4b` and Kosmos
-`d6ad695ae74b02c9188d4f04291147a43d3b83a6`. Their published GitHub archives were
+`508d76b7fb4925d1073cef37067c678eff2dbc6b`. Their published GitHub archives were
 independently downloaded and matched against the complete committed source
 inventories. Native dependency setup authenticates those same inputs.
 The Protean implementation is based on accepted controller reconstruction
@@ -107,28 +107,30 @@ Native macOS Safe `check check-package` passes 264/264 steps and 988/988 tests i
 These reviews cover the finite implementation; they do not prove arbitrary
 program equivalence.
 
-Kosmos's exact-head committed TigerStyle passes 37 changed files, 6,409 changed
+Kosmos's exact-head committed TigerStyle passes 38 changed files, 6,758 changed
 lines and 24 auditor self-tests. Independent source regeneration passes 7/7
-steps. [Native Linux qualification](https://github.com/tkersey/kosmos/actions/runs/39701175126)
-passes all 12 jobs, with 539 seconds at the aggregate budget gate and 533 seconds
+steps. [Native Linux qualification](https://github.com/tkersey/kosmos/actions/runs/39720825815)
+passes all 12 jobs, with 565 seconds at the aggregate budget gate and 559 seconds
 in the longest job. Its two source partitions cover all 47 fixtures and 9,570
-observations. The local aggregate command reached its 600-second watchdog after
-completing the foreign-boundary checks. Native/package completion then passed
-58/58 steps and 332/332 tests in 270.16 seconds using the existing compiler cache.
+observations. Native macOS Safe publication, driver and semantic checks pass
+20/20 steps and 146/146 tests in 188.50 seconds. These checks cover the six
+review repairs: observation rollback, inherited guest restrictions, experiment
+restore compatibility, empty recovery roles, validation policy propagation and
+yielded continuation. Fresh serial review convergence remains pending.
 
-Protean's current-tuple custody check passes 18/18 steps and its full retained
-scenario in 426.08 seconds on native Apple silicon with Zig 0.17.0 Safe. The test
-executes both generated productions, independent validation, retained activation,
-all five comparison arms, restart, transfer and cleanup. Three compiler steps
-built, two reused cached outputs, and one C translation ran. The build summary
-reports approximately 3 GiB compiler RSS and 5 GiB test RSS; the complete command
-reports 5,123,850,240 bytes maximum RSS. The
-[Linux qualification](https://github.com/tkersey/protean/actions/runs/39704069650)
-of Protean `1ef675e` with this dependency tuple passes all 19 lanes and the
-aggregate gate in 558 seconds, with a 549-second
-longest job. Confirmed Kosmos review findings still require repair, a dependency
-refresh, affected qualification and Kosmos/Protean review convergence.
-No check on a different dependency tuple discharges those remaining gates.
+Protean's qualification of this updated dependency tuple remains pending.
+The preceding tuple, with Kosmos `d6ad695` and the same Horos commit, passes
+18/18 custody steps and its full retained scenario in 426.08 seconds on native
+Apple silicon with Zig 0.17.0 Safe. That test executes both generated productions,
+independent validation, retained activation, all five comparison arms, restart,
+transfer and cleanup. Three compiler steps built, two reused cached outputs, and
+one C translation ran. The build summary reports approximately 3 GiB compiler
+RSS and 5 GiB test RSS; the complete command reports 5,123,850,240 bytes maximum
+RSS. The preceding [Linux qualification](https://github.com/tkersey/protean/actions/runs/39704069650)
+of Protean `1ef675e` passes all 19 lanes and the aggregate gate in 558 seconds,
+with a 549-second longest job. Those prior results do not discharge qualification
+of the updated dependency tuple. Kosmos and Protean review convergence also
+remain outstanding.
 
 Compiled qualification artifacts bind their complete source, dependency lock,
 toolchain, target, environment and recipe. Every selected test still executes on
@@ -174,12 +176,12 @@ measure; the complete Zig totals below expose that additional source growth.
 | Repository | Changed test files | Added bytes | Deleted bytes |
 |---|---:|---:|---:|
 | Horos | 14 | 122,144 | 213 |
-| Kosmos | 9 | 92,362 | 953 |
+| Kosmos | 10 | 105,826 | 953 |
 | Protean | 20 | 221,852 | 18,412 |
-| Total | 43 | 436,358 | 19,578 |
+| Total | 44 | 449,822 | 19,578 |
 
 Complete changed Zig source adds/deletes 376,845/66,889 bytes in Horos,
-255,404/18,011 in Kosmos, and 516,120/57,890 in Protean. No test modules,
+270,911/18,049 in Kosmos, and 516,120/57,890 in Protean. No test modules,
 directories, executables, CI lanes or checked-in trace banks were added. The
 largest test-file extension is Protean's existing `workspace_runtime.zig`:
 176,665 added and 9,125 deleted bytes. Its two generated productions are reused
@@ -187,17 +189,17 @@ by activation, five-arm measurements, recovery and mobility. Historical
 independent byte fixtures remain unchanged.
 
 The packaged semantic core is 236,038 bytes, SHA-256
-`66b9dabd1f738dfff7412039b6f961f7e683777a3b292b6abf9c722722b7ef4b`.
-Final regeneration changes only the embedded Horos package identity relative to
-the preceding core; executable, recovery and evidence bytes are identical.
+`806378bcba8c8cca9d60ca5bfdb60de1113c13adb8c00c23079db888722e5296`.
+Regeneration binds the repaired Kosmos source and the selected Horos package.
 Generated candidates use `kosmos.semantic-artifact/3` and
 `kosmos.source-relation/1`; historical artifacts retain their existing family.
 
 ## Cost measurements
 
-The Linux result above uses exact cached compilation inputs and executes every
-selected test. The following single native macOS sample uses that same dependency
-tuple and shared witness; it precedes the outstanding Kosmos review repairs.
+The preceding Linux result uses exact cached compilation inputs and executes
+every selected test. The following single native macOS sample uses Horos
+`966970f` and Kosmos `d6ad695` with the shared witness; it precedes the Kosmos
+review repairs now selected in the dependency lock.
 The generated producer executes on 1,302,123 and 1,302,127-byte source inputs,
 returning 1,780,927 and 1,187,281 bytes in 65.931 and 20.085 seconds. Both outputs
 undergo independent validation. Their executions perform 6,774 and 1,020 guest
