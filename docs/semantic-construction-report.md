@@ -170,6 +170,40 @@ samples establish complete downstream execution, not a precise improvement
 attributable to archive reuse; the earlier attempts lacked phase timings.
 The diagnostic-only aggregate gate correctly rejects partial qualification.
 
+Full [native Linux qualification](https://github.com/tkersey/protean/actions/runs/39852884240)
+passes on `f6d3e7c`: all 19 lanes and the final identity/time gate succeed in
+550 seconds, with a 542-second longest job. Matching compiled artifacts are
+verified and reused; every selected test executes. Native, runtime and independent
+downstream identities agree. The native executable is 18,345,496 bytes, SHA-256
+`5961469de3e43e0d85b21a2546f4f73fec2dc5c0b8c12542fffe46d591251d7b`.
+Deployment checks retain execution tracing and private user, mount and PID
+namespaces. Downstream native admission takes 10.386 seconds, its independent
+build 391.707 seconds and its installed demo 84.220 seconds, illustrating the
+variation from the preceding diagnostic. Subsequent report-only edits preserve
+the qualified native source, test, dependency and build-recipe inputs.
+
+| Linux lane | Job seconds | Selected-check seconds |
+|---|---:|---:|
+| Authoring | 208 | 29 |
+| Owners | 494 | 454 |
+| Owner adaptive | 237 | 179 |
+| Owner adaptive control | 183 | 130 |
+| Owner support | 440 | 378 |
+| Workspace | 154 | 104 |
+| Workspace retention | 210 | 166 |
+| Workspace history | 143 | 96 |
+| Workspace runtime | 349 | 293 |
+| Workspace custody | 516 | 467 |
+| Workspace succession | 406 | 359 |
+| Correspondence | 320 | 254 |
+| Native | 198 | 126 |
+| Native workspace | 234 | 166 |
+| Native placement | 71 | 3 |
+| Runtime | 190 | 122 |
+| Runtime outer mobility | 448 | 380 |
+| Runtime guest mobility | 418 | 351 |
+| Downstream | 542 | 495 |
+
 The earlier [Linux qualification](https://github.com/tkersey/protean/actions/runs/39722835930)
 of Protean `00ac21f` with Kosmos `508d76b` did not pass. Ten lanes completed successfully; nine hit the
 ten-minute watchdog, and the final gate failed. Input-keyed caches were restored,
@@ -181,11 +215,11 @@ passing product run. No forced cache flush or separate cold/warm run was used.
 
 The preceding [Linux result](https://github.com/tkersey/protean/actions/runs/39704069650)
 of Protean `1ef675e` with Kosmos `d6ad695` passed all 19 lanes and the aggregate
-gate in 558 seconds, with a 549-second longest job. It does not discharge the
-current failed qualification. The current Kosmos fixes and exact dependency pin
-are integrated. Native Linux product qualification on this new tuple and
-Kosmos/Protean reviews remain outstanding. The earlier Linux results do not
-qualify the new tuple.
+gate in 558 seconds, with a 549-second longest job. That earlier pass does not
+qualify the later source changes. The current Kosmos fixes and exact dependency
+pin are integrated and qualified by the completed `f6d3e7c` run above.
+Kosmos/Protean reviews remain outstanding; the earlier Linux results do not
+qualify the new tuple independently.
 
 An isolated native-backend [custody probe](https://github.com/tkersey/protean/actions/runs/39724478116)
 on the earlier `00ac21f` source workload shortened its build stage to 77 seconds, but execution
@@ -229,7 +263,7 @@ applies to this entire mapping.
 | AC-12 | Existing controller/runtime intersection: current root epochs govern targeting and unrelated succession preserves existing work lineage. |
 | AC-13 | Protean custody/placement: validated dependencies travel through one existing peer path; trust, disclosure and unsupported guard modes reject. |
 | AC-14 | Existing Store and workspace replay/import tests: duplicate and stale operations cannot create execution ownership or checker authority. |
-| AC-15 | Existing native workflows, package consumers and this report: unchanged assertions, 600-second job/aggregate ceilings and disclosed costs. Current local measurements are below; native Linux qualification remains pending. |
+| AC-15 | Existing native workflows, package consumers and this report: unchanged assertions, 600-second job/aggregate ceilings and disclosed costs. Native Linux qualification passes all 19 lanes and the aggregate gate in 550 seconds. |
 | AC-16 | Existing native operation and evaluation runner: ordinary tools remain available, comparison preflight is runnable and paid inference is excluded. |
 
 ## Footprint
