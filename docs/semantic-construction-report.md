@@ -158,6 +158,18 @@ stderr; source export, independent consumer build, executable isolation, both
 identity-tamper checks and the offline demo remain selected. The existing lane
 can be selected for diagnosis; all 19 lanes and the aggregate gate remain required.
 
+The subsequent [downstream diagnostic](https://github.com/tkersey/protean/actions/runs/39851673156)
+on `e042052` passes its lane in 430 seconds, with 374.824 seconds inside the
+fixture. The shared archive cache hits; fresh native admission takes 19.426
+seconds, independent consumer compilation 295.435 seconds, both tamper failures
+2.497 seconds, and the installed demo 54.360 seconds. Native macOS execution
+passes the same fixture in 404.884 seconds, including a 310.812-second build and
+33.239-second demo. Each platform executes one native admission command, one
+package fetch, the successful build and two rejected builds. These single
+samples establish complete downstream execution, not a precise improvement
+attributable to archive reuse; the earlier attempts lacked phase timings.
+The diagnostic-only aggregate gate correctly rejects partial qualification.
+
 The earlier [Linux qualification](https://github.com/tkersey/protean/actions/runs/39722835930)
 of Protean `00ac21f` with Kosmos `508d76b` did not pass. Ten lanes completed successfully; nine hit the
 ten-minute watchdog, and the final gate failed. Input-keyed caches were restored,
@@ -231,8 +243,8 @@ measure; the complete Zig totals below expose that additional source growth.
 |---|---:|---:|---:|
 | Horos | 14 | 122,144 | 213 |
 | Kosmos | 11 | 119,417 | 1,104 |
-| Protean | 20 | 221,852 | 18,412 |
-| Total | 45 | 463,413 | 19,729 |
+| Protean | 20 | 222,236 | 18,462 |
+| Total | 45 | 463,797 | 19,779 |
 
 Complete changed Zig source adds/deletes 376,845/66,889 bytes in Horos,
 289,006/19,518 in Kosmos, and 516,120/57,890 in Protean. No test modules,
