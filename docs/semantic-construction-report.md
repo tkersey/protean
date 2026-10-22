@@ -93,7 +93,7 @@ remain unmeasured.
 
 The currently selected dependency tuple uses Horos
 `966970f81e4df3889a1cd4ef1f276fa109557a4b` and Kosmos
-`508d76b7fb4925d1073cef37067c678eff2dbc6b`. Their published GitHub archives were
+`98f9347df8ac465304e0d642a89bacdf742e3cc3`. Their published GitHub archives were
 independently downloaded and matched against the complete committed source
 inventories. Native dependency setup authenticates those same inputs.
 The Protean implementation is based on accepted controller reconstruction
@@ -107,19 +107,19 @@ Native macOS Safe `check check-package` passes 264/264 steps and 988/988 tests i
 These reviews cover the finite implementation; they do not prove arbitrary
 program equivalence.
 
-Kosmos's exact-head committed TigerStyle passes 38 changed files, 6,758 changed
-lines and 24 auditor self-tests. Independent source regeneration passes 7/7
-steps. [Native Linux qualification](https://github.com/tkersey/kosmos/actions/runs/39720825815)
-passes all 12 jobs, with 565 seconds at the aggregate budget gate and 559 seconds
-in the longest job. Its two source partitions cover all 47 fixtures and 9,570
-observations. Native macOS Safe publication, driver and semantic checks pass
-20/20 steps and 146/146 tests in 188.50 seconds. These checks cover the six
-review repairs: observation rollback, inherited guest restrictions, experiment
-restore compatibility, empty recovery roles, validation policy propagation and
-yielded continuation. The first fresh standard review confirmed a separate
-compatibility regression: the existing `hypotheticalReply` helper consumes an
-assumed response after its guest budget is exhausted. The remaining frozen
-initial review wave precedes repair and another qualification/review cycle.
+Kosmos's committed TigerStyle passes 39 changed files, 7,193 changed lines
+and 24 auditor self-tests. [Native Linux qualification](https://github.com/tkersey/kosmos/actions/runs/39837447080)
+passes all 12 jobs, with 520 seconds at the aggregate budget gate and 513 seconds
+in the longest job. The run includes all 193 native tests, 59 specialization and
+publication tests, 88 session tests, all 47 source fixtures and 9,570 observations,
+real Chromium/Firefox execution, and the extracted-package consumer. Native
+macOS Safe qualification passes all 338 tests in 336.05 seconds on the identical
+native inputs of predecessor `b2ba1ee`; `98f9347` changes only Ubuntu archive
+selection in CI. The integration includes the legacy hypothetical-reply budget
+repair, immutable blob-interner hashes, admitted constant-reference indexing,
+and typed replies derived from the retained service projection without invoking
+candidate recovery helpers outside the bounded pump. Kosmos review convergence
+remains incomplete.
 
 Protean `00ac21f` passes native macOS Safe custody qualification: 18/18 build
 steps and the complete retained scenario in 326.77 seconds. Both generated
@@ -140,8 +140,10 @@ passing product run. No forced cache flush or separate cold/warm run was used.
 The preceding [Linux result](https://github.com/tkersey/protean/actions/runs/39704069650)
 of Protean `1ef675e` with Kosmos `d6ad695` passed all 19 lanes and the aggregate
 gate in 558 seconds, with a 549-second longest job. It does not discharge the
-current failed qualification. The new Kosmos compatibility repair, final pins,
-affected product qualification and Kosmos/Protean reviews remain outstanding.
+current failed qualification. The current Kosmos fixes and exact dependency pin
+are integrated. Product qualification on this new tuple, final measurements and
+Kosmos/Protean reviews remain outstanding. The earlier results do not qualify the
+new tuple.
 
 An isolated native-backend [custody probe](https://github.com/tkersey/protean/actions/runs/39724478116)
 on the same source workload shortened its build stage to 77 seconds, but execution
