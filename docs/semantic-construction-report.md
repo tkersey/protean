@@ -143,8 +143,19 @@ gate in 558 seconds, with a 549-second longest job. It does not discharge the
 current failed qualification. The new Kosmos compatibility repair, final pins,
 affected product qualification and Kosmos/Protean reviews remain outstanding.
 
+An isolated native-backend [custody probe](https://github.com/tkersey/protean/actions/runs/39724478116)
+on the same source workload shortened its build stage to 77 seconds, but execution
+remained incomplete after 489 seconds and the job timed out. The probe kept Safe
+mode, all assertions, both generated productions and the existing lane. It is
+rejected as a qualification fix; the delivered build retains LLVM. Different
+restored compiler-cache contents limit attribution of the build-stage difference.
+
 Compiled qualification artifacts bind their complete source, dependency lock,
-toolchain, target, environment and recipe. Every selected test still executes on
+toolchain, effective target, environment and recipe. Linux x86-64 artifacts use
+the build graph's explicit baseline CPU; native macOS artifacts additionally bind
+Zig's reported native CPU model/features. A controlled native CPU-identity change
+collided under the previous macOS key and invalidates the corrected key; repeated
+identical inputs remain stable. Every selected test still executes on
 a cache hit. Qualification uses one cache policy: restore matching artifacts and
 rebuild missing or invalid entries. There are no separate cold/warm runs or
 manual cache-disable switch. This report is outside the recognized source/import
