@@ -130,6 +130,22 @@ summary reports 3 GiB compiler RSS and 5 GiB test RSS; the command reports
 5,604,671,488 bytes maximum RSS. This single sample does not establish a
 performance or memory improvement.
 
+The [native Linux custody diagnostic](https://github.com/tkersey/protean/actions/runs/39845815902)
+on Protean `fb17d1e` passes the complete scenario in 487 seconds and finishes its
+job in 541 seconds. The exact compiled artifact was restored and verified;
+both generated transformations, the five comparison arms, restart, transfer and
+cleanup execute. The workflow's final gate deliberately rejects a diagnostic-only
+run, so this is lane evidence rather than complete product qualification.
+The [preceding attempt](https://github.com/tkersey/protean/actions/runs/39843396995)
+rebuilt missing compilation inputs in 266 seconds, then reached the ten-minute
+watchdog after 296 seconds of unfinished execution. That interrupted attempt
+earns no passing credit. The retry used the same source and normal cache policy.
+Generated execution took 172.137 and 49.083 seconds in the completed run, compared
+with 131.371 and 38.680 seconds before the interruption in the earlier run;
+runner variation remains material. The `native_publication_nanoseconds` counter
+covers evaluator execution and checkpoint preparation before the Store commit,
+not database publication alone.
+
 The earlier [Linux qualification](https://github.com/tkersey/protean/actions/runs/39722835930)
 of Protean `00ac21f` with Kosmos `508d76b` did not pass. Ten lanes completed successfully; nine hit the
 ten-minute watchdog, and the final gate failed. Input-keyed caches were restored,
