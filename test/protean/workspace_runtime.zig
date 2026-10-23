@@ -4126,13 +4126,16 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
                 result = resolved.value.report;
                 try std.testing.expectEqual(.observed, result.value.reply.disposition);
             }
-            snapshot_namespace = try native.Namespace.open(a, io, successor_path);
-            defer snapshot_namespace.close() catch unreachable;
-            snapshot_receiver = try native.tasks.Service(OwnerTypes).init(a, io, &snapshot_namespace, assets, &application, handlers, snapshot_profile);
-            defer snapshot_receiver.close(a) catch unreachable;
-            try snapshot_receiver.placementFollowExecutor(scratch, subject.task, p.controlId(signed_control.value), route[0]);
-            try snapshot_receiver.placementApplyReport(scratch, subject.task, p.controlId(signed_control.value), result);
-            try std.testing.expectEqualDeep(destination_site, (try snapshot_receiver.placementStatus(scratch, subject)).?.owner);
+            {
+                snapshot_namespace = try native.Namespace.open(a, io, successor_path);
+                defer snapshot_namespace.close() catch unreachable;
+                snapshot_receiver = try native.tasks.Service(OwnerTypes).init(a, io, &snapshot_namespace, assets, &application, handlers, snapshot_profile);
+                defer snapshot_receiver.close(a) catch unreachable;
+                try snapshot_receiver.placementFollowExecutor(scratch, subject.task, p.controlId(signed_control.value), route[0]);
+                try snapshot_receiver.placementApplyReport(scratch, subject.task, p.controlId(signed_control.value), result);
+                try std.testing.expectEqualDeep(destination_site, (try snapshot_receiver.placementStatus(scratch, subject)).?.owner);
+            }
+            phase = "cancel executor-local observer";
             source_namespace = try native.Namespace.open(a, io, source_path);
             source_open = true;
             sender = try native.tasks.Service(OwnerTypes).init(a, io, &source_namespace, assets, &application, handlers, source_profile);

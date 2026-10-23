@@ -29,6 +29,10 @@ Committed macOS Safe runtime selection passes all four tests and 18 build steps
 in 288.42 seconds, with maximum RSS of 5,101,928,448 bytes. Custody passes its
 complete generated/reuse/five-arm/restart/transfer/cleanup scenario and all 18
 build steps in 364.39 seconds, with maximum RSS of 6,098,845,696 bytes. The existing
+workspace-execution and native owner-support roots pass together: 98 tests and
+25 build steps in 237.07 seconds, with maximum RSS of 3,341,418,496 bytes. They
+include 20 process crashes, 40 reopen checks, and no original-effect reinvocation
+or automatic recovery lookup. The
 witnesses include historical receipt replay, failed observer preparation,
 four source/runtime/diagnostic mutations, explicit parking across reopen,
 derived-runtime inspection, compiler timing and local executor cancellation.
@@ -520,14 +524,14 @@ measure; the complete Zig totals below expose that additional source growth.
 |---|---:|---:|---:|
 | Horos | 14 | 122,144 | 213 |
 | Kosmos | 11 | 136,871 | 1,104 |
-| Protean | 21 | 291,281 | 54,275 |
-| Total | 46 | 550,296 | 55,592 |
+| Protean | 21 | 292,134 | 55,018 |
+| Total | 46 | 551,149 | 56,335 |
 
 Complete changed Zig source adds/deletes 376,845/66,889 bytes in Horos,
-318,590/20,796 in Kosmos, and 598,186/93,773 in Protean. No test modules,
+318,590/20,796 in Kosmos, and 599,039/94,516 in Protean. No test modules,
 directories, executables, CI lanes or checked-in trace banks were added. The
 largest test-file extension is Protean's existing `workspace_runtime.zig`:
-204,408 added and 9,125 deleted bytes. Its two generated productions are reused
+205,261 added and 9,868 deleted bytes. Its two generated productions are reused
 by activation, five-arm measurements, recovery and mobility. Historical
 independent byte fixtures remain unchanged.
 
