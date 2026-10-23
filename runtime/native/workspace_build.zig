@@ -180,7 +180,7 @@ fn runValidate(ctx: registry.Context, input: ValidateInput) ![]u8 {
             error.OutOfMemory => .{ .resource_exhausted, @errorName(err) },
             error.Canceled => .{ .interrupted, @errorName(err) },
             error.UnsupportedRelation => .{ .unsupported_relation, @errorName(err) },
-            error.RelationLimit, error.WorkLimit => .{ .resource_exhausted, @errorName(err) },
+            error.Capacity, error.RelationLimit, error.WorkLimit, error.SpecializationLimit => .{ .resource_exhausted, @errorName(err) },
             error.ArtifactUnavailable => .{ .unavailable_dependency, @errorName(err) },
             else => .{ .rejected, @errorName(err) },
         };

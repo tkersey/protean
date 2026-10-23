@@ -57,4 +57,5 @@ pub const testing = if (@import("builtin").is_test) struct {
     pub const state = @import("state.zig");
     pub const occurrence = @import("occurrence.zig");
     pub const Worker = @import("worker.zig").Worker;
+    pub const workspace_build = @import("workspace_build.zig");
 } else struct {};

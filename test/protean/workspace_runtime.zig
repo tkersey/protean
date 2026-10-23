@@ -1433,6 +1433,63 @@ fn semanticArtifact(
     return kosmos.RuntimeArtifact.init(a, bytes, id);
 }
 
+fn expectValidationResourceOutcome(
+    a: std.mem.Allocator,
+    service: anytype,
+    task: native.testing.state.TaskId,
+    generated: GeneratedRuntime,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    var candidate = try service.workspaceCandidate(scratch, task, try nativeIdentity(generated.candidate));
+    defer candidate.deinit();
+    const ancestor = try service.namespace.store.object(scratch, candidate.value.description.ancestor, null);
+    var artifact = try semanticArtifact(scratch, service, task, .{ .runtime = generated.runtime });
+    defer artifact.deinit();
+    const count = (kosmos.RuntimeCompiler.ValidationPolicy{}).work / @sizeOf(u64) + 1;
+    const evidence = try scratch.alloc(u8, @intCast(count + 32));
+    @memset(evidence, 0);
+    var writer: data.wire.Writer = .{ .output = evidence };
+    try writer.bytes(&.{});
+    try writer.bytes(&.{});
+    try writer.natural(0);
+    try writer.natural(count);
+    var bundle = artifact.content.value;
+    bundle.evidence = evidence;
+    const bytes = try contracts.encodeOwned(@TypeOf(bundle), scratch, bundle);
+    var description = candidate.value.description;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &description.code.digest, .{});
+    description.code.bytes = bytes.len;
+    const descriptor = try contracts.encodeOwned(native.workspace.CandidateArtifact, scratch, description);
+    var reference: native.testing.state.Reference = .{ .digest = undefined, .bytes = descriptor.len };
+    std.crypto.hash.sha2.Sha256.hash(descriptor, &reference.digest, .{});
+    const build = native.testing.workspace_build;
+    const input = try contracts.encodeOwned(build.Input, scratch, .{ .validate = .{
+        .ancestor = .{ .bytes = ancestor },
+        .candidate = .{ .bytes = bytes },
+        .candidate_ref = reference,
+        .program = candidate.value.program,
+        .guest = description.guest,
+        .root = description.root,
+        .checker = description.checker,
+    } });
+    const task_name = std.fmt.bytesToHex(task, .lower);
+    const output = try build.run(.{
+        .allocator = scratch,
+        .io = service.io,
+        .authority = &service.profile.authority,
+        .task_id = &task_name,
+        .profile = service.profile.bytes,
+        .environment = null,
+    }, input);
+    var result = try contracts.decodeOwned(build.Output, scratch, output);
+    defer result.deinit();
+    try std.testing.expect(result.value == .validation);
+    try std.testing.expectEqualStrings("Capacity", result.value.validation.code.bytes);
+    try std.testing.expectEqual(.resource_exhausted, result.value.validation.outcome);
+}
+
 fn helperCorrespondence(
     a: std.mem.Allocator,
     service: anytype,
@@ -2276,6 +2333,7 @@ fn exerciseGenerated(
     try std.testing.expect(before.value.runtime == null);
     const ancestor = try semanticWork(a, before.value);
     const generated = try generatedRuntime(a, service, task, program, ancestor, "generated", input);
+    try expectValidationResourceOutcome(a, service, task, generated);
     try exerciseWrongCandidate(a, service, task, program, input, ancestor, generated.result);
     const reused = try generatedFromProducer(
         a,
