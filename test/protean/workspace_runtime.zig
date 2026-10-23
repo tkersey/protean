@@ -541,16 +541,19 @@ fn exerciseDivergentGuard(
     var divergent = try service.workspaceWork(a, task, id);
     defer divergent.deinit();
     {
-        const inspected = try service.workspaceCommand(a, "divergent-inspect", task, .{
-            .work = .{ .inspect = .{ .work = try workspaceRef(a, .work, id) } },
+        var request = std.heap.ArenaAllocator.init(service.allocator);
+        defer request.deinit();
+        const frame = request.allocator();
+        const inspected = try service.workspaceCommand(frame, "divergent-inspect", task, .{
+            .work = .{ .inspect = .{ .work = try workspaceRef(frame, .work, id) } },
         });
         try std.testing.expectEqual(.observed, inspected.disposition);
-        var observation = try native.json.parse(a, inspected.observation_json.bytes, .{});
+        var observation = try native.json.parse(frame, inspected.observation_json.bytes, .{});
         defer observation.deinit();
         const guard = observation.value.object.get("guard") orelse return error.MissingGuardObservation;
-        const inspected_guard = try native.values.fromJson(native.workspace.Guard, a, guard);
+        const inspected_guard = try native.values.fromJson(native.workspace.Guard, frame, guard);
         try std.testing.expectEqualDeep(divergent.value.guard.?, inspected_guard);
-        try service.validateWorkspace(a, task);
+        try service.validateWorkspace(frame, task);
     }
     try std.testing.expect(divergent.value.guard.?.initialized);
     try std.testing.expectEqualDeep(before.value.checkpoint, divergent.value.checkpoint);
