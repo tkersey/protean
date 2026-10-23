@@ -1501,7 +1501,7 @@ fn semanticBasisShapeWitness(a: std.mem.Allocator, service: anytype, task: [16]u
         forged.description.provenance = try service.namespace.store.putObject(try contracts.encodeOwned(native.workspace.Derivation, a, forged.derivation));
         forged.artifact = try service.namespace.store.putObject(try contracts.encodeOwned(native.workspace.ValueArtifact, a, forged.description));
         forged.id = try native.workspace.custodyId(a, task, forged.artifact.digest);
-        try service.namespace.store.putRecord(native.workspace.Value, "workspace_value", forged.id, task, forged);
+        try service.namespace.store.createRecord(native.workspace.Value, "workspace_value", forged.id, task, forged);
         const body = try service.namespace.store.putObject(try contracts.encodeOwned(native.workspace.Value, a, forged));
         records[0] = .{ .kind = .workspace_value, .id = forged.id, .body = body };
         try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, task, records, &facts));
