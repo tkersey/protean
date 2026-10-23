@@ -93,7 +93,7 @@ remain unmeasured.
 
 The currently selected dependency tuple uses Horos
 `966970f81e4df3889a1cd4ef1f276fa109557a4b` and Kosmos
-`98f9347df8ac465304e0d642a89bacdf742e3cc3`. Their published GitHub archives were
+`77546130c27e73e829b5ce511cfd26c732db0702`. Their published GitHub archives were
 independently downloaded and matched against the complete committed source
 inventories. Native dependency setup authenticates those same inputs.
 The Protean implementation is based on accepted controller reconstruction
@@ -107,19 +107,18 @@ Native macOS Safe `check check-package` passes 264/264 steps and 988/988 tests i
 These reviews cover the finite implementation; they do not prove arbitrary
 program equivalence.
 
-Kosmos's committed TigerStyle passes 39 changed files, 7,193 changed lines
-and 24 auditor self-tests. [Native Linux qualification](https://github.com/tkersey/kosmos/actions/runs/39837447080)
-passes all 12 jobs, with 520 seconds at the aggregate budget gate and 513 seconds
-in the longest job. The run includes all 193 native tests, 59 specialization and
-publication tests, 88 session tests, all 47 source fixtures and 9,570 observations,
-real Chromium/Firefox execution, and the extracted-package consumer. Native
-macOS Safe qualification passes all 338 tests in 336.05 seconds on the identical
-native inputs of predecessor `b2ba1ee`; `98f9347` changes only Ubuntu archive
-selection in CI. The integration includes the legacy hypothetical-reply budget
-repair, immutable blob-interner hashes, admitted constant-reference indexing,
-and typed replies derived from the retained service projection without invoking
-candidate recovery helpers outside the bounded pump. Kosmos review convergence
-remains incomplete.
+Kosmos `7754613` repairs retained projection-cache admission: every stored
+range must agree with the uncached projection of its keyed source, schema and
+index before restoration can acquire custody. Native macOS Safe qualification
+passes all 340 tests and the Zig 0.17 compatibility check in 368.92 seconds.
+Committed TigerStyle passes 40 changed files, 7,742 changed lines and 24 auditor
+self-tests. The new capsule regression rejects shifted product and sequence
+ranges, preserves exact unfinished lawful execution, and fails against the
+preceding runtime. [Native Linux qualification](https://github.com/tkersey/kosmos/actions/runs/39886638962)
+and fresh review convergence remain pending.
+
+Protean qualification against the new Kosmos pin remains pending. The results
+below retain their original dependency tuple and do not qualify this changed input.
 
 Protean `49093e8` passes native macOS Safe custody qualification: 18/18 build
 steps and the complete retained scenario in 329.51 seconds. Both generated
@@ -288,8 +287,8 @@ largest test-file extension is Protean's existing `workspace_runtime.zig`:
 by activation, five-arm measurements, recovery and mobility. Historical
 independent byte fixtures remain unchanged.
 
-The packaged semantic core is 236,038 bytes, SHA-256
-`806378bcba8c8cca9d60ca5bfdb60de1113c13adb8c00c23079db888722e5296`.
+The packaged semantic core is 264,134 bytes, SHA-256
+`5a92dbf978ddec5a7ec3eaa2fdab51acb719e4f85ad450df6cf0213cb9c96201`.
 Regeneration binds the repaired Kosmos source and the selected Horos package.
 Generated candidates use `kosmos.semantic-artifact/3` and
 `kosmos.source-relation/1`; historical artifacts retain their existing family.
