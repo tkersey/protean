@@ -5086,10 +5086,13 @@ fn observerFoldWitness(
         error.ObservationBlocked,
         advanceObservedSource(service, a, advanced.value, "observed-source-blocked"),
     );
-    const inspect: contracts.workspace.Command = .{ .work = .{ .inspect = .{
+    const advance: contracts.workspace.Command = .{ .work = .{ .advance = .{
         .work = selection.source.expected.work,
+        .execution_revision = source_work.execution_revision,
+        .control_revision = source_work.control_revision,
     } } };
-    const blocked = try service.workspaceCommand(a, "observer-blocked-history", task, inspect);
+    const blocked = try service.workspaceCommand(a, "observed-source-step", task, advance);
+    try std.testing.expectEqual(.observed, blocked.disposition);
     selection.source.expected.execution_revision = advanced.value.execution_revision;
     selection.source.expected.control_revision = advanced.value.control_revision;
     selection.previous = try workspaceRef(a, .work, first.receipt.workspace.?);
@@ -5105,7 +5108,7 @@ fn observerFoldWitness(
         folded.value.observer.?.consumed_revision.?,
     );
     try std.testing.expectEqual(null, folded.value.observer.?.gap_first);
-    const replay = try service.workspaceCommand(a, "observer-blocked-history", task, inspect);
+    const replay = try service.workspaceCommand(a, "observed-source-step", task, advance);
     try std.testing.expectEqualStrings(blocked.observation_json.bytes, replay.observation_json.bytes);
     try observerFoldValue(service, a, folded.value, source_work.execution_revision +
         advanced.value.execution_revision);
