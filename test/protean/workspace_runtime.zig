@@ -1205,34 +1205,46 @@ fn runTransformer(
     label: []const u8,
     expected_layout: bool,
 ) !struct { work: contracts.workspace.Ref, result: contracts.workspace.Ref } {
-    const materialized = try service.workspaceCommand(
-        a,
-        try std.fmt.allocPrint(a, "{s}-semantic-source", .{label}),
-        task,
-        .{ .context = .{ .materialize = .{
-            .input = .{ .semantic_source = .{
-                .subject = ancestor,
-                .module = .{ .selected = .{} },
-                .references = true,
-            } },
-            .sources = .{ .items = &.{} },
-        } } },
-    );
-    const input = try semanticReference(a, materialized, "value");
-    if (expected_layout) try semanticContextWitness(a, service, task, input, label);
+    const input = materialize: {
+        var request = std.heap.ArenaAllocator.init(service.allocator);
+        defer request.deinit();
+        const scratch = request.allocator();
+        const materialized = try service.workspaceCommand(
+            scratch,
+            try std.fmt.allocPrint(scratch, "{s}-semantic-source", .{label}),
+            task,
+            .{ .context = .{ .materialize = .{
+                .input = .{ .semantic_source = .{
+                    .subject = ancestor,
+                    .module = .{ .selected = .{} },
+                    .references = true,
+                } },
+                .sources = .{ .items = &.{} },
+            } } },
+        );
+        const reference = try semanticReference(scratch, materialized, "value");
+        if (expected_layout) try semanticContextWitness(scratch, service, task, reference, label);
+        break :materialize try workspaceRef(a, reference.kind, try nativeIdentity(reference));
+    };
     const started_ms = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
-    const started = try service.workspaceCommand(
-        a,
-        try std.fmt.allocPrint(a, "{s}-transform-start", .{label}),
-        task,
-        .{ .work = .{ .start = .{
-            .program = program,
-            .input = .{ .reference = input },
-            .runtime = .{ .packaged = .{} },
-            .policy = .{ .stop = .terminal },
-        } } },
-    );
-    const work = try semanticReference(a, started, "work");
+    const work = start: {
+        var request = std.heap.ArenaAllocator.init(service.allocator);
+        defer request.deinit();
+        const scratch = request.allocator();
+        const started = try service.workspaceCommand(
+            scratch,
+            try std.fmt.allocPrint(scratch, "{s}-transform-start", .{label}),
+            task,
+            .{ .work = .{ .start = .{
+                .program = program,
+                .input = .{ .reference = input },
+                .runtime = .{ .packaged = .{} },
+                .policy = .{ .stop = .terminal },
+            } } },
+        );
+        const reference = try semanticReference(scratch, started, "work");
+        break :start try workspaceRef(a, reference.kind, try nativeIdentity(reference));
+    };
     return .{ .work = work, .result = try finishTransformer(a, service, task, work, label, started_ms, expected_layout) };
 }
 

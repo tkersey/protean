@@ -215,7 +215,7 @@ jobs:
           set -o pipefail
           run_compiled_tests() {
             local log="$RUNNER_TEMP/$1-tests.log"
-            "$RUNNER_TEMP/protean-qualification/verification/$1" 2>&1 | tee "$log"
+            /usr/bin/time -v "$RUNNER_TEMP/protean-qualification/verification/$1" 2>&1 | tee "$log"
             grep -Fxq "All $2 tests passed." "$log"
           }
           if [ "${{ matrix.lane }}" = authoring ]; then
@@ -238,6 +238,7 @@ jobs:
           elif [ "${{ matrix.lane }}" = workspace-runtime ]; then
             run_compiled_tests workspace-runtime 4
           elif [ "${{ matrix.lane }}" = workspace-custody ]; then
+            node -e 'const os = require("node:os"); console.log(JSON.stringify({cpus: os.cpus().length, model: os.cpus()[0].model, memory_bytes: os.totalmem()}))'
             run_compiled_tests workspace-runtime 1
           elif [ "${{ matrix.lane }}" = workspace-succession ]; then
             run_compiled_tests workspace-runtime 8
