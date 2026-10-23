@@ -118,6 +118,9 @@ const Audit = struct {
             pub fn reply(this: *@This(), acquired: occurrence.Acquired) !void {
                 try this.add(try this.audit.store.objectReference(acquired.reply, null));
             }
+            pub fn observerSource(this: *@This(), ref: state.Reference) !void {
+                try state.visitObserverSource(this.audit.a, this.audit.store, ref, this.audit);
+            }
         }{ .audit = self, .parent = parent };
         try state.visitReferences(T, input, &sink);
     }

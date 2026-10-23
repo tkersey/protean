@@ -308,6 +308,9 @@ pub const Store = struct {
             pub fn reply(_: *@This(), _: occurrence.Acquired) !void {
                 @compileError("context dependencies cannot contain host occurrence replies");
             }
+            pub fn observerSource(_: *@This(), _: state.Reference) !void {
+                @compileError("context dependencies cannot contain host observer evidence");
+            }
         }{ .store = self, .parent = parent };
         try state.visitReferencesAs(T, Ref, value, &sink);
     }
@@ -591,6 +594,12 @@ pub const Store = struct {
             }
             pub fn reply(this: *@This(), acquired: occurrence.Acquired) !void {
                 try this.add(try this.store.objectReference(acquired.reply, null));
+            }
+            pub fn observerSource(this: *@This(), ref: state.Reference) !void {
+                try state.visitObserverSource(this.store.allocator, this.store, ref, this);
+            }
+            pub fn typed(this: *@This(), comptime V: type, ref: state.Reference, item: V) !void {
+                try this.store.retainValueDirect(V, ref, item);
             }
         }{ .store = self, .parent = parent };
         try state.visitReferences(T, value, &sink);

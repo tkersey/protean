@@ -276,6 +276,9 @@ const Collector = struct {
     pub fn reply(self: *Collector, value: occurrence.Acquired) !void {
         try self.add(try self.store.objectReference(value.reply, null));
     }
+    pub fn observerSource(self: *Collector, ref: state.Reference) !void {
+        try state.visitObserverSource(self.allocator, self.store, ref, self);
+    }
 };
 
 pub const Inspected = struct { task: contracts.Decoded(state.Task), objects: []state.Reference, current: ?occurrence.Occurrence };

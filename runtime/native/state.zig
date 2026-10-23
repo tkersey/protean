@@ -20,6 +20,8 @@ pub fn visitReferences(comptime T: type, value: T, collector: anytype) anyerror!
 pub fn visitReferencesAs(comptime T: type, comptime Ref: type, value: T, collector: anytype) anyerror!void {
     if (T == Ref) return collector.add(.{ .digest = value.digest, .bytes = value.bytes });
     if (T == occurrence.Acquired) try collector.reply(value);
+    if (T == @import("workspace_state.zig").Observer.Incomplete)
+        try collector.observerSource(value.source);
     switch (@typeInfo(T)) {
         .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| try visitReferencesAs(Field, Ref, @field(value, name), collector),
         .optional => |info| if (value) |child| try visitReferencesAs(info.child, Ref, child, collector),
@@ -34,6 +36,15 @@ pub fn visitReferencesAs(comptime T: type, comptime Ref: type, value: T, collect
         },
         else => {},
     }
+}
+
+pub fn visitObserverSource(a: std.mem.Allocator, store: anytype, ref: Reference, collector: anytype) anyerror!void {
+    const bytes = try store.object(a, ref, null);
+    defer a.free(bytes);
+    const T = @import("workspace_state.zig").WorkObservation;
+    var decoded = try contracts.decodeOwned(T, a, bytes);
+    defer decoded.deinit();
+    try collector.typed(T, ref, decoded.value);
 }
 pub const Outcome = enum { progressed, yielded, requested, completed, failed, cancelled };
 pub const Schedule = enum { queued, active, parked };

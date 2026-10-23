@@ -200,6 +200,7 @@ pub const Observer = struct {
     pub const Incomplete = struct {
         publication: u64,
         revision: u64,
+        source: state.Reference,
         runtime_code: state.Reference,
         diagnostic: enum { invalid_disclosure, outer_cut_unavailable },
     };

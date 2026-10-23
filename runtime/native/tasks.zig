@@ -13490,12 +13490,22 @@ pub fn Service(comptime Types: type) type {
             defer prepared.deinit();
             const code = try prepared.runtime.encode(a);
             defer a.free(code);
+            var pending: ?contracts.Decoded(occurrence.Occurrence) = null;
+            defer if (pending) |*value| value.deinit();
+            if (source.current_occurrence) |id|
+                pending = try self.record(occurrence.Occurrence, a, "occurrence", id, source.task);
+            const snapshot = try contracts.encodeOwned(workspace.WorkObservation, a, .{
+                .work = source,
+                .occurrence = if (pending) |value| value.value else null,
+            });
+            defer a.free(snapshot);
             try self.store().begin();
             defer self.store().rollback();
             var value = work;
             value.observer.?.incomplete = .{
                 .publication = source.event_watermark,
                 .revision = revision,
+                .source = try self.store().putObject(snapshot),
                 .runtime_code = try self.store().putObject(code),
                 .diagnostic = diagnostic,
             };
@@ -13529,28 +13539,17 @@ pub fn Service(comptime Types: type) type {
                     observer.source_work,
                     watermark -| 1,
                 )) return error.InvalidArchive;
-            const before_bytes = try self.store().object(
+            var expected = before;
+            expected.observer.?.incomplete = incomplete;
+            expected.observation = item.observation;
+            if (!try samePublication(a, expected, item)) return error.InvalidArchive;
+            try self.validateObserverIncompleteAt(
                 a,
-                try self.store().objectReference(before.observation, null),
-                null,
+                task_id,
+                item.control.outcome,
+                watermark,
+                observer,
             );
-            defer a.free(before_bytes);
-            const after_bytes = try self.store().object(
-                a,
-                try self.store().objectReference(item.observation, null),
-                null,
-            );
-            defer a.free(after_bytes);
-            var expected = try contracts.decodeOwned(workspace.WorkObservation, a, before_bytes);
-            defer expected.deinit();
-            var actual = try contracts.decodeOwned(workspace.WorkObservation, a, after_bytes);
-            defer actual.deinit();
-            expected.value.work.event_watermark = watermark;
-            expected.value.work.observer.?.incomplete = incomplete;
-            const encoded = try contracts.encodeOwned(workspace.WorkObservation, a, expected.value);
-            defer a.free(encoded);
-            if (!same(encoded, after_bytes)) return error.InvalidArchive;
-            try self.validateObserverIncomplete(a, actual.value.work);
             return true;
         }
 
@@ -13560,16 +13559,33 @@ pub fn Service(comptime Types: type) type {
             work: workspace.Work,
         ) !void {
             const observer = work.observer orelse return;
+            return self.validateObserverIncompleteAt(
+                a,
+                work.task,
+                work.outcome_kind,
+                work.event_watermark,
+                observer,
+            );
+        }
+
+        fn validateObserverIncompleteAt(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            outcome: state.Outcome,
+            watermark: u64,
+            observer: workspace.Observer,
+        ) !void {
             const incomplete = observer.incomplete orelse return;
             const consumed = observer.consumed_revision orelse return error.InvalidArchive;
-            if (work.outcome_kind != .completed or incomplete.publication >= work.event_watermark or
+            if (outcome != .completed or incomplete.publication >= watermark or
                 incomplete.revision -| consumed < observer.selection.policy.cadence or
                 observer.selection.policy.continuation != .owner_scheduled)
                 return error.InvalidArchive;
             var query = try self.store().database.prepare(
                 "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body " ++
                     "WHERE e.task=? AND e.seq=?",
-                &.{ .{ .blob = &work.task }, .{
+                &.{ .{ .blob = &task_id }, .{
                     .integer = std.math.cast(i64, incomplete.publication) orelse
                         return error.InvalidArchive,
                 } },
@@ -13580,18 +13596,16 @@ pub fn Service(comptime Types: type) type {
             defer event_value.deinit();
             for (event_value.value.workspace_publications.items) |publication| {
                 if (!std.meta.eql(publication.work, observer.source_work)) continue;
-                const bytes = try self.store().object(
-                    a,
-                    try self.store().objectReference(publication.observation, null),
-                    null,
-                );
+                if (!std.meta.eql(publication.observation, incomplete.source.digest))
+                    return error.InvalidArchive;
+                const bytes = try self.store().object(a, incomplete.source, null);
                 defer a.free(bytes);
                 var source = try contracts.decodeOwned(workspace.WorkObservation, a, bytes);
                 defer source.deinit();
                 if (!std.meta.eql(source.value.work.id, observer.source_work) or
                     source.value.work.event_watermark != incomplete.publication)
                     return error.InvalidArchive;
-                try self.validateWorkspacePublication(a, work.task, source.value);
+                try self.validateWorkspacePublication(a, task_id, source.value);
                 if (incomplete.revision != try self.observerSourceRevision(
                     a,
                     source.value.work,

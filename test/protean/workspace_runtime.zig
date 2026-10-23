@@ -200,7 +200,10 @@ fn pumpGuardWitness(
         );
         try std.testing.expect(after.value.guard.?.pending_control != null);
         if (index == 0 or (!reference_reopened and after.value.guard.?.reference_operation != null)) {
-            if (after.value.guard.?.reference_operation != null) reference_reopened = true;
+            if (after.value.guard.?.reference_operation) |pending| {
+                try std.testing.expect(pending.dependencies.items.len != 0);
+                reference_reopened = true;
+            }
             try restartGuardOwner(a, service);
             var reopened = try service.workspaceWork(a, task, id);
             defer reopened.deinit();
@@ -513,8 +516,9 @@ fn exerciseDivergentGuard(
         try std.testing.expectEqual(.observed, inspected.disposition);
         var observation = try native.json.parse(a, inspected.observation_json.bytes, .{});
         defer observation.deinit();
-        const failure = observation.value.object.get("guard").?.object.get("failure").?;
-        try std.testing.expectEqualStrings(divergent.value.guard.?.failure.?.bytes, failure.string);
+        const guard = observation.value.object.get("guard") orelse return error.MissingGuardObservation;
+        const inspected_guard = try native.values.fromJson(native.workspace.Guard, a, guard);
+        try std.testing.expectEqualDeep(divergent.value.guard.?, inspected_guard);
         try service.validateWorkspace(poisoned.allocator(), task);
     }
     try std.testing.expect(divergent.value.guard.?.initialized);
@@ -1380,6 +1384,7 @@ fn generatedFromProducer(
     );
     const candidate = try semanticReference(a, derived, "candidate");
     const construction_ns = std.math.cast(u64, @max(0, std.Io.Clock.awake.now(std.testing.io).nanoseconds - construction_started.nanoseconds)) orelse std.math.maxInt(u64);
+    phase = "construction timing";
     try expectCompilerTime(a, service, task, derived);
     phase = "reference guard";
     if (guard_input) |input| try exerciseGuard(a, service, task, program, input, candidate);
@@ -1393,7 +1398,9 @@ fn generatedFromProducer(
     );
     const runtime = try semanticReference(a, validated, "runtime");
     const validation_ns = std.math.cast(u64, @max(0, std.Io.Clock.awake.now(std.testing.io).nanoseconds - validation_started.nanoseconds)) orelse std.math.maxInt(u64);
+    phase = "validation timing";
     try expectCompilerTime(a, service, task, validated);
+    phase = "runtime inspection";
     try expectRuntimeInspection(a, service, task, runtime, label);
     if (ancestor == .runtime)
         try std.testing.expect(!std.meta.eql(try nativeIdentity(ancestor.runtime), try nativeIdentity(runtime)));
@@ -1418,16 +1425,19 @@ fn expectRuntimeInspection(a: std.mem.Allocator, service: anytype, task: native.
     try std.testing.expectEqual(.observed, inspected.disposition);
     var page = try native.json.parse(a, inspected.observation_json.bytes, .{});
     defer page.deinit();
-    var observation = try native.json.parse(a, page.value.object.get("text").?.string, .{});
+    const text = page.value.object.get("text") orelse return error.MissingRuntimeInspectionPage;
+    var observation = try native.json.parse(a, text.string, .{});
     defer observation.deinit();
-    const actual = try native.values.fromJson(contracts.workspace.Ref, a, observation.value.object.get("runtime").?);
+    const reference = observation.value.object.get("runtime") orelse return error.MissingInspectedRuntime;
+    const actual = try native.values.fromJson(contracts.workspace.Ref, a, reference);
     try std.testing.expectEqualDeep(runtime, actual);
 }
 
 fn expectCompilerTime(a: std.mem.Allocator, service: anytype, task: native.testing.state.TaskId, reply: contracts.workspace.Reply) !void {
     var observation = try native.json.parse(a, reply.observation_json.bytes, .{});
     defer observation.deinit();
-    const elapsed = try native.json.numberInteger(u64, observation.value.object.get("compiler_nanoseconds").?.number_string);
+    const measured = observation.value.object.get("compiler_nanoseconds") orelse return error.MissingCompilerTime;
+    const elapsed = try native.json.numberInteger(u64, measured.number_string);
     var query = try service.namespace.store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq DESC", &.{.{ .blob = &task }});
     defer query.deinit();
     while (try query.step() == .row) {
@@ -5465,7 +5475,7 @@ fn incompleteObserverTamper(service: anytype, a: std.mem.Allocator, work: native
     var facts = try service.prepareWorkspaceValidation(work.task);
     defer facts.deinit();
     try service.validateWorkspaceRecordsPrepared(a, work.task, index.records.items, &facts);
-    for (0..3) |attack| {
+    for (0..4) |attack| {
         try service.namespace.store.begin();
         defer service.namespace.store.rollback();
         var forged = work;
@@ -5473,6 +5483,16 @@ fn incompleteObserverTamper(service: anytype, a: std.mem.Allocator, work: native
             0 => forged.observer.?.incomplete.?.revision += 1,
             1 => forged.observer.?.incomplete.?.runtime_code = work.observer.?.source,
             2 => forged.observer.?.incomplete.?.diagnostic = .outer_cut_unavailable,
+            3 => {
+                const custody = try native.workspace.custodyId(a, work.task, work.observer.?.source.digest);
+                const encoded = (try service.namespace.store.recordBytes(a, "workspace_value", custody, work.task)).?;
+                defer a.free(encoded);
+                var value = try contracts.decodeOwned(native.workspace.Value, a, encoded);
+                defer value.deinit();
+                const snapshot = try contracts.encodeOwned(native.workspace.WorkObservation, a, value.value.derivation.inspection.?.observation);
+                defer a.free(snapshot);
+                forged.observer.?.incomplete.?.source = try service.namespace.store.putObject(snapshot);
+            },
             else => unreachable,
         }
         try service.namespace.store.putRecord(native.workspace.Work, "workspace_work", work.id, work.task, forged);
