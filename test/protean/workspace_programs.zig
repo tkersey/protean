@@ -328,25 +328,7 @@ const AfterCommitAllocator = support.AfterCommitAllocator;
 
 /// Keep allocations in an outer arena, but destroy freed contents so an arena
 /// cannot accidentally hide a projection borrowing a decoded record's storage.
-const PoisonFreedAllocator = struct {
-    backing: std.mem.Allocator,
-    fn allocator(self: *@This()) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
-    }
-    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
-        const self: *@This() = @ptrCast(@alignCast(ctx));
-        return self.backing.rawAlloc(len, alignment, ra);
-    }
-    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
-        return false;
-    }
-    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
-        return null;
-    }
-    fn free(_: *anyopaque, bytes: []u8, _: std.mem.Alignment, _: usize) void {
-        @memset(bytes, 'X');
-    }
-};
+const PoisonFreedAllocator = support.PoisonFreedAllocator;
 
 test "BUILD-07 source build allocation fault sweep releases partial owners and cancellation admits nothing" {
     const a = std.testing.allocator;
@@ -1674,6 +1656,43 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
         try std.testing.expectEqual(@as(u64, 3_000_000_001), try native.json.numberInteger(u64, parsed.value.object.get("total_bytes").?.number_string));
     }
     try service.validateWorkspace(scratch, frozen_parent.receipt.task);
+
+    const denied_derivation = try service.submit(scratch, "denied-semantic-preparation", .{
+        .program = .{ .derive = .{
+            .ancestor = .{ .controller = .{ .cut = .{ .epoch = 0, .execution_revision = 1 } } },
+            .program = try workspaceRef(scratch, .program, @splat(0)),
+            .proposal = .{ .json_text = .{ .bytes = "{}" } },
+        } },
+    });
+    var rejected_preparation = false;
+    for (0..32) |_| {
+        const step = try service.pump(scratch);
+        try std.testing.expect(step != .work);
+        var query = try namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='workspace_reply'", &.{.{ .blob = &denied_derivation.receipt.task }});
+        defer query.deinit();
+        if (try query.step() != .row) continue;
+        var evidence = try contracts.decodeOwned(native.workspace.ReplyObservation, scratch, try query.bytes(0));
+        defer evidence.deinit();
+        try std.testing.expect(evidence.value.evidence == .rejected);
+        try std.testing.expectEqual(.preparation, evidence.value.evidence.rejected.stage);
+        try std.testing.expectEqualStrings("SemanticPolicyDenied", evidence.value.evidence.rejected.code.bytes);
+        rejected_preparation = true;
+        break;
+    }
+    try std.testing.expect(rejected_preparation);
+    try service.validateWorkspace(scratch, denied_derivation.receipt.task);
+    for (0..32) |_| {
+        const step = try service.pump(scratch);
+        try std.testing.expect(step != .work);
+        var current = try service.task(scratch, denied_derivation.receipt.task);
+        defer current.deinit();
+        if (current.value.terminal()) break;
+    }
+    var denied_finished = try service.task(scratch, denied_derivation.receipt.task);
+    defer denied_finished.deinit();
+    try std.testing.expectEqual(.completed, denied_finished.value.outcome_kind);
+    try std.testing.expect(denied_finished.value.execution_revision > 1);
+    try service.validateWorkspace(scratch, denied_derivation.receipt.task);
 
     // Runtime value JSON is not either construction-document grammar. Reject
     // the compact value before expanding its billion logical elements, while

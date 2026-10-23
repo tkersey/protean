@@ -58,8 +58,8 @@ export function armViolations(arm, actions) {
       (name === 'work' && ['guard', 'observe'].includes(command?.tag)) ||
       (name === 'program' && command?.tag === 'inspect' && command.value?.target?.tag === 'semantic_source') ||
       (name === 'context' && command?.tag === 'materialize' && command.value?.input?.tag === 'semantic_source');
-    if (arm === 'generic') return (name === 'program' && command?.tag === 'specialize') ||
-      (name === 'work' && (command?.tag === 'realize' || (command?.tag === 'start' && command.value?.runtime?.tag === 'selected'))) || guestView;
+    if (arm === 'generic') return replacement ||
+      (name === 'program' && command?.tag === 'specialize') || guestView;
     if (arm !== 'pure') return false;
     if (guestView) return true;
     if (name === 'program') return command?.tag === 'build' && command.value?.exposures?.length;

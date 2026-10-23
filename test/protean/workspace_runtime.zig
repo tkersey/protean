@@ -503,6 +503,20 @@ fn exerciseDivergentGuard(
     try pumpDivergentGuard(a, service, before.value);
     var divergent = try service.workspaceWork(a, task, id);
     defer divergent.deinit();
+    {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var poisoned: support.PoisonFreedAllocator = .{ .backing = arena.allocator() };
+        const inspected = try service.workspaceCommand(poisoned.allocator(), "divergent-inspect", task, .{
+            .work = .{ .inspect = .{ .work = try workspaceRef(a, .work, id) } },
+        });
+        try std.testing.expectEqual(.observed, inspected.disposition);
+        var observation = try native.json.parse(a, inspected.observation_json.bytes, .{});
+        defer observation.deinit();
+        const failure = observation.value.object.get("guard").?.object.get("failure").?;
+        try std.testing.expectEqualStrings(divergent.value.guard.?.failure.?.bytes, failure.string);
+        try service.validateWorkspace(poisoned.allocator(), task);
+    }
     try std.testing.expect(divergent.value.guard.?.initialized);
     try std.testing.expectEqualDeep(before.value.checkpoint, divergent.value.checkpoint);
     try std.testing.expectEqualDeep(
@@ -1365,6 +1379,7 @@ fn generatedFromProducer(
         } } },
     );
     const candidate = try semanticReference(a, derived, "candidate");
+    try expectCompilerTime(a, service, task, derived);
     const construction_ns = std.math.cast(u64, @max(0, std.Io.Clock.awake.now(std.testing.io).nanoseconds - construction_started.nanoseconds)) orelse std.math.maxInt(u64);
     phase = "reference guard";
     if (guard_input) |input| try exerciseGuard(a, service, task, program, input, candidate);
@@ -1377,6 +1392,12 @@ fn generatedFromProducer(
         .{ .program = .{ .validate = .{ .candidate = candidate } } },
     );
     const runtime = try semanticReference(a, validated, "runtime");
+    try expectCompilerTime(a, service, task, validated);
+    const inspected = try service.workspaceCommand(a, try std.fmt.allocPrint(a, "{s}-inspect-runtime", .{label}), task, .{
+        .program = .{ .inspect = .{ .target = .{ .runtime = runtime }, .page = .{} } },
+    });
+    try std.testing.expectEqual(.observed, inspected.disposition);
+    try std.testing.expectEqualDeep(runtime, try semanticReference(a, inspected, "runtime"));
     const validation_ns = std.math.cast(u64, @max(0, std.Io.Clock.awake.now(std.testing.io).nanoseconds - validation_started.nanoseconds)) orelse std.math.maxInt(u64);
     if (ancestor == .runtime)
         try std.testing.expect(!std.meta.eql(try nativeIdentity(ancestor.runtime), try nativeIdentity(runtime)));
@@ -1390,6 +1411,34 @@ fn generatedFromProducer(
         .construction_ns = construction_ns,
         .validation_ns = validation_ns,
     };
+}
+
+fn expectCompilerTime(a: std.mem.Allocator, service: anytype, task: native.testing.state.TaskId, reply: contracts.workspace.Reply) !void {
+    var observation = try native.json.parse(a, reply.observation_json.bytes, .{});
+    defer observation.deinit();
+    const elapsed = try native.json.numberInteger(u64, observation.value.object.get("compiler_nanoseconds").?.number_string);
+    var query = try service.namespace.store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq DESC", &.{.{ .blob = &task }});
+    defer query.deinit();
+    while (try query.step() == .row) {
+        var event = try contracts.decodeOwned(native.testing.state.Event, a, try query.bytes(0));
+        defer event.deinit();
+        const reference = event.value.workspace_command orelse continue;
+        const bytes = try service.namespace.store.object(a, reference, null);
+        defer a.free(bytes);
+        var command = try contracts.decodeOwned(native.workspace.PublicationCommand, a, bytes);
+        defer command.deinit();
+        if (command.value != .semantic) continue;
+        const output = try service.namespace.store.object(a, command.value.semantic.output, null);
+        defer a.free(output);
+        var built = try contracts.decodeOwned(native.testing.workspace_build.Output, a, output);
+        defer built.deinit();
+        const recorded = switch (built.value) {
+            inline else => |value| value.compiler_nanoseconds,
+        };
+        try std.testing.expectEqual(recorded, elapsed);
+        return;
+    }
+    return error.MissingCompilerPublication;
 }
 
 fn semanticWork(a: std.mem.Allocator, work: native.workspace.Work) !contracts.workspace.SemanticTarget {
@@ -3733,6 +3782,10 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     const retry_withdrawn = try sender.workspaceCommand(scratch, "placement-retry-withdrawn", subject.task, .{ .placement = .{ .retry = .{ .operation = .{ .bytes = "withdraw-before-send" } } } });
     try std.testing.expectEqual(.observed, retry_withdrawn.disposition);
     source_peers[0].channel = null;
+    const executor_observer: ?contracts.workspace.Expected = if (scenario == .preoffer) blk: {
+        const observed_source = try sender.workspaceStart(scratch, "executor-observer-source", subject.task, selected_program, input, .{});
+        break :blk try placementObserver(&sender, scratch, subject.task, selected_program, observed_source.receipt.workspace.?, false);
+    } else null;
     if (scenario == .root or scenario == .preoffer) {
         if (scenario == .preoffer) _ = try freezePlacement(&sender, subject, "destination", cut, @splat(14));
         const controller: p.Subject = .{ .task = subject.task };
@@ -4059,6 +4112,11 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             try snapshot_receiver.placementFollowExecutor(scratch, subject.task, p.controlId(signed_control.value), route[0]);
             try snapshot_receiver.placementApplyReport(scratch, subject.task, p.controlId(signed_control.value), result);
             try std.testing.expectEqualDeep(destination_site, (try snapshot_receiver.placementStatus(scratch, subject)).?.owner);
+            source_namespace = try native.Namespace.open(a, io, source_path);
+            source_open = true;
+            sender = try native.tasks.Service(OwnerTypes).init(a, io, &source_namespace, assets, &application, handlers, source_profile);
+            sender_open = true;
+            try executorObserverCancellation(&sender, scratch, subject.task, executor_observer.?);
         }
         return;
     }
@@ -4854,6 +4912,7 @@ const ScheduledObserverWitness = struct {
     previous: [32]u8,
     cursor: u64,
     accumulated: u64,
+    parked_source: ?[32]u8 = null,
 };
 
 fn disclosedViewWitness(
@@ -4978,6 +5037,17 @@ fn observerWitness(
     const started = try service.workspaceStart(a, "observer-source", task, program, input, .{});
     var source_work = try service.workspaceWork(a, task, started.receipt.workspace.?);
     defer source_work.deinit();
+    var selection = try observerSelection(service, a, task, program, source_work.value);
+    return observerFoldWitness(service, a, task, program, input, source_work.value, &selection);
+}
+
+fn observerSelection(
+    service: anytype,
+    a: std.mem.Allocator,
+    task: [16]u8,
+    program: [32]u8,
+    work: native.workspace.Work,
+) !contracts.workspace.Observe {
     var builder = source.Builder.init(a);
     defer builder.deinit();
     const module = try @import("workspace_sources.zig").cutObserver(&builder, false);
@@ -4985,31 +5055,47 @@ fn observerWitness(
     defer a.free(text);
     var diagnostic: native.program_construction.Diagnostic = .{};
     const built = try service.workspaceBuild(a, "observer-program", task, text, &diagnostic);
-    var selection: contracts.workspace.Observe = .{
+    return .{
         .program = try workspaceRef(a, .program, built.receipt.workspace.?),
         .source = .{ .expected = .{
-            .work = try workspaceRef(a, .work, source_work.value.id),
-            .execution_revision = source_work.value.execution_revision,
-            .control_revision = source_work.value.control_revision,
+            .work = try workspaceRef(a, .work, work.id),
+            .execution_revision = work.execution_revision,
+            .control_revision = work.control_revision,
         }, .realization_revision = 0, .nodes = .{ .all = .{} } },
         .accumulator = try observerAccumulator(service, a, task, program),
         .policy = .{ .delivery = .lossless, .granularity = .one_guest_step },
     };
-    const first = try service.workspaceObserve(a, "observe-first", task, selection);
+}
+
+fn observerFoldWitness(
+    service: anytype,
+    a: std.mem.Allocator,
+    task: [16]u8,
+    program: [32]u8,
+    input: []const u8,
+    source_work: native.workspace.Work,
+    selection: *contracts.workspace.Observe,
+) !ObserverWitness {
+    const first = try service.workspaceObserve(a, "observe-first", task, selection.*);
     try observerCompleted(service, a, task, first.receipt.workspace.?);
-    try advanceObservedSource(service, a, source_work.value, "observed-source-step");
-    var advanced = try service.workspaceWork(a, task, source_work.value.id);
+    try advanceObservedSource(service, a, source_work, "observed-source-step");
+    var advanced = try service.workspaceWork(a, task, source_work.id);
     defer advanced.deinit();
+    try std.testing.expect(advanced.value.guest_work <= 1);
     try std.testing.expectError(
         error.ObservationBlocked,
         advanceObservedSource(service, a, advanced.value, "observed-source-blocked"),
     );
+    const inspect: contracts.workspace.Command = .{ .work = .{ .inspect = .{
+        .work = selection.source.expected.work,
+    } } };
+    const blocked = try service.workspaceCommand(a, "observer-blocked-history", task, inspect);
     selection.source.expected.execution_revision = advanced.value.execution_revision;
     selection.source.expected.control_revision = advanced.value.control_revision;
     selection.previous = try workspaceRef(a, .work, first.receipt.workspace.?);
-    const second = try service.workspaceObserve(a, "observe-second", task, selection);
+    const second = try service.workspaceObserve(a, "observe-second", task, selection.*);
     try observerCompleted(service, a, task, second.receipt.workspace.?);
-    const repeated = try service.workspaceObserve(a, "observe-second", task, selection);
+    const repeated = try service.workspaceObserve(a, "observe-second", task, selection.*);
     try std.testing.expect(repeated.replayed);
     try std.testing.expectEqualDeep(second.receipt.id, repeated.receipt.id);
     var folded = try service.workspaceWork(a, task, second.receipt.workspace.?);
@@ -5019,20 +5105,25 @@ fn observerWitness(
         folded.value.observer.?.consumed_revision.?,
     );
     try std.testing.expectEqual(null, folded.value.observer.?.gap_first);
-    try observerFoldValue(service, a, folded.value, source_work.value.execution_revision +
+    const replay = try service.workspaceCommand(a, "observer-blocked-history", task, inspect);
+    try std.testing.expectEqualStrings(blocked.observation_json.bytes, replay.observation_json.bytes);
+    try observerFoldValue(service, a, folded.value, source_work.execution_revision +
         advanced.value.execution_revision);
-    var unchanged = try service.workspaceWork(a, task, source_work.value.id);
+    var unchanged = try service.workspaceWork(a, task, source_work.id);
     defer unchanged.deinit();
     try std.testing.expectEqualDeep(advanced.value.checkpoint, unchanged.value.checkpoint);
     try advanceObservedSource(service, a, unchanged.value, "observer-source-after-fold");
-    const historical = try service.workspaceObserve(a, "observe-second", task, selection);
+    const historical = try service.workspaceObserve(a, "observe-second", task, selection.*);
     try std.testing.expect(historical.replayed);
     try std.testing.expectEqualDeep(second.receipt.id, historical.receipt.id);
-    try cancelObservedSourceWitness(service, a, task, source_work.value.id);
-    const scheduled = try sampledObserverWitness(service, a, task, program, input, selection);
+    try cancelObservedSourceWitness(service, a, task, source_work.id, folded.value.id);
+    try incompleteObserverWitness(service, a, task, selection.*);
+    try lateObserverWitness(service, a, task, program, input, selection.*);
+    var scheduled = try sampledObserverWitness(service, a, task, program, input, selection.*);
+    scheduled.parked_source = source_work.id;
     try outerObserverWitness(service, a, task, program, input, selection.accumulator);
     return .{
-        .selection = selection,
+        .selection = selection.*,
         .work = folded.value.id,
         .receipt = second.receipt.id,
         .scheduled = scheduled,
@@ -5061,6 +5152,7 @@ fn cancelObservedSourceWitness(
     a: std.mem.Allocator,
     task: [16]u8,
     id: [32]u8,
+    observer_id: [32]u8,
 ) !void {
     var before = try service.workspaceWork(a, task, id);
     defer before.deinit();
@@ -5077,10 +5169,284 @@ fn cancelObservedSourceWitness(
     defer after.deinit();
     try std.testing.expect(after.value.cancellation != null);
     try std.testing.expect(!after.value.cancellation_applied);
-    try std.testing.expectEqual(.parked, after.value.schedule);
+    try std.testing.expectEqual(.queued, after.value.schedule);
     try std.testing.expectEqual(.observation_blocked, after.value.blocker.?);
     try std.testing.expectEqual(before.value.execution_revision, after.value.execution_revision);
     try std.testing.expectEqualDeep(before.value.checkpoint, after.value.checkpoint);
+    _ = try service.workspaceControl(a, "park-observed-cancellation", task, id, after.value.execution_revision, after.value.control_revision, .park);
+    var observer = try service.workspaceWork(a, task, observer_id);
+    defer observer.deinit();
+    _ = try service.workspaceStopObserving(a, "stop-after-observed-park", task, .{
+        .work = try workspaceRef(a, .work, observer_id),
+        .execution_revision = observer.value.execution_revision,
+        .control_revision = observer.value.control_revision,
+    });
+    try observedParkHolds(service, a, task, id);
+}
+
+fn observedParkHolds(service: anytype, a: std.mem.Allocator, task: [16]u8, id: [32]u8) !void {
+    var before = try service.workspaceWork(a, task, id);
+    defer before.deinit();
+    try std.testing.expectEqual(.parked, before.value.schedule);
+    try std.testing.expect(before.value.cancellation != null);
+    try std.testing.expect(!before.value.cancellation_applied);
+    for (0..8) |_| _ = try service.pump(a);
+    var after = try service.workspaceWork(a, task, id);
+    defer after.deinit();
+    try std.testing.expectEqual(.parked, after.value.schedule);
+    try std.testing.expectEqual(before.value.execution_revision, after.value.execution_revision);
+    try std.testing.expectEqualDeep(before.value.checkpoint, after.value.checkpoint);
+    try std.testing.expect(!after.value.cancellation_applied);
+}
+
+fn incompleteObserverWitness(
+    service: anytype,
+    a: std.mem.Allocator,
+    task: [16]u8,
+    original: contracts.workspace.Observe,
+) !void {
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const document = try native.source_records.encode(a, try listLength(&builder));
+    defer a.free(document);
+    var diagnostic: native.program_construction.Diagnostic = .{};
+    const program = try service.workspaceBuild(a, "vanishing-source", task, document, &diagnostic);
+    const started = try service.workspaceStart(a, "vanishing-start", task, program.receipt.workspace.?, &.{ 1, 1, 0, 0, 0, 0, 0, 0, 0, 0 }, .{});
+    var initial = try service.workspaceWork(a, task, started.receipt.workspace.?);
+    defer initial.deinit();
+    const checkpoint = try service.namespace.store.object(a, initial.value.checkpoint, null);
+    defer a.free(checkpoint);
+    var graph = try data.state_image.decodeGraphBorrowed(a, checkpoint, .{});
+    defer graph.deinit();
+    try std.testing.expect(graph.state.nodes.len != 0);
+    const node = [_]u64{graph.state.nodes.len - 1};
+    var selection = original;
+    selection.previous = null;
+    selection.source.expected = .{
+        .work = try workspaceRef(a, .work, initial.value.id),
+        .execution_revision = initial.value.execution_revision,
+        .control_revision = initial.value.control_revision,
+    };
+    selection.source.nodes = .{ .selected = .{ .items = &node } };
+    selection.policy = .{ .delivery = .lossless, .continuation = .owner_scheduled };
+    const observed = try service.workspaceObserve(a, "vanishing-observe", task, selection);
+    try observerCompleted(service, a, task, observed.receipt.workspace.?);
+    var folded = try service.workspaceWork(a, task, observed.receipt.workspace.?);
+    defer folded.deinit();
+    try advanceObservedSource(service, a, initial.value, "vanishing-advance");
+    var advanced = try service.workspaceWork(a, task, initial.value.id);
+    defer advanced.deinit();
+    try incompleteObserverRetained(service, a, folded.value, advanced.value);
+}
+
+fn lateObserverWitness(
+    service: anytype,
+    a: std.mem.Allocator,
+    task: [16]u8,
+    program: [32]u8,
+    input: []const u8,
+    original: contracts.workspace.Observe,
+) !void {
+    const started = try service.workspaceStart(a, "late-source", task, program, input, .{});
+    var initial = try service.workspaceWork(a, task, started.receipt.workspace.?);
+    defer initial.deinit();
+    const reference = try workspaceRef(a, .work, initial.value.id);
+    _ = try service.workspacePump(a, "late-source-begin", task, .{ .expected = .{
+        .work = reference,
+        .execution_revision = initial.value.execution_revision,
+        .control_revision = initial.value.control_revision,
+    }, .base_quantum = 1 });
+    var pending = try service.workspaceWork(a, task, initial.value.id);
+    defer pending.deinit();
+    try std.testing.expect(pending.value.outer_operation != null);
+    var selection = original;
+    selection.previous = null;
+    selection.source.expected = .{
+        .work = reference,
+        .execution_revision = pending.value.execution_revision,
+        .control_revision = pending.value.control_revision,
+    };
+    const first = try service.workspaceObserve(a, "late-observer-first", task, selection);
+    try observerCompleted(service, a, task, first.receipt.workspace.?);
+    try finishLateObserverSource(service, a, pending.value);
+    var advanced = try service.workspaceWork(a, task, initial.value.id);
+    defer advanced.deinit();
+    try std.testing.expect(advanced.value.guest_work > 1);
+    selection.source.expected.execution_revision = advanced.value.execution_revision;
+    selection.source.expected.control_revision = advanced.value.control_revision;
+    selection.previous = try workspaceRef(a, .work, first.receipt.workspace.?);
+    const second = try service.workspaceObserve(a, "late-observer-second", task, selection);
+    try observerCompleted(service, a, task, second.receipt.workspace.?);
+    var folded = try service.workspaceWork(a, task, second.receipt.workspace.?);
+    defer folded.deinit();
+    const bytes = try service.namespace.store.object(a, folded.value.input, null);
+    defer a.free(bytes);
+    var decoded = try contracts.decodeOwned(struct {
+        selected: struct {
+            envelope: native.workspace.ObserverEnvelope,
+            cut: kosmos.RuntimeViews.GuestView,
+        },
+        accumulator: u64,
+    }, a, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqual(.publication, decoded.value.selected.envelope.granularity);
+    try std.testing.expectEqual(advanced.value.guest_work, decoded.value.selected.envelope.guest_work_delta.?);
+}
+
+fn finishLateObserverSource(service: anytype, a: std.mem.Allocator, initial: native.workspace.Work) !void {
+    for (0..128) |index| {
+        var current = try service.workspaceWork(a, initial.task, initial.id);
+        defer current.deinit();
+        if (current.value.execution_revision != initial.execution_revision) return;
+        const operation_id = try std.fmt.allocPrint(a, "late-source-finish-{d}", .{index});
+        defer a.free(operation_id);
+        _ = try service.workspacePump(a, operation_id, initial.task, .{ .expected = .{
+            .work = try workspaceRef(a, .work, initial.id),
+            .execution_revision = current.value.execution_revision,
+            .control_revision = current.value.control_revision,
+        } });
+    }
+    return error.LateObserverSourceDidNotAdvance;
+}
+
+fn executorObserverCancellation(
+    service: anytype,
+    a: std.mem.Allocator,
+    task: [16]u8,
+    expected: contracts.workspace.Expected,
+) !void {
+    const id = try nativeIdentity(expected.work);
+    var observer = try service.workspaceWork(a, task, id);
+    defer observer.deinit();
+    try std.testing.expectEqual(.completed, observer.value.outcome_kind);
+    try std.testing.expectEqual(.explicit_only, observer.value.observer.?.selection.policy.continuation);
+    try std.testing.expect(!observer.value.observer.?.stopped);
+    try std.testing.expectEqual(.away, (try service.placementStatus(a, .{ .task = task })).?.phase);
+    var source_work = try service.workspaceWork(a, task, observer.value.observer.?.source_work);
+    defer source_work.deinit();
+    _ = try service.workspaceControl(a, "claim-local-observer-source", task, source_work.value.id, source_work.value.execution_revision, source_work.value.control_revision, .park);
+    const remote_before = try observerRemoteControlCount(service, task);
+    try service.cancelOwned(a, "executor-observer-shutdown", "stop local subscriptions");
+    for (0..512) |_| {
+        _ = try service.pump(a);
+        if (!try service.shutdownIncomplete(a)) break;
+    }
+    try std.testing.expect(!try service.shutdownIncomplete(a));
+    var stopped = try service.workspaceWork(a, task, id);
+    defer stopped.deinit();
+    try std.testing.expect(stopped.value.observer.?.stopped);
+    try std.testing.expectEqualDeep(observer.value.result, stopped.value.result);
+    try std.testing.expectEqualDeep(observer.value.checkpoint, stopped.value.checkpoint);
+    try std.testing.expectEqual(remote_before, try observerRemoteControlCount(service, task));
+}
+
+fn observerRemoteControlCount(service: anytype, task: [16]u8) !i64 {
+    var query = try service.namespace.store.database.prepare(
+        "SELECT count(*) FROM records WHERE task=? AND kind='placement_control'",
+        &.{.{ .blob = &task }},
+    );
+    defer query.deinit();
+    try std.testing.expect(try query.step() == .row);
+    return query.integer(0);
+}
+
+fn incompleteObserverRetained(
+    service: anytype,
+    a: std.mem.Allocator,
+    folded: native.workspace.Work,
+    source_work: native.workspace.Work,
+) !void {
+    for (0..128) |_| {
+        var current = try service.workspaceWork(a, folded.task, folded.id);
+        defer current.deinit();
+        if (current.value.observer.?.incomplete) |incomplete| {
+            try std.testing.expectEqual(.invalid_disclosure, incomplete.diagnostic);
+            try std.testing.expectEqual(source_work.event_watermark, incomplete.publication);
+            try std.testing.expectEqual(source_work.execution_revision, incomplete.revision);
+            try std.testing.expectEqual(.completed, current.value.outcome_kind);
+            try std.testing.expect(!current.value.observer.?.stopped);
+            var expected = folded.observer.?;
+            expected.incomplete = incomplete;
+            try std.testing.expectEqualDeep(expected, current.value.observer.?);
+            try std.testing.expectEqualDeep(folded.checkpoint, current.value.checkpoint);
+            try std.testing.expectEqualDeep(folded.result, current.value.result);
+            try std.testing.expectEqualDeep(folded.result_value, current.value.result_value);
+            try std.testing.expectEqual(null, try observerSuccessor(service, a, folded.task, folded.id));
+            try std.testing.expectError(error.ActiveObserverMobilityUnsupported, service.placementCompatibility(a, .{
+                .task = folded.task,
+                .work = source_work.id,
+            }));
+            for (0..8) |_| _ = try service.pump(a);
+            var stable = try service.workspaceWork(a, folded.task, folded.id);
+            defer stable.deinit();
+            try std.testing.expectEqual(current.value.event_watermark, stable.value.event_watermark);
+            var source_after = try service.workspaceWork(a, folded.task, source_work.id);
+            defer source_after.deinit();
+            try std.testing.expectEqualDeep(source_work, source_after.value);
+            try incompleteObserverTamper(service, a, stable.value);
+            return;
+        }
+        _ = try service.pump(a);
+    }
+    return error.ObserverPreparationDidNotFail;
+}
+
+fn incompleteObserverTamper(service: anytype, a: std.mem.Allocator, work: native.workspace.Work) !void {
+    for (0..3) |attack| {
+        try service.namespace.store.begin();
+        defer service.namespace.store.rollback();
+        var forged = work;
+        switch (attack) {
+            0 => forged.observer.?.incomplete.?.revision += 1,
+            1 => forged.observer.?.incomplete.?.runtime_code = work.observer.?.source,
+            2 => forged.observer.?.incomplete.?.diagnostic = .outer_cut_unavailable,
+            else => unreachable,
+        }
+        try service.namespace.store.putRecord(native.workspace.Work, "workspace_work", work.id, work.task, forged);
+        const observation = try service.namespace.store.putObject(
+            try contracts.encodeOwned(native.workspace.WorkObservation, a, .{
+                .work = forged,
+                .occurrence = null,
+            }),
+        );
+        var query = try service.namespace.store.database.prepare(
+            "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+                "WHERE e.task=? AND e.seq=?",
+            &.{ .{ .blob = &work.task }, .{ .integer = @intCast(work.event_watermark) } },
+        );
+        defer query.deinit();
+        try std.testing.expect(try query.step() == .row);
+        var event = try contracts.decodeOwned(native.testing.state.Event, a, try query.bytes(0));
+        defer event.deinit();
+        const publications = try a.dupe(native.testing.state.WorkPublication, event.value.workspace_publications.items);
+        defer a.free(publications);
+        event.value.workspace_publications.items = publications;
+        for (publications) |*publication| if (std.meta.eql(publication.work, work.id)) {
+            publication.observer = forged.observer;
+            publication.observation = observation.digest;
+        };
+        const encoded = try contracts.encodeOwned(native.testing.state.Event, a, event.value);
+        defer a.free(encoded);
+        const reference = try service.namespace.store.putObject(encoded);
+        try service.namespace.store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &reference.digest }, .{ .blob = &work.task }, .{ .integer = @intCast(work.event_watermark) } });
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspace(a, work.task));
+    }
+}
+
+fn resumeObservedCancellation(
+    service: anytype,
+    a: std.mem.Allocator,
+    task: [16]u8,
+    id: [32]u8,
+) !void {
+    try observedParkHolds(service, a, task, id);
+    var before = try service.workspaceWork(a, task, id);
+    defer before.deinit();
+    _ = try service.workspaceControl(a, "fresh-observed-cancel", task, id, before.value.execution_revision, before.value.control_revision, .{ .cancel = .{ .bytes = "resume observed cancellation" } });
+    var after = try service.workspaceWork(a, task, id);
+    defer after.deinit();
+    try std.testing.expect(after.value.execution_revision > before.value.execution_revision);
+    try std.testing.expect(after.value.cancellation_applied);
 }
 
 fn cancelObserverTaskWitness(service: anytype, a: std.mem.Allocator, task: [16]u8) !void {
@@ -5507,6 +5873,7 @@ fn scheduledObserverWitness(
     task: [16]u8,
     expected: ScheduledObserverWitness,
 ) !void {
+    if (expected.parked_source) |id| try resumeObservedCancellation(service, a, task, id);
     for (0..128) |_| {
         if (try observerSuccessor(service, a, task, expected.previous)) |id| {
             var work = try service.workspaceWork(a, task, id);

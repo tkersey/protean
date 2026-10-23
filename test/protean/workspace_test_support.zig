@@ -12,6 +12,26 @@ pub fn workspaceRef(a: std.mem.Allocator, kind: @FieldType(contracts.workspace.R
     return .{ .kind = kind, .id = .{ .bytes = try a.dupe(u8, &std.fmt.bytesToHex(id, .lower)) } };
 }
 
+pub const PoisonFreedAllocator = struct {
+    backing: std.mem.Allocator,
+    pub fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.backing.rawAlloc(len, alignment, ra);
+    }
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+    fn free(_: *anyopaque, bytes: []u8, _: std.mem.Alignment, _: usize) void {
+        @memset(bytes, 'X');
+    }
+};
+
 pub const AfterCommitAllocator = struct {
     backing: std.mem.Allocator,
     namespace: *native.Namespace,

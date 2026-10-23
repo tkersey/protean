@@ -197,7 +197,15 @@ pub const Guard = struct {
 pub const Trial = struct { id: state.Digest, task: state.TaskId, selection: contracts.workspace.Trial, view: state.Reference, view_works: contracts.Vector(WorkObservation, null), policy: state.Reference, responses: contracts.Vector(struct { identity: contracts.Utf8, payload: state.Reference, response: state.Reference }, null) };
 
 pub const Observer = struct {
+    pub const Incomplete = struct {
+        publication: u64,
+        revision: u64,
+        runtime_code: state.Reference,
+        diagnostic: enum { invalid_disclosure, outer_cut_unavailable },
+    };
+
     stopped: bool = false,
+    incomplete: ?Incomplete = null,
     selection: contracts.workspace.Observe,
     source: state.Reference,
     source_work: state.Digest,

@@ -128,7 +128,7 @@ fn compile(
 fn runDerive(ctx: registry.Context, input: DeriveInput) ![]u8 {
     const started = std.Io.Clock.awake.now(ctx.io);
     const bytes = derive(ctx, input) catch |err| {
-        if (err == error.OutOfMemory) return err;
+        if (err == error.Canceled or err == error.OutOfMemory) return err;
         return c.encodeOwned(Output, ctx.allocator, .{ .rejected = .{
             .code = .{ .bytes = @errorName(err) },
             .phase = .{ .bytes = "construction" },
@@ -213,4 +213,28 @@ fn validate(ctx: registry.Context, input: ValidateInput) !void {
     }
     try kosmos.RuntimeCompiler.validateAgainst(a, &candidate, &ancestor);
     try ctx.checkCancellation();
+}
+
+test "semantic derivation interruption does not become a compiler rejection" {
+    var cancelled = std.atomic.Value(bool).init(true);
+    const authority: registry.Authority = .{ .grants = &.{}, .principal = "test", .tenant = "test" };
+    try std.testing.expectError(error.Canceled, runDerive(.{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .authority = &authority,
+        .task_id = "test",
+        .profile = "test",
+        .environment = null,
+        .cancellation = &cancelled,
+    }, .{
+        .ancestor = .{ .bytes = "" },
+        .guest = .{ .bytes = "" },
+        .program = @splat(0),
+        .proposal = .{ .bytes = "" },
+        .producer = null,
+        .root = @splat(0),
+        .checker = .{ .bytes = "test" },
+        .subject = .{ .controller = .{ .cut = .{ .epoch = 0, .execution_revision = 0 } } },
+        .basis = .immutable,
+    }));
 }

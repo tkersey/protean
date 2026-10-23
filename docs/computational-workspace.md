@@ -164,9 +164,16 @@ A successor fold names its
 `previous` work; ordinary work state retains progress and results. Policy chooses
 `sampled` or `lossless` delivery, cadence, `publication` or `one_guest_step`
 granularity, and explicit or owner-scheduled continuation. Sampling reports gaps.
-Lossless delivery can park the source with `observation_blocked` until the fold
-finishes; `work.stop_observing` explicitly ends the subscription. An observer
-failure does not become a guest-language failure.
+Lossless delivery blocks source progression with `observation_blocked` until the
+fold finishes; `work.stop_observing` explicitly ends the subscription. A later
+explicit source park remains parked after the fold finishes. An observer failure
+does not become a guest-language failure. Failed successor preparation retains the
+last completed fold and an `incomplete` diagnostic bound to the source publication
+and runtime. It does not retry that source revision automatically or release a
+lossless subscription. Sampling can continue when the source revision advances.
+Historical replies retain the blocking state of their original event prefix.
+The envelope reports `one_guest_step` only for an observed segment containing at
+most one guest step; an already pending larger segment retains its actual scope.
 
 Interpretations are ordinary built programs and retained work. They can consume
 initial inputs, authorized snapshots or semantic slices, implement alternative

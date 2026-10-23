@@ -50,6 +50,10 @@ import {workspaceMetrics, armViolations, evaluateCase} from '../../tools/evaluat
   assert.deepEqual(armViolations('interpretation', runtime), runtime.slice(0, 3));
   assert.deepEqual(armViolations('specialization', runtime), runtime.slice(3));
   assert.deepEqual(armViolations('interpretation', [remote(work('realize_controller'))]), [remote(work('realize_controller'))]);
+  const newReplacement = ['realize_controller', 'guard'].map(work);
+  for (const actions of [newReplacement, newReplacement.map(remote)]) {
+    assert.deepEqual(armViolations('generic', [...actions, work('pump')]), actions);
+  }
 }
 import {contract, assertAdaptiveCaptures} from './adaptive_capture_checks.mjs';
 import {runtimeTrace} from './runtime_trace.mjs';
