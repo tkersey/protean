@@ -3,50 +3,50 @@
   "status": "development-integration",
   "boundary": {
     "repository": "tkersey/horos",
-    "commit": "592eb0839326f2d8a423b59ce2746ab18ef5136a",
-    "gitTree": "ce1fec549d6eb79f859fc73d1b66b8feb11fa479",
-    "version": "6.0.0",
+    "commit": "5bea02f41e6ca5cbc41f91ad7497f48742004557",
+    "gitTree": "c15a947f9fa372011d691893e65fd6fdd2e56ab1",
+    "version": "7.0.0",
     "source": {
-      "inventorySha256": "2dab0aed8e2ec7409477764fc5535ad8342d4dd8e677b02e9389bfdb6df945d3",
-      "entries": 418,
-      "bytes": 8939498
+      "inventorySha256": "c3d551c91d489b5c5073ca395277e6d5aa23c9a6ad93e683d5aceb6285080075",
+      "entries": 440,
+      "bytes": 9789964
     },
     "archive": {
-      "url": "https://github.com/tkersey/horos/archive/592eb0839326f2d8a423b59ce2746ab18ef5136a.tar.gz",
-      "sha256": "f552f214d5d5e0d83d11e9bbd35b08d0e613413bd91d7358f49476f23c05b18f",
-      "bytes": 1648359,
+      "url": "https://github.com/tkersey/horos/archive/5bea02f41e6ca5cbc41f91ad7497f48742004557.tar.gz",
+      "sha256": "cc43283f507b1a93091a2306c35ee76595353993c4c9ae0113168dbc499d7b16",
+      "bytes": 1780044,
       "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
     "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree.",
     "package": {
-      "zigHash": "horos-6.0.0-flclaDfbQAD6K8zS9U8ts9xpziBg_1zaU23OvgqKePKb",
+      "zigHash": "horos-7.0.0-flclaF7LTQBCfUOfwo9Pe7EkiqXHnUKguDftc98sGQAe",
       "defaultProfile": "zig-managed",
       "profiles": {
         "zig-managed": {
-          "inventorySha256": "da62cc22217ec75acf1e13ee898073ff18562b0c3b7cf367432df6b7148efbc3",
-          "entries": 398,
-          "bytes": 4250423
+          "inventorySha256": "4088cdd6d34c47dc0bd189a7bd55f2609b37d4cc44b8708b49dbaa0cf5a4571f",
+          "entries": 418,
+          "bytes": 5098334
         },
         "archive-extracted": {
-          "inventorySha256": "da62cc22217ec75acf1e13ee898073ff18562b0c3b7cf367432df6b7148efbc3",
-          "entries": 398,
-          "bytes": 4250423
+          "inventorySha256": "c07b3cc8ad87ea89c35240d87e7cd1d3142334a5b6061f066988448c639d7434",
+          "entries": 418,
+          "bytes": 5098334
         }
       },
       "archive": {
-        "sha256": "58086aff4e7778c744a3776d703c30973a720934c7ffdd15fad22b6793c6e868",
-        "bytes": 857926
+        "sha256": "99afc5283b9c8b26374ebd271633ecaaa5f3b872b27a0bbe597cf2d51b5cbd06",
+        "bytes": 986821
       }
     },
     "api": {
       "authoring": "src/root.zig",
       "data": "src/data/root.zig",
       "source": "src/source.zig",
-      "profile": "Horos 6 checked first-order specialization and recovery; unchanged BMO1/BPI3/PST3 and invocation grammars",
+      "profile": "Horos 7 canonical typed hyperfunction authoring and checked recursive records; unchanged BMO1/BPI3/PST3 and invocation grammars",
       "files": [
         {
           "path": "src/root.zig",
-          "sha256": "19ee59e4a8e6a78b763947c586725a26300dc2bd6d7a72e85f0eb217a51f6003"
+          "sha256": "1bb7ea9900749c52f51c693b9a3e1a5db123c6ecdddee81c0975af961272544b"
         },
         {
           "path": "src/data/root.zig",
@@ -54,7 +54,7 @@
         },
         {
           "path": "src/source.zig",
-          "sha256": "dba84f92c23e2e3ff2a450d4e7d6e8a7998f98786d929dac9f24b0a154c19214"
+          "sha256": "056db6ef8b244e79d69d6bda143791c1f564d561cef9473087a1deb3817dd0c6"
         },
         {
           "path": "docs/bpi3-wire.md",
@@ -66,49 +66,49 @@
         },
         {
           "path": "src/data/graph_order.zig",
-          "sha256": "d23f420a481ee063ccc615f22b4161ffe6159039e1b231455d3b22ec07311b84"
+          "sha256": "fd0d4e5a1cb34232bad7039d7ae81ffcdaeb4edba9115d5e03da1c30dd39a91f"
         },
         {
           "path": "src/data/invocation.zig",
-          "sha256": "e5d5aa5d54aa1a0af999b1beed6f41e72d2e3ddb28c99aad2d237e3b797bc393"
+          "sha256": "85b466d7a314b2d04d80e4c5ceb887199639e578c901c06d7a2261f86c0cc5b4"
         },
         {
           "path": "src/data/closed_compilation.zig",
-          "sha256": "76efa8cee6634c6ec1987bad31cda70cf6246a16b5a27633ed8209a5f7264599"
+          "sha256": "1021df8517292a095271b68a7d78fd56ae6e59eebc1454ad21c620171eab73a9"
         },
         {
           "path": "src/source/diagnostic.zig",
-          "sha256": "85065ffd93cd623a0eaebbb4e75731bfd5d87a6a615a9043aebc7750daf2ad36"
+          "sha256": "0ec3d8b038018a41a5185636ab1a936b404a58ef55c1bad3b7d67b50596e93c4"
         },
         {
           "path": "src/authoring.zig",
-          "sha256": "d5d508b8f1cbc9be04c7ff42990616bd26a5d5088c14c42edd67ca768b3ac288"
+          "sha256": "47906a0ba9956d40cf097ee507b2079a07d0601c1393a093d4bcdf2faf3efc74"
         },
         {
           "path": "src/data/native_shape.zig",
-          "sha256": "5f12695e20b1fb2fa663cb4e5d278b27e1231bdd8af7c6709e95cc7291d60f34"
+          "sha256": "86c12ac8bd46e400947980a7d2b4a02b9f6ec3af3277ac3e50a3db586ccf7dea"
         },
         {
           "path": "src/authoring/runtime.zig",
-          "sha256": "755db87e807dffd1fcbc9aa5997308e81122206e0645b8f27042bd515d9e7642"
+          "sha256": "f183fbe07ecb8ee0dbc469e6a354f789157ff1d96b30caaaae4727320e912e1c"
         }
       ]
     }
   },
   "world": {
     "repository": "tkersey/kosmos",
-    "commit": "0ae7ad45ade2ea7512d563663a25f31c7b296311",
-    "gitTree": "b1a9db9c05cc766b9512b72a0c6b6162358b8e1f",
-    "version": "9.0.0",
+    "commit": "840b114515734300a76e6247fec6a3a20479fe96",
+    "gitTree": "ff517501cbb88f50e70283848cf3cf0caa0afd4b",
+    "version": "9.0.1",
     "source": {
-      "inventorySha256": "f373d6a5c7df676ca79a7f29154f47647638161ae3a9274d7a34aae6d65636ff",
-      "entries": 201,
-      "bytes": 2663470
+      "inventorySha256": "36aaff33f0563df0268fc874e39f70c8084a3ab3daaab4ec24f041d5b9ba6927",
+      "entries": 208,
+      "bytes": 3029738
     },
     "archive": {
-      "url": "https://github.com/tkersey/kosmos/archive/0ae7ad45ade2ea7512d563663a25f31c7b296311.tar.gz",
-      "sha256": "98a38e555576c65d13857f72468a411a196a1fda6615038633433ab75f3bf9ac",
-      "bytes": 610879,
+      "url": "https://github.com/tkersey/kosmos/archive/840b114515734300a76e6247fec6a3a20479fe96.tar.gz",
+      "sha256": "8dd2507b721177f3c085fa030ff285f9682f76c6550f9be3c5e29c16dab3ee1d",
+      "bytes": 680007,
       "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
     "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree."
@@ -125,15 +125,15 @@
     "compatiblePublishedReleaseObserved": false,
     "releases": [],
     "pullRequests": [
-      "https://github.com/tkersey/horos/pull/174",
-      "https://github.com/tkersey/kosmos/pull/71"
+      "https://github.com/tkersey/horos/pull/178",
+      "https://github.com/tkersey/kosmos/pull/75"
     ]
   },
   "limitations": [
-    "Development Horos 6.0.0 and Kosmos 9.0.0 commits published in draft PRs; complete remote archive transport and source identities authenticated. These are not released versions.",
+    "Development Horos 7.0.0 and Kosmos 9.0.1 commits are published in draft PRs; complete archive transports and source trees are authenticated. Version fields do not claim published releases.",
     "Controlled-provider qualification does not establish live-provider availability or model quality; existing saved tasks retain their original executable and image bindings."
   ],
   "notes": [
-    "Exact published development source tuple for executable semantics. Final platform, performance and review qualification remains open."
+    "Exact published development source tuple for canonical typed hyperfunctions and existing executable semantics. Qualification belongs to the checks and PR evidence for these exact candidates."
   ]
 }
