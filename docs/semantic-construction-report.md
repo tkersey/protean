@@ -21,12 +21,45 @@ on success and allocation failure. Evaluation counts each validated candidate
 independently of deduplicated runtime code.
 
 The repair extends three existing test files without adding a test root or lane.
-The local development selection run passes all four tests and 18 build steps,
-including stale observer retries, unavailable outer cuts and allocation-failure
-ownership. Guard restoration failure/retry, packaged subject round trips and
-malformed retained source bases are exercised by custody qualification, which
-remains outstanding. Final committed-tuple qualification and fresh serial
-reviews remain outstanding. Earlier results below retain their original scope.
+Native macOS qualification at `06e34e6`, with Horos `966970f` and Kosmos
+`cfb9c28`, passes the following checks. Selection covers stale observer retries,
+unavailable outer cuts and allocation-failure ownership. Custody covers guard
+restoration failure/retry, packaged subject round trips, malformed retained source
+bases, generated transformation, restart, transfer and remote cleanup. The source
+inspection fixture assembles every page before decoding its JSON summary.
+
+| Native check | Result | Seconds | Maximum RSS bytes |
+|---|---:|---:|---:|
+| Runtime selection | 4 tests, 18 steps | 321.40 | 4,271,931,392 |
+| Custody | 1 complete scenario, 18 steps | 382.84 | 5,759,107,072 |
+| Controller succession | 8 tests, 18 steps | 340.87 | 4,233,035,776 |
+| Retention | 3 tests, 18 steps | 292.92 | 3,503,587,328 |
+| History | 3 tests, 18 steps | 241.20 | 3,466,575,872 |
+| Product build | 24 steps | 193.80 | 3,108,700,160 |
+| Packaged controls | Passed | 87.24 | 468,205,568 |
+| Packaged workspace and candidate metrics | Passed | 136.75 | 417,431,552 |
+| Independent downstream installation | Passed | 426.59 | 3,353,804,800 |
+
+Workspace execution and owner support passed 98 tests in 224.64 seconds at
+`4f8fc0f`; native owner integration passed 83 tests in 446.64 seconds. Their
+complete qualification input closures are unchanged through `06e34e6`.
+The shared runtime-test source changed, so selection, custody and succession
+were rebuilt and executed again. Earlier failed fixture runs receive no passing
+credit. The current product executable is 15,137,688 bytes; its controlled
+provider fixtures use no paid inference.
+
+The first [Linux run](https://github.com/tkersey/protean/actions/runs/40024067007)
+at `4f8fc0f` passed ten of nineteen lanes, failed custody compilation on a fixture
+initializer, and reached the deadline in eight lanes. The corrected
+[run at `06e34e6`](https://github.com/tkersey/protean/actions/runs/40026504150)
+passed seventeen lanes, including custody and downstream installation. Runtime
+selection and succession finished compilation and saved their exact compiled
+inputs, then reached their ten-minute deadlines during test execution. Both
+aggregate gates failed. Complete Linux qualification and fresh serial reviews
+remain outstanding; matching compiled inputs may be reused, but every selected
+test must execute. Earlier results below retain their original scope. Current
+qualification and review status are recorded in
+[Protean #59](https://github.com/tkersey/protean/pull/59).
 
 Protean `82bc894` separates retained observations from current admission and
 keeps observer lifecycle state independent of guest execution. Work-receipt
@@ -571,15 +604,15 @@ measure; the complete Zig totals below expose that additional source growth.
 | Repository | Changed test files | Added bytes | Deleted bytes |
 |---|---:|---:|---:|
 | Horos | 14 | 122,144 | 213 |
-| Kosmos | 11 | 136,871 | 1,104 |
-| Protean | 21 | 295,658 | 55,018 |
-| Total | 46 | 554,673 | 56,335 |
+| Kosmos | 11 | 139,794 | 1,104 |
+| Protean | 21 | 314,592 | 55,018 |
+| Total | 46 | 576,530 | 56,335 |
 
 Complete changed Zig source adds/deletes 376,845/66,889 bytes in Horos,
-318,590/20,796 in Kosmos, and 602,563/94,516 in Protean. No test modules,
+323,886/20,796 in Kosmos, and 623,153/94,337 in Protean. No test modules,
 directories, executables, CI lanes or checked-in trace banks were added. The
 largest test-file extension is Protean's existing `workspace_runtime.zig`:
-208,785 added and 9,868 deleted bytes. Its two generated productions are reused
+223,071 added and 9,868 deleted bytes. Its two generated productions are reused
 by activation, five-arm measurements, recovery and mobility. Historical
 independent byte fixtures remain unchanged.
 
