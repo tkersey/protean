@@ -387,7 +387,7 @@ jobs:
           retention-days: 14
       - name: Admit a complete bounded cache snapshot
         id: cache_size
-        if: ${{ !cancelled() && !matrix.product_consumer && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.compiled.outputs.valid != 'true' && steps.build_cache_size.outputs.save != 'true' }}
+        if: ${{ !cancelled() && !matrix.product_consumer && matrix.lane != 'downstream' && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.compiled.outputs.valid != 'true' && steps.build_cache_size.outputs.save != 'true' }}
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"

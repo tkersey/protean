@@ -68,7 +68,16 @@ job ceiling; both job and aggregate results remain failures. The workflow now
 authenticates exact compiled inputs before build preparation. A matching custody
 binary skips compiler-cache restoration and native build-input provisioning; a
 miss follows the existing build path. Every selected test and both timing gates
-remain unchanged. This setup reduction still requires full Linux qualification.
+remain unchanged.
+
+At `4553cf4`, both full Linux attempts passed all nineteen jobs and the independent
+build-identity comparison, but their aggregate gates failed at 603 and 606 seconds.
+The latter run finished downstream assertions before spending thirteen seconds
+preparing and uploading an optional compiler-cache snapshot. The downstream lane
+now retains its compiler-cache restore, authenticated dependency setup, independent
+build, runtime checks and identity publication without that post-validation
+snapshot upload. Complete qualification remains outstanding; these changes do not
+establish a timing guarantee.
 
 Protean `82bc894` separates retained observations from current admission and
 keeps observer lifecycle state independent of guest execution. Work-receipt
