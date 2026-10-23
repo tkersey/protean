@@ -583,6 +583,11 @@ fn exerciseDivergentGuard(
         const guard = observation.value.object.get("guard") orelse return error.MissingGuardObservation;
         const inspected_guard = try native.values.fromJson(native.workspace.Guard, frame, guard);
         try std.testing.expectEqualDeep(divergent.value.guard.?, inspected_guard);
+        var facts = try service.prepareWorkspaceValidation(task);
+        defer facts.deinit();
+        const prior = service.compiler_facts;
+        service.compiler_facts = &facts;
+        defer service.compiler_facts = prior;
         try service.validateWorkspace(frame, task);
     }
     try std.testing.expect(divergent.value.guard.?.initialized);
