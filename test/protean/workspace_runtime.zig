@@ -648,9 +648,12 @@ fn transformerDocument(b: *source.Builder) !source.Module {
     const output = try contracts.schema(native.program_construction.CandidateDocument, b);
     const entry = try b.declare(&.{input}, output, &.{}, &.{});
     const document = try b.reference(b.parameter(entry, 0));
-    const module_variable = try b.variable(try contracts.schema(source.Module, b));
-    const module = try b.reference(module_variable);
-    const references = try producerField(b, document, 2);
+    const body_entry = try b.declare(&.{
+        try contracts.schema(source.Module, b),
+        try contracts.schema(kosmos.RuntimeCompiler.SourceReferences, b),
+    }, output, &.{}, &.{});
+    const module = try b.reference(b.parameter(body_entry, 0));
+    const references = try b.reference(b.parameter(body_entry, 1));
     const functions = try producerField(
         b,
         module,
@@ -684,15 +687,15 @@ fn transformerDocument(b: *source.Builder) !source.Module {
         .when_true = transformed,
         .when_false = normalized,
     } });
-    try b.define(entry, try b.bind(
-        module_variable,
-        try b.pure(try producerField(b, document, 1)),
-        try b.bind(selected_variable, try b.pure(try producerField(
-            b,
-            selected_function,
-            std.meta.fieldIndex(source.ast.Function, "result").?,
-        )), body),
-    ));
+    try b.define(body_entry, try b.bind(selected_variable, try b.pure(try producerField(
+        b,
+        selected_function,
+        std.meta.fieldIndex(source.ast.Function, "result").?,
+    )), body));
+    try b.define(entry, try b.term(.{ .call = .{
+        .function = body_entry,
+        .arguments = &.{ try producerField(b, document, 1), try producerField(b, document, 2) },
+    } }));
     return b.module(entry, transform.failure);
 }
 
