@@ -63,3 +63,25 @@ The selected Horos/Kosmos revisions and authenticated source, archive, package
 and API identities are in `conformance/protean/dependencies.lock.json` and the
 Horos package binding in `build.zig.zon`. Qualification uses those exact bindings;
 uncommitted local-module development checks do not qualify a dependency tuple.
+
+## Typed recursive participants with Horos 7
+
+Protean 6.0.1 selects Horos 7's canonical `library.hyper` interface. The recursive
+participant fixture promises its effectful task schema before constructing the
+reciprocal pair, then completes the task with its actual peer captures. Its
+retained `ana` emitter uses typed state, named fields and typed Need operations;
+repeated requests and work after a counterpart returns remain ordinary authored
+control flow. Forcing the delayed task obtains its callable value. Applying that
+value executes the task's model and read effects.
+
+Component symbols and registry certification still use explicit source interop.
+`authoring.interop.importFunction` checks the installed function against its
+actual callable contract before ordinary authoring can call it.
+`authoring.interop.componentModule` permits the declared component imports while
+retaining completion, capture and component-admission checks. The deliberately
+false capture fixture continues to mutate IR and must fail ownership admission.
+
+The dependency lock binds the complete development tuple, including the Kosmos
+artifact built with the selected Horos package. Rollback restores the preceding
+lock and package manifest together; saved tasks retain their original executable
+and image bindings.

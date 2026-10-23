@@ -4,6 +4,11 @@ const protean = @import("protean");
 const horos = @import("horos");
 const native = @import("protean_native");
 const kosmos = @import("kosmos");
+
+test "recursive participant native execution restores repeated typed demand" {
+    try @import("recursive_participant.zig").nativeExecution(kosmos);
+}
+
 const protocol = horos.data.invocation;
 const Inbox = protean.inbox.Profile(u32);
 const T = struct {
