@@ -5210,19 +5210,30 @@ fn incompleteObserverWitness(
 ) !void {
     var builder = source.Builder.init(a);
     defer builder.deinit();
-    const document = try native.source_records.encode(a, try listLength(&builder));
+    const document = try native.source_records.encode(a, try observerRegionSource(&builder));
     defer a.free(document);
     var diagnostic: native.program_construction.Diagnostic = .{};
     const program = try service.workspaceBuild(a, "vanishing-source", task, document, &diagnostic);
-    const started = try service.workspaceStart(a, "vanishing-start", task, program.receipt.workspace.?, &.{ 1, 1, 0, 0, 0, 0, 0, 0, 0, 0 }, .{});
+    const input = try contracts.encodeOwned(u64, a, 42);
+    defer a.free(input);
+    const started = try service.workspaceStart(
+        a,
+        "vanishing-start",
+        task,
+        program.receipt.workspace.?,
+        input,
+        .{},
+    );
     var initial = try service.workspaceWork(a, task, started.receipt.workspace.?);
     defer initial.deinit();
     const checkpoint = try service.namespace.store.object(a, initial.value.checkpoint, null);
     defer a.free(checkpoint);
     var graph = try data.state_image.decodeGraphBorrowed(a, checkpoint, .{});
     defer graph.deinit();
-    try std.testing.expect(graph.state.nodes.len != 0);
+    try std.testing.expectEqual(.yielded, initial.value.outcome_kind);
+    try std.testing.expect(graph.state.nodes.len > 1);
     const node = [_]u64{graph.state.nodes.len - 1};
+    try std.testing.expect(node[0] < graph.state.nodes.len);
     var selection = original;
     selection.previous = null;
     selection.source.expected = .{
@@ -5239,7 +5250,46 @@ fn incompleteObserverWitness(
     try advanceObservedSource(service, a, initial.value, "vanishing-advance");
     var advanced = try service.workspaceWork(a, task, initial.value.id);
     defer advanced.deinit();
+    try std.testing.expectEqual(.completed, advanced.value.outcome_kind);
+    const released = try service.namespace.store.object(a, advanced.value.checkpoint, null);
+    defer a.free(released);
+    var after = try data.state_image.decodeGraphBorrowed(a, released, .{});
+    defer after.deinit();
+    try std.testing.expect(node[0] >= after.state.nodes.len);
     try incompleteObserverRetained(service, a, folded.value, advanced.value);
+}
+
+fn observerRegionSource(builder: *source.Builder) !source.Module {
+    const number = try builder.scalar(u64);
+    const unit = try builder.scalar(void);
+    const region_id = builder.region();
+    const region = try builder.schema(.{ .internal = .{ .region = region_id } });
+    const cell = try builder.schema(.{ .internal = .{ .cell = .{
+        .element = number,
+        .region = region_id,
+    } } });
+    const entry = try builder.declare(&.{number}, number, &.{}, &.{});
+    const inside = try builder.declare(&.{ region, number }, number, &.{}, &.{region_id});
+    const allocated = try builder.variable(cell);
+    const result = try builder.pure(try builder.primitive(number, .cell_get, &.{try builder.reference(allocated)}, 0));
+    const yielding = try builder.term(.{ .yield_then = result });
+    const created = try builder.pure(try builder.primitive(cell, .cell_new, &.{
+        try builder.reference(builder.parameter(inside, 0)),
+        try builder.reference(builder.parameter(inside, 1)),
+    }, 0));
+    try builder.define(inside, try builder.bind(allocated, created, yielding));
+    const body = try builder.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{ region, number },
+        .result = number,
+        .effects = &.{},
+        .regions = &.{region_id},
+    } } });
+    try builder.define(entry, try builder.term(.{ .with_region = .{
+        .region = region_id,
+        .body = try builder.lambda(inside, body),
+        .arguments = &.{try builder.reference(builder.parameter(entry, 0))},
+    } }));
+    return builder.module(entry, unit);
 }
 
 fn lateObserverWitness(
