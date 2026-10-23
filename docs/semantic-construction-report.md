@@ -93,7 +93,7 @@ remain unmeasured.
 
 The currently selected dependency tuple uses Horos
 `966970f81e4df3889a1cd4ef1f276fa109557a4b` and Kosmos
-`77546130c27e73e829b5ce511cfd26c732db0702`. Their published GitHub archives were
+`a660470fdc69000b8ce108aa9168c674a7a113d9`. Their published GitHub archives were
 independently downloaded and matched against the complete committed source
 inventories. Native dependency setup authenticates those same inputs.
 The Protean implementation is based on accepted controller reconstruction
@@ -107,7 +107,24 @@ Native macOS Safe `check check-package` passes 264/264 steps and 988/988 tests i
 These reviews cover the finite implementation; they do not prove arbitrary
 program equivalence.
 
-Kosmos `7754613` repairs retained projection-cache admission: every stored
+Kosmos `a660470` retains full projection-cache admission while sorting entries
+and reusing only previously verified collection prefixes. Stable merge sorting
+preserves each original slot/entry pair, including equal coordinates from different
+blobs, without the larger bucket-map specialization. The 16-edit generated
+transformation passes independent validation under the unchanged default 64-million
+work budget. The dense 256-entry validation fixture remains below one million
+transitions. A separate 64-identity-step fixture requires rejection by either
+existing resource error (`Capacity` or `RelationLimit`), then requires successful
+validation with its existing explicit larger budget. No work limit changed.
+Committed macOS Safe qualification passes all 341 tests and Zig 0.17 compatibility
+in 365.99 seconds, with maximum RSS of 4,578,115,584 bytes. TigerStyle passes
+40 files, 7,933 changed lines and all 24 auditor self-tests. Native Linux
+qualification and current Protean integration remain outstanding. The preceding
+bucket-based candidate failed the positive validation budget; its Linux native
+lane timed out during compilation while other runtime lanes passed. Neither that
+candidate nor the historical results below qualify this successor.
+
+The preceding Kosmos `7754613` repairs retained projection-cache admission: every stored
 range must agree with the uncached projection of its keyed source, schema and
 index before restoration can acquire custody. Native macOS Safe qualification
 passes all 340 tests and the Zig 0.17 compatibility check in 368.92 seconds.
@@ -325,20 +342,20 @@ measure; the complete Zig totals below expose that additional source growth.
 | Repository | Changed test files | Added bytes | Deleted bytes |
 |---|---:|---:|---:|
 | Horos | 14 | 122,144 | 213 |
-| Kosmos | 11 | 134,866 | 1,104 |
+| Kosmos | 11 | 136,871 | 1,104 |
 | Protean | 20 | 259,430 | 53,472 |
-| Total | 45 | 516,440 | 54,789 |
+| Total | 45 | 518,445 | 54,789 |
 
 Complete changed Zig source adds/deletes 376,845/66,889 bytes in Horos,
-311,967/20,796 in Kosmos, and 553,314/92,900 in Protean. No test modules,
+318,590/20,796 in Kosmos, and 553,314/92,900 in Protean. No test modules,
 directories, executables, CI lanes or checked-in trace banks were added. The
 largest test-file extension is Protean's existing `workspace_runtime.zig`:
 176,665 added and 9,125 deleted bytes. Its two generated productions are reused
 by activation, five-arm measurements, recovery and mobility. Historical
 independent byte fixtures remain unchanged.
 
-The packaged semantic core is 264,134 bytes, SHA-256
-`5a92dbf978ddec5a7ec3eaa2fdab51acb719e4f85ad450df6cf0213cb9c96201`.
+The packaged semantic core is 275,293 bytes, SHA-256
+`d539e6814221f82e1bd0609f9aa504d9e42287657f1a431771261ab89d4620d7`.
 Regeneration binds the repaired Kosmos source and the selected Horos package.
 Generated candidates use `kosmos.semantic-artifact/3` and
 `kosmos.source-relation/1`; historical artifacts retain their existing family.
