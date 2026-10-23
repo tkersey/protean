@@ -61,6 +61,15 @@ test must execute. Earlier results below retain their original scope. Current
 qualification and review status are recorded in
 [Protean #59](https://github.com/tkersey/protean/pull/59).
 
+The two full [runs at `0e75961`](https://github.com/tkersey/protean/actions/runs/40027948478)
+each passed eighteen lanes. Custody completed every assertion in 553.53 and
+556.43 seconds on AMD EPYC 7763 runners, but setup and finalization exceeded the
+job ceiling; both job and aggregate results remain failures. The workflow now
+authenticates exact compiled inputs before build preparation. A matching custody
+binary skips compiler-cache restoration and native build-input provisioning; a
+miss follows the existing build path. Every selected test and both timing gates
+remain unchanged. This setup reduction still requires full Linux qualification.
+
 Protean `82bc894` separates retained observations from current admission and
 keeps observer lifecycle state independent of guest execution. Work-receipt
 replay evaluates blocking at its recorded event cut; runtime inspection compares

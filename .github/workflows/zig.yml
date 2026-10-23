@@ -43,9 +43,48 @@ jobs:
           mirror: https://zigmirror.com
           use-tool-cache: true
           use-cache: false
+      - name: Identify complete compiled qualification inputs
+        id: deployment_inputs
+        if: matrix.compiled_profile
+        env:
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/protean-input-key/global
+          ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/protean-input-key/local
+        run: |
+          compiler_root="$(dirname "$(realpath "$(command -v zig)")")"
+          compiler=$(tar -C "$compiler_root" --sort=name --mtime=@0 \
+            --owner=0 --group=0 --numeric-owner --dereference -cf - zig lib LICENSE \
+            | sha256sum | cut -d' ' -f1)
+          key=$(node tools/native/qualification_build.mjs key "${{ matrix.compiled_profile }}" "$compiler")
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - name: Restore exact compiled qualification inputs
+        id: deployment_cache
+        if: matrix.compiled_profile
+        continue-on-error: true
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ runner.temp }}/protean-qualification
+          key: ${{ steps.deployment_inputs.outputs.key }}
+      - name: Validate restored compiled qualification inputs
+        id: compiled
+        if: matrix.compiled_profile
+        run: |
+          valid=false
+          if [ "${{ steps.deployment_cache.outputs.cache-hit }}" = true ]; then
+            if node tools/native/qualification_build.mjs verify "${{ matrix.compiled_profile }}" \
+                "$RUNNER_TEMP/protean-qualification" "${{ steps.deployment_inputs.outputs.key }}"; then
+              valid=true
+              echo 'Exact compiled-artifact cache hit; selected checks still execute.'
+            else
+              echo '::warning::Rejected unusable compiled cache; rebuilding the selected artifact.'
+            fi
+          else
+            echo 'Exact compiled-artifact cache miss; selected artifact will build.'
+          fi
+          if [ "$valid" != true ]; then rm -rf "$RUNNER_TEMP/protean-qualification"; fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Restore complete compiler cache
         id: cache
-        if: ${{ !matrix.product_consumer }}
+        if: ${{ !matrix.product_consumer && (matrix.lane != 'workspace-custody' || steps.compiled.outputs.valid != 'true') }}
         continue-on-error: true
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
@@ -89,7 +128,7 @@ jobs:
         if: matrix.lane == 'authoring'
         run: sh tools/check_zig_paths.sh
       - name: Restore locked native transport bytes
-        if: ${{ !matrix.product_consumer }}
+        if: ${{ !matrix.product_consumer && (matrix.lane != 'workspace-custody' || steps.compiled.outputs.valid != 'true') }}
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
@@ -97,48 +136,12 @@ jobs:
             .protean-native/inputs/*.zip
           key: protean-native-archives-v2-${{ matrix.lane == 'downstream' && 'native' || matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}
       - name: Authenticate and provision selected native inputs
-        if: ${{ !matrix.product_consumer && matrix.lane != 'downstream' }}
+        if: ${{ !matrix.product_consumer && matrix.lane != 'downstream' && (matrix.lane != 'workspace-custody' || steps.compiled.outputs.valid != 'true') }}
         run: |
           zig run tools/native/dependencies.zig -- setup \
             conformance/protean/dependencies.lock.json \
             conformance/protean/native-dependencies.lock.json \
             .protean-native/inputs "$(command -v zig)"
-      - name: Identify complete compiled qualification inputs
-        id: deployment_inputs
-        if: matrix.compiled_profile
-        run: |
-          compiler_root="$(dirname "$(realpath "$(command -v zig)")")"
-          compiler=$(tar -C "$compiler_root" --sort=name --mtime=@0 \
-            --owner=0 --group=0 --numeric-owner --dereference -cf - zig lib LICENSE \
-            | sha256sum | cut -d' ' -f1)
-          key=$(node tools/native/qualification_build.mjs key "${{ matrix.compiled_profile }}" "$compiler")
-          echo "key=$key" >> "$GITHUB_OUTPUT"
-      - name: Restore exact compiled qualification inputs
-        id: deployment_cache
-        if: matrix.compiled_profile
-        continue-on-error: true
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ runner.temp }}/protean-qualification
-          key: ${{ steps.deployment_inputs.outputs.key }}
-      - name: Validate restored compiled qualification inputs
-        id: compiled
-        if: matrix.compiled_profile
-        run: |
-          valid=false
-          if [ "${{ steps.deployment_cache.outputs.cache-hit }}" = true ]; then
-            if node tools/native/qualification_build.mjs verify "${{ matrix.compiled_profile }}" \
-                "$RUNNER_TEMP/protean-qualification" "${{ steps.deployment_inputs.outputs.key }}"; then
-              valid=true
-              echo 'Exact compiled-artifact cache hit; selected checks still execute.'
-            else
-              echo '::warning::Rejected unusable compiled cache; rebuilding the selected artifact.'
-            fi
-          else
-            echo 'Exact compiled-artifact cache miss; selected artifact will build.'
-          fi
-          if [ "$valid" != true ]; then rm -rf "$RUNNER_TEMP/protean-qualification"; fi
-          echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Build compiled qualification inputs
         if: matrix.compiled_profile && steps.compiled.outputs.valid != 'true'
         run: |
