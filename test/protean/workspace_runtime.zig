@@ -202,6 +202,7 @@ fn pumpGuardWitness(
         if (index == 0 or (!reference_reopened and after.value.guard.?.reference_operation != null)) {
             if (after.value.guard.?.reference_operation) |pending| {
                 try std.testing.expect(pending.dependencies.items.len != 0);
+                try frozenGuardPayloadWitness(a, service, after.value);
                 reference_reopened = true;
             }
             try restartGuardOwner(a, service);
@@ -482,6 +483,39 @@ fn exerciseGuardReply(a: std.mem.Allocator, service: anytype, task: native.testi
     try service.validateWorkspace(a, task);
 }
 
+fn frozenGuardPayloadWitness(a: std.mem.Allocator, service: anytype, work: native.workspace.Work) !void {
+    try std.testing.expect(work.guard.?.reference_operation.?.dependencies.items.len != 0);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var poisoned: support.PoisonFreedAllocator = .{ .backing = arena.allocator() };
+    const operation_id = try std.fmt.allocPrint(a, "guard-payload-{s}-{d}", .{
+        std.fmt.bytesToHex(work.id, .lower), work.guard.?.revision,
+    });
+    defer a.free(operation_id);
+    const materialized = try service.workspaceCommand(poisoned.allocator(), operation_id, work.task, .{
+        .context = .{ .materialize = .{
+            .input = .{ .guest_view = .{
+                .expected = .{
+                    .work = try workspaceRef(a, .work, work.id),
+                    .execution_revision = work.execution_revision,
+                    .control_revision = work.control_revision,
+                },
+                .realization_revision = work.realization_revision,
+                .nodes = .{ .selected = .{ .items = &.{} } },
+            } },
+            .sources = .{ .items = &.{} },
+        } },
+    });
+    try std.testing.expectEqual(.observed, materialized.disposition);
+    const custody = try native.workspace.custodyId(a, work.task, try nativeIdentity(materialized.evidence.?));
+    const bytes = (try service.namespace.store.recordBytes(a, "workspace_value", custody, work.task)).?;
+    defer a.free(bytes);
+    var retained = try contracts.decodeOwned(native.workspace.Value, a, bytes);
+    defer retained.deinit();
+    const frozen = retained.value.derivation.inspection.?.observation.work;
+    try std.testing.expectEqualDeep(work.guard.?, frozen.guard.?);
+}
+
 fn exerciseDivergentGuard(
     a: std.mem.Allocator,
     service: anytype,
@@ -507,10 +541,7 @@ fn exerciseDivergentGuard(
     var divergent = try service.workspaceWork(a, task, id);
     defer divergent.deinit();
     {
-        var arena = std.heap.ArenaAllocator.init(a);
-        defer arena.deinit();
-        var poisoned: support.PoisonFreedAllocator = .{ .backing = arena.allocator() };
-        const inspected = try service.workspaceCommand(poisoned.allocator(), "divergent-inspect", task, .{
+        const inspected = try service.workspaceCommand(a, "divergent-inspect", task, .{
             .work = .{ .inspect = .{ .work = try workspaceRef(a, .work, id) } },
         });
         try std.testing.expectEqual(.observed, inspected.disposition);
@@ -519,7 +550,7 @@ fn exerciseDivergentGuard(
         const guard = observation.value.object.get("guard") orelse return error.MissingGuardObservation;
         const inspected_guard = try native.values.fromJson(native.workspace.Guard, a, guard);
         try std.testing.expectEqualDeep(divergent.value.guard.?, inspected_guard);
-        try service.validateWorkspace(poisoned.allocator(), task);
+        try service.validateWorkspace(a, task);
     }
     try std.testing.expect(divergent.value.guard.?.initialized);
     try std.testing.expectEqualDeep(before.value.checkpoint, divergent.value.checkpoint);

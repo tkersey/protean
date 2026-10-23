@@ -25,10 +25,13 @@ These changes address the eleven defect classes found in the completed review
 of the preceding `10d8eef` candidate; that candidate's reviews supply no successor
 review credit.
 
-Committed macOS Safe runtime selection passes all four tests and 18 build steps
-in 288.42 seconds, with maximum RSS of 5,101,928,448 bytes. Custody passes its
-complete generated/reuse/five-arm/restart/transfer/cleanup scenario and all 18
-build steps in 364.39 seconds, with maximum RSS of 6,098,845,696 bytes. The existing
+Committed `84cf1d6` macOS Safe runtime selection passes all four tests and 18
+build steps in 282.96 seconds, with maximum RSS of 5,414,174,720 bytes. Custody
+passes its complete generated/reuse/five-arm/restart/transfer/cleanup scenario
+and all 18 build steps in 357.90 seconds, with maximum RSS of 5,907,480,576 bytes.
+Succession passes all eight tests in 310.53 seconds with maximum RSS of
+4,233,805,824 bytes. Independent downstream installation passes in 408.21
+seconds with maximum RSS of 3,386,114,048 bytes. The existing
 workspace-execution and native owner-support roots pass together: 98 tests and
 25 build steps in 237.07 seconds, with maximum RSS of 3,341,418,496 bytes. They
 include 20 process crashes, 40 reopen checks, and no original-effect reinvocation
@@ -36,9 +39,11 @@ or automatic recovery lookup. The
 witnesses include historical receipt replay, failed observer preparation,
 four source/runtime/diagnostic mutations, explicit parking across reopen,
 derived-runtime inspection, compiler timing and local executor cancellation.
-The prior failed runs exposed a missing retained source snapshot and incorrect
-test assumptions; they receive no passing credit. Current exact-head native,
-Linux and serial-review results are recorded in
+The guard lifetime discriminator materializes a retained guest view with freed
+decoding memory poisoned, then compares its nonempty guard dependencies with the
+independently retained source. The prior failed runs exposed a missing retained
+source snapshot and incorrect test assumptions; they receive no passing credit.
+Current exact-head native, Linux and serial-review results are recorded in
 [Protean #59](https://github.com/tkersey/protean/pull/59).
 
 Protean `d27ae19` corrects validation outcomes for decoding-budget `Capacity`
@@ -524,14 +529,14 @@ measure; the complete Zig totals below expose that additional source growth.
 |---|---:|---:|---:|
 | Horos | 14 | 122,144 | 213 |
 | Kosmos | 11 | 136,871 | 1,104 |
-| Protean | 21 | 292,134 | 55,018 |
-| Total | 46 | 551,149 | 56,335 |
+| Protean | 21 | 293,747 | 55,018 |
+| Total | 46 | 552,762 | 56,335 |
 
 Complete changed Zig source adds/deletes 376,845/66,889 bytes in Horos,
-318,590/20,796 in Kosmos, and 599,039/94,516 in Protean. No test modules,
+318,590/20,796 in Kosmos, and 600,652/94,516 in Protean. No test modules,
 directories, executables, CI lanes or checked-in trace banks were added. The
 largest test-file extension is Protean's existing `workspace_runtime.zig`:
-205,261 added and 9,868 deleted bytes. Its two generated productions are reused
+206,874 added and 9,868 deleted bytes. Its two generated productions are reused
 by activation, five-arm measurements, recovery and mobility. Historical
 independent byte fixtures remain unchanged.
 
