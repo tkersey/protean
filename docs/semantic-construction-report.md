@@ -25,13 +25,13 @@ These changes address the eleven defect classes found in the completed review
 of the preceding `10d8eef` candidate; that candidate's reviews supply no successor
 review credit.
 
-Committed `7e61dd1` macOS Safe runtime selection passes all four tests and 18
-build steps in 285.93 seconds, with maximum RSS of 4,954,898,432 bytes. Custody
+Committed `f626f1a` macOS Safe runtime selection passes all four tests and 18
+build steps in 288.70 seconds, with maximum RSS of 4,478,140,416 bytes. Custody
 passes its complete generated/reuse/five-arm/restart/transfer/cleanup scenario
-and all 18 build steps in 355.44 seconds, with maximum RSS of 5,008,949,248 bytes.
-Succession passes all eight tests in 309.71 seconds with maximum RSS of
-4,233,789,440 bytes. Independent downstream installation passes in 407.10
-seconds with maximum RSS of 3,567,370,240 bytes. The existing
+and all 18 build steps in 356.66 seconds, with maximum RSS of 5,266,833,408 bytes.
+Succession passes all eight tests in 313.07 seconds with maximum RSS of
+4,233,101,312 bytes. Independent downstream installation passes in 407.59
+seconds with maximum RSS of 3,317,891,072 bytes. The existing
 workspace-execution and native owner-support roots pass together: 98 tests and
 25 build steps in 237.07 seconds, with maximum RSS of 3,341,418,496 bytes. They
 include 20 process crashes, 40 reopen checks, and no original-effect reinvocation
@@ -51,8 +51,18 @@ All ten exact compiled profiles are retained, but the run and aggregate gate fai
 Commit `f626f1a` scopes the divergent-guard inspection and full workspace validation
 to a temporary arena backed directly by the service allocator, allowing its memory
 to be reclaimed independently of the larger construction scenario. All assertions
-and the separate poisoned-memory guard materialization remain. This changes test
-scratch lifetime; qualification of the successor remains outstanding here.
+and the separate poisoned-memory guard materialization remain. That scratch
+change does not resolve the Linux failure: the [same-input retry](https://github.com/tkersey/protean/actions/runs/39973763037/attempts/2)
+passes eighteen lanes but custody again reports `OutOfMemory` at context event 6,
+after 245.26 seconds with maximum RSS of 4,162,052 KiB.
+
+Commit `d5b4175` uses the existing `prepareWorkspaceValidation` owner before the
+same full validation. Semantic source reconstruction now runs in the owner's
+per-record scratch scopes; exact cached results are copied into validation.
+Every publication, receipt and current divergent-work comparison still executes.
+The independently prepared destination import remains unchanged. Failure-only
+allocation diagnostics retain the requested size and accounting if a backing
+allocation fails. Qualification of this successor remains outstanding here.
 Current exact-head native, Linux and serial-review results are recorded in
 [Protean #59](https://github.com/tkersey/protean/pull/59).
 
@@ -539,14 +549,14 @@ measure; the complete Zig totals below expose that additional source growth.
 |---|---:|---:|---:|
 | Horos | 14 | 122,144 | 213 |
 | Kosmos | 11 | 136,871 | 1,104 |
-| Protean | 21 | 293,913 | 55,018 |
-| Total | 46 | 552,928 | 56,335 |
+| Protean | 21 | 295,658 | 55,018 |
+| Total | 46 | 554,673 | 56,335 |
 
 Complete changed Zig source adds/deletes 376,845/66,889 bytes in Horos,
-318,590/20,796 in Kosmos, and 600,818/94,516 in Protean. No test modules,
+318,590/20,796 in Kosmos, and 602,563/94,516 in Protean. No test modules,
 directories, executables, CI lanes or checked-in trace banks were added. The
 largest test-file extension is Protean's existing `workspace_runtime.zig`:
-207,040 added and 9,868 deleted bytes. Its two generated productions are reused
+208,785 added and 9,868 deleted bytes. Its two generated productions are reused
 by activation, five-arm measurements, recovery and mobility. Historical
 independent byte fixtures remain unchanged.
 
