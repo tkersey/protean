@@ -2716,6 +2716,7 @@ fn expectPackagedSemanticInspection(
     subject: contracts.workspace.SemanticTarget,
     label: []const u8,
 ) !void {
+    errdefer std.debug.print("packaged semantic inspection: {s}\n", .{label});
     const response = try service.workspaceCommand(a, label, task, .{ .program = .{ .inspect = .{
         .target = .{ .semantic_source = .{ .subject = subject, .section = .{ .summary = .{} } } },
         .page = .{},
@@ -2736,7 +2737,24 @@ fn expectPackagedSemanticInspection(
     } } });
     try std.testing.expectEqual(.observed, again.disposition);
     try std.testing.expectEqualStrings(response.observation_json.bytes, again.observation_json.bytes);
-    var summary = try native.json.parse(a, parsed.value.object.get("text").?.string, .{});
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    var offset: u64 = 0;
+    while (true) {
+        const part = if (offset == 0) response else try service.workspaceCommand(a, try std.fmt.allocPrint(a, "{s}-page-{d}", .{ label, offset }), task, .{ .program = .{ .inspect = .{
+            .target = .{ .semantic_source = .{ .subject = returned, .section = .{ .summary = .{} } } },
+            .page = .{ .offset = offset },
+        } } });
+        try std.testing.expectEqual(.observed, part.disposition);
+        var page = try native.json.parse(a, part.observation_json.bytes, .{});
+        defer page.deinit();
+        try text.appendSlice(a, page.value.object.get("text").?.string);
+        if (page.value.object.get("eof").?.bool) break;
+        const next = try native.json.numberInteger(u64, page.value.object.get("next_offset").?.number_string);
+        try std.testing.expect(next > offset);
+        offset = next;
+    }
+    var summary = try native.json.parse(a, text.items, .{});
     defer summary.deinit();
     try std.testing.expect(!summary.value.object.contains("runtime"));
     try std.testing.expectEqualStrings(&identity, summary.value.object.get("runtime_identity").?.string);
