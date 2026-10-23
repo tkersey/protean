@@ -18,6 +18,35 @@ const fixtureManifest = support.fixtureManifest;
 const gcd = @import("workspace_sources.zig").gcd;
 const listLength = @import("workspace_sources.zig").listLength;
 
+const AllocationFailureTrace = struct {
+    backing: std.mem.Allocator,
+    meter: *kosmos.AllocationBudget,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.backing.rawAlloc(len, alignment, ra) orelse {
+            std.debug.print("allocation failure: bytes={d} alignment={d} return_address={x} live={d} peak={d} required={d} budget_failed={}\n", .{
+                len, alignment.toByteUnits(), ra, self.meter.live, self.meter.peak, self.meter.required, self.meter.failed,
+            });
+            return null;
+        };
+    }
+
+    fn free(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(bytes, alignment, ra);
+    }
+};
+
 fn exerciseGuard(
     a: std.mem.Allocator,
     service: anytype,
@@ -543,6 +572,7 @@ fn exerciseDivergentGuard(
     {
         var request = std.heap.ArenaAllocator.init(service.allocator);
         defer request.deinit();
+        errdefer std.debug.print("divergent validation: scratch_capacity={d}\n", .{request.queryCapacity()});
         const frame = request.allocator();
         const inspected = try service.workspaceCommand(frame, "divergent-inspect", task, .{
             .work = .{ .inspect = .{ .work = try workspaceRef(frame, .work, id) } },
@@ -3298,6 +3328,9 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     var attack_index: usize = 0;
     errdefer std.debug.print("placement {s}: {s} ({d})\n", .{ @tagName(scenario), phase, attack_index });
     var meter: kosmos.AllocationBudget = .{ .parent = std.testing.allocator, .limit = std.math.maxInt(usize) };
+    var traced: AllocationFailureTrace = .{ .backing = meter.parent, .meter = &meter };
+    meter.parent = traced.allocator();
+    errdefer std.debug.print("placement allocation: peak={d} required={d} budget_failed={}\n", .{ meter.peak, meter.required, meter.failed });
     const a = if (scenario == .work) meter.allocator() else std.testing.allocator;
     const io = std.testing.io;
     const p = native.placement;
