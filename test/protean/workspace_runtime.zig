@@ -1379,8 +1379,8 @@ fn generatedFromProducer(
         } } },
     );
     const candidate = try semanticReference(a, derived, "candidate");
-    try expectCompilerTime(a, service, task, derived);
     const construction_ns = std.math.cast(u64, @max(0, std.Io.Clock.awake.now(std.testing.io).nanoseconds - construction_started.nanoseconds)) orelse std.math.maxInt(u64);
+    try expectCompilerTime(a, service, task, derived);
     phase = "reference guard";
     if (guard_input) |input| try exerciseGuard(a, service, task, program, input, candidate);
     phase = "independent validation";
@@ -1392,13 +1392,9 @@ fn generatedFromProducer(
         .{ .program = .{ .validate = .{ .candidate = candidate } } },
     );
     const runtime = try semanticReference(a, validated, "runtime");
-    try expectCompilerTime(a, service, task, validated);
-    const inspected = try service.workspaceCommand(a, try std.fmt.allocPrint(a, "{s}-inspect-runtime", .{label}), task, .{
-        .program = .{ .inspect = .{ .target = .{ .runtime = runtime }, .page = .{} } },
-    });
-    try std.testing.expectEqual(.observed, inspected.disposition);
-    try std.testing.expectEqualDeep(runtime, try semanticReference(a, inspected, "runtime"));
     const validation_ns = std.math.cast(u64, @max(0, std.Io.Clock.awake.now(std.testing.io).nanoseconds - validation_started.nanoseconds)) orelse std.math.maxInt(u64);
+    try expectCompilerTime(a, service, task, validated);
+    try expectRuntimeInspection(a, service, task, runtime, label);
     if (ancestor == .runtime)
         try std.testing.expect(!std.meta.eql(try nativeIdentity(ancestor.runtime), try nativeIdentity(runtime)));
     phase = "helper correspondence";
@@ -1411,6 +1407,21 @@ fn generatedFromProducer(
         .construction_ns = construction_ns,
         .validation_ns = validation_ns,
     };
+}
+
+fn expectRuntimeInspection(a: std.mem.Allocator, service: anytype, task: native.testing.state.TaskId, runtime: contracts.workspace.Ref, label: []const u8) !void {
+    const operation_id = try std.fmt.allocPrint(a, "{s}-inspect-runtime", .{label});
+    defer a.free(operation_id);
+    const inspected = try service.workspaceCommand(a, operation_id, task, .{
+        .program = .{ .inspect = .{ .target = .{ .program = runtime }, .page = .{} } },
+    });
+    try std.testing.expectEqual(.observed, inspected.disposition);
+    var page = try native.json.parse(a, inspected.observation_json.bytes, .{});
+    defer page.deinit();
+    var observation = try native.json.parse(a, page.value.object.get("text").?.string, .{});
+    defer observation.deinit();
+    const actual = try native.values.fromJson(contracts.workspace.Ref, a, observation.value.object.get("runtime").?);
+    try std.testing.expectEqualDeep(runtime, actual);
 }
 
 fn expectCompilerTime(a: std.mem.Allocator, service: anytype, task: native.testing.state.TaskId, reply: contracts.workspace.Reply) !void {
@@ -5445,6 +5456,15 @@ fn incompleteObserverRetained(
 }
 
 fn incompleteObserverTamper(service: anytype, a: std.mem.Allocator, work: native.workspace.Work) !void {
+    var manifest_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
+    const index = try service.namespace.store.archiveIndex(a, work.task, .{
+        .digest = manifest_digest,
+        .bytes = service.assets.manifest.len,
+    });
+    var facts = try service.prepareWorkspaceValidation(work.task);
+    defer facts.deinit();
+    try service.validateWorkspaceRecordsPrepared(a, work.task, index.records.items, &facts);
     for (0..3) |attack| {
         try service.namespace.store.begin();
         defer service.namespace.store.rollback();
@@ -5482,7 +5502,7 @@ fn incompleteObserverTamper(service: anytype, a: std.mem.Allocator, work: native
         defer a.free(encoded);
         const reference = try service.namespace.store.putObject(encoded);
         try service.namespace.store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{ .{ .blob = &reference.digest }, .{ .blob = &work.task }, .{ .integer = @intCast(work.event_watermark) } });
-        try std.testing.expectError(error.InvalidArchive, service.validateWorkspace(a, work.task));
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, work.task, index.records.items, &facts));
     }
 }
 
