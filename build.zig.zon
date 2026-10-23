@@ -1,10 +1,10 @@
 .{
     .name = .protean,
-    .version = "6.0.0",
+    .version = "6.0.1",
     .dependencies = .{
         .horos = .{
-            .url = "git+https://github.com/tkersey/horos#592eb0839326f2d8a423b59ce2746ab18ef5136a",
-            .hash = "horos-6.0.0-flclaDfbQAD6K8zS9U8ts9xpziBg_1zaU23OvgqKePKb",
+            .url = "git+https://github.com/tkersey/horos#5bea02f41e6ca5cbc41f91ad7497f48742004557",
+            .hash = "horos-7.0.0-flclaF7LTQBCfUOfwo9Pe7EkiqXHnUKguDftc98sGQAe",
         },
     },
     .minimum_zig_version = "0.17.0",
