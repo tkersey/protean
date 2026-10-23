@@ -3961,6 +3961,7 @@ fn reconstructionTrials(service: anytype, a: std.mem.Allocator, task: [16]u8, or
         if (case == 6) selected_responses[0].response = unit;
         const cancelled = case == 16 or case == 17;
         const explicit = case == 3 or case == 4 or case == 5 or cancelled;
+        if (case == 0) service.checked_workspace_programs.clearRetainingCapacity();
         const started = try service.workspaceCommand(a, try std.fmt.allocPrint(a, "trial-start-{d}", .{case}), task, .{ .work = .{ .start = .{ .program = original, .input = .{ .reference = input }, .policy = .{ .stop = .terminal, .continuation = if (explicit) .explicit_only else .owner_scheduled }, .trial = .{ .synthetic = .{ .responses = .{ .items = if (case == 2) selected_responses[1..] else &selected_responses }, .live_inference = case == 2 } } } } });
         try std.testing.expectEqual(.observed, started.disposition);
         const started_json = (try native.json.parse(a, started.observation_json.bytes, .{})).value;
@@ -4131,6 +4132,20 @@ pub const ReconstructionProcess = struct {
 };
 fn reconstructionModelMove(service: anytype, a: std.mem.Allocator, root: []const u8, task: [16]u8, work: native.tasks.Work, destination_identity: [32]u8, service_open: *bool, namespace_open: *bool) !void {
     const backing = std.testing.allocator;
+    var before = try service.task(a, task);
+    defer before.deinit();
+    const source_read = try service.workspaceCommand(a, "model-before-move-source", task, .{ .context = .{ .materialize = .{
+        .input = .{ .semantic_source = .{
+            .subject = .{ .controller = .{ .cut = .{
+                .epoch = before.value.controller_epoch,
+                .execution_revision = before.value.execution_revision,
+                .realization_revision = before.value.realization_revision,
+            } } },
+            .module = .{ .selected = .{} },
+        } },
+        .sources = .{ .items = &.{} },
+    } } });
+    try std.testing.expectEqual(.observed, source_read.disposition);
     try service.notSent(a, work);
     const io = service.io;
     const assets = service.assets;

@@ -62,6 +62,64 @@ import {runtimePlacementFixture, placementRequest} from './runtime_placement_fix
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const reference = bytes => [[...createHash('sha256').update(bytes).digest()], BigInt(bytes.length)];
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+export function verifyCandidateMetrics(measuredBytes, application) {
+  const archive = readArchive(measuredBytes);
+  const store = bytes => { const ref = reference(bytes); archive.objects.set(Buffer.from(ref[0]).toString('hex'), bytes); return ref; };
+  const record = (name, value) => store(Buffer.from(encodeValue(archive.schemas.get(name), value)));
+  const code = store(Buffer.from('shared candidate code'));
+  const candidateRefs = ['first', 'second', 'failed'].map(name => store(Buffer.from(name)));
+  const none = {tag: 0, value: null}, some = value => ({tag: 1, value});
+  const task = archive.task.id, program = code[0];
+  archive.manifest[6] = candidateRefs.map(ref => [31, ref[0], record('workspace_candidate', [ref[0], task, program, ref,
+    [1, code, code, ref, code, none, code[0], 'fixture']])]);
+  archive.manifest[6].push([18, code[0], record('workspace_runtime', [code[0], task, program, code,
+    some([1, candidateRefs[0], code, code, code[0], 'fixture'])])]);
+  const receipt = decodeValue(archive.schemas.get('receipt'), archive.object(archive.manifest[8][0][2]));
+  const observationSchema = {root: 0, types: [{product: [1, 1, 3]}, {sum: [2, 3]}, 'unit', {product: [4, 6]}, {array: {element: 5, length: 32}}, 'u8', 'u64']};
+  archive.manifest[8] = [0, 1, 1, 2].map(index => {
+    const observation = store(Buffer.from(encodeValue(observationSchema, [some(candidateRefs[index]), index === 2 ? none : some(code), code])));
+    const retained = [...receipt];
+    retained[10] = some(candidateRefs[index][0]);
+    retained[11] = some(10);
+    retained[12] = some(observation);
+    return [receipt[0], receipt[1], record('receipt', retained)];
+  });
+  const observed = workspaceMetrics(archive, application);
+  assert.equal(observed.candidate_artifacts, 3);
+  assert.equal(observed.admitted_runtimes, 1);
+  assert.equal(observed.distinct_candidate_code_bytes, Number(code[1]));
+  assert.equal(observed.validated_candidates, 2);
+  assert.equal(observed.unvalidated_candidates, 1);
+  const semanticReceipts = archive.manifest[8];
+  archive.manifest[8] = [];
+  const runtimeOnly = workspaceMetrics(archive, application);
+  assert.equal(runtimeOnly.validated_candidates, 1);
+  assert.equal(runtimeOnly.unvalidated_candidates, 2);
+  for (const [ordinal, index] of [0, 1, 1, 2].entries()) {
+    const id = reference(Buffer.from(`validation attempt ${ordinal}`))[0];
+    const observation = {candidate: {kind: 'candidate', id: Buffer.from(candidateRefs[index][0]).toString('hex')},
+      validation: index === 2 ? 'rejected' : 'validated', compiler_nanoseconds: 3,
+      ...(index === 2 ? {} : {runtime: {kind: 'runtime', id: Buffer.from(code[0]).toString('hex')}})};
+    const reply = encodeValue(contract(application, 'WorkspaceReply'), [0, JSON.stringify(observation), none, none, none]);
+    const payload = Buffer.from(encodeValue(resultSchema, [id, reply]));
+    const header = Buffer.alloc(20);
+    header.write('ABL_ERS3');
+    header.writeBigUInt64LE(BigInt(payload.length), 12);
+    const bound = store(Buffer.concat([header, payload]));
+    archive.manifest[6].push([5, id, record('attempt', [id, task, id, code, code, 'fixture.workspace', false, none, 1, none])],
+      [4, id, record('capture', [task, id, id, code, none, 0, some([bound, [], none]), none])]);
+  }
+  const captured = workspaceMetrics(archive, application);
+  assert.equal(captured.validated_candidates, 2);
+  assert.equal(captured.unvalidated_candidates, 1);
+  assert.equal(captured.builds, 4);
+  assert.equal(captured.compiler_nanoseconds, 12);
+  assert.equal(captured.distinct_candidate_code_bytes, Number(code[1]));
+  archive.manifest[8] = semanticReceipts;
+  const combined = workspaceMetrics(archive, application);
+  assert.equal(combined.validated_candidates, 2);
+  assert.equal(combined.unvalidated_candidates, 1);
+}
 async function within(promise, milliseconds, message) {
   let timer;
   try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), milliseconds); })]); }
@@ -1168,6 +1226,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         // the evaluator over that domain with the archive's actual codecs.
         const measuredBytes = await readFile(measured);
         const application = JSON.parse(await readFile(applicationPath, 'utf8'));
+        verifyCandidateMetrics(measuredBytes, application);
         for (const [body, input, output, missing] of [
           ['<html>502 Bad Gateway</html>', 0, 0, 1, 0],
           ['', 0, 0, 1, 0], ['null', 0, 0, 1, 0], ['{}', 0, 0, 1, 0],

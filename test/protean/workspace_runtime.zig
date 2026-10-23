@@ -93,6 +93,10 @@ fn exerciseGuard(
     defer agreed.deinit();
     try std.testing.expectEqual(@as(u64, 1), agreed.value.guard.?.agreed_segments);
     try std.testing.expectEqualDeep(before.value.runtime, agreed.value.runtime);
+    try retryGuardRestoreFailure(a, service, agreed.value);
+    agreed.deinit();
+    agreed = try service.workspaceWork(a, task, id);
+    try std.testing.expectEqual(@as(u64, 2), agreed.value.guard.?.agreed_segments);
     const remove: @FieldType(contracts.workspace.Work, "unguard") = .{
         .expected = .{
             .work = command.expected.work,
@@ -114,6 +118,72 @@ fn exerciseGuard(
     try std.testing.expectEqualDeep(agreed.value.checkpoint, unguarded.value.checkpoint);
     try assertGuardNotRuntime(a, service, unguarded.value, candidate);
     try cancelGuardWitness(a, service, unguarded.value, candidate);
+}
+
+const FailOneAllocationSize = struct {
+    backing: std.mem.Allocator,
+    size: usize,
+    failed: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (!self.failed and len == self.size) {
+            self.failed = true;
+            return null;
+        }
+        return self.backing.rawAlloc(len, alignment, ra);
+    }
+
+    fn free(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(bytes, alignment, ra);
+    }
+};
+
+fn retryGuardRestoreFailure(a: std.mem.Allocator, service: anytype, initial: native.workspace.Work) !void {
+    var failing: FailOneAllocationSize = .{
+        .backing = a,
+        .size = @intCast(initial.guard.?.continuation.?.bytes),
+    };
+    _ = try service.workspaceControl(failing.allocator(), "guard-restore-failure", initial.task, initial.id, initial.execution_revision, initial.control_revision, .advance);
+    try std.testing.expect(failing.failed);
+    var failed = try service.workspaceWork(a, initial.task, initial.id);
+    defer failed.deinit();
+    try std.testing.expectEqualStrings("OutOfMemory", failed.value.guard.?.failure.?.bytes);
+    try std.testing.expect(failed.value.guard.?.pending_control != null);
+    try std.testing.expectEqualDeep(initial.guard.?.continuation, failed.value.guard.?.continuation);
+    try std.testing.expectEqualDeep(initial.checkpoint, failed.value.checkpoint);
+    try restartGuardOwner(a, service);
+    for (0..512) |index| {
+        var current = try service.workspaceWork(a, initial.task, initial.id);
+        defer current.deinit();
+        _ = try service.workspacePump(a, try std.fmt.allocPrint(a, "guard-restore-retry-{d}", .{index}), initial.task, .{
+            .expected = .{
+                .work = try workspaceRef(a, .work, initial.id),
+                .execution_revision = current.value.execution_revision,
+                .control_revision = current.value.control_revision,
+            },
+            .base_quantum = 1048576,
+        });
+        var next = try service.workspaceWork(a, initial.task, initial.id);
+        defer next.deinit();
+        try std.testing.expect(next.value.guard.?.failure == null);
+        if (next.value.guard.?.disposition == .agreed) {
+            try std.testing.expect(next.value.guard.?.pending_control == null);
+            try std.testing.expectEqual(initial.guard.?.agreed_segments + 1, next.value.guard.?.agreed_segments);
+            return;
+        }
+    }
+    return error.GuardRetryDidNotComplete;
 }
 
 fn assertGuardNotRuntime(
@@ -449,7 +519,18 @@ fn finishGuardReplyCancellation(a: std.mem.Allocator, service: anytype, initial:
         var pending = try guardReplyOccurrence(a, service, initial);
         defer pending.deinit();
         try std.testing.expectEqualDeep(acquired, pending.value.state.admitted.reply);
-        if (work.value.cancellation_applied and work.value.outcome_kind == .yielded) saw_cleanup = true;
+        if (work.value.cancellation_applied and work.value.outcome_kind == .yielded) {
+            saw_cleanup = true;
+            try std.testing.expectError(error.InvalidState, service.workspaceGuard(a, "guard-during-cleanup", initial.task, .{ .guard = .{
+                .expected = .{
+                    .work = try workspaceRef(a, .work, work.value.id),
+                    .execution_revision = work.value.execution_revision,
+                    .control_revision = work.value.control_revision,
+                },
+                .realization_revision = work.value.realization_revision,
+                .candidate = try workspaceRef(a, .candidate, current.value.guard.?.candidate.digest),
+            } }));
+        }
         if (work.value.terminal()) {
             try std.testing.expectEqual(.cancelled, work.value.outcome_kind);
             try std.testing.expect(saw_cleanup);
@@ -1384,6 +1465,47 @@ fn semanticContextWitness(
     try std.testing.expectEqual(.observed, selected.disposition);
     try std.testing.expect(selected.selected_view != null);
     try std.testing.expect(service.compiler_facts == null);
+    try semanticBasisShapeWitness(a, service, task, input);
+}
+
+fn semanticBasisShapeWitness(a: std.mem.Allocator, service: anytype, task: [16]u8, input: contracts.workspace.Ref) !void {
+    const id = try native.workspace.custodyId(a, task, try nativeIdentity(input));
+    const bytes = (try service.namespace.store.recordBytes(a, "workspace_value", id, task)).?;
+    var saved = try contracts.decodeOwned(native.workspace.Value, a, bytes);
+    defer saved.deinit();
+    if (saved.value.derivation.semantic_source.?.selection.subject != .work) return;
+    var manifest_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
+    const index = try service.namespace.store.archiveIndex(a, task, .{
+        .digest = manifest_digest,
+        .bytes = service.assets.manifest.len,
+    });
+    var facts = try service.prepareWorkspaceValidation(task);
+    defer facts.deinit();
+    const records = try a.alloc(native.testing.state.ArchiveRecord, index.records.items.len + 1);
+    defer a.free(records);
+    @memcpy(records[1..], index.records.items);
+    for (0..3) |variant| {
+        var forged = saved.value;
+        const origin = &forged.derivation.semantic_source.?;
+        origin.basis = if (variant == 1)
+            .{ .works = .{ .works = .{ .items = &.{} }, .event_watermark = 0 } }
+        else
+            .{ .immutable = .{} };
+        if (variant == 2) origin.selection.subject = .{ .controller = .{ .cut = .{
+            .epoch = 0,
+            .execution_revision = 1,
+        } } };
+        try service.namespace.store.begin();
+        defer service.namespace.store.rollback();
+        forged.description.provenance = try service.namespace.store.putObject(try contracts.encodeOwned(native.workspace.Derivation, a, forged.derivation));
+        forged.artifact = try service.namespace.store.putObject(try contracts.encodeOwned(native.workspace.ValueArtifact, a, forged.description));
+        forged.id = try native.workspace.custodyId(a, task, forged.artifact.digest);
+        try service.namespace.store.putRecord(native.workspace.Value, "workspace_value", forged.id, task, forged);
+        const body = try service.namespace.store.putObject(try contracts.encodeOwned(native.workspace.Value, a, forged));
+        records[0] = .{ .kind = .workspace_value, .id = forged.id, .body = body };
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, task, records, &facts));
+    }
 }
 
 fn generatedRuntime(
@@ -2471,6 +2593,14 @@ fn exerciseGenerated(
     try std.testing.expect(!before.value.terminal());
     try std.testing.expect(before.value.runtime == null);
     const ancestor = try semanticWork(a, before.value);
+    try expectPackagedSemanticInspection(a, service, task, ancestor, "packaged-work");
+    var parent = try service.task(a, task);
+    defer parent.deinit();
+    try expectPackagedSemanticInspection(a, service, task, .{ .controller = .{ .cut = .{
+        .epoch = parent.value.controller_epoch,
+        .execution_revision = parent.value.execution_revision,
+        .realization_revision = parent.value.realization_revision,
+    } } }, "packaged-controller");
     const generated = try generatedRuntime(a, service, task, program, ancestor, "generated", input);
     try expectValidationResourceOutcome(a, service, task, generated);
     try exerciseWrongCandidate(a, service, task, program, input, ancestor, generated.result);
@@ -2577,6 +2707,39 @@ fn inspectGeneratedArchive(
         } },
     });
     try std.testing.expectEqual(.observed, producer.disposition);
+}
+
+fn expectPackagedSemanticInspection(
+    a: std.mem.Allocator,
+    service: anytype,
+    task: [16]u8,
+    subject: contracts.workspace.SemanticTarget,
+    label: []const u8,
+) !void {
+    const response = try service.workspaceCommand(a, label, task, .{ .program = .{ .inspect = .{
+        .target = .{ .semantic_source = .{ .subject = subject, .section = .{ .summary = .{} } } },
+        .page = .{},
+    } } });
+    try std.testing.expectEqual(.observed, response.disposition);
+    var parsed = try native.json.parse(a, response.observation_json.bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expect(!parsed.value.object.contains("runtime"));
+    var packaged = try service.program.retainRuntime();
+    defer packaged.deinit();
+    const identity = std.fmt.bytesToHex(packaged.identity, .lower);
+    try std.testing.expectEqualStrings(&identity, parsed.value.object.get("runtime_identity").?.string);
+    const returned = try native.values.fromJson(contracts.workspace.SemanticTarget, a, parsed.value.object.get("subject").?);
+    try std.testing.expectEqualDeep(subject, returned);
+    const again = try service.workspaceCommand(a, try std.fmt.allocPrint(a, "{s}-returned", .{label}), task, .{ .program = .{ .inspect = .{
+        .target = .{ .semantic_source = .{ .subject = returned, .section = .{ .summary = .{} } } },
+        .page = .{},
+    } } });
+    try std.testing.expectEqual(.observed, again.disposition);
+    try std.testing.expectEqualStrings(response.observation_json.bytes, again.observation_json.bytes);
+    var summary = try native.json.parse(a, parsed.value.object.get("text").?.string, .{});
+    defer summary.deinit();
+    try std.testing.expect(!summary.value.object.contains("runtime"));
+    try std.testing.expectEqualStrings(&identity, summary.value.object.get("runtime_identity").?.string);
 }
 
 const CleanupTrace = struct {
@@ -5134,7 +5297,70 @@ fn observerWitness(
     var source_work = try service.workspaceWork(a, task, started.receipt.workspace.?);
     defer source_work.deinit();
     var selection = try observerSelection(service, a, task, program, source_work.value);
+    try staleObserverRetry(service, a, task, program, input, selection);
     return observerFoldWitness(service, a, task, program, input, source_work.value, &selection);
+}
+
+fn staleObserverRetry(service: anytype, a: std.mem.Allocator, task: [16]u8, program: [32]u8, input: []const u8, original: contracts.workspace.Observe) !void {
+    const started = try service.workspaceStart(a, "retry-observer-source", task, program, input, .{});
+    var source_work = try service.workspaceWork(a, task, started.receipt.workspace.?);
+    defer source_work.deinit();
+    var selection = original;
+    selection.source.expected = .{
+        .work = try workspaceRef(a, .work, source_work.value.id),
+        .execution_revision = source_work.value.execution_revision,
+        .control_revision = source_work.value.control_revision,
+    };
+    var failing: AfterCommitAllocator = .{
+        .backing = a,
+        .namespace = service.namespace,
+        .generation = service.namespace.store.head.generation,
+    };
+    try std.testing.expectError(error.OutOfMemory, service.workspaceObserve(failing.allocator(), "retry-observer", task, selection));
+    try std.testing.expect(failing.rejected != 0);
+    try advanceObservedSource(service, a, source_work.value, "retry-observer-advance-one");
+    var middle = try service.workspaceWork(a, task, source_work.value.id);
+    defer middle.deinit();
+    try advanceObservedSource(service, a, middle.value, "retry-observer-advance-two");
+    try std.testing.expectError(error.StaleRevision, service.workspaceObserve(a, "retry-observer", task, selection));
+    var current = try service.workspaceWork(a, task, source_work.value.id);
+    defer current.deinit();
+    selection.source.expected.execution_revision = current.value.execution_revision;
+    selection.source.expected.control_revision = current.value.control_revision;
+    const fresh = try service.workspaceObserve(a, "retry-observer-fresh", task, selection);
+    try observerCompleted(service, a, task, fresh.receipt.workspace.?);
+    var observed = try service.workspaceWork(a, task, fresh.receipt.workspace.?);
+    defer observed.deinit();
+    try std.testing.expectEqual(current.value.execution_revision, observed.value.observer.?.consumed_revision.?);
+    _ = try service.workspaceStopObserving(a, "retry-observer-stop", task, .{
+        .work = try workspaceRef(a, .work, observed.value.id),
+        .execution_revision = observed.value.execution_revision,
+        .control_revision = observed.value.control_revision,
+    });
+    try sharedCancel(a, service, task, current.value.id, "retry-observer-cancel");
+}
+
+fn observerCopyOwnership(original: native.workspace.Observer) !void {
+    const nodes = [_]u64{ 0, 2 };
+    var observer = original;
+    observer.selection.source.nodes = .{ .selected = .{ .items = &nodes } };
+    observer.selection.source.disclosure = .{
+        .values = .{ .fields = .{ .items = &.{
+            .{ .node = 0, .field = .{ .bytes = "first" } },
+            .{ .node = 2, .field = .{ .bytes = "second" } },
+        } } },
+        .blobs = .{ .items = &.{.{ .blob = 1, .offset = 2, .length = 3 }} },
+    };
+    const Check = struct {
+        fn run(a: std.mem.Allocator, value: native.workspace.Observer) !void {
+            const copied = try native.testing.workspace_observers.copyObserver(a, value);
+            defer native.testing.workspace_observers.freeObserver(a, copied);
+            try std.testing.expectEqualDeep(value, copied);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{observer});
+    observer.selection.source.disclosure.?.values = .{ .nodes = .{ .selected = .{ .items = &nodes } } };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{observer});
 }
 
 fn observerSelection(
@@ -5199,6 +5425,7 @@ fn observerFoldWitness(
     try std.testing.expectEqualDeep(second.receipt.id, repeated.receipt.id);
     var folded = try service.workspaceWork(a, task, second.receipt.workspace.?);
     defer folded.deinit();
+    try observerCopyOwnership(folded.value.observer.?);
     try std.testing.expectEqual(
         advanced.value.execution_revision,
         folded.value.observer.?.consumed_revision.?,
@@ -5218,9 +5445,9 @@ fn observerFoldWitness(
     try cancelObservedSourceWitness(service, a, task, source_work.id, folded.value.id);
     try incompleteObserverWitness(service, a, task, selection.*);
     try lateObserverWitness(service, a, task, program, input, selection.*);
+    try outerObserverWitness(service, a, task, program, input, selection.accumulator);
     var scheduled = try sampledObserverWitness(service, a, task, program, input, selection.*);
     scheduled.parked_source = source_work.id;
-    try outerObserverWitness(service, a, task, program, input, selection.accumulator);
     return .{
         .selection = selection.*,
         .work = folded.value.id,
@@ -5970,7 +6197,7 @@ fn outerObserverWitness(
             .control_revision = source_work.value.control_revision,
         }, .realization_revision = 0, .nodes = .{ .all = .{} }, .level = .outer_execution },
         .accumulator = accumulator,
-        .policy = .{ .delivery = .lossless, .granularity = .one_guest_step },
+        .policy = .{ .delivery = .lossless, .granularity = .one_guest_step, .continuation = .owner_scheduled },
     };
     const first = try service.workspaceObserve(a, "outer-observer-first", task, selection);
     try observerCompleted(service, a, task, first.receipt.workspace.?);
@@ -5992,6 +6219,26 @@ fn outerObserverWitness(
     defer result.deinit();
     try std.testing.expectEqual(@as(u64, 1), result.value.accum);
     try std.testing.expectEqual(@as(u64, 1), result.value.emitted);
+    _ = try service.workspaceRequestCut(a, "outer-observer-guest-cut", task, .{
+        .expected = selection.source.expected,
+        .level = .guest_cut,
+    });
+    for (0..128) |_| {
+        _ = try service.pump(a);
+        var current = try service.workspaceWork(a, task, folded.value.id);
+        defer current.deinit();
+        if (current.value.observer.?.incomplete) |incomplete| {
+            try std.testing.expectEqual(.outer_cut_unavailable, incomplete.diagnostic);
+            try std.testing.expectEqualDeep(folded.value.checkpoint, current.value.checkpoint);
+            _ = try service.workspaceStopObserving(a, "outer-observer-stop", task, .{
+                .work = try workspaceRef(a, .work, current.value.id),
+                .execution_revision = current.value.execution_revision,
+                .control_revision = current.value.control_revision,
+            });
+            return;
+        }
+    }
+    return error.MissingOuterCutDiagnostic;
 }
 
 fn failedObserverWitness(

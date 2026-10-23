@@ -129,6 +129,9 @@ source digests, helper roles and root/derivation identities. Selecting a derived
 runtime changes its selected-source observation; stale cuts reject instead of
 silently inspecting a different evaluator. Controller actions use their returned
 interaction/epoch/realization target, not a guessed global runtime.
+Inspection returns a reusable `subject` and the code's `runtime_identity`.
+Only retained selectable runtimes also return a `runtime` reference; packaged
+execution keeps its exact work or controller subject and guest binding.
 
 `context.materialize.input.semantic_source` retains a typed source document for
 the selected generic module, selected module, helper or pure slice. It binds the

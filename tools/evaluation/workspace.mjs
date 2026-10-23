@@ -136,6 +136,14 @@ export function workspaceMetrics(archive, application) {
   const candidateCode = new Map();
   const candidates = new Set();
   const validatedCandidates = new Set();
+  const semanticObservationSchema = {root: 0, types: [{product: [1, 1, 3]}, {sum: [2, 3]}, 'unit', {product: [4, 6]}, {array: {element: 5, length: 32}}, 'u8', 'u64']};
+  for (const [,, reference] of archive.manifest[8]) {
+    const receipt = decodeValue(archive.schemas.get('receipt'), archive.object(reference));
+    if (receipt[11].tag !== 1 || receipt[11].value !== 10 || receipt[12].tag !== 1) continue;
+    const observation = decodeValue(semanticObservationSchema, archive.object(receipt[12].value));
+    if (observation[0].tag === 1 && observation[1].tag === 1)
+      validatedCandidates.add(Buffer.from(observation[0].value[0]).toString('hex'));
+  }
   const actions = [];
   // Count possible provider delivery, including unknown delivery, but exclude
   // positive non-invocation evidence. Rearming an occurrence is only permitted
@@ -240,6 +248,9 @@ export function workspaceMetrics(archive, application) {
       const observation = JSON.parse(Buffer.from(reply[1]).toString());
       stats.compiler_nanoseconds += Number(observation.compiler_nanoseconds ?? 0);
       if (observation.error) stats.rejected_builds++;
+      if (observation.validation === 'validated' && observation.candidate?.kind === 'candidate' &&
+          /^[0-9a-f]{64}$/.test(observation.candidate.id) && observation.runtime?.kind === 'runtime' &&
+          /^[0-9a-f]{64}$/.test(observation.runtime.id)) validatedCandidates.add(observation.candidate.id);
       continue;
     }
   }

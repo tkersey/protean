@@ -174,7 +174,6 @@ fn semanticSummary(
     guest: @import("state.zig").Reference,
 ) ![]u8 {
     const json = @import("json.zig");
-    const wp = @import("workspace_projection.zig");
     const values = @import("values.zig");
     var result = json.object();
     try json.put(a, &result, "contract", json.string("protean-semantic-source/1"));
@@ -182,10 +181,8 @@ fn semanticSummary(
     try json.put(a, &result, "root_identity", json.string(
         try a.dupe(u8, &std.fmt.bytesToHex(root, .lower)),
     ));
-    try json.put(a, &result, "runtime", try values.toJson(
-        contracts.workspace.Ref,
-        a,
-        try wp.reference(a, .runtime, bundle.realization),
+    try json.put(a, &result, "runtime_identity", json.string(
+        try a.dupe(u8, &std.fmt.bytesToHex(bundle.realization, .lower)),
     ));
     inline for (.{ "image", "emitter" }) |field| {
         const id = @field(bundle, field);

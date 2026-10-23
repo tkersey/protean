@@ -131,12 +131,21 @@ pub fn copyDisclosure(a: std.mem.Allocator, selected: w.Disclosure) !w.Disclosur
         std.meta.Elem(@TypeOf(selected.blobs.items)),
         selected.blobs.items,
     );
+    errdefer a.free(result.blobs.items);
     switch (selected.values) {
         .none => {},
         .nodes => |nodes| result.values = .{ .nodes = try copyScope(a, nodes) },
         .fields => |fields| {
             const copied = try a.dupe(std.meta.Elem(@TypeOf(fields.items)), fields.items);
-            for (copied) |*field| field.field.bytes = try a.dupe(u8, field.field.bytes);
+            var initialized: usize = 0;
+            errdefer {
+                for (copied[0..initialized]) |field| a.free(field.field.bytes);
+                a.free(copied);
+            }
+            for (copied) |*field| {
+                field.field.bytes = try a.dupe(u8, field.field.bytes);
+                initialized += 1;
+            }
             result.values = .{ .fields = .{ .items = copied } };
         },
     }
@@ -149,15 +158,44 @@ pub fn copyObserver(
 ) !@import("workspace_state.zig").Observer {
     var result = observer;
     result.selection.program = try copyReference(a, observer.selection.program);
+    errdefer a.free(result.selection.program.id.bytes);
     result.selection.accumulator = try copyReference(a, observer.selection.accumulator);
+    errdefer a.free(result.selection.accumulator.id.bytes);
     if (observer.selection.previous) |previous|
         result.selection.previous = try copyReference(a, previous);
+    errdefer if (result.selection.previous) |previous| a.free(previous.id.bytes);
     result.selection.source.expected.work = try copyReference(
         a,
         observer.selection.source.expected.work,
     );
+    errdefer a.free(result.selection.source.expected.work.id.bytes);
     result.selection.source.nodes = try copyScope(a, observer.selection.source.nodes);
+    errdefer freeScope(a, result.selection.source.nodes);
     if (observer.selection.source.disclosure) |selected|
         result.selection.source.disclosure = try copyDisclosure(a, selected);
     return result;
+}
+
+fn freeScope(a: std.mem.Allocator, scope: w.NodeScope) void {
+    if (scope == .selected) a.free(scope.selected.items);
+}
+
+pub fn freeObserver(a: std.mem.Allocator, observer: @import("workspace_state.zig").Observer) void {
+    const selection = observer.selection;
+    a.free(selection.program.id.bytes);
+    a.free(selection.accumulator.id.bytes);
+    if (selection.previous) |previous| a.free(previous.id.bytes);
+    a.free(selection.source.expected.work.id.bytes);
+    freeScope(a, selection.source.nodes);
+    if (selection.source.disclosure) |selected| {
+        a.free(selected.blobs.items);
+        switch (selected.values) {
+            .none => {},
+            .nodes => |nodes| freeScope(a, nodes),
+            .fields => |fields| {
+                for (fields.items) |field| a.free(field.field.bytes);
+                a.free(fields.items);
+            },
+        }
+    }
 }

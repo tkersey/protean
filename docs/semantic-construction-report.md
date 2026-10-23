@@ -5,6 +5,28 @@ observations, isolated interpretations, and generated runtime construction throu
 the existing workspace owners. The public contract is
 [Computational workspace](computational-workspace.md).
 
+The current repair preserves guard retry across restoration failures and binds
+completed candidate segments to the retained experiment's actual projection.
+Semantic-source admission checks the retained basis shape before dereferencing it;
+packaged inspection returns a reusable work/controller subject and a separate
+runtime identity. Historical controller reads use their recorded event epoch.
+Trial views and recovered semantic completions prepare their actual guest
+dependencies before Store transactions.
+
+Observer registration rejects stale prepared snapshots. An unavailable outer cut
+becomes an explicit observer diagnostic, remote pending work does not report false
+scheduler progress, and cancellation reaches an active worker even while an
+observer blocks guest advancement. Observer copies release their nested storage
+on success and allocation failure. Evaluation counts each validated candidate
+independently of deduplicated runtime code.
+
+The repair extends three existing test files without adding a test root or lane.
+The local development selection run passes all four tests and 18 build steps,
+including guard restoration failure/retry, malformed retained source bases,
+packaged subject round trips, stale observer retries, unavailable outer cuts and
+allocation-failure ownership. Final committed-tuple qualification and fresh serial
+reviews remain outstanding. Earlier results below retain their original scope.
+
 Protean `82bc894` separates retained observations from current admission and
 keeps observer lifecycle state independent of guest execution. Work-receipt
 replay evaluates blocking at its recorded event cut; runtime inspection compares
@@ -185,7 +207,7 @@ remain unmeasured.
 
 The currently selected dependency tuple uses Horos
 `966970f81e4df3889a1cd4ef1f276fa109557a4b` and Kosmos
-`a660470fdc69000b8ce108aa9168c674a7a113d9`. Their published GitHub archives were
+`cfb9c28a745b7b3b3a5be61142d03eb0fcbeec9c`. Their published GitHub archives were
 independently downloaded and matched against the complete committed source
 inventories. Native dependency setup authenticates those same inputs.
 The Protean implementation is based on accepted controller reconstruction
