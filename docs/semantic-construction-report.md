@@ -22,9 +22,9 @@ independently of deduplicated runtime code.
 
 The repair extends three existing test files without adding a test root or lane.
 The local development selection run passes all four tests and 18 build steps,
-including guard restoration failure/retry, packaged subject round trips, stale
-observer retries, unavailable outer cuts and allocation-failure ownership.
-Malformed retained source bases are exercised by custody qualification, which
+including stale observer retries, unavailable outer cuts and allocation-failure
+ownership. Guard restoration failure/retry, packaged subject round trips and
+malformed retained source bases are exercised by custody qualification, which
 remains outstanding. Final committed-tuple qualification and fresh serial
 reviews remain outstanding. Earlier results below retain their original scope.
 
