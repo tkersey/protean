@@ -227,6 +227,17 @@ timing difference cannot be attributed solely to code. Its measured peak RSS is
 Native macOS and Linux evidence now cover the same runtime source inputs.
 Fresh Kosmos and Protean review convergence remains required.
 
+The subsequent [report-only head qualification](https://github.com/tkersey/protean/actions/runs/39922190111)
+passes eighteen lanes. Runtime outer restoration stops before test execution
+because GitHub's artifact inventory returns HTTP 502; the aggregate gate fails.
+The two artifact readers now retry only HTTP 502, 503 and 504, at most three
+attempts within the original request deadline. Authentication, artifact identity,
+digests, selected test execution and the 600-second limits remain unchanged.
+Fault injection against both exact reader functions verifies successful byte
+preservation, transient recovery, bounded attempts, shared deadlines and immediate
+rejection of other failures. Current-head CI and review results are tracked in
+the pull request; the preceding failures receive no passing credit.
+
 The preceding Kosmos `7754613` repairs retained projection-cache admission: every stored
 range must agree with the uncached projection of its keyed source, schema and
 index before restoration can acquire custody. Native macOS Safe qualification
