@@ -1491,7 +1491,7 @@ fn semanticBasisShapeWitness(a: std.mem.Allocator, service: anytype, task: [16]u
         origin.basis = if (variant == 1)
             .{ .works = .{ .works = .{ .items = &.{} }, .event_watermark = 0 } }
         else
-            .{ .immutable = .{} };
+            .immutable;
         if (variant == 2) origin.selection.subject = .{ .controller = .{ .cut = .{
             .epoch = 0,
             .execution_revision = 1,
