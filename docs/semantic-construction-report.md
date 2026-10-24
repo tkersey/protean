@@ -23,9 +23,13 @@ match the candidate's actual completed checkpoint, observation and guest work;
 delegating a diverged guard keeps it parked until explicit cancellation or removal.
 
 Raw computation construction now derives original constructor bindings before
-wrapper generation, then admits the complete executable. Horos `cede67e` owns
-that derivation; Kosmos `6b74f2b` carries the regenerated evaluator and compiler
+wrapper generation, then admits the complete executable. Horos `f60b116` owns
+that derivation; Kosmos `6aec3c7` carries the regenerated evaluator and compiler
 binding. The exact published dependency archives match their committed inventories.
+Horos also preserves compiler-emitted unit constants when scalar folding or
+specialization adds literals. Specialization captures the original admitted
+catalog before optimization can compact it; relation checking transports raw
+constant and primitive failure references while preserving unit schema identity.
 The new tests extend existing fixtures and add one workspace construction case;
 the existing CI count becomes 15 without adding a root or lane. New archive
 validation probes use the service allocator so their temporary validation arenas
@@ -38,12 +42,12 @@ these runs support a memory reduction, not a latency improvement. The guard
 forgery also rewrites its matching receipt, preserving unrelated publication
 consistency so rejection challenges the actual candidate agreement.
 
-Horos passes 992 native macOS tests, package checks, TigerStyle, and
-[native Linux qualification](https://github.com/tkersey/horos/actions/runs/40058359125).
+Horos `f60b116` passes 993 native macOS tests, package checks, TigerStyle, and
+[native Linux qualification](https://github.com/tkersey/horos/actions/runs/40065793077).
 Kosmos passes all 341 native macOS tests and its complete native/WASM, browser,
-package and TigerStyle checks in 506.95 seconds. Protean development execution
-passes 15 tests. Complete successor qualification and fresh reviews remain
-outstanding; earlier review credit does not carry forward.
+package and TigerStyle checks at `6aec3c7` in 483.88 seconds. Current integration
+qualification and review results are bound to their exact commits in the pull
+requests. Earlier review credit does not carry forward to this dependency tuple.
 
 The preceding repair preserves guard retry across restoration failures and binds
 completed candidate segments to the retained experiment's actual projection.
