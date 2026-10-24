@@ -1787,6 +1787,183 @@ fn expectDeriveCaptureOwnerBound(service: anytype, a: std.mem.Allocator, task: n
     try expectDirectDeriveOwnerBound(service, a, task, input.value.derive, direct_path);
 }
 
+fn captureSemanticSuccess(
+    service: anytype,
+    a: std.mem.Allocator,
+    task: native.testing.state.TaskId,
+    validation: bool,
+) !native.testing.state.Capture {
+    for (0..64) |_| {
+        const step = try service.pump(a);
+        if (step != .work) continue;
+        try std.testing.expectEqual(.workspace_build, step.work.operation);
+        try std.testing.expectEqualDeep(task, step.work.task);
+        const worker = try native.testing.Worker.init(a, service.io);
+        defer worker.deinit(a) catch unreachable;
+        try worker.start(step.work, service.profile.authority, null);
+        while (!worker.finished()) try service.io.sleep(.fromMilliseconds(1), .awake);
+        try worker.join();
+        try service.completeWork(a, step.work, worker.result.?);
+        try worker.release();
+        const store = &service.namespace.store;
+        const bytes = (try store.recordBytes(a, "capture", step.work.attempt, task)).?;
+        defer a.free(bytes);
+        var captured = try contracts.decodeOwned(native.testing.state.Capture, a, bytes);
+        defer captured.deinit();
+        try std.testing.expect(captured.value.projection == null);
+        try std.testing.expectEqual(.complete, captured.value.disposition);
+        const response = try store.object(a, captured.value.response.?, null);
+        defer a.free(response);
+        var output = try contracts.decodeOwned(native.testing.workspace_build.Output, a, response);
+        defer output.deinit();
+        if (output.value == .rejected)
+            std.debug.print("semantic capture rejected: {s}\n", .{output.value.rejected.code.bytes});
+        if (validation) {
+            try std.testing.expect(output.value == .validation);
+            if (output.value.validation.outcome != .validated)
+                std.debug.print("semantic validation: {s}\n", .{output.value.validation.code.bytes});
+            try std.testing.expectEqual(.validated, output.value.validation.outcome);
+        } else try std.testing.expect(output.value == .derived);
+        return captured.value;
+    }
+    return error.MissingSemanticCapture;
+}
+
+fn expectSemanticCaptureSettled(
+    service: anytype,
+    a: std.mem.Allocator,
+    captured: native.testing.state.Capture,
+    cancellation: bool,
+) !contracts.Decoded(contracts.workspace.Reply) {
+    const store = &service.namespace.store;
+    var acquired = false;
+    var consumed = false;
+    var terminal = false;
+    for (0..64) |_| {
+        try std.testing.expect(try service.pump(a) != .work);
+        const bytes = (try store.recordBytes(a, "occurrence", captured.occurrence, captured.task)).?;
+        defer a.free(bytes);
+        var pending = try contracts.decodeOwned(native.testing.occurrence.Occurrence, a, bytes);
+        defer pending.deinit();
+        if (pending.value.state == .settled_reply) {
+            try std.testing.expect(!consumed);
+            if (!acquired and !cancellation) try expectSemanticActivationDenied(service, a, captured);
+            acquired = true;
+            try std.testing.expectEqualDeep(captured.attempt, pending.value.state.settled_reply.attempt);
+        }
+        if (pending.value.state == .admitted) {
+            try std.testing.expect(acquired and pending.value.state.admitted == .reply);
+            consumed = true;
+        }
+        var current = try service.task(a, captured.task);
+        defer current.deinit();
+        if (!current.value.terminal()) continue;
+        try std.testing.expectEqual(
+            @as(native.testing.state.Outcome, if (cancellation) .cancelled else .completed),
+            current.value.outcome_kind,
+        );
+        if (cancellation) try std.testing.expect(current.value.cancellation_applied);
+        terminal = true;
+        break;
+    }
+    try std.testing.expect(acquired and consumed and terminal);
+    const bytes = (try store.recordBytes(a, "capture", captured.attempt, captured.task)).?;
+    defer a.free(bytes);
+    var settled = try contracts.decodeOwned(native.testing.state.Capture, a, bytes);
+    defer settled.deinit();
+    var original = settled.value;
+    original.projection = null;
+    try std.testing.expectEqualDeep(captured, original);
+    const bound = try store.object(a, settled.value.projection.?.reply, null);
+    defer a.free(bound);
+    var result = try data.invocation.decode(data.invocation.Result, a, bound);
+    defer result.deinit();
+    return contracts.decodeOwned(contracts.workspace.Reply, a, result.value.value);
+}
+
+fn expectSemanticActivationDenied(
+    service: anytype,
+    a: std.mem.Allocator,
+    captured: native.testing.state.Capture,
+) !void {
+    const store = &service.namespace.store;
+    const request = try store.object(a, captured.request, null);
+    defer a.free(request);
+    var input = try contracts.decodeOwned(native.testing.workspace_build.Input, a, request);
+    defer input.deinit();
+    try std.testing.expect(input.value == .validate);
+    const selected = input.value.validate;
+    const denied = try service.workspaceCommand(a, "revoked-validate", captured.task, .{
+        .program = .{ .validate = .{
+            .candidate = try workspaceRef(a, .candidate, selected.candidate_ref.digest),
+        } },
+    });
+    try std.testing.expectEqual(.rejected, denied.disposition);
+    try std.testing.expect(std.mem.indexOf(u8, denied.observation_json.bytes, "SemanticPolicyDenied") != null);
+    var candidate = try service.workspaceCandidate(a, captured.task, selected.candidate_ref.digest);
+    defer candidate.deinit();
+    var program = try service.workspaceProgram(a, captured.task, selected.program);
+    defer program.deinit();
+    const start = try service.workspaceCommand(a, "revoked-runtime-start", captured.task, .{
+        .work = .{ .start = .{
+            .program = try workspaceRef(a, .program, selected.program),
+            .input = .{ .inline_json = .{
+                .schema = try workspaceRef(a, .schema, program.value.description.input_schema.digest),
+                .json_text = .{ .bytes = "[1071,462]" },
+            } },
+            .policy = .{},
+            .runtime = .{ .selected = try workspaceRef(
+                a,
+                .runtime,
+                candidate.value.description.code.digest,
+            ) },
+        } },
+    });
+    try std.testing.expectEqual(.rejected, start.disposition);
+    try std.testing.expect(std.mem.indexOf(u8, start.observation_json.bytes, "SemanticPolicyDenied") != null);
+}
+
+fn expectSemanticFactsRetained(
+    service: anytype,
+    a: std.mem.Allocator,
+    captured: native.testing.state.Capture,
+    validation: bool,
+) !void {
+    const store = &service.namespace.store;
+    var query = try store.database.prepare(
+        "SELECT kind,id,body FROM records WHERE task=? AND kind IN " ++
+            "('workspace_candidate','workspace_runtime','capture','attempt','occurrence')",
+        &.{.{ .blob = &captured.task }},
+    );
+    defer query.deinit();
+    const Record = struct { kind: []const u8, id: [32]u8, body: [32]u8 };
+    var records: std.ArrayList(Record) = .empty;
+    defer records.deinit(a);
+    var candidates: usize = 0;
+    var runtimes: usize = 0;
+    while (try query.step() == .row) {
+        const kind = try a.dupe(u8, try query.bytes(0));
+        const id = (try query.bytes(1))[0..32].*;
+        const body = (try query.bytes(2))[0..32].*;
+        try records.append(a, .{ .kind = kind, .id = id, .body = body });
+        candidates += @intFromBool(std.mem.eql(u8, kind, "workspace_candidate"));
+        runtimes += @intFromBool(std.mem.eql(u8, kind, "workspace_runtime"));
+    }
+    try std.testing.expectEqual(@as(usize, 1), candidates);
+    try std.testing.expectEqual(@as(usize, @intFromBool(validation)), runtimes);
+    for (0..3) |_| try std.testing.expect(try service.pump(a) != .work);
+    for (records.items) |record| {
+        defer a.free(record.kind);
+        var retained = try store.database.prepare(
+            "SELECT body FROM records WHERE kind=? AND id=? AND task=?",
+            &.{ .{ .text = record.kind }, .{ .blob = &record.id }, .{ .blob = &captured.task } },
+        );
+        defer retained.deinit();
+        try std.testing.expectEqual(.row, try retained.step());
+        try std.testing.expectEqualSlices(u8, &record.body, try retained.bytes(0));
+    }
+}
+
 test "CTX-01 snapshot materialization retains omitted source for a broader evidence pivot" {
     const a = std.testing.allocator;
     const io = std.testing.io;
@@ -2196,6 +2373,127 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
     defer derived.deinit();
     try std.testing.expectEqual(.completed, derived.value.outcome_kind);
     try service.validateWorkspace(scratch, derive_parent.receipt.task);
+    const proposal = try native.source_records.encodeRecord(
+        native.program_construction.CandidateDocument,
+        scratch,
+        .{ .version = 1, .proposal = .{
+            .selected = read_source.value.selected.module,
+            .steps = &.{},
+        } },
+    );
+    const successful_derive: contracts.workspace.Command = .{ .program = .{ .derive = .{
+        .ancestor = .{ .controller = .{ .cut = .{ .epoch = 0, .execution_revision = 1 } } },
+        .program = try workspaceRef(scratch, .program, seed_program.receipt.workspace.?),
+        .proposal = .{ .json_text = .{ .bytes = proposal } },
+    } } };
+    const approved_policy = service.profile.semantic_construction;
+    var candidate_ref: ?contracts.workspace.Ref = null;
+    for ([_]bool{ false, true }) |validation| {
+        const label = if (validation) "retained-validation" else "cancelled-derivation";
+        service.profile.semantic_construction = approved_policy;
+        const selected_command: contracts.workspace.Command = if (validation)
+            .{ .program = .{ .validate = .{ .candidate = candidate_ref.? } } }
+        else
+            successful_derive;
+        const captured_parent = try service.submit(scratch, label, selected_command);
+        const task_id = captured_parent.receipt.task;
+        _ = try service.workspaceBuild(scratch, try std.fmt.allocPrint(scratch, "{s}-program", .{label}), task_id, document, &diagnostic);
+        if (validation) {
+            var initial = try service.task(scratch, task_id);
+            defer initial.deinit();
+            var preparation = successful_derive;
+            preparation.program.derive.ancestor.controller.cut = .{
+                .epoch = initial.value.controller_epoch,
+                .execution_revision = initial.value.execution_revision,
+            };
+            const prepared = try service.workspaceCommand(
+                scratch,
+                "validation-candidate",
+                task_id,
+                preparation,
+            );
+            if (prepared.disposition != .observed)
+                std.debug.print("validation candidate: {s}\n", .{prepared.observation_json.bytes});
+            try std.testing.expectEqual(.observed, prepared.disposition);
+            try std.testing.expectEqualStrings(candidate_ref.?.id.bytes, prepared.evidence.?.id.bytes);
+        }
+        const captured = try captureSemanticSuccess(&service, a, task_id, validation);
+        const attempt_bytes = (try namespace.store.recordBytes(
+            scratch,
+            "attempt",
+            captured.attempt,
+            task_id,
+        )).?;
+        var attempt = try contracts.decodeOwned(native.testing.state.Attempt, scratch, attempt_bytes);
+        defer attempt.deinit();
+        const frozen_profile = try namespace.store.object(scratch, attempt.value.profile, null);
+        try std.testing.expectEqualStrings(profile.bytes, frozen_profile);
+        var revoked = service.profile;
+        revoked.semantic_construction = if (validation)
+            .{ .roots = &roots, .checkers = &.{} }
+        else
+            .{ .roots = &.{}, .checkers = &.{kosmos.RuntimeCompiler.checker_identity} };
+        try service.close(a);
+        service = try native.tasks.Service(ContextTypes).init(
+            a,
+            io,
+            &namespace,
+            assets,
+            &application,
+            handlers,
+            revoked,
+        );
+        try std.testing.expectEqualStrings(frozen_profile, service.profile.bytes);
+        try std.testing.expectEqualSlices(u8, attempt_bytes, (try namespace.store.recordBytes(scratch, "attempt", captured.attempt, task_id)).?);
+        try std.testing.expectEqual(.idle, try service.pump(scratch));
+        var retained = try service.task(scratch, task_id);
+        defer retained.deinit();
+        try std.testing.expectEqualDeep(attempt.value.profile, retained.value.profile);
+        if (validation) {
+            _ = try service.resumeTask(scratch, "resume-retained-validation", task_id, retained.value.revision);
+        } else {
+            var denied_command = successful_derive;
+            denied_command.program.derive.ancestor.controller.cut.execution_revision =
+                retained.value.execution_revision;
+            const denied = try service.workspaceCommand(
+                scratch,
+                "revoked-derive",
+                task_id,
+                denied_command,
+            );
+            try std.testing.expectEqual(.rejected, denied.disposition);
+            try std.testing.expect(std.mem.indexOf(u8, denied.observation_json.bytes, "SemanticPolicyDenied") != null);
+            _ = try service.requestCancel(scratch, "cancel-retained-derivation", task_id, "settle compiler capture before cancellation");
+        }
+        var settled = try expectSemanticCaptureSettled(&service, scratch, captured, !validation);
+        defer settled.deinit();
+        if (settled.value.disposition != .admitted)
+            std.debug.print("{s}: {s}\n", .{ label, settled.value.observation_json.bytes });
+        try std.testing.expectEqual(.admitted, settled.value.disposition);
+        if (validation) {
+            var observed = try native.json.parse(scratch, settled.value.observation_json.bytes, .{});
+            defer observed.deinit();
+            try std.testing.expect(observed.value.object.get("runtime_authority").?.bool);
+            try std.testing.expectEqualStrings("validated", observed.value.object.get("validation").?.string);
+        } else {
+            candidate_ref = settled.value.evidence.?;
+            candidate_ref.?.id.bytes = try scratch.dupe(u8, candidate_ref.?.id.bytes);
+        }
+        try expectSemanticFactsRetained(&service, scratch, captured, validation);
+        try service.close(a);
+        service = try native.tasks.Service(ContextTypes).init(
+            a,
+            io,
+            &namespace,
+            assets,
+            &application,
+            handlers,
+            revoked,
+        );
+        try expectSemanticFactsRetained(&service, scratch, captured, validation);
+        service.profile.semantic_construction = approved_policy;
+        try service.validateWorkspace(scratch, task_id);
+    }
 }
 
 const WaitTypes = struct {

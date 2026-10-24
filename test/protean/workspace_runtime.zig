@@ -3523,16 +3523,37 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     );
     var parked_parent = try imported.task(scratch, parent.receipt.task);
     defer parked_parent.deinit();
-    _ = try imported.resumeTask(
-        scratch,
-        "resume-observer-owner",
-        parent.receipt.task,
-        parked_parent.value.revision,
-    );
+    {
+        var statement = try imported_namespace.store.database.prepare("SELECT 1", &.{});
+        const database = CleanupTrace.sqlite3_db_handle(statement.handle);
+        statement.deinit();
+        var trace: CleanupTrace = .{};
+        try std.testing.expectEqual(@as(c_int, 0), CleanupTrace.sqlite3_trace_v2(database, 1, CleanupTrace.observe, &trace));
+        defer std.debug.assert(CleanupTrace.sqlite3_trace_v2(database, 0, null, null) == 0);
+        _ = try imported.resumeTask(
+            scratch,
+            "resume-observer-owner",
+            parent.receipt.task,
+            parked_parent.value.revision,
+        );
+        std.debug.print("observer inventory scans: resume={d}\n", .{trace.scans});
+        try std.testing.expectEqual(@as(usize, 2), trace.scans);
+    }
     try scheduledObserverWitness(&imported, scratch, parent.receipt.task, observer.scheduled);
     phase = "export completed cancellation history";
     _ = try imported.exportCheckpoint(scratch, parent.receipt.task, try std.fmt.allocPrint(scratch, "{s}/pending-cancellation.par", .{path_buffer[0..length]}));
     try cancelObserverTaskWitness(&imported, scratch, parent.receipt.task);
+    {
+        var statement = try imported_namespace.store.database.prepare("SELECT 1", &.{});
+        const database = CleanupTrace.sqlite3_db_handle(statement.handle);
+        statement.deinit();
+        var trace: CleanupTrace = .{};
+        try std.testing.expectEqual(@as(c_int, 0), CleanupTrace.sqlite3_trace_v2(database, 1, CleanupTrace.observe, &trace));
+        defer std.debug.assert(CleanupTrace.sqlite3_trace_v2(database, 0, null, null) == 0);
+        try std.testing.expect(try imported.associatedWorkDisposed(scratch, parent.receipt.task));
+        std.debug.print("observer inventory scans: disposal={d}\n", .{trace.scans});
+        try std.testing.expectEqual(@as(usize, 2), trace.scans);
+    }
     try observerArchiveWitness(&imported, scratch, document, input);
 }
 

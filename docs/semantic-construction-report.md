@@ -5,7 +5,27 @@ observations, isolated interpretations, and generated runtime construction throu
 the existing workspace owners. The public contract is
 [Computational workspace](computational-workspace.md).
 
-The current successor addresses the three accepted classes from the completed
+The current successor addresses the two accepted classes from the completed
+`2e131690` review round. Observer successor indexes now belong to each operation
+that traverses retained work, including resume, cleanup, mobility and archive
+validation. Each index binds one task, loads lazily and reuses temporary
+decoding storage between records. An extracted cleanup comparison at 10, 100 and
+1,000 retained folds measures 10, 100 and 1,000 successor record reads, versus
+90, 9,900 and 999,000 before the change, while preserving duplicate rejection.
+The native selection scenario also requires exactly two workspace inventory
+queries for resume and two for disposal across its retained observer history.
+These counts establish traversal complexity, not an end-to-end speedup.
+
+Successful compiler captures settle under their originally authorized inputs
+after current root or checker policy changes. Candidate and validation results
+remain inert historical publications; new preparation, runtime selection and
+execution retain their current policy checks. Capture projection, occurrence
+acquisition and publication still commit together. The existing execution fixture
+covers successful derivation with pending cancellation and successful validation
+across reopen with revoked policy. Qualification and fresh reviews remain
+outstanding for this successor.
+
+The preceding successor addresses the three accepted classes from the completed
 `73a82fa` review round. Selected runtime execution checks the current root and
 checker policy, including built-in specialization and restored controllers or
 work. Revocation preserves receipt replay, packaged-runtime return and retained
