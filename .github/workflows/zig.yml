@@ -233,7 +233,7 @@ jobs:
           elif [ "${{ matrix.lane }}" = owner-support ]; then
             zig build check-native-owner-support -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = workspace ]; then
-            run_compiled_tests workspace-general 14
+            run_compiled_tests workspace-general 15
           elif [ "${{ matrix.lane }}" = workspace-retention ]; then
             run_compiled_tests workspace-general 3
           elif [ "${{ matrix.lane }}" = workspace-history ]; then

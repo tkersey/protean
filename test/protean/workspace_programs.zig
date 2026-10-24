@@ -16,6 +16,40 @@ const gcd = @import("workspace_sources.zig").gcd;
 const listLength = @import("workspace_sources.zig").listLength;
 const alternatives = @import("workspace_sources.zig").alternatives;
 
+const RawPair = struct { value: Id, schema: Id, generator: Id };
+
+fn rawPair(b: *source.Builder, captured: bool, values: [2]u64, effect: ?Id) !RawPair {
+    const word = try b.scalar(u64);
+    const pair = try b.schema(.{ .product = &.{ word, word } });
+    const effects: []const Id = if (effect) |id| try b.allocator().dupe(Id, &.{id}) else &.{};
+    const computation = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{},
+        .result = pair,
+        .effects = effects,
+        .capture_bound = if (captured) &.{word} else &.{},
+    } } });
+    const generator = try b.declare(&.{ word, word }, computation, &.{}, &.{});
+    const target = try b.declare(&.{}, pair, effects, &.{});
+    const first = if (captured) try b.reference(b.parameter(generator, 0)) else try b.constant(u64, values[0]);
+    const second = if (captured) try b.reference(b.parameter(generator, 1)) else try b.constant(u64, values[1]);
+    var body = try b.pure(try b.primitive(pair, .product, &.{ first, second }, 0));
+    if (effect) |id| body = try b.bind(try b.variable(try b.scalar(void)), try b.term(.{ .perform = .{
+        .effect = id,
+        .payload = try b.constant(void, {}),
+    } }), body);
+    try b.define(target, body);
+    try b.define(generator, try b.pure(try b.lambda(target, computation)));
+    const operands: []const Id = if (captured) try b.allocator().dupe(Id, &.{
+        try b.constant(u64, values[0]),
+        try b.constant(u64, values[1]),
+    }) else &.{};
+    return .{
+        .value = try b.primitive(computation, .computation, operands, 0),
+        .schema = pair,
+        .generator = generator,
+    };
+}
+
 test "BUILD-S01 unused semantic bridge declarations grant no construction authority" {
     const a = std.testing.allocator;
     var b = source.Builder.init(a);
@@ -49,40 +83,27 @@ test "BUILD-S02 pure slices execute captured raw computation through native cons
     var b = source.Builder.init(a);
     defer b.deinit();
     const unit = try b.scalar(void);
-    const word = try b.scalar(u64);
-    const pair = try b.schema(.{ .product = &.{ word, word } });
-    const computation = try b.schema(.{ .internal = .{ .computation = .{
-        .parameters = &.{},
-        .result = pair,
-        .capture_bound = &.{word},
-    } } });
+    const pair = try rawPair(&b, true, .{ 11, 29 }, null);
     const bridge = try b.effect(.{
         .identity = "kosmos.semantic-service/1",
         .payload = unit,
         .result = unit,
         .external = true,
     });
-    const generator = try b.declare(&.{ word, word }, computation, &.{bridge}, &.{});
-    const target = try b.declare(&.{}, pair, &.{}, &.{});
-    const first = try b.reference(b.parameter(generator, 0));
-    const second = try b.reference(b.parameter(generator, 1));
-    try b.define(target, try b.pure(try b.primitive(pair, .product, &.{ first, second }, 0)));
-    try b.define(generator, try b.bind(try b.variable(unit), try b.term(.{ .perform = .{
+    const generator = &b.functions.items[@intCast(pair.generator)];
+    generator.effects = try b.allocator().dupe(Id, &.{bridge});
+    generator.body = try b.bind(try b.variable(unit), try b.term(.{ .perform = .{
         .effect = bridge,
         .payload = try b.constant(void, {}),
-    } }), try b.pure(try b.lambda(target, computation))));
-    const entry = try b.declare(&.{unit}, pair, &.{}, &.{});
-    const raw = try b.primitive(computation, .computation, &.{
-        try b.constant(u64, 11),
-        try b.constant(u64, 29),
-    }, 0);
-    try b.define(entry, try b.term(.{ .apply = .{ .computation = raw, .arguments = &.{} } }));
+    } }), generator.body.?);
+    const entry = try b.declare(&.{unit}, pair.schema, &.{}, &.{});
+    try b.define(entry, try b.term(.{ .apply = .{ .computation = pair.value, .arguments = &.{} } }));
     var selected = try source.slice.extract(a, b.module(entry, unit), .{
         .entry = entry,
         .require_pure = true,
     });
     defer selected.deinit();
-    try std.testing.expectEqual(@as(?Id, null), selected.maps.functions[@intCast(generator)]);
+    try std.testing.expectEqual(@as(?Id, null), selected.maps.functions[@intCast(pair.generator)]);
     try std.testing.expectEqual(@as(usize, 0), selected.module().effects.len);
     const text = try native.source_records.encode(a, selected.module());
     defer a.free(text);
@@ -108,6 +129,82 @@ test "BUILD-S02 pure slices execute captured raw computation through native cons
         },
         else => return error.UnexpectedOutcome,
     };
+}
+
+test "BUILD-S03 exposures preserve raw constructor captures and reject wrapper repair" {
+    const a = std.testing.allocator;
+    for (0..3) |variant| {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const unit = try b.scalar(void);
+        const effect = try b.effect(.{ .identity = "example/raw-pair", .payload = unit, .result = unit, .external = false });
+        const pair = try rawPair(&b, variant != 0, .{ 11, 29 }, if (variant == 2) effect else null);
+        const entry = try b.declare(&.{unit}, pair.schema, &.{effect}, &.{});
+        const apply = try b.term(.{ .apply = .{ .computation = pair.value, .arguments = &.{} } });
+        try b.define(entry, try b.bind(try b.variable(unit), try b.term(.{ .perform = .{
+            .effect = effect,
+            .payload = try b.constant(void, {}),
+        } }), apply));
+        const module = b.module(entry, unit);
+        const text = try native.source_records.encode(a, module);
+        defer a.free(text);
+        const exposures = [_]contracts.workspace.Exposure{.{ .effect = effect, .class = .observation }};
+        var diagnostic: native.program_construction.Diagnostic = .{};
+        if (variant == 2) {
+            try std.testing.expectError(error.TypeMismatch, native.program_construction.buildExposed(a, text, &exposures, null, &diagnostic));
+            continue;
+        }
+        var built = try native.program_construction.buildExposed(a, text, &exposures, null, &diagnostic);
+        defer built.deinit();
+        try expectExposedRawPair(a, built.image);
+        var generated = try native.program_construction.driver.generate(a, module, &exposures);
+        defer generated.deinit();
+        var work: u64 = 1_000_000;
+        const added = try source.constructor_bindings.admit(a, b.allocator(), generated.module, &work);
+        try std.testing.expect(added.len > 1);
+        b.values.items[@intCast(pair.value)].expression.primitive.immediate = 1;
+        const forged = try native.source_records.encode(a, module);
+        defer a.free(forged);
+        try std.testing.expectError(error.InvalidReference, native.program_construction.buildExposed(a, forged, &exposures, null, &diagnostic));
+    }
+}
+
+fn expectExposedRawPair(a: std.mem.Allocator, image: []const u8) !void {
+    var suspended = try kosmos.invocation.invoke(a, .{ .image = image, .instance = .{ .initial_args = &.{} } });
+    defer suspended.deinit();
+    try std.testing.expect(suspended.record == .requested);
+    var request = try data.invocation.decode(data.invocation.Request, a, suspended.record.requested.request);
+    defer request.deinit();
+    try std.testing.expectEqualStrings("protean.workspace.control/1/0", request.value.binding.semantic_identity);
+    const reply = try data.invocation.encodeOwned(data.invocation.Result, a, .{ .request_identity = request.value.request_identity, .value = &.{} });
+    defer a.free(reply);
+    var completed = try kosmos.invocation.invoke(a, .{ .image = image, .instance = .{ .state = suspended.record.requested.state.? }, .control = .{ .reply = reply } });
+    defer completed.deinit();
+    try std.testing.expect(completed.record == .completed);
+    var result = try contracts.decodeOwned(struct { u64, u64 }, a, completed.record.completed);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u64, 11), result.value[0]);
+    try std.testing.expectEqual(@as(u64, 29), result.value[1]);
+}
+
+fn rawController(b: *source.Builder, original: source.Module) !source.Module {
+    const pair = try rawPair(b, true, .{ 41, 29 }, null);
+    const result = try b.variable(pair.schema);
+    const proposal = try b.primitive(try b.scalar(u64), .field, &.{try b.reference(result)}, 0);
+    for (b.terms.items) |*term| {
+        if (term.* != .perform or term.perform.effect != 0) continue;
+        const request = b.values.items[@intCast(term.perform.payload)];
+        term.perform.payload = try b.primitive(request.schema, .product, &.{
+            proposal,
+            request.expression.primitive.operands[1],
+        }, 0);
+    }
+    const entry = &b.functions.items[@intCast(original.entry)];
+    entry.body = try b.bind(result, try b.term(.{ .apply = .{
+        .computation = pair.value,
+        .arguments = &.{},
+    } }), entry.body.?);
+    return b.module(original.entry, original.failure);
 }
 
 test "BUILD-C02 controller construction binds exact imports and publishes inert boot before carry" {
@@ -167,21 +264,22 @@ test "BUILD-C02 controller construction binds exact imports and publishes inert 
     defer arena.deinit();
     const scratch = arena.allocator();
     const task = (try service.submit(scratch, "controller-parent", .{ 25, 5 })).receipt.task;
-    for (0..5) |variant| {
+    for (0..6) |variant| {
         const indexed = variant == 1;
         var b = source.Builder.init(a);
         defer b.deinit();
         const sources = @import("workspace_sources.zig");
-        const module = switch (variant) {
+        var module = switch (variant) {
             2, 3 => try sources.controllerWithHandler(&b, variant == 3),
             4 => try sources.controllerWithUnusedImport(&b),
             else => try sources.controller(&b, indexed),
         };
+        if (variant == 5) module = try rawController(&b, module);
         const text = try native.source_records.encode(a, module);
         defer a.free(text);
         var diagnostic: construction.Diagnostic = .{};
         const command: contracts.workspace.Command = .{ .program = .{ .build = .{ .source = .{ .json_text = .{ .bytes = text } }, .source_kind = .source_records, .exposures = .{ .items = &.{} }, .role = .controller } } };
-        const operation_id = ([_][]const u8{ "controller-A", "controller-B", "controller-deep", "controller-shallow", "controller-unused-import" })[variant];
+        const operation_id = ([_][]const u8{ "controller-A", "controller-B", "controller-deep", "controller-shallow", "controller-unused-import", "controller-raw-captures" })[variant];
         const reply_value = try service.workspaceCommand(scratch, operation_id, task, command);
         if (reply_value.disposition != .observed) std.debug.print("controller construction: {s}\n", .{reply_value.observation_json.bytes});
         try std.testing.expectEqual(.observed, reply_value.disposition);
@@ -296,6 +394,16 @@ test "BUILD-C02 controller construction binds exact imports and publishes inert 
         defer completed.deinit();
         try std.testing.expect(completed.record == .completed);
         try std.testing.expectEqualStrings(response, completed.record.completed);
+        if (variant == 5) {
+            const raw = for (b.values.items) |*value| {
+                if (source.constructor_bindings.raw(value.*) != null) break value;
+            } else return error.MissingRawConstructor;
+            raw.expression.primitive.immediate = 1;
+            const wrapper_only = try native.source_records.encode(a, module);
+            defer a.free(wrapper_only);
+            try std.testing.expectError(error.InvalidReference, construction.buildController(a, wrapper_only, contract, null, &diagnostic));
+            raw.expression.primitive.immediate = 0;
+        }
         b.effects.items[0].identity = "protean.controller/1/deliberate";
         const forged = try native.source_records.encode(a, b.module(module.entry, module.failure));
         defer a.free(forged);

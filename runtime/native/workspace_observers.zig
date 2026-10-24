@@ -5,6 +5,12 @@ const c = @import("protean_contracts");
 const w = c.workspace;
 const views = kosmos.RuntimeViews;
 
+pub fn validatePolicy(policy: w.ObserverPolicy) !void {
+    if (policy.cadence == 0 or
+        (policy.delivery == .lossless and policy.cadence != 1))
+        return error.InvalidObserverPolicy;
+}
+
 pub const Disclosed = struct {
     value: views.Disclosure,
     values: ?[]bool = null,

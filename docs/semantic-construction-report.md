@@ -5,7 +5,47 @@ observations, isolated interpretations, and generated runtime construction throu
 the existing workspace owners. The public contract is
 [Computational workspace](computational-workspace.md).
 
-The current repair preserves guard retry across restoration failures and binds
+The current successor addresses the nine defect classes from the completed
+`ce07dec` review round. Observer source-advance checks build a temporary successor
+index once per operation, preserving duplicate detection and lossless backpressure.
+An extracted traversal probe with 10, 100 and 1,000 retained folds measures
+22, 202 and 2,002 record reads, versus 121, 10,201 and 1,002,001 before the change.
+The probe also checks blocked observations, relevant and irrelevant duplicates,
+and the no-observer fast path. These counts establish traversal complexity,
+not database latency or an end-to-end speedup.
+
+Archive admission binds each observer predecessor to its retained publication,
+the initial accumulator to its selection, and cadence to the ordinary admission
+policy. Metadata-only successor lookup accepts retained execution profiles.
+Automatic retry identity includes the complete prepared observation request, so
+a control change cannot replay an obsolete prepared view. An agreed guard must
+match the candidate's actual completed checkpoint, observation and guest work;
+delegating a diverged guard keeps it parked until explicit cancellation or removal.
+
+Raw computation construction now derives original constructor bindings before
+wrapper generation, then admits the complete executable. Horos `cede67e` owns
+that derivation; Kosmos `6b74f2b` carries the regenerated evaluator and compiler
+binding. The exact published dependency archives match their committed inventories.
+The new tests extend existing fixtures and add one workspace construction case;
+the existing CI count becomes 15 without adding a root or lane. New archive
+validation probes use the service allocator so their temporary validation arenas
+retire independently of the surrounding fixture.
+The complete selection and custody scenarios still pass after this ownership
+change. Peak RSS falls from 5,654,740,992 to 4,698,275,840 bytes for selection and
+from 8,723,218,432 to 5,502,386,176 bytes for custody. Measured elapsed times are
+298.67 versus 291.84 seconds and 364.20 versus 372.90 seconds respectively;
+these runs support a memory reduction, not a latency improvement. The guard
+forgery also rewrites its matching receipt, preserving unrelated publication
+consistency so rejection challenges the actual candidate agreement.
+
+Horos passes 992 native macOS tests, package checks, TigerStyle, and
+[native Linux qualification](https://github.com/tkersey/horos/actions/runs/40058359125).
+Kosmos passes all 341 native macOS tests and its complete native/WASM, browser,
+package and TigerStyle checks in 506.95 seconds. Protean development execution
+passes 15 tests. Complete successor qualification and fresh reviews remain
+outstanding; earlier review credit does not carry forward.
+
+The preceding repair preserves guard retry across restoration failures and binds
 completed candidate segments to the retained experiment's actual projection.
 Semantic-source admission checks the retained basis shape before dereferencing it;
 packaged inspection returns a reusable work/controller subject and a separate

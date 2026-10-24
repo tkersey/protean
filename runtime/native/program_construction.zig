@@ -372,7 +372,7 @@ fn preserveConstructors(a: std.mem.Allocator, before: horos.source.Module, after
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
         var work: u64 = std.math.maxInt(u64);
-        const old = try constructors.admit(a, arena.allocator(), before, &work);
+        const old = try constructors.derive(a, arena.allocator(), before, &work);
         const new = try constructors.admit(a, arena.allocator(), after, &work);
         try constructors.validate(before, old, new, .{}, &work);
         return;

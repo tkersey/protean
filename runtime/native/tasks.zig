@@ -9033,9 +9033,13 @@ pub fn Service(comptime Types: type) type {
             return if (value.cancellation != null or (value.policy.continuation == .owner_scheduled and value.policy.stop != .next_slice and (value.outcome != .yielded or value.policy.stop == .terminal))) .queued else .parked;
         }
 
-        fn delegatedControl(before: workspace.ControlObservation, has_outer: bool, policy: workspace.RunPolicy) workspace.ControlObservation {
+        fn delegatedControl(before: workspace.ControlObservation, has_outer: bool, guard: ?workspace.Guard, policy: workspace.RunPolicy) workspace.ControlObservation {
             var after = before;
             after.policy = policy;
+            if (guard) |binding| if (binding.disposition == .diverged) {
+                after.schedule = .parked;
+                return after;
+            };
             if (!has_outer and before.delivery == .not_sent and (before.instrument or before.trial)) after.delivery = .ready;
             const cancel_ready = before.cancellation != null and !before.cancellation_applied and
                 (after.delivery == .ready or after.delivery == .awaiting or after.delivery == .not_sent);
@@ -9509,7 +9513,7 @@ pub fn Service(comptime Types: type) type {
                             },
                             .delegate => |policy| {
                                 if (advanced) return error.InvalidArchive;
-                                const delegated = delegatedControl(before.control, before.outer_operation != null, policy);
+                                const delegated = delegatedControl(before.control, before.outer_operation != null, before.guard, policy);
                                 expected.policy = delegated.policy;
                                 expected.delivery = delegated.delivery;
                                 expected.schedule = delegated.schedule;
@@ -11632,14 +11636,12 @@ pub fn Service(comptime Types: type) type {
                 program.value.description.image,
             )) return error.InvalidArchive;
             if (guard.initialized and guard.continuation == null) return error.InvalidArchive;
-            if (guard.continuation != null) {
+            if (guard.continuation != null and guard.disposition != .agreed) {
                 phase = "candidate continuation";
                 var candidate_execution = try self.workspaceGuardExperiment(a, work);
                 defer candidate_execution.deinit();
                 if (guard.initialized != (candidate_execution.stage == .advanced))
                     return error.InvalidArchive;
-                if (guard.disposition == .agreed and
-                    candidate_execution.phase != .ready) return error.InvalidArchive;
             }
             phase = "reference";
             try self.validateGuardReference(a, work);
@@ -11653,6 +11655,25 @@ pub fn Service(comptime Types: type) type {
                 if (guard.guest_quantum != 1 and guard.guest_quantum != 256)
                     return error.InvalidArchive;
             } else if (guard.disposition == .incomplete or guard.disposition == .diverged)
+                return error.InvalidArchive;
+        }
+
+        fn validateGuardAgreement(self: *Self, a: std.mem.Allocator, work: workspace.Work, reference: *kosmos.Session) !void {
+            const guard = work.guard orelse return;
+            if (guard.disposition != .agreed) return;
+            if (!guard.initialized or guard.continuation == null) return error.InvalidArchive;
+            var candidate = try self.workspaceGuardExperiment(a, work);
+            defer candidate.deinit();
+            if (candidate.stage != .advanced or candidate.phase != .ready)
+                return error.InvalidArchive;
+            var completed = try candidate.completedSegment(a);
+            defer completed.deinit();
+            const observation = if (reference.view) |view| view.event.value.observation else .progressed;
+            const expected = try contracts.encodeOwned(@TypeOf(observation), a, observation);
+            defer a.free(expected);
+            if (!std.meta.eql(storage.digest(completed.checkpoint), work.checkpoint.digest) or
+                completed.checkpoint.len != work.checkpoint.bytes or
+                completed.guest_work != work.guest_work or !same(completed.observation, expected))
                 return error.InvalidArchive;
         }
 
@@ -12921,6 +12942,7 @@ pub fn Service(comptime Types: type) type {
             var finished = try kosmos.invocation.finishPublication(a, &candidate, .receipt, null);
             defer finished.outcome.deinit();
             defer self.allocator.free(finished.checkpoint.?);
+            try self.validateGuardAgreement(a, value, &candidate);
             const publication = .{ .outcome = try data.invocation.encodeOwned(data.invocation.Outcome, a, finished.outcome.record), .checkpoint = finished.checkpoint.? };
             defer a.free(publication.outcome);
             if (!std.meta.eql(storage.digest(publication.outcome), value.outcome.digest) or publication.outcome.len != value.outcome.bytes or
@@ -13396,7 +13418,7 @@ pub fn Service(comptime Types: type) type {
             defer a.free(ids);
             var found = false;
             for (ids) |other_id| {
-                var other = try self.workspaceWork(a, task_id, other_id);
+                var other = try self.retainedWorkspaceWork(a, task_id, other_id);
                 defer other.deinit();
                 const observer = other.value.observer orelse continue;
                 const prior = observer.selection.previous orelse continue;
@@ -13406,6 +13428,34 @@ pub fn Service(comptime Types: type) type {
             }
             return found;
         }
+
+        const ObserverSuccessors = struct {
+            entries: std.AutoHashMapUnmanaged(state.Digest, bool) = .empty,
+            loaded: bool = false,
+
+            fn deinit(self: *ObserverSuccessors, a: std.mem.Allocator) void {
+                self.entries.deinit(a);
+            }
+
+            fn has(self: *ObserverSuccessors, service: *Self, a: std.mem.Allocator, task_id: state.TaskId, id: state.Digest) !bool {
+                if (!self.loaded) {
+                    const ids = try service.workspaceIds(a, task_id);
+                    defer a.free(ids);
+                    for (ids) |other_id| {
+                        var other = try service.retainedWorkspaceWork(a, task_id, other_id);
+                        defer other.deinit();
+                        const observer = other.value.observer orelse continue;
+                        const prior = observer.selection.previous orelse continue;
+                        const entry = try self.entries.getOrPut(a, try wp.identity(prior, .work));
+                        entry.value_ptr.* = entry.found_existing;
+                    }
+                    self.loaded = true;
+                }
+                const duplicate = self.entries.get(id) orelse return false;
+                if (duplicate) return error.InvalidArchive;
+                return true;
+            }
+        };
 
         fn publicationHasSuccessor(latest: anytype, id: state.Digest) !bool {
             var iterator = latest.iterator();
@@ -13500,9 +13550,9 @@ pub fn Service(comptime Types: type) type {
             selection.source.expected.control_revision = source.value.control_revision;
             selection.source.realization_revision = source.value.realization_revision;
             selection.previous = try wp.reference(a, .work, work.id);
-            const identity = try operation(struct { work: state.Digest, revision: u64 }, a, .{
-                .work = work.id,
+            const identity = try operation(struct { revision: u64, request: workspace.ObserveRequest }, a, .{
                 .revision = revision,
+                .request = .{ .task = work.task, .selection = selection },
             });
             const operation_id = try std.fmt.allocPrint(a, "observe-{s}", .{
                 std.fmt.bytesToHex(identity, .lower),
@@ -13723,6 +13773,8 @@ pub fn Service(comptime Types: type) type {
             if (!parent.value.observers_present) return;
             const ids = try self.workspaceIds(a, source.task);
             defer a.free(ids);
+            var successors: ObserverSuccessors = .{};
+            defer successors.deinit(a);
             for (ids) |id| {
                 var saved = try self.workspaceWork(a, source.task, id);
                 defer saved.deinit();
@@ -13730,7 +13782,7 @@ pub fn Service(comptime Types: type) type {
                 if (observer.stopped or observer.selection.policy.delivery != .lossless or
                     (level != null and observer.selection.source.level != level.?) or
                     !std.meta.eql(observer.source_work, source.id) or
-                    try self.observerHasSuccessor(a, source.task, id)) continue;
+                    try successors.has(self, a, source.task, id)) continue;
                 if (observer.consumed_revision == null or
                     observer.consumed_revision.? !=
                         try self.observerSourceRevision(a, source, observer.selection.source.level))
@@ -13852,6 +13904,8 @@ pub fn Service(comptime Types: type) type {
             if (!parent.value.observers_present) return 256;
             const ids = try self.workspaceIds(a, source.task);
             defer a.free(ids);
+            var successors: ObserverSuccessors = .{};
+            defer successors.deinit(a);
             for (ids) |id| {
                 var saved = try self.workspaceWork(a, source.task, id);
                 defer saved.deinit();
@@ -13859,7 +13913,7 @@ pub fn Service(comptime Types: type) type {
                 if (!observer.stopped and
                     observer.selection.policy.granularity == .one_guest_step and
                     std.meta.eql(observer.source_work, source.id) and
-                    !try self.observerHasSuccessor(a, source.task, id)) return 1;
+                    !try successors.has(self, a, source.task, id)) return 1;
             }
             return 256;
         }
@@ -13867,13 +13921,15 @@ pub fn Service(comptime Types: type) type {
         fn retainObservedOuter(self: *Self, a: std.mem.Allocator, value: *workspace.Work) !void {
             const ids = try self.workspaceIds(a, value.task);
             defer a.free(ids);
+            var successors: ObserverSuccessors = .{};
+            defer successors.deinit(a);
             for (ids) |id| {
                 var work = try self.workspaceWork(a, value.task, id);
                 defer work.deinit();
                 const observer = work.value.observer orelse continue;
                 if (observer.stopped or observer.selection.source.level != .outer_execution or
                     !std.meta.eql(observer.source_work, value.id) or
-                    try self.observerHasSuccessor(a, value.task, id)) continue;
+                    try successors.has(self, a, value.task, id)) continue;
                 const driver = self.active.?.driver;
                 const capsule = try driver.retainCapsule(runtimeProvenance(value.*));
                 const code = try driver.runtimeBytes(a);
@@ -13898,9 +13954,7 @@ pub fn Service(comptime Types: type) type {
             });
             if (try self.replay(a, operation_id, request)) |prior| return prior;
             try self.requireCustody(a, task_id, try wp.identity(selection.source.expected.work, .work));
-            if (selection.policy.cadence == 0 or
-                (selection.policy.delivery == .lossless and selection.policy.cadence != 1))
-                return error.InvalidObserverPolicy;
+            try @import("workspace_observers.zig").validatePolicy(selection.policy);
             const key = storage.digest(operation_id);
             const view_id = try std.fmt.allocPrint(a, "observe-view-{s}", .{
                 std.fmt.bytesToHex(key, .lower),
@@ -14108,6 +14162,8 @@ pub fn Service(comptime Types: type) type {
             work: workspace.Work,
         ) !void {
             const observer = work.observer orelse return;
+            @import("workspace_observers.zig").validatePolicy(observer.selection.policy) catch
+                return error.InvalidArchive;
             try self.validateObserverIncomplete(a, work);
             if ((observer.previous == null) != (observer.selection.previous == null))
                 return error.InvalidArchive;
@@ -14151,7 +14207,12 @@ pub fn Service(comptime Types: type) type {
                 if (!std.meta.eql(prior.value.task, work.task) or
                     !std.meta.eql(prior.value.id, previous_id) or
                     !std.meta.eql(prior.value.result_value, observer.accumulator) or
-                    prior.value.outcome_kind != .completed) return error.InvalidArchive;
+                    prior.value.outcome_kind != .completed or prior.value.cancellation != null)
+                    return error.InvalidArchive;
+                try self.validateWorkspacePublication(a, work.task, .{
+                    .work = prior.value,
+                    .occurrence = null,
+                });
                 const before = prior.value.observer orelse return error.InvalidArchive;
                 const consumed = before.consumed_revision orelse return error.InvalidArchive;
                 if (!std.meta.eql(prior.value.program, work.program) or
@@ -14166,7 +14227,12 @@ pub fn Service(comptime Types: type) type {
                         observer.source_revision - 1
                     else
                         null)) return error.InvalidArchive;
-            } else if (observer.selection.previous != null) return error.InvalidArchive;
+            } else {
+                const initial = try self.workspaceValueReference(a, work.task, observer.selection.accumulator);
+                if (!std.meta.eql(initial.artifact, observer.accumulator) or
+                    observer.gap_first != null or observer.gap_last != null)
+                    return error.InvalidArchive;
+            }
         }
 
         fn observerScope(
@@ -15328,12 +15394,12 @@ pub fn Service(comptime Types: type) type {
                         var pending = try self.record(occurrence.Occurrence, a, "occurrence", id, task_id);
                         defer pending.deinit();
                         before.delivery = std.meta.activeTag(pending.value.state);
-                        const delegated = delegatedControl(before, value.outer_operation != null, policy);
+                        const delegated = delegatedControl(before, value.outer_operation != null, value.guard, policy);
                         if (delegated.delivery != before.delivery) {
                             rearmed = try occurrence.rearm(pending.value, .{ .id = id, .task = task_id, .work = work_id, .request = pending.value.request });
                         }
                     }
-                    const delegated = delegatedControl(before, value.outer_operation != null, policy);
+                    const delegated = delegatedControl(before, value.outer_operation != null, value.guard, policy);
                     value.policy = delegated.policy;
                     value.schedule = delegated.schedule;
                 },
