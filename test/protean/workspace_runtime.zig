@@ -2953,6 +2953,134 @@ test "scheduler bounds cleanup scans during productive scheduling and completes 
     try std.testing.expect(productive_scan_bound);
 }
 
+fn prefixIdentity(value: usize) [32]u8 {
+    var id: [32]u8 = @splat(0);
+    std.mem.writeInt(u64, id[0..8], @intCast(value), .little);
+    return id;
+}
+
+fn prefixPublication(a: std.mem.Allocator, index: usize) !native.testing.state.WorkPublication {
+    const id = prefixIdentity(index);
+    const source_id = prefixIdentity(10000 + index % 3);
+    const empty: native.testing.state.Reference = .{ .digest = @splat(0), .bytes = 0 };
+    return .{
+        .work = id,
+        .execution_revision = 1,
+        .control_revision = 1,
+        .observation = id,
+        .control = .{ .policy = .{}, .schedule = .queued, .blocker = null, .cancellation = null, .cancellation_applied = false, .outcome = .progressed, .instrument = false, .port = false, .delivery = null },
+        .observer = .{
+            .selection = .{
+                .program = try workspaceRef(a, .program, prefixIdentity(20000)),
+                .accumulator = try workspaceRef(a, .value, prefixIdentity(20001)),
+                .source = .{
+                    .expected = .{ .work = try workspaceRef(a, .work, source_id), .execution_revision = 1, .control_revision = 1 },
+                    .realization_revision = 0,
+                    .nodes = .{ .all = .{} },
+                    .level = if (index % 3 == 2) .guest_cut else .outer_execution,
+                },
+                .policy = .{ .delivery = if (index % 3 == 1) .sampled else .lossless },
+                .previous = if (index < 3) null else try workspaceRef(a, .work, prefixIdentity(index - 3)),
+            },
+            .source = empty,
+            .source_work = source_id,
+            .source_revision = index / 3,
+            .accumulator = empty,
+        },
+    };
+}
+
+fn expectPublicationPrefix(
+    prefix: *native.testing.workspace_observers.PublicationPrefix,
+    publications: []const native.testing.state.WorkPublication,
+    scanned: *usize,
+    indexed: *usize,
+) !void {
+    for (0..4) |source_index| {
+        const source_id = prefixIdentity(10000 + source_index);
+        var lossless: usize = 0;
+        var outer = false;
+        for (publications) |item| {
+            scanned.* += 1;
+            const observer = item.observer orelse continue;
+            if (observer.stopped or !std.meta.eql(observer.source_work, source_id)) continue;
+            const text = std.fmt.bytesToHex(item.work, .lower);
+            const successor = for (publications) |other| {
+                scanned.* += 1;
+                const following = other.observer orelse continue;
+                const previous = following.selection.previous orelse continue;
+                if (std.mem.eql(u8, previous.id.bytes, &text)) break true;
+            } else false;
+            if (successor) continue;
+            if (observer.selection.source.level == .outer_execution) outer = true;
+            if (observer.selection.policy.delivery == .lossless) {
+                lossless += 1;
+                try std.testing.expect(prefix.lossless(source_id).?.contains(item.work));
+                try std.testing.expectEqual(
+                    observer.consumed_revision,
+                    prefix.latest.get(item.work).?.publication.observer.?.consumed_revision,
+                );
+            }
+        }
+        try std.testing.expectEqual(outer, prefix.hasOuter(source_id));
+        const active = prefix.lossless(source_id);
+        try std.testing.expectEqual(lossless, if (active) |set| set.count() else 0);
+        if (active) |set| {
+            var ids = set.keyIterator();
+            while (ids.next() != null) indexed.* += 1;
+        }
+    }
+}
+
+fn allocatePublicationPrefix(
+    a: std.mem.Allocator,
+    publications: []const native.testing.state.WorkPublication,
+) !void {
+    var prefix: native.testing.workspace_observers.PublicationPrefix = .init(a);
+    defer prefix.deinit();
+    for (publications, 0..) |item, i| try prefix.put(item, i);
+}
+
+test "runtime selection publication prefixes preserve active observers without historical rescans" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    for ([_]usize{ 10, 100, 1000 }) |count| {
+        var prefix: native.testing.workspace_observers.PublicationPrefix = .init(a);
+        defer prefix.deinit();
+        const publications = try scratch.alloc(native.testing.state.WorkPublication, count);
+        var scanned: usize = 0;
+        var indexed: usize = 0;
+        for (publications, 0..) |*item, i| {
+            item.* = try prefixPublication(scratch, i);
+            try prefix.put(item.*, i * 2);
+            try expectPublicationPrefix(&prefix, publications[0 .. i + 1], &scanned, &indexed);
+            item.observer.?.consumed_revision = item.observer.?.source_revision;
+            try prefix.put(item.*, i * 2 + 1);
+            try expectPublicationPrefix(&prefix, publications[0 .. i + 1], &scanned, &indexed);
+        }
+        for (publications[count - 3 ..], 0..) |*item, i| {
+            item.observer.?.stopped = true;
+            try prefix.put(item.*, count * 2 + i);
+        }
+        for (0..count) |i| {
+            try prefix.put(publications[0], count * 3 + i);
+            for (0..3) |source_index| {
+                const id = prefixIdentity(10000 + source_index);
+                try std.testing.expect(!prefix.hasOuter(id));
+                try std.testing.expectEqual(@as(u32, 0), prefix.lossless(id).?.count());
+            }
+        }
+        try expectPublicationPrefix(&prefix, publications, &scanned, &indexed);
+        try std.testing.expect(indexed <= count * 4);
+        try std.testing.expect(scanned > count * count);
+        std.debug.print("publication prefixes: folds={d} reference_visits={d} active_visits={d}\n", .{ count, scanned, indexed });
+        if (count == 10)
+            try std.testing.checkAllAllocationFailures(a, allocatePublicationPrefix, .{publications});
+    }
+}
+
 test "runtime selection switches exact guest cuts and retains carried artifacts through archive import" {
     var phase: []const u8 = "runtime selection and import";
     errdefer std.debug.print("runtime selection: {s}\n", .{phase});

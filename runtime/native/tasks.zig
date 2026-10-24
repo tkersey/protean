@@ -4202,6 +4202,25 @@ pub fn Service(comptime Types: type) type {
             };
         }
 
+        fn controllerOverlayCurrent(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            interaction: state.ControllerInteraction,
+        ) !bool {
+            if (interaction.next_message != parent.next_message or
+                interaction.epoch != parent.controller_epoch) return false;
+            const bytes = try self.store().object(a, interaction.overlay, null);
+            defer a.free(bytes);
+            var overlay = try json.parseAsset(a, bytes, bytes.len);
+            defer overlay.deinit();
+            const control = json.get(overlay.value, "control") orelse
+                return error.InvalidControllerBinding;
+            const target = try values.fromJson(wc.ControllerTarget, a, json.get(control, "realization_target") orelse return error.InvalidControllerBinding);
+            if (target != .action) return error.InvalidControllerBinding;
+            return target.action.realization_revision == parent.realization_revision;
+        }
+
         fn refreshControllerOverlay(self: *Self, a: std.mem.Allocator, parent: state.Task, pending: occurrence.Occurrence) !bool {
             if (pending.work != null or pending.residual != null) return false;
             var route = try self.record(workspace.ExecutionRoute, a, "execution_route", pending.id, parent.id);
@@ -4210,7 +4229,7 @@ pub fn Service(comptime Types: type) type {
             var saved = try self.record(state.ControllerInteraction, a, "controller_interaction", id, parent.id);
             defer saved.deinit();
             if (!std.meta.eql(saved.value.model, pending.id) or !std.meta.eql(saved.value.controller, parent.controller orelse return error.InvalidControllerBinding)) return error.InvalidControllerBinding;
-            if (saved.value.next_message == parent.next_message and saved.value.epoch == parent.controller_epoch) return false;
+            if (try self.controllerOverlayCurrent(a, parent, saved.value)) return false;
             if (pending.state != .ready) return error.UnsettledOccurrence;
             const overlay = try self.controllerOverlay(a, parent, saved.value.controller, id, parent.event_high, parent.next_message, parent.controller_epoch);
             defer a.free(overlay);
@@ -9879,9 +9898,8 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn validateWorkspacePublications(self: *Self, a: std.mem.Allocator, parent: state.Task, records: []const state.ArchiveRecord, checked: *SnapshotValidation) !void {
-            const Position = struct { publication: state.WorkPublication, seq: u64 };
-            var latest: std.AutoHashMap(state.Digest, Position) = .init(a);
-            defer latest.deinit();
+            var prefix: @import("workspace_observers.zig").PublicationPrefix = .init(a);
+            defer prefix.deinit();
             var admissions: std.AutoHashMap(u64, WorkspaceAdmission) = .init(a);
             defer admissions.deinit();
             var replies: std.AutoHashMap(state.Digest, void) = .init(a);
@@ -9968,7 +9986,7 @@ pub fn Service(comptime Types: type) type {
                 }
                 for (event_value.workspace_publications.items) |item| {
                     try requireArchiveRecord(records, .workspace_work, item.work);
-                    if (latest.get(item.work)) |prior| {
+                    if (prefix.latest.get(item.work)) |prior| {
                         if (prior.seq >= event_value.seq) return error.InvalidArchive;
                         inline for (.{ "execution_revision", "control_revision" }) |field| {
                             const before = @field(prior.publication, field);
@@ -9976,15 +9994,15 @@ pub fn Service(comptime Types: type) type {
                             if (after < before or after - before > 1) return error.InvalidArchive;
                         }
                         if (parent.observers_present)
-                            try self.validateObservedAdvance(a, prior.publication, item, latest);
+                            try self.validateObservedAdvance(a, prior.publication, item, &prefix);
                     } else if (item.execution_revision != 1 or item.control_revision != 1) return error.InvalidArchive;
-                    try self.validateWorkspaceControl(a, parent, event_value, item, if (latest.get(item.work)) |prior| prior.publication else null, if (command) |decoded| decoded.value else null, if (admission) |entry| entry.value else null, parent.observers_present and try publicationHasOuterObserver(latest, item.work));
+                    try self.validateWorkspaceControl(a, parent, event_value, item, if (prefix.latest.get(item.work)) |prior| prior.publication else null, if (command) |decoded| decoded.value else null, if (admission) |entry| entry.value else null, parent.observers_present and prefix.hasOuter(item.work));
                     var retained = item;
                     if (item.observer) |observer| retained.observer =
                         try @import("workspace_observers.zig").copyObserver(a, observer);
                     if (item.control.cancellation) |reason| retained.control.cancellation = .{ .bytes = try a.dupe(u8, reason.bytes) };
                     if (item.guard) |guard| retained.guard = try copyWorkspaceGuard(a, guard);
-                    try latest.put(item.work, .{ .publication = retained, .seq = event_value.seq });
+                    try prefix.put(retained, event_value.seq);
                 }
             }
             if (admissions.count() != 0) return error.InvalidArchive;
@@ -9998,7 +10016,7 @@ pub fn Service(comptime Types: type) type {
                 }
                 if (row.kind != .workspace_work) continue;
                 const current = try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, row.id), true);
-                const last = latest.get(row.id) orelse return error.InvalidArchive;
+                const last = prefix.latest.get(row.id) orelse return error.InvalidArchive;
                 if (last.seq != current.work.event_watermark or !try samePublication(a, last.publication, try workPublication(a, current))) return error.InvalidArchive;
             }
         }
@@ -13527,51 +13545,33 @@ pub fn Service(comptime Types: type) type {
             }
         };
 
-        fn publicationHasSuccessor(latest: anytype, id: state.Digest) !bool {
-            var iterator = latest.iterator();
-            while (iterator.next()) |entry| {
-                const observer = entry.value_ptr.publication.observer orelse continue;
-                const previous = observer.selection.previous orelse continue;
-                if (std.meta.eql(try wp.identity(previous, .work), id)) return true;
-            }
-            return false;
-        }
-
-        fn publicationHasOuterObserver(latest: anytype, id: state.Digest) !bool {
-            var iterator = latest.iterator();
-            while (iterator.next()) |entry| {
-                const observer = entry.value_ptr.publication.observer orelse continue;
-                if (!observer.stopped and observer.selection.source.level == .outer_execution and
-                    std.meta.eql(observer.source_work, id) and
-                    !try publicationHasSuccessor(latest, entry.key_ptr.*)) return true;
-            }
-            return false;
-        }
-
         fn validateObservedAdvance(
             self: *Self,
             a: std.mem.Allocator,
             before: state.WorkPublication,
             after: state.WorkPublication,
-            latest: anytype,
+            prefix: *@import("workspace_observers.zig").PublicationPrefix,
         ) !void {
             if (before.execution_revision == after.execution_revision and
                 std.meta.eql(
                     before.outer_operation orelse before.runtime_capsule,
                     after.outer_operation orelse after.runtime_capsule,
                 )) return;
-            var iterator = latest.iterator();
-            while (iterator.next()) |entry| {
-                const observer = entry.value_ptr.publication.observer orelse continue;
-                if (observer.stopped or observer.selection.policy.delivery != .lossless or
-                    !std.meta.eql(observer.source_work, before.work) or
-                    try publicationHasSuccessor(latest, entry.key_ptr.*)) continue;
+            const active = prefix.lossless(before.work) orelse return;
+            var outer: ?struct { before: u64, after: u64 } = null;
+            var iterator = active.keyIterator();
+            while (iterator.next()) |id| {
+                const observer = prefix.latest.get(id.*).?.publication.observer.?;
                 if (observer.selection.source.level == .guest_cut and
                     before.execution_revision == after.execution_revision) continue;
                 var cursor = before.execution_revision;
                 if (observer.selection.source.level == .outer_execution) {
-                    cursor = try self.observerPublicationRevision(a, before);
-                    if (cursor == try self.observerPublicationRevision(a, after)) continue;
+                    if (outer == null) outer = .{
+                        .before = try self.observerPublicationRevision(a, before),
+                        .after = try self.observerPublicationRevision(a, after),
+                    };
+                    cursor = outer.?.before;
+                    if (cursor == outer.?.after) continue;
                 }
                 if (observer.consumed_revision == null or observer.consumed_revision.? != cursor)
                     return error.InvalidArchive;

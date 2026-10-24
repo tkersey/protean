@@ -4461,16 +4461,72 @@ const ReconstructionModel = struct {
 fn reconstructionRuntimeAction(service: anytype, a: std.mem.Allocator) !void {
     const task = (try service.submit(a, "runtime-controller-task", .{ .items = &.{ 2, 3 } })).receipt.task;
     var requested: ?@FieldType(contracts.workspace.Work, "realize_controller") = null;
+    var operator_switched = false;
     var switched = false;
     var calls: usize = 0;
     for (0..256) |_| {
         var before = try service.task(a, task);
         defer before.deinit();
         if (before.value.terminal()) {
-            if (!switched) return error.ControllerRealizationNotObserved;
+            if (!operator_switched or !switched) return error.ControllerRealizationNotObserved;
             try std.testing.expectEqual(@as(usize, 2), calls);
             try service.validateWorkspace(a, task);
             return;
+        }
+        if (!operator_switched and before.value.controller_interaction != null) {
+            const id = before.value.controller_interaction.?;
+            var interaction = try contracts.decodeOwned(native.testing.state.ControllerInteraction, a, (try service.namespace.store.recordBytes(a, "controller_interaction", id, task)).?);
+            defer interaction.deinit();
+            if (interaction.value.model != null and
+                std.meta.eql(interaction.value.model, before.value.current_occurrence))
+            {
+                const pending_bytes = (try service.namespace.store.recordBytes(
+                    a,
+                    "occurrence",
+                    before.value.current_occurrence.?,
+                    task,
+                )).?;
+                defer a.free(pending_bytes);
+                var pending = try contracts.decodeOwned(
+                    native.testing.occurrence.Occurrence,
+                    a,
+                    pending_bytes,
+                );
+                defer pending.deinit();
+                try std.testing.expectEqual(.ready, std.meta.activeTag(pending.value.state));
+                try std.testing.expectEqual(@as(usize, 0), calls);
+                _ = try service.workspaceRealizeController(
+                    a,
+                    "operator-runtime-switch-before-dispatch",
+                    task,
+                    .{ .expected = .{ .cut = .{
+                        .epoch = before.value.controller_epoch,
+                        .execution_revision = before.value.execution_revision,
+                        .realization_revision = before.value.realization_revision,
+                    } }, .runtime = .{ .packaged = .{} } },
+                );
+                var realized = try service.task(a, task);
+                defer realized.deinit();
+                try std.testing.expectEqual(
+                    before.value.realization_revision + 1,
+                    realized.value.realization_revision,
+                );
+                inline for (.{ "image", "controller_epoch", "execution_revision", "checkpoint", "current_occurrence", "controller", "controller_interaction" }) |field|
+                    try std.testing.expectEqualDeep(
+                        @field(before.value, field),
+                        @field(realized.value, field),
+                    );
+                const retained = (try service.namespace.store.recordBytes(
+                    a,
+                    "occurrence",
+                    before.value.current_occurrence.?,
+                    task,
+                )).?;
+                defer a.free(retained);
+                try std.testing.expectEqualSlices(u8, pending_bytes, retained);
+                operator_switched = true;
+                continue;
+            }
         }
         const progress = try service.pump(a);
         if (progress == .work) {
@@ -4490,6 +4546,11 @@ fn reconstructionRuntimeAction(service: anytype, a: std.mem.Allocator) !void {
                     defer overlay.deinit();
                     const target = try native.values.fromJson(contracts.workspace.ControllerTarget, a, native.json.get(native.json.get(overlay.value, "control").?, "realization_target").?);
                     try std.testing.expectEqual(.action, std.meta.activeTag(target));
+                    try std.testing.expect(operator_switched);
+                    try std.testing.expectEqual(
+                        current.value.realization_revision,
+                        target.action.realization_revision,
+                    );
                     requested = .{ .expected = target, .runtime = .{ .packaged = .{} } };
                     try service.acquire(a, progress.work, try contracts.encodeOwned(Reconstruction.Response, a, .{ .realize = requested.? }));
                 } else try service.acquire(a, progress.work, try contracts.encodeOwned(Reconstruction.Response, a, .{ .next = {} }));

@@ -4,6 +4,73 @@ const kosmos = @import("kosmos");
 const c = @import("protean_contracts");
 const w = c.workspace;
 const views = kosmos.RuntimeViews;
+const state = @import("state.zig");
+const projection = @import("workspace_projection.zig");
+
+pub const PublicationPrefix = struct {
+    const Set = std.AutoHashMapUnmanaged(state.Digest, void);
+    const Position = struct { publication: state.WorkPublication, seq: u64 };
+    const Source = struct { lossless: Set = .empty, outer: Set = .empty };
+
+    latest: std.AutoHashMap(state.Digest, Position),
+    successors: Set = .empty,
+    sources: std.AutoHashMapUnmanaged(state.Digest, Source) = .empty,
+
+    pub fn init(a: std.mem.Allocator) PublicationPrefix {
+        return .{ .latest = .init(a) };
+    }
+
+    pub fn deinit(self: *PublicationPrefix) void {
+        const a = self.latest.allocator;
+        var entries = self.sources.valueIterator();
+        while (entries.next()) |entry| {
+            entry.lossless.deinit(a);
+            entry.outer.deinit(a);
+        }
+        self.sources.deinit(a);
+        self.successors.deinit(a);
+        self.latest.deinit();
+    }
+
+    fn remove(self: *PublicationPrefix, source: state.Digest, id: state.Digest) void {
+        const group = self.sources.getPtr(source) orelse return;
+        _ = group.lossless.remove(id);
+        _ = group.outer.remove(id);
+    }
+
+    pub fn put(self: *PublicationPrefix, item: state.WorkPublication, seq: u64) !void {
+        const a = self.latest.allocator;
+        if (self.latest.get(item.work)) |before| if (before.publication.observer) |observer|
+            self.remove(observer.source_work, item.work);
+        if (item.observer) |observer| {
+            if (observer.selection.previous) |previous| {
+                const id = try projection.identity(previous, .work);
+                try self.successors.put(a, id, {});
+                if (self.latest.get(id)) |prior| if (prior.publication.observer) |predecessor|
+                    self.remove(predecessor.source_work, id);
+            }
+            if (!observer.stopped and !self.successors.contains(item.work)) {
+                const entry = try self.sources.getOrPut(a, observer.source_work);
+                if (!entry.found_existing) entry.value_ptr.* = .{};
+                if (observer.selection.policy.delivery == .lossless)
+                    try entry.value_ptr.lossless.put(a, item.work, {});
+                if (observer.selection.source.level == .outer_execution)
+                    try entry.value_ptr.outer.put(a, item.work, {});
+            }
+        }
+        try self.latest.put(item.work, .{ .publication = item, .seq = seq });
+    }
+
+    pub fn hasOuter(self: *const PublicationPrefix, id: state.Digest) bool {
+        const group = self.sources.get(id) orelse return false;
+        return group.outer.count() != 0;
+    }
+
+    pub fn lossless(self: *PublicationPrefix, id: state.Digest) ?*Set {
+        const group = self.sources.getPtr(id) orelse return null;
+        return &group.lossless;
+    }
+};
 
 pub fn validatePolicy(policy: w.ObserverPolicy) !void {
     if (policy.cadence == 0 or

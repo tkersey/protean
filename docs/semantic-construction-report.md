@@ -6,6 +6,26 @@ the existing workspace owners. The public contract is
 [Computational workspace](computational-workspace.md).
 
 The current successor addresses the two accepted classes from the completed
+`82bcfdf` review round. Historical publication validation maintains the successor
+set and active lossless and outer observers per source after each validated
+publication. Source advancement checks only its active lossless observers; outer
+observer presence uses the corresponding set. Completed, superseded and stopped
+folds remain in the historical publication map. The differential prefix fixture
+compares these memberships with the former scan definition, including completion,
+stopped tails and republication of older folds. Allocation-failure checks cover
+partial index construction. The existing Linux selection lane now requires five
+tests; all nineteen lanes and both time limits remain unchanged.
+
+Before model dispatch, controller overlay freshness includes the realization
+revision encoded in its retained typed target. A native realization switch can
+therefore refresh the offered target without changing the controller epoch or
+model occurrence. The existing reconstruction fixture performs that switch
+before its first model call, preserves the guest and occurrence, and continues
+through model-directed realization, replay and stale-action rejection. Submitted
+stale actions still fail. Qualification and fresh review results are bound to
+exact commits in [Protean #59](https://github.com/tkersey/protean/pull/59).
+
+The preceding successor addresses the two accepted classes from the completed
 `2e131690` review round. Observer successor indexes now belong to each operation
 that traverses retained work, including resume, cleanup, mobility and archive
 validation. Each index binds one task, loads lazily and reuses temporary
@@ -700,7 +720,8 @@ applies to this entire mapping.
 ## Footprint
 
 The comparison bases are Horos `ae8ace5`, Kosmos `6c70d24`, and accepted Protean
-`2e40ce4`; measured heads are `f60b116`, `6aec3c7`, and `4f749dd` respectively.
+`2e40ce4`; measured sources are `f60b116`, `6aec3c7`, and the current Protean
+successor of `82bcfdf` respectively.
 Added/deleted byte counts include newlines in dedicated test files and inline
 test blocks. Helpers outside those blocks are excluded from this test-only
 measure; the complete Zig totals below expose that additional source growth.
@@ -709,14 +730,14 @@ measure; the complete Zig totals below expose that additional source growth.
 |---|---:|---:|---:|
 | Horos | 14 | 133,296 | 213 |
 | Kosmos | 11 | 139,794 | 1,104 |
-| Protean | 23 | 381,038 | 55,751 |
-| Total | 48 | 654,128 | 57,068 |
+| Protean | 23 | 390,085 | 55,751 |
+| Total | 48 | 663,175 | 57,068 |
 
 Complete changed Zig source adds/deletes 393,020/67,052 bytes in Horos,
-323,886/20,796 in Kosmos, and 715,239/111,280 in Protean. No test modules,
+323,886/20,796 in Kosmos, and 716,266/100,454 in Protean. No test modules,
 directories, executables, CI lanes or checked-in trace banks were added. The
 largest test-file extension is Protean's existing `workspace_runtime.zig`:
-244,234 added and 9,868 deleted bytes. Its two generated productions are reused
+250,162 added and 9,868 deleted bytes. Its two generated productions are reused
 by activation, five-arm measurements, recovery and mobility. Historical
 independent byte fixtures remain unchanged.
 
