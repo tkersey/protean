@@ -366,6 +366,15 @@ exclusive custody, credentials, or authority over ambiguous effects.
 
 ## Verification boundaries
 
+Linux qualification runs on native Ubuntu x86-64 GitHub Actions runners with
+Zig 0.17.0. Use native macOS checks for local feedback on Apple silicon; do not
+reproduce required Linux CI through Rosetta, QEMU, or an emulated local container.
+Cross-compilation and local emulation do not substitute for the Linux CI result.
+Preserve execution tracing, user/mount/PID isolation, every required assertion,
+and the existing per-job and aggregate 600-second limits. Reuse compiled inputs
+only under their exact input-aware cache key, rebuild on a miss, and always
+execute the selected tests. Do not automatically run cold/warm qualification pairs.
+
 `check-protean` checks reusable authoring, compile-time rejections, and independent
 wire fixtures. `check-native` checks native owners plus the adaptive and HTTPS
 peers. The peers run copied binaries under OS execution/file boundaries, using

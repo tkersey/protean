@@ -369,8 +369,16 @@ pub fn build(b: *std.Build) void {
         const runtime_workspace_group = b.option(enum { selection, custody, succession }, "runtime-workspace-group", "Select independent runtime workspace qualification cases (default: all)");
         const workspace_runtime_tests = native_graph.testModuleFiltered(workspace_runtime_checks, workspace_runtime_module, if (runtime_workspace_group) |group| switch (group) {
             .selection => &.{ "runtime selection", "terminal parent cancellation", "scheduler bounds" },
-            .custody => &.{ "native placement carries", "frozen controller" },
-            .succession => &.{ "delayed controls", "controller succession precedes", "controller succession preserves" },
+            .custody => &.{
+                "native placement carries a suspended evaluator with exclusive per-work custody",
+            },
+            .succession => &.{
+                "delayed controls",
+                "controller succession precedes",
+                "controller succession preserves",
+                "native placement carries the current cut",
+                "frozen controller",
+            },
         } else &.{});
         b.step("build-workspace-runtime-check", "Build the retained runtime workspace test executable")
             .dependOn(&b.addInstallArtifact(workspace_runtime_tests, .{
@@ -519,12 +527,21 @@ pub fn build(b: *std.Build) void {
             const suite = b.allocator.create(std.Build.Module) catch @panic("out of memory");
             suite.init(b, .{ .existing = native_suite });
             suite.root_source_file = b.path(group[1]);
+            if (comptime std.mem.eql(u8, group[0], "tasks")) {
+                suite.import_table = suite.import_table.clone(b.allocator) catch @panic("out of memory");
+                _ = suite.import_table.swapRemove("adaptive_image");
+                _ = suite.import_table.swapRemove("adaptive_application");
+            }
             const checks = b.step("check-native-owner-" ++ group[0], "Qualify native " ++ group[0] ++ " contracts");
             const filters: []const []const u8 = if (comptime std.mem.eql(u8, group[0], "adaptive")) if (adaptive_group) |selected| switch (selected) {
                 .capture => &.{ "adaptive copied capture", "adaptive report correction" },
                 .control => &.{ "authored inference", "authored skill", "authored report", "report model arguments", "compiled catalog", "adaptive snapshot", "adaptive provider", "adaptive malformed", "adaptive workspace" },
             } else &.{} else &.{};
             const tests = native_graph.testModuleFiltered(checks, suite, filters);
+            if (comptime std.mem.eql(u8, group[0], "tasks")) {
+                if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64)
+                    tests.use_llvm = false;
+            }
             b.step("build-native-owner-" ++ group[0] ++ "-check", "Build the retained native " ++ group[0] ++ " test executable")
                 .dependOn(&b.addInstallArtifact(tests, .{
                 .dest_dir = .{ .override = .{ .custom = "verification" } },

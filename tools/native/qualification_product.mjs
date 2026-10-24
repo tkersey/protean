@@ -24,7 +24,21 @@ if (operation === 'pack') {
 } else {
   assert.equal(operation, 'receive');
   const repo = process.env.GITHUB_REPOSITORY;
-  const api = async (path, timeout = 30_000) => (await execute('gh', ['api', `repos/${repo}/${path}`], {encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, timeout})).stdout;
+  const api = async (path, timeout = 30_000) => {
+    const deadline = Date.now() + timeout;
+    for (let attempt = 0; ; attempt++) {
+      const remaining = deadline - Date.now();
+      assert(remaining > 0, 'artifact read deadline exhausted');
+      try {
+        return (await execute('gh', ['api', `repos/${repo}/${path}`], {encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, timeout: remaining})).stdout;
+      } catch (error) {
+        const status = /\bHTTP (502|503|504)\b/.exec(String(error.stderr))?.[1];
+        if (!status || attempt === 2 || deadline - Date.now() <= 1000) throw error;
+        console.warn(`Retrying GitHub artifact read after HTTP ${status}`);
+        await delay(1000);
+      }
+    }
+  };
   const run = JSON.parse(await api(`actions/runs/${context.run}`));
   assert.equal(String(run.id), context.run);
   assert.equal(String(run.run_attempt), context.attempt);

@@ -805,452 +805,466 @@ fn adaptiveRecovery(comptime correction: bool, comptime recovery_probe: enum { n
     errdefer std.debug.print("adaptive recovery failure: calls={d} restarted={} witnessed={} finished={} state_bytes={d} scratch_bytes={d}\n", .{ model_calls, restarted, witnessed, finished, maximum_state, maximum_scratch });
     // Preserve the complete recovery trace across evaluator micro-suspensions.
     for (0..4096) |_| {
+        var restart: ?struct { attempt: [32]u8, capture: []const u8, archive: ?[]const u8 } = null;
         var scratch: kosmos.AllocationBudget = .{ .parent = a, .limit = 64 * 1024 * 1024 };
-        var arena = std.heap.ArenaAllocator.init(scratch.allocator());
-        defer arena.deinit();
         defer maximum_scratch = @max(maximum_scratch, scratch.peak);
-        const frame = arena.allocator();
-        var saved = try service.task(frame, task);
-        defer saved.deinit();
-        maximum_state = @max(maximum_state, saved.value.checkpoint.bytes);
-        if (saved.value.terminal()) {
-            try std.testing.expect(saved.value.outcome_kind == .completed);
-            const result = try namespace.store.object(frame, saved.value.result.?, null);
-            var output = try protean.contracts.decodeOwned(t.Output, frame, result);
-            defer output.deinit();
-            try std.testing.expect(output.value.result == .report);
-            try std.testing.expectEqual(@as(u64, if (correction) 16 else 14), output.value.model_calls);
-            if (correction) {
-                try std.testing.expect(result.len > (native.protocol.Limits{}).inline_bytes);
-                try std.testing.expectEqual(@as(usize, 70 * 1024), output.value.result.report.summary.bytes.len);
-                try std.testing.expectEqual(@as(usize, 2), output.value.evidence.items.len);
-                try std.testing.expectEqual(@as(usize, 3), output.value.result.report.claims.items.len);
-                try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, output.value.result.report.claims.items[0].evidence_indices.items);
-                try std.testing.expectEqual(@as(u64, 6), output.value.work_calls);
-                try std.testing.expectEqualStrings("src/main.zig", output.value.evidence.items[0].source.path.bytes);
-                try std.testing.expectEqualStrings("src/main.zig", output.value.evidence.items[1].source.path.bytes);
-                try std.testing.expectEqual(@as(u64, 32), output.value.evidence.items[1].source.end);
-                var client: native.client.Client(t) = .{ .service = &service };
-                var params = native.json.object();
-                try native.json.put(frame, &params, "task_id", native.json.string(try frame.dupe(u8, &std.fmt.bytesToHex(task, .lower))));
-                const exposed = try client.call(frame, .@"task.result", params);
-                const outcome = native.json.get(exposed, "outcome").?;
-                try std.testing.expect(native.json.get(outcome, "value") == null);
-                try std.testing.expect(native.json.get(outcome, "value_ref") != null);
-            }
-            try std.testing.expectEqual(8, output.value.receipts.items.len);
-            try std.testing.expectEqual(8, output.value.control.selection.control_revision);
-            finished = true;
-            break;
-        }
-        if (restarted and !witnessed and saved.value.outcome_kind == .requested) {
-            const encoded = try namespace.store.object(frame, saved.value.outcome, 1024 * 1024);
-            var outcome = try protocol.decode(protocol.Outcome, frame, encoded);
-            defer outcome.deinit();
-            var request = try protocol.decode(protocol.Request, frame, outcome.value.requested.request);
-            defer request.deinit();
-            if (std.mem.eql(u8, request.value.binding.semantic_identity, protean.contracts.controller.effect_prefix ++ "deliberate")) {
-                const entry = try handlers.resolve(request.value, application.image_identity);
-                var adaptive = try protean.contracts.decodeOwned(t.P.AdaptiveRequest, frame, try entry.payload(frame, request.value.binding.payload));
-                defer adaptive.deinit();
-                if (adaptive.value.plan.watermark == 8) {
-                    try std.testing.expectEqual(8, model_calls);
-                    try std.testing.expectEqual(5, adaptive.value.selection.control_revision);
-                    try std.testing.expectEqual(1, adaptive.value.plan.eviction_generation);
-                    try std.testing.expectEqual(0, adaptive.value.plan.skills.items.len);
-                    try std.testing.expect(!adaptive.value.offered[7] and !adaptive.value.materialized[7]);
-                    try std.testing.expectEqual(8, saved.value.inference_attempts);
-                    witnessed = true;
+        {
+            var arena = std.heap.ArenaAllocator.init(scratch.allocator());
+            defer arena.deinit();
+            const frame = arena.allocator();
+            var saved = try service.task(frame, task);
+            defer saved.deinit();
+            maximum_state = @max(maximum_state, saved.value.checkpoint.bytes);
+            if (saved.value.terminal()) {
+                try std.testing.expect(saved.value.outcome_kind == .completed);
+                const result = try namespace.store.object(frame, saved.value.result.?, null);
+                var output = try protean.contracts.decodeOwned(t.Output, frame, result);
+                defer output.deinit();
+                try std.testing.expect(output.value.result == .report);
+                try std.testing.expectEqual(@as(u64, if (correction) 16 else 14), output.value.model_calls);
+                if (correction) {
+                    try std.testing.expect(result.len > (native.protocol.Limits{}).inline_bytes);
+                    try std.testing.expectEqual(@as(usize, 70 * 1024), output.value.result.report.summary.bytes.len);
+                    try std.testing.expectEqual(@as(usize, 2), output.value.evidence.items.len);
+                    try std.testing.expectEqual(@as(usize, 3), output.value.result.report.claims.items.len);
+                    try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, output.value.result.report.claims.items[0].evidence_indices.items);
+                    try std.testing.expectEqual(@as(u64, 6), output.value.work_calls);
+                    try std.testing.expectEqualStrings("src/main.zig", output.value.evidence.items[0].source.path.bytes);
+                    try std.testing.expectEqualStrings("src/main.zig", output.value.evidence.items[1].source.path.bytes);
+                    try std.testing.expectEqual(@as(u64, 32), output.value.evidence.items[1].source.end);
+                    var client: native.client.Client(t) = .{ .service = &service };
+                    var params = native.json.object();
+                    try native.json.put(frame, &params, "task_id", native.json.string(try frame.dupe(u8, &std.fmt.bytesToHex(task, .lower))));
+                    const exposed = try client.call(frame, .@"task.result", params);
+                    const outcome = native.json.get(exposed, "outcome").?;
+                    try std.testing.expect(native.json.get(outcome, "value") == null);
+                    try std.testing.expect(native.json.get(outcome, "value_ref") != null);
                 }
+                try std.testing.expectEqual(8, output.value.receipts.items.len);
+                try std.testing.expectEqual(8, output.value.control.selection.control_revision);
+                finished = true;
+                break;
             }
-        }
-        const step = try service.pump(frame);
-        if (step == .work) {
-            const work = step.work;
-            var request = try protocol.decode(protocol.Request, frame, work.request);
-            defer request.deinit();
-            const context: native.Context = .{ .allocator = frame, .io = io, .authority = &profile.authority, .task_id = &std.fmt.bytesToHex(task, .lower), .profile = profile.bytes, .environment = profile.environment };
-            const reply = if (work.entry.declaration.capture) |adapter| blk: {
-                maximum_prepared = @max(maximum_prepared, work.prepared.?.len);
-                if (recovery_probe == .imported and restarted and work.entry.declaration.inference) {
-                    errdefer service.unknown(frame, work) catch {};
-                    const projection = struct {
-                        adapter: native.registry.CaptureAdapter,
-                        payload: []const u8,
-                        pub fn run(this: @This(), ctx: native.registry.ProjectionContext) ![]u8 {
-                            return this.adapter.prepare(ctx, this.payload);
-                        }
-                    }{ .adapter = adapter, .payload = try work.entry.payload(frame, request.value.binding.payload) };
-                    const binding: native.registry.ProjectionBinding = .{ .task = task, .tenant = profile.authority.tenant, .profile = profile.bytes, .application = application.image_identity, .resources = saved.value.resources.items, .controller = work.controller_projection };
-                    _ = try namespace.store.project([]u8, frame, handlers, binding, projection);
-                    const cache = &namespace.store.context_cache;
-                    cache.hits = 0;
-                    cache.misses = 0;
-                    cache.ancestry_bytes = 0;
-                    cache.object_reads = 0;
-                    cache.object_bytes = 0;
-                    const repeated = try namespace.store.project([]u8, frame, handlers, binding, projection);
-                    try std.testing.expectEqualSlices(u8, work.prepared.?, repeated);
-                    std.debug.print("same-service import model_calls={d} hits={d} misses={d} ancestry_bytes={d} reads={d} bytes={d}\n", .{ model_calls, cache.hits, cache.misses, cache.ancestry_bytes, cache.object_reads, cache.object_bytes });
-                    try std.testing.expectEqual(@as(u64, 1), cache.hits);
-                    try std.testing.expectEqual(@as(u64, 0), cache.misses);
-                    try std.testing.expectEqual(@as(u64, 0), cache.ancestry_bytes);
-                }
-                if (work.entry.declaration.inference and model_calls == 8) {
-                    var prepared = try protean.contracts.decodeOwned(t.P.AdaptivePrepared, frame, work.prepared.?);
-                    defer prepared.deinit();
-                    const rendered = try native.json.parse(frame, prepared.value.body.bytes, .{});
-                    var task_count: usize = 0;
-                    var followup_count: usize = 0;
-                    for (rendered.value.object.get("input").?.array.items) |item| {
-                        const content = native.json.get(item, "content") orelse continue;
-                        if (content != .array) continue;
-                        for (content.array.items) |part| {
-                            const text = native.json.get(part, "text") orelse continue;
-                            if (text != .string) continue;
-                            if (std.mem.eql(u8, text.string, &long_task)) task_count += 1;
-                            if (std.mem.eql(u8, text.string, &long_followup)) followup_count += 1;
-                        }
+            if (restarted and !witnessed and saved.value.outcome_kind == .requested) {
+                const encoded = try namespace.store.object(frame, saved.value.outcome, 1024 * 1024);
+                var outcome = try protocol.decode(protocol.Outcome, frame, encoded);
+                defer outcome.deinit();
+                var request = try protocol.decode(protocol.Request, frame, outcome.value.requested.request);
+                defer request.deinit();
+                if (std.mem.eql(u8, request.value.binding.semantic_identity, protean.contracts.controller.effect_prefix ++ "deliberate")) {
+                    const entry = try handlers.resolve(request.value, application.image_identity);
+                    var adaptive = try protean.contracts.decodeOwned(t.P.AdaptiveRequest, frame, try entry.payload(frame, request.value.binding.payload));
+                    defer adaptive.deinit();
+                    if (adaptive.value.plan.watermark == 8) {
+                        try std.testing.expectEqual(8, model_calls);
+                        try std.testing.expectEqual(5, adaptive.value.selection.control_revision);
+                        try std.testing.expectEqual(1, adaptive.value.plan.eviction_generation);
+                        try std.testing.expectEqual(0, adaptive.value.plan.skills.items.len);
+                        try std.testing.expect(!adaptive.value.offered[7] and !adaptive.value.materialized[7]);
+                        try std.testing.expectEqual(8, saved.value.inference_attempts);
+                        witnessed = true;
                     }
-                    try std.testing.expect(prepared.value.body.bytes.len > 8192);
-                    try std.testing.expectEqual(@as(usize, 1), task_count);
-                    try std.testing.expectEqual(@as(usize, 2), followup_count);
                 }
-                if (correction and work.entry.declaration.inference and model_calls >= 13) {
-                    if (model_calls == 15) {
+            }
+            const step = try service.pump(frame);
+            if (step == .work) {
+                const work = step.work;
+                var request = try protocol.decode(protocol.Request, frame, work.request);
+                defer request.deinit();
+                const context: native.Context = .{ .allocator = frame, .io = io, .authority = &profile.authority, .task_id = &std.fmt.bytesToHex(task, .lower), .profile = profile.bytes, .environment = profile.environment };
+                const reply = if (work.entry.declaration.capture) |adapter| blk: {
+                    maximum_prepared = @max(maximum_prepared, work.prepared.?.len);
+                    if (recovery_probe == .imported and restarted and work.entry.declaration.inference) {
+                        errdefer service.unknown(frame, work) catch {};
+                        var probe_arena = std.heap.ArenaAllocator.init(scratch.allocator());
+                        defer probe_arena.deinit();
+                        const probe = probe_arena.allocator();
+                        const projection = struct {
+                            adapter: native.registry.CaptureAdapter,
+                            payload: []const u8,
+                            pub fn run(this: @This(), ctx: native.registry.ProjectionContext) ![]u8 {
+                                return this.adapter.prepare(ctx, this.payload);
+                            }
+                        }{ .adapter = adapter, .payload = try work.entry.payload(probe, request.value.binding.payload) };
+                        const binding: native.registry.ProjectionBinding = .{ .task = task, .tenant = profile.authority.tenant, .profile = profile.bytes, .application = application.image_identity, .resources = saved.value.resources.items, .controller = work.controller_projection };
+                        _ = try namespace.store.project([]u8, probe, handlers, binding, projection);
+                        const cache = &namespace.store.context_cache;
+                        cache.hits = 0;
+                        cache.misses = 0;
+                        cache.ancestry_bytes = 0;
+                        cache.object_reads = 0;
+                        cache.object_bytes = 0;
+                        const repeated = try namespace.store.project([]u8, probe, handlers, binding, projection);
+                        try std.testing.expectEqualSlices(u8, work.prepared.?, repeated);
+                        std.debug.print("same-service import model_calls={d} hits={d} misses={d} ancestry_bytes={d} reads={d} bytes={d}\n", .{ model_calls, cache.hits, cache.misses, cache.ancestry_bytes, cache.object_reads, cache.object_bytes });
+                        try std.testing.expectEqual(@as(u64, 1), cache.hits);
+                        try std.testing.expectEqual(@as(u64, 0), cache.misses);
+                        try std.testing.expectEqual(@as(u64, 0), cache.ancestry_bytes);
+                    }
+                    if (work.entry.declaration.inference and model_calls == 8) {
                         var prepared = try protean.contracts.decodeOwned(t.P.AdaptivePrepared, frame, work.prepared.?);
                         defer prepared.deinit();
-                        const prior = prepared.value.request.results.items;
-                        try std.testing.expectEqual(@as(usize, 1), prior.len);
-                        try std.testing.expectEqualStrings("report-14", prior[0].call_id.bytes);
-                        const rejection_json = (try native.json.parse(frame, prior[0].output.bytes, .{})).value;
-                        const rejection = try native.values.fromJson(t.ReportRejection, frame, rejection_json);
-                        try std.testing.expectEqualDeep(t.ReportRejection{ .reason = .out_of_range, .claim_index = 0, .evidence_position = 1 }, rejection);
+                        const rendered = try native.json.parseAsset(frame, prepared.value.body.bytes, prepared.value.body.bytes.len);
+                        var task_count: usize = 0;
+                        var followup_count: usize = 0;
+                        for (rendered.value.object.get("input").?.array.items) |item| {
+                            const content = native.json.get(item, "content") orelse continue;
+                            if (content != .array) continue;
+                            for (content.array.items) |part| {
+                                const text = native.json.get(part, "text") orelse continue;
+                                if (text != .string) continue;
+                                if (std.mem.eql(u8, text.string, &long_task)) task_count += 1;
+                                if (std.mem.eql(u8, text.string, &long_followup)) followup_count += 1;
+                            }
+                        }
+                        try std.testing.expect(prepared.value.body.bytes.len > 8192);
+                        try std.testing.expectEqual(@as(usize, 1), task_count);
+                        try std.testing.expectEqual(@as(usize, 2), followup_count);
                     }
-                    const name = if (model_calls == 13) "read" else "report";
-                    const arguments = if (model_calls == 13)
-                        "{\"path\":\"src/main.zig\",\"start\":0,\"maximum\":32}"
-                    else if (model_calls == 14)
-                        "{\"summary\":\"Invalid citation\",\"claims\":[{\"kind\":\"observation\",\"statement\":\"Observed\",\"reasoning\":\"\",\"evidence_indices\":[0,2]}],\"limitations\":[]}"
-                    else blk_args: {
-                        const summary = try frame.alloc(u8, 70 * 1024);
-                        @memset(summary, 'S');
-                        break :blk_args try std.json.Stringify.valueAlloc(frame, .{ .summary = summary, .claims = .{
-                            .{ .kind = "observation", .statement = "Both ranges are retained.", .reasoning = "", .evidence_indices = .{ 0, 1 } },
-                            .{ .kind = "inference", .statement = "The ranges overlap.", .reasoning = "Both begin at offset zero.", .evidence_indices = .{1} },
-                            .{ .kind = "hypothesis", .statement = "Other files may differ.", .reasoning = "They were not inspected.", .evidence_indices = .{} },
-                        }, .limitations = .{"No entailment proof is claimed."} }, .{});
-                    };
-                    const call = try std.fmt.allocPrint(frame, "report-{d}", .{model_calls});
-                    const provider = try std.json.Stringify.valueAlloc(frame, .{ .id = call, .status = "completed", .@"error" = @as(?u8, null), .output = .{.{ .type = "function_call", .status = "completed", .call_id = call, .name = name, .arguments = arguments }} }, .{});
-                    break :blk try protean.contracts.encodeOwned(native.responses.Raw, frame, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = provider } });
-                }
-                const acquired = try adapter.acquire(context, work.prepared.?);
-                if (acquired != .captured) return error.UnexpectedAcquisitionFailure;
-                break :blk acquired.captured;
-            } else try work.entry.declaration.invoke.?(context, request.value.binding.payload);
-            const inference = work.entry.declaration.inference;
-            if (recovery_probe == .malformed and inference) {
-                const malformed = "invalid response framing";
-                try service.acquire(frame, work, malformed);
-                _ = try service.pump(frame);
-                var rejected_task = try service.task(frame, task);
-                defer rejected_task.deinit();
-                try std.testing.expectEqual(native.tasks.Status.blocked, try service.status(frame, rejected_task.value));
-                const State = native.testing.state;
-                var retained = try protean.contracts.decodeOwned(State.Capture, frame, (try namespace.store.recordBytes(frame, "capture", work.attempt, task)).?);
-                defer retained.deinit();
-                try std.testing.expect(retained.value.projection == null);
-                try std.testing.expectEqualSlices(u8, malformed, try namespace.store.object(frame, retained.value.response.?, null));
-                const archive_path = try std.fmt.allocPrint(frame, "{s}/malformed.agnx", .{buffer[0..length]});
-                _ = try service.exportCheckpoint(frame, task, archive_path);
-                try service.close(frame);
-                service_live = false;
-                try namespace.close();
-                namespace_live = false;
-                const target = try std.fmt.allocPrint(frame, "{s}/malformed-import", .{buffer[0..length]});
-                var destination = try native.Namespace.open(a, io, target);
-                defer destination.close() catch unreachable;
-                var imported = try native.tasks.Service(t).init(a, io, &destination, assets, &application, handlers, profile);
-                defer imported.close(frame) catch unreachable;
-                _ = try imported.importCheckpoint(frame, "import-malformed", archive_path);
-                try std.testing.expect((try imported.pump(frame)) == .idle);
-                var copied_task = try imported.task(frame, task);
-                defer copied_task.deinit();
-                try std.testing.expectError(error.CustodyNotLocal, imported.resumeTask(frame, "copy-cannot-interpret", task, copied_task.value.revision));
-                try imported.close(frame);
-                try destination.close();
-                destination = try native.Namespace.open(a, io, path);
-                imported = try native.tasks.Service(t).init(a, io, &destination, assets, &application, handlers, profile);
-                var owned_task = try imported.task(frame, task);
-                defer owned_task.deinit();
-                _ = try imported.resumeTask(frame, "interpret-malformed", task, owned_task.value.revision);
-                _ = try imported.pump(frame);
-                var still_blocked = try imported.task(frame, task);
-                defer still_blocked.deinit();
-                try std.testing.expectEqual(native.tasks.Status.blocked, try imported.status(frame, still_blocked.value));
-                try std.testing.expectEqual(rejected_task.value.inference_attempts, still_blocked.value.inference_attempts);
-                try std.testing.expectEqual(rejected_task.value.inference_request_bytes, still_blocked.value.inference_request_bytes);
-                try std.testing.expectEqual(rejected_task.value.inference_output_tokens, still_blocked.value.inference_output_tokens);
-                var untouched = try protean.contracts.decodeOwned(State.Capture, frame, (try destination.store.recordBytes(frame, "capture", work.attempt, task)).?);
-                defer untouched.deinit();
-                try std.testing.expectEqualDeep(retained.value, untouched.value);
-                try std.testing.expectError(error.ArtifactUnavailable, imported.projectedArtifact(frame, task, retained.value.response.?.digest));
-                const second_archive = try std.fmt.allocPrint(frame, "{s}/still-malformed.agnx", .{buffer[0..length]});
-                // The broader archive domain must still reject contradictory
-                // occurrence/capture facts, even when every object hashes.
-                var occurrence_record = try protean.contracts.decodeOwned(native.testing.occurrence.Occurrence, frame, (try destination.store.recordBytes(frame, "occurrence", work.occurrence, task)).?);
-                defer occurrence_record.deinit();
-                var contradictory = occurrence_record.value;
-                contradictory.state = .{ .unknown = .{ .id = work.attempt } };
-                destination.store.invalidateIntegrity();
-                try destination.store.begin();
-                try destination.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", work.occurrence, task, contradictory);
-                try destination.commit("test.contradictory-capture");
-                try std.testing.expectError(error.CorruptState, imported.exportCheckpoint(frame, task, second_archive));
-                try destination.store.begin();
-                try destination.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", work.occurrence, task, occurrence_record.value);
-                try destination.commit("test.restore-captured-occurrence");
-                _ = try imported.exportCheckpoint(frame, task, second_archive);
-                return;
-            }
-            if ((recovery_probe == .snapshot and work.entry.declaration.recovery != null) or (recovery_probe == .provider and inference)) {
-                const occurrence_id = work.occurrence;
-                const attempt_id = work.attempt;
-                try service.unknown(frame, work);
-                try service.close(frame);
-                service_live = false;
-                try namespace.close();
-                namespace_live = false;
-                namespace = try native.Namespace.open(a, io, path);
-                namespace_live = true;
-                service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
-                service_live = true;
-                const before = namespace.store.head;
-                try std.testing.expectEqualDeep(before, namespace.store.head);
-                var unchanged = try service.task(frame, task);
-                defer unchanged.deinit();
-                try std.testing.expectEqual(saved.value.inference_attempts + @intFromBool(inference), unchanged.value.inference_attempts);
-                try std.testing.expectError(error.UnsettledOccurrence, service.resumeTask(frame, "recovery-does-not-settle", task, unchanged.value.revision));
-                var stale = attempt_id;
-                stale[0] ^= 1;
-                try std.testing.expectError(error.StaleOccurrence, service.reconcile(frame, "stale-recovery", task, unchanged.value.revision, occurrence_id, stale, .rederive));
-                const revision = unchanged.value.revision;
-                var client: native.client.Client(t) = .{ .service = &service };
-                var status_params = native.json.object();
-                try native.json.put(frame, &status_params, "task_id", native.json.string(try frame.dupe(u8, &std.fmt.bytesToHex(task, .lower))));
-                const status = try client.call(frame, .@"task.status", status_params);
-                const availability = status.object.get("recovery").?;
-                try std.testing.expectEqual(if (recovery_probe == .provider) @as(usize, 0) else 1, availability.object.get("mechanisms").?.array.items.len);
-                var params = try native.json.copy(frame, status_params);
-                try native.json.put(frame, &params, "client_operation_id", native.json.string("recover-original"));
-                try native.json.put(frame, &params, "expected_revision", native.json.string(try std.fmt.allocPrint(frame, "{d}", .{revision})));
-                try native.json.put(frame, &params, "occurrence_id", availability.object.get("occurrence_id").?);
-                try native.json.put(frame, &params, "attempt_id", availability.object.get("attempt_id").?);
-                try native.json.put(frame, &params, "recovery", (try native.json.parse(frame, "{\"mechanism\":\"rederive\"}", .{})).value);
-                var forged = try native.json.copy(frame, params);
-                try native.json.put(frame, forged.object.getPtr("recovery").?, "safe_to_retry", .{ .bool = true });
-                try std.testing.expectError(error.InvalidParams, client.call(frame, .@"task.reconcile", forged));
-                try std.testing.expectEqualDeep(before, namespace.store.head);
-                const public_admission = try client.call(frame, .@"task.reconcile", params);
-                try std.testing.expect(!public_admission.object.get("replayed").?.bool);
-                const public_recovery = public_admission.object.get("reconciliation").?;
-                try std.testing.expectEqualStrings(if (recovery_probe == .provider) "unresolved" else "pending", public_recovery.object.get("status").?.string);
-                try std.testing.expectEqual(8, public_recovery.object.count());
-                const admitted = try service.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive);
-                const reconciliation_id = admitted.receipt.reconciliation.?;
-                const committed = namespace.store.head;
-                const replayed = try service.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive);
-                try std.testing.expect(replayed.replayed);
-                try std.testing.expectEqualDeep(admitted.receipt.id, replayed.receipt.id);
-                try std.testing.expectEqualDeep(committed, namespace.store.head);
-                try std.testing.expectError(error.OperationConflict, service.reconcile(frame, "recover-original", task, revision + 1, occurrence_id, attempt_id, .rederive));
-                if (recovery_probe != .provider) {
-                    const computation = (try service.pump(frame)).work;
-                    const worker = try native.testing.Worker.init(a, io);
-                    defer worker.deinit(a) catch unreachable;
-                    try worker.start(computation, profile.authority, null);
-                    const deadline = std.Io.Clock.awake.now(io).toMilliseconds() + 5000;
-                    while (!worker.finished()) {
-                        if (std.Io.Clock.awake.now(io).toMilliseconds() >= deadline) return error.WorkerTimeout;
-                        try io.sleep(.fromMilliseconds(1), .awake);
+                    if (correction and work.entry.declaration.inference and model_calls >= 13) {
+                        if (model_calls == 15) {
+                            var prepared = try protean.contracts.decodeOwned(t.P.AdaptivePrepared, frame, work.prepared.?);
+                            defer prepared.deinit();
+                            const prior = prepared.value.request.results.items;
+                            try std.testing.expectEqual(@as(usize, 1), prior.len);
+                            try std.testing.expectEqualStrings("report-14", prior[0].call_id.bytes);
+                            const rejection_json = (try native.json.parse(frame, prior[0].output.bytes, .{})).value;
+                            const rejection = try native.values.fromJson(t.ReportRejection, frame, rejection_json);
+                            try std.testing.expectEqualDeep(t.ReportRejection{ .reason = .out_of_range, .claim_index = 0, .evidence_position = 1 }, rejection);
+                        }
+                        const name = if (model_calls == 13) "read" else "report";
+                        const arguments = if (model_calls == 13)
+                            "{\"path\":\"src/main.zig\",\"start\":0,\"maximum\":32}"
+                        else if (model_calls == 14)
+                            "{\"summary\":\"Invalid citation\",\"claims\":[{\"kind\":\"observation\",\"statement\":\"Observed\",\"reasoning\":\"\",\"evidence_indices\":[0,2]}],\"limitations\":[]}"
+                        else blk_args: {
+                            const summary = try frame.alloc(u8, 70 * 1024);
+                            @memset(summary, 'S');
+                            break :blk_args try std.json.Stringify.valueAlloc(frame, .{ .summary = summary, .claims = .{
+                                .{ .kind = "observation", .statement = "Both ranges are retained.", .reasoning = "", .evidence_indices = .{ 0, 1 } },
+                                .{ .kind = "inference", .statement = "The ranges overlap.", .reasoning = "Both begin at offset zero.", .evidence_indices = .{1} },
+                                .{ .kind = "hypothesis", .statement = "Other files may differ.", .reasoning = "They were not inspected.", .evidence_indices = .{} },
+                            }, .limitations = .{"No entailment proof is claimed."} }, .{});
+                        };
+                        const call = try std.fmt.allocPrint(frame, "report-{d}", .{model_calls});
+                        const provider = try std.json.Stringify.valueAlloc(frame, .{ .id = call, .status = "completed", .@"error" = @as(?u8, null), .output = .{.{ .type = "function_call", .status = "completed", .call_id = call, .name = name, .arguments = arguments }} }, .{});
+                        break :blk try protean.contracts.encodeOwned(native.responses.Raw, frame, .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{ .bytes = provider } });
                     }
-                    try worker.join();
-                    defer worker.release() catch unreachable;
-                    try std.testing.expect(worker.result.? == .rederived);
-                    try std.testing.expectEqualSlices(u8, reply, worker.result.?.rederived.result);
-                    try service.completeWork(frame, computation, worker.result.?);
-                }
-                const State = native.testing.state;
-                var recorded = try protean.contracts.decodeOwned(State.Reconciliation, frame, (try namespace.store.recordBytes(frame, "reconciliation", reconciliation_id, task)).?);
-                defer recorded.deinit();
-                try std.testing.expectError(error.ArtifactUnavailable, service.projectedArtifact(frame, task, recorded.value.original_occurrence.digest));
-                try std.testing.expectError(error.ArtifactUnavailable, service.projectedArtifact(frame, task, recorded.value.original_attempt.digest));
-                try std.testing.expect(recorded.value.provenance == (if (recovery_probe == .provider) .none else .rederived));
-                var history_params = try native.json.copy(frame, status_params);
-                try native.json.put(frame, &history_params, "after_seq", native.json.string("0"));
-                try native.json.put(frame, &history_params, "limit", try native.json.number(frame, 128));
-                // Export at the actual unresolved/capture-admitted boundary.
-                // Import preserves private evidence and stays parked; it never
-                // acquires again or claims an uninterpreted response is settled.
-                {
-                    const unresolved_archive = try std.fmt.allocPrint(frame, "{s}/unsettled.agnx", .{buffer[0..length]});
-                    _ = try service.exportCheckpoint(frame, task, unresolved_archive);
-                    try service.close(frame);
-                    service_live = false;
-                    try namespace.close();
-                    namespace_live = false;
-                    const copy_path = try std.fmt.allocPrint(frame, "{s}/unsettled-import", .{buffer[0..length]});
-                    var copy_namespace = try native.Namespace.open(a, io, copy_path);
-                    defer copy_namespace.close() catch unreachable;
-                    var copy = try native.tasks.Service(t).init(a, io, &copy_namespace, assets, &application, handlers, profile);
-                    defer copy.close(frame) catch unreachable;
-                    _ = try copy.importCheckpoint(frame, "import-unsettled", unresolved_archive);
-                    try std.testing.expect((try copy.pump(frame)) == .idle);
-                    const copied_head = copy_namespace.store.head;
-                    const copied_receipt = try copy.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive);
-                    try std.testing.expect(copied_receipt.replayed);
-                    try std.testing.expectEqualDeep(admitted.receipt, copied_receipt.receipt);
-                    try std.testing.expectError(error.CustodyNotLocal, copy.reconcile(frame, "copied-new-recovery", task, revision, occurrence_id, attempt_id, .rederive));
-                    try std.testing.expectEqualDeep(copied_head, copy_namespace.store.head);
-                    try @import("native_test_support.zig").expectRetainedReceipt(frame, &copy_namespace, admitted.receipt);
-                    var copied = try copy.task(frame, task);
-                    defer copied.deinit();
-                    try std.testing.expect(copied.value.schedule == .parked);
-                    try std.testing.expectEqual(unchanged.value.inference_attempts, copied.value.inference_attempts);
-                    try std.testing.expectEqual(unchanged.value.inference_request_bytes, copied.value.inference_request_bytes);
-                    var observation = try copy.reconciliation(frame, task, reconciliation_id);
-                    defer observation.deinit();
-                    try std.testing.expectEqualDeep(recorded.value, observation.value);
-                    try std.testing.expectError(error.ArtifactUnavailable, copy.projectedArtifact(frame, task, recorded.value.original_occurrence.digest));
-                    try std.testing.expectError(error.ArtifactUnavailable, copy.projectedArtifact(frame, task, recorded.value.original_attempt.digest));
-                    if (recorded.value.prepared) |prepared| try std.testing.expectError(error.ArtifactUnavailable, copy.projectedArtifact(frame, task, prepared.digest));
-                    if (recovery_probe == .provider) {
-                        try std.testing.expectError(error.CustodyNotLocal, copy.resumeTask(frame, "cannot-retry-import", task, copied.value.revision));
-                    } else {
-                        const capture = recorded.value.outcome.capture_admitted;
-                        try std.testing.expectError(error.ArtifactUnavailable, copy.projectedArtifact(frame, task, capture.digest));
-                        try std.testing.expectEqualSlices(u8, reply, try copy_namespace.store.object(frame, capture, null));
-                        try std.testing.expectError(error.CustodyNotLocal, copy.resumeTask(frame, "interpret-import", task, copied.value.revision));
-                        try std.testing.expectEqual(.idle, try copy.pump(frame));
-                        var interpreted = try copy.reconciliation(frame, task, reconciliation_id);
-                        defer interpreted.deinit();
-                        try std.testing.expectEqualDeep(recorded.value, interpreted.value);
-                    }
-                }
-                namespace = try native.Namespace.open(a, io, path);
-                namespace_live = true;
-                service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
-                service_live = true;
-                if (recovery_probe == .provider) {
-                    try std.testing.expect(recorded.value.outcome == .unresolved);
-                    try std.testing.expectError(error.UnsettledOccurrence, service.resumeTask(frame, "unresolved-cannot-resume", task, admitted.receipt.revision));
-                } else {
-                    try std.testing.expect(recorded.value.outcome == .capture_admitted);
-                    try std.testing.expectError(error.ArtifactUnavailable, service.projectedArtifact(frame, task, recorded.value.outcome.capture_admitted.digest));
-                    try std.testing.expectEqualSlices(u8, reply, try namespace.store.object(frame, recorded.value.outcome.capture_admitted, null));
-                    var original_task = try service.task(frame, task);
-                    defer original_task.deinit();
-                    _ = try service.resumeTask(frame, "interpret-original", task, original_task.value.revision);
+                    const acquired = try adapter.acquire(context, work.prepared.?);
+                    if (acquired != .captured) return error.UnexpectedAcquisitionFailure;
+                    break :blk acquired.captured;
+                } else try work.entry.declaration.invoke.?(context, request.value.binding.payload);
+                const inference = work.entry.declaration.inference;
+                if (recovery_probe == .malformed and inference) {
+                    const malformed = "invalid response framing";
+                    try service.acquire(frame, work, malformed);
                     _ = try service.pump(frame);
-                    var settled = try protean.contracts.decodeOwned(State.Reconciliation, frame, (try namespace.store.recordBytes(frame, "reconciliation", reconciliation_id, task)).?);
-                    defer settled.deinit();
-                    try std.testing.expect(settled.value.outcome == .reply_settled);
-                    try std.testing.expect(settled.value.previous != null);
-                    try std.testing.expectEqualDeep(recorded.value.original_occurrence, settled.value.original_occurrence);
-                    const archive_path = try std.fmt.allocPrint(frame, "{s}/rederived.agnx", .{buffer[0..length]});
+                    var rejected_task = try service.task(frame, task);
+                    defer rejected_task.deinit();
+                    try std.testing.expectEqual(native.tasks.Status.blocked, try service.status(frame, rejected_task.value));
+                    const State = native.testing.state;
+                    var retained = try protean.contracts.decodeOwned(State.Capture, frame, (try namespace.store.recordBytes(frame, "capture", work.attempt, task)).?);
+                    defer retained.deinit();
+                    try std.testing.expect(retained.value.projection == null);
+                    try std.testing.expectEqualSlices(u8, malformed, try namespace.store.object(frame, retained.value.response.?, null));
+                    const archive_path = try std.fmt.allocPrint(frame, "{s}/malformed.agnx", .{buffer[0..length]});
                     _ = try service.exportCheckpoint(frame, task, archive_path);
                     try service.close(frame);
                     service_live = false;
                     try namespace.close();
                     namespace_live = false;
-                    const target = try std.fmt.allocPrint(frame, "{s}/rederived-import", .{buffer[0..length]});
+                    const target = try std.fmt.allocPrint(frame, "{s}/malformed-import", .{buffer[0..length]});
                     var destination = try native.Namespace.open(a, io, target);
                     defer destination.close() catch unreachable;
                     var imported = try native.tasks.Service(t).init(a, io, &destination, assets, &application, handlers, profile);
                     defer imported.close(frame) catch unreachable;
-                    _ = try imported.importCheckpoint(frame, "import-rederived", archive_path);
-                    const imported_head = destination.store.head;
-                    const imported_receipt = try imported.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive);
-                    try std.testing.expect(imported_receipt.replayed);
-                    try std.testing.expectEqualDeep(admitted.receipt, imported_receipt.receipt);
-                    try std.testing.expectError(error.CustodyNotLocal, imported.reconcile(frame, "copied-new-recovery", task, revision, occurrence_id, attempt_id, .rederive));
-                    try std.testing.expectEqualDeep(imported_head, destination.store.head);
-                    try @import("native_test_support.zig").expectRetainedReceipt(frame, &destination, admitted.receipt);
-                    var imported_task = try imported.task(frame, task);
-                    defer imported_task.deinit();
-                    try std.testing.expectEqual(unchanged.value.inference_attempts, imported_task.value.inference_attempts);
-                    try std.testing.expectEqual(unchanged.value.inference_request_bytes, imported_task.value.inference_request_bytes);
-                    try std.testing.expectError(error.ArtifactUnavailable, imported.projectedArtifact(frame, task, recorded.value.original_occurrence.digest));
-                    // Retaining the reply and raw capture cannot excuse losing
-                    // the recovery operation and its original ambiguous history.
+                    _ = try imported.importCheckpoint(frame, "import-malformed", archive_path);
+                    try std.testing.expect((try imported.pump(frame)) == .idle);
+                    var copied_task = try imported.task(frame, task);
+                    defer copied_task.deinit();
+                    try std.testing.expectError(error.CustodyNotLocal, imported.resumeTask(frame, "copy-cannot-interpret", task, copied_task.value.revision));
+                    try imported.close(frame);
+                    try destination.close();
+                    destination = try native.Namespace.open(a, io, path);
+                    imported = try native.tasks.Service(t).init(a, io, &destination, assets, &application, handlers, profile);
+                    var owned_task = try imported.task(frame, task);
+                    defer owned_task.deinit();
+                    _ = try imported.resumeTask(frame, "interpret-malformed", task, owned_task.value.revision);
+                    _ = try imported.pump(frame);
+                    var still_blocked = try imported.task(frame, task);
+                    defer still_blocked.deinit();
+                    try std.testing.expectEqual(native.tasks.Status.blocked, try imported.status(frame, still_blocked.value));
+                    try std.testing.expectEqual(rejected_task.value.inference_attempts, still_blocked.value.inference_attempts);
+                    try std.testing.expectEqual(rejected_task.value.inference_request_bytes, still_blocked.value.inference_request_bytes);
+                    try std.testing.expectEqual(rejected_task.value.inference_output_tokens, still_blocked.value.inference_output_tokens);
+                    var untouched = try protean.contracts.decodeOwned(State.Capture, frame, (try destination.store.recordBytes(frame, "capture", work.attempt, task)).?);
+                    defer untouched.deinit();
+                    try std.testing.expectEqualDeep(retained.value, untouched.value);
+                    try std.testing.expectError(error.ArtifactUnavailable, imported.projectedArtifact(frame, task, retained.value.response.?.digest));
+                    const second_archive = try std.fmt.allocPrint(frame, "{s}/still-malformed.agnx", .{buffer[0..length]});
+                    // The broader archive domain must still reject contradictory
+                    // occurrence/capture facts, even when every object hashes.
+                    var occurrence_record = try protean.contracts.decodeOwned(native.testing.occurrence.Occurrence, frame, (try destination.store.recordBytes(frame, "occurrence", work.occurrence, task)).?);
+                    defer occurrence_record.deinit();
+                    var contradictory = occurrence_record.value;
+                    contradictory.state = .{ .unknown = .{ .id = work.attempt } };
                     destination.store.invalidateIntegrity();
                     try destination.store.begin();
-                    try destination.store.database.run("DELETE FROM records WHERE kind='reconciliation' AND id=?", &.{.{ .blob = &reconciliation_id }});
-                    try std.testing.expectEqual(1, try destination.store.database.changes());
-                    try std.testing.expectError(error.CorruptState, destination.store.auditRetention(handlers, application.image_identity));
-                    destination.store.rollback();
+                    try destination.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", work.occurrence, task, contradictory);
+                    try destination.commit("test.contradictory-capture");
+                    try std.testing.expectError(error.CorruptState, imported.exportCheckpoint(frame, task, second_archive));
+                    try destination.store.begin();
+                    try destination.store.putRecord(native.testing.occurrence.Occurrence, "occurrence", work.occurrence, task, occurrence_record.value);
+                    try destination.commit("test.restore-captured-occurrence");
+                    _ = try imported.exportCheckpoint(frame, task, second_archive);
                     return;
                 }
-                try service.close(frame);
-                service_live = false;
-                try namespace.close();
-                namespace_live = false;
-                namespace = try native.Namespace.open(a, io, path);
-                namespace_live = true;
-                service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
-                service_live = true;
-                try std.testing.expect((try service.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive)).replayed);
-                var recovered_task = try service.task(frame, task);
-                defer recovered_task.deinit();
-                try std.testing.expectEqual(unchanged.value.inference_attempts, recovered_task.value.inference_attempts);
-                try std.testing.expectEqual(unchanged.value.inference_request_bytes, recovered_task.value.inference_request_bytes);
-                return;
+                if ((recovery_probe == .snapshot and work.entry.declaration.recovery != null) or (recovery_probe == .provider and inference)) {
+                    const occurrence_id = work.occurrence;
+                    const attempt_id = work.attempt;
+                    try service.unknown(frame, work);
+                    try service.close(frame);
+                    service_live = false;
+                    try namespace.close();
+                    namespace_live = false;
+                    namespace = try native.Namespace.open(a, io, path);
+                    namespace_live = true;
+                    service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
+                    service_live = true;
+                    const before = namespace.store.head;
+                    try std.testing.expectEqualDeep(before, namespace.store.head);
+                    var unchanged = try service.task(frame, task);
+                    defer unchanged.deinit();
+                    try std.testing.expectEqual(saved.value.inference_attempts + @intFromBool(inference), unchanged.value.inference_attempts);
+                    try std.testing.expectError(error.UnsettledOccurrence, service.resumeTask(frame, "recovery-does-not-settle", task, unchanged.value.revision));
+                    var stale = attempt_id;
+                    stale[0] ^= 1;
+                    try std.testing.expectError(error.StaleOccurrence, service.reconcile(frame, "stale-recovery", task, unchanged.value.revision, occurrence_id, stale, .rederive));
+                    const revision = unchanged.value.revision;
+                    var client: native.client.Client(t) = .{ .service = &service };
+                    var status_params = native.json.object();
+                    try native.json.put(frame, &status_params, "task_id", native.json.string(try frame.dupe(u8, &std.fmt.bytesToHex(task, .lower))));
+                    const status = try client.call(frame, .@"task.status", status_params);
+                    const availability = status.object.get("recovery").?;
+                    try std.testing.expectEqual(if (recovery_probe == .provider) @as(usize, 0) else 1, availability.object.get("mechanisms").?.array.items.len);
+                    var params = try native.json.copy(frame, status_params);
+                    try native.json.put(frame, &params, "client_operation_id", native.json.string("recover-original"));
+                    try native.json.put(frame, &params, "expected_revision", native.json.string(try std.fmt.allocPrint(frame, "{d}", .{revision})));
+                    try native.json.put(frame, &params, "occurrence_id", availability.object.get("occurrence_id").?);
+                    try native.json.put(frame, &params, "attempt_id", availability.object.get("attempt_id").?);
+                    try native.json.put(frame, &params, "recovery", (try native.json.parse(frame, "{\"mechanism\":\"rederive\"}", .{})).value);
+                    var forged = try native.json.copy(frame, params);
+                    try native.json.put(frame, forged.object.getPtr("recovery").?, "safe_to_retry", .{ .bool = true });
+                    try std.testing.expectError(error.InvalidParams, client.call(frame, .@"task.reconcile", forged));
+                    try std.testing.expectEqualDeep(before, namespace.store.head);
+                    const public_admission = try client.call(frame, .@"task.reconcile", params);
+                    try std.testing.expect(!public_admission.object.get("replayed").?.bool);
+                    const public_recovery = public_admission.object.get("reconciliation").?;
+                    try std.testing.expectEqualStrings(if (recovery_probe == .provider) "unresolved" else "pending", public_recovery.object.get("status").?.string);
+                    try std.testing.expectEqual(8, public_recovery.object.count());
+                    const admitted = try service.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive);
+                    const reconciliation_id = admitted.receipt.reconciliation.?;
+                    const committed = namespace.store.head;
+                    const replayed = try service.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive);
+                    try std.testing.expect(replayed.replayed);
+                    try std.testing.expectEqualDeep(admitted.receipt.id, replayed.receipt.id);
+                    try std.testing.expectEqualDeep(committed, namespace.store.head);
+                    try std.testing.expectError(error.OperationConflict, service.reconcile(frame, "recover-original", task, revision + 1, occurrence_id, attempt_id, .rederive));
+                    if (recovery_probe != .provider) {
+                        const computation = (try service.pump(frame)).work;
+                        const worker = try native.testing.Worker.init(a, io);
+                        defer worker.deinit(a) catch unreachable;
+                        try worker.start(computation, profile.authority, null);
+                        const deadline = std.Io.Clock.awake.now(io).toMilliseconds() + 5000;
+                        while (!worker.finished()) {
+                            if (std.Io.Clock.awake.now(io).toMilliseconds() >= deadline) return error.WorkerTimeout;
+                            try io.sleep(.fromMilliseconds(1), .awake);
+                        }
+                        try worker.join();
+                        defer worker.release() catch unreachable;
+                        try std.testing.expect(worker.result.? == .rederived);
+                        try std.testing.expectEqualSlices(u8, reply, worker.result.?.rederived.result);
+                        try service.completeWork(frame, computation, worker.result.?);
+                    }
+                    const State = native.testing.state;
+                    var recorded = try protean.contracts.decodeOwned(State.Reconciliation, frame, (try namespace.store.recordBytes(frame, "reconciliation", reconciliation_id, task)).?);
+                    defer recorded.deinit();
+                    try std.testing.expectError(error.ArtifactUnavailable, service.projectedArtifact(frame, task, recorded.value.original_occurrence.digest));
+                    try std.testing.expectError(error.ArtifactUnavailable, service.projectedArtifact(frame, task, recorded.value.original_attempt.digest));
+                    try std.testing.expect(recorded.value.provenance == (if (recovery_probe == .provider) .none else .rederived));
+                    var history_params = try native.json.copy(frame, status_params);
+                    try native.json.put(frame, &history_params, "after_seq", native.json.string("0"));
+                    try native.json.put(frame, &history_params, "limit", try native.json.number(frame, 128));
+                    // Export at the actual unresolved/capture-admitted boundary.
+                    // Import preserves private evidence and stays parked; it never
+                    // acquires again or claims an uninterpreted response is settled.
+                    {
+                        const unresolved_archive = try std.fmt.allocPrint(frame, "{s}/unsettled.agnx", .{buffer[0..length]});
+                        _ = try service.exportCheckpoint(frame, task, unresolved_archive);
+                        try service.close(frame);
+                        service_live = false;
+                        try namespace.close();
+                        namespace_live = false;
+                        const copy_path = try std.fmt.allocPrint(frame, "{s}/unsettled-import", .{buffer[0..length]});
+                        var copy_namespace = try native.Namespace.open(a, io, copy_path);
+                        defer copy_namespace.close() catch unreachable;
+                        var copy = try native.tasks.Service(t).init(a, io, &copy_namespace, assets, &application, handlers, profile);
+                        defer copy.close(frame) catch unreachable;
+                        _ = try copy.importCheckpoint(frame, "import-unsettled", unresolved_archive);
+                        try std.testing.expect((try copy.pump(frame)) == .idle);
+                        const copied_head = copy_namespace.store.head;
+                        const copied_receipt = try copy.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive);
+                        try std.testing.expect(copied_receipt.replayed);
+                        try std.testing.expectEqualDeep(admitted.receipt, copied_receipt.receipt);
+                        try std.testing.expectError(error.CustodyNotLocal, copy.reconcile(frame, "copied-new-recovery", task, revision, occurrence_id, attempt_id, .rederive));
+                        try std.testing.expectEqualDeep(copied_head, copy_namespace.store.head);
+                        try @import("native_test_support.zig").expectRetainedReceipt(frame, &copy_namespace, admitted.receipt);
+                        var copied = try copy.task(frame, task);
+                        defer copied.deinit();
+                        try std.testing.expect(copied.value.schedule == .parked);
+                        try std.testing.expectEqual(unchanged.value.inference_attempts, copied.value.inference_attempts);
+                        try std.testing.expectEqual(unchanged.value.inference_request_bytes, copied.value.inference_request_bytes);
+                        var observation = try copy.reconciliation(frame, task, reconciliation_id);
+                        defer observation.deinit();
+                        try std.testing.expectEqualDeep(recorded.value, observation.value);
+                        try std.testing.expectError(error.ArtifactUnavailable, copy.projectedArtifact(frame, task, recorded.value.original_occurrence.digest));
+                        try std.testing.expectError(error.ArtifactUnavailable, copy.projectedArtifact(frame, task, recorded.value.original_attempt.digest));
+                        if (recorded.value.prepared) |prepared| try std.testing.expectError(error.ArtifactUnavailable, copy.projectedArtifact(frame, task, prepared.digest));
+                        if (recovery_probe == .provider) {
+                            try std.testing.expectError(error.CustodyNotLocal, copy.resumeTask(frame, "cannot-retry-import", task, copied.value.revision));
+                        } else {
+                            const capture = recorded.value.outcome.capture_admitted;
+                            try std.testing.expectError(error.ArtifactUnavailable, copy.projectedArtifact(frame, task, capture.digest));
+                            try std.testing.expectEqualSlices(u8, reply, try copy_namespace.store.object(frame, capture, null));
+                            try std.testing.expectError(error.CustodyNotLocal, copy.resumeTask(frame, "interpret-import", task, copied.value.revision));
+                            try std.testing.expectEqual(.idle, try copy.pump(frame));
+                            var interpreted = try copy.reconciliation(frame, task, reconciliation_id);
+                            defer interpreted.deinit();
+                            try std.testing.expectEqualDeep(recorded.value, interpreted.value);
+                        }
+                    }
+                    namespace = try native.Namespace.open(a, io, path);
+                    namespace_live = true;
+                    service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
+                    service_live = true;
+                    if (recovery_probe == .provider) {
+                        try std.testing.expect(recorded.value.outcome == .unresolved);
+                        try std.testing.expectError(error.UnsettledOccurrence, service.resumeTask(frame, "unresolved-cannot-resume", task, admitted.receipt.revision));
+                    } else {
+                        try std.testing.expect(recorded.value.outcome == .capture_admitted);
+                        try std.testing.expectError(error.ArtifactUnavailable, service.projectedArtifact(frame, task, recorded.value.outcome.capture_admitted.digest));
+                        try std.testing.expectEqualSlices(u8, reply, try namespace.store.object(frame, recorded.value.outcome.capture_admitted, null));
+                        var original_task = try service.task(frame, task);
+                        defer original_task.deinit();
+                        _ = try service.resumeTask(frame, "interpret-original", task, original_task.value.revision);
+                        _ = try service.pump(frame);
+                        var settled = try protean.contracts.decodeOwned(State.Reconciliation, frame, (try namespace.store.recordBytes(frame, "reconciliation", reconciliation_id, task)).?);
+                        defer settled.deinit();
+                        try std.testing.expect(settled.value.outcome == .reply_settled);
+                        try std.testing.expect(settled.value.previous != null);
+                        try std.testing.expectEqualDeep(recorded.value.original_occurrence, settled.value.original_occurrence);
+                        const archive_path = try std.fmt.allocPrint(frame, "{s}/rederived.agnx", .{buffer[0..length]});
+                        _ = try service.exportCheckpoint(frame, task, archive_path);
+                        try service.close(frame);
+                        service_live = false;
+                        try namespace.close();
+                        namespace_live = false;
+                        const target = try std.fmt.allocPrint(frame, "{s}/rederived-import", .{buffer[0..length]});
+                        var destination = try native.Namespace.open(a, io, target);
+                        defer destination.close() catch unreachable;
+                        var imported = try native.tasks.Service(t).init(a, io, &destination, assets, &application, handlers, profile);
+                        defer imported.close(frame) catch unreachable;
+                        _ = try imported.importCheckpoint(frame, "import-rederived", archive_path);
+                        const imported_head = destination.store.head;
+                        const imported_receipt = try imported.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive);
+                        try std.testing.expect(imported_receipt.replayed);
+                        try std.testing.expectEqualDeep(admitted.receipt, imported_receipt.receipt);
+                        try std.testing.expectError(error.CustodyNotLocal, imported.reconcile(frame, "copied-new-recovery", task, revision, occurrence_id, attempt_id, .rederive));
+                        try std.testing.expectEqualDeep(imported_head, destination.store.head);
+                        try @import("native_test_support.zig").expectRetainedReceipt(frame, &destination, admitted.receipt);
+                        var imported_task = try imported.task(frame, task);
+                        defer imported_task.deinit();
+                        try std.testing.expectEqual(unchanged.value.inference_attempts, imported_task.value.inference_attempts);
+                        try std.testing.expectEqual(unchanged.value.inference_request_bytes, imported_task.value.inference_request_bytes);
+                        try std.testing.expectError(error.ArtifactUnavailable, imported.projectedArtifact(frame, task, recorded.value.original_occurrence.digest));
+                        // Retaining the reply and raw capture cannot excuse losing
+                        // the recovery operation and its original ambiguous history.
+                        destination.store.invalidateIntegrity();
+                        try destination.store.begin();
+                        try destination.store.database.run("DELETE FROM records WHERE kind='reconciliation' AND id=?", &.{.{ .blob = &reconciliation_id }});
+                        try std.testing.expectEqual(1, try destination.store.database.changes());
+                        try std.testing.expectError(error.CorruptState, destination.store.auditRetention(handlers, application.image_identity));
+                        destination.store.rollback();
+                        return;
+                    }
+                    try service.close(frame);
+                    service_live = false;
+                    try namespace.close();
+                    namespace_live = false;
+                    namespace = try native.Namespace.open(a, io, path);
+                    namespace_live = true;
+                    service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
+                    service_live = true;
+                    try std.testing.expect((try service.reconcile(frame, "recover-original", task, revision, occurrence_id, attempt_id, .rederive)).replayed);
+                    var recovered_task = try service.task(frame, task);
+                    defer recovered_task.deinit();
+                    try std.testing.expectEqual(unchanged.value.inference_attempts, recovered_task.value.inference_attempts);
+                    try std.testing.expectEqual(unchanged.value.inference_request_bytes, recovered_task.value.inference_request_bytes);
+                    return;
+                }
+                if (inference) model_calls += 1;
+                try service.acquire(frame, work, reply);
+                if (inference) last_model_capture = work.attempt;
+                if (inference and model_calls == 8 and !restarted) {
+                    // No interpretation, receipt publication or Kosmos successor has
+                    // run after the raw control response became durable.
+                    const raw = (try namespace.store.recordBytes(frame, "capture", work.attempt, task)) orelse return error.MissingCapture;
+                    var capture = try protean.contracts.decodeOwned(CaptureRecord, frame, raw);
+                    defer capture.deinit();
+                    try std.testing.expect(capture.value.projection == null);
+                    const imported_archive: ?[]const u8 = if (recovery_probe == .imported) try std.fmt.allocPrint(permanent, "{s}/captured.agnx", .{buffer[0..length]}) else null;
+                    if (imported_archive) |archive_path| {
+                        _ = try service.exportCheckpoint(frame, task, archive_path);
+                    }
+                    restart = .{ .attempt = work.attempt, .capture = try permanent.dupe(u8, raw), .archive = imported_archive };
+                }
+            } else if (step == .waiting) {
+                var question = (try service.pendingQuestion(frame, task)) orelse return error.MissingQuestion;
+                defer question.deinit();
+                _ = try service.respond(frame, "adaptive-recovery-answer", task, question.value.id, question.value.revision, question.value.request_digest, question.value.answer_schema_id.bytes, try native.values.toJson(t.Answer, frame, environment.demo_answer));
             }
-            if (inference) model_calls += 1;
-            try service.acquire(frame, work, reply);
-            if (inference) last_model_capture = work.attempt;
-            if (inference and model_calls == 8 and !restarted) {
-                // No interpretation, receipt publication or Kosmos successor has
-                // run after the raw control response became durable.
-                const raw = (try namespace.store.recordBytes(frame, "capture", work.attempt, task)) orelse return error.MissingCapture;
-                var capture = try protean.contracts.decodeOwned(CaptureRecord, frame, raw);
+        }
+        if (restart) |pending| {
+            var arena = std.heap.ArenaAllocator.init(scratch.allocator());
+            defer arena.deinit();
+            const frame = arena.allocator();
+            try service.close(frame);
+            service_live = false;
+            try namespace.close();
+            namespace_live = false;
+            if (pending.archive) |archive_path| {
+                var capture = try protean.contracts.decodeOwned(CaptureRecord, frame, pending.capture);
                 defer capture.deinit();
-                try std.testing.expect(capture.value.projection == null);
-                const imported_archive: ?[]const u8 = if (recovery_probe == .imported) try std.fmt.allocPrint(permanent, "{s}/captured.agnx", .{buffer[0..length]}) else null;
-                if (imported_archive) |archive_path| {
-                    _ = try service.exportCheckpoint(frame, task, archive_path);
-                }
-                try service.close(frame);
-                service_live = false;
-                try namespace.close();
-                namespace_live = false;
-                if (imported_archive) |archive_path| {
-                    const copied_path = try std.fmt.allocPrint(permanent, "{s}/imported", .{buffer[0..length]});
-                    var copied_namespace = try native.Namespace.open(a, io, copied_path);
-                    defer copied_namespace.close() catch unreachable;
-                    var copied = try native.tasks.Service(t).init(a, io, &copied_namespace, assets, &application, handlers, profile);
-                    defer copied.close(frame) catch unreachable;
-                    _ = try copied.importCheckpoint(frame, "adaptive-capture-import", archive_path);
-                    var copied_capture = try protean.contracts.decodeOwned(CaptureRecord, frame, (try copied_namespace.store.recordBytes(frame, "capture", work.attempt, task)).?);
-                    defer copied_capture.deinit();
-                    try std.testing.expectEqualDeep(capture.value, copied_capture.value);
-                    try std.testing.expectError(error.CustodyNotLocal, copied.resumeTask(frame, "copy-capture-resume", task, 1));
-                    try std.testing.expectEqual(.idle, try copied.pump(frame));
-                }
-                namespace = try native.Namespace.open(a, io, path);
-                namespace_live = true;
-                service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
-                service_live = true;
-                var current = try service.task(frame, task);
-                defer current.deinit();
-                _ = try service.resumeTask(frame, "adaptive-capture-resume", task, current.value.revision);
-                restarted = true;
+                const copied_path = try std.fmt.allocPrint(permanent, "{s}/imported", .{buffer[0..length]});
+                var copied_namespace = try native.Namespace.open(a, io, copied_path);
+                defer copied_namespace.close() catch unreachable;
+                var copied = try native.tasks.Service(t).init(a, io, &copied_namespace, assets, &application, handlers, profile);
+                defer copied.close(frame) catch unreachable;
+                _ = try copied.importCheckpoint(frame, "adaptive-capture-import", archive_path);
+                var copied_capture = try protean.contracts.decodeOwned(CaptureRecord, frame, (try copied_namespace.store.recordBytes(frame, "capture", pending.attempt, task)).?);
+                defer copied_capture.deinit();
+                try std.testing.expectEqualDeep(capture.value, copied_capture.value);
+                try std.testing.expectError(error.CustodyNotLocal, copied.resumeTask(frame, "copy-capture-resume", task, 1));
+                try std.testing.expectEqual(.idle, try copied.pump(frame));
             }
-        } else if (step == .waiting) {
-            var question = (try service.pendingQuestion(frame, task)) orelse return error.MissingQuestion;
-            defer question.deinit();
-            _ = try service.respond(frame, "adaptive-recovery-answer", task, question.value.id, question.value.revision, question.value.request_digest, question.value.answer_schema_id.bytes, try native.values.toJson(t.Answer, frame, environment.demo_answer));
+            namespace = try native.Namespace.open(a, io, path);
+            namespace_live = true;
+            service = try native.tasks.Service(t).init(a, io, &namespace, assets, &application, handlers, profile);
+            service_live = true;
+            var current = try service.task(frame, task);
+            defer current.deinit();
+            _ = try service.resumeTask(frame, "adaptive-capture-resume", task, current.value.revision);
+            restarted = true;
         }
     }
     try std.testing.expect(witnessed and finished);

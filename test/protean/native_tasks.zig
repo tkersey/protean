@@ -204,6 +204,7 @@ fn omitArchiveFact(a: std.mem.Allocator, io: std.Io, shape: anytype, task: anyty
             }, null),
             workspace_command: ?Reference,
             residual_publications: protean.contracts.Vector(native.testing.state.ResidualPublication, null),
+            controller_read: ?struct { event_watermark: u64, execution_revision: u64 },
         };
         var found = false;
         const events = try a.dupe(@TypeOf(archive.events.items[0]), archive.events.items);

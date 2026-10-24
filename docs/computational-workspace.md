@@ -11,9 +11,9 @@ The canonical model interface is `program`, `work`, and `context` in
 are in [the application guide](../examples/adaptive/README.md#construct-and-retain-computations).
 The previous `tool_build`/`tool_run` action route is retired in this image.
 Component recipes remain an input to the shared program build owner.
-Build references identify stored construction documents. Frozen runtime data
-remains expandable for inspection, but its JSON representation is not a source
-record document or component recipe and is rejected before build expansion.
+Build references identify stored construction documents. A typed source value
+must have the exact source-document schema; other frozen runtime values reject
+before build expansion. Ordinary value and source inspection remains available.
 
 ## Construction and authority
 
@@ -112,14 +112,152 @@ preserving their order and multiplicity without retaining the full expanded JSON
 It still loads and validates the stored provenance metadata; paging is not a
 constant-memory guarantee for all retained state.
 
+## Semantic source, observations and construction
+
+These operations compose through the same program, work and context owners.
+They do not prescribe an analysis sequence or require a runtime replacement.
+`program.describe` with `semantic_candidates` returns the actual proposal and
+indexed-source schemas, checker identity, permitted roots/checkers and guard
+availability.
+
+`program.inspect.target.semantic_source` names a retained runtime, a work with
+exact execution/control/realization revisions, or a controller cut/action.
+Its sections are `summary`, `generic`, `selected`, `helper`, `evidence` and a
+pure generic-source `slice` selected by function ID. The source exporter uses the compiler's
+construction owners. The summary binds the guest image, actual runtime,
+source digests, helper roles and root/derivation identities. Selecting a derived
+runtime changes its selected-source observation; stale cuts reject instead of
+silently inspecting a different evaluator. Controller actions use their returned
+interaction/epoch/realization target, not a guessed global runtime.
+Inspection returns a reusable `subject` and the code's `runtime_identity`.
+Only retained selectable runtimes also return a `runtime` reference; packaged
+execution keeps its exact work or controller subject and guest binding.
+
+`context.materialize.input.semantic_source` retains a typed source document for
+the selected generic module, selected module, helper or pure slice. It binds the
+exact runtime, guest and frozen observation. An ordinary generated program can
+consume this value and compute another source/evidence document. Source and
+evidence inspection is paged; materializing a module deliberately retains the
+whole typed module. Merely declaring a `kosmos.semantic-service` effect in
+ordinary source, including unused source, cannot acquire the private bridge.
+
+The optional `references: true` materialization selects a distinct typed
+`IndexedDocument` containing `version`, `module` and `references`. The default
+retains the existing version-one `Document` and does not construct an index.
+Kosmos binds the index to the selected module's canonical source digest. For each
+source catalog kind and declaration ID, its reverse-reference rows contain the
+sorted, unique declarations that refer to it. These are complete source facts;
+the host does not select a transformation, target, rewrite or proof rule. An
+ordinary program can consume the index to perform those decisions and produce
+the same independently checked candidate format.
+
+Materializing references performs work and allocation proportional to source
+catalogs and reference edges, then retains the complete typed index alongside
+the module. Existing materialization limits and allocator failures still apply;
+the index adds no implicit truncation or fallback. Retained provenance includes
+the selection, so replay and archive validation reconstruct the same canonical
+module and index rather than trusting a submitted index. Requesting references
+does not grant execution, publication or runtime-replacement authority.
+
+`work.observe` selects an ordinary program, a `guest_view` source, an initial
+accumulator and an explicit policy. Its input is the typed product
+`[[ObserverEnvelope, View], Accumulator]`; its result is `[Accumulator, Result]`.
+The envelope binds the actual publication, cursor/gaps and control observation.
+A successor fold names its
+`previous` work; ordinary work state retains progress and results. Policy chooses
+`sampled` or `lossless` delivery, cadence, `publication` or `one_guest_step`
+granularity, and explicit or owner-scheduled continuation. Sampling reports gaps.
+Lossless delivery blocks source progression with `observation_blocked` until the
+fold finishes; `work.stop_observing` explicitly ends the subscription. A later
+explicit source park remains parked after the fold finishes. An observer failure
+does not become a guest-language failure. Failed successor preparation retains the
+last completed fold and an `incomplete` diagnostic bound to the source publication
+and runtime. It does not retry that source revision automatically or release a
+lossless subscription. Sampling can continue when the source revision advances.
+Historical replies retain the blocking state of their original event prefix.
+The envelope reports `one_guest_step` only for an observed segment containing at
+most one guest step; an already pending larger segment retains its actual scope.
+
+Interpretations are ordinary built programs and retained work. They can consume
+initial inputs, authorized snapshots or semantic slices, implement alternative
+reply sequences, and retain an unfinished alternative through ordinary state and
+ports. Missing answers remain unavailable. A disclosed partial view does not
+establish a complete guest state. Preserve source values in materialization
+ancestry; equal hypothetical and acquired payloads retain different origins and
+do not grant settlement or continuation custody.
+
+Owner-produced `interpretation_evidence` names the actual executable, program,
+work, input/provenance and result. Its control observation binds the task event
+prefix, checkpoint and revisions, with coverage limited to committed
+publications. Unchecked interpretation claims are `experimental`, with no analysis
+checker. This classification does not erase actual acquisitions or effects in
+the provenance. A program's output labels cannot promote it to
+`concrete_witness_checked` or `certified_analysis`; no general certified-analysis
+checker is installed. Calling approved source functions does not by itself prove
+the interpretation's claimed property or coverage.
+
+`program.derive` freezes an exact ancestor target, admitted guest program and
+proposal document. A proposal may come from JSON or a generated work's typed
+value. Construction produces an inert `candidate`, retaining its proposal,
+producer, guest, ancestor and compiled code. `program.validate` independently
+checks the retained candidate through the configured checker. Its outcomes are
+`validated`, `rejected`, `unsupported_relation`, `resource_exhausted`,
+`interrupted` and `unavailable_dependency`; only `validated` publishes a usable
+runtime fact. Retrying an operation uses its original receipt.
+
+The linked finite source checker covers identity, relocation, scalar folding/
+identities/projection, supported call inlining, private product-layout changes
+and checked specialization. It checks complete successor changes and transports
+protected roles, helpers and recovery correspondence to final code. Arbitrary
+equivalence claims, unsupported transformations and exhausted checking do not
+approve code. Structural admission, a producer's assertion and agreement on
+samples are separate from this relation.
+
+`work.realize` explicitly selects a validated runtime for the same guest at an
+exact retained cut. `work.realize_controller` applies the corresponding root
+target and authority checks. Neither operation changes the guest program or
+transfers another work's continuation. `work.guard` instead selects an inert
+candidate for a bounded reference comparison. Only the trusted reference commits
+guest state and external effects; candidate execution cannot issue an external
+request or settle an occurrence. Suspended or divergent comparison remains
+visible, and cancellation retains reference cleanup responsibility.
+`work.unguard` is an explicit revision-bound control.
+
+The operator's current application configuration may contain:
+
+```json
+"semantic_construction": {
+  "roots": ["<64 lowercase hexadecimal digits>"],
+  "checkers": ["<exact installed checker identity>"],
+  "guard": true
+}
+```
+
+Omission or `null` grants no selected-runtime trust, including built-in
+specializations. Roots come from operator approval of the actual source summary;
+proposals cannot select new trust roots.
+The existing build/run and realization permissions still apply. The policy
+participates in the frozen profile identity, while native trust is taken only
+from explicit current launch configuration. Reopening or importing profile bytes
+alone cannot install it. Destination use revalidates under its current root and
+checker policy; a sender signature is not a semantic proof. Start, realization
+selection and execution check the current policy, including after restoration.
+Revocation preserves receipt replay, return to the packaged runtime and retained
+cancellation cleanup.
+
 ## Reconstructing the active controller
 
-Application 7 uses `protean-workspace/3` and native state writer 17. The packaged
+Application 8 uses `protean-workspace/4` and native state writer 18. The packaged
 seed is an ordinary controller artifact built through the same source constructor
 as later candidates. `program.describe` with `current_controller` pages the
 actual binding, epoch, program, source, interfaces and residual references.
 `context.expand` reads that exact source. `controller_contract` describes the
 host's admitted imports and stable task result/failure interface.
+
+Retained controller reads bind their execution revision to the native event or
+compiler attempt that captured the read. Source materializations require their
+owning publication. Later execution does not change those historical cuts, and
+rehashing a read or its projected reply cannot substitute an earlier revision.
 
 `program.build` accepts `role: "controller"` for general source records. Its entry
 is `[TaskAnchor, Private]`; the controller chooses an exportable `Private` and
@@ -202,16 +340,30 @@ optional and never grant environmental authority.
 
 `context.materialize` accepts `guest_view` with an expected work revision,
 realization revision, and `nodes` scope (`all` or selected numeric node IDs).
-The task owner authorizes metadata from that task's own work. The result includes
-reference and ownership edges, roots, node kinds and available block/activation
-positions. It includes no guest payloads, blob contents or source text. Numeric
+The task owner authorizes data from that task's own work. The default result is
+metadata: reference/ownership edges, roots, node kinds and available
+block/activation positions. Optional `disclosure` selects typed values by node
+or field and exact blob ranges. Each observation reports its actual scope and
+omissions; it does not imply complete graph, value or blob coverage. Numeric
 node IDs describe one checkpoint; they are not continuation handles.
+Selected schemas include owned structural definitions and their reachable schema
+dependencies. IDs retain their program-relative meaning; a wire descriptor is
+present only for exportable types.
+
+Explicit `disclosure.snapshot: true` returns an owned, reconstructible guest
+state only at `guest_cut`, with `nodes.all`, `disclosure.values.nodes.all` and
+no bounded blob ranges. It opts into the complete payload, bound to the exact
+checkpoint and disclosure. Partial selections and outer snapshots are rejected;
+ordinary metadata and richer partial views carry no reconstructible snapshot.
+The disclosed state is analysis input and conveys no live execution or custody.
 
 The `inspection` derivation retains the exact work publication, checkpoint,
-runtime code and node scope. Access reconstructs the value from that publication;
+runtime code, node scope and disclosure. Access reconstructs the value from that publication;
 archive validation checks its journal and runtime dependencies. A partial view
 does not claim graph completeness. A later request may select another scope.
 Materializing or querying a view does not advance the inspected work.
+The selection's `level` distinguishes `guest_cut` from `outer_execution`;
+unfinished physical evaluator progress is not a new committed guest cut.
 
 The native controller also advances in bounded physical steps. Its guest
 execution revision changes only when a guest cut is published. Parking,
@@ -228,6 +380,18 @@ The native owner captures the cut, signs and retains the action, freezes that
 subject, then stages its complete archive over the configured peer channel.
 An exact outer capsule includes its selected runtime artifact; that artifact
 does not have to be preinstalled at the destination.
+
+Derived runtime compatibility additionally binds `semantic_root` and
+`semantic_checker` (the checker identity digest); peer configuration supplies
+both or neither. The archive retains candidate, validation and runtime closure,
+and the destination still needs current approval for that exact root/checker.
+Movement while a work has an active guard is explicitly unsupported. An active
+observer and its source cannot be split across sites, and controller movement
+with an owner-scheduled subscription is unsupported. Stop the subscription
+before those moves. Explicit subscriptions may remain at their original site
+when the controller moves; signed remote `stop_observing` reaches that executor.
+These limits are reported before custody freezes, rather than silently dropping
+guard or observer obligations.
 
 The configured command opens an owner stdio session. Access to that session
 grants the full owner API, including unsigned local placement operations.
@@ -399,13 +563,17 @@ checkpoint bytes and a 223-byte maximum. Every case had zero controller/delegate
 inference calls. Timing varies with compiler/host and native process startup;
 the check prints actual compiler, arena, native and WASM measurements per run.
 
-The [evaluation runner](../tools/evaluation/README.md) freezes three workload
-families and three arms, records actual costs, and leaves quality adjudication
-explicit. No live model efficacy or token-saving percentage is claimed.
+The [evaluation runner](../tools/evaluation/README.md) freezes matched workload
+families and suite-specific comparison arms, records actual costs, and leaves
+quality adjudication explicit. No live model efficacy or token-saving percentage
+is claimed.
 
-Application 5.0.0, context v7, output v5 and native state format 13 require a new
-namespace. Current pins are Horos `931b960723fb8a2b6808d0c53e2e18efe8394c92`
-and Kosmos `f38b077f78e39267c05207393d4043b053187e81`. `describe-build` records
+Application 8.0.0 uses `protean-workspace/4`, context v7, output v5 and native
+state format 18. Older namespaces require their compatible executable. The
+[dependency lock](../conformance/protean/dependencies.lock.json) binds the local
+Horos 6.1.0 and Kosmos 9.1.0 source archives and their exact commits. These commits
+are not yet published, and remote archive transport is not qualified by the
+local source tuple. `describe-build` records
 the exact compiler, image, package and executable hashes for each platform.
 The [retaining installer](native-single-binary.md#saved-state-and-portability)
 ships with qualification archives. It never migrates old continuations or edits

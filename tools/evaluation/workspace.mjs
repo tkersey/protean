@@ -25,10 +25,15 @@ const runtimeArms = {
   generic: 'You may use ordinary tools and the full retained computational workspace with the packaged generic runtime. Do not specialize a program, select another runtime, switch realization, or materialize a guest_view. This condition leaves ordinary evidence access and guest execution available.',
   runtime: 'You may use ordinary tools, the retained computational workspace, approved specialization, runtime switching, and executable runtime views or hypothetical analysis. Choose whether any of these help the task; they are optional. Include construction and inspection costs when judging reuse, and change your approach if broader evidence contradicts the current investigation.',
 };
+const semanticArms = {
+  specialization: 'You may use ordinary tools, retained work, and built-in program specialization and runtime selection. Do not inspect or materialize semantic source, construct programmable observations or interpretations, derive or validate candidates, or use guarded execution.',
+  interpretation: 'You may use ordinary tools, retained work, exact semantic source, programmable observations, and isolated interpretations. These capabilities are optional. Do not specialize, derive or validate runtime candidates, select another runtime, switch realization, or use guarded execution.',
+  construction: 'You may use ordinary tools and all permitted semantic construction capabilities: exact source, programmable observations, isolated interpretations, generated transformers, candidate validation, guarded experiments and qualified realization selection. Choose whether any help this task; declining them or abandoning an unsuccessful candidate is allowed. Include all construction, validation, reference and observation costs.',
+};
 const option = (args, name, fallback) => { const i = args.indexOf(name); return i < 0 ? fallback : args[i + 1]; };
 const [mode, ...args] = process.argv.slice(2);
 if (import.meta.main && !['prepare', 'run'].includes(mode)) {
-  console.log('prepare --config CONFIG --out DIRECTORY [--suite workspace|runtime] [--repetitions 1] [--seconds 600]\nrun --plan DIRECTORY --binary BINARY --application APPLICATION_JSON --authorize-inference --credential-file PRIVATE_FILE');
+  console.log('prepare --config CONFIG --out DIRECTORY [--suite workspace|runtime|reconstruction|semantic] [--repetitions 1] [--seconds 600]\nrun --plan DIRECTORY --binary BINARY --application APPLICATION_JSON --authorize-inference --credential-file PRIVATE_FILE');
   process.exit(mode === '--help' || !mode ? 0 : 2);
 }
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -45,8 +50,16 @@ export function armViolations(arm, actions) {
     if (arm === 'ordinary') return ['program', 'work', 'context', 'placement'].includes(action.name);
     const {name, command} = workspaceAction(action);
     const guestView = name === 'context' && command?.tag === 'materialize' && command.value?.input?.tag === 'guest_view';
-    if (arm === 'generic') return (name === 'program' && command?.tag === 'specialize') ||
-      (name === 'work' && (command?.tag === 'realize' || (command?.tag === 'start' && command.value?.runtime?.tag === 'selected'))) || guestView;
+    const replacement = name === 'work' && (['realize', 'realize_controller', 'guard'].includes(command?.tag) ||
+      (command?.tag === 'start' && command.value?.runtime?.tag === 'selected'));
+    const candidate = name === 'program' && ['derive', 'validate'].includes(command?.tag);
+    if (arm === 'interpretation') return replacement || candidate || (name === 'program' && command?.tag === 'specialize');
+    if (arm === 'specialization') return candidate || guestView ||
+      (name === 'work' && ['guard', 'observe'].includes(command?.tag)) ||
+      (name === 'program' && command?.tag === 'inspect' && command.value?.target?.tag === 'semantic_source') ||
+      (name === 'context' && command?.tag === 'materialize' && command.value?.input?.tag === 'semantic_source');
+    if (arm === 'generic') return replacement ||
+      (name === 'program' && command?.tag === 'specialize') || guestView;
     if (arm !== 'pure') return false;
     if (guestView) return true;
     if (name === 'program') return command?.tag === 'build' && command.value?.exposures?.length;
@@ -54,6 +67,28 @@ export function armViolations(arm, actions) {
     return !['start', 'wait', 'collect'].includes(command?.tag) ||
       (command?.tag === 'start' && (command.value?.policy?.stop !== 'terminal' || command.value?.policy?.continuation !== 'owner_scheduled'));
   });
+}
+function guardCosts(archive) {
+  const previous = new Map();
+  let reference = 0, candidate = 0;
+  const events = [...archive.manifest[7]].sort((left, right) => left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0);
+  for (const row of events) {
+    const event = decodeValue(archive.schemas.get('event'), archive.object(row[2]));
+    for (const publication of event[5]) {
+      const work = Buffer.from(publication[0]).toString('hex'), guard = publication[12];
+      if (guard.tag === 0) { previous.delete(work); continue; }
+      const value = guard.value;
+      const id = Buffer.from(value[0][0]).toString('hex');
+      const current = {id, reference: Number(value[10]), candidate: Number(value[11])};
+      const prior = previous.get(work);
+      const continuing = prior?.id === id && value[2] !== 0n;
+      if (continuing) assert(current.reference >= prior.reference && current.candidate >= prior.candidate);
+      reference += current.reference - (continuing ? prior.reference : 0);
+      candidate += current.candidate - (continuing ? prior.candidate : 0);
+      previous.set(work, current);
+    }
+  }
+  return {reference, candidate};
 }
 function command(binary, args) {
   const r = spawnSync(binary, args, {encoding: 'utf8', maxBuffer: 64 << 20});
@@ -81,7 +116,11 @@ export function workspaceMetrics(archive, application) {
     runtime_specializations_requested: 0, runtime_switches_requested: 0, guest_views_requested: 0,
     controller_adoptions: 0, rejected_adoptions: 0, controller_trials: 0, conversion_publication_nanoseconds: 0,
     admitted_runtimes: 0, distinct_runtime_artifact_bytes: 0, distinct_current_runtime_capsule_bytes: 0,
-    runtime_specialization_nanoseconds: null, runtime_validation_nanoseconds: null};
+    runtime_specialization_nanoseconds: null, runtime_validation_nanoseconds: null,
+    semantic_derivations_requested: 0, semantic_validations_requested: 0,
+    guards_requested: 0, observers_requested: 0, candidate_artifacts: 0,
+    distinct_candidate_code_bytes: 0, validated_candidates: 0, unvalidated_candidates: 0,
+    guard_reference_nanoseconds: 0, guard_candidate_nanoseconds: 0};
   const conversions = new Set();
   for (const [kind,, reference] of archive.manifest[6]) {
     if (kind === 30) stats.controller_trials++;
@@ -94,6 +133,17 @@ export function workspaceMetrics(archive, application) {
   }
   const runtimeArtifacts = new Map();
   const runtimeCapsules = new Map();
+  const candidateCode = new Map();
+  const candidates = new Set();
+  const validatedCandidates = new Set();
+  const semanticObservationSchema = {root: 0, types: [{product: [1, 1, 3]}, {sum: [2, 3]}, 'unit', {product: [4, 6]}, {array: {element: 5, length: 32}}, 'u8', 'u64']};
+  for (const [,, reference] of archive.manifest[8]) {
+    const receipt = decodeValue(archive.schemas.get('receipt'), archive.object(reference));
+    if (receipt[11].tag !== 1 || receipt[11].value !== 10 || receipt[12].tag !== 1) continue;
+    const observation = decodeValue(semanticObservationSchema, archive.object(receipt[12].value));
+    if (observation[0].tag === 1 && observation[1].tag === 1)
+      validatedCandidates.add(Buffer.from(observation[0].value[0]).toString('hex'));
+  }
   const actions = [];
   // Count possible provider delivery, including unknown delivery, but exclude
   // positive non-invocation evidence. Rearming an occurrence is only permitted
@@ -154,22 +204,32 @@ export function workspaceMetrics(archive, application) {
   for (const action of stats.actions) {
     const {name, command} = workspaceAction(action);
     if (name === 'program' && command?.tag === 'specialize') stats.runtime_specializations_requested++;
-    if (name === 'work' && command?.tag === 'realize') stats.runtime_switches_requested++;
+    if (name === 'program' && command?.tag === 'derive') stats.semantic_derivations_requested++;
+    if (name === 'program' && command?.tag === 'validate') stats.semantic_validations_requested++;
+    if (name === 'work' && command?.tag === 'guard') stats.guards_requested++;
+    if (name === 'work' && command?.tag === 'observe') stats.observers_requested++;
+    if (name === 'work' && ['realize', 'realize_controller'].includes(command?.tag)) stats.runtime_switches_requested++;
     if (name === 'context' && command?.tag === 'materialize' && command.value?.input?.tag === 'guest_view') stats.guest_views_requested++;
   }
   for (const [kind, id, reference] of archive.manifest[6]) {
     if (kind === 18) {
       const selected = decodeValue(archive.schemas.get('workspace_runtime'), archive.object(reference));
-      assert.equal(selected.length, 4);
+      assert.equal(selected.length, 5);
       stats.admitted_runtimes++;
       runtimeArtifacts.set(Buffer.from(selected[3][0]).toString('hex'), Number(selected[3][1]));
+      if (selected[4].tag === 1) validatedCandidates.add(Buffer.from(selected[4].value[1][0]).toString('hex'));
+    }
+    if (kind === 31) {
+      const candidate = decodeValue(archive.schemas.get('workspace_candidate'), archive.object(reference));
+      candidates.add(Buffer.from(candidate[3][0]).toString('hex'));
+      const code = candidate[4][4];
+      candidateCode.set(Buffer.from(code[0]).toString('hex'), Number(code[1]));
+      stats.candidate_artifacts++;
     }
     if (kind === 9) {
       const work = decodeValue(archive.schemas.get('workspace_work'), archive.object(reference));
-      // Version 2 Work: the schema is carried in the archive; positions are this
-      // evaluator's explicit versioned interpretation, not imported authority.
-      assert.equal(work[0], 2);
-      assert.equal(work.length, 35);
+      assert.equal(work[0], 3);
+      assert.equal(work.length, 38);
       stats.work_items++; stats.native_publication_nanoseconds += Number(work[34]);
       if (conversions.has(Buffer.from(work[1]).toString('hex'))) stats.conversion_publication_nanoseconds += Number(work[34]);
       stats.checkpoint_publications += Number(work[20]);
@@ -188,11 +248,20 @@ export function workspaceMetrics(archive, application) {
       const observation = JSON.parse(Buffer.from(reply[1]).toString());
       stats.compiler_nanoseconds += Number(observation.compiler_nanoseconds ?? 0);
       if (observation.error) stats.rejected_builds++;
+      if (observation.validation === 'validated' && observation.candidate?.kind === 'candidate' &&
+          /^[0-9a-f]{64}$/.test(observation.candidate.id) && observation.runtime?.kind === 'runtime' &&
+          /^[0-9a-f]{64}$/.test(observation.runtime.id)) validatedCandidates.add(observation.candidate.id);
       continue;
     }
   }
   stats.distinct_runtime_artifact_bytes = [...runtimeArtifacts.values()].reduce((sum, bytes) => sum + bytes, 0);
   stats.distinct_current_runtime_capsule_bytes = [...runtimeCapsules.values()].reduce((sum, bytes) => sum + bytes, 0);
+  stats.distinct_candidate_code_bytes = [...candidateCode.values()].reduce((sum, bytes) => sum + bytes, 0);
+  stats.validated_candidates = [...candidates].filter(id => validatedCandidates.has(id)).length;
+  stats.unvalidated_candidates = candidates.size - stats.validated_candidates;
+  const guard = guardCosts(archive);
+  stats.guard_reference_nanoseconds = guard.reference;
+  stats.guard_candidate_nanoseconds = guard.candidate;
   return stats;
 }
 
@@ -275,8 +344,8 @@ if (mode === 'prepare') {
   const config = JSON.parse(await readFile(configFile, 'utf8'));
   assert.equal(config.schema, 'adaptive-agent.configuration.v3');
   const suite = option(args, '--suite', 'workspace');
-  assert(['workspace', 'runtime', 'reconstruction'].includes(suite), 'Choose workspace, runtime or reconstruction evaluation.');
-  const selectedArms = suite === 'runtime' ? runtimeArms : suite === 'reconstruction' ? reconstructionArms : arms;
+  assert(['workspace', 'runtime', 'reconstruction', 'semantic'].includes(suite), 'Choose workspace, runtime, reconstruction or semantic evaluation.');
+  const selectedArms = suite === 'runtime' ? runtimeArms : suite === 'reconstruction' ? reconstructionArms : suite === 'semantic' ? semanticArms : arms;
   const repetitions = Number(option(args, '--repetitions', '1')), seconds = Number(option(args, '--seconds', '600'));
   assert(Number.isSafeInteger(repetitions) && repetitions > 0 && Number.isSafeInteger(seconds) && seconds > 0);
   const profile = config.adaptive.profiles.find(p => p.id === config.adaptive.initial_profile); assert(profile);
@@ -290,7 +359,7 @@ if (mode === 'prepare') {
     {id: 'repetitive', prompt: 'For each row, compute gcd(key, value). Report the sum of these GCDs for each group, covering every row. Explain how you established coverage.', files: {'rows.csv': 'id,key,value,group\n' + rows.map(r => [r.id,r.key,r.value,r.group].join(',')).join('\n') + '\n'}, expected: {sums, rows: rows.length, evidence: ['rows.csv']}, inputs: [{id: 'rows', description: 'The same complete rows as rows.csv, as typed structured input.', rows, relation: [], selected: []}]},
     {id: 'reframing', prompt: 'Investigate why yesterday’s scheduled rollout did not appear. The initial incident note suspects slow ingestion. Establish the cause from available evidence and explain any remaining uncertainty.', files: {'incident.md': 'At 09:00 UTC operators saw no rollout. Initial hypothesis: ingestion backlog delayed eligibility. Investigate that hypothesis.\n', 'ingestion.csv': 'time_utc,queue_depth,oldest_age_seconds\n08:50,2,1\n08:55,1,1\n09:00,0,0\n09:05,0,0\n', 'schedule.conf': 'rollout = 09:00\ntimezone = America/Los_Angeles\n', 'scheduler.log': '2026-10-13T16:00:00Z rollout started\n2026-10-13T16:00:03Z rollout completed\n'}, expected: {cause: 'Schedule timezone mismatch: 09:00 Los Angeles was 16:00 UTC; ingestion was clear and rollout completed then.', evidence: ['ingestion.csv', 'schedule.conf', 'scheduler.log'], reframing: 'Reject the ingestion hypothesis using broader evidence. A pending child may be abandoned without an answer; that is optional, not a prompted required phase.'}, inputs: []},
   ];
-  if (suite === 'runtime') {
+  if (suite === 'runtime' || suite === 'semantic') {
     const datasets = Array.from({length: 8}, (_, batch) => {
       const values = rows.map((r, i) => row(r.id, Number(r.key) + batch * 6, Number(r.value) + batch * (i % 5 + 1) * 12, r.group));
       const totals = Array(8).fill(0);
@@ -314,7 +383,7 @@ if (mode === 'prepare') {
     const evidence_sha256 = hash(json(evidence));
     for (let repetition = 0; repetition < repetitions; repetition++) for (const [arm, instruction] of Object.entries(selectedArms)) {
       const id = `${family.id}-${repetition}-${arm}`, configPath = join(directory, `${id}.json`);
-      const selected = {...frozen, adaptive: {...frozen.adaptive, snapshot_root: snapshot}, tools: {build: arm !== 'ordinary', run: arm !== 'ordinary', reconstruct: arm === 'reconstruction', inputs: family.inputs}};
+      const selected = {...frozen, adaptive: {...frozen.adaptive, snapshot_root: snapshot}, tools: {...frozen.tools, build: arm !== 'ordinary', run: arm !== 'ordinary', reconstruct: arm === 'reconstruction', inputs: family.inputs}};
       await writeFile(configPath, json(selected));
       plan.cases.push({id, family: family.id, arm, repetition, config: configPath, config_sha256: hash(json(selected)), evidence, evidence_sha256, snapshot, prompt: `${family.prompt}\n\nEvaluation capability condition: ${instruction}`, expected: join(directory,family.id,'expected.json'), expected_sha256});
     }

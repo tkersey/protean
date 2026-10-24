@@ -15,7 +15,15 @@ const Peer = struct {
     public_key: []const u8,
     namespace: []const u8,
     native_build: []const u8,
-    compatibility: struct { base: []const u8, admission: []const u8, bridge: []const u8, semantics: []const u8, private_state: []const u8 },
+    compatibility: struct {
+        base: []const u8,
+        admission: []const u8,
+        bridge: []const u8,
+        semantics: []const u8,
+        private_state: []const u8,
+        semantic_root: ?[]const u8 = null,
+        semantic_checker: ?[]const u8 = null,
+    },
     resource_binding: []const u8,
     disclosure: Policy,
     archive_limit: ?u64 = null,
@@ -64,6 +72,8 @@ pub fn load(a: std.mem.Allocator, io: std.Io, path: []const u8) !*const p.Config
     const peers = try a.alloc(p.Peer, document.peers.len);
     for (document.peers, peers, 0..) |input, *peer, index| {
         if (input.name.len == 0 or input.name.len > 128) return error.InvalidConfiguration;
+        if ((input.compatibility.semantic_root == null) !=
+            (input.compatibility.semantic_checker == null)) return error.InvalidConfiguration;
         for (document.peers[0..index]) |prior| if (std.mem.eql(u8, prior.name, input.name)) return error.InvalidConfiguration;
         const policy = try a.create(Disclosure);
         const denied = try a.alloc(p.Digest, input.disclosure.denied_objects.len);
@@ -75,7 +85,21 @@ pub fn load(a: std.mem.Allocator, io: std.Io, path: []const u8) !*const p.Config
             .name = input.name,
             .site = .{ .key = try digest(input.public_key), .namespace = try digest(input.namespace) },
             .native_build = try digest(input.native_build),
-            .compatibility = .{ .base = try digest(input.compatibility.base), .admission = try digest(input.compatibility.admission), .bridge = try digest(input.compatibility.bridge), .semantics = try digest(input.compatibility.semantics), .private_state = try digest(input.compatibility.private_state) },
+            .compatibility = .{
+                .base = try digest(input.compatibility.base),
+                .admission = try digest(input.compatibility.admission),
+                .bridge = try digest(input.compatibility.bridge),
+                .semantics = try digest(input.compatibility.semantics),
+                .private_state = try digest(input.compatibility.private_state),
+                .semantic_root = if (input.compatibility.semantic_root) |root|
+                    try digest(root)
+                else
+                    null,
+                .semantic_checker = if (input.compatibility.semantic_checker) |checker|
+                    try digest(checker)
+                else
+                    null,
+            },
             .resource_binding = try digest(input.resource_binding),
             .disclosure_policy = storage.digest(policy_bytes),
             .archive_limit = input.archive_limit,

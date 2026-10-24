@@ -25,7 +25,7 @@ fn authorize(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
         if (!policy.build) return error.Unauthorized;
         if (command.program.build.source_kind == .component_recipe) catalog = .{ .digest = policy.catalog.digest, .bytes = policy.catalog.bytes };
     }
-    if (command == .program and command.program == .specialize) {
+    if (command == .program and (command.program == .specialize or command.program == .derive or command.program == .validate)) {
         if (!(try resources.policy(ctx)).build) return error.Unauthorized;
     }
     if (command == .program and command.program == .describe and command.program.describe.section == .components) {
@@ -33,7 +33,7 @@ fn authorize(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
         catalog = .{ .digest = policy.catalog.digest, .bytes = policy.catalog.bytes };
     }
     if (command == .work) switch (command.work) {
-        .start, .advance, .pump, .delegate, .interact, .realize, .request_cut => {
+        .start, .advance, .pump, .delegate, .interact, .realize, .realize_controller, .request_cut, .guard, .unguard, .observe, .stop_observing => {
             const policy = try resources.policy(ctx);
             if (!policy.run) return error.Unauthorized;
         },
@@ -44,7 +44,7 @@ fn authorize(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
             if (!(try resources.policy(ctx)).run) return error.Unauthorized;
         },
         .control => |selected| switch (selected.command) {
-            .start, .advance, .pump, .delegate, .interact, .realize, .request_cut => {
+            .start, .advance, .pump, .delegate, .interact, .realize, .realize_controller, .request_cut, .guard, .unguard, .observe, .stop_observing => {
                 if (!(try resources.policy(ctx)).run) return error.Unauthorized;
             },
             else => {},

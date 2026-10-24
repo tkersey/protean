@@ -63,6 +63,17 @@ fn argument(comptime T: type, a: std.mem.Allocator, value: json.Value) ArgumentE
         return .{ .items = items };
     }
     return switch (@typeInfo(T)) {
+        .optional => |info| blk: {
+            if (value == .null) break :blk null;
+            if (comptime !contracts.json.taggedOptional(T))
+                break :blk try argument(info.child, a, value);
+            if (value != .object) return error.WrongType;
+            for (value.object.keys()) |key|
+                if (!equal(key, "tag") and !equal(key, "value")) return error.UnknownField;
+            const tag = value.object.get("tag") orelse return error.MissingField;
+            if (tag != .string or !equal(tag.string, "some")) return error.WrongType;
+            break :blk try argument(info.child, a, value.object.get("value") orelse return error.MissingField);
+        },
         .int => blk: {
             if (value != .number_string) return error.WrongType;
             // The shared model contract first classifies an exact i64/u64
@@ -107,6 +118,19 @@ fn argument(comptime T: type, a: std.mem.Allocator, value: json.Value) ArgumentE
         },
         else => @compileError("unsupported model argument"),
     };
+}
+
+test "nullable model arguments preserve nested absence" {
+    const a = std.testing.allocator;
+    try std.testing.expectEqual(@as(?u64, null), try argument(?u64, a, .null));
+    var present = try json.parse(a, "{\"tag\":\"some\",\"value\":null}", .{});
+    defer present.deinit();
+    const nested = try argument(??u64, a, present.value);
+    try std.testing.expect(nested != null);
+    try std.testing.expect(nested.? == null);
+    var number = try json.parse(a, "42", .{});
+    defer number.deinit();
+    try std.testing.expectEqual(@as(?u64, 42), try argument(?u64, a, number.value));
 }
 
 /// Provider output grammar shared by the sole v11 adapter and pure recovery.

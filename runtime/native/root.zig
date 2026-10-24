@@ -41,6 +41,7 @@ test {
     _ = discovery;
     _ = placement;
     _ = placement_configuration;
+    _ = configuration;
     _ = @import("placement_stage.zig");
     _ = @import("occurrence.zig");
     _ = @import("store.zig");
@@ -48,6 +49,7 @@ test {
     _ = @import("transport.zig");
     _ = @import("host.zig");
     _ = @import("driver.zig");
+    _ = @import("workspace_build.zig");
 }
 
 // Private history internals are exposed only to the repository's test graph.
@@ -56,4 +58,6 @@ pub const testing = if (@import("builtin").is_test) struct {
     pub const state = @import("state.zig");
     pub const occurrence = @import("occurrence.zig");
     pub const Worker = @import("worker.zig").Worker;
+    pub const workspace_build = @import("workspace_build.zig");
+    pub const workspace_observers = @import("workspace_observers.zig");
 } else struct {};

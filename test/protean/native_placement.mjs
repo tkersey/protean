@@ -51,7 +51,7 @@ try {
   const cut = await request(active, 'cut', subject);
   await active.close(); active = null;
   const peer = (local, remote) => ({name: remote.name, public_key: remote.publicKey, namespace: hex(remote.identity.site.namespace), native_build: binary,
-    resource_binding: hex(remote.identity.resource_binding), compatibility: Object.fromEntries(Object.entries(compatibility).map(([key, value]) => [key, hex(value)])),
+    resource_binding: hex(remote.identity.resource_binding), compatibility: Object.fromEntries(Object.entries(compatibility).map(([key, value]) => [key, value === null ? null : hex(value)])),
     disclosure: {allow_private: true}, command: [app.executable, 'serve', '--transport', 'stdio', '--offline', '--state-dir', remote.state, '--placement-config', remote.config],
     remote_name: local.name, timeout_ms: 120_000});
   config(source, [peer(source, destination)]);

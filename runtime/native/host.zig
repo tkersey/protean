@@ -84,6 +84,12 @@ fn Connection(comptime Types: type) type {
                 try json.put(a, &capabilities, "task_execution", .{ .bool = self.client != null });
                 try json.put(a, &capabilities, "task_reconciliation", .{ .bool = self.client != null });
                 try json.put(a, &capabilities, "placement", .{ .bool = if (self.client) |client| client.service.profile.placement != null else false });
+                try json.put(a, &capabilities, "semantic_construction", .{
+                    .bool = if (self.client) |client|
+                        client.service.profile.semantic_construction != null
+                    else
+                        false,
+                });
                 try json.put(a, &result, "capabilities", capabilities);
                 return protocol.response(a, request.id, result);
             }
@@ -174,14 +180,14 @@ fn failureKind(err: anyerror) protocol.Kind {
         error.Denied, error.UnknownTask, error.NotFound => .NotFound,
         error.OperationConflict => .OperationConflict,
         error.CustodyNotLocal, error.CustodyNotRemote, error.StaleCustody, error.StaleController, error.UnsettledRemoteControl => .StateConflict,
-        error.Unauthorized, error.DisclosureDenied, error.KeyOwnerMismatch, error.SignatureVerificationFailed => .Denied,
+        error.Unauthorized, error.DisclosureDenied, error.KeyOwnerMismatch, error.SignatureVerificationFailed, error.SemanticPolicyDenied, error.GuardPolicyDenied => .Denied,
         error.StaleInteraction, error.QuestionMismatch, error.StaleOccurrence => .StaleInteraction,
         error.AnswerConflict => .AnswerConflict,
         error.CursorExpired => .CursorExpired,
         error.Capacity, error.OutOfMemory, error.Overloaded => .Overloaded,
         error.TerminalTask, error.StaleRevision, error.UnsettledOccurrence, error.IncompatibleProfile, error.UnsupportedStateFormat, error.ShuttingDown, error.NonPortable, error.NonEmptyNamespace, error.AlreadyExists, error.ControllerRecoveryUnavailable, error.StaleInstructions, error.Canceled, error.ControllerConversionSchemaMismatch, error.ImpureControllerConversion, error.ControllerResultSchemaMismatch, error.IncompatibleControllerTrial => .StateConflict,
         error.MissingArtifact, error.ArtifactUnavailable => .ArtifactUnavailable,
-        error.UnsupportedCapability => .UnsupportedCapability,
+        error.UnsupportedCapability, error.GuardedMobilityUnsupported, error.ActiveObserverMobilityUnsupported, error.ScheduledObserverMobilityUnsupported => .UnsupportedCapability,
         error.StorageUnavailable, error.CorruptState => .StorageUnavailable,
         error.InvalidParams, error.InvalidValue, error.InvalidJson, error.Overflow, error.InvalidCharacter, error.InvalidArchive, error.UnsafeStatePath => .InvalidParams,
         else => .InternalError,
@@ -344,6 +350,7 @@ pub fn run(comptime Types: type, comptime Environment: type, init: std.process.I
             profile.bytes = admitted.bytes;
             profile.resources = admitted.resources;
             profile.environment = admitted.environment;
+            profile.semantic_construction = admitted.semantic_construction;
             profile.authority.inference = offline or authorize_inference;
             profile.validate() catch return 64;
             application.execution_mode = if (offline) .offline else .live;

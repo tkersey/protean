@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
-import {dirname, join, resolve} from 'node:path';
+import {basename, dirname, join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {pathToFileURL} from 'node:url';
 
@@ -51,7 +51,11 @@ function run(executable, args, cwd = scratch, {failure = false, diagnostic, time
   timeout = deadline === null ? undefined : Math.min(timeout, Math.floor(deadline - performance.now()));
   assert(timeout === undefined || timeout > 0, 'independent installation exceeded its nine-minute budget');
   const command = [...prefix, ...(process.platform === 'linux' ? ['--chdir', cwd] : []), executable, ...args];
+  const operation = `${basename(executable)} ${args[0] ?? ''}${failure ? ' negative' : ''}`;
+  const started = performance.now();
+  console.error(`downstream ${operation}: started`);
   const result = spawnSync(command[0], command.slice(1), {cwd, env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout});
+  console.error(`downstream ${operation}: ${Math.round(performance.now() - started)} ms, status ${result.status}, signal ${result.signal}`);
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.signal, null, result.stderr);
   if (failure) {
@@ -84,7 +88,7 @@ try {
     const target = join(exportRoot, file); mkdirSync(dirname(target), {recursive: true}); copyFileSync(join(root, file), target);
   }
   const packageHash = run(zig, ['fetch', exportRoot]);
-  assert.match(packageHash, /^protean-6\.0\.0-[A-Za-z0-9_-]+$/);
+  assert.match(packageHash, /^protean-7\.0\.0-[A-Za-z0-9_-]+$/);
   const packageDir = join(scratch, 'package'); mkdirSync(packageDir);
   run('/usr/bin/tar', ['-xzf', join(cache, 'p', `${packageHash}.tar.gz`), '-C', packageDir]);
   const source = join(packageDir, packageHash);

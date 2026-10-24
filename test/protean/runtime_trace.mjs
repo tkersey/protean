@@ -52,7 +52,7 @@ export function* runtimeTrace(subject, scenario) {
   const work = observed(yield call('work', 'start', {program: subject.program, input: {tag: 'reference', value: input}, policy: {stop: 'next_slice', continuation: 'explicit_only'}, runtime: {tag: 'packaged', value: {}}}));
   const view = observed(yield call('context', 'materialize', {input: {tag: 'guest_view', value: {
     expected: {work: work.work, execution_revision: work.execution_revision, control_revision: work.control_revision},
-    realization_revision: work.realization_revision, nodes: {tag: 'all', value: {}},
+    realization_revision: work.realization_revision, nodes: {tag: 'all', value: {}}, level: 'guest_cut', disclosure: null,
   }}, sources: []}));
   subject.view = view.value;
   assert.equal(subject.view.kind, 'value');
@@ -171,7 +171,7 @@ function* mobilityTrace(subject, guestCut = false) {
   // exact micro-progress, controller succession and remote cleanup assertions.
   if (guestCut) {
     const view = observed(yield call('context', 'materialize', {input: {tag: 'guest_view', value: {
-      expected: expected(work), realization_revision: work.realization_revision, nodes: {tag: 'all', value: {}}}}, sources: []}));
+      expected: expected(work), realization_revision: work.realization_revision, nodes: {tag: 'all', value: {}}, level: 'guest_cut', disclosure: null}}, sources: []}));
     subject.view = view.value;
     function* pages(name, tag, value) {
       let text = '', offset = 0;

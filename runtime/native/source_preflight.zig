@@ -101,9 +101,11 @@ fn validateBody(a: std.mem.Allocator, m: source.Module, diagnostic: *source.Diag
                 // Structural dependencies are acyclic; function/schema recursion
                 // does not pass through these operand IDs and remains legal.
                 try references(primitive.operands, id);
-                // Constructors are derived from lambda records during lowering.
-                // A raw opcode cannot address that private generated catalog.
-                if (primitive.opcode == .computation) return error.InvalidSource;
+                if (primitive.opcode == .computation) {
+                    _ = try data.contracts.computation(declarations, value.schema);
+                    if (primitive.failures.len != 0) return error.InvalidProgram;
+                    continue;
+                }
                 var owner = m.entry;
                 if (primitive.opcode == .resource_pack or primitive.opcode == .resource_unpack) {
                     if (primitive.operands.len != 1) return error.InvalidProgram;

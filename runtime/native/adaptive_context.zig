@@ -260,7 +260,7 @@ pub fn Projection(comptime P: type) type {
             try json.put(a, &item, "type", json.string("function"));
             try json.put(a, &item, "name", json.string(declaration.name.bytes));
             try json.put(a, &item, "description", json.string(declaration.description.bytes));
-            try json.put(a, &item, "parameters", (try json.parse(a, declaration.input_schema_json.bytes, .{})).value);
+            try json.put(a, &item, "parameters", try json.parseInto(a, declaration.input_schema_json.bytes, .{}));
             try json.put(a, &item, "strict", .{ .bool = true });
             return item;
         }

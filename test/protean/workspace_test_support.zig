@@ -12,6 +12,26 @@ pub fn workspaceRef(a: std.mem.Allocator, kind: @FieldType(contracts.workspace.R
     return .{ .kind = kind, .id = .{ .bytes = try a.dupe(u8, &std.fmt.bytesToHex(id, .lower)) } };
 }
 
+pub const PoisonFreedAllocator = struct {
+    backing: std.mem.Allocator,
+    pub fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.backing.rawAlloc(len, alignment, ra);
+    }
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+    fn free(_: *anyopaque, bytes: []u8, _: std.mem.Alignment, _: usize) void {
+        @memset(bytes, 'X');
+    }
+};
+
 pub const AfterCommitAllocator = struct {
     backing: std.mem.Allocator,
     namespace: *native.Namespace,
@@ -72,6 +92,8 @@ pub fn expectContextOutputBound(service: anytype, a: std.mem.Allocator, task: na
     var manifest_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
     const index = try store.archiveIndex(a, task, .{ .digest = manifest_digest, .bytes = service.assets.manifest.len });
+    var compiler_facts = try service.prepareWorkspaceValidation(task);
+    defer compiler_facts.deinit();
     try store.begin();
     defer store.rollback();
     var operations = try store.database.prepare("SELECT p.id,o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?", &.{.{ .blob = &task }});
@@ -113,7 +135,7 @@ pub fn expectContextOutputBound(service: anytype, a: std.mem.Allocator, task: na
     }
     // All substituted objects remain legitimate task-owned artifacts; receipt,
     // event and optional acquired reply have coherent content hashes.
-    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecords(a, task, index.records.items));
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, task, index.records.items, &compiler_facts));
 }
 
 pub fn nativeIdentity(ref: contracts.workspace.Ref) ![32]u8 {
@@ -134,7 +156,7 @@ pub fn fixtureManifest(a: std.mem.Allocator, image: []const u8, identity: [32]u8
         .native_host_contract = "unit-native-contract",
         .protocol = "agent-host/2.1",
         .client_mapping = "agent-client-values/1.1",
-        .state_format = "agent-native-state/17",
+        .state_format = "agent-native-state/18",
         .optimize = "debug",
         .program_sha256 = @as([]const u8, &image_hex),
         .program_identity = @as([]const u8, &identity_hex),
