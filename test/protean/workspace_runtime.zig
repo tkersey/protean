@@ -4867,14 +4867,17 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     try std.testing.expectEqualDeep(cut.checkpoint, p.ObjectIdentity.from(imported_work.value.checkpoint));
     try std.testing.expectEqualDeep(cut.runtime, p.ObjectIdentity.optional(imported_work.value.runtime));
     if (generated) |derived| {
-        const candidate_bytes = (try destination_namespace.store.recordBytes(scratch, "workspace_candidate", try native.workspace.custodyId(scratch, subject.task, try nativeIdentity(derived.candidate)), subject.task)).?;
-        var candidate = try contracts.decodeOwned(native.workspace.Candidate, scratch, candidate_bytes);
+        var inspection = std.heap.ArenaAllocator.init(a);
+        defer inspection.deinit();
+        const inspection_allocator = inspection.allocator();
+        const candidate_bytes = (try destination_namespace.store.recordBytes(inspection_allocator, "workspace_candidate", try native.workspace.custodyId(inspection_allocator, subject.task, try nativeIdentity(derived.candidate)), subject.task)).?;
+        var candidate = try contracts.decodeOwned(native.workspace.Candidate, inspection_allocator, candidate_bytes);
         defer candidate.deinit();
         for ([_]native.testing.state.Reference{ candidate.value.artifact, candidate.value.description.ancestor, candidate.value.description.guest, candidate.value.description.proposal, candidate.value.description.code, candidate.value.description.producer.? }) |ref| {
             try std.testing.expectEqualDeep(ref, try destination_namespace.store.objectReference(ref.digest, null));
         }
-        try std.testing.expectEqualDeep(compatibility, try receiver.placementCompatibility(scratch, subject));
-        try inspectGeneratedArchive(scratch, &receiver, subject.task, derived);
+        try std.testing.expectEqualDeep(compatibility, try receiver.placementCompatibility(inspection_allocator, subject));
+        try inspectGeneratedArchive(inspection_allocator, &receiver, subject.task, derived);
     }
     phase = "continue imported evaluator";
     _ = try receiver.workspacePump(scratch, "continue-outer", subject.task, .{ .expected = .{ .work = work_ref, .execution_revision = imported_work.value.execution_revision, .control_revision = imported_work.value.control_revision }, .base_quantum = 1 });

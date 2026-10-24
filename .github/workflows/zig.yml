@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'workspace-custody' && '[{"lane":"workspace-custody","compiled_profile":"workspace-custody"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'downstream' && '[{"lane":"downstream"}]' || '[{"lane":"authoring"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive","compiled_profile":"owner-adaptive"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control"},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"workspace-runtime","compiled_profile":"workspace-runtime"},{"lane":"workspace-custody","compiled_profile":"workspace-custody"},{"lane":"workspace-succession","compiled_profile":"workspace-succession"},{"lane":"correspondence"},{"lane":"native","compiled_profile":"product"},{"lane":"native-workspace","product_consumer":true},{"lane":"native-placement","compiled_profile":"product"},{"lane":"runtime","product_consumer":true},{"lane":"runtime-outer","product_consumer":true},{"lane":"runtime-guest","product_consumer":true},{"lane":"downstream"}]') }}
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'workspace-custody' && '[{"lane":"workspace-custody","compiled_profile":"workspace-custody"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'downstream' && '[{"lane":"downstream"}]' || '[{"lane":"authoring","compiled_profile":"mobility-helper"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive","compiled_profile":"owner-adaptive"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control"},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"workspace-runtime","compiled_profile":"workspace-runtime"},{"lane":"workspace-custody","compiled_profile":"workspace-custody"},{"lane":"workspace-succession","compiled_profile":"workspace-succession"},{"lane":"correspondence"},{"lane":"native","compiled_profile":"product"},{"lane":"native-workspace","product_consumer":true},{"lane":"native-placement","compiled_profile":"product"},{"lane":"runtime","product_consumer":true},{"lane":"runtime-outer","product_consumer":true},{"lane":"runtime-guest","product_consumer":true},{"lane":"downstream"}]') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -105,7 +105,7 @@ jobs:
           mkdir -p .zig-cache/tmp
           lane="${{ matrix.lane }}"
           packages=()
-          if [ -z "${{ matrix.compiled_profile }}" ] || [ "${{ matrix.compiled_profile }}" = product ]; then
+          if [ -z "${{ matrix.compiled_profile }}" ] || [ "${{ matrix.compiled_profile }}" = product ] || [ "$lane" = authoring ]; then
             command -v rg >/dev/null || packages+=(ripgrep)
           fi
           if [[ "$lane" == native* ]] || [[ "$lane" == runtime* ]] || [ "$lane" = downstream ]; then
@@ -176,11 +176,6 @@ jobs:
         with:
           path: ${{ runner.temp }}/protean-qualification
           key: ${{ steps.deployment_inputs.outputs.key }}
-      - name: Build mobility helper before independent authoring checks
-        if: matrix.lane == 'authoring'
-        run: |
-          zig build build-runtime-mobility-peer -Doptimize=safe --summary all \
-            --prefix "$RUNNER_TEMP/protean-qualification" --prefix-exe-dir executables
       - name: Retain independently compiled mobility helper
         if: matrix.lane == 'authoring'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -387,7 +382,7 @@ jobs:
           retention-days: 14
       - name: Admit a complete bounded cache snapshot
         id: cache_size
-        if: ${{ !cancelled() && !matrix.product_consumer && matrix.lane != 'downstream' && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.compiled.outputs.valid != 'true' && steps.build_cache_size.outputs.save != 'true' }}
+        if: ${{ !cancelled() && !matrix.product_consumer && matrix.lane != 'downstream' && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && (steps.compiled.outputs.valid != 'true' || matrix.lane == 'authoring') && steps.build_cache_size.outputs.save != 'true' }}
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"

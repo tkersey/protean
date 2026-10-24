@@ -6,6 +6,7 @@ import {dirname, join, posix} from 'node:path';
 
 const [operation, profile, argument, key] = process.argv.slice(2);
 const profiles = {
+  'mobility-helper': ['build-runtime-mobility-peer', [], 'runtime_mobility_peer.zig', ['verification/runtime-mobility-peer']],
   product: ['protean', [], null, ['executables/protean', 'protean/adaptive/application.json', 'protean/adaptive/program.bpi3']],
   owners: ['build-native-owner-tasks-check', [], 'native_owner_tests.zig', ['verification/native-owner-tasks']],
   'owner-adaptive': ['build-native-owner-adaptive-check', ['-Dadaptive-owner-group=capture'], 'native_adaptive_tests.zig', ['verification/native-owner-adaptive']],
