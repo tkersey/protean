@@ -9,8 +9,9 @@ const projection = @import("workspace_projection.zig");
 
 pub const PublicationPrefix = struct {
     const Set = std.AutoHashMapUnmanaged(state.Digest, void);
+    const Active = std.AutoArrayHashMapUnmanaged(state.Digest, void);
     const Position = struct { publication: state.WorkPublication, seq: u64 };
-    const Source = struct { lossless: Set = .empty, outer: Set = .empty };
+    const Source = struct { lossless: Active = .empty, outer: Set = .empty };
 
     latest: std.AutoHashMap(state.Digest, Position),
     successors: Set = .empty,
@@ -34,7 +35,7 @@ pub const PublicationPrefix = struct {
 
     fn remove(self: *PublicationPrefix, source: state.Digest, id: state.Digest) void {
         const group = self.sources.getPtr(source) orelse return;
-        _ = group.lossless.remove(id);
+        _ = group.lossless.swapRemove(id);
         _ = group.outer.remove(id);
     }
 
@@ -66,7 +67,7 @@ pub const PublicationPrefix = struct {
         return group.outer.count() != 0;
     }
 
-    pub fn lossless(self: *PublicationPrefix, id: state.Digest) ?*Set {
+    pub fn lossless(self: *PublicationPrefix, id: state.Digest) ?*Active {
         const group = self.sources.getPtr(id) orelse return null;
         return &group.lossless;
     }

@@ -3026,8 +3026,7 @@ fn expectPublicationPrefix(
         const active = prefix.lossless(source_id);
         try std.testing.expectEqual(lossless, if (active) |set| set.count() else 0);
         if (active) |set| {
-            var ids = set.keyIterator();
-            while (ids.next() != null) indexed.* += 1;
+            for (set.keys()) |_| indexed.* += 1;
         }
     }
 }
@@ -3078,6 +3077,33 @@ test "runtime selection publication prefixes preserve active observers without h
         std.debug.print("publication prefixes: folds={d} reference_visits={d} active_visits={d}\n", .{ count, scanned, indexed });
         if (count == 10)
             try std.testing.checkAllAllocationFailures(a, allocatePublicationPrefix, .{publications});
+        var parallel: native.testing.workspace_observers.PublicationPrefix = .init(a);
+        defer parallel.deinit();
+        const independent = try scratch.dupe(native.testing.state.WorkPublication, publications);
+        const source_id = publications[0].observer.?.source_work;
+        for (independent, 0..) |*item, i| {
+            item.observer.?.stopped = false;
+            item.observer.?.source_work = source_id;
+            item.observer.?.selection.source = publications[0].observer.?.selection.source;
+            item.observer.?.selection.previous = null;
+            item.observer.?.selection.policy.delivery = .lossless;
+            try parallel.put(item.*, i);
+        }
+        try expectPublicationPrefix(&parallel, independent, &scanned, &indexed);
+        for (independent[0 .. count - 1], 0..) |*item, i| {
+            item.observer.?.stopped = true;
+            try parallel.put(item.*, count + i);
+        }
+        indexed = 0;
+        for (0..count) |_| {
+            for (parallel.lossless(source_id).?.keys()) |id| {
+                try std.testing.expectEqualDeep(independent[count - 1].work, id);
+                indexed += 1;
+            }
+        }
+        try std.testing.expectEqual(count, indexed);
+        try expectPublicationPrefix(&parallel, independent, &scanned, &indexed);
+        std.debug.print("publication prefixes: parallel_peak={d} remaining=1 queried_visits={d}\n", .{ count, indexed - 1 });
     }
 }
 

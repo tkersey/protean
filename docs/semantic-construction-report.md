@@ -16,6 +16,13 @@ stopped tails and republication of older folds. Allocation-failure checks cover
 partial index construction. The existing Linux selection lane now requires five
 tests; all nineteen lanes and both time limits remain unchanged.
 
+Active lossless IDs use dense storage so traversal follows the live set after
+a large parallel population stops. A native iterator probe with peaks of 10,
+100 and 1,000 observers, one survivor and that many queries visits 10, 100 and
+1,000 dense keys, versus 160, 12,800 and 2,048,000 sparse metadata slots. The
+prefix fixture also checks this contraction. These counts establish iterator
+work, not an end-to-end speedup.
+
 Before model dispatch, controller overlay freshness includes the realization
 revision encoded in its retained typed target. A native realization switch can
 therefore refresh the offered target without changing the controller epoch or
@@ -730,14 +737,14 @@ measure; the complete Zig totals below expose that additional source growth.
 |---|---:|---:|---:|
 | Horos | 14 | 133,296 | 213 |
 | Kosmos | 11 | 139,794 | 1,104 |
-| Protean | 23 | 390,085 | 55,751 |
-| Total | 48 | 663,175 | 57,068 |
+| Protean | 23 | 391,482 | 55,751 |
+| Total | 48 | 664,572 | 57,068 |
 
 Complete changed Zig source adds/deletes 393,020/67,052 bytes in Horos,
-323,886/20,796 in Kosmos, and 716,266/100,454 in Protean. No test modules,
+323,886/20,796 in Kosmos, and 717,688/100,454 in Protean. No test modules,
 directories, executables, CI lanes or checked-in trace banks were added. The
 largest test-file extension is Protean's existing `workspace_runtime.zig`:
-250,162 added and 9,868 deleted bytes. Its two generated productions are reused
+251,559 added and 9,868 deleted bytes. Its two generated productions are reused
 by activation, five-arm measurements, recovery and mobility. Historical
 independent byte fixtures remain unchanged.
 

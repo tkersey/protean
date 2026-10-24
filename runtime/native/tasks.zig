@@ -13559,9 +13559,8 @@ pub fn Service(comptime Types: type) type {
                 )) return;
             const active = prefix.lossless(before.work) orelse return;
             var outer: ?struct { before: u64, after: u64 } = null;
-            var iterator = active.keyIterator();
-            while (iterator.next()) |id| {
-                const observer = prefix.latest.get(id.*).?.publication.observer.?;
+            for (active.keys()) |id| {
+                const observer = prefix.latest.get(id).?.publication.observer.?;
                 if (observer.selection.source.level == .guest_cut and
                     before.execution_revision == after.execution_revision) continue;
                 var cursor = before.execution_revision;
