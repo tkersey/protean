@@ -756,43 +756,43 @@ Generated candidates use `kosmos.semantic-artifact/3` and
 
 ## Cost measurements
 
-The following single native macOS sample uses committed Protean `4f749dd`, Horos
+The following single native macOS sample uses committed Protean `c1e2ffb`, Horos
 `f60b116` and Kosmos `6aec3c7` with the shared witness and exact Zig 0.17.0 Safe.
-Custody passes all eighteen build steps and its complete scenario in 350.18
+Custody passes all eighteen build steps and its complete scenario in 354.26
 seconds, rebuilding the test binary with four other compiler steps cached and
 executing the test. No other native qualification job ran alongside it. Process
-peak RSS is 11,479,465,984 bytes. This does not discharge Linux qualification.
+peak RSS is 11,388,616,704 bytes. This does not discharge Linux qualification.
 
 The generated producer executes on 1,321,173 and 1,321,177-byte source inputs,
-returning 1,807,351 and 1,204,897 bytes in 83.294 and 20.267 seconds. Both outputs
+returning 1,807,351 and 1,204,897 bytes in 84.697 and 20.505 seconds. Both outputs
 undergo independent validation. Their executions perform 6,798 and 1,045 guest
 transitions, preserving the same 256-transition quantum. First-candidate
-construction takes 85.487 seconds, independent validation 0.748 seconds and
+construction takes 86.929 seconds, independent validation 0.758 seconds and
 producer build 0.006 seconds. Built-in specialization plus validation takes
-10.459 seconds; instrumentation plus validation takes 10.439 seconds. These are
+10.456 seconds; instrumentation plus validation takes 10.454 seconds. These are
 instrumented finite observations, not model efficacy or speedup claims.
 
 | Arm | Three-cut continuation ms | Publication ms | Artifact bytes | Evidence bytes |
 |---|---:|---:|---:|---:|
-| Generic | 39.834 | 7.713 | 275,293 | 51,808 |
-| Built-in specialized | 4,001.703 | 46.632 | 27,144,060 | 23,450,911 |
-| Generated validated | 785.550 | 9.259 | 721,836 | 498,044 |
-| Instrumented | 4,131.948 | 47.345 | 27,145,721 | 23,452,349 |
-| Reference guarded | 576.412 | 8.452 | 997,129 | 549,852 |
+| Generic | 39.391 | 7.663 | 275,293 | 51,808 |
+| Built-in specialized | 4,013.031 | 47.047 | 27,144,060 | 23,450,911 |
+| Generated validated | 792.257 | 8.796 | 721,836 | 498,044 |
+| Instrumented | 4,160.363 | 47.615 | 27,145,721 | 23,452,349 |
+| Reference guarded | 580.323 | 8.127 | 997,129 | 549,852 |
 
 All five arms perform 21 guest transitions and publish 550 logical guest
 checkpoint bytes. Instrumentation retains 389 trace bytes. The guarded arm
-spends 28.007 ms in reference execution and 18.256 ms in candidate execution;
+spends 28.343 ms in reference execution and 17.989 ms in candidate execution;
 its guard capsule is 20,232 bytes and its candidate proposal is 5,902,036 logical
 bytes. These logical sizes do not measure deduplicated retained disk space.
 
 | Arm | Owner restart ms | First continuation including reconstruction ms | Backing baseline bytes | Peak above baseline bytes | Live backing at end bytes |
 |---|---:|---:|---:|---:|---:|
-| Generic | 139.732 | 15.701 | 349,690,614 | 898,191 | 350,001,786 |
-| Built-in specialized | 142.841 | 3,962.892 | 349,690,614 | 4,302,829,242 | 484,216,992 |
-| Generated validated | 140.887 | 759.672 | 599,677,530 | 2,087,350,807 | 984,337,708 |
-| Instrumented | 146.037 | 4,007.385 | 975,015,852 | 4,303,705,018 | 1,109,549,738 |
-| Reference guarded | 141.061 | 270.565 | 1,588,072,840 | 922,647,795 | 2,510,312,781 |
+| Generic | 137.045 | 15.315 | 349,688,508 | 898,191 | 349,999,680 |
+| Built-in specialized | 139.760 | 3,975.332 | 349,688,508 | 4,302,829,242 | 484,214,886 |
+| Generated validated | 141.875 | 767.393 | 599,672,266 | 2,087,346,071 | 984,327,708 |
+| Instrumented | 141.580 | 4,037.132 | 975,005,852 | 4,303,705,018 | 1,109,539,738 |
+| Reference guarded | 140.627 | 271.315 | 1,588,045,476 | 922,597,431 | 2,510,235,053 |
 
 Each requested Zig backing baseline includes the preparation, owners and arenas
 retained at that arm's entry. Peak above baseline is the maximum additional
@@ -805,9 +805,9 @@ interpreting these values as isolated per-runtime memory costs.
 
 Releasing completed imported-candidate inspection reduced the first-cut backing
 baseline from about 3.37 GB at `afa36d7` to 350 MB. Process peak RSS increased
-from 5,902,909,440 bytes in the `9d32bdc` sample to 11,479,465,984 bytes at
-`4f749dd`. These results establish the narrower temporary allocation lifetime,
-not an overall memory or latency improvement. The 350.18-second run rebuilt its
+from 5,902,909,440 bytes in the `9d32bdc` sample to 11,388,616,704 bytes at
+`c1e2ffb`. These results establish the narrower temporary allocation lifetime,
+not an overall memory or latency improvement. The 354.26-second run rebuilt its
 test binary, while the 217.75-second `9d32bdc` run reused it; elapsed times are
 not a like-for-like comparison. No break-even count or model efficacy claim
 follows.
