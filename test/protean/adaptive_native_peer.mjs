@@ -106,7 +106,7 @@ export function verifyCandidateMetrics(measuredBytes, application) {
     header.write('ABL_ERS3');
     header.writeBigUInt64LE(BigInt(payload.length), 12);
     const bound = store(Buffer.concat([header, payload]));
-    archive.manifest[6].push([5, id, record('attempt', [id, task, id, code, code, 'fixture.workspace', false, none, 1, none])],
+    archive.manifest[6].push([5, id, record('attempt', [id, task, id, code, code, 'fixture.workspace', false, none, 1, none, none])],
       [4, id, record('capture', [task, id, id, code, none, 0, some([bound, [], none]), none])]);
   }
   const captured = workspaceMetrics(archive, application);
@@ -984,7 +984,29 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       const selectedInputs = name === 'tools-runtime-specialized' ? [
         ...inputs, {...inputs[0], id: 'batch', description: 'Sixteen source records retain exact batch cardinality and order.', rows: Array.from({length: 16}, (_, i) => row(2000 + i, 10, 100, 1))},
       ] : inputs;
-      await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: ['tools-reuse', 'tools-reverse'].includes(name) ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, reconstruct: name === 'tools-runtime-mobility', inputs: selectedInputs}}));
+      let semanticConstruction = null;
+      if (['tools-runtime-specialized', 'tools-runtime-guest-mobility'].includes(name)) {
+        assert(sourcePeer, 'selected runtimes require the independent policy fixture');
+        const sourcePath = join(app.data, `${name}-source.json`);
+        const specialized = name === 'tools-runtime-specialized';
+        await writeFile(sourcePath, specialized ? JSON.stringify(coverageRecipe) : toolSubject.mobility.transport);
+        const policyArgs = ['specialized-policy', specialized ? 'component-recipe' : 'mobility', sourcePath];
+        if (specialized) {
+          const catalog = asset.resources.find(resource => resource.id === 'tool-construction.catalog');
+          assert(catalog);
+          const catalogPath = join(app.data, `${name}-catalog.bin`);
+          await writeFile(catalogPath, Buffer.from(catalog.base64url, 'base64url'));
+          policyArgs.push(catalogPath);
+        }
+        const policy = await execute(sourcePeer, policyArgs, {encoding: 'utf8', maxBuffer: 16 << 20});
+        assert.equal(policy.status, 0, policy.stderr);
+        semanticConstruction = JSON.parse(policy.stdout);
+        assert.equal(semanticConstruction.roots.length, 1);
+        assert.match(semanticConstruction.roots[0], /^[0-9a-f]{64}$/);
+        assert.equal(semanticConstruction.checkers.length, 1);
+        assert.equal(semanticConstruction.guard, false);
+      }
+      await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: ['tools-reuse', 'tools-reverse'].includes(name) ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, reconstruct: name === 'tools-runtime-mobility', inputs: selectedInputs}, semantic_construction: semanticConstruction}));
       const placement = ['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name) ? await runtimePlacementFixture(app, selectedConfig, trust, selectedState) : null;
       toolSubject.placement = placement;
       // Each scenario selects its own initial directory. A prior controller

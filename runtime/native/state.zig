@@ -348,6 +348,15 @@ pub const EventType = enum {
     controller,
     controller_requested,
 };
+pub const ControllerReadCut = struct {
+    event_watermark: u64,
+    execution_revision: u64,
+
+    pub fn from(task: Task) ControllerReadCut {
+        return .{ .event_watermark = task.event_high, .execution_revision = task.execution_revision };
+    }
+};
+
 pub const Event = struct {
     task: TaskId,
     seq: u64,
@@ -361,6 +370,7 @@ pub const Event = struct {
     workspace_publications: contracts.Vector(WorkPublication, null) = .{ .items = &.{} },
     workspace_command: ?Reference = null,
     residual_publications: contracts.Vector(ResidualPublication, null) = .{ .items = &.{} },
+    controller_read: ?ControllerReadCut = null,
 };
 
 pub const WorkPublication = struct {
@@ -407,6 +417,7 @@ pub const Attempt = struct {
     prepared: ?Reference = null,
     operation: AttemptOperation = .environment,
     controller_context: ?ControllerContext = null,
+    controller_read: ?ControllerReadCut = null,
 };
 pub const Capture = struct {
     task: TaskId,

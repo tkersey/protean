@@ -5,7 +5,18 @@ observations, isolated interpretations, and generated runtime construction throu
 the existing workspace owners. The public contract is
 [Computational workspace](computational-workspace.md).
 
-The current successor addresses the nine defect classes from the completed
+The current successor addresses the three accepted classes from the completed
+`73a82fa` review round. Selected runtime execution checks the current root and
+checker policy, including built-in specialization and restored controllers or
+work. Revocation preserves receipt replay, packaged-runtime return and retained
+cancellation cleanup. Compiler captures bind transient validation outcomes to
+validation inputs. Controller reads retain their native event or attempt cut;
+materialized controller sources require their owning publication. The existing
+model-use fixtures explicitly admit their independently constructed specialized
+artifacts. Qualification and fresh review results belong to the successor commit
+in [Protean #59](https://github.com/tkersey/protean/pull/59).
+
+The earlier successor addresses the nine defect classes from the completed
 `ce07dec` review round. Observer source-advance checks build a temporary successor
 index once per operation, preserving duplicate detection and lossless backpressure.
 An extracted traversal probe with 10, 100 and 1,000 retained folds measures

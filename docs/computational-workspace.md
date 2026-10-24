@@ -233,13 +233,17 @@ The operator's current application configuration may contain:
 }
 ```
 
-Omission or `null` grants no derived-runtime trust. Roots come from operator
-approval of the actual source summary; proposals cannot select new trust roots.
+Omission or `null` grants no selected-runtime trust, including built-in
+specializations. Roots come from operator approval of the actual source summary;
+proposals cannot select new trust roots.
 The existing build/run and realization permissions still apply. The policy
 participates in the frozen profile identity, while native trust is taken only
 from explicit current launch configuration. Reopening or importing profile bytes
 alone cannot install it. Destination use revalidates under its current root and
-checker policy; a sender signature is not a semantic proof.
+checker policy; a sender signature is not a semantic proof. Start, realization
+selection and execution check the current policy, including after restoration.
+Revocation preserves receipt replay, return to the packaged runtime and retained
+cancellation cleanup.
 
 ## Reconstructing the active controller
 
@@ -249,6 +253,11 @@ as later candidates. `program.describe` with `current_controller` pages the
 actual binding, epoch, program, source, interfaces and residual references.
 `context.expand` reads that exact source. `controller_contract` describes the
 host's admitted imports and stable task result/failure interface.
+
+Retained controller reads bind their execution revision to the native event or
+compiler attempt that captured the read. Source materializations require their
+owning publication. Later execution does not change those historical cuts, and
+rehashing a read or its projected reply cannot substitute an earlier revision.
 
 `program.build` accepts `role: "controller"` for general source records. Its entry
 is `[TaskAnchor, Private]`; the controller chooses an exportable `Private` and

@@ -884,6 +884,20 @@ fn exerciseControllerRealization(
     try std.testing.expectEqualDeep(native.placement.ObjectIdentity.optional(actual.value.controller_runtime), placement_cut.runtime);
     _ = try service.placementCompatibility(a, .{ .task = task_id });
 
+    stage = "revoked active policy";
+    service.profile.semantic_construction = null;
+    try std.testing.expectError(error.SemanticPolicyDenied, service.pump(a));
+    stage = "revoked restored policy";
+    try service.park(a);
+    var parked = try service.task(a, task_id);
+    defer parked.deinit();
+    _ = try service.resumeTask(a, "controller-runtime-resume", task_id, parked.value.revision);
+    service.profile.semantic_construction = .{ .roots = &roots, .checkers = &.{} };
+    try std.testing.expectError(error.SemanticPolicyDenied, service.pump(a));
+    var denied = try service.task(a, task_id);
+    defer denied.deinit();
+    try std.testing.expectEqual(actual.value.execution_revision, denied.value.execution_revision);
+    try std.testing.expectEqualDeep(actual.value.checkpoint, denied.value.checkpoint);
     stage = "replay";
     try std.testing.expect((try service.workspaceRealizeController(a, "controller-runtime-select", task_id, command)).replayed);
     try std.testing.expectError(error.StaleRevision, service.workspaceRealizeController(a, "controller-runtime-stale", task_id, command));
@@ -3081,6 +3095,18 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     try std.testing.expect(!before.value.terminal());
     const expected: contracts.workspace.Expected = .{ .work = try workspaceRef(scratch, .work, id), .execution_revision = before.value.execution_revision, .control_revision = before.value.control_revision };
     const selection: @FieldType(contracts.workspace.Work, "realize") = .{ .expected = expected, .realization_revision = 0, .runtime = .{ .selected = runtime } };
+    const allowed_policy = service.profile.semantic_construction;
+    service.profile.semantic_construction = null;
+    try std.testing.expectError(error.SemanticPolicyDenied, service.workspaceRealize(scratch, "denied-select", parent.receipt.task, selection));
+    const denied_start = try service.workspaceCommand(scratch, "denied-runtime-start", parent.receipt.task, .{ .work = .{ .start = .{
+        .program = try workspaceRef(scratch, .program, alias_program.receipt.workspace.?),
+        .input = .{ .reference = try workspaceRef(scratch, .value, before.value.input_value.?.digest) },
+        .policy = .{},
+        .runtime = .{ .selected = runtime },
+    } } });
+    try std.testing.expectEqual(.rejected, denied_start.disposition);
+    try std.testing.expect(std.mem.indexOf(u8, denied_start.observation_json.bytes, "SemanticPolicyDenied") != null);
+    service.profile.semantic_construction = allowed_policy;
     {
         var request_arena = std.heap.ArenaAllocator.init(a);
         defer request_arena.deinit();
@@ -3100,6 +3126,23 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     try std.testing.expectEqual(before.value.execution_revision, selected.value.execution_revision);
     try std.testing.expectEqual(@as(u64, 1), selected.value.realization_revision);
     try std.testing.expect(selected.value.runtime != null and selected.value.runtime_capsule != null);
+    const selected_pump: @FieldType(contracts.workspace.Work, "pump") = .{
+        .expected = .{ .work = expected.work, .execution_revision = selected.value.execution_revision, .control_revision = selected.value.control_revision },
+        .base_quantum = 1,
+    };
+    service.profile.semantic_construction = null;
+    try std.testing.expectError(error.SemanticPolicyDenied, service.workspacePump(scratch, "denied-active-pump", parent.receipt.task, selected_pump));
+    try std.testing.expect((try service.workspaceRealize(scratch, "select", parent.receipt.task, selection)).replayed);
+    try service.park(scratch);
+    var policy_parked_parent = try service.task(scratch, parent.receipt.task);
+    defer policy_parked_parent.deinit();
+    _ = try service.resumeTask(scratch, "selected-policy-resume", parent.receipt.task, policy_parked_parent.value.revision);
+    try std.testing.expectError(error.SemanticPolicyDenied, service.workspacePump(scratch, "denied-restored-pump", parent.receipt.task, selected_pump));
+    var denied_work = try service.workspaceWork(scratch, parent.receipt.task, id);
+    defer denied_work.deinit();
+    try std.testing.expectEqualDeep(selected.value.checkpoint, denied_work.value.checkpoint);
+    try std.testing.expectEqual(selected.value.execution_revision, denied_work.value.execution_revision);
+    service.profile.semantic_construction = allowed_policy;
     {
         var different_builder = source.Builder.init(a);
         defer different_builder.deinit();
@@ -3708,14 +3751,16 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
     defer packaged_runtime.deinit();
     const semantic_roots = [_][32]u8{
         kosmos.RuntimeCompiler.approvedRootIdentity(&packaged_runtime),
+        if (specialized != null) kosmos.RuntimeCompiler.approvedRootIdentity(&sender.runtime_cache.?.artifact) else kosmos.RuntimeCompiler.approvedRootIdentity(&packaged_runtime),
     };
+    profile.semantic_construction = .{
+        .roots = &semantic_roots,
+        .checkers = &.{kosmos.RuntimeCompiler.checker_identity},
+        .guard = true,
+    };
+    sender.profile.semantic_construction = profile.semantic_construction;
+    receiver.profile.semantic_construction = profile.semantic_construction;
     const generated: ?GeneratedRuntime = if (scenario == .work) blk: {
-        profile.semantic_construction = .{
-            .roots = &semantic_roots,
-            .checkers = &.{kosmos.RuntimeCompiler.checker_identity},
-            .guard = true,
-        };
-        sender.profile.semantic_construction = profile.semantic_construction;
         phase = "generated transformation and retained runtime continuation";
         var construction_live: usize = 0;
         const derived = construction: {
@@ -4536,6 +4581,7 @@ fn placementCase(comptime scenario: enum { work, queued, root, preoffer, onward,
             const refused_offer = try offerPlacement(&sender, subject, "destination", refused_path);
             refused = try p.sign(p.Decision, scratch, destination_key, .{ .transfer = refused_offer.value.intent.transfer, .offer_digest = try p.digest(p.Offer, scratch, refused_offer.value), .source = source_site, .destination = destination_site, .epoch = refused_offer.value.intent.epoch + 1, .verdict = .{ .refused = .withdrawn } });
         }
+        sender.profile.semantic_construction = null;
         _ = try sender.requestCancel(scratch, "cancel-with-frozen-work", subject.task, "stop");
         var terminal = false;
         for (0..512) |_| {

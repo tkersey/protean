@@ -1646,6 +1646,147 @@ const ContextApplication = struct {
     }
 };
 
+fn expectBuildCaptureOutputBound(service: anytype, a: std.mem.Allocator, task: native.testing.state.TaskId, attempt: [32]u8, archive_path: []const u8) !void {
+    const store = &service.namespace.store;
+    const bytes = (try store.recordBytes(a, "capture", attempt, task)).?;
+    defer a.free(bytes);
+    var captured = try contracts.decodeOwned(native.testing.state.Capture, a, bytes);
+    defer captured.deinit();
+    try std.testing.expect(captured.value.projection == null);
+    const request = try store.object(a, captured.value.request, null);
+    defer a.free(request);
+    var input = try contracts.decodeOwned(native.testing.workspace_build.Input, a, request);
+    defer input.deinit();
+    try std.testing.expect(input.value == .program);
+    _ = try service.exportCheckpoint(a, task, archive_path);
+    for ([_]contracts.workspace.ValidationOutcome{ .resource_exhausted, .interrupted, .unavailable_dependency }) |outcome| {
+        const output = try contracts.encodeOwned(native.testing.workspace_build.Output, a, .{ .validation = .{
+            .outcome = outcome,
+            .code = .{ .bytes = "TransientCompilerFailure" },
+        } });
+        defer a.free(output);
+        try store.begin();
+        defer store.rollback();
+        var forged = captured.value;
+        forged.response = try store.putObject(output);
+        try store.putRecord(native.testing.state.Capture, "capture", attempt, task, forged);
+        try service.namespace.commit("test.forge-build-capture-output");
+        const forged_path = try std.fmt.allocPrint(a, "{s}-{s}", .{ archive_path, @tagName(outcome) });
+        defer a.free(forged_path);
+        try std.testing.expectError(error.InvalidArchive, service.exportCheckpoint(a, task, forged_path));
+        try store.begin();
+        try store.putRecord(native.testing.state.Capture, "capture", attempt, task, captured.value);
+        try service.namespace.commit("test.restore-build-capture-output");
+    }
+    const restored_path = try std.fmt.allocPrint(a, "{s}-restored", .{archive_path});
+    defer a.free(restored_path);
+    _ = try service.exportCheckpoint(a, task, restored_path);
+}
+
+fn expectDirectDeriveOwnerBound(service: anytype, a: std.mem.Allocator, task: native.testing.state.TaskId, input: native.testing.workspace_build.DeriveInput, archive_path: []const u8) !void {
+    var before = try service.task(a, task);
+    defer before.deinit();
+    const reply = try service.workspaceCommand(a, "direct-derive-owner-cut", task, .{ .program = .{ .derive = .{
+        .ancestor = input.subject,
+        .program = try workspaceRef(a, .program, input.program),
+        .proposal = .{ .json_text = .{ .bytes = input.proposal.bytes } },
+    } } });
+    try std.testing.expectEqual(.rejected, reply.disposition);
+    var after = try service.task(a, task);
+    defer after.deinit();
+    try std.testing.expectEqual(before.value.event_high + 1, after.value.event_high);
+    try std.testing.expectEqual(before.value.revision + 1, after.value.revision);
+    const store = &service.namespace.store;
+    const event_bytes = blk: {
+        var query = try store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq=? AND e.revision=?", &.{ .{ .blob = &task }, .{ .integer = @intCast(after.value.event_high) }, .{ .integer = @intCast(after.value.revision) } });
+        defer query.deinit();
+        try std.testing.expect(try query.step() == .row);
+        break :blk try a.dupe(u8, try query.bytes(0));
+    };
+    defer a.free(event_bytes);
+    var event = try contracts.decodeOwned(native.testing.state.Event, a, event_bytes);
+    defer event.deinit();
+    try std.testing.expectEqual(.workspace, event.value.kind);
+    const command_bytes = try store.object(a, event.value.workspace_command.?, null);
+    defer a.free(command_bytes);
+    var command = try contracts.decodeOwned(native.workspace.PublicationCommand, a, command_bytes);
+    defer command.deinit();
+    try std.testing.expect(command.value == .semantic and command.value.semantic.command == .derive);
+    const frozen_bytes = try store.object(a, command.value.semantic.input, null);
+    defer a.free(frozen_bytes);
+    var frozen = try contracts.decodeOwned(native.testing.workspace_build.Input, a, frozen_bytes);
+    defer frozen.deinit();
+    try std.testing.expect(frozen.value == .derive and frozen.value.derive.basis == .controller);
+    const owner = event.value.controller_read orelse return error.MissingControllerReadCut;
+    try std.testing.expectEqual(frozen.value.derive.basis.controller.event_watermark, owner.event_watermark);
+    try std.testing.expectEqual(frozen.value.derive.basis.controller.execution_revision, owner.execution_revision);
+    _ = try service.exportCheckpoint(a, task, archive_path);
+    try store.begin();
+    defer store.rollback();
+    event.value.controller_read.?.execution_revision += 1;
+    try store.database.run("DELETE FROM events WHERE task=? AND seq=?", &.{ .{ .blob = &task }, .{ .integer = @intCast(event.value.seq) } });
+    try store.putEvent(event.value);
+    try service.namespace.commit("test.forge-direct-derive-owner");
+    const forged_path = try std.fmt.allocPrint(a, "{s}-forged", .{archive_path});
+    defer a.free(forged_path);
+    try std.testing.expectError(error.InvalidArchive, service.exportCheckpoint(a, task, forged_path));
+    try store.begin();
+    event.value.controller_read = owner;
+    try store.database.run("DELETE FROM events WHERE task=? AND seq=?", &.{ .{ .blob = &task }, .{ .integer = @intCast(event.value.seq) } });
+    try store.putEvent(event.value);
+    try service.namespace.commit("test.restore-direct-derive-owner");
+    const restored_path = try std.fmt.allocPrint(a, "{s}-restored", .{archive_path});
+    defer a.free(restored_path);
+    _ = try service.exportCheckpoint(a, task, restored_path);
+}
+
+fn expectDeriveCaptureOwnerBound(service: anytype, a: std.mem.Allocator, task: native.testing.state.TaskId, attempt: [32]u8, archive_path: []const u8) !void {
+    const store = &service.namespace.store;
+    const capture_bytes = (try store.recordBytes(a, "capture", attempt, task)).?;
+    defer a.free(capture_bytes);
+    var captured = try contracts.decodeOwned(native.testing.state.Capture, a, capture_bytes);
+    defer captured.deinit();
+    try std.testing.expect(captured.value.projection == null);
+    const request = try store.object(a, captured.value.request, null);
+    defer a.free(request);
+    var input = try contracts.decodeOwned(native.testing.workspace_build.Input, a, request);
+    defer input.deinit();
+    try std.testing.expect(input.value == .derive and input.value.derive.basis == .controller);
+    const response = try store.object(a, captured.value.response.?, null);
+    defer a.free(response);
+    var output = try contracts.decodeOwned(native.testing.workspace_build.Output, a, response);
+    defer output.deinit();
+    try std.testing.expect(output.value == .rejected);
+    const attempt_bytes = (try store.recordBytes(a, "attempt", attempt, task)).?;
+    defer a.free(attempt_bytes);
+    var saved = try contracts.decodeOwned(native.testing.state.Attempt, a, attempt_bytes);
+    defer saved.deinit();
+    const owner = saved.value.controller_read orelse return error.MissingControllerReadCut;
+    try std.testing.expectEqual(input.value.derive.basis.controller.event_watermark, owner.event_watermark);
+    try std.testing.expectEqual(input.value.derive.basis.controller.execution_revision, owner.execution_revision);
+    _ = try service.exportCheckpoint(a, task, archive_path);
+    try store.begin();
+    defer store.rollback();
+    saved.value.controller_read.?.execution_revision += 1;
+    try store.database.run("DELETE FROM records WHERE kind='attempt' AND id=? AND task=?", &.{ .{ .blob = &attempt }, .{ .blob = &task } });
+    try store.createRecord(native.testing.state.Attempt, "attempt", attempt, task, saved.value);
+    try service.namespace.commit("test.forge-derive-capture-owner");
+    const forged_path = try std.fmt.allocPrint(a, "{s}-forged", .{archive_path});
+    defer a.free(forged_path);
+    try std.testing.expectError(error.InvalidArchive, service.exportCheckpoint(a, task, forged_path));
+    try store.begin();
+    saved.value.controller_read = owner;
+    try store.database.run("DELETE FROM records WHERE kind='attempt' AND id=? AND task=?", &.{ .{ .blob = &attempt }, .{ .blob = &task } });
+    try store.createRecord(native.testing.state.Attempt, "attempt", attempt, task, saved.value);
+    try service.namespace.commit("test.restore-derive-capture-owner");
+    const restored_path = try std.fmt.allocPrint(a, "{s}-restored", .{archive_path});
+    defer a.free(restored_path);
+    _ = try service.exportCheckpoint(a, task, restored_path);
+    const direct_path = try std.fmt.allocPrint(a, "{s}-direct", .{archive_path});
+    defer a.free(direct_path);
+    try expectDirectDeriveOwnerBound(service, a, task, input.value.derive, direct_path);
+}
+
 test "CTX-01 snapshot materialization retains omitted source for a broader evidence pivot" {
     const a = std.testing.allocator;
     const io = std.testing.io;
@@ -1669,7 +1810,8 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
     defer a.free(snapshot);
     var algorithm = source.Builder.init(a);
     defer algorithm.deinit();
-    var gcd_program = try horos.source.lower(a, try gcd(&algorithm));
+    const gcd_module = try gcd(&algorithm);
+    var gcd_program = try horos.source.lower(a, gcd_module);
     defer gcd_program.deinit();
     const component: data.component.Object = .{ .program = gcd_program.program, .exports = &.{.{ .name = "apply", .reference = .{ .kind = .function, .id = gcd_program.program.roots.entry } }}, .borrows = &.{.{ .function = gcd_program.program.roots.entry }} };
     const component_bytes = try a.alloc(u8, try data.component.encodedLength(component));
@@ -1965,6 +2107,7 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
             try worker.join();
             try service.completeWork(scratch, step.work, worker.result.?);
             try worker.release();
+            try expectBuildCaptureOutputBound(&service, scratch, build_parent.receipt.task, step.work.attempt, try std.fmt.allocPrint(scratch, "{s}/build-capture.par", .{path_buffer[0..length]}));
             // A captured build survives owner replacement without a second
             // compilation dispatch; explicit resume only interprets it.
             try service.close(a);
@@ -2001,6 +2144,58 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
     const archive_path = try std.fmt.allocPrint(a, "{s}/build.par", .{path_buffer[0..length]});
     defer a.free(archive_path);
     _ = try service.exportCheckpoint(scratch, build_parent.receipt.task, archive_path);
+    const document = try native.source_records.encode(scratch, gcd_module);
+    const seed = try service.submit(scratch, "derive-seed", command);
+    var diagnostic: native.program_construction.Diagnostic = .{};
+    const seed_program = try service.workspaceBuild(scratch, "derive-seed-program", seed.receipt.task, document, &diagnostic);
+    var packaged_runtime = try service.program.retainRuntime();
+    defer packaged_runtime.deinit();
+    const roots = [_][32]u8{kosmos.RuntimeCompiler.approvedRootIdentity(&packaged_runtime)};
+    const previous_policy = service.profile.semantic_construction;
+    defer service.profile.semantic_construction = previous_policy;
+    service.profile.semantic_construction = .{ .roots = &roots, .checkers = &.{kosmos.RuntimeCompiler.checker_identity} };
+    const derive_parent = try service.submit(scratch, "derive-parent", .{ .program = .{ .derive = .{
+        .ancestor = .{ .controller = .{ .cut = .{ .epoch = 0, .execution_revision = 1 } } },
+        .program = try workspaceRef(scratch, .program, seed_program.receipt.workspace.?),
+        .proposal = .{ .json_text = .{ .bytes = "{}" } },
+    } } });
+    const derive_program = try service.workspaceBuild(scratch, "derive-parent-program", derive_parent.receipt.task, document, &diagnostic);
+    try std.testing.expectEqualDeep(seed_program.receipt.workspace, derive_program.receipt.workspace);
+    var derivation_seen = false;
+    for (0..64) |_| {
+        const step = try service.pump(scratch);
+        if (step == .work) {
+            try std.testing.expectEqual(.workspace_build, step.work.operation);
+            try std.testing.expectEqualDeep(derive_parent.receipt.task, step.work.task);
+            try std.testing.expect(!derivation_seen);
+            derivation_seen = true;
+            const worker = try native.testing.Worker.init(a, io);
+            defer worker.deinit(a) catch unreachable;
+            try worker.start(step.work, profile.authority, null);
+            while (!worker.finished()) try io.sleep(.fromMilliseconds(1), .awake);
+            try worker.join();
+            try service.completeWork(scratch, step.work, worker.result.?);
+            try worker.release();
+            try expectDeriveCaptureOwnerBound(&service, scratch, derive_parent.receipt.task, step.work.attempt, try std.fmt.allocPrint(scratch, "{s}/derive-capture.par", .{path_buffer[0..length]}));
+            const active_profile = service.profile;
+            try service.close(a);
+            service = try native.tasks.Service(ContextTypes).init(a, io, &namespace, assets, &application, handlers, active_profile);
+            var captured = try service.task(a, derive_parent.receipt.task);
+            defer captured.deinit();
+            _ = try service.resumeTask(scratch, "resume-derive-capture", derive_parent.receipt.task, captured.value.revision);
+        }
+        var derived = try service.task(a, derive_parent.receipt.task);
+        defer derived.deinit();
+        if (derived.value.terminal()) {
+            try std.testing.expectEqual(.completed, derived.value.outcome_kind);
+            break;
+        }
+    }
+    try std.testing.expect(derivation_seen);
+    var derived = try service.task(a, derive_parent.receipt.task);
+    defer derived.deinit();
+    try std.testing.expectEqual(.completed, derived.value.outcome_kind);
+    try service.validateWorkspace(scratch, derive_parent.receipt.task);
 }
 
 const WaitTypes = struct {
@@ -4238,6 +4433,82 @@ pub const ReconstructionProcess = struct {
     operation: [32]u8 = @splat(0),
     stop: *const fn ([]const u8, [16]u8, [32]u8) anyerror!void,
 };
+fn expectControllerReadBound(service: anytype, a: std.mem.Allocator, task: [16]u8, occurrence_id: [32]u8) !bool {
+    const store = &service.namespace.store;
+    const evidence_bytes = (try store.recordBytes(a, "workspace_reply", occurrence_id, task)) orelse return false;
+    var evidence = try contracts.decodeOwned(native.workspace.ReplyObservation, a, evidence_bytes);
+    defer evidence.deinit();
+    if (evidence.value.evidence != .read or evidence.value.evidence.read != .controller) return false;
+    var pending = try contracts.decodeOwned(native.testing.occurrence.Occurrence, a, (try store.recordBytes(a, "occurrence", occurrence_id, task)).?);
+    defer pending.deinit();
+    try std.testing.expect(pending.value.state == .settled_reply);
+    try std.testing.expect(evidence.value.evidence.read.controller.execution_revision > 0);
+    var manifest_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
+    const index = try store.archiveIndex(a, task, .{ .digest = manifest_digest, .bytes = service.assets.manifest.len });
+    var facts = try service.prepareWorkspaceValidation(task);
+    defer facts.deinit();
+    try service.validateWorkspaceRecordsPrepared(a, task, index.records.items, &facts);
+    const bound = (try data.invocation.decode(data.invocation.Result, a, try store.acquiredObject(a, pending.value.state.settled_reply.reply, null))).value;
+    const original_reply = (try contracts.decodeOwned(contracts.workspace.Reply, a, bound.value)).value;
+    var page = (try native.json.parse(a, original_reply.observation_json.bytes, .{})).value;
+    try std.testing.expect(page.object.get("complete").?.bool);
+    var description = (try native.json.parse(a, page.object.get("text").?.string, .{})).value;
+    try native.json.put(a, &description, "execution_revision", try native.json.number(a, @as(u64, 0)));
+    const text = try native.json.canonical(a, description);
+    try native.json.put(a, &page, "text", native.json.string(text));
+    try native.json.put(a, &page, "next_offset", try native.json.number(a, text.len));
+    try native.json.put(a, &page, "total_bytes", try native.json.number(a, text.len));
+    var forged_reply = original_reply;
+    forged_reply.observation_json.bytes = try native.json.canonical(a, page);
+    const payload = try contracts.encodeOwned(contracts.workspace.Reply, a, forged_reply);
+    const forged_bound = try data.invocation.encodeOwned(data.invocation.Result, a, .{ .request_identity = pending.value.request, .value = payload });
+    try store.begin();
+    defer store.rollback();
+    var forged_evidence = evidence.value;
+    forged_evidence.evidence.read.controller.execution_revision = 0;
+    const forged_evidence_body = try store.putObject(try contracts.encodeOwned(native.workspace.ReplyObservation, a, forged_evidence));
+    try store.database.run("UPDATE records SET body=? WHERE kind='workspace_reply' AND id=?", &.{ .{ .blob = &forged_evidence_body.digest }, .{ .blob = &occurrence_id } });
+    var forged_occurrence = pending.value;
+    forged_occurrence.state.settled_reply.reply = (try store.putObject(forged_bound)).digest;
+    try store.putRecord(native.testing.occurrence.Occurrence, "occurrence", occurrence_id, task, forged_occurrence);
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, task, index.records.items, &facts));
+    store.rollback();
+    try service.validateWorkspaceRecordsPrepared(a, task, index.records.items, &facts);
+    return true;
+}
+
+fn expectControllerValueBound(service: anytype, a: std.mem.Allocator, task: [16]u8, ref: contracts.workspace.Ref) !void {
+    const store = &service.namespace.store;
+    const identity = try native.workspace.custodyId(a, task, try nativeIdentity(ref));
+    var saved = try contracts.decodeOwned(native.workspace.Value, a, (try store.recordBytes(a, "workspace_value", identity, task)).?);
+    defer saved.deinit();
+    const origin = saved.value.derivation.semantic_source.?;
+    try std.testing.expect(origin.basis == .controller and origin.selection.subject == .controller);
+    try std.testing.expect(origin.basis.controller.execution_revision > 0);
+    var manifest_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
+    const index = try store.archiveIndex(a, task, .{ .digest = manifest_digest, .bytes = service.assets.manifest.len });
+    var facts = try service.prepareWorkspaceValidation(task);
+    defer facts.deinit();
+    try service.validateWorkspaceRecordsPrepared(a, task, index.records.items, &facts);
+    const records = try a.alloc(native.testing.state.ArchiveRecord, index.records.items.len + 1);
+    @memcpy(records[1..], index.records.items);
+    try store.begin();
+    defer store.rollback();
+    var forged = saved.value;
+    forged.derivation.semantic_source.?.basis.controller.execution_revision -= 1;
+    forged.derivation.semantic_source.?.selection.subject.controller.cut.execution_revision -= 1;
+    forged.description.provenance = try store.putObject(try contracts.encodeOwned(native.workspace.Derivation, a, forged.derivation));
+    forged.artifact = try store.putObject(try contracts.encodeOwned(native.workspace.ValueArtifact, a, forged.description));
+    forged.id = try native.workspace.custodyId(a, task, forged.artifact.digest);
+    try store.createRecord(native.workspace.Value, "workspace_value", forged.id, task, forged);
+    records[0] = .{ .kind = .workspace_value, .id = forged.id, .body = try store.putObject(try contracts.encodeOwned(native.workspace.Value, a, forged)) };
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, task, records, &facts));
+    store.rollback();
+    try service.validateWorkspaceRecordsPrepared(a, task, index.records.items, &facts);
+}
+
 fn reconstructionModelMove(service: anytype, a: std.mem.Allocator, root: []const u8, task: [16]u8, work: native.tasks.Work, destination_identity: [32]u8, service_open: *bool, namespace_open: *bool) !void {
     const backing = std.testing.allocator;
     var before = try service.task(a, task);
@@ -4255,6 +4526,7 @@ fn reconstructionModelMove(service: anytype, a: std.mem.Allocator, root: []const
     } } });
     try std.testing.expectEqual(.observed, source_read.disposition);
     try service.notSent(a, work);
+    try expectControllerValueBound(service, a, task, source_read.evidence.?);
     const io = service.io;
     const assets = service.assets;
     const application = service.application;
@@ -4790,10 +5062,15 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                     const succession = (try contracts.decodeOwned(native.testing.state.ControllerSuccession, frame, (try namespace.store.recordBytes(frame, "controller_succession", succession_id, task)).?)).value;
                     const residual_id = succession.residual.?;
                     var woke = !residual_wait;
+                    var controller_read_checked = false;
                     var completed: usize = 0;
                     for (0..128) |_| {
                         const residual = (try contracts.decodeOwned(native.testing.state.ControllerResidual, frame, (try namespace.store.recordBytes(frame, "controller_residual", residual_id, task)).?)).value;
                         if (residual.outcome_kind == .cancelled) break;
+                        if (scenario == .residual_read and !controller_read_checked) {
+                            if (residual.current_occurrence) |current_occurrence|
+                                controller_read_checked = try expectControllerReadBound(&service, frame, task, current_occurrence);
+                        }
                         if (!woke and residual.schedule == .parked) {
                             try std.testing.expect(residual.cancellation_applied);
                             stage = "parked residual read";
@@ -4842,6 +5119,7 @@ pub fn reconstructionContinuity(process: ?ReconstructionProcess, scenario: Recon
                         }
                     } else return error.ResidualReadDidNotFinish;
                     try std.testing.expectEqual(@as(usize, 1), completed);
+                    if (scenario == .residual_read) try std.testing.expect(controller_read_checked);
                     var replies = try namespace.store.database.prepare("SELECT o.body FROM records r JOIN objects o ON o.digest=r.body WHERE r.task=? AND r.kind='workspace_reply'", &.{.{ .blob = &task }});
                     defer replies.deinit();
                     var count: usize = 0;

@@ -20,6 +20,40 @@ pub fn main(init: std.process.Init) !void {
         const module = try @import("runtime_mobility_source.zig").build(&builder);
         const transport = try native.source_records.encode(a, module);
         try output.interface.writeAll(try std.json.Stringify.valueAlloc(a, .{ .transport = transport }, .{}));
+    } else if (std.mem.eql(u8, mode, "specialized-policy")) {
+        const kind = args.next() orelse return error.MissingKind;
+        const source_path = args.next() orelse return error.MissingSource;
+        const text = try std.Io.Dir.cwd().readFileAlloc(init.io, source_path, a, .unlimited);
+        var diagnostic: native.program_construction.Diagnostic = .{};
+        var built = if (std.mem.eql(u8, kind, "component-recipe")) blk: {
+            const catalog_path = args.next() orelse return error.MissingCatalog;
+            const catalog = try std.Io.Dir.cwd().readFileAlloc(init.io, catalog_path, a, .unlimited);
+            break :blk try native.program_construction.buildComponent(a, catalog, text);
+        } else if (std.mem.eql(u8, kind, "mobility"))
+            try native.program_construction.buildExposed(a, text, &.{
+                .{ .effect = 0, .class = .observation },
+                .{ .effect = 1, .class = .input },
+                .{ .effect = 2, .class = .observation },
+            }, null, &diagnostic)
+        else
+            return error.InvalidKind;
+        defer built.deinit();
+        var packaged = try kosmos.Prepared.init(a, built.image);
+        defer packaged.deinit();
+        const guest = try horos.data.program_image.Admitted.decode(a, built.image);
+        defer guest.deinit();
+        const bytes = try kosmos.RuntimeCompiler.compile(a, .{
+            .guest = guest,
+            .horos_package = packaged.runtime.content.value.manifest.compiler.horos_package,
+            .hooks = .{ .control = false, .storage = false },
+        });
+        var selected = try kosmos.RuntimeArtifact.init(a, bytes, kosmos.RuntimeCapsule.reference(bytes).digest);
+        defer selected.deinit();
+        try kosmos.RuntimeCompiler.validate(a, &selected);
+        try output.interface.print("{{\"roots\":[\"{s}\"],\"checkers\":[\"{s}\"],\"guard\":false}}", .{
+            std.fmt.bytesToHex(kosmos.RuntimeCompiler.approvedRootIdentity(&selected), .lower),
+            kosmos.RuntimeCompiler.checker_identity,
+        });
     } else if (std.mem.eql(u8, mode, "controller-converter")) {
         const source_path = args.next() orelse return error.MissingSource;
         const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, source_path, a, .unlimited);
