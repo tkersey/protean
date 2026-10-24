@@ -1886,6 +1886,8 @@ fn expectSemanticActivationDenied(
     a: std.mem.Allocator,
     captured: native.testing.state.Capture,
 ) !void {
+    var phase: []const u8 = "decode capture";
+    errdefer std.debug.print("semantic activation failed at {s}\n", .{phase});
     const store = &service.namespace.store;
     const request = try store.object(a, captured.request, null);
     defer a.free(request);
@@ -1893,23 +1895,38 @@ fn expectSemanticActivationDenied(
     defer input.deinit();
     try std.testing.expect(input.value == .validate);
     const selected = input.value.validate;
+    phase = "fresh validation";
     const denied = try service.workspaceCommand(a, "revoked-validate", captured.task, .{
         .program = .{ .validate = .{
             .candidate = try workspaceRef(a, .candidate, selected.candidate_ref.digest),
         } },
     });
+    const validation_denied = std.mem.indexOf(
+        u8,
+        denied.observation_json.bytes,
+        "SemanticPolicyDenied",
+    ) != null;
+    if (!validation_denied)
+        std.debug.print("revoked validation: {s}\n", .{denied.observation_json.bytes});
     try std.testing.expectEqual(.rejected, denied.disposition);
-    try std.testing.expect(std.mem.indexOf(u8, denied.observation_json.bytes, "SemanticPolicyDenied") != null);
+    try std.testing.expect(validation_denied);
+    phase = "runtime input";
     var candidate = try service.workspaceCandidate(a, captured.task, selected.candidate_ref.digest);
     defer candidate.deinit();
     var program = try service.workspaceProgram(a, captured.task, selected.program);
     defer program.deinit();
+    const input_json = try native.json.canonical(
+        a,
+        try native.values.toJson([2]u64, a, .{ 1071, 462 }),
+    );
+    defer a.free(input_json);
+    phase = "runtime start";
     const start = try service.workspaceCommand(a, "revoked-runtime-start", captured.task, .{
         .work = .{ .start = .{
             .program = try workspaceRef(a, .program, selected.program),
             .input = .{ .inline_json = .{
                 .schema = try workspaceRef(a, .schema, program.value.description.input_schema.digest),
-                .json_text = .{ .bytes = "[1071,462]" },
+                .json_text = .{ .bytes = input_json },
             } },
             .policy = .{},
             .runtime = .{ .selected = try workspaceRef(
@@ -1919,8 +1936,15 @@ fn expectSemanticActivationDenied(
             ) },
         } },
     });
+    const runtime_denied = std.mem.indexOf(
+        u8,
+        start.observation_json.bytes,
+        "SemanticPolicyDenied",
+    ) != null;
+    if (!runtime_denied)
+        std.debug.print("revoked runtime start: {s}\n", .{start.observation_json.bytes});
     try std.testing.expectEqual(.rejected, start.disposition);
-    try std.testing.expect(std.mem.indexOf(u8, start.observation_json.bytes, "SemanticPolicyDenied") != null);
+    try std.testing.expect(runtime_denied);
 }
 
 fn expectSemanticFactsRetained(
@@ -2390,6 +2414,8 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
     var candidate_ref: ?contracts.workspace.Ref = null;
     for ([_]bool{ false, true }) |validation| {
         const label = if (validation) "retained-validation" else "cancelled-derivation";
+        var phase: []const u8 = "prepare";
+        errdefer std.debug.print("semantic {s} failed at {s}\n", .{ label, phase });
         service.profile.semantic_construction = approved_policy;
         const selected_command: contracts.workspace.Command = if (validation)
             .{ .program = .{ .validate = .{ .candidate = candidate_ref.? } } }
@@ -2417,6 +2443,7 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
             try std.testing.expectEqual(.observed, prepared.disposition);
             try std.testing.expectEqualStrings(candidate_ref.?.id.bytes, prepared.evidence.?.id.bytes);
         }
+        phase = "capture";
         const captured = try captureSemanticSuccess(&service, a, task_id, validation);
         const attempt_bytes = (try namespace.store.recordBytes(
             scratch,
@@ -2433,6 +2460,7 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
             .{ .roots = &roots, .checkers = &.{} }
         else
             .{ .roots = &.{}, .checkers = &.{kosmos.RuntimeCompiler.checker_identity} };
+        phase = "reopen captured";
         try service.close(a);
         service = try native.tasks.Service(ContextTypes).init(
             a,
@@ -2449,6 +2477,7 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
         var retained = try service.task(scratch, task_id);
         defer retained.deinit();
         try std.testing.expectEqualDeep(attempt.value.profile, retained.value.profile);
+        phase = "resume or cancel";
         if (validation) {
             _ = try service.resumeTask(scratch, "resume-retained-validation", task_id, retained.value.revision);
         } else {
@@ -2465,7 +2494,11 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
             try std.testing.expect(std.mem.indexOf(u8, denied.observation_json.bytes, "SemanticPolicyDenied") != null);
             _ = try service.requestCancel(scratch, "cancel-retained-derivation", task_id, "settle compiler capture before cancellation");
         }
-        var settled = try expectSemanticCaptureSettled(&service, scratch, captured, !validation);
+        phase = "settle";
+        var settled = expectSemanticCaptureSettled(&service, scratch, captured, !validation) catch |err| {
+            std.debug.print("semantic settlement: {s}\n", .{@errorName(err)});
+            return err;
+        };
         defer settled.deinit();
         if (settled.value.disposition != .admitted)
             std.debug.print("{s}: {s}\n", .{ label, settled.value.observation_json.bytes });
@@ -2479,6 +2512,7 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
             candidate_ref = settled.value.evidence.?;
             candidate_ref.?.id.bytes = try scratch.dupe(u8, candidate_ref.?.id.bytes);
         }
+        phase = "retain facts";
         try expectSemanticFactsRetained(&service, scratch, captured, validation);
         try service.close(a);
         service = try native.tasks.Service(ContextTypes).init(
@@ -2491,6 +2525,7 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
             revoked,
         );
         try expectSemanticFactsRetained(&service, scratch, captured, validation);
+        phase = "canonical validation";
         service.profile.semantic_construction = approved_policy;
         try service.validateWorkspace(scratch, task_id);
     }
