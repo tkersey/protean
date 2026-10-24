@@ -2437,6 +2437,14 @@ fn sharedComparison(
     const instrumentation_started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
     const instrumented = try service.workspaceSpecializeWithHooks(a, "shared-instrument", task, program, .{ .control = true, .storage = true });
     const instrumentation_ns = sharedElapsed(instrumentation_started);
+    const previous_roots = service.profile.semantic_construction.?.roots;
+    const roots = [_][32]u8{
+        previous_roots[0],
+        previous_roots[1],
+        kosmos.RuntimeCompiler.approvedRootIdentity(&service.runtime_cache.?.artifact),
+    };
+    service.profile.semantic_construction.?.roots = &roots;
+    defer service.profile.semantic_construction.?.roots = previous_roots;
     const input = try contracts.encodeOwned(@import("workspace_sources.zig").SemanticGuestInput, a, .{ .yields = 0, .seed = 100 });
     defer a.free(input);
     const arms = [_]SharedArm{

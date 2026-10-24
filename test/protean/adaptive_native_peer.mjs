@@ -999,7 +999,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           policyArgs.push(catalogPath);
         }
         const policy = await execute(sourcePeer, policyArgs, {encoding: 'utf8', maxBuffer: 16 << 20});
-        assert.equal(policy.status, 0, policy.stderr);
+        assert.equal(policy.status, 0, policy.error ?? policy.stderr);
         semanticConstruction = JSON.parse(policy.stdout);
         assert.equal(semanticConstruction.roots.length, 1);
         assert.match(semanticConstruction.roots[0], /^[0-9a-f]{64}$/);

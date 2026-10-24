@@ -277,7 +277,8 @@ jobs:
               if [ "$lane" = runtime-outer ] || [ "$lane" = runtime-guest ]; then
                 scenarios=tools-runtime-mobility
                 if [ "$lane" = runtime-guest ]; then scenarios=tools-runtime-guest-mobility; fi
-                node --input-type=module <<'JS'
+              fi
+              node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
           import {execFile} from 'node:child_process';
           import {promisify} from 'node:util';
@@ -323,7 +324,6 @@ jobs:
           await writeFile(`${directory}/runtime-mobility-peer`, bytes, {mode: 0o755});
           console.log(`Authenticated current-run mobility helper: ${artifact.digest}`);
           JS
-              fi
               if [ "$result" -eq 0 ]; then
                 node test/protean/native_runtime.mjs \
                   "$RUNNER_TEMP/protean-qualification/executables/protean" \

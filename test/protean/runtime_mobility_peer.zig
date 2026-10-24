@@ -21,6 +21,7 @@ pub fn main(init: std.process.Init) !void {
         const transport = try native.source_records.encode(a, module);
         try output.interface.writeAll(try std.json.Stringify.valueAlloc(a, .{ .transport = transport }, .{}));
     } else if (std.mem.eql(u8, mode, "specialized-policy")) {
+        const compiler_allocator = init.gpa;
         const kind = args.next() orelse return error.MissingKind;
         const source_path = args.next() orelse return error.MissingSource;
         const text = try std.Io.Dir.cwd().readFileAlloc(init.io, source_path, a, .unlimited);
@@ -28,9 +29,9 @@ pub fn main(init: std.process.Init) !void {
         var built = if (std.mem.eql(u8, kind, "component-recipe")) blk: {
             const catalog_path = args.next() orelse return error.MissingCatalog;
             const catalog = try std.Io.Dir.cwd().readFileAlloc(init.io, catalog_path, a, .unlimited);
-            break :blk try native.program_construction.buildComponent(a, catalog, text);
+            break :blk try native.program_construction.buildComponent(compiler_allocator, catalog, text);
         } else if (std.mem.eql(u8, kind, "mobility"))
-            try native.program_construction.buildExposed(a, text, &.{
+            try native.program_construction.buildExposed(compiler_allocator, text, &.{
                 .{ .effect = 0, .class = .observation },
                 .{ .effect = 1, .class = .input },
                 .{ .effect = 2, .class = .observation },
@@ -38,18 +39,19 @@ pub fn main(init: std.process.Init) !void {
         else
             return error.InvalidKind;
         defer built.deinit();
-        var packaged = try kosmos.Prepared.init(a, built.image);
+        var packaged = try kosmos.Prepared.init(compiler_allocator, built.image);
         defer packaged.deinit();
-        const guest = try horos.data.program_image.Admitted.decode(a, built.image);
+        const guest = try horos.data.program_image.Admitted.decode(compiler_allocator, built.image);
         defer guest.deinit();
-        const bytes = try kosmos.RuntimeCompiler.compile(a, .{
+        const bytes = try kosmos.RuntimeCompiler.compile(compiler_allocator, .{
             .guest = guest,
             .horos_package = packaged.runtime.content.value.manifest.compiler.horos_package,
             .hooks = .{ .control = false, .storage = false },
         });
-        var selected = try kosmos.RuntimeArtifact.init(a, bytes, kosmos.RuntimeCapsule.reference(bytes).digest);
+        defer compiler_allocator.free(bytes);
+        var selected = try kosmos.RuntimeArtifact.init(compiler_allocator, bytes, kosmos.RuntimeCapsule.reference(bytes).digest);
         defer selected.deinit();
-        try kosmos.RuntimeCompiler.validate(a, &selected);
+        try kosmos.RuntimeCompiler.validate(compiler_allocator, &selected);
         try output.interface.print("{{\"roots\":[\"{s}\"],\"checkers\":[\"{s}\"],\"guard\":false}}", .{
             std.fmt.bytesToHex(kosmos.RuntimeCompiler.approvedRootIdentity(&selected), .lower),
             kosmos.RuntimeCompiler.checker_identity,
