@@ -7,7 +7,7 @@ import {once} from 'node:events';
 import {DatabaseSync} from 'node:sqlite';
 import {mkdir, writeFile, readFile, unlink} from 'node:fs/promises';
 import {execFile} from 'node:child_process';
-import {join} from 'node:path';
+import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {ProteanClient} from '../support/stdio-client.mts';
 import {certificates} from '../support/tls.mjs';
@@ -54,6 +54,13 @@ import {workspaceMetrics, armViolations, evaluateCase} from '../../tools/evaluat
   for (const actions of [newReplacement, newReplacement.map(remote)]) {
     assert.deepEqual(armViolations('generic', [...actions, work('pump')]), actions);
   }
+  const observe = work('observe');
+  for (const action of [observe, remote(observe)]) {
+    for (const arm of ['generic', 'specialization', 'pure']) assert.deepEqual(armViolations(arm, [action]), [action]);
+    for (const arm of ['interpretation', 'construction', 'runtime', 'retained']) assert.deepEqual(armViolations(arm, [action]), []);
+  }
+  const inspections = [work('inspect'), remote(work('inspect')), ...placementReads];
+  for (const arm of ['generic', 'specialization', 'interpretation', 'construction']) assert.deepEqual(armViolations(arm, inspections), []);
 }
 import {contract, assertAdaptiveCaptures} from './adaptive_capture_checks.mjs';
 import {runtimeTrace} from './runtime_trace.mjs';
@@ -119,6 +126,54 @@ export function verifyCandidateMetrics(measuredBytes, application) {
   const combined = workspaceMetrics(archive, application);
   assert.equal(combined.validated_candidates, 2);
   assert.equal(combined.unvalidated_candidates, 1);
+}
+export async function verifyEvaluationFailures({directory, taskId, measuredBytes, application}) {
+  const metrics = workspaceMetrics(readArchive(measuredBytes), application);
+  for (const failure of ['success', 'task.submit', 'task.status', 'task.result', 'artifact.read', 'close', 'close-code', 'close-signal', 'export']) {
+    const output = join(directory, 'evaluation-failure-' + failure); await mkdir(output);
+    const config = join(output, 'approved semantic config.json');
+    let closed = false, launch, exported;
+    class FailingClient {
+      constructor(binary, args) { launch = {binary, args}; }
+      child = {pid: process.pid};
+      async initialize() { await mkdir(join(output, 'state')); }
+      async call(method) {
+        if (method === failure) throw new Error('injected ' + failure);
+        if (method === 'describe') return {profile: {id: 'fixture'}};
+        if (method === 'task.submit') return {task_id: taskId};
+        if (method === 'task.status') return {status: 'completed'};
+        if (method === 'task.result' && ['success', 'close', 'close-code', 'close-signal', 'export'].includes(failure)) return {ready: true, outcome: {value: {fixture: true}}};
+        if (method === 'task.result') return {ready: true, outcome: {value_ref: {artifact_id: 'fixture', sha256: 'fixture', bytes: '1'}}};
+        throw new Error('unexpected ' + method);
+      }
+      async close() {
+        closed = true;
+        if (failure === 'close') throw new Error('injected close');
+        return {code: failure === 'close-code' ? 2 : failure === 'close-signal' ? null : 0, signal: failure === 'close-signal' ? 'SIGKILL' : null};
+      }
+    }
+    const report = await evaluateCase({subject: {id: failure, arm: 'pure', config, prompt: 'fixture'}, build: {fixture: true}, output, binary: 'fixture', credential: 'unused', application, seconds: 1}, {
+      Client: FailingClient,
+      runCommand: async (binary, args) => {
+        exported = {binary, args};
+        if (failure === 'export') throw new Error('injected export');
+        await writeFile(args.at(-1), measuredBytes);
+      },
+    });
+    assert(closed);
+    assert.deepEqual(launch, {binary: 'fixture', args: ['--config', config, '--authorize-inference', '--credential-file', resolve('unused'), '--state-dir', join(output, 'state')]});
+    assert.deepEqual(exported, failure === 'task.submit' ? undefined : {binary: 'fixture', args: ['export-checkpoint', '--config', config, '--state-dir', join(output, 'state'), '--task-id', taskId, '--output', join(output, 'task.agnx')]});
+    if (failure === 'success') assert.deepEqual(report.errors, []);
+    else if (failure === 'close-code' || failure === 'close-signal') {
+      assert(report.errors.some(error => error.stage === 'close' && error.message === (failure === 'close-code' ? 'Native process exited with code 2, signal null' : 'Native process exited with code null, signal SIGKILL')));
+    } else assert(report.errors.some(error => error.message === 'injected ' + failure));
+    assert.equal(report.task?.task_id ?? null, failure === 'task.submit' ? null : taskId);
+    assert(report.elapsed_ms >= 0);
+    if (failure === 'task.submit' || failure === 'export') {
+      assert.equal(report.metrics, null); assert.equal(report.arm_violations, null);
+    } else assert.equal(report.metrics.controller.calls, metrics.controller.calls);
+    assert.deepEqual(JSON.parse(await readFile(join(output, 'report.json'), 'utf8')), report);
+  }
 }
 async function within(promise, milliseconds, message) {
   let timer;
@@ -1302,45 +1357,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
             assert.deepEqual(rejected.controller, observed.controller, 'rejected output retains its actual cost observations');
           }
         }
-        for (const failure of ['task.submit', 'task.status', 'task.result', 'artifact.read', 'close', 'close-code', 'close-signal', 'export']) {
-          const output = join(app.data, 'evaluation-failure-' + failure); await mkdir(output);
-          let closed = false;
-          class FailingClient {
-            child = {pid: process.pid};
-            async initialize() { await mkdir(join(output, 'state')); }
-            async call(method) {
-              if (method === failure) throw new Error('injected ' + failure);
-              if (method === 'describe') return {profile: {id: 'fixture'}};
-              if (method === 'task.submit') return {task_id: task.task_id};
-              if (method === 'task.status') return {status: 'completed'};
-              if (method === 'task.result' && ['close', 'close-code', 'close-signal', 'export'].includes(failure)) return {ready: true, outcome: {value: {fixture: true}}};
-              if (method === 'task.result') return {ready: true, outcome: {value_ref: {artifact_id: 'fixture', sha256: 'fixture', bytes: '1'}}};
-              throw new Error('unexpected ' + method);
-            }
-            async close() {
-              closed = true;
-              if (failure === 'close') throw new Error('injected close');
-              return {code: failure === 'close-code' ? 2 : failure === 'close-signal' ? null : 0, signal: failure === 'close-signal' ? 'SIGKILL' : null};
-            }
-          }
-          const report = await evaluateCase({subject: {id: failure, arm: 'pure', config: 'fixture', prompt: 'fixture'}, build: {fixture: true}, output, binary: 'fixture', credential: 'unused', application, seconds: 1}, {
-            Client: FailingClient,
-            runCommand: async (_binary, args) => {
-              if (failure === 'export') throw new Error('injected export');
-              await writeFile(args.at(-1), measuredBytes);
-            },
-          });
-          assert(closed);
-          if (failure === 'close-code' || failure === 'close-signal') {
-            assert(report.errors.some(error => error.stage === 'close' && error.message === (failure === 'close-code' ? 'Native process exited with code 2, signal null' : 'Native process exited with code null, signal SIGKILL')));
-          } else assert(report.errors.some(error => error.message === 'injected ' + failure));
-          assert.equal(report.task?.task_id ?? null, failure === 'task.submit' ? null : task.task_id);
-          assert(report.elapsed_ms >= 0);
-          if (failure === 'task.submit' || failure === 'export') {
-            assert.equal(report.metrics, null); assert.equal(report.arm_violations, null);
-          } else assert.equal(report.metrics.controller.calls, metrics.controller.calls);
-          assert.deepEqual(JSON.parse(await readFile(join(output, 'report.json'), 'utf8')), report);
-        }
+        await verifyEvaluationFailures({directory: app.data, taskId: task.task_id, measuredBytes, application});
       }
     }
     return {tool_construction: toolRuns};

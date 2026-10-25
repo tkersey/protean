@@ -4527,19 +4527,49 @@ const ReconstructionModel = struct {
     }
 };
 
+const ControllerOverlayTrace = struct {
+    scans: usize = 0,
+    rows: usize = 0,
+    extern "c" fn sqlite3_db_handle(?*anyopaque) ?*anyopaque;
+    extern "c" fn sqlite3_sql(?*anyopaque) ?[*:0]const u8;
+    extern "c" fn sqlite3_trace_v2(?*anyopaque, c_uint, ?*const fn (c_uint, ?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) c_int, ?*anyopaque) c_int;
+
+    fn observe(kind: c_uint, context: ?*anyopaque, statement: ?*anyopaque, sql: ?*anyopaque) callconv(.c) c_int {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const text = if (kind == 1)
+            std.mem.span(@as([*:0]const u8, @ptrCast(sql.?)))
+        else
+            std.mem.span(sqlite3_sql(statement) orelse return 0);
+        if (std.mem.eql(u8, text, "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq<=? ORDER BY e.seq")) {
+            if (kind == 1) self.scans += 1 else if (kind == 4) self.rows += 1;
+        }
+        return 0;
+    }
+};
+
 fn reconstructionRuntimeAction(service: anytype, a: std.mem.Allocator) !void {
     const task = (try service.submit(a, "runtime-controller-task", .{ .items = &.{ 2, 3 } })).receipt.task;
+    var statement = try service.namespace.store.database.prepare("SELECT 1", &.{});
+    const database = ControllerOverlayTrace.sqlite3_db_handle(statement.handle);
+    statement.deinit();
     var requested: ?@FieldType(contracts.workspace.Work, "realize_controller") = null;
     var operator_switched = false;
     var switched = false;
     var calls: usize = 0;
+    var live_offers: usize = 0;
     for (0..256) |_| {
         var before = try service.task(a, task);
         defer before.deinit();
         if (before.value.terminal()) {
             if (!operator_switched or !switched) return error.ControllerRealizationNotObserved;
             try std.testing.expectEqual(@as(usize, 2), calls);
+            try std.testing.expect(live_offers > 0);
+            var trace: ControllerOverlayTrace = .{};
+            try std.testing.expectEqual(@as(c_int, 0), ControllerOverlayTrace.sqlite3_trace_v2(database, 1 | 4, ControllerOverlayTrace.observe, &trace));
+            defer std.debug.assert(ControllerOverlayTrace.sqlite3_trace_v2(database, 0, null, null) == 0);
             try service.validateWorkspace(a, task);
+            try std.testing.expect(trace.scans > 0);
+            try std.testing.expect(trace.rows > 0);
             return;
         }
         if (!operator_switched and before.value.controller_interaction != null) {
@@ -4597,7 +4627,12 @@ fn reconstructionRuntimeAction(service: anytype, a: std.mem.Allocator) !void {
                 continue;
             }
         }
-        const progress = try service.pump(a);
+        var trace: ControllerOverlayTrace = .{};
+        const progress = progress: {
+            try std.testing.expectEqual(@as(c_int, 0), ControllerOverlayTrace.sqlite3_trace_v2(database, 1 | 4, ControllerOverlayTrace.observe, &trace));
+            defer std.debug.assert(ControllerOverlayTrace.sqlite3_trace_v2(database, 0, null, null) == 0);
+            break :progress try service.pump(a);
+        };
         if (progress == .work) {
             if (!progress.work.entry.declaration.inference) {
                 try service.acquire(a, progress.work, &.{});
@@ -4627,6 +4662,16 @@ fn reconstructionRuntimeAction(service: anytype, a: std.mem.Allocator) !void {
         }
         var after = try service.task(a, task);
         defer after.deinit();
+        if (before.value.realization_revision != 0 and after.value.controller_interaction != null and
+            !std.meta.eql(before.value.controller_interaction, after.value.controller_interaction))
+        {
+            live_offers += 1;
+            std.debug.print("controller live overlay: events={d} history_scans={d} history_rows={d}\n", .{
+                before.value.event_high, trace.scans, trace.rows,
+            });
+            try std.testing.expectEqual(@as(usize, 0), trace.scans);
+            try std.testing.expectEqual(@as(usize, 0), trace.rows);
+        }
         if (after.value.realization_revision != before.value.realization_revision) {
             try std.testing.expect(!switched);
             try std.testing.expectEqual(before.value.realization_revision + 1, after.value.realization_revision);

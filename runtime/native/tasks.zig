@@ -3043,7 +3043,11 @@ pub fn Service(comptime Types: type) type {
             try json.put(a, &control, "task", json.string(try a.dupe(u8, &std.fmt.bytesToHex(parent.id, .lower))));
             try json.put(a, &control, "controller_epoch", try json.number(a, epoch));
             try json.put(a, &control, "expected_handoff_identity", json.string(try a.dupe(u8, &std.fmt.bytesToHex(handoff, .lower))));
-            const runtime_cut = if (parent.realization_revision != 0 or
+            const runtime_cut: ControllerRuntimeCut = if (event_cut == parent.event_high and
+                epoch == parent.controller_epoch and
+                std.meta.eql(parent.controller, @as(?state.Digest, binding_id)))
+                .{ .runtime = parent.controller_runtime, .realization_revision = parent.realization_revision }
+            else if (parent.realization_revision != 0 or
                 !std.meta.eql(parent.controller, @as(?state.Digest, binding_id)))
                 try self.controllerRuntimeAt(a, parent, event_cut)
             else
@@ -7832,6 +7836,16 @@ pub fn Service(comptime Types: type) type {
                 var observed = json.object();
                 try json.put(a, &observed, "source", try values.toJson(wc.GuestViewSelection, a, observer.selection.source));
                 try json.put(a, &observed, "policy", try values.toJson(wc.ObserverPolicy, a, observer.selection.policy));
+                try json.put(a, &observed, "previous", try values.toJson(
+                    ?wc.Ref,
+                    a,
+                    observer.selection.previous,
+                ));
+                try json.put(a, &observed, "successor", try values.toJson(
+                    ?wc.Ref,
+                    a,
+                    if (observer.successor) |id| try wp.reference(a, .work, id) else null,
+                ));
                 try json.put(a, &observed, "consumed_revision", try values.toJson(?u64, a, observer.consumed_revision));
                 try json.put(a, &observed, "gap_first", try values.toJson(?u64, a, observer.gap_first));
                 try json.put(a, &observed, "gap_last", try values.toJson(?u64, a, observer.gap_last));

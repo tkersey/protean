@@ -164,7 +164,10 @@ accumulator and an explicit policy. Its input is the typed product
 `[[ObserverEnvelope, View], Accumulator]`; its result is `[Accumulator, Result]`.
 The envelope binds the actual publication, cursor/gaps and control observation.
 A successor fold names its
-`previous` work; ordinary work state retains progress and results. Policy chooses
+`previous` work; ordinary work state retains progress and results. Inspection
+exposes `observer.previous` and `observer.successor` as work references. Follow
+successor links to the current fold and use its inspected revisions with
+`work.stop_observing` to end that subscription. Policy chooses
 `sampled` or `lossless` delivery, cadence, `publication` or `one_guest_step`
 granularity, and explicit or owner-scheduled continuation. Sampling reports gaps.
 Lossless delivery blocks source progression with `observation_blocked` until the

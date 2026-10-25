@@ -49,13 +49,14 @@ export function armViolations(arm, actions) {
   return actions.filter(action => {
     if (arm === 'ordinary') return ['program', 'work', 'context', 'placement'].includes(action.name);
     const {name, command} = workspaceAction(action);
-    const guestView = name === 'context' && command?.tag === 'materialize' && command.value?.input?.tag === 'guest_view';
+    const guestView = (name === 'context' && command?.tag === 'materialize' && command.value?.input?.tag === 'guest_view') ||
+      (name === 'work' && command?.tag === 'observe');
     const replacement = name === 'work' && (['realize', 'realize_controller', 'guard'].includes(command?.tag) ||
       (command?.tag === 'start' && command.value?.runtime?.tag === 'selected'));
     const candidate = name === 'program' && ['derive', 'validate'].includes(command?.tag);
     if (arm === 'interpretation') return replacement || candidate || (name === 'program' && command?.tag === 'specialize');
     if (arm === 'specialization') return candidate || guestView ||
-      (name === 'work' && ['guard', 'observe'].includes(command?.tag)) ||
+      (name === 'work' && command?.tag === 'guard') ||
       (name === 'program' && command?.tag === 'inspect' && command.value?.target?.tag === 'semantic_source') ||
       (name === 'context' && command?.tag === 'materialize' && command.value?.input?.tag === 'semantic_source');
     if (arm === 'generic') return replacement ||
@@ -315,7 +316,7 @@ export async function evaluateCase({subject, build, output, binary, credential, 
   if (task) {
     const archivePath = join(output, 'task.agnx');
     try {
-      await runCommand(binary, ['export-checkpoint', '--state-dir', state, '--task-id', task.task_id, '--output', archivePath]);
+      await runCommand(binary, ['export-checkpoint', '--config', subject.config, '--state-dir', state, '--task-id', task.task_id, '--output', archivePath]);
       archive = archivePath;
       metrics = workspaceMetrics(readArchive(await readFile(archivePath)), application);
     } catch (error) { record('measurements', error); }

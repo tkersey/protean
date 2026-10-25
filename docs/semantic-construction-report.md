@@ -11,6 +11,10 @@ Starting a continuation publishes both records atomically, without changing the
 observed source work. Earlier fold snapshots remain immutable historical
 observations. Archive admission reconstructs the head and successor relationships
 from publications before trusting the current records.
+Work observations expose predecessor and successor work references, so a caller
+can follow its subscription to the current fold and stop it using the returned
+revisions. The same projection serves inspection, collection, wait and controller
+views; historical snapshots retain the links known at their publication.
 
 Every Work write normalizes its outer cursor from the last capsule identity.
 Null and repeated capsules preserve the cursor; a changed capsule advances it.
@@ -47,6 +51,14 @@ while admitting an earlier selection after later execution progress. This checks
 archive consistency; it does not authenticate an arbitrarily rewritten unsigned
 history. Native state format 19 requires the publication evidence, while older
 namespaces retain their compatible executables.
+
+Live controller offers use the task's retained runtime and realization revision
+when their event cut, controller binding and epoch are current. Earlier cuts
+still reconstruct history, and archive validation independently checks the
+current runtime against its publications. In the existing controller witness,
+one offer after realization at nine retained events previously scanned and
+decoded all nine events; it now performs zero such scans and decodes. This is an
+operation-count result, not an end-to-end latency measurement.
 
 ## Construction and authority
 
@@ -122,6 +134,9 @@ The [evaluation runner](../tools/evaluation/README.md) supplies matched real-mod
 comparison conditions and retains unsuccessful work. Its semantic preflight
 prepares nine cases without inference. Independent model discovery and efficacy
 remain unmeasured.
+Archive export receives the run's approved configuration, preserving current
+semantic-policy checks when measuring retained candidate work. Arm classification
+treats observer creation as guest-view use, including placement-routed controls.
 
 ## Integrated inputs and qualification
 
@@ -180,7 +195,7 @@ applies to this entire mapping.
 
 The comparison bases are Horos `ae8ace5`, Kosmos `6c70d24`, and accepted Protean
 `2e40ce4`; measured sources are `f60b116`, `c6de0fa`, and the Protean
-state-format-19 successor of `11f92a6` respectively.
+observer/control and evaluation successor of `44eea68` respectively.
 Added/deleted byte counts include newlines in dedicated test files and inline
 test blocks. Helpers outside those blocks are excluded from this test-only
 measure; the complete Zig totals below include it. Git diff counts can include
@@ -190,14 +205,14 @@ moved lines as additions and deletions.
 |---|---:|---:|---:|
 | Horos | 14 | 133,296 | 213 |
 | Kosmos | 11 | 142,798 | 1,104 |
-| Protean | 24 | 516,190 | 144,130 |
-| Total | 49 | 792,284 | 145,447 |
+| Protean | 24 | 523,678 | 144,388 |
+| Total | 49 | 799,772 | 145,705 |
 
 Complete changed Zig source adds/deletes 393,020/67,052 bytes in Horos,
-326,159/20,796 in Kosmos, and 869,765/198,397 in Protean. No test modules,
+326,159/20,796 in Kosmos, and 873,824/195,778 in Protean. No test modules,
 directories, executables, CI lanes or checked-in trace banks were added. The
 largest test-file extension is Protean's existing `workspace_runtime.zig`:
-365,600 added and 95,052 deleted bytes. Its two generated productions are reused
+366,294 added and 92,433 deleted bytes. Its two generated productions are reused
 by activation, five-arm measurements, recovery and mobility. Historical
 independent byte fixtures remain unchanged.
 

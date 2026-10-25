@@ -7115,6 +7115,7 @@ fn scheduledObserverWitness(
                 var stable = try service.workspaceWork(a, task, id);
                 defer stable.deinit();
                 try std.testing.expectEqualDeep(work.value.result_value, stable.value.result_value);
+                try stopDiscoveredObserver(service, a, stable.value);
                 return;
             }
         }
@@ -7350,7 +7351,76 @@ fn observerSuccessor(
         try std.testing.expectEqual(null, found);
         found = id;
     }
-    return found;
+    const reply = try service.workspaceCommand(a, "observer-lineage-inspect", task, .{
+        .work = .{ .inspect = .{ .work = try workspaceRef(a, .work, previous) } },
+    });
+    var observed = try native.json.parse(a, reply.observation_json.bytes, .{});
+    defer observed.deinit();
+    const observer = observed.value.object.get("observer").?;
+    const successor = try native.values.fromJson(
+        ?contracts.workspace.Ref,
+        a,
+        observer.object.get("successor") orelse return error.MissingObserverSuccessor,
+    );
+    const projected = if (successor) |ref| try nativeIdentity(ref) else null;
+    try std.testing.expectEqual(found, projected);
+    return projected;
+}
+
+fn stopDiscoveredObserver(service: anytype, a: std.mem.Allocator, work: native.workspace.Work) !void {
+    var before = try service.workspaceWork(a, work.task, work.observer.?.source_work);
+    defer before.deinit();
+    var owner_before = try service.task(a, work.task);
+    defer owner_before.deinit();
+    const reply = try service.workspaceCommand(a, "observer-head-inspect", work.task, .{
+        .work = .{ .inspect = .{ .work = try workspaceRef(a, .work, work.id) } },
+    });
+    var observed = try native.json.parse(a, reply.observation_json.bytes, .{});
+    defer observed.deinit();
+    const observer = observed.value.object.get("observer").?;
+    const previous = try native.values.fromJson(
+        ?contracts.workspace.Ref,
+        a,
+        observer.object.get("previous") orelse return error.MissingObserverPredecessor,
+    );
+    try std.testing.expectEqualDeep(work.observer.?.selection.previous, previous);
+    try std.testing.expect(!observer.object.get("stopped").?.bool);
+    _ = try service.workspaceCommand(a, "stop-discovered-observer", work.task, .{
+        .work = .{ .stop_observing = .{
+            .work = try native.values.fromJson(
+                contracts.workspace.Ref,
+                a,
+                observed.value.object.get("work").?,
+            ),
+            .execution_revision = try native.json.numberInteger(
+                u64,
+                observed.value.object.get("execution_revision").?.number_string,
+            ),
+            .control_revision = try native.json.numberInteger(
+                u64,
+                observed.value.object.get("control_revision").?.number_string,
+            ),
+        } },
+    });
+    var stopped = try service.workspaceWork(a, work.task, work.id);
+    defer stopped.deinit();
+    try std.testing.expect(stopped.value.observer.?.stopped);
+    var after = try service.workspaceWork(a, work.task, work.observer.?.source_work);
+    defer after.deinit();
+    try std.testing.expectEqualDeep(before.value, after.value);
+    var owner_after = try service.task(a, work.task);
+    defer owner_after.deinit();
+    try std.testing.expectEqual(
+        owner_before.value.observer_heads.items.len - 1,
+        owner_after.value.observer_heads.items.len,
+    );
+    for (owner_after.value.observer_heads.items) |head| {
+        try std.testing.expect(!std.meta.eql(head, work.id));
+        const retained = for (owner_before.value.observer_heads.items) |prior| {
+            if (std.meta.eql(prior, head)) break true;
+        } else false;
+        try std.testing.expect(retained);
+    }
 }
 
 fn observerCompleted(service: anytype, a: std.mem.Allocator, task: [16]u8, id: [32]u8) !void {
