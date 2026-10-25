@@ -8,9 +8,13 @@ the existing workspace owners. The public contract is
 Current observer ownership is part of the existing Task and Work records. The
 Task names current subscription heads; each predecessor names its successor.
 Starting a continuation publishes both records atomically, without changing the
-observed source work. Earlier fold snapshots remain immutable historical
+observed source work. The continuation owner requires local custody of its
+predecessor before updating it. Earlier fold snapshots remain immutable historical
 observations. Archive admission reconstructs the head and successor relationships
 from publications before trusting the current records.
+Completed predecessor snapshots also reconstruct the canonical observation used
+to check both sides of succession. This preserves archive closure when the
+scheduler completed the predecessor without an explicit operation receipt.
 Work observations expose predecessor and successor work references, so a caller
 can follow its subscription to the current fold and stop it using the returned
 revisions. The same projection serves inspection, collection, wait and controller
@@ -24,8 +28,13 @@ cursors independently from capsule publications. Live inspection, collection,
 wait and controller views share a request-local index of active lossless heads.
 The index records a common consumed revision per source and checkpoint level;
 unconsumed or differing revisions block advancement. Historical projections
-explicitly use independently replayed indexes, including at the current watermark.
-Older source snapshots retain their own cursor watermark.
+explicitly use independently replayed history, including at the current watermark.
+One validation owns one compact timeline per task: consumed-revision requirements
+are indexed by source and checkpoint level, and outer cursors by source. A read
+selects observer membership at its own event cut and the source cursor at the
+snapshot's watermark. Event payloads are decoded and released during one ordered
+scan; historical queries retain no decoded event prefixes. Standalone historical
+reads scan only through their requested cut.
 
 In the existing native observer fixture, source advancement after 4, 8 and 16
 retained folds reads 5 Work records in each case, compared with 28, 49 and 78
@@ -36,14 +45,29 @@ Live inspection, collection and wait after 4, 8 and 16 folds now scan zero event
 rows, compared with 18, 30 and 54 rows per request before this repair. Stopped
 subscriptions, simultaneous consumed revisions, and both checkpoint levels retain
 their blocking behavior. Archive validation shares one snapshot-validation owner
-across provenance, captured projections and record bodies. In the existing history
-fixture, current-prefix query counts stay at three for one, two and four saved
-replies, compared with four, five and seven before the repair. The three include
-independent controller checks; distinct historical cuts still require their own
-replay. These counts do not claim constant total archive cost or lower peak memory.
-Historical indexes live only for one validation invocation and retain memory
-proportional to their selected event prefixes. No facts survive into another
-validation invocation, and no persistent cache is added.
+across provenance, captured projections and record bodies. Its observer index
+retains scalar changes proportional to publications and works, shared across
+distinct read cuts. Independent publication and controller checks remain in the
+archive verifier. The index lives only for one validation invocation; no facts
+survive into another invocation and no persistent cache is added.
+
+The existing archive fixture captures 4, 8 and 16 additional reads of unchanged
+work, with a real observer active and then stopped. One native macOS Safe run of
+each implementation gives the following comparison against `0ed1b2c`:
+
+| Additional reads | Retained events | Observer scans before/after | Decoded observer rows before/after | Validation allocation peak before/after |
+|---|---:|---:|---:|---:|
+| 4 | 363 | 9 / 1 | 2,772 / 363 | 152,156,179 / 57,772,139 bytes |
+| 8 | 387 | 13 / 1 | 4,304 / 387 | 261,255,281 / 54,147,181 bytes |
+| 16 | 436 | 21 / 1 | 7,665 / 436 | 149,896,099 / 34,098,705 bytes |
+
+Allocation peaks count requested bytes above live allocation at validation entry,
+not process RSS. Arena growth makes these whole-validation peaks nonmonotonic.
+The fixture has four earlier replies, so the total reply counts are 8, 12 and 20.
+Independent archive scans still decode 52,325, 52,373 and 52,859 rows in both
+implementations. These measurements establish reduced observer-history work and
+allocation for this fixture, without claiming constant total archive cost or an
+end-to-end speedup.
 
 Historical semantic descriptions retain the policy facts used to render their
 pages. Later policy changes affect new descriptions and execution eligibility,
@@ -59,6 +83,9 @@ retained by these commitments. Archive validation checks their continuity and
 derives read-cut ordinals from the publications and the final task. A retained
 suffix reconciles its omitted prefix against that endpoint. Realization commands
 and receipts must match the resulting cut, historical epoch, and realization.
+Captured construction attempts supply their read cuts to the same ordered pass.
+Matching an attempt to its frozen input is insufficient without the corresponding
+root ordinal at that exact watermark.
 The native witness rejects a coherently rehashed command, receipt, and read cut
 while admitting an earlier selection after later execution progress. This checks
 archive consistency; it does not authenticate an arbitrarily rewritten unsigned
@@ -208,7 +235,7 @@ applies to this entire mapping.
 
 The comparison bases are Horos `ae8ace5`, Kosmos `6c70d24`, and accepted Protean
 `2e40ce4`; measured sources are `f60b116`, `c6de0fa`, and the Protean
-observer history-scope successor of `2d28d15` respectively.
+observer custody and temporal-history successor of `0ed1b2c` respectively.
 Added/deleted byte counts include newlines in dedicated test files and inline
 test blocks. Helpers outside those blocks are excluded from this test-only
 measure; the complete Zig totals below include it. Git diff counts can include
@@ -218,14 +245,14 @@ moved lines as additions and deletions.
 |---|---:|---:|---:|
 | Horos | 14 | 133,296 | 213 |
 | Kosmos | 11 | 142,798 | 1,104 |
-| Protean | 24 | 522,092 | 137,118 |
-| Total | 49 | 798,186 | 138,435 |
+| Protean | 24 | 570,148 | 164,015 |
+| Total | 49 | 846,242 | 165,332 |
 
 Complete changed Zig source adds/deletes 393,020/67,052 bytes in Horos,
-326,159/20,796 in Kosmos, and 868,979/181,689 in Protean. No test modules,
+326,159/20,796 in Kosmos, and 927,972/208,238 in Protean. No test modules,
 directories, executables, CI lanes or checked-in trace banks were added. The
 largest test-file extension is Protean's existing `workspace_runtime.zig`:
-361,659 added and 85,098 deleted bytes. Its two generated productions are reused
+402,242 added and 111,958 deleted bytes. Its two generated productions are reused
 by activation, five-arm measurements, recovery and mobility. Historical
 independent byte fixtures remain unchanged.
 

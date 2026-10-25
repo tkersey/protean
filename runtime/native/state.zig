@@ -393,12 +393,16 @@ pub const RootPublication = struct {
 pub const RootHistory = struct {
     advances: u64 = 0,
     origin: ?u64,
+    event_watermark: u64,
     cut: ?RootCut = null,
     advance_revision: u64 = 0,
     previous_revision: u64 = 0,
 
     pub fn init(task: Task) RootHistory {
-        return .{ .origin = if (task.event_floor == 1) 0 else null };
+        return .{
+            .origin = if (task.event_floor == 1) 0 else null,
+            .event_watermark = task.event_floor -| 1,
+        };
     }
 
     fn observeRevision(self: *RootHistory, execution_revision: u64) !void {
@@ -413,13 +417,19 @@ pub const RootHistory = struct {
         self.cut = cut;
     }
 
+    pub fn observeRead(self: *RootHistory, read: ControllerReadCut) !void {
+        if (read.event_watermark != self.event_watermark) return error.InvalidArchive;
+        try self.observeRevision(read.execution_revision);
+    }
+
     pub fn observe(self: *RootHistory, event: Event) !void {
+        if (event.seq != (std.math.add(u64, self.event_watermark, 1) catch
+            return error.InvalidArchive)) return error.InvalidArchive;
         const advances = event.kind == .execution or event.kind == .controller;
         if (advances != (event.root_publication != null)) return error.InvalidArchive;
         if (event.controller_read) |read| {
-            if (event.seq == 0 or read.event_watermark != event.seq - 1 or advances)
-                return error.InvalidArchive;
-            try self.observeRevision(read.execution_revision);
+            if (advances) return error.InvalidArchive;
+            try self.observeRead(read);
         }
         if (event.root_publication) |publication| {
             if (event.revision <= self.previous_revision) return error.InvalidArchive;
@@ -446,9 +456,11 @@ pub const RootHistory = struct {
             else => return error.InvalidArchive,
         };
         self.previous_revision = event.revision;
+        self.event_watermark = event.seq;
     }
 
     pub fn finish(self: *RootHistory, task: Task) !void {
+        if (self.event_watermark != task.event_high) return error.InvalidArchive;
         try self.observeRevision(task.execution_revision);
         if (task.event_floor == 0 or self.origin.? > task.event_floor - 1)
             return error.InvalidArchive;

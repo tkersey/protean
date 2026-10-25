@@ -7804,9 +7804,11 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn renderWorkspaceWorkObservation(self: *Self, a: std.mem.Allocator, value: workspace.Work, pending: ?occurrence.Occurrence, observed_at: u64) !json.Value {
-            var observers = HistoricalObservers.init(a, value.task, observed_at);
+            var observers = HistoricalObservers.init(self.allocator, value.task, observed_at);
             defer observers.deinit();
-            return self.renderWorkspaceWorkObservationIn(a, value, pending, observed_at, .{ .historical = &observers });
+            return self.renderWorkspaceWorkObservationIn(a, value, pending, observed_at, .{
+                .historical = .{ .index = &observers, .watermark = observed_at },
+            });
         }
 
         fn renderWorkspaceWorkObservationIn(self: *Self, a: std.mem.Allocator, value: workspace.Work, pending: ?occurrence.Occurrence, observed_at: u64, observers: WorkObservers) !json.Value {
@@ -9986,8 +9988,45 @@ pub fn Service(comptime Types: type) type {
             }
         }
 
+        fn capturedControllerReads(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            records: []const state.ArchiveRecord,
+        ) ![]state.ControllerReadCut {
+            var captured_reads: std.ArrayList(state.ControllerReadCut) = .empty;
+            errdefer captured_reads.deinit(a);
+            for (records) |row| {
+                if (row.kind != .attempt) continue;
+                var attempt = try self.record(
+                    state.Attempt,
+                    self.allocator,
+                    "attempt",
+                    row.id,
+                    task_id,
+                );
+                defer attempt.deinit();
+                if (!std.meta.eql(attempt.value.task, task_id) or
+                    !std.meta.eql(attempt.value.id, row.id)) return error.InvalidArchive;
+                if (attempt.value.controller_read) |read| try captured_reads.append(a, read);
+            }
+            std.mem.sort(state.ControllerReadCut, captured_reads.items, {}, struct {
+                fn less(
+                    _: void,
+                    left: state.ControllerReadCut,
+                    right: state.ControllerReadCut,
+                ) bool {
+                    return left.event_watermark < right.event_watermark;
+                }
+            }.less);
+            return captured_reads.toOwnedSlice(a);
+        }
+
         fn validateWorkspacePublications(self: *Self, a: std.mem.Allocator, parent: state.Task, records: []const state.ArchiveRecord, checked: *SnapshotValidation) !void {
             var root_history: state.RootHistory = .init(parent);
+            const captured_reads = try self.capturedControllerReads(a, parent.id, records);
+            defer a.free(captured_reads);
+            var captured_read: usize = 0;
             var prefix: @import("workspace_observers.zig").PublicationPrefix = .init(a);
             defer prefix.deinit();
             var successor_ids: std.AutoHashMap(state.Digest, state.Digest) = .init(a);
@@ -10015,6 +10054,12 @@ pub fn Service(comptime Types: type) type {
                 var saved = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
                 defer saved.deinit();
                 const event_value = saved.value;
+                while (captured_read < captured_reads.len and
+                    captured_reads[captured_read].event_watermark < event_value.seq)
+                {
+                    try root_history.observeRead(captured_reads[captured_read]);
+                    captured_read += 1;
+                }
                 try root_history.observe(event_value);
                 errdefer std.debug.print("workspace publication: {s} at {d}\n", .{ @tagName(event_value.kind), event_value.seq });
                 var command: ?contracts.Decoded(workspace.PublicationCommand) = null;
@@ -10144,6 +10189,7 @@ pub fn Service(comptime Types: type) type {
                 const observer = latest.publication.observer orelse return error.InvalidArchive;
                 if (observer.stopped or successor_ids.contains(id)) return error.InvalidArchive;
             }
+            for (captured_reads[captured_read..]) |read| try root_history.observeRead(read);
             try root_history.finish(parent);
         }
 
@@ -12707,7 +12753,7 @@ pub fn Service(comptime Types: type) type {
             const a = arena.allocator();
             var checked: SnapshotValidation = .{
                 .allocator = a,
-                .observer_successors = .init(a, parent.id),
+                .observer_successors = .init(self.allocator, parent.id),
                 .semantic_sources = true,
             };
             defer checked.deinit();
@@ -13592,12 +13638,15 @@ pub fn Service(comptime Types: type) type {
             const publications = event_value.workspace_publications.items;
             if (publications.len != 2 or !std.meta.eql(publications[1].work, item.work) or
                 !std.meta.eql(try wp.identity(previous, .work), item.work)) return error.InvalidArchive;
-            const reference = try self.store().objectReference(before.observation, null);
+            const reference = observer.previous orelse return error.InvalidArchive;
             const bytes = try self.store().object(a, reference, null);
             defer a.free(bytes);
-            var snapshot = try contracts.decodeOwned(workspace.WorkObservation, a, bytes);
-            defer snapshot.deinit();
-            const predecessor = snapshot.value.work;
+            var retained = try contracts.decodeOwned(workspace.Work, a, bytes);
+            defer retained.deinit();
+            const predecessor = retained.value;
+            var snapshot: workspace.WorkObservation = .{ .work = predecessor, .occurrence = null };
+            if (!try samePublication(a, before, try workPublication(a, snapshot)))
+                return error.InvalidArchive;
             if (predecessor.observer == null or predecessor.observer.?.successor != null or
                 predecessor.outcome_kind != .completed or predecessor.cancellation != null)
                 return error.InvalidArchive;
@@ -13606,10 +13655,10 @@ pub fn Service(comptime Types: type) type {
             const previous_reference: state.Reference = .{ .digest = storage.digest(previous_bytes), .bytes = previous_bytes.len };
             if (!std.meta.eql(observer.previous, @as(?state.Reference, previous_reference)))
                 return error.InvalidArchive;
-            snapshot.value.work.observer.?.successor = publications[0].work;
-            snapshot.value.work.control_revision = try std.math.add(u64, predecessor.control_revision, 1);
-            snapshot.value.work.event_watermark = event_value.seq;
-            if (!try samePublication(a, item, try workPublication(a, snapshot.value)))
+            snapshot.work.observer.?.successor = publications[0].work;
+            snapshot.work.control_revision = try std.math.add(u64, predecessor.control_revision, 1);
+            snapshot.work.event_watermark = event_value.seq;
+            if (!try samePublication(a, item, try workPublication(a, snapshot)))
                 return error.InvalidArchive;
             return true;
         }
@@ -14043,7 +14092,7 @@ pub fn Service(comptime Types: type) type {
 
         const WorkObservers = union(enum) {
             current: *CurrentObservers,
-            historical: *HistoricalObservers,
+            historical: HistoricalRead,
 
             fn blocked(observers: WorkObservers, service: *Self, source: workspace.Work, observed_at: u64) !bool {
                 switch (observers) {
@@ -14113,9 +14162,8 @@ pub fn Service(comptime Types: type) type {
         };
 
         const ObserverHistories = struct {
-            const Key = struct { task: state.TaskId, watermark: u64 };
             allocator: std.mem.Allocator,
-            entries: std.AutoHashMapUnmanaged(Key, *HistoricalObservers) = .empty,
+            entries: std.AutoHashMapUnmanaged(state.TaskId, *HistoricalObservers) = .empty,
 
             fn deinit(histories: *ObserverHistories) void {
                 const a = histories.allocator;
@@ -14130,86 +14178,114 @@ pub fn Service(comptime Types: type) type {
             fn validateCursor(histories: *ObserverHistories, service: *Self, a: std.mem.Allocator, work: workspace.Work) !void {
                 var parent = try service.task(a, work.task);
                 defer parent.deinit();
-                const index = try histories.get(work.task, parent.value.event_high);
-                if (work.event_watermark > index.watermark) return error.InvalidArchive;
+                const read = try histories.get(work.task, parent.value.event_high);
+                const index = read.index;
                 try index.load(service);
-                if (!std.meta.eql(work.outer_cursor, index.prefix.outerCursorAt(work.id, work.event_watermark)))
+                if (work.event_watermark > index.watermark) return error.InvalidArchive;
+                const cursor = index.history.outerCursorAt(work.id, work.event_watermark);
+                if (!std.meta.eql(work.outer_cursor, cursor))
                     return error.InvalidArchive;
             }
 
-            fn get(histories: *ObserverHistories, task_id: state.TaskId, watermark: u64) !*HistoricalObservers {
+            fn get(
+                histories: *ObserverHistories,
+                task_id: state.TaskId,
+                watermark: u64,
+            ) !HistoricalRead {
                 const a = histories.allocator;
-                const key: Key = .{ .task = task_id, .watermark = watermark };
-                if (histories.entries.get(key)) |index| return index;
+                if (histories.entries.get(task_id)) |index|
+                    return .{ .index = index, .watermark = watermark };
                 const index = try a.create(HistoricalObservers);
                 errdefer a.destroy(index);
-                index.* = .init(a, task_id, watermark);
-                try histories.entries.put(a, key, index);
-                return index;
+                index.* = .init(a, task_id, std.math.maxInt(u64));
+                try histories.entries.put(a, task_id, index);
+                return .{ .index = index, .watermark = watermark };
+            }
+        };
+
+        const HistoricalRead = struct {
+            index: *HistoricalObservers,
+            watermark: u64,
+
+            fn blocked(read: HistoricalRead, service: *Self, source: workspace.Work) !bool {
+                const index = read.index;
+                if (!std.meta.eql(source.task, index.task) or
+                    source.event_watermark > read.watermark)
+                    return error.InvalidArchive;
+                try index.prepare(service);
+                if (read.watermark > index.watermark) return error.InvalidArchive;
+                if (!index.observers_present.?) return false;
+                try index.load(service);
+                return index.history.blocked(
+                    source.id,
+                    source.execution_revision,
+                    source.event_watermark,
+                    read.watermark,
+                    if (source.outer_operation) |pending|
+                        pending.capsule
+                    else
+                        source.runtime_capsule,
+                );
             }
         };
 
         const HistoricalObservers = struct {
+            const History = @import("workspace_observers.zig").PublicationHistory;
             allocator: std.mem.Allocator,
             task: state.TaskId,
             watermark: u64,
             loaded: bool = false,
             observers_present: ?bool = null,
-            prefix: @import("workspace_observers.zig").PublicationPrefix,
-            events: std.ArrayList(contracts.Decoded(state.Event)) = .empty,
+            history: History,
 
             fn init(a: std.mem.Allocator, task_id: state.TaskId, watermark: u64) HistoricalObservers {
-                return .{ .allocator = a, .task = task_id, .watermark = watermark, .prefix = .init(a) };
+                return .{
+                    .allocator = a,
+                    .task = task_id,
+                    .watermark = watermark,
+                    .history = .init(a),
+                };
             }
 
             fn deinit(index: *HistoricalObservers) void {
-                index.prefix.deinit();
-                for (index.events.items) |*event_value| event_value.deinit();
-                index.events.deinit(index.allocator);
+                index.history.deinit();
             }
 
             fn prepare(index: *HistoricalObservers, service: *Self) !void {
                 if (index.observers_present != null) return;
                 var parent = try service.task(index.allocator, index.task);
                 defer parent.deinit();
-                if (index.watermark > parent.value.event_high) return error.InvalidArchive;
+                index.watermark = @min(index.watermark, parent.value.event_high);
                 index.observers_present = parent.value.observers_present;
             }
 
             fn load(index: *HistoricalObservers, service: *Self) !void {
                 if (index.loaded) return;
                 try index.prepare(service);
-                const a = index.allocator;
+                var history = History.init(index.allocator);
+                errdefer history.deinit();
+                var builder = History.Builder.init(service.allocator, &history);
+                defer builder.deinit();
                 var rows = try service.store().database.prepare(
-                    "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+                    "SELECT e.seq, o.body FROM events e JOIN objects o ON o.digest=e.body " ++
                         "WHERE e.task=? AND e.seq<=? ORDER BY e.seq",
                     &.{ .{ .blob = &index.task }, .{ .integer = std.math.cast(i64, index.watermark) orelse return error.InvalidArchive } },
                 );
                 defer rows.deinit();
                 while (try rows.step() == .row) {
-                    var event_value = try contracts.decodeOwned(state.Event, a, try rows.bytes(0));
-                    index.events.append(a, event_value) catch |err| {
-                        event_value.deinit();
-                        return err;
-                    };
+                    var event_value = try contracts.decodeOwned(
+                        state.Event,
+                        service.allocator,
+                        try rows.bytes(1),
+                    );
+                    defer event_value.deinit();
+                    if (event_value.value.seq != try rows.integer(0)) return error.InvalidArchive;
                     for (event_value.value.workspace_publications.items) |item|
-                        try index.prefix.put(item, event_value.value.seq);
+                        try builder.put(item, event_value.value.seq);
                 }
+                index.history.deinit();
+                index.history = history;
                 index.loaded = true;
-            }
-
-            fn blocked(index: *HistoricalObservers, service: *Self, source: workspace.Work) !bool {
-                if (!std.meta.eql(source.task, index.task) or source.event_watermark > index.watermark)
-                    return error.InvalidArchive;
-                try index.prepare(service);
-                if (!index.observers_present.?) return false;
-                try index.load(service);
-                return index.prefix.blocked(
-                    source.id,
-                    source.execution_revision,
-                    source.event_watermark,
-                    if (source.outer_operation) |operation_value| operation_value.capsule else source.runtime_capsule,
-                );
             }
         };
 
@@ -14622,7 +14698,9 @@ pub fn Service(comptime Types: type) type {
             var predecessor: ?contracts.Decoded(workspace.Work) = null;
             defer if (predecessor) |*prior| prior.deinit();
             if (observer) |bound| if (bound.selection.previous) |previous| {
-                predecessor = try self.workspaceWork(a, task_id, try wp.identity(previous, .work));
+                const previous_id = try wp.identity(previous, .work);
+                try self.requireCustody(a, task_id, previous_id);
+                predecessor = try self.workspaceWork(a, task_id, previous_id);
                 const prior = predecessor.?.value;
                 const prior_observer = prior.observer orelse return error.InvalidObserverInput;
                 if (prior_observer.successor != null) return error.DuplicateObservation;

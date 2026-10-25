@@ -7,16 +7,78 @@ const views = kosmos.RuntimeViews;
 const state = @import("state.zig");
 const projection = @import("workspace_projection.zig");
 
+const OuterHistory = struct {
+    const Entry = struct { seq: u64, capsule: state.Reference, revision: u64 };
+    entries: std.AutoHashMapUnmanaged(state.Digest, std.ArrayList(Entry)) = .empty,
+
+    fn deinit(self: *OuterHistory, a: std.mem.Allocator) void {
+        var histories = self.entries.valueIterator();
+        while (histories.next()) |history| history.deinit(a);
+        self.entries.deinit(a);
+    }
+
+    fn put(
+        self: *OuterHistory,
+        a: std.mem.Allocator,
+        id: state.Digest,
+        seq: u64,
+        capsule: state.Reference,
+    ) !void {
+        const entry = try self.entries.getOrPut(a, id);
+        if (!entry.found_existing) entry.value_ptr.* = .empty;
+        const history = entry.value_ptr;
+        const last = history.getLastOrNull();
+        if (last == null or !std.meta.eql(last.?.capsule, capsule))
+            try history.append(a, .{
+                .seq = seq,
+                .capsule = capsule,
+                .revision = if (last) |prior| try std.math.add(u64, prior.revision, 1) else 0,
+            });
+    }
+
+    fn at(
+        self: *const OuterHistory,
+        id: state.Digest,
+        watermark: u64,
+    ) @import("workspace_state.zig").OuterCursor {
+        const history = self.entries.get(id) orelse return .{};
+        var low: usize = 0;
+        var high = history.items.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (history.items[middle].seq <= watermark) low = middle + 1 else high = middle;
+        }
+        if (low == 0) return .{};
+        const previous = history.items[low - 1];
+        return .{ .revision = previous.revision, .last = previous.capsule.digest };
+    }
+
+    fn withCurrent(
+        self: *const OuterHistory,
+        id: state.Digest,
+        watermark: u64,
+        current: ?state.Reference,
+    ) !@import("workspace_state.zig").OuterCursor {
+        var cursor = self.at(id, watermark);
+        if (current) |capsule| {
+            if (cursor.last) |previous| if (!std.meta.eql(previous, capsule.digest)) {
+                cursor.revision = try std.math.add(u64, cursor.revision, 1);
+            };
+            cursor.last = capsule.digest;
+        }
+        return cursor;
+    }
+};
+
 pub const PublicationPrefix = struct {
     const Set = std.AutoHashMapUnmanaged(state.Digest, void);
     const Active = std.AutoArrayHashMapUnmanaged(state.Digest, void);
     const Position = struct { publication: state.WorkPublication, seq: u64 };
     const Source = struct { lossless: Active = .empty, outer: Set = .empty };
-    const Outer = struct { seq: u64, capsule: state.Reference, revision: u64 };
 
     latest: std.AutoHashMap(state.Digest, Position),
     successors: Set = .empty,
-    outer_history: std.AutoHashMapUnmanaged(state.Digest, std.ArrayList(Outer)) = .empty,
+    outer_history: OuterHistory = .{},
     sources: std.AutoHashMapUnmanaged(state.Digest, Source) = .empty,
 
     pub fn init(a: std.mem.Allocator) PublicationPrefix {
@@ -31,8 +93,6 @@ pub const PublicationPrefix = struct {
             entry.outer.deinit(a);
         }
         self.sources.deinit(a);
-        var histories = self.outer_history.valueIterator();
-        while (histories.next()) |history| history.deinit(a);
         self.outer_history.deinit(a);
         self.successors.deinit(a);
         self.latest.deinit();
@@ -65,42 +125,17 @@ pub const PublicationPrefix = struct {
             }
         }
         if (item.outer_operation orelse item.runtime_capsule) |capsule| {
-            const entry = try self.outer_history.getOrPut(a, item.work);
-            if (!entry.found_existing) entry.value_ptr.* = .empty;
-            const history = entry.value_ptr;
-            const last = history.getLastOrNull();
-            if (last == null or !std.meta.eql(last.?.capsule, capsule))
-                try history.append(a, .{
-                    .seq = seq,
-                    .capsule = capsule,
-                    .revision = if (last) |prior| try std.math.add(u64, prior.revision, 1) else 0,
-                });
+            try self.outer_history.put(a, item.work, seq, capsule);
         }
         try self.latest.put(item.work, .{ .publication = item, .seq = seq });
     }
 
     pub fn outerCursorAt(self: *const PublicationPrefix, id: state.Digest, watermark: u64) @import("workspace_state.zig").OuterCursor {
-        const history = self.outer_history.get(id) orelse return .{};
-        var low: usize = 0;
-        var high = history.items.len;
-        while (low < high) {
-            const middle = low + (high - low) / 2;
-            if (history.items[middle].seq <= watermark) low = middle + 1 else high = middle;
-        }
-        if (low == 0) return .{};
-        const previous = history.items[low - 1];
-        return .{ .revision = previous.revision, .last = previous.capsule.digest };
+        return self.outer_history.at(id, watermark);
     }
 
     pub fn outerCursor(self: *const PublicationPrefix, id: state.Digest, watermark: u64, current: ?state.Reference) !@import("workspace_state.zig").OuterCursor {
-        var cursor = self.outerCursorAt(id, watermark);
-        if (current) |capsule| {
-            if (cursor.last) |previous| if (!std.meta.eql(previous, capsule.digest)) {
-                cursor.revision = try std.math.add(u64, cursor.revision, 1);
-            };
-            cursor.last = capsule.digest;
-        }
-        return cursor;
+        return self.outer_history.withCurrent(id, watermark, current);
     }
 
     pub fn validateOuterCursor(self: *const PublicationPrefix, item: state.WorkPublication) !void {
@@ -144,6 +179,170 @@ pub const PublicationPrefix = struct {
         const group = self.sources.getPtr(id) orelse return null;
         return &group.lossless;
     }
+};
+
+pub const PublicationHistory = struct {
+    const Level = @FieldType(w.GuestViewSelection, "level");
+    const Key = struct { source: state.Digest, level: Level };
+    const Requirement = union(enum) { unobserved, blocked, consumed: u64 };
+    const Entry = struct { seq: u64, requirement: Requirement };
+
+    allocator: std.mem.Allocator,
+    requirements: std.AutoHashMapUnmanaged(Key, std.ArrayList(Entry)) = .empty,
+    outer: OuterHistory = .{},
+
+    pub fn init(a: std.mem.Allocator) PublicationHistory {
+        return .{ .allocator = a };
+    }
+
+    pub fn deinit(self: *PublicationHistory) void {
+        var entries = self.requirements.valueIterator();
+        while (entries.next()) |entry| entry.deinit(self.allocator);
+        self.requirements.deinit(self.allocator);
+        self.outer.deinit(self.allocator);
+    }
+
+    fn record(self: *PublicationHistory, key: Key, seq: u64, value: Requirement) !void {
+        const entry = try self.requirements.getOrPut(self.allocator, key);
+        if (!entry.found_existing) entry.value_ptr.* = .empty;
+        const history = entry.value_ptr;
+        if (history.items.len != 0) {
+            const last = &history.items[history.items.len - 1];
+            if (last.seq == seq) {
+                last.requirement = value;
+                return;
+            }
+            if (std.meta.eql(last.requirement, value)) return;
+        }
+        try history.append(self.allocator, .{ .seq = seq, .requirement = value });
+    }
+
+    fn requirementAt(self: *const PublicationHistory, key: Key, watermark: u64) Requirement {
+        const history = self.requirements.get(key) orelse return .unobserved;
+        var low: usize = 0;
+        var high = history.items.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (history.items[middle].seq <= watermark) low = middle + 1 else high = middle;
+        }
+        return if (low == 0) .unobserved else history.items[low - 1].requirement;
+    }
+
+    pub fn outerCursorAt(
+        self: *const PublicationHistory,
+        id: state.Digest,
+        watermark: u64,
+    ) @import("workspace_state.zig").OuterCursor {
+        return self.outer.at(id, watermark);
+    }
+
+    pub fn blocked(
+        self: *const PublicationHistory,
+        id: state.Digest,
+        execution_revision: u64,
+        source_watermark: u64,
+        read_watermark: u64,
+        capsule: ?state.Reference,
+    ) !bool {
+        for ([_]Level{ .guest_cut, .outer_execution }) |level| {
+            const requirement = self.requirementAt(
+                .{ .source = id, .level = level },
+                read_watermark,
+            );
+            switch (requirement) {
+                .unobserved => {},
+                .blocked => return true,
+                .consumed => |consumed| {
+                    const revision = if (level == .guest_cut)
+                        execution_revision
+                    else
+                        (try self.outer.withCurrent(id, source_watermark, capsule)).revision;
+                    if (consumed != revision) return true;
+                },
+            }
+        }
+        return false;
+    }
+
+    pub const Builder = struct {
+        const Member = struct { key: Key, consumed: ?u64 };
+        const Counts = std.AutoArrayHashMapUnmanaged(?u64, usize);
+
+        allocator: std.mem.Allocator,
+        history: *PublicationHistory,
+        members: std.AutoHashMapUnmanaged(state.Digest, Member) = .empty,
+        successors: std.AutoHashMapUnmanaged(state.Digest, void) = .empty,
+        groups: std.AutoHashMapUnmanaged(Key, Counts) = .empty,
+        sequence: u64 = 0,
+
+        pub fn init(a: std.mem.Allocator, history: *PublicationHistory) Builder {
+            return .{ .allocator = a, .history = history };
+        }
+
+        pub fn deinit(self: *Builder) void {
+            var groups = self.groups.valueIterator();
+            while (groups.next()) |group| group.deinit(self.allocator);
+            self.groups.deinit(self.allocator);
+            self.members.deinit(self.allocator);
+            self.successors.deinit(self.allocator);
+        }
+
+        pub fn put(self: *Builder, item: state.WorkPublication, seq: u64) !void {
+            if (seq < self.sequence) return error.InvalidArchive;
+            self.sequence = seq;
+            try self.remove(item.work, seq);
+            if (item.observer) |observer| {
+                if (observer.selection.previous) |previous| {
+                    const id = try projection.identity(previous, .work);
+                    try self.successors.put(self.allocator, id, {});
+                    try self.remove(id, seq);
+                }
+                if (!observer.stopped and !self.successors.contains(item.work) and
+                    observer.selection.policy.delivery == .lossless)
+                {
+                    try self.add(item.work, .{
+                        .key = .{
+                            .source = observer.source_work,
+                            .level = observer.selection.source.level,
+                        },
+                        .consumed = observer.consumed_revision,
+                    }, seq);
+                }
+            }
+            if (item.outer_operation orelse item.runtime_capsule) |capsule|
+                try self.history.outer.put(self.history.allocator, item.work, seq, capsule);
+        }
+
+        fn add(self: *Builder, id: state.Digest, member: Member, seq: u64) !void {
+            const entry = try self.groups.getOrPut(self.allocator, member.key);
+            if (!entry.found_existing) entry.value_ptr.* = .empty;
+            const group = entry.value_ptr;
+            const count = try group.getOrPut(self.allocator, member.consumed);
+            if (!count.found_existing) count.value_ptr.* = 0;
+            count.value_ptr.* = try std.math.add(usize, count.value_ptr.*, 1);
+            try self.members.put(self.allocator, id, member);
+            try self.history.record(member.key, seq, summarize(group));
+        }
+
+        fn remove(self: *Builder, id: state.Digest, seq: u64) !void {
+            const member = self.members.fetchRemove(id) orelse return;
+            const group = self.groups.getPtr(member.value.key).?;
+            const count = group.getPtr(member.value.consumed).?;
+            std.debug.assert(count.* != 0);
+            count.* -= 1;
+            if (count.* == 0) {
+                const removed = group.swapRemove(member.value.consumed);
+                std.debug.assert(removed);
+            }
+            try self.history.record(member.value.key, seq, summarize(group));
+        }
+
+        fn summarize(group: *const Counts) Requirement {
+            if (group.count() == 0) return .unobserved;
+            if (group.count() != 1) return .blocked;
+            return if (group.keys()[0]) |revision| .{ .consumed = revision } else .blocked;
+        }
+    };
 };
 
 pub fn validatePolicy(policy: w.ObserverPolicy) !void {

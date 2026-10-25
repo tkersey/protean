@@ -1782,9 +1782,71 @@ fn expectDeriveCaptureOwnerBound(service: anytype, a: std.mem.Allocator, task: n
     const restored_path = try std.fmt.allocPrint(a, "{s}-restored", .{archive_path});
     defer a.free(restored_path);
     _ = try service.exportCheckpoint(a, task, restored_path);
+    try expectDeriveCapturePrefixBound(
+        service,
+        a,
+        saved.value,
+        captured.value,
+        input.value,
+        archive_path,
+    );
     const direct_path = try std.fmt.allocPrint(a, "{s}-direct", .{archive_path});
     defer a.free(direct_path);
     try expectDirectDeriveOwnerBound(service, a, task, input.value.derive, direct_path);
+}
+
+fn expectDeriveCapturePrefixBound(
+    service: anytype,
+    a: std.mem.Allocator,
+    saved: native.testing.state.Attempt,
+    captured: native.testing.state.Capture,
+    input: native.testing.workspace_build.Input,
+    archive_path: []const u8,
+) !void {
+    const store = &service.namespace.store;
+    const task = saved.task;
+    const attempt = saved.id;
+    const owner = saved.controller_read orelse return error.MissingControllerReadCut;
+    try std.testing.expect(owner.event_watermark > 0 and owner.execution_revision > 0);
+    var forged_input = input;
+    forged_input.derive.basis.controller.event_watermark = 0;
+    const forged_bytes = try contracts.encodeOwned(
+        native.testing.workspace_build.Input,
+        a,
+        forged_input,
+    );
+    defer a.free(forged_bytes);
+    try store.begin();
+    defer store.rollback();
+    var forged_attempt = saved;
+    forged_attempt.controller_read.?.event_watermark = 0;
+    forged_attempt.prepared = try store.putObject(forged_bytes);
+    var forged_capture = captured;
+    forged_capture.request = forged_attempt.prepared.?;
+    try store.database.run(
+        "DELETE FROM records WHERE kind='attempt' AND id=? AND task=?",
+        &.{ .{ .blob = &attempt }, .{ .blob = &task } },
+    );
+    try store.createRecord(native.testing.state.Attempt, "attempt", attempt, task, forged_attempt);
+    try store.putRecord(native.testing.state.Capture, "capture", attempt, task, forged_capture);
+    try service.namespace.commit("test.forge-derive-capture-prefix");
+    const prefix_path = try std.fmt.allocPrint(a, "{s}-prefix", .{archive_path});
+    defer a.free(prefix_path);
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspace(a, task));
+    try std.testing.expectError(
+        error.InvalidArchive,
+        service.exportCheckpoint(a, task, prefix_path),
+    );
+    try store.begin();
+    try store.database.run(
+        "DELETE FROM records WHERE kind='attempt' AND id=? AND task=?",
+        &.{ .{ .blob = &attempt }, .{ .blob = &task } },
+    );
+    try store.createRecord(native.testing.state.Attempt, "attempt", attempt, task, saved);
+    try store.putRecord(native.testing.state.Capture, "capture", attempt, task, captured);
+    try service.namespace.commit("test.restore-derive-capture-prefix");
+    try service.validateWorkspace(a, task);
+    _ = try service.exportCheckpoint(a, task, prefix_path);
 }
 
 fn captureSemanticSuccess(
@@ -3974,7 +4036,11 @@ test "deep recursive workspace values support input admission inspection expansi
 }
 
 test "collected history rejects rehashed result substitution and false absence" {
-    const a = std.testing.allocator;
+    var meter: kosmos.AllocationBudget = .{
+        .parent = std.testing.allocator,
+        .limit = std.math.maxInt(usize),
+    };
+    const a = meter.allocator();
     const io = std.testing.io;
     var compiled = try @import("protean").compile(a, @import("protean").system(.{ .InitialArgs = void, .Result = void, .Failure = void, .application = DelegateApplication }));
     defer compiled.deinit();
@@ -4061,7 +4127,12 @@ test "collected history rejects rehashed result substitution and false absence" 
     }
     const original = observed orelse return error.MissingReadObservation;
     try std.testing.expect(original.state == .settled_reply);
-    const current_history_reads = try archiveHistoryReads(&service, scratch, parent.receipt.task);
+    const current_history_reads = try archiveHistoryReads(
+        &service,
+        scratch,
+        parent.receipt.task,
+        &meter,
+    );
     const original_evidence = (try namespace.store.recordBytes(scratch, "workspace_reply", original.id, original.task)).?;
     const acquired_bytes = try namespace.store.object(scratch, try namespace.store.objectReference(original.state.settled_reply.reply, null), null);
     const acquired = try data.invocation.decode(data.invocation.Result, scratch, acquired_bytes);
@@ -4330,8 +4401,19 @@ test "collected history rejects rehashed result substitution and false absence" 
             break;
         }
         try std.testing.expect(captured);
-        if (read != 1) try std.testing.expectEqual(current_history_reads, try archiveHistoryReads(&service, scratch, parent.receipt.task));
+        if (read != 1) {
+            const current = try archiveHistoryReads(&service, scratch, parent.receipt.task, &meter);
+            try std.testing.expectEqual(current_history_reads.current_scans, current.current_scans);
+        }
     }
+    try observerHistoricalReadScaling(
+        &service,
+        scratch,
+        parent.receipt.task,
+        work.value,
+        hypothesis_ref,
+        &meter,
+    );
 }
 
 const WorkspaceCleanupApplication = struct {
@@ -4549,6 +4631,8 @@ const ReconstructionModel = struct {
 const ControllerOverlayTrace = struct {
     scans: usize = 0,
     rows: usize = 0,
+    observer_scans: usize = 0,
+    observer_rows: usize = 0,
     current_watermark: ?u64 = null,
     current_scans: usize = 0,
     extern "c" fn sqlite3_db_handle(?*anyopaque) ?*anyopaque;
@@ -4563,6 +4647,12 @@ const ControllerOverlayTrace = struct {
             std.mem.span(@as([*:0]const u8, @ptrCast(sql.?)))
         else
             std.mem.span(sqlite3_sql(statement) orelse return 0);
+        if (std.mem.eql(u8, text, "SELECT e.seq, o.body FROM events e " ++
+            "JOIN objects o ON o.digest=e.body " ++
+            "WHERE e.task=? AND e.seq<=? ORDER BY e.seq"))
+        {
+            if (kind == 1) self.observer_scans += 1 else if (kind == 4) self.observer_rows += 1;
+        }
         if (std.mem.eql(u8, text, "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq<=? ORDER BY e.seq")) {
             if (kind == 1) self.scans += 1 else if (kind == 4) self.rows += 1;
             if (kind == 1) if (self.current_watermark) |watermark| {
@@ -4577,7 +4667,99 @@ const ControllerOverlayTrace = struct {
     }
 };
 
-fn archiveHistoryReads(service: anytype, a: std.mem.Allocator, task: [16]u8) !usize {
+fn archiveReadObserver(
+    service: anytype,
+    a: std.mem.Allocator,
+    source_work: native.workspace.Work,
+    accumulator: contracts.workspace.Ref,
+) ![32]u8 {
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const module = try @import("workspace_sources.zig").cutObserver(&builder, false);
+    const document = try native.source_records.encode(a, module);
+    defer a.free(document);
+    var diagnostic: native.program_construction.Diagnostic = .{};
+    const built = try service.workspaceBuild(
+        a,
+        "history-observer-program",
+        source_work.task,
+        document,
+        &diagnostic,
+    );
+    const observed = try service.workspaceObserve(a, "history-observer-start", source_work.task, .{
+        .program = try workspaceRef(a, .program, built.receipt.workspace.?),
+        .source = .{ .expected = .{
+            .work = try workspaceRef(a, .work, source_work.id),
+            .execution_revision = source_work.execution_revision,
+            .control_revision = source_work.control_revision,
+        }, .realization_revision = source_work.realization_revision, .nodes = .{ .all = .{} } },
+        .accumulator = accumulator,
+        .policy = .{ .delivery = .lossless, .granularity = .one_guest_step },
+    });
+    return observed.receipt.workspace.?;
+}
+
+fn observerHistoricalReadScaling(
+    service: anytype,
+    a: std.mem.Allocator,
+    task: [16]u8,
+    source_work: native.workspace.Work,
+    accumulator: contracts.workspace.Ref,
+    meter: *kosmos.AllocationBudget,
+) !void {
+    const observer = try archiveReadObserver(service, a, source_work, accumulator);
+    const source_ref = try workspaceRef(a, .work, source_work.id);
+    var bounded = true;
+    for (0..16) |read| {
+        const operation_id = try std.fmt.allocPrint(a, "observer-history-read-{d}", .{read});
+        _ = try service.message(a, operation_id, task, .{
+            .work = .{ .inspect = .{ .work = source_ref } },
+        });
+        var captured = false;
+        for (0..64) |_| {
+            _ = try service.pump(a);
+            var replies = try service.namespace.store.database.prepare(
+                "SELECT count(*) FROM records WHERE task=? AND kind='workspace_reply'",
+                &.{.{ .blob = &task }},
+            );
+            defer replies.deinit();
+            try std.testing.expect(try replies.step() == .row);
+            if (try replies.integer(0) != read + 5) continue;
+            captured = true;
+            break;
+        }
+        try std.testing.expect(captured);
+        if (read == 3 or read == 7 or read == 15) {
+            std.debug.print("observer history growth: captured_reads={d}\n", .{read + 1});
+            const profile = try archiveHistoryReads(service, a, task, meter);
+            var parent = try service.task(a, task);
+            defer parent.deinit();
+            bounded = bounded and profile.observer_scans == 1 and
+                profile.observer_rows == parent.value.event_high - parent.value.event_floor + 1;
+        }
+        if (read == 7) {
+            var work = try service.workspaceWork(a, task, observer);
+            defer work.deinit();
+            try std.testing.expectEqual(.completed, work.value.outcome_kind);
+            _ = try service.workspaceStopObserving(a, "history-observer-stop", task, .{
+                .work = try workspaceRef(a, .work, observer),
+                .execution_revision = work.value.execution_revision,
+                .control_revision = work.value.control_revision,
+            });
+        }
+    }
+    var unchanged = try service.workspaceWork(a, task, source_work.id);
+    defer unchanged.deinit();
+    try std.testing.expectEqualDeep(source_work, unchanged.value);
+    try std.testing.expect(bounded);
+}
+
+fn archiveHistoryReads(
+    service: anytype,
+    a: std.mem.Allocator,
+    task: [16]u8,
+    meter: *kosmos.AllocationBudget,
+) !ControllerOverlayTrace {
     var parent = try service.task(a, task);
     defer parent.deinit();
     var statement = try service.namespace.store.database.prepare("SELECT count(*) FROM records WHERE task=? AND kind='workspace_reply'", &.{.{ .blob = &task }});
@@ -4588,12 +4770,17 @@ fn archiveHistoryReads(service: anytype, a: std.mem.Allocator, task: [16]u8) !us
     var trace: ControllerOverlayTrace = .{ .current_watermark = parent.value.event_high };
     try std.testing.expectEqual(@as(c_int, 0), ControllerOverlayTrace.sqlite3_trace_v2(database, 1 | 4, ControllerOverlayTrace.observe, &trace));
     defer std.debug.assert(ControllerOverlayTrace.sqlite3_trace_v2(database, 0, null, null) == 0);
-    try service.validateWorkspace(a, task);
-    std.debug.print("archive history queries: replies={d} events={d} current_scans={d} total_scans={d} decoded_event_rows={d}\n", .{
-        replies, parent.value.event_high, trace.current_scans, trace.scans, trace.rows,
+    const initial_live = meter.live;
+    meter.peak = initial_live;
+    try service.validateWorkspace(service.allocator, task);
+    std.debug.print("archive history queries: replies={d} events={d} current_scans={d} " ++
+        "total_scans={d} decoded_event_rows={d} observer_scans={d} observer_rows={d} " ++
+        "validation_peak_bytes={d}\n", .{
+        replies,    parent.value.event_high, trace.current_scans, trace.scans,
+        trace.rows, trace.observer_scans,    trace.observer_rows, meter.peak - initial_live,
     });
     try std.testing.expect(trace.current_scans > 0);
-    return trace.current_scans;
+    return trace;
 }
 
 fn reconstructionRuntimeAction(service: anytype, a: std.mem.Allocator) !void {
