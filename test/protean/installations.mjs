@@ -21,12 +21,14 @@ const library = realpathSync(JSON.parse(description.match(/^\s*\.lib_dir = (".*"
 assert.equal(execFileSync(zig, ['version'], {encoding: 'utf8'}).trim(), '0.17.0');
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'Protean downstream ü ')));
 const cache = resolve(process.env.ZIG_GLOBAL_CACHE_DIR ?? join(scratch, 'global-cache'));
-const local = join(scratch, 'local-cache'), inputs = join(scratch, 'inputs');
-mkdirSync(cache, {recursive: true}); mkdirSync(local); mkdirSync(inputs);
+const local = process.platform === 'linux' ? join(cache, 'downstream-local') : join(scratch, 'local-cache');
+const inputs = join(scratch, 'inputs');
+const sandboxPath = value => process.platform === 'linux' ? value.replaceAll(scratch, '/tmp/Protean downstream ü') : value;
+mkdirSync(cache, {recursive: true}); mkdirSync(local, {recursive: true}); mkdirSync(inputs);
 // Package managers may expose the selected library through a directory link.
 const libraryAlias = join(scratch, 'selected-zig-lib');
 symlinkSync(library, libraryAlias, 'dir');
-const env = {...process.env, PATH: '/usr/bin:/bin', ZIG_GLOBAL_CACHE_DIR: cache, ZIG_LOCAL_CACHE_DIR: local, ZIG_LIB_DIR: libraryAlias};
+const env = {...process.env, PATH: '/usr/bin:/bin', ZIG_GLOBAL_CACHE_DIR: sandboxPath(cache), ZIG_LOCAL_CACHE_DIR: sandboxPath(local), ZIG_LIB_DIR: sandboxPath(libraryAlias)};
 delete env.NODE_OPTIONS; delete env.NODE_TEST_CONTEXT; delete env.TAR_OPTIONS;
 let prefix;
 if (process.platform === 'darwin') {
@@ -43,14 +45,14 @@ if (process.platform === 'darwin') {
   // Expose those regular sidecar files without mounting an executable directory.
   for (const path of new Set([join(dirname(zig), 'LICENSE'), resolve(dirname(zig), '../LICENSE'), resolve(library, '../LICENSE'), resolve(library, '../../LICENSE')]))
     if (lstatSync(path, {throwIfNoEntry: false})?.isFile()) prefix.push('--ro-bind', path, path);
-  prefix.push('--bind', scratch, scratch);
+  prefix.push('--bind', scratch, sandboxPath(scratch));
   if (!cache.startsWith(scratch + '/')) prefix.push('--bind', cache, cache);
 } else throw new Error('unsupported downstream qualification platform');
 
 function run(executable, args, cwd = scratch, {failure = false, diagnostic, timeout = 300000} = {}) {
   timeout = deadline === null ? undefined : Math.min(timeout, Math.floor(deadline - performance.now()));
   assert(timeout === undefined || timeout > 0, 'independent installation exceeded its nine-minute budget');
-  const command = [...prefix, ...(process.platform === 'linux' ? ['--chdir', cwd] : []), executable, ...args];
+  const command = [...prefix, ...(process.platform === 'linux' ? ['--chdir', sandboxPath(cwd)] : []), sandboxPath(executable), ...args.map(sandboxPath)];
   const operation = `${basename(executable)} ${args[0] ?? ''}${failure ? ' negative' : ''}`;
   const started = performance.now();
   console.error(`downstream ${operation}: started`);

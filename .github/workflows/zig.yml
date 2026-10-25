@@ -383,13 +383,17 @@ jobs:
           retention-days: 14
       - name: Admit a complete bounded cache snapshot
         id: cache_size
-        if: ${{ !cancelled() && !matrix.product_consumer && matrix.lane != 'downstream' && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && (steps.compiled.outputs.valid != 'true' || matrix.lane == 'authoring') && steps.build_cache_size.outputs.save != 'true' }}
+        if: ${{ !cancelled() && !matrix.product_consumer && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && (steps.compiled.outputs.valid != 'true' || matrix.lane == 'authoring') && steps.build_cache_size.outputs.save != 'true' }}
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
-          test -d .zig-cache/o || exit 0
+          objects=.zig-cache/o
+          if [ "${{ matrix.lane }}" = downstream ]; then
+            objects=.zig-cache/global/downstream-local/o
+          fi
+          test -d "$objects" || exit 0
           test -z "$(find .zig-cache ! -type d ! -type f -print -quit)" || exit 0
-          test -n "$(find .zig-cache/o -type f -size +0c -print -quit)" || exit 0
+          test -n "$(find "$objects" -type f -size +0c -print -quit)" || exit 0
           bytes=$(find .zig-cache -type f -printf '%s\n' | awk '{n+=$1} END {printf "%.0f",n}')
           echo "Compiler cache: $bytes bytes (4 GiB upload maximum)"
           test "$bytes" -le 4294967296 || exit 0
