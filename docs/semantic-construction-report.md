@@ -120,7 +120,7 @@ remain unmeasured.
 
 The selected dependency tuple uses Horos
 `f60b116b170d8e175db440095fb4d60384aa90bd` and Kosmos
-`deeab8d9b7704667756e60e9fe30f492a77ad712`. Their published GitHub archives were
+`c6de0fa718ab322c53127db7e8fd3fb3197837a7`. Their published GitHub archives were
 independently downloaded and matched against complete committed source
 inventories. Native dependency setup authenticates those same inputs.
 Protean builds on accepted controller reconstruction
