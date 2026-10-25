@@ -842,6 +842,7 @@ fn exerciseControllerRealization(
 ) !void {
     var stage: []const u8 = "build";
     errdefer std.debug.print("controller realization: {s}\n", .{stage});
+    try advanceControllerPast(a, service, task_id, 0);
     var original = try service.task(a, task_id);
     defer original.deinit();
     var diagnostic: native.program_construction.Diagnostic = .{};
@@ -886,14 +887,30 @@ fn exerciseControllerRealization(
 
     stage = "revoked active policy";
     service.profile.semantic_construction = null;
-    try std.testing.expectError(error.SemanticPolicyDenied, service.pump(a));
+    try std.testing.expectEqual(.idle, try service.pump(a));
+    const independent = try service.submit(a, "policy-independent-task", .{ 25, 5 });
+    try advanceControllerPast(a, service, independent.receipt.task, 0);
+    var progressed = try service.task(a, independent.receipt.task);
+    defer progressed.deinit();
+    try std.testing.expect(progressed.value.execution_revision > 0);
+    _ = try service.requestCancel(a, "policy-independent-cancel", independent.receipt.task, "ordinary control remains available");
+    for (0..8) |_| {
+        var current = try service.task(a, independent.receipt.task);
+        defer current.deinit();
+        if (current.value.terminal()) break;
+        _ = try service.pump(a);
+    }
+    var cancelled = try service.task(a, independent.receipt.task);
+    defer cancelled.deinit();
+    try std.testing.expect(cancelled.value.terminal());
+    try std.testing.expect(cancelled.value.cancellation_applied);
     stage = "revoked restored policy";
     try service.park(a);
     var parked = try service.task(a, task_id);
     defer parked.deinit();
     _ = try service.resumeTask(a, "controller-runtime-resume", task_id, parked.value.revision);
     service.profile.semantic_construction = .{ .roots = &roots, .checkers = &.{} };
-    try std.testing.expectError(error.SemanticPolicyDenied, service.pump(a));
+    try std.testing.expectEqual(.idle, try service.pump(a));
     var denied = try service.task(a, task_id);
     defer denied.deinit();
     try std.testing.expectEqual(actual.value.execution_revision, denied.value.execution_revision);
@@ -908,6 +925,134 @@ fn exerciseControllerRealization(
     try std.testing.expect(restored.value.controller_runtime == null);
     try std.testing.expectEqualDeep(original.value.checkpoint, restored.value.checkpoint);
     try std.testing.expectEqual(original.value.execution_revision, restored.value.execution_revision);
+    stage = "historical controller cut";
+    service.profile.semantic_construction = .{ .roots = &roots, .checkers = &.{kosmos.RuntimeCompiler.checker_identity} };
+    try expectControllerRealizationCut(a, service, switched.receipt, original.value.execution_revision);
+}
+
+fn advanceControllerPast(
+    a: std.mem.Allocator,
+    service: anytype,
+    task_id: native.testing.state.TaskId,
+    execution_revision: u64,
+) !void {
+    for (0..64) |_| {
+        var parent = try service.task(a, task_id);
+        defer parent.deinit();
+        if (parent.value.execution_revision > execution_revision) return;
+        _ = try service.pump(a);
+    }
+    return error.UnfinishedControllerAdvance;
+}
+
+fn expectControllerRealizationCut(
+    a: std.mem.Allocator,
+    service: anytype,
+    receipt: native.testing.state.Receipt,
+    execution_revision: u64,
+) !void {
+    var stage: []const u8 = "advance";
+    errdefer std.debug.print("historical controller cut: {s}\n", .{stage});
+    try advanceControllerPast(a, service, receipt.task, execution_revision);
+    var parent = try service.task(a, receipt.task);
+    defer parent.deinit();
+    try std.testing.expect(parent.value.execution_revision > execution_revision);
+    stage = "retained validation";
+    var manifest_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
+    const index = try service.namespace.store.archiveIndex(a, receipt.task, .{
+        .digest = manifest_digest,
+        .bytes = service.assets.manifest.len,
+    });
+    var facts = try service.prepareWorkspaceValidation(receipt.task);
+    defer facts.deinit();
+    try service.validateWorkspaceRecordsPrepared(a, receipt.task, index.records.items, &facts);
+    stage = "publication";
+    var query = try service.namespace.store.database.prepare(
+        "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.revision=?",
+        &.{ .{ .blob = &receipt.task }, .{ .integer = @intCast(receipt.revision) } },
+    );
+    defer query.deinit();
+    try std.testing.expect(try query.step() == .row);
+    var event = try contracts.decodeOwned(native.testing.state.Event, a, try query.bytes(0));
+    defer event.deinit();
+    try std.testing.expectEqual(execution_revision, event.value.controller_read.?.execution_revision);
+    try std.testing.expectEqual(event.value.seq - 1, event.value.controller_read.?.event_watermark);
+    const bytes = try service.namespace.store.object(a, event.value.workspace_command.?, null);
+    defer a.free(bytes);
+    var command = try contracts.decodeOwned(native.workspace.PublicationCommand, a, bytes);
+    defer command.deinit();
+    try std.testing.expect(execution_revision > 0);
+    stage = "mutations";
+    for (0..4) |mutation| {
+        errdefer std.debug.print("controller cut mutation: {d}\n", .{mutation});
+        try service.namespace.store.begin();
+        defer service.namespace.store.rollback();
+        var changed = event.value;
+        var selected = command.value.realize_controller;
+        switch (mutation) {
+            0 => {
+                selected.cut.execution_revision -= 1;
+                selected.command.expected.cut.execution_revision -= 1;
+            },
+            1 => changed.controller_read.?.event_watermark -= 1,
+            2 => changed.controller_read = null,
+            3 => {
+                selected.cut.execution_revision = parent.value.execution_revision;
+                selected.command.expected.cut.execution_revision = parent.value.execution_revision;
+            },
+            else => unreachable,
+        }
+        try rewriteControllerRealization(a, service, changed, selected, receipt);
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(
+            a,
+            receipt.task,
+            index.records.items,
+            &facts,
+        ));
+    }
+}
+
+fn rewriteControllerRealization(
+    a: std.mem.Allocator,
+    service: anytype,
+    original: native.testing.state.Event,
+    selected: native.workspace.ControllerRealization,
+    original_receipt: native.testing.state.Receipt,
+) !void {
+    var receipt = original_receipt;
+    receipt.workspace_observation = try service.namespace.store.putObject(
+        try contracts.encodeOwned(native.workspace.ControllerRealization, a, selected),
+    );
+    const request = try contracts.encodeOwned(native.workspace.ControllerRealizeRequest, a, .{
+        .task = receipt.task,
+        .command = selected.command,
+    });
+    defer a.free(request);
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update("agent.native.operation.v1\x00");
+    hash.update(request);
+    hash.final(&receipt.request_digest);
+    var event = original;
+    event.workspace_command = try service.namespace.store.putObject(
+        try contracts.encodeOwned(native.workspace.PublicationCommand, a, .{
+            .realize_controller = selected,
+        }),
+    );
+    const body = try service.namespace.store.putObject(
+        try contracts.encodeOwned(native.testing.state.Event, a, event),
+    );
+    try service.namespace.store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{
+        .{ .blob = &body.digest }, .{ .blob = &event.task }, .{ .integer = @intCast(event.seq) },
+    });
+    const receipt_body = try service.namespace.store.putObject(
+        try contracts.encodeOwned(native.testing.state.Receipt, a, receipt),
+    );
+    try service.namespace.store.database.run(
+        "UPDATE operations SET request=?,receipt=? WHERE task=? AND request=?",
+        &.{ .{ .blob = &receipt.request_digest }, .{ .blob = &receipt_body.digest }, .{ .blob = &receipt.task }, .{ .blob = &original_receipt.request_digest } },
+    );
+    try std.testing.expectEqual(@as(u64, 1), try service.namespace.store.database.changes());
 }
 
 const GeneratedRuntime = struct {
@@ -2883,13 +3028,23 @@ fn expectPackagedSemanticInspection(
 
 const CleanupTrace = struct {
     scans: usize = 0,
+    work_reads: usize = 0,
+    history_scans: usize = 0,
     extern "c" fn sqlite3_db_handle(?*anyopaque) ?*anyopaque;
+    extern "c" fn sqlite3_expanded_sql(?*anyopaque) ?[*:0]u8;
+    extern "c" fn sqlite3_free(?*anyopaque) void;
     extern "c" fn sqlite3_trace_v2(?*anyopaque, c_uint, ?*const fn (c_uint, ?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) c_int, ?*anyopaque) c_int;
 
-    fn observe(_: c_uint, context: ?*anyopaque, _: ?*anyopaque, sql: ?*anyopaque) callconv(.c) c_int {
+    fn observe(_: c_uint, context: ?*anyopaque, statement: ?*anyopaque, sql: ?*anyopaque) callconv(.c) c_int {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         const text = std.mem.span(@as([*:0]const u8, @ptrCast(sql.?)));
         if (std.mem.eql(u8, text, "SELECT id FROM records WHERE task=? AND kind='workspace_work' ORDER BY id")) self.scans += 1;
+        if (std.mem.eql(u8, text, "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq<=? ORDER BY e.seq")) self.history_scans += 1;
+        if (std.mem.eql(u8, text, "SELECT body FROM records WHERE kind=? AND id=? AND task=?")) {
+            const expanded = sqlite3_expanded_sql(statement) orelse return 0;
+            defer sqlite3_free(expanded);
+            if (std.mem.startsWith(u8, std.mem.span(expanded), "SELECT body FROM records WHERE kind='workspace_work'")) self.work_reads += 1;
+        }
         return 0;
     }
 };
@@ -3341,13 +3496,19 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     try std.testing.expect(view_data.value.array.items[1].bool);
     try std.testing.expect(view_data.value.array.items[2].array.items.len != 0);
     try disclosedViewWitness(&service, scratch, parent.receipt.task, view_command);
-    {
+    for (0..3) |attack| {
         // Rehashing a plausible snapshot does not create a journal publication.
         // Keep all ordinary content references valid while changing its revision.
         try namespace.store.begin();
         defer namespace.store.rollback();
         var forged = view_record.value;
-        forged.derivation.inspection.?.observation.work.execution_revision += 1;
+        const frozen = &forged.derivation.inspection.?.observation.work;
+        switch (attack) {
+            0 => frozen.execution_revision += 1,
+            1 => frozen.outer_cursor.revision += 1,
+            2 => frozen.outer_cursor.last = frozen.input.digest,
+            else => unreachable,
+        }
         forged.description.provenance = try namespace.store.putObject(try contracts.encodeOwned(native.workspace.Derivation, scratch, forged.derivation));
         forged.artifact = try namespace.store.putObject(try contracts.encodeOwned(native.workspace.ValueArtifact, scratch, forged.description));
         forged.id = try native.workspace.custodyId(scratch, parent.receipt.task, forged.artifact.digest);
@@ -3691,7 +3852,7 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
             parked_parent.value.revision,
         );
         std.debug.print("observer inventory scans: resume={d}\n", .{trace.scans});
-        try std.testing.expectEqual(@as(usize, 2), trace.scans);
+        try std.testing.expectEqual(@as(usize, 1), trace.scans);
     }
     try scheduledObserverWitness(&imported, scratch, parent.receipt.task, observer.scheduled);
     phase = "export completed cancellation history";
@@ -3706,7 +3867,7 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
         defer std.debug.assert(CleanupTrace.sqlite3_trace_v2(database, 0, null, null) == 0);
         try std.testing.expect(try imported.associatedWorkDisposed(scratch, parent.receipt.task));
         std.debug.print("observer inventory scans: disposal={d}\n", .{trace.scans});
-        try std.testing.expectEqual(@as(usize, 2), trace.scans);
+        try std.testing.expectEqual(@as(usize, 1), trace.scans);
     }
     try observerArchiveWitness(&imported, scratch, document, input);
 }
@@ -5650,6 +5811,152 @@ fn observerWitness(
     return observerFoldWitness(service, a, task, program, input, source_work.value, &selection);
 }
 
+test "runtime selection current observer ownership bounds retained fold reads" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const module = try gcd(&builder);
+    const entry = &builder.functions.items[@intCast(module.entry)];
+    for (0..2) |_| entry.body = try builder.term(.{ .yield_then = entry.body.? });
+    var root = try compile(a, &builder, builder.module(module.entry, module.failure));
+    defer root.deinit();
+    const admitted = try data.program_image.Admitted.decode(a, root.image);
+    defer admitted.deinit();
+    var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "observer-owner-unit", .image_identity = admitted.identity() };
+    defer application.deinit();
+    const manifest = try fixtureManifest(a, root.image, admitted.identity(), "observer-owner-unit");
+    defer a.free(manifest);
+    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
+    const assets: native.discovery.Assets = .{ .image = root.image, .application = "observer-owner-unit", .manifest = manifest };
+    var handlers = try native.Registry.init(a, &.{});
+    defer handlers.deinit();
+    const profile: native.tasks.Profile = .{ .id = "offline", .runtime_identity = @splat(42), .bytes = "observer-owner-test", .authority = .{ .grants = &.{}, .principal = "test", .tenant = "test" } };
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var path_buffer: [4096]u8 = undefined;
+    const length = try temp.dir.realPath(io, &path_buffer);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    var namespace = try native.Namespace.open(a, io, try std.fmt.allocPrint(scratch, "{s}/state", .{path_buffer[0..length]}));
+    defer namespace.close() catch unreachable;
+    var service = try native.tasks.Service(OwnerTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    defer service.close(a) catch unreachable;
+    const parent = try service.submit(scratch, "parent", .{ 25, 5 });
+    const program = try semanticGuestProgram(scratch, &service, parent.receipt.task, "current-observer-program");
+    const input = try contracts.encodeOwned(@import("workspace_sources.zig").SemanticGuestInput, scratch, .{ .yields = 300, .seed = 100 });
+    const started = try service.workspaceStart(scratch, "current-observer-selection", parent.receipt.task, program, input, .{});
+    var work = try service.workspaceWork(scratch, parent.receipt.task, started.receipt.workspace.?);
+    defer work.deinit();
+    const selection = try observerSelection(&service, scratch, parent.receipt.task, program, work.value);
+    try observerCurrentOwnershipWitness(&service, scratch, parent.receipt.task, program, input, selection);
+    try service.park(scratch);
+    try outerObserverWitness(&service, scratch, parent.receipt.task, program, input, selection.accumulator);
+}
+
+fn observerCurrentOwnershipWitness(service: anytype, a: std.mem.Allocator, task: [16]u8, program: [32]u8, input: []const u8, original: contracts.workspace.Observe) !void {
+    const started = try service.workspaceStart(a, "current-observer-source", task, program, input, .{});
+    var current = try service.workspaceWork(a, task, started.receipt.workspace.?);
+    defer current.deinit();
+    var selection = original;
+    selection.previous = null;
+    var reads: [3]usize = undefined;
+    for (0..16) |index| {
+        selection.source.expected = .{
+            .work = try workspaceRef(a, .work, current.value.id),
+            .execution_revision = current.value.execution_revision,
+            .control_revision = current.value.control_revision,
+        };
+        const observed = try service.workspaceObserve(a, try std.fmt.allocPrint(a, "current-observer-fold-{d}", .{index}), task, selection);
+        try observerCompleted(service, a, task, observed.receipt.workspace.?);
+        var unchanged = try service.workspaceWork(a, task, current.value.id);
+        defer unchanged.deinit();
+        try std.testing.expectEqualDeep(current.value, unchanged.value);
+        var owner = try service.task(a, task);
+        defer owner.deinit();
+        try std.testing.expectEqual(@as(usize, 1), owner.value.observer_heads.items.len);
+        try std.testing.expectEqualDeep(observed.receipt.workspace.?, owner.value.observer_heads.items[0]);
+        if (selection.previous) |previous| {
+            var prior = try service.workspaceWork(a, task, try nativeIdentity(previous));
+            defer prior.deinit();
+            try std.testing.expectEqual(@as(?[32]u8, observed.receipt.workspace.?), prior.value.observer.?.successor);
+        }
+        var statement = try service.namespace.store.database.prepare("SELECT 1", &.{});
+        const database = CleanupTrace.sqlite3_db_handle(statement.handle);
+        statement.deinit();
+        var trace: CleanupTrace = .{};
+        try std.testing.expectEqual(@as(c_int, 0), CleanupTrace.sqlite3_trace_v2(database, 1, CleanupTrace.observe, &trace));
+        defer std.debug.assert(CleanupTrace.sqlite3_trace_v2(database, 0, null, null) == 0);
+        try advanceObservedSource(service, a, current.value, try std.fmt.allocPrint(a, "current-observer-step-{d}", .{index}));
+        try std.testing.expectEqual(@as(c_int, 0), CleanupTrace.sqlite3_trace_v2(database, 0, null, null));
+        try std.testing.expectEqual(@as(usize, 0), trace.scans);
+        if (index == 3 or index == 7 or index == 15) {
+            const slot: usize = if (index == 3) 0 else if (index == 7) 1 else 2;
+            reads[slot] = trace.work_reads;
+            std.debug.print("current observer work reads: folds={d} reads={d} inventories={d}\n", .{ index + 1, trace.work_reads, trace.scans });
+        }
+        const next = try service.workspaceWork(a, task, current.value.id);
+        current.deinit();
+        current = next;
+        selection.previous = try workspaceRef(a, .work, observed.receipt.workspace.?);
+    }
+    var last = try service.workspaceWork(a, task, try nativeIdentity(selection.previous.?));
+    defer last.deinit();
+    try observerOwnershipTamper(service, a, last.value);
+    _ = try service.workspaceStopObserving(a, "current-observer-stop", task, .{
+        .work = selection.previous.?,
+        .execution_revision = last.value.execution_revision,
+        .control_revision = last.value.control_revision,
+    });
+    for (reads) |count| try std.testing.expect(count > 0 and count <= 8);
+    var owner = try service.task(a, task);
+    defer owner.deinit();
+    try std.testing.expectEqual(@as(usize, 0), owner.value.observer_heads.items.len);
+}
+
+fn observerOwnershipTamper(service: anytype, a: std.mem.Allocator, work: native.workspace.Work) !void {
+    var owner = try service.task(a, work.task);
+    defer owner.deinit();
+    var facts = try service.prepareWorkspaceValidation(work.task);
+    defer facts.deinit();
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &digest, .{});
+    const manifest: native.testing.state.Reference = .{ .digest = digest, .bytes = service.assets.manifest.len };
+    const valid = try service.namespace.store.archiveIndex(a, work.task, manifest);
+    try service.validateWorkspaceRecordsPrepared(a, work.task, valid.records.items, &facts);
+    for (0..3) |attack| {
+        try service.namespace.store.begin();
+        defer service.namespace.store.rollback();
+        var changed = owner.value;
+        const duplicate = [_][32]u8{ work.id, work.id };
+        const previous = try nativeIdentity(work.observer.?.selection.previous.?);
+        changed.observer_heads.items = switch (attack) {
+            0 => &.{},
+            1 => &duplicate,
+            2 => &.{previous},
+            else => unreachable,
+        };
+        const encoded = try contracts.encodeOwned(native.testing.state.Task, a, changed);
+        defer a.free(encoded);
+        const reference = try service.namespace.store.putObject(encoded);
+        try service.namespace.store.database.run("UPDATE tasks SET body=? WHERE id=?", &.{ .{ .blob = &reference.digest }, .{ .blob = &work.task } });
+        const index = try service.namespace.store.archiveIndex(a, work.task, manifest);
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, work.task, index.records.items, &facts));
+    }
+    {
+        try service.namespace.store.begin();
+        defer service.namespace.store.rollback();
+        const previous = try nativeIdentity(work.observer.?.selection.previous.?);
+        var prior = try service.workspaceWork(a, work.task, previous);
+        defer prior.deinit();
+        prior.value.observer.?.successor = null;
+        try service.namespace.store.putRecord(native.workspace.Work, "workspace_work", previous, work.task, prior.value);
+        const index = try service.namespace.store.archiveIndex(a, work.task, manifest);
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, work.task, index.records.items, &facts));
+    }
+}
+
 fn staleObserverRetry(service: anytype, a: std.mem.Allocator, task: [16]u8, program: [32]u8, input: []const u8, original: contracts.workspace.Observe) !void {
     const started = try service.workspaceStart(a, "retry-observer-source", task, program, input, .{});
     var source_work = try service.workspaceWork(a, task, started.receipt.workspace.?);
@@ -5797,6 +6104,7 @@ fn observerFoldWitness(
     var advanced = try service.workspaceWork(a, task, source_work.id);
     defer advanced.deinit();
     try std.testing.expect(advanced.value.guest_work <= 1);
+    try historicalObserverBatchWitness(service, a, task, advanced.value);
     try std.testing.expectError(
         error.ObservationBlocked,
         advanceObservedSource(service, a, advanced.value, "observed-source-blocked"),
@@ -6595,7 +6903,18 @@ fn outerObserverWitness(
     };
     const first = try service.workspaceObserve(a, "outer-observer-first", task, selection);
     try observerCompleted(service, a, task, first.receipt.workspace.?);
-    try advanceObservedSource(service, a, source_work.value, "outer-observed-advance");
+    {
+        var statement = try service.namespace.store.database.prepare("SELECT 1", &.{});
+        const database = CleanupTrace.sqlite3_db_handle(statement.handle);
+        statement.deinit();
+        var trace: CleanupTrace = .{};
+        try std.testing.expectEqual(@as(c_int, 0), CleanupTrace.sqlite3_trace_v2(database, 1, CleanupTrace.observe, &trace));
+        defer std.debug.assert(CleanupTrace.sqlite3_trace_v2(database, 0, null, null) == 0);
+        try advanceObservedSource(service, a, source_work.value, "outer-observed-advance");
+        try std.testing.expectEqual(@as(usize, 0), trace.scans);
+        try std.testing.expectEqual(@as(usize, 0), trace.history_scans);
+        std.debug.print("live outer observer: inventory_scans={d} history_scans={d}\n", .{ trace.scans, trace.history_scans });
+    }
     var advanced = try service.workspaceWork(a, task, source_work.value.id);
     defer advanced.deinit();
     try std.testing.expect(advanced.value.runtime_capsule != null);
@@ -6770,7 +7089,7 @@ fn observerArchiveTamper(service: anytype, a: std.mem.Allocator, work: native.wo
     defer facts.deinit();
     try service.validateWorkspaceRecordsPrepared(service.allocator, work.task, index.records.items, &facts);
     const successor = work.observer.?.previous != null;
-    for (0..@as(usize, if (successor) 1 else 3)) |attack| {
+    for (0..@as(usize, if (successor) 3 else 5)) |attack| {
         try service.namespace.store.begin();
         defer service.namespace.store.rollback();
         var forged = work;
@@ -6780,7 +7099,12 @@ fn observerArchiveTamper(service: anytype, a: std.mem.Allocator, work: native.wo
             defer a.free(bytes);
             var predecessor = try contracts.decodeOwned(native.workspace.Work, a, bytes);
             defer predecessor.deinit();
-            predecessor.value.control_revision += 1;
+            switch (attack) {
+                0 => predecessor.value.control_revision += 1,
+                1 => predecessor.value.outer_cursor.revision += 1,
+                2 => predecessor.value.outer_cursor.last = work.input.digest,
+                else => unreachable,
+            }
             const changed = try contracts.encodeOwned(native.workspace.Work, a, predecessor.value);
             defer a.free(changed);
             observer.previous = try service.namespace.store.putObject(changed);
@@ -6788,6 +7112,8 @@ fn observerArchiveTamper(service: anytype, a: std.mem.Allocator, work: native.wo
             0 => observer.selection.accumulator = try workspaceRef(a, .value, observer.source.digest),
             1 => observer.selection.policy.cadence = 0,
             2 => observer.selection.policy.cadence = 2,
+            3 => forged.outer_cursor.revision += 1,
+            4 => forged.outer_cursor.last = work.input.digest,
             else => unreachable,
         }
         try rewriteObserverArchive(service, a, forged);
@@ -6953,4 +7279,144 @@ fn observerCompleted(service: anytype, a: std.mem.Allocator, task: [16]u8, id: [
         } });
     }
     return error.ObserverDidNotComplete;
+}
+
+fn scannedOuterCursor(
+    publications: []const native.testing.state.WorkPublication,
+    id: [32]u8,
+    watermark: u64,
+    current: ?native.testing.state.Reference,
+    visits: *usize,
+) !native.workspace.OuterCursor {
+    var previous: ?native.testing.state.Reference = null;
+    var revision: u64 = 0;
+    for (publications, 1..) |item, seq| {
+        if (seq > watermark) break;
+        visits.* += 1;
+        if (!std.meta.eql(item.work, id)) continue;
+        const capsule = item.outer_operation orelse item.runtime_capsule orelse continue;
+        if (previous != null and !std.meta.eql(previous.?, capsule)) revision += 1;
+        previous = capsule;
+    }
+    if (current != null and previous != null and !std.meta.eql(current.?, previous.?)) revision += 1;
+    return .{ .revision = revision, .last = if (current orelse previous) |capsule| capsule.digest else null };
+}
+
+fn scannedOuterRevision(
+    publications: []const native.testing.state.WorkPublication,
+    id: [32]u8,
+    watermark: u64,
+    current: ?native.testing.state.Reference,
+    visits: *usize,
+) !u64 {
+    return (try scannedOuterCursor(publications, id, watermark, current, visits)).revision;
+}
+
+test "runtime selection outer publication cursors fold exact historical capsule transitions" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    for ([_]usize{ 10, 100, 1000 }) |count| {
+        const items = try scratch.alloc(native.testing.state.WorkPublication, count);
+        for (items, 0..) |*item, i| {
+            item.* = try prefixPublication(scratch, i);
+            item.work = prefixIdentity(10000 + i % 3);
+            item.observer = null;
+            const capsule: native.testing.state.Reference = .{
+                .digest = prefixIdentity((i / 3) % 5),
+                .bytes = 8,
+            };
+            if (i % 7 != 0) {
+                if (i % 2 == 0) item.outer_operation = capsule else item.runtime_capsule = capsule;
+            }
+        }
+        var prefix: native.testing.workspace_observers.PublicationPrefix = .init(a);
+        defer prefix.deinit();
+        var visits: usize = 0;
+        for (items, 0..) |item, i| {
+            const current = item.outer_operation orelse item.runtime_capsule;
+            const before = try scannedOuterCursor(items, item.work, i, current, &visits);
+            try std.testing.expectEqualDeep(before, try prefix.outerCursor(item.work, i, current));
+            var published = item;
+            published.outer_cursor = before;
+            try prefix.validateOuterCursor(published);
+            var forged = published;
+            forged.outer_cursor.revision += 1;
+            try std.testing.expectError(error.InvalidArchive, prefix.validateOuterCursor(forged));
+            forged = published;
+            forged.outer_cursor.last = prefixIdentity(999999);
+            try std.testing.expectError(error.InvalidArchive, prefix.validateOuterCursor(forged));
+            try prefix.put(published, i + 1);
+            const after = try scannedOuterRevision(items, item.work, i + 1, current, &visits);
+            try std.testing.expectEqual(after, try prefix.outerRevision(item.work, i + 1, current));
+        }
+        try std.testing.expectEqual(count * count, visits);
+        for ([_]usize{ 0, count / 2, count }) |watermark| {
+            for (items[count - 3 ..]) |item| {
+                const current = item.outer_operation orelse item.runtime_capsule;
+                try std.testing.expectEqualDeep(
+                    try scannedOuterCursor(items, item.work, watermark, current, &visits),
+                    try prefix.outerCursor(item.work, watermark, current),
+                );
+                try std.testing.expectEqualDeep(
+                    try scannedOuterCursor(items, item.work, watermark, null, &visits),
+                    prefix.outerCursorAt(item.work, watermark),
+                );
+            }
+        }
+        std.debug.print("outer cursors: publications={d} ordered_reference_visits={d} indexed_folds={d}\n", .{
+            count, count * count, count,
+        });
+        if (count == 10) try std.testing.checkAllAllocationFailures(a, allocatePublicationPrefix, .{items});
+    }
+}
+
+const HistoricalObserverTrace = struct {
+    scans: usize = 0,
+    rows: usize = 0,
+    extern "c" fn sqlite3_sql(?*anyopaque) ?[*:0]const u8;
+
+    fn observe(kind: c_uint, context: ?*anyopaque, statement: ?*anyopaque, sql: ?*anyopaque) callconv(.c) c_int {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const text = if (kind == 1)
+            std.mem.span(@as([*:0]const u8, @ptrCast(sql.?)))
+        else
+            std.mem.span(sqlite3_sql(statement) orelse return 0);
+        if (std.mem.eql(u8, text, "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq<=? ORDER BY e.seq")) {
+            if (kind == 1) self.scans += 1 else if (kind == 4) self.rows += 1;
+        }
+        return 0;
+    }
+};
+
+fn historicalObserverBatchWitness(service: anytype, a: std.mem.Allocator, task: [16]u8, work: native.workspace.Work) !void {
+    var statement = try service.namespace.store.database.prepare("SELECT 1", &.{});
+    const database = CleanupTrace.sqlite3_db_handle(statement.handle);
+    statement.deinit();
+    const ref = try workspaceRef(a, .work, work.id);
+    const refs: [4]contracts.workspace.Ref = @splat(ref);
+    var parent = try service.task(a, task);
+    defer parent.deinit();
+    for ([_]bool{ false, true }) |wait| {
+        var trace: HistoricalObserverTrace = .{};
+        try std.testing.expectEqual(@as(c_int, 0), CleanupTrace.sqlite3_trace_v2(database, 1 | 4, HistoricalObserverTrace.observe, &trace));
+        defer std.debug.assert(CleanupTrace.sqlite3_trace_v2(database, 0, null, null) == 0);
+        const command: contracts.workspace.Command = .{ .work = if (wait)
+            .{ .wait = .{ .works = .{ .items = &refs }, .after = 0 } }
+        else
+            .{ .collect = .{ .works = .{ .items = &refs } } } };
+        const reply = try service.workspaceCommand(a, if (wait) "observer-history-wait" else "observer-history-collect", task, command);
+        try std.testing.expectEqual(.observed, reply.disposition);
+        try std.testing.expectEqual(@as(usize, 1), trace.scans);
+        try std.testing.expectEqual(parent.value.event_high, trace.rows);
+        var observation = try native.json.parseAsset(a, reply.observation_json.bytes, reply.observation_json.bytes.len);
+        defer observation.deinit();
+        const items = if (wait) observation.value.object.get("works").?.array.items else observation.value.array.items;
+        try std.testing.expectEqual(refs.len, items.len);
+        for (items) |item| try std.testing.expect(item.object.get("observation_blocked").?.bool);
+        std.debug.print("observer historical batch: wait={} works={d} scans={d} decoded_event_rows={d}\n", .{
+            wait, refs.len, trace.scans, trace.rows,
+        });
+    }
 }

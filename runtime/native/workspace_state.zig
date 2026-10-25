@@ -216,6 +216,7 @@ pub const Observer = struct {
     consumed_revision: ?u64 = null,
     gap_first: ?u64 = null,
     gap_last: ?u64 = null,
+    successor: ?state.Digest = null,
 };
 
 pub const ObserverEnvelope = struct {
@@ -229,6 +230,11 @@ pub const ObserverEnvelope = struct {
     granularity: @FieldType(contracts.workspace.ObserverPolicy, "granularity"),
     disclosed_value: state.Reference,
     control: ControlObservation,
+};
+
+pub const OuterCursor = struct {
+    revision: u64 = 0,
+    last: ?state.Digest = null,
 };
 
 pub const Work = struct {
@@ -274,6 +280,7 @@ pub const Work = struct {
     observer: ?Observer = null,
     guard: ?Guard = null,
     guest_work: u64 = 0,
+    outer_cursor: OuterCursor = .{},
 
     pub fn terminal(self: Work) bool {
         return switch (self.outcome_kind) {
@@ -383,6 +390,12 @@ pub const PublicationCommand = union(enum) {
     delegate: @FieldType(contracts.workspace.Work, "delegate"),
 };
 
+pub const SemanticPolicyObservation = struct {
+    roots: contracts.Vector(state.Digest, null),
+    checkers: contracts.Vector(state.Name, null),
+    guard: bool,
+};
+
 /// Inputs to a read projection, captured before later work can replace them.
 /// Executable claims in each work are checked against its retained checkpoint.
 pub const ReadObservation = union(enum) {
@@ -409,6 +422,7 @@ pub const ReadObservation = union(enum) {
         interrupted: bool,
         event_watermark: u64,
     },
+    semantic_policy: struct { policy: ?SemanticPolicyObservation, event_watermark: u64 },
 };
 
 /// The local operation owns these inputs; reply JSON is always a projection.

@@ -610,8 +610,6 @@ pub fn Service(comptime Types: type) type {
             return try self.controllerResidualsSettled(a, task_id) and try self.workspaceSettled(a, task_id, true, true, false);
         }
         fn workspaceSettled(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, require_disposal: bool, include_remote: bool, require_park: bool) !bool {
-            var successors: ObserverSuccessors = .init(a, task_id);
-            defer successors.deinit();
             var query = try self.store().database.prepare("SELECT id FROM records WHERE task=? AND kind='workspace_work' ORDER BY id", &.{.{ .blob = &task_id }});
             defer query.deinit();
             var arena = std.heap.ArenaAllocator.init(a);
@@ -632,7 +630,7 @@ pub fn Service(comptime Types: type) type {
                     var remote = try self.remoteWorkState(temporary, task_id, id);
                     defer remote.deinit();
                     if (remote.pending) return false;
-                    if (try self.retainedWorkspaceDisposed(temporary, task_id, id, &successors)) continue;
+                    if (try self.retainedWorkspaceDisposed(temporary, task_id, id)) continue;
                     if (require_disposal) {
                         const observed = if (remote.latest) |saved| saved.value.report.?.value.work_state.? else return false;
                         if (!remoteDisposed(observed)) return false;
@@ -644,14 +642,14 @@ pub fn Service(comptime Types: type) type {
                 }
                 var child = try self.retainedWorkspaceWork(temporary, task_id, id);
                 defer child.deinit();
-                if (!try self.workspaceWorkSettled(temporary, child.value, require_disposal, require_park, &successors)) return false;
+                if (!try self.workspaceWorkSettled(temporary, child.value, require_disposal, require_park)) return false;
             }
             return true;
         }
 
-        fn workspaceWorkSettled(self: *Self, a: std.mem.Allocator, child: workspace.Work, require_disposal: bool, require_park: bool, successors: *ObserverSuccessors) !bool {
+        fn workspaceWorkSettled(self: *Self, a: std.mem.Allocator, child: workspace.Work, require_disposal: bool, require_park: bool) !bool {
             if (require_disposal and child.observer != null and !child.observer.?.stopped and
-                !try successors.has(self, child.id)) return false;
+                child.observer.?.successor == null) return false;
             if (child.terminal()) {
                 const outcome_bytes = try self.store().object(a, child.outcome, null);
                 defer a.free(outcome_bytes);
@@ -670,10 +668,10 @@ pub fn Service(comptime Types: type) type {
             }
             return true;
         }
-        fn retainedWorkspaceDisposed(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: state.Digest, successors: *ObserverSuccessors) !bool {
+        fn retainedWorkspaceDisposed(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: state.Digest) !bool {
             var child = try self.retainedWorkspaceWork(a, task_id, work_id);
             defer child.deinit();
-            return child.value.terminal() and try self.workspaceWorkSettled(a, child.value, true, false, successors);
+            return child.value.terminal() and try self.workspaceWorkSettled(a, child.value, true, false);
         }
         pub fn shutdownIncomplete(self: *Self, a: std.mem.Allocator) !bool {
             for (self.owned.items) |id| {
@@ -709,15 +707,13 @@ pub fn Service(comptime Types: type) type {
                     _ = try self.requestCancel(a, operation_id, id, reason);
                     continue;
                 }
-                var successors: ObserverSuccessors = .init(a, id);
-                defer successors.deinit();
                 const children = try self.workspaceIds(a, id);
                 defer a.free(children);
                 for (children) |work_id| {
                     if (!try self.hasLocalCustody(a, id, work_id)) continue;
                     var child = try self.workspaceWork(a, id, work_id);
                     defer child.deinit();
-                    if (try self.stopLocalWorkspaceObserver(a, child.value, &successors)) {
+                    if (try self.stopLocalWorkspaceObserver(a, child.value)) {
                         const updated = try self.workspaceWork(a, id, work_id);
                         child.deinit();
                         child = updated;
@@ -871,18 +867,17 @@ pub fn Service(comptime Types: type) type {
             a: std.mem.Allocator,
             task_id: state.TaskId,
             work_id: state.Digest,
-            successors: *ObserverSuccessors,
         ) !bool {
             var child = try self.retainedWorkspaceWork(a, task_id, work_id);
             defer child.deinit();
-            if (!try self.activeObserver(child.value, successors)) return false;
+            if (!self.activeObserver(child.value)) return false;
             var remote = try self.remoteWorkState(a, task_id, work_id);
             defer remote.deinit();
             if (remote.latest) |saved| if (!saved.value.report.?.value.work_state.?.observer_active)
                 return false;
             var parent = try self.task(a, task_id);
             defer parent.deinit();
-            return self.settleRemoteWork(a, parent.value, work_id, successors);
+            return self.settleRemoteWork(a, parent.value, work_id);
         }
         fn remoteWorkState(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: state.Digest) !RemoteWorkState {
             const p = @import("placement.zig");
@@ -929,7 +924,7 @@ pub fn Service(comptime Types: type) type {
             }
             return result;
         }
-        fn settleRemoteWork(self: *Self, a: std.mem.Allocator, parent: state.Task, work_id: state.Digest, successors: *ObserverSuccessors) !bool {
+        fn settleRemoteWork(self: *Self, a: std.mem.Allocator, parent: state.Task, work_id: state.Digest) !bool {
             const p = @import("placement.zig");
             const cancellation_revision: ?u64 = if (parent.cancellation != null) try self.parentCancellationRevision(a, parent.id) else null;
             var observed = try self.remoteWorkState(a, parent.id, work_id);
@@ -941,7 +936,7 @@ pub fn Service(comptime Types: type) type {
                 }
                 return false;
             }
-            if (try self.retainedWorkspaceDisposed(a, parent.id, work_id, successors)) return false;
+            if (try self.retainedWorkspaceDisposed(a, parent.id, work_id)) return false;
             const reference = try wp.reference(a, .work, work_id);
             var command: wc.Work = .{ .inspect = .{ .work = reference } };
             var predecessor: state.Digest = @splat(0);
@@ -1099,21 +1094,19 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn settleWorkspaceOne(self: *Self, a: std.mem.Allocator, parent: state.Task, controller: bool) !bool {
-            var successors: ObserverSuccessors = .init(a, parent.id);
-            defer successors.deinit();
             const ids = try self.workspaceIds(a, parent.id);
             defer a.free(ids);
             if (controller and (parent.cancellation != null or parent.terminal()) and
-                try self.stopWorkspaceObserverOne(a, parent.id, ids, &successors)) return true;
+                try self.stopWorkspaceObserverOne(a, parent.id, parent.observer_heads.items)) return true;
             for (ids) |id| {
                 if (!try self.hasLocalCustody(a, parent.id, id)) {
-                    if (controller and (parent.cancellation != null or parent.terminal()) and try self.settleRemoteWork(a, parent, id, &successors)) return true;
+                    if (controller and (parent.cancellation != null or parent.terminal()) and try self.settleRemoteWork(a, parent, id)) return true;
                     continue;
                 }
                 var child = try self.workspaceWork(a, parent.id, id);
                 defer child.deinit();
                 if (self.shutdown_cancel_requested and
-                    try self.stopLocalWorkspaceObserver(a, child.value, &successors)) return true;
+                    try self.stopLocalWorkspaceObserver(a, child.value)) return true;
                 if (child.value.terminal()) continue;
                 if (!controller or parent.cancellation == null) {
                     if (child.value.cancellation != null and child.value.schedule != .parked) try self.subjectAdd(.{ .task = parent.id, .work = id });
@@ -1143,16 +1136,15 @@ pub fn Service(comptime Types: type) type {
             a: std.mem.Allocator,
             task_id: state.TaskId,
             ids: []const state.Digest,
-            successors: *ObserverSuccessors,
         ) !bool {
             for (ids) |id| {
                 if (!try self.hasLocalCustody(a, task_id, id)) {
-                    if (try self.stopRemoteObserverOne(a, task_id, id, successors)) return true;
+                    if (try self.stopRemoteObserverOne(a, task_id, id)) return true;
                     continue;
                 }
                 var child = try self.workspaceWork(a, task_id, id);
                 defer child.deinit();
-                if (try self.stopLocalWorkspaceObserver(a, child.value, successors)) return true;
+                if (try self.stopLocalWorkspaceObserver(a, child.value)) return true;
             }
             return false;
         }
@@ -1161,9 +1153,8 @@ pub fn Service(comptime Types: type) type {
             self: *Self,
             a: std.mem.Allocator,
             child: workspace.Work,
-            successors: *ObserverSuccessors,
         ) !bool {
-            if (!try self.activeObserver(child, successors)) return false;
+            if (!self.activeObserver(child)) return false;
             const operation_id = try std.fmt.allocPrint(a, "stop-cancelled-observer-{s}-{d}", .{
                 std.fmt.bytesToHex(child.id, .lower), child.control_revision,
             });
@@ -1949,8 +1940,6 @@ pub fn Service(comptime Types: type) type {
                 if (saved.value.state == .unknown or saved.value.state == .dispatching) return error.UnsettledOccurrence;
                 if (saved.value.state == .not_sent) rearmed = try occurrence.rearm(saved.value, .{ .id = current, .task = task_id, .request = saved.value.request });
             }
-            var successors: ObserverSuccessors = .init(a, task_id);
-            defer successors.deinit();
             const children = try self.workspaceIds(a, task_id);
             defer a.free(children);
             var eligible: std.ArrayList(workspace.Subject) = .empty;
@@ -1959,7 +1948,7 @@ pub fn Service(comptime Types: type) type {
             for (children) |child_id| {
                 var child = try self.workspaceWork(a, task_id, child_id);
                 defer child.deinit();
-                if (try self.workspaceRunnable(a, value, child.value, &successors)) try eligible.append(a, .{ .task = task_id, .work = child_id });
+                if (try self.workspaceRunnable(a, value, child.value)) try eligible.append(a, .{ .task = task_id, .work = child_id });
             }
             try self.appendControllerResiduals(a, task_id, &eligible);
             value.revision = try std.math.add(u64, value.revision, 1);
@@ -2463,10 +2452,15 @@ pub fn Service(comptime Types: type) type {
                 const id = self.runnable.items[self.runnable_cursor];
                 self.runnable_cursor += 1;
                 if (self.runnable_cursor == self.runnable.items.len) self.runnable_cursor = 0;
-                const step = if (id.residual) |residual_id| try self.pumpControllerResidual(a, id.task, residual_id) else if (id.work) |work_id| self.pumpWorkspace(a, id.task, work_id) catch |err| switch (err) {
-                    error.ObservationBlocked => .idle,
+                const step = (if (id.residual) |residual_id|
+                    self.pumpControllerResidual(a, id.task, residual_id)
+                else if (id.work) |work_id|
+                    self.pumpWorkspace(a, id.task, work_id)
+                else
+                    self.pumpTask(a, id.task)) catch |err| switch (err) {
+                    error.ObservationBlocked, error.SemanticPolicyDenied, error.GuardPolicyDenied => .idle,
                     else => return err,
-                } else try self.pumpTask(a, id.task);
+                };
                 if (step != .idle) return step;
             }
             return .idle;
@@ -2950,7 +2944,7 @@ pub fn Service(comptime Types: type) type {
             if (schedule != .queued or work.value.schedule != .parked) work.value.schedule = schedule;
             work.value.blocker = blocker;
             work.value.event_watermark = try std.math.add(u64, parent.event_high, 1);
-            try self.store().putRecord(workspace.Work, "workspace_work", id, parent.id, work.value);
+            try self.writeWorkspaceWork(&work.value, .replace);
             const event_data = try std.fmt.allocPrint(a, "{{\"workspace_id\":\"{s}\"}}", .{std.fmt.bytesToHex(id, .lower)});
             defer a.free(event_data);
             const observed = try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, id), true);
@@ -3918,11 +3912,13 @@ pub fn Service(comptime Types: type) type {
                 for (snapshots[0..initialized]) |snapshot| freeControllerViewWork(allocator, snapshot);
                 allocator.free(snapshots);
             }
+            var observers = HistoricalObservers.init(a, parent.id, parent.event_high);
+            defer observers.deinit();
             for (ids, works, snapshots) |id, *out, *snapshot| {
                 snapshot.* = try self.freezeWorkspaceWork(allocator, parent.id, try wp.reference(a, .work, id), true);
                 initialized += 1;
                 const child = snapshot.work;
-                out.* = .{ .work = try wp.reference(a, .work, id), .execution_revision = child.execution_revision, .control_revision = child.control_revision, .event_watermark = child.event_watermark, .observation = .{ .bytes = try json.canonical(a, try self.renderWorkspaceWorkObservation(a, child, snapshot.occurrence, parent.event_high)) } };
+                out.* = .{ .work = try wp.reference(a, .work, id), .execution_revision = child.execution_revision, .control_revision = child.control_revision, .event_watermark = child.event_watermark, .observation = .{ .bytes = try json.canonical(a, try self.renderWorkspaceWorkObservationIn(a, child, snapshot.occurrence, parent.event_high, &observers)) } };
             }
             return .{ .works = snapshots, .bytes = try contracts.encodeOwned(contracts.controller.OwnerView, allocator, .{ .task = parent.id, .event_cut = parent.event_high, .next_message = parent.next_message, .policy = parent.profile.digest, .input_schema = .{ .bytes = try values.schemaBytes(Types.Input, a) }, .input = .{ .bytes = try self.store().object(a, parent.input, null) }, .messages = .{ .items = messages }, .works = .{ .items = works } }) };
         }
@@ -3959,7 +3955,7 @@ pub fn Service(comptime Types: type) type {
                 if (!std.meta.eql(id, try wp.identity(fact.work, .work)) or !std.meta.eql(id, child.id) or fact.execution_revision != child.execution_revision or fact.control_revision != child.control_revision or fact.event_watermark != child.event_watermark or child.event_watermark != try self.workspacePublicationAt(a, parent.id, id, view.event_cut)) return error.InvalidArchive;
                 try self.validateWorkspaceWorkSnapshotIn(parent, snapshot, records, checked);
                 try self.validateHistoricalOccurrence(a, snapshot);
-                if (!same(fact.observation.bytes, try json.canonical(a, try self.renderWorkspaceWorkObservation(a, child, snapshot.occurrence, view.event_cut)))) return error.InvalidArchive;
+                if (!same(fact.observation.bytes, try json.canonical(a, try self.renderWorkspaceWorkObservationIn(a, child, snapshot.occurrence, view.event_cut, try checked.observer_successors.histories.get(parent.id, view.event_cut))))) return error.InvalidArchive;
             }
         }
         fn validateControllerMessageCut(self: *Self, a: std.mem.Allocator, parent: state.Task, event_cut: u64, expected_next_message: u64) !void {
@@ -5998,11 +5994,9 @@ pub fn Service(comptime Types: type) type {
             const outcome_bytes = try self.store().object(scratch.allocator(), observed_work.value.outcome, null);
             var outcome = try data.invocation.decode(data.invocation.Outcome, scratch.allocator(), outcome_bytes);
             defer outcome.deinit();
-            var successors: ObserverSuccessors = .init(a, value.subject.task);
-            defer successors.deinit();
-            const observed: p.WorkState = .{ .observed_at = self.store().head.generation, .execution_revision = observed_work.value.execution_revision, .control_revision = observed_work.value.control_revision, .outcome = observed_work.value.outcome_kind, .cleanup_complete = cleanupComplete(outcome.value), .cancellation = observed_work.value.cancellation, .explicitly_parked = try self.workspaceExplicitlyParked(a, observed_work.value), .park_complete = try self.workspaceWorkSettled(a, observed_work.value, false, true, &successors) };
+            const observed: p.WorkState = .{ .observed_at = self.store().head.generation, .execution_revision = observed_work.value.execution_revision, .control_revision = observed_work.value.control_revision, .outcome = observed_work.value.outcome_kind, .cleanup_complete = cleanupComplete(outcome.value), .cancellation = observed_work.value.cancellation, .explicitly_parked = try self.workspaceExplicitlyParked(a, observed_work.value), .park_complete = try self.workspaceWorkSettled(a, observed_work.value, false, true) };
             var lifecycle = observed;
-            lifecycle.observer_active = try self.activeObserver(observed_work.value, &successors);
+            lifecycle.observer_active = self.activeObserver(observed_work.value);
             const report = try p.sign(p.Report, a, self.profile.placement.?.signing_key, .{ .control = try p.digest(p.Control, a, value), .executor = site, .custody_epoch = head.epoch, .reply = reply, .work_state = lifecycle });
             const result = try contracts.encodeOwned(p.Signed(p.Report), a, report);
             errdefer a.free(result);
@@ -6271,9 +6265,34 @@ pub fn Service(comptime Types: type) type {
             };
         }
 
-        fn activeObserver(self: *Self, work: workspace.Work, successors: *ObserverSuccessors) !bool {
+        fn activeObserver(_: *Self, work: workspace.Work) bool {
             const observer = work.observer orelse return false;
-            return !observer.stopped and !try successors.has(self, work.id);
+            return !observer.stopped and observer.successor == null;
+        }
+
+        fn observerHeadIndex(parent: state.Task, id: state.Digest) ?usize {
+            for (parent.observer_heads.items, 0..) |head, index|
+                if (std.meta.eql(head, id)) return index;
+            return null;
+        }
+
+        fn observerHeadOrder(_: void, left: state.Digest, right: state.Digest) bool {
+            return std.mem.order(u8, &left, &right) == .lt;
+        }
+
+        fn observerHeadsAfter(a: std.mem.Allocator, parent: state.Task, removed: ?state.Digest, added: ?state.Digest) ![]state.Digest {
+            var heads: std.ArrayList(state.Digest) = .empty;
+            errdefer heads.deinit(a);
+            for (parent.observer_heads.items, 0..) |head, index| {
+                if (index != 0 and !observerHeadOrder({}, parent.observer_heads.items[index - 1], head))
+                    return error.CorruptState;
+                if (removed) |id| if (std.meta.eql(head, id)) continue;
+                if (added) |id| if (std.meta.eql(head, id)) return error.CorruptState;
+                try heads.append(a, head);
+            }
+            if (added) |id| try heads.append(a, id);
+            std.mem.sort(state.Digest, heads.items, {}, observerHeadOrder);
+            return heads.toOwnedSlice(a);
         }
 
         fn requireObserverMobility(
@@ -6282,22 +6301,17 @@ pub fn Service(comptime Types: type) type {
             parent: state.Task,
             work_id: ?state.Digest,
         ) !void {
-            if (!parent.observers_present) return;
-            var successors: ObserverSuccessors = .init(a, parent.id);
-            defer successors.deinit();
-            const ids = try self.workspaceIds(a, parent.id);
-            defer a.free(ids);
-            for (ids) |id| {
-                var work = try self.workspaceWork(a, parent.id, id);
+            if (parent.observer_heads.items.len != 0) try self.compatible(parent);
+            for (parent.observer_heads.items) |id| {
+                var work = try self.retainedWorkspaceWork(a, parent.id, id);
                 defer work.deinit();
-                const observer = work.value.observer orelse continue;
+                const observer = work.value.observer orelse return error.CorruptState;
+                if (!self.activeObserver(work.value)) return error.CorruptState;
                 if (work_id) |selected| {
                     if (!std.meta.eql(selected, id) and
                         !std.meta.eql(selected, observer.source_work)) continue;
-                    if (try self.activeObserver(work.value, &successors))
-                        return error.ActiveObserverMobilityUnsupported;
-                } else if (observer.selection.policy.continuation == .owner_scheduled and
-                    try self.activeObserver(work.value, &successors))
+                    return error.ActiveObserverMobilityUnsupported;
+                } else if (observer.selection.policy.continuation == .owner_scheduled)
                     return error.ScheduledObserverMobilityUnsupported;
             }
         }
@@ -6873,6 +6887,12 @@ pub fn Service(comptime Types: type) type {
             return self.workspaceCommandFrom(a, operation_id, task_id, admitted, null);
         }
         fn workspaceCommandFrom(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, admitted: workspace.Authorized, basis: ?workspace.ReadObservation) !wc.Reply {
+            var histories: ObserverHistories = .{ .allocator = a };
+            defer histories.deinit();
+            return self.workspaceCommandFromIn(a, operation_id, task_id, admitted, basis, &histories);
+        }
+
+        fn workspaceCommandFromIn(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, admitted: workspace.Authorized, basis: ?workspace.ReadObservation, histories: *ObserverHistories) !wc.Reply {
             try self.allowed();
             const command = admitted.command;
             var compiler_facts: CompilerFacts = .{ .allocator = self.allocator };
@@ -6889,7 +6909,7 @@ pub fn Service(comptime Types: type) type {
                 if (self.store().fenced or err == error.OutOfMemory or err == error.StorageUnavailable) return err;
                 return workspaceRejection(a, err);
             };
-            const executed = self.workspaceExecute(a, operation_id, task_id, admitted, basis) catch |err| {
+            const executed = self.workspaceExecute(a, operation_id, task_id, admitted, basis, histories) catch |err| {
                 if (self.store().fenced or err == error.OutOfMemory or err == error.StorageUnavailable) return err;
                 return workspaceRejection(a, err);
             };
@@ -6930,7 +6950,7 @@ pub fn Service(comptime Types: type) type {
 
         const WorkspaceExecution = union(enum) { observation: json.Value, admitted: Admission };
 
-        fn workspaceExecute(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, authorized: workspace.Authorized, basis: ?workspace.ReadObservation) !WorkspaceExecution {
+        fn workspaceExecute(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, authorized: workspace.Authorized, basis: ?workspace.ReadObservation, histories: *ObserverHistories) !WorkspaceExecution {
             const command = authorized.command;
             switch (command) {
                 .placement => return error.InvalidState,
@@ -6950,7 +6970,7 @@ pub fn Service(comptime Types: type) type {
                     },
                     .describe => |request| {
                         const description = switch (request.section) {
-                            .semantic_candidates => try self.workspaceSemanticContract(a),
+                            .semantic_candidates => try self.workspaceSemanticContract(a, basis),
                             .source_records => try @import("source_records.zig").describe(a),
                             .values => try a.dupe(u8, "Runtime values use JSON arrays for products and sequences, {\"tag\":ordinal,\"value\":payload} for sums, {} for unit, booleans, exact decimal strings for 64-bit integers, UTF-8 strings for text, and base64url strings for bytes. Supply the actual program input schema reference. Program source uses the separately described Horos record transport."),
                             .bindings => try a.dupe(u8, "Pure source records require no environmental adapter. No effect request grants authority. Workspace observations and input ports do not restrict the controller's next action."),
@@ -7132,18 +7152,20 @@ pub fn Service(comptime Types: type) type {
                             defer residual.deinit();
                             return .{ .observation = try self.controllerResidualObservation(a, .from(residual.value)) };
                         }
-                        if (basis) |frozen| return .{ .observation = try self.renderWorkspaceWorkObservation(a, frozen.works.works.items[0].?.work, frozen.works.works.items[0].?.occurrence, frozen.works.event_watermark) };
+                        if (basis) |frozen| return .{ .observation = try self.renderWorkspaceWorkObservationIn(a, frozen.works.works.items[0].?.work, frozen.works.works.items[0].?.occurrence, frozen.works.event_watermark, try histories.get(task_id, frozen.works.event_watermark)) };
                         var value = try self.workspaceWork(a, task_id, try wp.identity(request.work, .work));
                         defer value.deinit();
                         return .{ .observation = try self.workspaceWorkObservation(a, value.value) };
                     },
                     .collect => |request| {
+                        var parent = try self.task(a, task_id);
+                        defer parent.deinit();
                         var result: json.Value = .{ .array = .init(a) };
                         for (request.works.items, 0..) |ref, i| {
                             if (basis) |frozen| {
                                 const item = frozen.works.works.items[i];
                                 if (item) |observed| {
-                                    try result.array.append(try self.renderWorkspaceWorkObservation(a, observed.work, observed.occurrence, frozen.works.event_watermark));
+                                    try result.array.append(try self.renderWorkspaceWorkObservationIn(a, observed.work, observed.occurrence, frozen.works.event_watermark, try histories.get(task_id, frozen.works.event_watermark)));
                                 } else {
                                     var missing = json.object();
                                     try json.put(a, &missing, "work", try values.toJson(wc.Ref, a, ref));
@@ -7161,7 +7183,7 @@ pub fn Service(comptime Types: type) type {
                                 continue;
                             };
                             defer value.deinit();
-                            try result.array.append(try self.workspaceWorkObservation(a, value.value));
+                            try result.array.append(try self.workspaceWorkObservationIn(a, value.value, try histories.get(task_id, parent.value.event_high)));
                         }
                         return .{ .observation = result };
                     },
@@ -7195,12 +7217,12 @@ pub fn Service(comptime Types: type) type {
                             if (basis) |frozen| {
                                 const observed = frozen.wait.works.items[i].?;
                                 ready = ready or observed.work.event_watermark > request.after or observed.work.terminal();
-                                try selected.array.append(try self.renderWorkspaceWorkObservation(a, observed.work, observed.occurrence, frozen.wait.event_watermark));
+                                try selected.array.append(try self.renderWorkspaceWorkObservationIn(a, observed.work, observed.occurrence, frozen.wait.event_watermark, try histories.get(task_id, frozen.wait.event_watermark)));
                             } else {
                                 var work = try self.workspaceWork(a, task_id, try wp.identity(ref, .work));
                                 defer work.deinit();
                                 ready = ready or work.value.event_watermark > request.after or work.value.terminal();
-                                try selected.array.append(try self.workspaceWorkObservation(a, work.value));
+                                try selected.array.append(try self.workspaceWorkObservationIn(a, work.value, try histories.get(task_id, parent.value.event_high)));
                             }
                         }
                         try json.put(a, &result, "ready", .{ .bool = ready });
@@ -7381,7 +7403,28 @@ pub fn Service(comptime Types: type) type {
             try self.requireSemanticPolicy(kosmos.RuntimeCompiler.approvedRootIdentity(&selected.admitted), kosmos.RuntimeCompiler.checker_identity);
         }
 
-        fn workspaceSemanticContract(self: *Self, a: std.mem.Allocator) ![]u8 {
+        fn workspaceSemanticPolicy(self: *Self, a: std.mem.Allocator) !?workspace.SemanticPolicyObservation {
+            const policy = self.profile.semantic_construction orelse return null;
+            const checkers = try a.alloc(state.Name, policy.checkers.len);
+            for (policy.checkers, checkers) |checker, *checker_name|
+                checker_name.* = .{ .bytes = checker };
+            return .{
+                .roots = .{ .items = policy.roots },
+                .checkers = .{ .items = checkers },
+                .guard = policy.guard,
+            };
+        }
+
+        fn workspaceSemanticContract(
+            self: *Self,
+            a: std.mem.Allocator,
+            basis: ?workspace.ReadObservation,
+        ) ![]u8 {
+            const selected = if (basis) |frozen| blk: {
+                if (frozen != .semantic_policy) return error.InvalidArchive;
+                break :blk frozen.semantic_policy.policy;
+            } else try self.workspaceSemanticPolicy(a);
+            defer if (basis == null) if (selected) |policy| a.free(policy.checkers.items);
             var result = json.object();
             const schema = try @import("source_records.zig").describeRecord(
                 construction.CandidateDocument,
@@ -7403,25 +7446,25 @@ pub fn Service(comptime Types: type) type {
             ));
             var roots: json.Value = .{ .array = .init(a) };
             var checkers: json.Value = .{ .array = .init(a) };
-            if (self.profile.semantic_construction) |policy| {
-                for (policy.roots) |root| try roots.array.append(json.string(
+            if (selected) |policy| {
+                for (policy.roots.items) |root| try roots.array.append(json.string(
                     try a.dupe(u8, &std.fmt.bytesToHex(root, .lower)),
                 ));
-                for (policy.checkers) |checker| try checkers.array.append(
-                    json.string(try a.dupe(u8, checker)),
+                for (policy.checkers.items) |checker| try checkers.array.append(
+                    json.string(try a.dupe(u8, checker.bytes)),
                 );
             }
             try json.put(a, &result, "approved_roots", roots);
             try json.put(a, &result, "checkers", checkers);
             try json.put(a, &result, "derived_use_permitted", .{
-                .bool = self.profile.semantic_construction != null,
+                .bool = selected != null,
             });
             try json.put(a, &result, "controller_realization", .{
-                .bool = self.profile.semantic_construction != null,
+                .bool = selected != null,
             });
             try json.put(a, &result, "controller_realization_target", json.string("work.realize_controller accepts an exact cut or the current control.realization_target from the authenticated controller action; pending outer evaluation or controller adoption must settle first"));
             try json.put(a, &result, "reference_guarded", .{
-                .bool = if (self.profile.semantic_construction) |policy| policy.guard else false,
+                .bool = if (selected) |policy| policy.guard else false,
             });
             return json.canonical(a, result);
         }
@@ -7738,15 +7781,28 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn workspaceWorkObservation(self: *Self, a: std.mem.Allocator, value: workspace.Work) !json.Value {
+            var parent = try self.task(a, value.task);
+            defer parent.deinit();
+            var observers = HistoricalObservers.init(a, value.task, parent.value.event_high);
+            defer observers.deinit();
+            return self.workspaceWorkObservationIn(a, value, &observers);
+        }
+
+        fn workspaceWorkObservationIn(self: *Self, a: std.mem.Allocator, value: workspace.Work, observers: *HistoricalObservers) !json.Value {
             var pending: ?contracts.Decoded(occurrence.Occurrence) = null;
             defer if (pending) |*saved| saved.deinit();
             if (value.current_occurrence) |id| pending = try self.record(occurrence.Occurrence, a, "occurrence", id, value.task);
-            var parent = try self.task(a, value.task);
-            defer parent.deinit();
-            return self.renderWorkspaceWorkObservation(a, value, if (pending) |saved| saved.value else null, parent.value.event_high);
+            return self.renderWorkspaceWorkObservationIn(a, value, if (pending) |saved| saved.value else null, observers.watermark, observers);
         }
 
         fn renderWorkspaceWorkObservation(self: *Self, a: std.mem.Allocator, value: workspace.Work, pending: ?occurrence.Occurrence, observed_at: u64) !json.Value {
+            var observers = HistoricalObservers.init(a, value.task, observed_at);
+            defer observers.deinit();
+            return self.renderWorkspaceWorkObservationIn(a, value, pending, observed_at, &observers);
+        }
+
+        fn renderWorkspaceWorkObservationIn(self: *Self, a: std.mem.Allocator, value: workspace.Work, pending: ?occurrence.Occurrence, observed_at: u64, observers: *HistoricalObservers) !json.Value {
+            if (!std.meta.eql(value.task, observers.task) or observed_at != observers.watermark) return error.InvalidArchive;
             var result = json.object();
             try json.put(a, &result, "interpretation_evidence", try self.workspaceInterpretationEvidence(
                 a,
@@ -7766,7 +7822,7 @@ pub fn Service(comptime Types: type) type {
             try json.put(a, &result, "runtime_capsule", try values.toJson(?state.Reference, a, value.runtime_capsule));
             try json.put(a, &result, "runtime_trace", try values.toJson(?kosmos.RuntimeInstrumentation.Output, a, if (value.runtime_trace) |trace| trace.output else null));
             try json.put(a, &result, "guard", try values.toJson(?workspace.Guard, a, value.guard));
-            const observation_blocked = try self.workObservationBlockedAt(a, value, observed_at);
+            const observation_blocked = try observers.blocked(self, value);
             try json.put(a, &result, "observation_blocked", .{ .bool = observation_blocked });
             if (value.observer) |observer| {
                 var observed = json.object();
@@ -8060,7 +8116,7 @@ pub fn Service(comptime Types: type) type {
             value.control_revision = try std.math.add(u64, value.control_revision, 1);
             value.event_watermark = try std.math.add(u64, parent.value.event_high, 1);
             value.schedule = .queued;
-            try self.store().putRecord(workspace.Work, "workspace_work", value.id, task_id, value);
+            try self.writeWorkspaceWork(&value, .replace);
             const admitted = try self.workspaceCommit(a, parent.value, operation_id, request_digest, value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, task_id), .{ .interact = interaction });
             return admitted;
         }
@@ -9068,7 +9124,7 @@ pub fn Service(comptime Types: type) type {
         fn workPublication(a: std.mem.Allocator, observed: workspace.WorkObservation) !state.WorkPublication {
             const bytes = try contracts.encodeOwned(workspace.WorkObservation, a, observed);
             defer a.free(bytes);
-            return .{ .observer = observed.work.observer, .work = observed.work.id, .execution_revision = observed.work.execution_revision, .control_revision = observed.work.control_revision, .runtime = observed.work.runtime, .realization_revision = observed.work.realization_revision, .runtime_capsule = observed.work.runtime_capsule, .runtime_trace = observed.work.runtime_trace != null, .guard = observed.work.guard, .guest_work = observed.work.guest_work, .outer_operation = if (observed.work.outer_operation) |pending| pending.capsule else null, .checkpoint = observed.work.checkpoint, .observation = storage.digest(bytes), .control = workspace.ControlObservation.from(observed) };
+            return .{ .observer = observed.work.observer, .work = observed.work.id, .execution_revision = observed.work.execution_revision, .control_revision = observed.work.control_revision, .runtime = observed.work.runtime, .realization_revision = observed.work.realization_revision, .runtime_capsule = observed.work.runtime_capsule, .runtime_trace = observed.work.runtime_trace != null, .outer_cursor = observed.work.outer_cursor, .guard = observed.work.guard, .guest_work = observed.work.guest_work, .outer_operation = if (observed.work.outer_operation) |pending| pending.capsule else null, .checkpoint = observed.work.checkpoint, .observation = storage.digest(bytes), .control = workspace.ControlObservation.from(observed) };
         }
 
         fn samePublication(a: std.mem.Allocator, declared: state.WorkPublication, observed: state.WorkPublication) !bool {
@@ -9292,6 +9348,10 @@ pub fn Service(comptime Types: type) type {
             const count: usize = switch (command) {
                 .build, .context, .specialize, .semantic, .residual, .realize_controller => 0,
                 .delegate => 2,
+                .start => |start| if (start.observer) |observer|
+                    if (observer.selection.previous != null) 2 else 1
+                else
+                    1,
                 else => 1,
             };
             if (items.len != count) return error.InvalidArchive;
@@ -9349,6 +9409,11 @@ pub fn Service(comptime Types: type) type {
                     break :blk try operation(workspace.ContextRequest, a, .{ .task = parent.id, .command = context.command, .snapshot = context.snapshot, .input = context.input });
                 },
                 .start => |start| blk: {
+                    if (count == 2) {
+                        const previous = start.observer.?.selection.previous.?;
+                        if (!std.meta.eql(items[1].work, try wp.identity(previous, .work)) or
+                            std.meta.eql(items[0].work, items[1].work)) return error.InvalidArchive;
+                    }
                     var work = try self.retainedWorkspaceWork(a, parent.id, admission.work);
                     defer work.deinit();
                     if ((start.trial == .none) != (work.value.trial == null)) return error.InvalidArchive;
@@ -9404,7 +9469,8 @@ pub fn Service(comptime Types: type) type {
             if (!std.meta.eql(input.provenance, state.Reference{ .digest = storage.digest(provenance), .bytes = provenance.len })) return error.InvalidArchive;
         }
 
-        fn validateWorkspaceControl(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, item: state.WorkPublication, prior: ?state.WorkPublication, command: ?workspace.PublicationCommand, admission: ?WorkspaceAdmission, outer_observed: bool) !void {
+        fn validateWorkspaceControl(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, item: state.WorkPublication, prior: ?state.WorkPublication, command: ?workspace.PublicationCommand, admission: ?WorkspaceAdmission, outer_observed: bool, prefix: *@import("workspace_observers.zig").PublicationPrefix, histories: *ObserverHistories) !void {
+            if (try self.validateObserverSuccessionPublication(a, event_value, item, prior, command)) return;
             const actual = item.control;
             const execution_changed = if (prior) |before| item.execution_revision != before.execution_revision else true;
             if (!execution_changed and item.guest_work != prior.?.guest_work)
@@ -9482,6 +9548,7 @@ pub fn Service(comptime Types: type) type {
                 item,
                 prior,
                 command,
+                histories,
             );
             if (command) |decoded| switch (decoded) {
                 .stop_observing => {},
@@ -9579,7 +9646,7 @@ pub fn Service(comptime Types: type) type {
                                     if (actual.delivery != before.control.delivery or
                                         !std.meta.eql(item.outer_operation, before.outer_operation))
                                         return error.InvalidArchive;
-                                    if (!try self.observationBlockedAt(a, parent.id, before, event_value.seq - 1)) return error.InvalidArchive;
+                                    if (!try observationBlockedAt(before, prefix)) return error.InvalidArchive;
                                     expected.schedule = .queued;
                                     expected.blocker = .observation_blocked;
                                 } else {
@@ -9900,6 +9967,8 @@ pub fn Service(comptime Types: type) type {
         fn validateWorkspacePublications(self: *Self, a: std.mem.Allocator, parent: state.Task, records: []const state.ArchiveRecord, checked: *SnapshotValidation) !void {
             var prefix: @import("workspace_observers.zig").PublicationPrefix = .init(a);
             defer prefix.deinit();
+            var successor_ids: std.AutoHashMap(state.Digest, state.Digest) = .init(a);
+            defer successor_ids.deinit();
             var admissions: std.AutoHashMap(u64, WorkspaceAdmission) = .init(a);
             defer admissions.deinit();
             var replies: std.AutoHashMap(state.Digest, void) = .init(a);
@@ -9967,6 +10036,7 @@ pub fn Service(comptime Types: type) type {
                     if (evidence.value.evidence != .read) return error.InvalidArchive;
                     const at = switch (evidence.value.evidence.read) {
                         .immutable => return error.InvalidArchive,
+                        .semantic_policy => |value| value.event_watermark,
                         .scope => |value| value,
                         .controller => |value| value.event_watermark,
                         .residual => |value| value.event_watermark,
@@ -9986,6 +10056,7 @@ pub fn Service(comptime Types: type) type {
                 }
                 for (event_value.workspace_publications.items) |item| {
                     try requireArchiveRecord(records, .workspace_work, item.work);
+                    try prefix.validateOuterCursor(item);
                     if (prefix.latest.get(item.work)) |prior| {
                         if (prior.seq >= event_value.seq) return error.InvalidArchive;
                         inline for (.{ "execution_revision", "control_revision" }) |field| {
@@ -9994,9 +10065,16 @@ pub fn Service(comptime Types: type) type {
                             if (after < before or after - before > 1) return error.InvalidArchive;
                         }
                         if (parent.observers_present)
-                            try self.validateObservedAdvance(a, prior.publication, item, &prefix);
-                    } else if (item.execution_revision != 1 or item.control_revision != 1) return error.InvalidArchive;
-                    try self.validateWorkspaceControl(a, parent, event_value, item, if (prefix.latest.get(item.work)) |prior| prior.publication else null, if (command) |decoded| decoded.value else null, if (admission) |entry| entry.value else null, parent.observers_present and prefix.hasOuter(item.work));
+                            try validateObservedAdvance(prior.publication, item, &prefix);
+                    } else {
+                        if (item.execution_revision != 1 or item.control_revision != 1) return error.InvalidArchive;
+                        if (item.observer) |observer| if (observer.selection.previous) |previous| {
+                            const entry = try successor_ids.getOrPut(try wp.identity(previous, .work));
+                            if (entry.found_existing) return error.InvalidArchive;
+                            entry.value_ptr.* = item.work;
+                        };
+                    }
+                    try self.validateWorkspaceControl(a, parent, event_value, item, if (prefix.latest.get(item.work)) |prior| prior.publication else null, if (command) |decoded| decoded.value else null, if (admission) |entry| entry.value else null, parent.observers_present and prefix.hasOuter(item.work), &prefix, &checked.observer_successors.histories);
                     var retained = item;
                     if (item.observer) |observer| retained.observer =
                         try @import("workspace_observers.zig").copyObserver(a, observer);
@@ -10018,6 +10096,22 @@ pub fn Service(comptime Types: type) type {
                 const current = try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, row.id), true);
                 const last = prefix.latest.get(row.id) orelse return error.InvalidArchive;
                 if (last.seq != current.work.event_watermark or !try samePublication(a, last.publication, try workPublication(a, current))) return error.InvalidArchive;
+                if (current.work.observer) |observer|
+                    if (!std.meta.eql(observer.successor, successor_ids.get(row.id))) return error.InvalidArchive;
+            }
+            var active_count: usize = 0;
+            var publications = prefix.latest.iterator();
+            while (publications.next()) |entry| {
+                const observer = entry.value_ptr.publication.observer orelse continue;
+                if (!observer.stopped and !successor_ids.contains(entry.key_ptr.*)) active_count += 1;
+            }
+            if (active_count != parent.observer_heads.items.len) return error.InvalidArchive;
+            for (parent.observer_heads.items, 0..) |id, index| {
+                if (index != 0 and !observerHeadOrder({}, parent.observer_heads.items[index - 1], id))
+                    return error.InvalidArchive;
+                const latest = prefix.latest.get(id) orelse return error.InvalidArchive;
+                const observer = latest.publication.observer orelse return error.InvalidArchive;
+                if (observer.stopped or successor_ids.contains(id)) return error.InvalidArchive;
             }
         }
 
@@ -10060,6 +10154,11 @@ pub fn Service(comptime Types: type) type {
                 .program => |p| {
                     if (p == .build or p == .specialize or p == .adopt or
                         p == .derive or p == .validate) return error.InvalidState;
+                    if (p == .describe and p.describe.section == .semantic_candidates)
+                        basis = .{ .semantic_policy = .{
+                            .policy = try self.workspaceSemanticPolicy(a),
+                            .event_watermark = parent.event_high,
+                        } };
                     const semantic = if (p == .inspect and p.inspect.target == .semantic_source)
                         p.inspect.target.semantic_source.subject
                     else
@@ -10140,6 +10239,7 @@ pub fn Service(comptime Types: type) type {
 
         fn publicationReadsController(command: workspace.PublicationCommand) bool {
             return switch (command) {
+                .realize_controller => true,
                 .semantic => |selected| selected.command == .derive and selected.command.derive.ancestor == .controller,
                 .context => |selected| selected.command == .materialize and selected.command.materialize.input == .semantic_source and selected.command.materialize.input.semantic_source.subject == .controller,
                 else => false,
@@ -10200,6 +10300,8 @@ pub fn Service(comptime Types: type) type {
                     if (p == .describe and p.describe.section == .current_controller) {
                         expected = .controller;
                     }
+                    if (p == .describe and p.describe.section == .semantic_candidates)
+                        expected = .semantic_policy;
                     if (p == .inspect and p.inspect.target == .semantic_source) {
                         switch (p.inspect.target.semantic_source.subject) {
                             .runtime => {},
@@ -10217,6 +10319,9 @@ pub fn Service(comptime Types: type) type {
             if (std.meta.activeTag(basis) != expected) return error.InvalidArchive;
             switch (basis) {
                 .immutable => {},
+                .semantic_policy => |observed| {
+                    if (observed.event_watermark > parent.event_high) return error.InvalidArchive;
+                },
                 .residual => return error.InvalidArchive,
                 .controller => |observed| {
                     if (!std.meta.eql(observed.binding, try self.controllerAt(a, parent, observed.event_watermark))) return error.InvalidArchive;
@@ -10329,6 +10434,7 @@ pub fn Service(comptime Types: type) type {
                     var controller_read: ?state.ControllerReadCut = null;
                     const watermark: ?u64 = switch (basis) {
                         .immutable => null,
+                        .semantic_policy => |observed| observed.event_watermark,
                         .scope => |at| at,
                         .controller => |observed| observed.event_watermark,
                         .residual => |observed| observed.event_watermark,
@@ -10351,8 +10457,13 @@ pub fn Service(comptime Types: type) type {
                         const id = try json.text(event_data.value.object.get("occurrence_id") orelse return error.InvalidArchive);
                         if (!same(id, &std.fmt.bytesToHex(pending.id, .lower))) return error.InvalidArchive;
                     }
-                    try self.validateWorkspaceRead(a, parent, command, basis, records, controller_read);
-                    break :blk try self.workspaceCommandFrom(a, &operation_id, parent.id, authorized.value, basis);
+                    var checked: SnapshotValidation = .{
+                        .allocator = a,
+                        .observer_successors = .init(a, parent.id),
+                    };
+                    defer checked.deinit();
+                    try self.validateWorkspaceReadIn(a, parent, command, basis, records, controller_read, &checked);
+                    break :blk try self.workspaceCommandFromIn(a, &operation_id, parent.id, authorized.value, basis, &checked.observer_successors.histories);
                 },
                 .admitted => |admitted| blk: {
                     if (workspaceIsRead(command) or workspaceCompiles(command)) return error.InvalidArchive;
@@ -11506,7 +11617,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().begin();
             defer self.store().rollback();
             const id = work.value.id;
-            try self.store().putRecord(workspace.Work, "workspace_work", id, task_id, work.value);
+            try self.writeWorkspaceWork(&work.value, .replace);
             const publication: workspace.PublicationCommand = switch (command) {
                 .guard => |selection| .{ .guard = selection },
                 .unguard => |selection| .{ .unguard = selection },
@@ -11855,7 +11966,7 @@ pub fn Service(comptime Types: type) type {
             defer a.free(work.value.runtime_dependencies.items);
             work.value.control_revision = try std.math.add(u64, work.value.control_revision, 1);
             work.value.event_watermark = parent.value.event_high + 1;
-            try self.store().putRecord(workspace.Work, "workspace_work", work.value.id, task_id, work.value);
+            try self.writeWorkspaceWork(&work.value, .replace);
             return self.workspaceCommit(a, parent.value, operation_id, request, work.value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", work.value.id, task_id), .{ .request_cut = command });
         }
 
@@ -11890,6 +12001,10 @@ pub fn Service(comptime Types: type) type {
 
         fn validateControllerRealization(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, selected: workspace.ControllerRealization, admission: WorkspaceAdmission) !void {
             if (!std.meta.eql(admission.work, rootIdentity(parent.id)) or event_value.seq == 0)
+                return error.InvalidArchive;
+            const cut = event_value.controller_read orelse return error.InvalidArchive;
+            if (cut.event_watermark != event_value.seq - 1 or
+                cut.execution_revision != selected.cut.execution_revision)
                 return error.InvalidArchive;
             const receipt_body = try contracts.encodeOwned(workspace.ControllerRealization, a, selected);
             defer a.free(receipt_body);
@@ -12196,7 +12311,7 @@ pub fn Service(comptime Types: type) type {
                     next.realization_revision = try std.math.add(u64, next.realization_revision, 1);
                     next.control_revision = try std.math.add(u64, next.control_revision, 1);
                     next.event_watermark = publication.parent.event_high + 1;
-                    try host.store().putRecord(workspace.Work, "workspace_work", next.id, next.task, next);
+                    try host.writeWorkspaceWork(&next, .replace);
                     const dependencies = [_]state.Reference{ source_code_ref, target_code_ref, next.runtime_dependencies.items[1] };
                     return host.workspaceCommit(publication.a, publication.parent, publication.operation_id, publication.request, next.id, .work, try host.snapshotRecord(workspace.Work, publication.a, "workspace_work", next.id, next.task), .{ .realize = .{ .execution = publication.work.execution_revision, .control = publication.work.control_revision, .realization = publication.work.realization_revision, .runtime = publication.target, .source = before, .target = after, .dependencies = .{ .items = &dependencies } } });
                 }
@@ -13300,10 +13415,8 @@ pub fn Service(comptime Types: type) type {
             var scheduled_count: usize = 0;
             var stopped: ?workspace.Subject = null;
             if (decoded_work) |work| {
-                var successors: ObserverSuccessors = .init(a, parent.id);
-                defer successors.deinit();
                 const subject: workspace.Subject = .{ .task = parent.id, .work = work.value.id };
-                if (try self.workspaceRunnable(a, parent, work.value, &successors)) {
+                if (try self.workspaceRunnable(a, parent, work.value)) {
                     scheduled[scheduled_count] = subject;
                     scheduled_count += 1;
                 } else stopped = subject;
@@ -13413,18 +13526,21 @@ pub fn Service(comptime Types: type) type {
             if (saved.value.execution_revision != expected.execution_revision or
                 saved.value.control_revision != expected.control_revision)
                 return error.StaleRevision;
-            var successors: ObserverSuccessors = .init(a, task_id);
-            defer successors.deinit();
             var value = saved.value;
             if (value.observer == null or
-                try successors.has(self, value.id))
+                value.observer.?.successor != null)
                 return error.InvalidObserverInput;
+            if (!value.observer.?.stopped and
+                observerHeadIndex(parent.value, value.id) == null) return error.CorruptState;
+            const heads = try observerHeadsAfter(a, parent.value, value.id, null);
+            defer a.free(heads);
+            parent.value.observer_heads.items = heads;
             value.observer.?.stopped = true;
             value.control_revision = try std.math.add(u64, value.control_revision, 1);
             value.event_watermark = try std.math.add(u64, parent.value.event_high, 1);
             try self.store().begin();
             defer self.store().rollback();
-            try self.store().putRecord(workspace.Work, "workspace_work", value.id, task_id, value);
+            try self.writeWorkspaceWork(&value, .replace);
             const frozen = try self.snapshotRecord(
                 workspace.Work,
                 a,
@@ -13442,6 +13558,44 @@ pub fn Service(comptime Types: type) type {
                 frozen,
                 .{ .stop_observing = expected },
             );
+        }
+
+        fn validateObserverSuccessionPublication(
+            self: *Self,
+            a: std.mem.Allocator,
+            event_value: state.Event,
+            item: state.WorkPublication,
+            prior: ?state.WorkPublication,
+            command: ?workspace.PublicationCommand,
+        ) !bool {
+            const before = prior orelse return false;
+            const selected = command orelse return false;
+            if (selected != .start) return false;
+            const observer = selected.start.observer orelse return error.InvalidArchive;
+            const previous = observer.selection.previous orelse return error.InvalidArchive;
+            const publications = event_value.workspace_publications.items;
+            if (publications.len != 2 or !std.meta.eql(publications[1].work, item.work) or
+                !std.meta.eql(try wp.identity(previous, .work), item.work)) return error.InvalidArchive;
+            const reference = try self.store().objectReference(before.observation, null);
+            const bytes = try self.store().object(a, reference, null);
+            defer a.free(bytes);
+            var snapshot = try contracts.decodeOwned(workspace.WorkObservation, a, bytes);
+            defer snapshot.deinit();
+            const predecessor = snapshot.value.work;
+            if (predecessor.observer == null or predecessor.observer.?.successor != null or
+                predecessor.outcome_kind != .completed or predecessor.cancellation != null)
+                return error.InvalidArchive;
+            const previous_bytes = try contracts.encodeOwned(workspace.Work, a, predecessor);
+            defer a.free(previous_bytes);
+            const previous_reference: state.Reference = .{ .digest = storage.digest(previous_bytes), .bytes = previous_bytes.len };
+            if (!std.meta.eql(observer.previous, @as(?state.Reference, previous_reference)))
+                return error.InvalidArchive;
+            snapshot.value.work.observer.?.successor = publications[0].work;
+            snapshot.value.work.control_revision = try std.math.add(u64, predecessor.control_revision, 1);
+            snapshot.value.work.event_watermark = event_value.seq;
+            if (!try samePublication(a, item, try workPublication(a, snapshot.value)))
+                return error.InvalidArchive;
+            return true;
         }
 
         fn validateObserverPublication(
@@ -13490,7 +13644,7 @@ pub fn Service(comptime Types: type) type {
                 defer a.free(actual);
                 if (!same(bytes, actual)) return error.InvalidArchive;
             } else {
-                if (observer.stopped or observer.incomplete != null or
+                if (observer.stopped or observer.successor != null or observer.incomplete != null or
                     command == null or command.? != .start)
                     return error.InvalidArchive;
                 var expected = command.?.start.observer orelse return error.InvalidArchive;
@@ -13504,28 +13658,31 @@ pub fn Service(comptime Types: type) type {
         }
 
         const ObserverSuccessors = struct {
+            const Entry = struct { id: state.Digest, duplicate: bool };
             allocator: std.mem.Allocator,
             task: state.TaskId,
-            entries: std.AutoHashMapUnmanaged(state.Digest, bool) = .empty,
+            entries: std.AutoHashMapUnmanaged(state.Digest, Entry) = .empty,
             loaded: bool = false,
+            histories: ObserverHistories,
 
             fn init(a: std.mem.Allocator, task_id: state.TaskId) ObserverSuccessors {
-                return .{ .allocator = a, .task = task_id };
+                return .{ .allocator = a, .task = task_id, .histories = .{ .allocator = a } };
             }
 
             fn deinit(self: *ObserverSuccessors) void {
                 self.entries.deinit(self.allocator);
+                self.histories.deinit();
             }
 
-            fn has(self: *ObserverSuccessors, service: *Self, id: state.Digest) !bool {
+            fn next(self: *ObserverSuccessors, service: *Self, id: state.Digest) !?state.Digest {
                 if (!self.loaded) try self.load(service);
-                const duplicate = self.entries.get(id) orelse return false;
-                if (duplicate) return error.InvalidArchive;
-                return true;
+                const entry = self.entries.get(id) orelse return null;
+                if (entry.duplicate) return error.InvalidArchive;
+                return entry.id;
             }
 
             fn load(self: *ObserverSuccessors, service: *Self) !void {
-                var entries: std.AutoHashMapUnmanaged(state.Digest, bool) = .empty;
+                var entries: std.AutoHashMapUnmanaged(state.Digest, Entry) = .empty;
                 errdefer entries.deinit(self.allocator);
                 const ids = try service.workspaceIds(self.allocator, self.task);
                 defer self.allocator.free(ids);
@@ -13538,7 +13695,7 @@ pub fn Service(comptime Types: type) type {
                     const observer = other.value.observer orelse continue;
                     const prior = observer.selection.previous orelse continue;
                     const entry = try entries.getOrPut(self.allocator, try wp.identity(prior, .work));
-                    entry.value_ptr.* = entry.found_existing;
+                    if (entry.found_existing) entry.value_ptr.duplicate = true else entry.value_ptr.* = .{ .id = other.value.id, .duplicate = false };
                 }
                 self.entries = entries;
                 self.loaded = true;
@@ -13546,8 +13703,6 @@ pub fn Service(comptime Types: type) type {
         };
 
         fn validateObservedAdvance(
-            self: *Self,
-            a: std.mem.Allocator,
             before: state.WorkPublication,
             after: state.WorkPublication,
             prefix: *@import("workspace_observers.zig").PublicationPrefix,
@@ -13566,8 +13721,8 @@ pub fn Service(comptime Types: type) type {
                 var cursor = before.execution_revision;
                 if (observer.selection.source.level == .outer_execution) {
                     if (outer == null) outer = .{
-                        .before = try self.observerPublicationRevision(a, before),
-                        .after = try self.observerPublicationRevision(a, after),
+                        .before = try prefix.outerRevision(before.work, std.math.maxInt(u64), before.outer_operation orelse before.runtime_capsule),
+                        .after = try prefix.outerRevision(after.work, std.math.maxInt(u64), after.outer_operation orelse after.runtime_capsule),
                     };
                     cursor = outer.?.before;
                     if (cursor == outer.?.after) continue;
@@ -13577,29 +13732,14 @@ pub fn Service(comptime Types: type) type {
             }
         }
 
-        fn observerPublicationRevision(
-            self: *Self,
-            a: std.mem.Allocator,
-            item: state.WorkPublication,
-        ) !u64 {
-            const reference = try self.store().objectReference(item.observation, null);
-            const bytes = try self.store().object(a, reference, null);
-            defer a.free(bytes);
-            var snapshot = try contracts.decodeOwned(workspace.WorkObservation, a, bytes);
-            defer snapshot.deinit();
-            return self.observerSourceRevision(a, snapshot.value.work, .outer_execution);
-        }
-
         fn pumpObserver(self: *Self, a: std.mem.Allocator, work: workspace.Work) !Step {
             const observer = work.observer.?;
             const subject: workspace.Subject = .{ .task = work.task, .work = work.id };
             var parent = try self.task(a, work.task);
             defer parent.deinit();
-            var successors: ObserverSuccessors = .init(a, work.task);
-            defer successors.deinit();
             if (self.workspaceParentStopped(parent.value) or observer.stopped or
                 observer.selection.policy.continuation != .owner_scheduled or
-                try successors.has(self, work.id))
+                observer.successor != null)
             {
                 self.subjectRemove(subject);
                 return .progressed;
@@ -13682,7 +13822,7 @@ pub fn Service(comptime Types: type) type {
                 .diagnostic = diagnostic,
             };
             value.event_watermark = try std.math.add(u64, parent.event_high, 1);
-            try self.store().putRecord(workspace.Work, "workspace_work", value.id, value.task, value);
+            try self.writeWorkspaceWork(&value, .replace);
             _ = try self.workspaceCommit(a, parent, null, @splat(0), value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, value.task), null);
             return .progressed;
         }
@@ -13695,6 +13835,7 @@ pub fn Service(comptime Types: type) type {
             item: state.WorkPublication,
             prior: ?state.WorkPublication,
             command: ?workspace.PublicationCommand,
+            histories: *ObserverHistories,
         ) !bool {
             const observer = item.observer orelse return false;
             const before = prior orelse return false;
@@ -13721,6 +13862,7 @@ pub fn Service(comptime Types: type) type {
                 item.control.outcome,
                 watermark,
                 observer,
+                histories,
             );
             return true;
         }
@@ -13729,6 +13871,7 @@ pub fn Service(comptime Types: type) type {
             self: *Self,
             a: std.mem.Allocator,
             work: workspace.Work,
+            histories: *ObserverHistories,
         ) !void {
             const observer = work.observer orelse return;
             return self.validateObserverIncompleteAt(
@@ -13737,6 +13880,7 @@ pub fn Service(comptime Types: type) type {
                 work.outcome_kind,
                 work.event_watermark,
                 observer,
+                histories,
             );
         }
 
@@ -13747,6 +13891,7 @@ pub fn Service(comptime Types: type) type {
             outcome: state.Outcome,
             watermark: u64,
             observer: workspace.Observer,
+            histories: *ObserverHistories,
         ) !void {
             const incomplete = observer.incomplete orelse return;
             const consumed = observer.consumed_revision orelse return error.InvalidArchive;
@@ -13778,6 +13923,7 @@ pub fn Service(comptime Types: type) type {
                     source.value.work.event_watermark != incomplete.publication)
                     return error.InvalidArchive;
                 try self.validateWorkspacePublication(a, task_id, source.value);
+                try histories.validateCursor(self, a, source.value.work);
                 if (incomplete.revision != try self.observerSourceRevision(
                     a,
                     source.value.work,
@@ -13841,19 +13987,15 @@ pub fn Service(comptime Types: type) type {
         ) !void {
             var parent = try self.task(a, source.task);
             defer parent.deinit();
-            if (!parent.value.observers_present) return;
-            const ids = try self.workspaceIds(a, source.task);
-            defer a.free(ids);
-            var successors: ObserverSuccessors = .init(a, source.task);
-            defer successors.deinit();
-            for (ids) |id| {
-                var saved = try self.workspaceWork(a, source.task, id);
+            if (parent.value.observer_heads.items.len != 0) try self.compatible(parent.value);
+            for (parent.value.observer_heads.items) |id| {
+                var saved = try self.retainedWorkspaceWork(a, source.task, id);
                 defer saved.deinit();
-                const observer = saved.value.observer orelse continue;
-                if (observer.stopped or observer.selection.policy.delivery != .lossless or
+                const observer = saved.value.observer orelse return error.CorruptState;
+                if (!self.activeObserver(saved.value)) return error.CorruptState;
+                if (observer.selection.policy.delivery != .lossless or
                     (level != null and observer.selection.source.level != level.?) or
-                    !std.meta.eql(observer.source_work, source.id) or
-                    try successors.has(self, id)) continue;
+                    !std.meta.eql(observer.source_work, source.id)) continue;
                 if (observer.consumed_revision == null or
                     observer.consumed_revision.? !=
                         try self.observerSourceRevision(a, source, observer.selection.source.level))
@@ -13862,145 +14004,168 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn observationBlockedAt(
-            self: *Self,
-            a: std.mem.Allocator,
-            task_id: state.TaskId,
             source: state.WorkPublication,
-            watermark: u64,
+            prefix: *@import("workspace_observers.zig").PublicationPrefix,
         ) !bool {
-            const reference = try self.store().objectReference(source.observation, null);
-            const bytes = try self.store().object(a, reference, null);
-            defer a.free(bytes);
-            var snapshot = try contracts.decodeOwned(workspace.WorkObservation, a, bytes);
-            defer snapshot.deinit();
-            if (!std.meta.eql(snapshot.value.work.task, task_id)) return error.InvalidArchive;
-            return self.workObservationBlockedAt(a, snapshot.value.work, watermark);
+            return prefix.blocked(source.work, source.execution_revision, std.math.maxInt(u64), source.outer_operation orelse source.runtime_capsule);
         }
 
-        fn workObservationBlockedAt(
-            self: *Self,
-            a: std.mem.Allocator,
-            source: workspace.Work,
-            watermark: u64,
-        ) !bool {
-            var parent = try self.task(a, source.task);
-            defer parent.deinit();
-            if (!parent.value.observers_present) return false;
-            const Subscription = struct {
-                source: state.Digest,
-                consumed: ?u64,
-                level: @FieldType(wc.GuestViewSelection, "level"),
-                active: bool,
-            };
-            var subscriptions: std.AutoHashMap(state.Digest, Subscription) = .init(a);
-            defer subscriptions.deinit();
-            var successors: std.AutoHashMap(state.Digest, void) = .init(a);
-            defer successors.deinit();
-            var rows = try self.store().database.prepare(
-                "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body " ++
-                    "WHERE e.task=? AND e.seq<=? ORDER BY e.seq",
-                &.{ .{ .blob = &source.task }, .{ .integer = @intCast(watermark) } },
-            );
-            defer rows.deinit();
-            while (try rows.step() == .row) {
-                var saved = try contracts.decodeOwned(state.Event, a, try rows.bytes(0));
-                defer saved.deinit();
-                for (saved.value.workspace_publications.items) |item| {
-                    const observer = item.observer orelse continue;
-                    try subscriptions.put(item.work, .{
-                        .source = observer.source_work,
-                        .consumed = observer.consumed_revision,
-                        .level = observer.selection.source.level,
-                        .active = !observer.stopped and
-                            observer.selection.policy.delivery == .lossless,
-                    });
-                    if (observer.selection.previous) |previous|
-                        try successors.put(try wp.identity(previous, .work), {});
+        const ObserverHistories = struct {
+            const Key = struct { task: state.TaskId, watermark: u64 };
+            allocator: std.mem.Allocator,
+            entries: std.AutoHashMapUnmanaged(Key, *HistoricalObservers) = .empty,
+
+            fn deinit(histories: *ObserverHistories) void {
+                const a = histories.allocator;
+                var iterator = histories.entries.valueIterator();
+                while (iterator.next()) |index| {
+                    index.*.deinit();
+                    a.destroy(index.*);
                 }
+                histories.entries.deinit(a);
             }
-            var iterator = subscriptions.iterator();
-            while (iterator.next()) |item| {
-                const subscription = item.value_ptr.*;
-                if (!subscription.active or successors.contains(item.key_ptr.*) or
-                    !std.meta.eql(subscription.source, source.id)) continue;
-                if (subscription.consumed == null or subscription.consumed.? !=
-                    try self.observerSourceRevision(a, source, subscription.level))
-                    return true;
+
+            fn validateCursor(histories: *ObserverHistories, service: *Self, a: std.mem.Allocator, work: workspace.Work) !void {
+                var parent = try service.task(a, work.task);
+                defer parent.deinit();
+                const index = try histories.get(work.task, parent.value.event_high);
+                if (work.event_watermark > index.watermark) return error.InvalidArchive;
+                try index.load(service);
+                if (!std.meta.eql(work.outer_cursor, index.prefix.outerCursorAt(work.id, work.event_watermark)))
+                    return error.InvalidArchive;
             }
-            return false;
-        }
+
+            fn get(histories: *ObserverHistories, task_id: state.TaskId, watermark: u64) !*HistoricalObservers {
+                const a = histories.allocator;
+                const key: Key = .{ .task = task_id, .watermark = watermark };
+                if (histories.entries.get(key)) |index| return index;
+                const index = try a.create(HistoricalObservers);
+                errdefer a.destroy(index);
+                index.* = .init(a, task_id, watermark);
+                try histories.entries.put(a, key, index);
+                return index;
+            }
+        };
+
+        const HistoricalObservers = struct {
+            allocator: std.mem.Allocator,
+            task: state.TaskId,
+            watermark: u64,
+            loaded: bool = false,
+            observers_present: ?bool = null,
+            prefix: @import("workspace_observers.zig").PublicationPrefix,
+            events: std.ArrayList(contracts.Decoded(state.Event)) = .empty,
+
+            fn init(a: std.mem.Allocator, task_id: state.TaskId, watermark: u64) HistoricalObservers {
+                return .{ .allocator = a, .task = task_id, .watermark = watermark, .prefix = .init(a) };
+            }
+
+            fn deinit(index: *HistoricalObservers) void {
+                index.prefix.deinit();
+                for (index.events.items) |*event_value| event_value.deinit();
+                index.events.deinit(index.allocator);
+            }
+
+            fn prepare(index: *HistoricalObservers, service: *Self) !void {
+                if (index.observers_present != null) return;
+                var parent = try service.task(index.allocator, index.task);
+                defer parent.deinit();
+                if (index.watermark > parent.value.event_high) return error.InvalidArchive;
+                index.observers_present = parent.value.observers_present;
+            }
+
+            fn load(index: *HistoricalObservers, service: *Self) !void {
+                if (index.loaded) return;
+                try index.prepare(service);
+                const a = index.allocator;
+                var rows = try service.store().database.prepare(
+                    "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+                        "WHERE e.task=? AND e.seq<=? ORDER BY e.seq",
+                    &.{ .{ .blob = &index.task }, .{ .integer = std.math.cast(i64, index.watermark) orelse return error.InvalidArchive } },
+                );
+                defer rows.deinit();
+                while (try rows.step() == .row) {
+                    var event_value = try contracts.decodeOwned(state.Event, a, try rows.bytes(0));
+                    index.events.append(a, event_value) catch |err| {
+                        event_value.deinit();
+                        return err;
+                    };
+                    for (event_value.value.workspace_publications.items) |item|
+                        try index.prefix.put(item, event_value.value.seq);
+                }
+                index.loaded = true;
+            }
+
+            fn blocked(index: *HistoricalObservers, service: *Self, source: workspace.Work) !bool {
+                if (!std.meta.eql(source.task, index.task) or source.event_watermark > index.watermark)
+                    return error.InvalidArchive;
+                try index.prepare(service);
+                if (!index.observers_present.?) return false;
+                try index.load(service);
+                return index.prefix.blocked(
+                    source.id,
+                    source.execution_revision,
+                    source.event_watermark,
+                    if (source.outer_operation) |operation_value| operation_value.capsule else source.runtime_capsule,
+                );
+            }
+        };
 
         fn observerSourceRevision(
-            self: *Self,
-            a: std.mem.Allocator,
+            _: *Self,
+            _: std.mem.Allocator,
             work: workspace.Work,
             level: @FieldType(wc.GuestViewSelection, "level"),
         ) !u64 {
             if (level == .guest_cut) return work.execution_revision;
-            var revision: u64 = 0;
-            var previous: ?state.Reference = null;
-            var query = try self.store().database.prepare(
-                "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body " ++
-                    "WHERE e.task=? AND e.seq<=? ORDER BY e.seq",
-                &.{ .{ .blob = &work.task }, .{
-                    .integer = std.math.cast(i64, work.event_watermark) orelse
-                        return error.InvalidObserverInput,
-                } },
-            );
-            defer query.deinit();
-            while (try query.step() == .row) {
-                var saved_event = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
-                defer saved_event.deinit();
-                for (saved_event.value.workspace_publications.items) |item| {
-                    if (!std.meta.eql(item.work, work.id)) continue;
-                    const capsule = item.outer_operation orelse
-                        item.runtime_capsule orelse continue;
-                    if (previous != null and !std.meta.eql(previous.?, capsule))
-                        revision = try std.math.add(u64, revision, 1);
-                    previous = capsule;
-                }
+            return (try workspaceOuterCursor(work)).revision;
+        }
+
+        fn workspaceOuterCursor(work: workspace.Work) !workspace.OuterCursor {
+            var cursor = work.outer_cursor;
+            const capsule = (if (work.outer_operation) |pending| pending.capsule else work.runtime_capsule) orelse return cursor;
+            if (cursor.last) |previous| {
+                if (!std.meta.eql(previous, capsule.digest))
+                    cursor.revision = try std.math.add(u64, cursor.revision, 1);
             }
-            const current = if (work.outer_operation) |pending|
-                pending.capsule
-            else
-                work.runtime_capsule;
-            if (current != null and previous != null and !std.meta.eql(current, previous))
-                revision = try std.math.add(u64, revision, 1);
-            return revision;
+            cursor.last = capsule.digest;
+            return cursor;
+        }
+
+        fn writeWorkspaceWork(self: *Self, work: *workspace.Work, mode: enum { create, replace }) !void {
+            work.outer_cursor = try workspaceOuterCursor(work.*);
+            switch (mode) {
+                .create => try self.store().createRecord(workspace.Work, "workspace_work", work.id, work.task, work.*),
+                .replace => try self.store().putRecord(workspace.Work, "workspace_work", work.id, work.task, work.*),
+            }
         }
 
         fn observerGuestQuantum(self: *Self, a: std.mem.Allocator, source: workspace.Work) !u64 {
             var parent = try self.task(a, source.task);
             defer parent.deinit();
-            if (!parent.value.observers_present) return 256;
-            const ids = try self.workspaceIds(a, source.task);
-            defer a.free(ids);
-            var successors: ObserverSuccessors = .init(a, source.task);
-            defer successors.deinit();
-            for (ids) |id| {
-                var saved = try self.workspaceWork(a, source.task, id);
+            if (parent.value.observer_heads.items.len != 0) try self.compatible(parent.value);
+            for (parent.value.observer_heads.items) |id| {
+                var saved = try self.retainedWorkspaceWork(a, source.task, id);
                 defer saved.deinit();
-                const observer = saved.value.observer orelse continue;
-                if (!observer.stopped and
-                    observer.selection.policy.granularity == .one_guest_step and
-                    std.meta.eql(observer.source_work, source.id) and
-                    !try successors.has(self, id)) return 1;
+                const observer = saved.value.observer orelse return error.CorruptState;
+                if (!self.activeObserver(saved.value)) return error.CorruptState;
+                if (observer.selection.policy.granularity == .one_guest_step and
+                    std.meta.eql(observer.source_work, source.id)) return 1;
             }
             return 256;
         }
 
         fn retainObservedOuter(self: *Self, a: std.mem.Allocator, value: *workspace.Work) !void {
-            const ids = try self.workspaceIds(a, value.task);
-            defer a.free(ids);
-            var successors: ObserverSuccessors = .init(a, value.task);
-            defer successors.deinit();
-            for (ids) |id| {
-                var work = try self.workspaceWork(a, value.task, id);
+            var parent = try self.task(a, value.task);
+            defer parent.deinit();
+            if (parent.value.observer_heads.items.len != 0) try self.compatible(parent.value);
+            for (parent.value.observer_heads.items) |id| {
+                var work = try self.retainedWorkspaceWork(a, value.task, id);
                 defer work.deinit();
-                const observer = work.value.observer orelse continue;
-                if (observer.stopped or observer.selection.source.level != .outer_execution or
-                    !std.meta.eql(observer.source_work, value.id) or
-                    try successors.has(self, id)) continue;
+                const observer = work.value.observer orelse return error.CorruptState;
+                if (!self.activeObserver(work.value)) return error.CorruptState;
+                if (observer.selection.source.level != .outer_execution or
+                    !std.meta.eql(observer.source_work, value.id)) continue;
                 const driver = self.active.?.driver;
                 const capsule = try driver.retainCapsule(runtimeProvenance(value.*));
                 const code = try driver.runtimeBytes(a);
@@ -14233,16 +14398,21 @@ pub fn Service(comptime Types: type) type {
             work: workspace.Work,
             successors: *ObserverSuccessors,
         ) !void {
+            try successors.histories.validateCursor(self, a, work);
             const observer = work.observer orelse return;
+            if (observer.successor != null and
+                !std.meta.eql(observer.successor, try successors.next(self, work.id))) return error.InvalidArchive;
             @import("workspace_observers.zig").validatePolicy(observer.selection.policy) catch
                 return error.InvalidArchive;
-            try self.validateObserverIncomplete(a, work);
+            try self.validateObserverIncomplete(a, work, &successors.histories);
             if ((observer.previous == null) != (observer.selection.previous == null))
                 return error.InvalidArchive;
             const custody = try workspaceContentCustody(a, work.task, observer.source.digest);
             var saved = try self.record(workspace.Value, a, "workspace_value", custody, work.task);
             defer saved.deinit();
             const origin = saved.value.derivation.inspection orelse return error.InvalidArchive;
+            if (!std.meta.eql(origin.observation.work.task, work.task)) return error.InvalidArchive;
+            try successors.histories.validateCursor(self, a, origin.observation.work);
             try inspectionSelection(origin.observation.work, observer.selection.source);
             var selected = observer.selection.source;
             selected.level = origin.level;
@@ -14274,7 +14444,7 @@ pub fn Service(comptime Types: type) type {
                 var prior = try contracts.decodeOwned(workspace.Work, a, bytes);
                 defer prior.deinit();
                 const previous_id = try wp.identity(observer.selection.previous.?, .work);
-                if (!try successors.has(self, previous_id))
+                if (!std.meta.eql(try successors.next(self, previous_id), @as(?state.Digest, work.id)))
                     return error.InvalidArchive;
                 if (!std.meta.eql(prior.value.task, work.task) or
                     !std.meta.eql(prior.value.id, previous_id) or
@@ -14285,6 +14455,7 @@ pub fn Service(comptime Types: type) type {
                     .work = prior.value,
                     .occurrence = null,
                 });
+                try successors.histories.validateCursor(self, a, prior.value);
                 const before = prior.value.observer orelse return error.InvalidArchive;
                 const consumed = before.consumed_revision orelse return error.InvalidArchive;
                 if (!std.meta.eql(prior.value.program, work.program) or
@@ -14346,11 +14517,15 @@ pub fn Service(comptime Types: type) type {
                 return prior;
             }
             try self.requireCustody(a, task_id, null);
-            var successors: ObserverSuccessors = .init(a, task_id);
-            defer successors.deinit();
+            var predecessor: ?contracts.Decoded(workspace.Work) = null;
+            defer if (predecessor) |*prior| prior.deinit();
             if (observer) |bound| if (bound.selection.previous) |previous| {
-                if (try successors.has(self, try wp.identity(previous, .work)))
-                    return error.DuplicateObservation;
+                predecessor = try self.workspaceWork(a, task_id, try wp.identity(previous, .work));
+                const prior = predecessor.?.value;
+                const prior_observer = prior.observer orelse return error.InvalidObserverInput;
+                if (prior_observer.successor != null) return error.DuplicateObservation;
+                if (!prior_observer.stopped and observerHeadIndex(parent.value, prior.id) == null)
+                    return error.CorruptState;
             };
             if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
             var artifact = try self.workspaceProgram(a, task_id, program_id);
@@ -14388,6 +14563,11 @@ pub fn Service(comptime Types: type) type {
             try self.retire(a);
             var id: state.Digest = undefined;
             if (delegated) |bound| id = bound.record.instrument else try self.io.randomSecure(&id);
+            const heads = if (observer != null)
+                try observerHeadsAfter(a, parent.value, if (predecessor) |prior| prior.value.id else null, id)
+            else
+                null;
+            defer if (heads) |items| a.free(items);
             var selected: ?SelectedRuntime = if (runtime) |ref| try self.workspaceRuntime(a, task_id, ref.digest, program_id) else null;
             defer if (selected) |*value| value.deinit();
             if (selected) |value| {
@@ -14416,7 +14596,7 @@ pub fn Service(comptime Types: type) type {
                 target.value.policy = bound.policy;
                 target.value.event_watermark = parent.value.event_high + 1;
                 target.value.schedule = .parked;
-                try self.store().putRecord(workspace.Work, "workspace_work", target.value.id, task_id, target.value);
+                try self.writeWorkspaceWork(&target.value, .replace);
                 try self.store().createRecord(workspace.Delegation, "workspace_delegation", record_value.id, task_id, record_value);
                 delegation_ref = try self.snapshotRecord(workspace.Delegation, a, "workspace_delegation", record_value.id, task_id);
             }
@@ -14466,16 +14646,26 @@ pub fn Service(comptime Types: type) type {
             });
             try self.workspacePublication(a, &saved, publication);
             defer if (saved.runtime_trace) |trace| a.free(trace.dependencies.items);
-            try self.store().createRecord(workspace.Work, "workspace_work", id, task_id, saved);
+            try self.writeWorkspaceWork(&saved, .create);
             try self.createCustody(a, task_id, id);
+            if (predecessor) |*prior| {
+                prior.value.observer.?.successor = id;
+                prior.value.control_revision = try std.math.add(u64, prior.value.control_revision, 1);
+                prior.value.event_watermark = try std.math.add(u64, parent.value.event_high, 1);
+                try self.writeWorkspaceWork(&prior.value, .replace);
+            }
             if (preparation) |initial| {
                 var prepared = initial;
                 if (!std.meta.eql(parent.value.controller_succession, prepared.id) or prepared.conversion_work != null or prepared.phase != .preparing) return error.StaleController;
                 prepared.conversion_work = id;
                 try self.store().putRecord(state.ControllerSuccession, "controller_succession", prepared.id, task_id, prepared);
             }
-            if (observer != null) parent.value.observers_present = true;
-            const admitted = try self.workspaceCommitRelated(a, parent.value, operation_id, request, id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", id, task_id), if (delegated) |bound| bound.record.work else null, if (delegated) |bound| .{ .delegate = bound.command } else .{ .start = .{ .policy = policy, .origin = origin != null, .runtime = runtime, .trial = trial, .observer = observer } });
+            if (heads) |items| {
+                parent.value.observers_present = true;
+                parent.value.observer_heads.items = items;
+            }
+            const admitted = try self.workspaceCommitRelated(a, parent.value, operation_id, request, id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", id, task_id), if (delegated) |bound| bound.record.work else if (predecessor) |prior| prior.value.id else null, if (delegated) |bound| .{ .delegate = bound.command } else .{ .start = .{ .policy = policy, .origin = origin != null, .runtime = runtime, .trial = trial, .observer = observer } });
+            if (predecessor) |prior| self.subjectRemove(.{ .task = task_id, .work = prior.value.id });
             self.active.?.execution_revision = saved.execution_revision;
             return admitted;
         }
@@ -14823,7 +15013,7 @@ pub fn Service(comptime Types: type) type {
                     value.event_watermark = try std.math.add(u64, parent.value.event_high, 1);
                     try self.store().begin();
                     defer self.store().rollback();
-                    try self.store().putRecord(workspace.Work, "workspace_work", value.id, task_id, value);
+                    try self.writeWorkspaceWork(&value, .replace);
                     _ = try self.workspaceCommit(a, parent.value, null, @splat(0), value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, task_id), null);
                     return .progressed;
                 }
@@ -14841,14 +15031,14 @@ pub fn Service(comptime Types: type) type {
             return if (value.outcome_kind == .yielded) .resume_yield else .none;
         }
 
-        fn workspaceRunnable(self: *Self, a: std.mem.Allocator, parent: state.Task, child: workspace.Work, successors: *ObserverSuccessors) !bool {
+        fn workspaceRunnable(self: *Self, a: std.mem.Allocator, parent: state.Task, child: workspace.Work) !bool {
             if (!try self.hasLocalCustody(a, parent.id, child.id)) return false;
             if (!child.terminal()) return child.schedule != .parked;
             if (child.observer) |observer| {
                 if (child.outcome_kind == .completed and !observer.stopped and
                     observer.selection.policy.continuation == .owner_scheduled and
                     !self.workspaceParentStopped(parent))
-                    return !try successors.has(self, child.id);
+                    return observer.successor == null;
             }
             return child.answer_value != null and try self.delegationCurrent(a, parent, child);
         }
@@ -14889,7 +15079,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().begin();
             defer self.store().rollback();
             if (pending.value.state == .not_sent) try self.store().putRecord(occurrence.Occurrence, "occurrence", id, parent.id, try occurrence.rearm(pending.value, .{ .id = id, .task = parent.id, .work = value.id, .request = pending.value.request }));
-            try self.store().putRecord(workspace.Work, "workspace_work", value.id, parent.id, value);
+            try self.writeWorkspaceWork(&value, .replace);
             const admitted = try self.workspaceCommit(a, parent, operation_id, request, value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, parent.id), command);
             return admitted;
         }
@@ -14963,7 +15153,7 @@ pub fn Service(comptime Types: type) type {
             value.native_publication_nanoseconds +|= elapsed;
             value.event_watermark = try std.math.add(u64, parent.event_high, 1);
             value.schedule = if (value.cancellation != null or value.policy.continuation == .owner_scheduled) .queued else .parked;
-            try self.store().putRecord(workspace.Work, "workspace_work", value.id, value.task, value);
+            try self.writeWorkspaceWork(&value, .replace);
             const admitted = try self.workspaceCommit(a, parent, operation_id, request, value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, value.task), command);
             self.active.?.outer_operation = value.outer_operation.?.capsule;
             return admitted;
@@ -15337,7 +15527,7 @@ pub fn Service(comptime Types: type) type {
                 defer program.deinit();
                 value.result_value = try self.workspaceResultValue(a, value, program.value);
             }
-            try self.store().putRecord(workspace.Work, "workspace_work", value.id, value.task, value);
+            try self.writeWorkspaceWork(&value, .replace);
             const admitted = try self.workspaceCommit(a, parent, operation_id, request, value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, value.task), command);
             self.active.?.execution_revision = value.execution_revision;
             self.active.?.outer_operation = null;
@@ -15374,7 +15564,7 @@ pub fn Service(comptime Types: type) type {
             try self.runnable.ensureUnusedCapacity(self.allocator, 1);
             try self.store().begin();
             defer self.store().rollback();
-            try self.store().putRecord(workspace.Work, "workspace_work", value.id, value.task, value);
+            try self.writeWorkspaceWork(&value, .replace);
             const admitted = try self.workspaceCommit(a, parent, operation_id, request, value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, value.task), command);
             if (self.work) |*active| if (std.meta.eql(active.subject_work, value.id) and
                 std.meta.eql(active.task, value.task))
@@ -15434,7 +15624,7 @@ pub fn Service(comptime Types: type) type {
                         try self.runnable.ensureUnusedCapacity(self.allocator, 2);
                         try self.store().begin();
                         defer self.store().rollback();
-                        try self.store().putRecord(workspace.Work, "workspace_work", work_id, task_id, value);
+                        try self.writeWorkspaceWork(&value, .replace);
                         const admitted = try self.workspaceCommit(a, parent.value, operation_id, request, work_id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", work_id, task_id), publication_command);
                         if (self.work) |*active| if (std.meta.eql(active.subject_work, work_id) and std.meta.eql(active.task, task_id)) {
                             active.cancel_requested = true;
@@ -15487,7 +15677,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().begin();
             defer self.store().rollback();
             if (rearmed) |pending| try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, task_id, pending);
-            try self.store().putRecord(workspace.Work, "workspace_work", work_id, task_id, value);
+            try self.writeWorkspaceWork(&value, .replace);
             const admitted = try self.workspaceCommit(a, parent.value, operation_id, request, work_id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", work_id, task_id), publication_command);
             return admitted;
         }
@@ -15504,7 +15694,7 @@ pub fn Service(comptime Types: type) type {
             saved.value.event_watermark = try std.math.add(u64, parent.value.event_high, 1);
             try self.store().begin();
             defer self.store().rollback();
-            try self.store().putRecord(workspace.Work, "workspace_work", work_id, task_id, saved.value);
+            try self.writeWorkspaceWork(&saved.value, .replace);
             _ = try self.workspaceCommit(a, parent.value, null, @splat(0), work_id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", work_id, task_id), null);
         }
 

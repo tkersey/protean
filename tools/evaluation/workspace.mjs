@@ -229,7 +229,7 @@ export function workspaceMetrics(archive, application) {
     if (kind === 9) {
       const work = decodeValue(archive.schemas.get('workspace_work'), archive.object(reference));
       assert.equal(work[0], 3);
-      assert.equal(work.length, 38);
+      assert.equal(work.length, 39);
       stats.work_items++; stats.native_publication_nanoseconds += Number(work[34]);
       if (conversions.has(Buffer.from(work[1]).toString('hex'))) stats.conversion_publication_nanoseconds += Number(work[34]);
       stats.checkpoint_publications += Number(work[20]);

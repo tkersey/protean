@@ -225,6 +225,7 @@ pub const Task = struct {
     controller_runtime: ?Reference = null,
     realization_revision: u64 = 0,
     observers_present: bool = false,
+    observer_heads: contracts.Vector(Digest, null) = .{ .items = &.{} },
 
     pub fn terminal(task: @This()) bool {
         return switch (task.outcome_kind) {
@@ -388,6 +389,7 @@ pub const WorkPublication = struct {
     observer: ?@import("workspace_state.zig").Observer = null,
     guard: ?@import("workspace_state.zig").Guard = null,
     guest_work: u64 = 0,
+    outer_cursor: @import("workspace_state.zig").OuterCursor = .{},
 };
 
 pub const Artifact = struct {

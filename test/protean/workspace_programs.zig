@@ -2001,7 +2001,10 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
     defer admitted.deinit();
     var application: native.discovery.Application = .{ .arena = .init(a), .metadata = .null, .manifest = .null, .manifest_id = "context-unit", .image_identity = admitted.identity() };
     defer application.deinit();
-    const assets: native.discovery.Assets = .{ .image = image, .application = "context-unit", .manifest = "{}" };
+    const manifest = try support.fixtureManifest(a, image, admitted.identity(), "context-unit");
+    defer a.free(manifest);
+    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
+    const assets: native.discovery.Assets = .{ .image = image, .application = "context-unit", .manifest = manifest };
     var handlers = try native.Registry.init(a, &.{.{ .identity = "workspace-context", .resource_role = "workspace", .kind = .workspace, .workspace = ContextApplication.authorize, .payload_schema = ContextApplication.payloadSchema, .resume_schema = ContextApplication.resultSchema }});
     defer handlers.deinit();
     const text = "ordinary rows agree\nrare exception: missing invoice\n";
@@ -2034,9 +2037,11 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
     const path = try std.fmt.allocPrint(a, "{s}/state", .{path_buffer[0..length]});
     defer a.free(path);
     var namespace = try native.Namespace.open(a, io, path);
-    defer namespace.close() catch unreachable;
+    var namespace_open = true;
+    defer if (namespace_open) namespace.close() catch unreachable;
     var service = try native.tasks.Service(ContextTypes).init(a, io, &namespace, assets, &application, handlers, profile);
-    defer service.close(a) catch unreachable;
+    var service_open = true;
+    defer if (service_open) service.close(a) catch unreachable;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -2236,8 +2241,32 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
             .target = .{ .semantic_source = .{ .subject = read_controller, .section = .{ .slice = .{ .function = read_source.value.generic_pure_entries[0].function } } } },
             .page = .{ .maximum = 128 },
         } } },
+        .{ .program = .{ .describe = .{
+            .section = .semantic_candidates,
+            .page = .{ .maximum = 128 },
+        } } },
+        .{ .program = .{ .describe = .{
+            .section = .semantic_candidates,
+            .page = .{ .offset = 128, .maximum = 128 },
+        } } },
     };
+    const description_roots = [_][32]u8{@splat(23)};
+    var description_archives: std.ArrayList(struct {
+        task: native.testing.state.TaskId,
+        path: []const u8,
+    }) = .empty;
+    defer description_archives.deinit(scratch);
     for (read_commands, 0..) |read_command, read_case| {
+        var read_stage: []const u8 = "capture";
+        errdefer std.debug.print("historical read {d}: {s}\n", .{ read_case, read_stage });
+        const policy_description = read_command.program == .describe and
+            read_command.program.describe.section == .semantic_candidates;
+        const saved_policy = service.profile.semantic_construction;
+        defer service.profile.semantic_construction = saved_policy;
+        if (policy_description) service.profile.semantic_construction = if (read_case % 2 == 0)
+            .{ .roots = &description_roots, .checkers = &.{"recorded-checker"}, .guard = true }
+        else
+            null;
         const operation = try std.fmt.allocPrint(scratch, "read-observation-{d}", .{read_case});
         const read_parent = try service.submit(scratch, operation, read_command);
         var read_occurrence: ?native.testing.occurrence.Occurrence = null;
@@ -2254,6 +2283,22 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
             }
         }
         const original = read_occurrence orelse return error.MissingReadObservation;
+        if (policy_description) {
+            service.profile.semantic_construction = if (read_case % 2 == 0)
+                null
+            else
+                .{ .roots = &description_roots, .checkers = &.{"new-checker"} };
+            const fresh = try service.workspaceCommand(
+                scratch,
+                "current-semantic-description",
+                original.task,
+                read_command,
+            );
+            const bound = try data.invocation.decode(data.invocation.Result, scratch, try namespace.store.object(scratch, try namespace.store.objectReference(original.state.settled_reply.reply, null), null));
+            const retained = try contracts.decodeOwned(contracts.workspace.Reply, scratch, bound.value.value);
+            try std.testing.expect(!std.mem.eql(u8, retained.value.observation_json.bytes, fresh.observation_json.bytes));
+        }
+        read_stage = "validate retained reply";
         try service.validateWorkspace(scratch, read_parent.receipt.task);
         var manifest_digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(assets.manifest, &manifest_digest, .{});
@@ -2281,7 +2326,31 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
             try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(scratch, original.task, index.records.items, &read_compiler_facts));
             namespace.store.rollback();
         }
+        if (policy_description) {
+            read_stage = "export retained description";
+            const archive_path = try std.fmt.allocPrint(scratch, "{s}/semantic-description-{d}.par", .{ path_buffer[0..length], read_case });
+            _ = try service.exportCheckpoint(scratch, original.task, archive_path);
+            try description_archives.append(scratch, .{ .task = original.task, .path = archive_path });
+        }
     }
+    try service.close(a);
+    service_open = false;
+    try namespace.close();
+    namespace_open = false;
+    for (description_archives.items, 0..) |archived, index| {
+        const imported_path = try std.fmt.allocPrint(scratch, "{s}/semantic-description-{d}", .{ path_buffer[0..length], index });
+        var imported_namespace = try native.Namespace.open(a, io, imported_path);
+        defer imported_namespace.close() catch unreachable;
+        var imported = try native.tasks.Service(ContextTypes).init(a, io, &imported_namespace, assets, &application, handlers, profile);
+        defer imported.close(a) catch unreachable;
+        const receipt = try imported.importCheckpoint(scratch, "import-semantic-description", archived.path);
+        try std.testing.expectEqualDeep(archived.task, receipt.receipt.task);
+        try imported.validateWorkspace(scratch, archived.task);
+    }
+    namespace = try native.Namespace.open(a, io, path);
+    namespace_open = true;
+    service = try native.tasks.Service(ContextTypes).init(a, io, &namespace, assets, &application, handlers, profile);
+    service_open = true;
     const other = try service.submit(scratch, "other-task", command);
     const forbidden = try service.workspaceCommand(scratch, "cross-task-source", other.receipt.task, .{ .context = .{ .expand = .{ .reference = source_ref, .page = .{} } } });
     try std.testing.expectEqual(.rejected, forbidden.disposition);

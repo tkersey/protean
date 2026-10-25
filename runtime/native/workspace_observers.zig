@@ -12,9 +12,11 @@ pub const PublicationPrefix = struct {
     const Active = std.AutoArrayHashMapUnmanaged(state.Digest, void);
     const Position = struct { publication: state.WorkPublication, seq: u64 };
     const Source = struct { lossless: Active = .empty, outer: Set = .empty };
+    const Outer = struct { seq: u64, capsule: state.Reference, revision: u64 };
 
     latest: std.AutoHashMap(state.Digest, Position),
     successors: Set = .empty,
+    outer_history: std.AutoHashMapUnmanaged(state.Digest, std.ArrayList(Outer)) = .empty,
     sources: std.AutoHashMapUnmanaged(state.Digest, Source) = .empty,
 
     pub fn init(a: std.mem.Allocator) PublicationPrefix {
@@ -29,6 +31,9 @@ pub const PublicationPrefix = struct {
             entry.outer.deinit(a);
         }
         self.sources.deinit(a);
+        var histories = self.outer_history.valueIterator();
+        while (histories.next()) |history| history.deinit(a);
+        self.outer_history.deinit(a);
         self.successors.deinit(a);
         self.latest.deinit();
     }
@@ -59,7 +64,75 @@ pub const PublicationPrefix = struct {
                     try entry.value_ptr.outer.put(a, item.work, {});
             }
         }
+        if (item.outer_operation orelse item.runtime_capsule) |capsule| {
+            const entry = try self.outer_history.getOrPut(a, item.work);
+            if (!entry.found_existing) entry.value_ptr.* = .empty;
+            const history = entry.value_ptr;
+            const last = history.getLastOrNull();
+            if (last == null or !std.meta.eql(last.?.capsule, capsule))
+                try history.append(a, .{
+                    .seq = seq,
+                    .capsule = capsule,
+                    .revision = if (last) |prior| try std.math.add(u64, prior.revision, 1) else 0,
+                });
+        }
         try self.latest.put(item.work, .{ .publication = item, .seq = seq });
+    }
+
+    pub fn outerCursorAt(self: *const PublicationPrefix, id: state.Digest, watermark: u64) @import("workspace_state.zig").OuterCursor {
+        const history = self.outer_history.get(id) orelse return .{};
+        var low: usize = 0;
+        var high = history.items.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (history.items[middle].seq <= watermark) low = middle + 1 else high = middle;
+        }
+        if (low == 0) return .{};
+        const previous = history.items[low - 1];
+        return .{ .revision = previous.revision, .last = previous.capsule.digest };
+    }
+
+    pub fn outerCursor(self: *const PublicationPrefix, id: state.Digest, watermark: u64, current: ?state.Reference) !@import("workspace_state.zig").OuterCursor {
+        var cursor = self.outerCursorAt(id, watermark);
+        if (current) |capsule| {
+            if (cursor.last) |previous| if (!std.meta.eql(previous, capsule.digest)) {
+                cursor.revision = try std.math.add(u64, cursor.revision, 1);
+            };
+            cursor.last = capsule.digest;
+        }
+        return cursor;
+    }
+
+    pub fn validateOuterCursor(self: *const PublicationPrefix, item: state.WorkPublication) !void {
+        const expected = self.outerCursor(item.work, std.math.maxInt(u64), item.outer_operation orelse item.runtime_capsule) catch return error.InvalidArchive;
+        if (!std.meta.eql(expected, item.outer_cursor)) return error.InvalidArchive;
+    }
+
+    pub fn outerRevision(self: *const PublicationPrefix, id: state.Digest, watermark: u64, current: ?state.Reference) !u64 {
+        return (try self.outerCursor(id, watermark, current)).revision;
+    }
+
+    pub fn blocked(
+        self: *PublicationPrefix,
+        id: state.Digest,
+        execution_revision: u64,
+        watermark: u64,
+        capsule: ?state.Reference,
+    ) !bool {
+        const active = self.lossless(id) orelse return false;
+        var outer: ?u64 = null;
+        for (active.keys()) |observer_id| {
+            const observer = self.latest.get(observer_id).?.publication.observer.?;
+            const revision = if (observer.selection.source.level == .guest_cut)
+                execution_revision
+            else value: {
+                if (outer == null) outer = try self.outerRevision(id, watermark, capsule);
+                break :value outer.?;
+            };
+            if (observer.consumed_revision == null or observer.consumed_revision.? != revision)
+                return true;
+        }
+        return false;
     }
 
     pub fn hasOuter(self: *const PublicationPrefix, id: state.Digest) bool {
