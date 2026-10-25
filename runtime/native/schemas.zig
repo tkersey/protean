@@ -193,7 +193,7 @@ fn eventFields(kind: state.EventType) []const EventField {
         .workspace, .workspace_progress => &.{.{ .name = "workspace_id", .kind = .digest }},
         .controller => &.{ .{ .name = "operation", .kind = .digest }, .{ .name = "phase", .kind = .name }, .{ .name = "epoch", .kind = .counter } },
         .controller_requested => &.{.{ .name = "operation", .kind = .digest }},
-        .accepted, .input_accepted, .cancellation_requested, .parked, .resumed, .delivery_unknown, .completed, .failed, .cancelled => &.{},
+        .accepted, .input_accepted, .cancellation_requested, .parked, .resumed, .delivery_unknown, .completed, .failed, .cancelled, .execution => &.{},
     };
 }
 fn questionReferenceSchema(a: std.mem.Allocator) !json.Value {

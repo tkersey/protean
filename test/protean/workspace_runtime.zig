@@ -984,7 +984,7 @@ fn expectControllerRealizationCut(
     defer command.deinit();
     try std.testing.expect(execution_revision > 0);
     stage = "mutations";
-    for (0..4) |mutation| {
+    for (0..5) |mutation| {
         errdefer std.debug.print("controller cut mutation: {d}\n", .{mutation});
         try service.namespace.store.begin();
         defer service.namespace.store.rollback();
@@ -1001,6 +1001,11 @@ fn expectControllerRealizationCut(
                 selected.cut.execution_revision = parent.value.execution_revision;
                 selected.command.expected.cut.execution_revision = parent.value.execution_revision;
             },
+            4 => {
+                selected.cut.execution_revision -= 1;
+                selected.command.expected.cut.execution_revision -= 1;
+                changed.controller_read.?.execution_revision -= 1;
+            },
             else => unreachable,
         }
         try rewriteControllerRealization(a, service, changed, selected, receipt);
@@ -1011,6 +1016,94 @@ fn expectControllerRealizationCut(
             &facts,
         ));
     }
+    try expectRootHistoryPrefixes(a, service, parent.value, index);
+    try expectRootPublicationRejected(a, service, receipt.task, index, &facts);
+}
+
+fn expectRootHistoryPrefixes(
+    a: std.mem.Allocator,
+    service: anytype,
+    parent: native.testing.state.Task,
+    index: native.testing.state.Archive,
+) !void {
+    const S = native.testing.state;
+    const events = try a.alloc(contracts.Decoded(S.Event), index.events.items.len);
+    defer a.free(events);
+    var initialized: usize = 0;
+    defer for (events[0..initialized]) |*event| event.deinit();
+    for (index.events.items, events) |row, *event| {
+        const bytes = try service.namespace.store.object(a, row.body, null);
+        defer a.free(bytes);
+        event.* = try contracts.decodeOwned(S.Event, a, bytes);
+        initialized += 1;
+    }
+    for (events, 0..) |first, offset| {
+        var suffix = parent;
+        suffix.event_floor = first.value.seq;
+        var history: S.RootHistory = .init(suffix);
+        for (events[offset..]) |event| try history.observe(event.value);
+        try history.finish(suffix);
+    }
+    var history: S.RootHistory = .init(parent);
+    for (events) |event| try history.observe(event.value);
+    var repeated = parent;
+    for (0..2) |_| {
+        repeated.revision += 1;
+        repeated.execution_revision += 1;
+        repeated.event_high += 1;
+        try history.observe(.{
+            .task = parent.id,
+            .seq = repeated.event_high,
+            .revision = repeated.revision,
+            .kind = .execution,
+            .data = .{ .bytes = "{}" },
+            .root_publication = .{ .before = .from(parent), .after = .from(parent) },
+        });
+    }
+    try history.finish(repeated);
+    try std.testing.expectError(error.InvalidArchive, history.finish(parent));
+}
+
+fn expectRootPublicationRejected(
+    a: std.mem.Allocator,
+    service: anytype,
+    task: native.testing.state.TaskId,
+    index: native.testing.state.Archive,
+    facts: anytype,
+) !void {
+    const S = native.testing.state;
+    for (index.events.items) |row| {
+        const bytes = try service.namespace.store.object(a, row.body, null);
+        defer a.free(bytes);
+        var event = try contracts.decodeOwned(S.Event, a, bytes);
+        defer event.deinit();
+        if (event.value.kind != .execution) continue;
+        for (0..4) |mutation| {
+            try service.namespace.store.begin();
+            defer service.namespace.store.rollback();
+            var changed = event.value;
+            switch (mutation) {
+                0 => changed.root_publication = null,
+                1 => changed.root_publication.?.after.checkpoint[0] ^= 1,
+                2 => changed.root_publication.?.after.controller = @splat(1),
+                3 => {
+                    changed.kind = .blocked;
+                    changed.root_publication = null;
+                },
+                else => unreachable,
+            }
+            const encoded = try contracts.encodeOwned(S.Event, a, changed);
+            defer a.free(encoded);
+            const body = try service.namespace.store.putObject(encoded);
+            try service.namespace.store.database.run(
+                "UPDATE events SET body=? WHERE task=? AND seq=?",
+                &.{ .{ .blob = &body.digest }, .{ .blob = &task }, .{ .integer = @intCast(changed.seq) } },
+            );
+            try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, task, index.records.items, facts));
+        }
+        return;
+    }
+    return error.MissingRootPublication;
 }
 
 fn rewriteControllerRealization(

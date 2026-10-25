@@ -348,6 +348,7 @@ pub const EventType = enum {
     workspace_read,
     controller,
     controller_requested,
+    execution,
 };
 pub const ControllerReadCut = struct {
     event_watermark: u64,
@@ -372,6 +373,87 @@ pub const Event = struct {
     workspace_command: ?Reference = null,
     residual_publications: contracts.Vector(ResidualPublication, null) = .{ .items = &.{} },
     controller_read: ?ControllerReadCut = null,
+    root_publication: ?RootPublication = null,
+};
+
+pub const RootCut = struct {
+    controller: ?Digest,
+    checkpoint: Digest,
+
+    pub fn from(task: Task) RootCut {
+        return .{ .controller = task.controller, .checkpoint = task.checkpoint.digest };
+    }
+};
+
+pub const RootPublication = struct {
+    before: RootCut,
+    after: RootCut,
+};
+
+pub const RootHistory = struct {
+    advances: u64 = 0,
+    origin: ?u64,
+    cut: ?RootCut = null,
+    advance_revision: u64 = 0,
+    previous_revision: u64 = 0,
+
+    pub fn init(task: Task) RootHistory {
+        return .{ .origin = if (task.event_floor == 1) 0 else null };
+    }
+
+    fn observeRevision(self: *RootHistory, execution_revision: u64) !void {
+        const origin = std.math.sub(u64, execution_revision, self.advances) catch
+            return error.InvalidArchive;
+        if (self.origin) |expected| if (origin != expected) return error.InvalidArchive;
+        self.origin = origin;
+    }
+
+    pub fn observeCut(self: *RootHistory, cut: RootCut) !void {
+        if (self.cut) |expected| if (!std.meta.eql(expected, cut)) return error.InvalidArchive;
+        self.cut = cut;
+    }
+
+    pub fn observe(self: *RootHistory, event: Event) !void {
+        const advances = event.kind == .execution or event.kind == .controller;
+        if (advances != (event.root_publication != null)) return error.InvalidArchive;
+        if (event.controller_read) |read| {
+            if (event.seq == 0 or read.event_watermark != event.seq - 1 or advances)
+                return error.InvalidArchive;
+            try self.observeRevision(read.execution_revision);
+        }
+        if (event.root_publication) |publication| {
+            if (event.revision <= self.previous_revision) return error.InvalidArchive;
+            const same_controller = std.meta.eql(publication.before.controller, publication.after.controller);
+            if (same_controller != (event.kind == .execution)) return error.InvalidArchive;
+            if (event.kind == .execution and (event.workspace_command != null or
+                event.workspace_publications.items.len != 0 or
+                event.residual_publications.items.len != 0)) return error.InvalidArchive;
+            if (event.kind == .controller) {
+                if (event.residual_publications.items.len != 1) return error.InvalidArchive;
+                const residual = event.residual_publications.items[0].value;
+                try self.observeRevision(residual.execution_revision);
+                if (!std.meta.eql(publication.before.controller, @as(?Digest, residual.controller)) or
+                    !std.meta.eql(publication.before.checkpoint, residual.initial_checkpoint.digest))
+                    return error.InvalidArchive;
+            }
+            try self.observeCut(publication.before);
+            self.cut = publication.after;
+            self.advances = std.math.add(u64, self.advances, 1) catch
+                return error.InvalidArchive;
+            self.advance_revision = event.revision;
+        } else if (event.revision == self.advance_revision) switch (event.kind) {
+            .message_consumed, .message_not_consumed, .completed, .failed, .cancelled => {},
+            else => return error.InvalidArchive,
+        };
+        self.previous_revision = event.revision;
+    }
+
+    pub fn finish(self: *RootHistory, task: Task) !void {
+        try self.observeRevision(task.execution_revision);
+        if (task.event_floor == 0 or self.origin.? > task.event_floor - 1)
+            return error.InvalidArchive;
+        try self.observeCut(.from(task));
+    }
 };
 
 pub const WorkPublication = struct {

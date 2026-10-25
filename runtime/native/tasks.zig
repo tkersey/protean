@@ -1283,11 +1283,11 @@ pub fn Service(comptime Types: type) type {
             return self.publicationEvent(value, kind, bytes, &.{}, null);
         }
         fn publicationEvent(self: *Self, value: *state.Task, kind: state.EventType, bytes: []const u8, publications: []const state.WorkPublication, command: ?state.Reference) !void {
-            return self.subjectPublicationEvent(value, kind, bytes, publications, &.{}, command, null);
+            return self.subjectPublicationEvent(value, kind, bytes, publications, &.{}, command, null, null);
         }
-        fn subjectPublicationEvent(self: *Self, value: *state.Task, kind: state.EventType, bytes: []const u8, publications: []const state.WorkPublication, residuals: []const state.ResidualPublication, command: ?state.Reference, controller_read: ?state.ControllerReadCut) !void {
+        fn subjectPublicationEvent(self: *Self, value: *state.Task, kind: state.EventType, bytes: []const u8, publications: []const state.WorkPublication, residuals: []const state.ResidualPublication, command: ?state.Reference, controller_read: ?state.ControllerReadCut, root_publication: ?state.RootPublication) !void {
             value.event_high = try std.math.add(u64, value.event_high, 1);
-            try self.store().putEvent(.{ .task = value.id, .seq = value.event_high, .revision = value.revision, .kind = kind, .data = .{ .bytes = bytes }, .workspace_publications = .{ .items = publications }, .workspace_command = command, .residual_publications = .{ .items = residuals }, .controller_read = controller_read });
+            try self.store().putEvent(.{ .task = value.id, .seq = value.event_high, .revision = value.revision, .kind = kind, .data = .{ .bytes = bytes }, .workspace_publications = .{ .items = publications }, .workspace_command = command, .residual_publications = .{ .items = residuals }, .controller_read = controller_read, .root_publication = root_publication });
         }
         fn messageEvent(self: *Self, a: std.mem.Allocator, value: *state.Task, kind: state.EventType, item: state.Message) !void {
             const body = try state.messageData(a, item, item.disposition);
@@ -2699,6 +2699,10 @@ pub fn Service(comptime Types: type) type {
             defer self.store().rollback();
             value.checkpoint = try self.store().putObject(checkpoint);
             value.outcome = try self.store().putObject(encoded);
+            try self.subjectPublicationEvent(&value, .execution, "{}", &.{}, &.{}, null, null, .{
+                .before = .from(initial),
+                .after = .from(value),
+            });
             // Terminal state has no remaining guest cleanup. Its checkpoint
             // and outcome are now owned by the transaction, so release the
             // physical evaluator before materializing potentially much larger
@@ -3433,7 +3437,7 @@ pub fn Service(comptime Types: type) type {
         fn residualProgressEvent(self: *Self, a: std.mem.Allocator, parent: *state.Task, value: state.ControllerResidual) !void {
             const bytes = try std.fmt.allocPrint(a, "{{\"workspace_id\":\"{s}\"}}", .{std.fmt.bytesToHex(value.id, .lower)});
             defer a.free(bytes);
-            try self.subjectPublicationEvent(parent, .workspace_progress, bytes, &.{}, &.{try self.residualPublication(a, value)}, null, null);
+            try self.subjectPublicationEvent(parent, .workspace_progress, bytes, &.{}, &.{try self.residualPublication(a, value)}, null, null, null);
         }
         fn controllerResidualControl(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, id: state.Digest, execution: u64, control: u64, command: workspace.Command) !Admission {
             const request = try operation(workspace.ResidualControlRequest, a, .{ .task = task_id, .residual = id, .execution = execution, .control = control, .command = command });
@@ -3544,7 +3548,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().createRecord(occurrence.Occurrence, "occurrence", occurrence_id, value.id, .{ .id = occurrence_id, .task = value.id, .request = request.value.request_identity, .request_object = try self.store().putObject(outcome.value.requested.request) });
             try self.store().createRecord(workspace.ExecutionRoute, "execution_route", occurrence_id, value.id, .{ .id = occurrence_id, .task = value.id, .work = null, .image = binding.image, .program_identity = binding.program_identity, .controller = binding_id, .controller_epoch = epoch });
             try self.putRootOperation(a, .{ .id = rootIdentity(value.id), .task = value.id, .execution_revision = value.execution_revision, .pending = null });
-            try self.subjectPublicationEvent(&value, .controller, event_data, &.{}, &.{try self.residualPublication(a, residual)}, null, null);
+            try self.subjectPublicationEvent(&value, .controller, event_data, &.{}, &.{try self.residualPublication(a, residual)}, null, null, .{ .before = .from(parent), .after = .from(value) });
             try self.persistScheduled(a, value, parent.revision, "controller.activate", .preserve, &.{ .{ .task = value.id, .residual = residual_id }, .{ .task = value.id } });
             return .progressed;
         }
@@ -9960,11 +9964,17 @@ pub fn Service(comptime Types: type) type {
                 defer succession.deinit();
                 const original = succession.value;
                 if (original.phase != .activated or original.activation_event != event_value.seq or !std.meta.eql(original.residual, value.id) or !std.meta.eql(original.predecessor, value.controller) or !std.meta.eql(original.checkpoint, value.initial_checkpoint) or !std.meta.eql(original.checkpoint, value.checkpoint) or !std.meta.eql(original.outcome, value.outcome) or !std.meta.eql(value.current_occurrence, original.handoff)) return error.InvalidArchive;
+                const publication = event_value.root_publication orelse return error.InvalidArchive;
+                const boot = original.boot orelse return error.InvalidArchive;
+                if (!std.meta.eql(publication.after.controller, try self.controllerAt(a, parent, event_value.seq)) or
+                    !std.meta.eql(publication.after.checkpoint, boot.checkpoint.digest))
+                    return error.InvalidArchive;
                 try self.validateResidualObservation(a, value);
             }
         }
 
         fn validateWorkspacePublications(self: *Self, a: std.mem.Allocator, parent: state.Task, records: []const state.ArchiveRecord, checked: *SnapshotValidation) !void {
+            var root_history: state.RootHistory = .init(parent);
             var prefix: @import("workspace_observers.zig").PublicationPrefix = .init(a);
             defer prefix.deinit();
             var successor_ids: std.AutoHashMap(state.Digest, state.Digest) = .init(a);
@@ -9992,6 +10002,7 @@ pub fn Service(comptime Types: type) type {
                 var saved = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
                 defer saved.deinit();
                 const event_value = saved.value;
+                try root_history.observe(event_value);
                 errdefer std.debug.print("workspace publication: {s} at {d}\n", .{ @tagName(event_value.kind), event_value.seq });
                 var command: ?contracts.Decoded(workspace.PublicationCommand) = null;
                 defer if (command) |*decoded| decoded.deinit();
@@ -10000,6 +10011,13 @@ pub fn Service(comptime Types: type) type {
                     const ref = event_value.workspace_command orelse return error.InvalidArchive;
                     command = try contracts.decodeOwned(workspace.PublicationCommand, a, try self.store().object(a, ref, null));
                     if ((event_value.controller_read != null) != publicationReadsController(command.?.value)) return error.InvalidArchive;
+                    if (command.?.value == .realize_controller) {
+                        const selected = command.?.value.realize_controller;
+                        try root_history.observeCut(.{
+                            .controller = selected.controller,
+                            .checkpoint = selected.checkpoint.digest,
+                        });
+                    }
                     try self.validateWorkspaceAdmission(a, parent, event_value, command.?.value, (admission orelse return error.InvalidArchive).value, records, &checked.observer_successors);
                     if (command.?.value == .context) if (event_value.controller_read) |cut|
                         try checked.controller_values.put(checked.allocator, admission.?.value.work, cut);
@@ -10113,6 +10131,7 @@ pub fn Service(comptime Types: type) type {
                 const observer = latest.publication.observer orelse return error.InvalidArchive;
                 if (observer.stopped or successor_ids.contains(id)) return error.InvalidArchive;
             }
+            try root_history.finish(parent);
         }
 
         fn workspaceReadBasis(self: *Self, allocator: std.mem.Allocator, parent: state.Task, command: wc.Command) ![]u8 {
@@ -11386,7 +11405,7 @@ pub fn Service(comptime Types: type) type {
                 try json.put(a, &event_data, "occurrence_id", json.string(try a.dupe(u8, &std.fmt.bytesToHex(pending.id, .lower))));
                 const cut: ?state.ControllerReadCut = if (evidence.read == .controller) .from(fresh.value) else null;
                 try validateControllerReadCut(evidence.read, cut);
-                try self.subjectPublicationEvent(&parent, .workspace_read, try json.canonical(a, event_data), &.{}, &.{}, null, cut);
+                try self.subjectPublicationEvent(&parent, .workspace_read, try json.canonical(a, event_data), &.{}, &.{}, null, cut, null);
             }
             try self.effectSchedule(a, &parent, pending, .queued, null);
             try self.persistOccurrence(a, parent, fresh.value.revision, "workspace.reply", pending, true);
@@ -13403,7 +13422,7 @@ pub fn Service(comptime Types: type) type {
             // work/delegation or captured build reply. Only work progress has
             // the retained publication facts needed for a journal projection.
             if (operation_id != null or publication_count != 0 or residual_count != 0)
-                try self.subjectPublicationEvent(&parent, if (operation_id != null) .workspace else .workspace_progress, event_data, publications[0..publication_count], residuals[0..residual_count], command_ref, if (command != null and publicationReadsController(command.?)) .from(initial) else null);
+                try self.subjectPublicationEvent(&parent, if (operation_id != null) .workspace else .workspace_progress, event_data, publications[0..publication_count], residuals[0..residual_count], command_ref, if (command != null and publicationReadsController(command.?)) .from(initial) else null, null);
             const saved: state.Receipt = .{ .id = receipt_id, .client_operation_id = try name(operation_id orelse "workspace.progress"), .method = .workspace, .request_digest = request, .task = parent.id, .revision = parent.revision, .disposition = .accepted, .workspace = identity, .workspace_kind = kind, .workspace_observation = frozen };
             if (operation_id) |op| {
                 const bytes = try contracts.encodeOwned(state.Receipt, a, saved);

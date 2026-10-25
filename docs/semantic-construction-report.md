@@ -35,11 +35,18 @@ pumping treats current semantic or guard-policy denial as a local blocked step;
 ordinary control and unrelated work remain available. Explicit operations retain
 their policy errors, and cancellation retains its cleanup authority.
 
-A controller realization event records the actual owner's execution cut. The
-retained command and receipt must match that cut as well as the historical
-controller epoch and realization. The native witness rejects rehashed stale
-command/receipt cuts while admitting a genuine earlier selection after later
-execution progress.
+Root guest publications and controller activations establish the execution
+ordinal in the existing event stream. Each retains compact before/after
+checkpoint and controller commitments; intermediate checkpoint objects are not
+retained by these commitments. Archive validation checks their continuity and
+derives read-cut ordinals from the publications and the final task. A retained
+suffix reconciles its omitted prefix against that endpoint. Realization commands
+and receipts must match the resulting cut, historical epoch, and realization.
+The native witness rejects a coherently rehashed command, receipt, and read cut
+while admitting an earlier selection after later execution progress. This checks
+archive consistency; it does not authenticate an arbitrarily rewritten unsigned
+history. Native state format 19 requires the publication evidence, while older
+namespaces retain their compatible executables.
 
 ## Construction and authority
 
@@ -85,7 +92,7 @@ Scoped facts survive response projection and restore any enclosing facts afterwa
 
 The implementation rebases onto accepted controller reconstruction
 `2e40ce45d0f4b9b2ee81838386d5f1e0693ea228`. Package/host 7.0.0, application 8.0.0,
-workspace contract 4, and native state format 18 retain historical executable
+workspace contract 4, and native state format 19 retain historical executable
 bindings; they do not migrate old state implicitly. Horos is 6.1.0 and Kosmos is 9.1.0. The
 [dependency lock](../conformance/protean/dependencies.lock.json) records exact
 source commits and archive identities. Downloaded GitHub archives match the
