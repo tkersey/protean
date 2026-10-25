@@ -179,8 +179,8 @@ applies to this entire mapping.
 ## Footprint
 
 The comparison bases are Horos `ae8ace5`, Kosmos `6c70d24`, and accepted Protean
-`2e40ce4`; measured sources are `f60b116`, `deeab8d`, and the current Protean
-successor of `f6f26d3` respectively.
+`2e40ce4`; measured sources are `f60b116`, `c6de0fa`, and the Protean
+state-format-19 successor of `11f92a6` respectively.
 Added/deleted byte counts include newlines in dedicated test files and inline
 test blocks. Helpers outside those blocks are excluded from this test-only
 measure; the complete Zig totals below include it. Git diff counts can include
@@ -190,14 +190,14 @@ moved lines as additions and deletions.
 |---|---:|---:|---:|
 | Horos | 14 | 133,296 | 213 |
 | Kosmos | 11 | 142,798 | 1,104 |
-| Protean | 24 | 512,038 | 143,986 |
-| Total | 49 | 788,132 | 145,303 |
+| Protean | 24 | 516,190 | 144,130 |
+| Total | 49 | 792,284 | 145,447 |
 
 Complete changed Zig source adds/deletes 393,020/67,052 bytes in Horos,
-326,159/20,796 in Kosmos, and 860,328/198,201 in Protean. No test modules,
+326,159/20,796 in Kosmos, and 869,765/198,397 in Protean. No test modules,
 directories, executables, CI lanes or checked-in trace banks were added. The
 largest test-file extension is Protean's existing `workspace_runtime.zig`:
-361,991 added and 95,234 deleted bytes. Its two generated productions are reused
+365,600 added and 95,052 deleted bytes. Its two generated productions are reused
 by activation, five-arm measurements, recovery and mobility. Historical
 independent byte fixtures remain unchanged.
 

@@ -183,7 +183,7 @@ fn omitArchiveFact(a: std.mem.Allocator, io: std.Io, shape: anytype, task: anyty
             task: [16]u8,
             seq: u64,
             revision: u64,
-            kind: enum { accepted, input_required, input_accepted, message_queued, message_consumed, message_not_consumed, cancellation_requested, parked, resumed, blocked, delivery_unknown, completed, failed, cancelled, imported, reconciled, workspace, workspace_progress, workspace_read, controller, controller_requested },
+            kind: enum { accepted, input_required, input_accepted, message_queued, message_consumed, message_not_consumed, cancellation_requested, parked, resumed, blocked, delivery_unknown, completed, failed, cancelled, imported, reconciled, workspace, workspace_progress, workspace_read, controller, controller_requested, execution },
             data: protean.contracts.Bytes(48 * 1024),
             workspace_publications: protean.contracts.Vector(struct {
                 work: [32]u8,
@@ -205,6 +205,10 @@ fn omitArchiveFact(a: std.mem.Allocator, io: std.Io, shape: anytype, task: anyty
             workspace_command: ?Reference,
             residual_publications: protean.contracts.Vector(native.testing.state.ResidualPublication, null),
             controller_read: ?struct { event_watermark: u64, execution_revision: u64 },
+            root_publication: ?struct {
+                before: struct { controller: ?[32]u8, checkpoint: [32]u8 },
+                after: struct { controller: ?[32]u8, checkpoint: [32]u8 },
+            },
         };
         var found = false;
         const events = try a.dupe(@TypeOf(archive.events.items[0]), archive.events.items);
