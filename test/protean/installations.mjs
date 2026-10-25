@@ -6,6 +6,7 @@ import {copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSyn
 import {basename, dirname, join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {pathToFileURL} from 'node:url';
+import {ProteanClient} from '../support/stdio-client.mts';
 
 const usage = 'usage: installations.mjs [ARCHIVE_SEED_DIRECTORY [REFERENCE_EXECUTABLE]]';
 if (process.argv.length === 3 && process.argv[2] === '--help') { console.log(usage); process.exit(0); }
@@ -127,10 +128,47 @@ try {
     const expected = JSON.parse(execFileSync(resolve(reference), ['describe-build'], {encoding: 'utf8'}));
     for (const key of Object.keys(identity)) assert.deepEqual(identity[key], expected[key], key);
   }
-  const demo = JSON.parse(run(executable, ['demo', '--offline', '--state-dir', join(scratch, 'state')]));
-  assert.equal(demo.output.result.tag, 'report');
-  assert.equal(demo.output.model_calls, '14');
-  console.log(JSON.stringify({downstream: 'public addNativeSystem', node_free_acquisition_build_install: true, package: packageHash, target: manifest.target, program: manifest.program_sha256, identity, elapsed_seconds: (performance.now() - started) / 1000}));
+  const launch = join(scratch, 'installed-launch');
+  const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+  const command = [...prefix, ...(process.platform === 'linux' ? ['--chdir', sandboxPath(scratch)] : []), sandboxPath(executable)];
+  writeFileSync(launch, `#!/bin/sh\nexec ${command.map(quote).join(' ')} "$@"\n`, {mode: 0o700});
+  const client = new ProteanClient(launch, ['--offline', '--state-dir', sandboxPath(join(scratch, 'state'))], {cwd: scratch, env});
+  const executionDeadline = Math.min(performance.now() + 30_000, deadline ?? Infinity);
+  const request = (method, params) => {
+    const remaining = Math.floor(executionDeadline - performance.now());
+    assert(remaining > 0, 'installed execution exceeded its bounded witness budget');
+    return client.call(method, params, remaining);
+  };
+  const executionStarted = performance.now();
+  let installedExecution;
+  try {
+    const initialized = await request('initialize', {protocol_versions: ['agent-host/2.1'], client_info: {name: 'installed-witness', version: '1'}});
+    assert.equal(initialized.protocol_version, 'agent-host/2.1');
+    const description = await request('describe');
+    const task = await request('task.submit', {client_operation_id: 'installed-start', application_id: 'adaptive-agent', profile_id: description.profile.id,
+      input: {schema_id: 'adaptive-agent.input.v2', value: {task: 'Exercise the independently installed application.'}}});
+    let current;
+    do {
+      current = await request('task.status', {task_id: task.task_id});
+      assert.equal(current.blocker, null);
+      assert.equal(current.result_available, false);
+      if (BigInt(current.revision) > BigInt(task.revision)) break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (true);
+    await request('task.cancel', {client_operation_id: 'installed-cancel', task_id: task.task_id});
+    let cancelled;
+    do {
+      cancelled = await request('task.result', {task_id: task.task_id});
+      if (cancelled.ready && cancelled.associated_work_disposed) break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (true);
+    assert.equal(cancelled.status, 'cancelled');
+    assert.equal(cancelled.outcome.cleanup_complete, true);
+    assert.deepEqual(await client.close(), {code: 0, signal: null});
+    installedExecution = {admission_revision: task.revision, execution_revision: current.revision, cancellation_revision: cancelled.revision, elapsed_ms: performance.now() - executionStarted};
+    console.error(`downstream installed execution: ${Math.round(installedExecution.elapsed_ms)} ms`);
+  } finally { await client.close(); }
+  console.log(JSON.stringify({downstream: 'public addNativeSystem', node_free_acquisition_build_install: true, package: packageHash, target: manifest.target, program: manifest.program_sha256, identity, installed_execution: installedExecution, elapsed_seconds: (performance.now() - started) / 1000}));
 } finally {
   rmSync(scratch, {recursive: true, force: true});
 }

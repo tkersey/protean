@@ -20,7 +20,7 @@ calls or discovered credentials.
 | `native_adaptive.mjs` and `adaptive_native_peer.mjs` | Copied native executable; controlled HTTPS; actual authored decisions; skill/model changes; held I/O; crash/restart; questions; cancellation; generated-tool build, run, reuse and foreign-reference rejection. |
 | `native_archive.mjs` | Independently decoded captures and deliberate closure, profile, private-artifact, receipt and event corruption. |
 | `native_https.mjs` | TLS chain/hostname/expiry, explicit body/timeout constraints, truncation, cancellation and absence of redirects/retries. |
-| `installations.mjs` | Clean source package and public `addNativeSystem` acquisition/build/install/inspection with Node/Python excluded by the OS execution boundary. |
+| `installations.mjs` | Clean source package and public `addNativeSystem` acquisition/build/install, tamper rejection, identity inspection and installed-program progress/cancellation with Node/Python excluded by the OS execution boundary. |
 | `values.test.mjs` | Independent canonical wire observations for the archive/capture peer's small codec. |
 
 The fixed demo's general manifest and archive-rejection checks now use the
@@ -30,13 +30,17 @@ model normalizer is removed: its established intersection wire bytes are fixed
 expectations in `native-responses-v1.json`; native-only cases retain their own
 explicit expected outcomes. No second provider implementation runs as an oracle.
 
-The 14-call adaptive trajectory and 38-call continuing generated-tool scenario use the actual
-compiled application. They establish neither live-model quality nor cache reuse,
+The 14-call adaptive trajectory and retained-program reuse scenario use the actual
+compiled application. Reuse computes A before restart and B/A/B afterward, retaining
+both inputs, per-result provenance and ordered archive accounting. It crosses the
+historical model-call, work-call and evidence quotas; the workspace owner separately
+starts 256 work items through the same admission path. These fixtures establish
+neither live-model quality nor cache reuse,
 billed cost, exhaustive scheduling, or all maximal input combinations. Transient
 prefixes and marker placement are checked directly; hypothetical eager/naive
 layout reports are retired.
 
-The complete CI workflow retains its 300-second target and 360-second maximum,
+The complete CI workflow retains its 600-second job and aggregate maximum,
 including downstream qualification. No new platform matrix is required. Native
 C/SQLite/libc are admitted dependencies; remaining JavaScript is an external
 verification controller or wire support. A small shell source check reports

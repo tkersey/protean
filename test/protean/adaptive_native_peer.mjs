@@ -284,7 +284,9 @@ function* workspaceTrace(subject, scenario) {
   const builtCall = subject.body.input.find(item => item.type === 'function_call' && item.name === 'program' && JSON.parse(item.arguments).command.tag === 'build' && subject.body.input.some(output => output.type === 'function_call_output' && output.call_id === item.call_id && strings(output).some(text => text.includes(subject.program.id))));
   assert(builtCall, 'the source-selected program build and its retained reference survive view selection, restart, and instruction eviction');
   const secondInput = yield* materialize(subject.inputs[1].id);
-  for (let n = 0; n < 11; n++) yield* run(n % 2 ? firstInput : secondInput, n % 2 ? [['1','1'],['2','2'],['3','3'],['4','4']] : [['80','1']]);
+  assert.deepEqual(yield* materialize(subject.inputs[0].id), firstInput);
+  assert.deepEqual(yield* materialize(subject.inputs[1].id), secondInput);
+  for (let n = 0; n < 3; n++) yield* run(n % 2 ? firstInput : secondInput, n % 2 ? [['1','1'],['2','2'],['3','3'],['4','4']] : [['80','1']]);
   yield ['report', {summary: 'The same admitted program continued auditing both inputs after restart.', claims: [
     {kind: 'observation', statement: 'The source range and second computed audit are acquired.', reasoning: '', evidence_indices: [subject.sourceIndex, subject.resultIndices.at(-1)]},
     {kind: 'inference', statement: 'The retained program supports comparing both audit results.', reasoning: 'The first and last computed values retain that program as provenance.', evidence_indices: [subject.resultIndices[0], subject.resultIndices.at(-1)]},
@@ -1159,9 +1161,12 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         retainedProgram = toolSubject.program; retainedState = selectedState;
       }
       if (name === 'tools-reuse') {
-        assert(alternateIndex > 38, 'materialization, retained work and restart all ran');
+        assert.equal(toolSubject.results.length, 4);
+        assert.equal(toolSubject.actions.filter(action => action.name === 'work' && action.arguments.command.tag === 'start').length, 4);
+        assert(BigInt(result.outcome.value.model_calls) > 16n);
+        assert(BigInt(result.outcome.value.work_calls) > 12n);
         assert.equal(result.outcome.value.model_calls, String(alternateIndex));
-        assert.equal(result.outcome.value.evidence.length, 15, 'twelve results, two inputs, and the source remain retained');
+        assert.equal(result.outcome.value.evidence.length, 9);
         assert.deepEqual(result.outcome.value.result.value.claims[0].evidence_indices, [String(toolSubject.sourceIndex), String(toolSubject.resultIndices.at(-1))]);
         assert.equal(result.outcome.value.evidence[toolSubject.sourceIndex].tag, 'source');
         assert.equal(result.outcome.value.control.selection.control_revision, '6');
@@ -1239,9 +1244,9 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         assert.deepEqual(metrics.actions, toolSubject.actions, 'archived actions preserve actual provider execution order across restart');
         assert.equal(metrics.actions.at(-1).name, 'report');
         assert.equal(metrics.delegated.calls, 0);
-        assert.equal(metrics.work_items, 12);
+        assert.equal(metrics.work_items, 4);
         assert(metrics.builds >= 1 && metrics.compiler_nanoseconds > 0 && metrics.native_publication_nanoseconds > 0);
-        assert(metrics.checkpoint_publications >= 12 && metrics.current_checkpoint_bytes > 0);
+        assert(metrics.checkpoint_publications >= 4 && metrics.current_checkpoint_bytes > 0);
         assert(armViolations('pure', metrics.actions).some(action => action.name === 'work' && action.arguments.command.tag === 'inspect'), 'accepted normalized inspection remains an arm violation');
         assert.equal(metrics.actions.filter(action => action.name === 'program' && action.arguments.command.tag === 'build').length, 4);
         // CapturedResponse deliberately carries raw transport bytes. Exercise

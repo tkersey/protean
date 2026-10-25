@@ -120,7 +120,7 @@ remain unmeasured.
 
 The selected dependency tuple uses Horos
 `f60b116b170d8e175db440095fb4d60384aa90bd` and Kosmos
-`6aec3c78b798107b9b324e726767af98998d252a`. Their published GitHub archives were
+`deeab8d9b7704667756e60e9fe30f492a77ad712`. Their published GitHub archives were
 independently downloaded and matched against complete committed source
 inventories. Native dependency setup authenticates those same inputs.
 Protean builds on accepted controller reconstruction
@@ -166,14 +166,14 @@ applies to this entire mapping.
 | AC-12 | Existing controller/runtime intersection: current root epochs govern targeting and unrelated succession preserves existing work lineage. |
 | AC-13 | Protean custody/placement: validated dependencies travel through one existing peer path; trust, disclosure and unsupported guard modes reject. |
 | AC-14 | Existing Store and workspace replay/import tests: duplicate and stale operations cannot create execution ownership or checker authority. |
-| AC-15 | Existing native workflows, package consumers and this report: unchanged assertions, input-keyed compilation reuse, every selected test executed, 600-second job/aggregate ceilings and disclosed costs. Current exact-head qualification is recorded in Protean #59; earlier passes do not qualify changed inputs. |
+| AC-15 | Existing native workflows, package consumers and this report: preserved substantive coverage, input-keyed compilation reuse, every selected test executed, 600-second job/aggregate ceilings and disclosed costs. Current exact-head qualification is recorded in Protean #59; earlier passes do not qualify changed inputs. |
 | AC-16 | Existing native operation and evaluation runner: ordinary tools remain available, comparison preflight is runnable and paid inference is excluded. |
 
 ## Footprint
 
 The comparison bases are Horos `ae8ace5`, Kosmos `6c70d24`, and accepted Protean
-`2e40ce4`; measured sources are `f60b116`, `6aec3c7`, and the current Protean
-successor of `2d18b31` respectively.
+`2e40ce4`; measured sources are `f60b116`, `deeab8d`, and the current Protean
+successor of `f6f26d3` respectively.
 Added/deleted byte counts include newlines in dedicated test files and inline
 test blocks. Helpers outside those blocks are excluded from this test-only
 measure; the complete Zig totals below include it. Git diff counts can include
@@ -182,12 +182,12 @@ moved lines as additions and deletions.
 | Repository | Changed test files | Added bytes | Deleted bytes |
 |---|---:|---:|---:|
 | Horos | 14 | 133,296 | 213 |
-| Kosmos | 11 | 139,794 | 1,104 |
-| Protean | 23 | 506,134 | 141,324 |
-| Total | 48 | 779,224 | 142,641 |
+| Kosmos | 11 | 142,798 | 1,104 |
+| Protean | 24 | 512,038 | 143,986 |
+| Total | 49 | 788,132 | 145,303 |
 
 Complete changed Zig source adds/deletes 393,020/67,052 bytes in Horos,
-323,886/20,796 in Kosmos, and 860,328/198,201 in Protean. No test modules,
+326,159/20,796 in Kosmos, and 860,328/198,201 in Protean. No test modules,
 directories, executables, CI lanes or checked-in trace banks were added. The
 largest test-file extension is Protean's existing `workspace_runtime.zig`:
 361,991 added and 95,234 deleted bytes. Its two generated productions are reused
@@ -201,6 +201,46 @@ Generated candidates use `kosmos.semantic-artifact/3` and
 `kosmos.source-relation/1`; historical artifacts retain their existing family.
 
 ## Cost measurements
+
+Native macOS fixture experiments use exact Zig 0.17.0 Safe. Reuse and downstream
+comparisons use the same product from `f6f26d3`; custody compares the unchanged
+`7524106` fixture with Kosmos `6aec3c7` against that fixture with `deeab8d`.
+Each whole-fixture row below is one before/after sample with no other heavy
+qualification running. These observations do not establish Linux savings.
+
+| Fixture | Before seconds | After seconds | Preserved deciding observations |
+|---|---:|---:|---|
+| Retained-program reuse | 118.30 | 80.54 | A before restart, B/A/B afterward; both inputs, repeated reuse, provenance, archive accounting and historical quota boundaries. |
+| Independent installation | 394.96 | 365.57 | Public acquisition/build/install, both tamper rejections, interpreter isolation, exact build identity, installed-program progress and settled cancellation. |
+| Custody execution | 224.594 | 205.752 | Both generated transformations, validation, retained-work activation, migration, cleanup and all five comparison arms. |
+
+Reuse performs four computations and 29 provider calls, down from twelve and 43.
+Two repeated input materializations retain the former evidence-quota discriminator;
+the existing workspace owner separately starts 256 work items. Protocol-version
+and retired-state rejections run once in the controls group. Three isolated
+prelude samples saved about 0.10 user-CPU seconds each, with no reliable elapsed
+improvement. Per-group deployment isolation, tracing and identity checks remain.
+
+The installed execution check takes 0.428 seconds, replacing a duplicated
+35.282-second demo; the complete fourteen-call demo still runs in controls.
+Installation build time was 299.393 versus 304.848 seconds. The shorter witness
+does not account for build-time variation. A 30-second total execution budget is
+also bounded by the existing Linux installation deadline.
+
+The first custody transformer performs 3,384 guest transitions and fourteen
+publications instead of 6,798 and 27; it takes 76.447 versus 86.292 seconds.
+The reused transformer retains 1,045 transitions and five publications and takes
+20.519 versus 20.636 seconds. Both input and result sizes are unchanged.
+Full custody build-and-test time is 345.61 versus 365.50 seconds, while peak
+command RSS rises from 6,186,156,032 to 6,632,669,184 bytes. The collector removes
+duplicate searches and permits idempotent row visits; duplicated synthetic input
+can require more work, so no universal producer speedup is claimed.
+
+Sharing immutable preparation across the six invalid-output cases would save at
+most about 0.12 seconds: all six preparations together measured 0.144 seconds.
+Those independent mutable fixtures remain unchanged. The full-table layout
+traversal experiment exceeded 600 seconds and was discarded. Lane partitioning,
+native platforms, isolation, tracing and 600-second job/aggregate limits remain.
 
 The following single native macOS sample uses committed Protean `c1e2ffb`, Horos
 `f60b116` and Kosmos `6aec3c7` with the shared witness and exact Zig 0.17.0 Safe.

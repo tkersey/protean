@@ -389,7 +389,7 @@ jobs:
           echo 'save=false' >> "$GITHUB_OUTPUT"
           objects=.zig-cache/o
           if [ "${{ matrix.lane }}" = downstream ]; then
-            objects=.zig-cache/global/downstream-local/o
+            objects="$ZIG_GLOBAL_CACHE_DIR/downstream-local/o"
           fi
           test -d "$objects" || exit 0
           test -z "$(find .zig-cache ! -type d ! -type f -print -quit)" || exit 0
