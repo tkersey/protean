@@ -20,17 +20,30 @@ Every Work write normalizes its outer cursor from the last capsule identity.
 Null and repeated capsules preserve the cursor; a changed capsule advances it.
 The cursor retains an identity, not another capsule retention root. Live observer
 queries visit current heads and use that cursor. Historical validation reconstructs
-cursors independently from capsule publications. Collection, wait and controller
-views share one historical index for their task and observation watermark;
-older source snapshots retain their own cursor watermark.
+cursors independently from capsule publications. Live inspection, collection,
+wait and controller views share a request-local index of active lossless heads.
+The index records a common consumed revision per source and checkpoint level;
+unconsumed or differing revisions block advancement. Historical projections
+explicitly use independently replayed indexes, including at the current watermark.
+Older source snapshots retain their own cursor watermark.
 
 In the existing native observer fixture, source advancement after 4, 8 and 16
 retained folds reads 5 Work records in each case, compared with 28, 49 and 78
 before the change. Inventory queries fall from five to zero. The outer-observer
 fixture performs no event-history query during live advancement. These are
 operation counts for the measured paths, not end-to-end latency claims.
-Historical indexes live only for their operation and retain memory proportional
-to the selected event prefix. They do not add a database or live-state cache.
+Live inspection, collection and wait after 4, 8 and 16 folds now scan zero event
+rows, compared with 18, 30 and 54 rows per request before this repair. Stopped
+subscriptions, simultaneous consumed revisions, and both checkpoint levels retain
+their blocking behavior. Archive validation shares one snapshot-validation owner
+across provenance, captured projections and record bodies. In the existing history
+fixture, current-prefix query counts stay at three for one, two and four saved
+replies, compared with four, five and seven before the repair. The three include
+independent controller checks; distinct historical cuts still require their own
+replay. These counts do not claim constant total archive cost or lower peak memory.
+Historical indexes live only for one validation invocation and retain memory
+proportional to their selected event prefixes. No facts survive into another
+validation invocation, and no persistent cache is added.
 
 Historical semantic descriptions retain the policy facts used to render their
 pages. Later policy changes affect new descriptions and execution eligibility,
@@ -195,7 +208,7 @@ applies to this entire mapping.
 
 The comparison bases are Horos `ae8ace5`, Kosmos `6c70d24`, and accepted Protean
 `2e40ce4`; measured sources are `f60b116`, `c6de0fa`, and the Protean
-observer/control and evaluation successor of `44eea68` respectively.
+observer history-scope successor of `2d28d15` respectively.
 Added/deleted byte counts include newlines in dedicated test files and inline
 test blocks. Helpers outside those blocks are excluded from this test-only
 measure; the complete Zig totals below include it. Git diff counts can include
@@ -205,14 +218,14 @@ moved lines as additions and deletions.
 |---|---:|---:|---:|
 | Horos | 14 | 133,296 | 213 |
 | Kosmos | 11 | 142,798 | 1,104 |
-| Protean | 24 | 523,678 | 144,388 |
-| Total | 49 | 799,772 | 145,705 |
+| Protean | 24 | 522,092 | 137,118 |
+| Total | 49 | 798,186 | 138,435 |
 
 Complete changed Zig source adds/deletes 393,020/67,052 bytes in Horos,
-326,159/20,796 in Kosmos, and 873,824/195,778 in Protean. No test modules,
+326,159/20,796 in Kosmos, and 868,979/181,689 in Protean. No test modules,
 directories, executables, CI lanes or checked-in trace banks were added. The
 largest test-file extension is Protean's existing `workspace_runtime.zig`:
-366,294 added and 92,433 deleted bytes. Its two generated productions are reused
+361,659 added and 85,098 deleted bytes. Its two generated productions are reused
 by activation, five-arm measurements, recovery and mobility. Historical
 independent byte fixtures remain unchanged.
 

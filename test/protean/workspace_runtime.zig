@@ -5993,6 +5993,8 @@ fn observerCurrentOwnershipWitness(service: anytype, a: std.mem.Allocator, task:
         current.deinit();
         current = next;
         selection.previous = try workspaceRef(a, .work, observed.receipt.workspace.?);
+        if (index == 3 or index == 7 or index == 15)
+            try currentObserverBatchWitness(service, a, task, current.value, true, try std.fmt.allocPrint(a, "folds-{d}", .{index + 1}));
     }
     var last = try service.workspaceWork(a, task, try nativeIdentity(selection.previous.?));
     defer last.deinit();
@@ -6006,6 +6008,35 @@ fn observerCurrentOwnershipWitness(service: anytype, a: std.mem.Allocator, task:
     var owner = try service.task(a, task);
     defer owner.deinit();
     try std.testing.expectEqual(@as(usize, 0), owner.value.observer_heads.items.len);
+    try currentObserverBatchWitness(service, a, task, current.value, false, "stopped");
+    selection.previous = null;
+    selection.source.expected = .{
+        .work = try workspaceRef(a, .work, current.value.id),
+        .execution_revision = current.value.execution_revision,
+        .control_revision = current.value.control_revision,
+    };
+    const older = try service.workspaceObserve(a, "parallel-observer-older", task, selection);
+    try observerCompleted(service, a, task, older.receipt.workspace.?);
+    try advanceObservedSource(service, a, current.value, "parallel-observer-source");
+    const advanced = try service.workspaceWork(a, task, current.value.id);
+    current.deinit();
+    current = advanced;
+    selection.source.expected.execution_revision = current.value.execution_revision;
+    selection.source.expected.control_revision = current.value.control_revision;
+    const newer = try service.workspaceObserve(a, "parallel-observer-newer", task, selection);
+    try observerCompleted(service, a, task, newer.receipt.workspace.?);
+    try currentObserverBatchWitness(service, a, task, current.value, true, "parallel-revisions");
+    try std.testing.expectError(error.ObservationBlocked, advanceObservedSource(service, a, current.value, "parallel-observer-blocked"));
+    for ([_][32]u8{ older.receipt.workspace.?, newer.receipt.workspace.? }, 0..) |id, i| {
+        var observer = try service.workspaceWork(a, task, id);
+        defer observer.deinit();
+        _ = try service.workspaceStopObserving(a, try std.fmt.allocPrint(a, "parallel-observer-stop-{d}", .{i}), task, .{
+            .work = try workspaceRef(a, .work, id),
+            .execution_revision = observer.value.execution_revision,
+            .control_revision = observer.value.control_revision,
+        });
+        try currentObserverBatchWitness(service, a, task, current.value, false, try std.fmt.allocPrint(a, "parallel-stop-{d}", .{i}));
+    }
 }
 
 fn observerOwnershipTamper(service: anytype, a: std.mem.Allocator, work: native.workspace.Work) !void {
@@ -6197,7 +6228,7 @@ fn observerFoldWitness(
     var advanced = try service.workspaceWork(a, task, source_work.id);
     defer advanced.deinit();
     try std.testing.expect(advanced.value.guest_work <= 1);
-    try historicalObserverBatchWitness(service, a, task, advanced.value);
+    try currentObserverBatchWitness(service, a, task, advanced.value, true, "guest-cut");
     try std.testing.expectError(
         error.ObservationBlocked,
         advanceObservedSource(service, a, advanced.value, "observed-source-blocked"),
@@ -6996,6 +7027,7 @@ fn outerObserverWitness(
     };
     const first = try service.workspaceObserve(a, "outer-observer-first", task, selection);
     try observerCompleted(service, a, task, first.receipt.workspace.?);
+    try currentObserverBatchWitness(service, a, task, source_work.value, false, "outer-consumed");
     {
         var statement = try service.namespace.store.database.prepare("SELECT 1", &.{});
         const database = CleanupTrace.sqlite3_db_handle(statement.handle);
@@ -7011,6 +7043,7 @@ fn outerObserverWitness(
     var advanced = try service.workspaceWork(a, task, source_work.value.id);
     defer advanced.deinit();
     try std.testing.expect(advanced.value.runtime_capsule != null);
+    try currentObserverBatchWitness(service, a, task, advanced.value, true, "outer-unconsumed");
     selection.source.expected.execution_revision = advanced.value.execution_revision;
     selection.source.expected.control_revision = advanced.value.control_revision;
     selection.previous = try workspaceRef(a, .work, first.receipt.workspace.?);
@@ -7553,7 +7586,7 @@ const HistoricalObserverTrace = struct {
     }
 };
 
-fn historicalObserverBatchWitness(service: anytype, a: std.mem.Allocator, task: [16]u8, work: native.workspace.Work) !void {
+fn currentObserverBatchWitness(service: anytype, a: std.mem.Allocator, task: [16]u8, work: native.workspace.Work, blocked: bool, label: []const u8) !void {
     var statement = try service.namespace.store.database.prepare("SELECT 1", &.{});
     const database = CleanupTrace.sqlite3_db_handle(statement.handle);
     statement.deinit();
@@ -7561,25 +7594,32 @@ fn historicalObserverBatchWitness(service: anytype, a: std.mem.Allocator, task: 
     const refs: [4]contracts.workspace.Ref = @splat(ref);
     var parent = try service.task(a, task);
     defer parent.deinit();
-    for ([_]bool{ false, true }) |wait| {
+    for (0..3) |kind| {
         var trace: HistoricalObserverTrace = .{};
         try std.testing.expectEqual(@as(c_int, 0), CleanupTrace.sqlite3_trace_v2(database, 1 | 4, HistoricalObserverTrace.observe, &trace));
         defer std.debug.assert(CleanupTrace.sqlite3_trace_v2(database, 0, null, null) == 0);
-        const command: contracts.workspace.Command = .{ .work = if (wait)
-            .{ .wait = .{ .works = .{ .items = &refs }, .after = 0 } }
-        else
-            .{ .collect = .{ .works = .{ .items = &refs } } } };
-        const reply = try service.workspaceCommand(a, if (wait) "observer-history-wait" else "observer-history-collect", task, command);
+        const command: contracts.workspace.Command = .{ .work = switch (kind) {
+            0 => .{ .inspect = .{ .work = ref } },
+            1 => .{ .collect = .{ .works = .{ .items = &refs } } },
+            2 => .{ .wait = .{ .works = .{ .items = &refs }, .after = 0 } },
+            else => unreachable,
+        } };
+        const reply = try service.workspaceCommand(a, try std.fmt.allocPrint(a, "observer-current-{s}-{d}", .{ label, kind }), task, command);
         try std.testing.expectEqual(.observed, reply.disposition);
-        try std.testing.expectEqual(@as(usize, 1), trace.scans);
-        try std.testing.expectEqual(parent.value.event_high, trace.rows);
+        try std.testing.expectEqual(@as(usize, 0), trace.scans);
+        try std.testing.expectEqual(@as(usize, 0), trace.rows);
         var observation = try native.json.parseAsset(a, reply.observation_json.bytes, reply.observation_json.bytes.len);
         defer observation.deinit();
-        const items = if (wait) observation.value.object.get("works").?.array.items else observation.value.array.items;
-        try std.testing.expectEqual(refs.len, items.len);
-        for (items) |item| try std.testing.expect(item.object.get("observation_blocked").?.bool);
-        std.debug.print("observer historical batch: wait={} works={d} scans={d} decoded_event_rows={d}\n", .{
-            wait, refs.len, trace.scans, trace.rows,
+        const items: []const native.json.Value = switch (kind) {
+            0 => &.{observation.value},
+            1 => observation.value.array.items,
+            2 => observation.value.object.get("works").?.array.items,
+            else => unreachable,
+        };
+        try std.testing.expectEqual(if (kind == 0) @as(usize, 1) else refs.len, items.len);
+        for (items) |item| try std.testing.expectEqual(blocked, item.object.get("observation_blocked").?.bool);
+        std.debug.print("current observer projection: case={s} kind={d} works={d} events={d} scans={d} decoded_event_rows={d}\n", .{
+            label, kind, items.len, parent.value.event_high, trace.scans, trace.rows,
         });
     }
 }

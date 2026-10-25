@@ -180,7 +180,7 @@ pub fn Service(comptime Types: type) type {
         compiler_facts: ?*CompilerFacts = null,
         // Import may use ordinary mutation projections only through an existing
         // matching receipt. Missing receipts must never execute a new mutation.
-        workspace_replay: ?struct { replayed: bool, records: []const state.ArchiveRecord } = null,
+        workspace_replay: ?struct { replayed: bool, records: []const state.ArchiveRecord, checked: *SnapshotValidation } = null,
 
         const CompilerFact = struct {
             kind: enum { program, candidate, runtime, output },
@@ -3250,7 +3250,7 @@ pub fn Service(comptime Types: type) type {
                 }
             };
         }
-        fn validateControllerSuccession(self: *Self, allocator: std.mem.Allocator, parent: state.Task, id: state.Digest, records: []const state.ArchiveRecord) !void {
+        fn validateControllerSuccession(self: *Self, allocator: std.mem.Allocator, parent: state.Task, id: state.Digest, records: []const state.ArchiveRecord, checked: *SnapshotValidation) !void {
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             const a = arena.allocator();
@@ -3322,7 +3322,7 @@ pub fn Service(comptime Types: type) type {
                 var view = try contracts.decodeOwned(contracts.controller.OwnerView, a, input[carry.len..]);
                 defer view.deinit();
                 if (!std.meta.eql(view.value.task, parent.id) or view.value.event_cut != operation_value.event_cut or view.value.next_message != operation_value.next_message or !std.meta.eql(view.value.policy, operation_value.policy.digest) or !same(view.value.input.bytes, try self.store().object(a, parent.input, null))) return error.InvalidArchive;
-                try self.validateControllerView(a, parent, view.value, operation_value.view_works.items, records);
+                try self.validateControllerViewIn(a, parent, view.value, operation_value.view_works.items, records, checked);
                 if (operation_value.conversion_work) |work_id| {
                     try requireArchiveRecord(records, .workspace_work, work_id);
                     var work = try self.workspaceWork(a, parent.id, work_id);
@@ -3920,23 +3920,15 @@ pub fn Service(comptime Types: type) type {
                 for (snapshots[0..initialized]) |snapshot| freeControllerViewWork(allocator, snapshot);
                 allocator.free(snapshots);
             }
-            var observers = HistoricalObservers.init(a, parent.id, parent.event_high);
+            var observers = CurrentObservers.init(a, parent.id, parent.event_high);
             defer observers.deinit();
             for (ids, works, snapshots) |id, *out, *snapshot| {
                 snapshot.* = try self.freezeWorkspaceWork(allocator, parent.id, try wp.reference(a, .work, id), true);
                 initialized += 1;
                 const child = snapshot.work;
-                out.* = .{ .work = try wp.reference(a, .work, id), .execution_revision = child.execution_revision, .control_revision = child.control_revision, .event_watermark = child.event_watermark, .observation = .{ .bytes = try json.canonical(a, try self.renderWorkspaceWorkObservationIn(a, child, snapshot.occurrence, parent.event_high, &observers)) } };
+                out.* = .{ .work = try wp.reference(a, .work, id), .execution_revision = child.execution_revision, .control_revision = child.control_revision, .event_watermark = child.event_watermark, .observation = .{ .bytes = try json.canonical(a, try self.renderWorkspaceWorkObservationIn(a, child, snapshot.occurrence, parent.event_high, .{ .current = &observers })) } };
             }
             return .{ .works = snapshots, .bytes = try contracts.encodeOwned(contracts.controller.OwnerView, allocator, .{ .task = parent.id, .event_cut = parent.event_high, .next_message = parent.next_message, .policy = parent.profile.digest, .input_schema = .{ .bytes = try values.schemaBytes(Types.Input, a) }, .input = .{ .bytes = try self.store().object(a, parent.input, null) }, .messages = .{ .items = messages }, .works = .{ .items = works } }) };
-        }
-        fn validateControllerView(self: *Self, a: std.mem.Allocator, parent: state.Task, view: contracts.controller.OwnerView, snapshots: []const workspace.WorkObservation, records: []const state.ArchiveRecord) anyerror!void {
-            var checked: SnapshotValidation = .{
-                .allocator = a,
-                .observer_successors = .init(a, parent.id),
-            };
-            defer checked.deinit();
-            return self.validateControllerViewIn(a, parent, view, snapshots, records, &checked);
         }
         fn validateControllerViewIn(self: *Self, a: std.mem.Allocator, parent: state.Task, view: contracts.controller.OwnerView, snapshots: []const workspace.WorkObservation, records: []const state.ArchiveRecord, checked: *SnapshotValidation) anyerror!void {
             if (!std.meta.eql(view.task, parent.id) or view.event_cut > parent.event_high or view.next_message == 0 or view.next_message > parent.next_message or !std.meta.eql(view.policy, parent.profile.digest) or !same(view.input.bytes, try self.store().object(a, parent.input, null)) or !same(view.input_schema.bytes, try values.schemaBytes(Types.Input, a))) return error.InvalidArchive;
@@ -3963,7 +3955,7 @@ pub fn Service(comptime Types: type) type {
                 if (!std.meta.eql(id, try wp.identity(fact.work, .work)) or !std.meta.eql(id, child.id) or fact.execution_revision != child.execution_revision or fact.control_revision != child.control_revision or fact.event_watermark != child.event_watermark or child.event_watermark != try self.workspacePublicationAt(a, parent.id, id, view.event_cut)) return error.InvalidArchive;
                 try self.validateWorkspaceWorkSnapshotIn(parent, snapshot, records, checked);
                 try self.validateHistoricalOccurrence(a, snapshot);
-                if (!same(fact.observation.bytes, try json.canonical(a, try self.renderWorkspaceWorkObservationIn(a, child, snapshot.occurrence, view.event_cut, try checked.observer_successors.histories.get(parent.id, view.event_cut))))) return error.InvalidArchive;
+                if (!same(fact.observation.bytes, try json.canonical(a, try self.renderWorkspaceWorkObservationIn(a, child, snapshot.occurrence, view.event_cut, .{ .historical = try checked.observer_successors.histories.get(parent.id, view.event_cut) })))) return error.InvalidArchive;
             }
         }
         fn validateControllerMessageCut(self: *Self, a: std.mem.Allocator, parent: state.Task, event_cut: u64, expected_next_message: u64) !void {
@@ -4924,7 +4916,7 @@ pub fn Service(comptime Types: type) type {
             }
         }
 
-        fn validateOccurrenceProvenance(self: *Self, a: std.mem.Allocator, value: state.Task, records: []const state.ArchiveRecord) !void {
+        fn validateOccurrenceProvenance(self: *Self, a: std.mem.Allocator, value: state.Task, records: []const state.ArchiveRecord, checked: *SnapshotValidation) !void {
             var residual_occurrences: std.AutoHashMap(state.Digest, state.Digest) = .init(a);
             defer residual_occurrences.deinit();
             for (records) |row| if (row.kind == .controller_residual) {
@@ -5098,7 +5090,7 @@ pub fn Service(comptime Types: type) type {
                             try requireArchiveRecord(records, .workspace_reply, saved.id);
                             var evidence = try contracts.decodeOwned(workspace.ReplyObservation, temporary, bytes);
                             defer evidence.deinit();
-                            try self.validateWorkspaceReply(temporary, value, saved, entry, request.value, evidence.value, reply_value.?, records);
+                            try self.validateWorkspaceReply(temporary, value, saved, entry, request.value, evidence.value, reply_value.?, records, checked);
                         } else {
                             try requireArchiveRecord(records, .attempt, reply.attempt);
                             try requireArchiveRecord(records, .capture, reply.attempt);
@@ -5176,7 +5168,7 @@ pub fn Service(comptime Types: type) type {
         /// objects and usage through the same pure adapter, without acquisition.
         /// Uninterpreted bytes remain private evidence, bound to the exact
         /// original attempt; transfer never claims that interpretation succeeds.
-        fn validateCapturedProjections(self: *Self, value: state.Task, records: []const state.ArchiveRecord, mode: enum { inspect, retain }) !void {
+        fn validateCapturedProjections(self: *Self, value: state.Task, records: []const state.ArchiveRecord, mode: enum { inspect, retain }, checked: *SnapshotValidation) !void {
             // Retained unsuccessful/rearmed attempts also need request/profile
             // coherence, even though they have no acquired response.
             for (records) |row| {
@@ -5216,6 +5208,7 @@ pub fn Service(comptime Types: type) type {
                             job.value,
                             records,
                             attempt.value.controller_read,
+                            checked,
                         );
                     }
                     if (job.value == .program and attempt.value.controller_read != null) return error.InvalidArchive;
@@ -6433,9 +6426,7 @@ pub fn Service(comptime Types: type) type {
             const snapshot_a = snapshot_arena.allocator();
             const manifest = try archive_api.prepare(snapshot_a, self.store(), subject.task, self.assets.manifest);
             try self.validateArchiveAdmissions(snapshot_a, parent.value, manifest);
-            try self.validateOccurrenceProvenance(snapshot_a, parent.value, manifest.records.items);
-            try self.validateCapturedProjections(parent.value, manifest.records.items, .inspect);
-            try self.validateWorkspaceRecordBodies(snapshot_a, subject.task, manifest.records.items);
+            try self.validateWorkspaceArchive(snapshot_a, parent.value, manifest.records.items, .inspect);
             try archive_api.retainAssets(snapshot_a, self.store(), self.assets.manifest);
             const snapshot: p.Snapshot = .{ .id = frozen.id, .task = subject.task, .work = subject.work, .frozen = .{ .intent = intent, .manifest = manifest } };
             if (try self.store().recordBytes(snapshot_a, "placement_snapshot", snapshot.id, snapshot.task)) |bytes| {
@@ -6577,9 +6568,7 @@ pub fn Service(comptime Types: type) type {
                 defer arena.deinit();
                 const index = try self.store().archiveIndex(arena.allocator(), task_id, .{ .digest = storage.digest(self.assets.manifest), .bytes = self.assets.manifest.len });
                 try self.validateArchiveAdmissions(arena.allocator(), value.value, index);
-                try self.validateOccurrenceProvenance(arena.allocator(), value.value, index.records.items);
-                try self.validateCapturedProjections(value.value, index.records.items, .inspect);
-                try self.validateWorkspaceRecordBodies(arena.allocator(), task_id, index.records.items);
+                try self.validateWorkspaceArchive(arena.allocator(), value.value, index.records.items, .inspect);
             }
             return archive_api.write(self.allocator, self.io, self.store(), task_id, self.assets.manifest, path, self.namespace.directory);
         }
@@ -6683,9 +6672,7 @@ pub fn Service(comptime Types: type) type {
             // original operation identities and all related input history.
             try self.store().restoreArchiveIndex(a, reader.manifest.value, value);
             try self.validateArchiveAdmissions(a, value, reader.manifest.value);
-            try self.validateOccurrenceProvenance(a, value, reader.manifest.value.records.items);
-            try self.validateCapturedProjections(value, reader.manifest.value.records.items, .retain);
-            try self.validateWorkspaceRecordBodies(a, value.id, reader.manifest.value.records.items);
+            try self.validateWorkspaceArchive(a, value, reader.manifest.value.records.items, .retain);
             // This transaction contains untrusted, unpublished archive data.
             // Reuse the closure validator without treating semantic rejection
             // as corruption of the committed namespace. Store integrity and
@@ -6895,12 +6882,15 @@ pub fn Service(comptime Types: type) type {
             return self.workspaceCommandFrom(a, operation_id, task_id, admitted, null);
         }
         fn workspaceCommandFrom(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, admitted: workspace.Authorized, basis: ?workspace.ReadObservation) !wc.Reply {
-            var histories: ObserverHistories = .{ .allocator = a };
-            defer histories.deinit();
-            return self.workspaceCommandFromIn(a, operation_id, task_id, admitted, basis, &histories);
+            try self.allowed();
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            var observers = CurrentObservers.init(a, task_id, parent.value.event_high);
+            defer observers.deinit();
+            return self.workspaceCommandFromIn(a, operation_id, task_id, admitted, basis, .{ .current = &observers });
         }
 
-        fn workspaceCommandFromIn(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, admitted: workspace.Authorized, basis: ?workspace.ReadObservation, histories: *ObserverHistories) !wc.Reply {
+        fn workspaceCommandFromIn(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, admitted: workspace.Authorized, basis: ?workspace.ReadObservation, observers: ObserverScope) !wc.Reply {
             try self.allowed();
             const command = admitted.command;
             var compiler_facts: CompilerFacts = .{ .allocator = self.allocator };
@@ -6917,7 +6907,7 @@ pub fn Service(comptime Types: type) type {
                 if (self.store().fenced or err == error.OutOfMemory or err == error.StorageUnavailable) return err;
                 return workspaceRejection(a, err);
             };
-            const executed = self.workspaceExecute(a, operation_id, task_id, admitted, basis, histories) catch |err| {
+            const executed = self.workspaceExecute(a, operation_id, task_id, admitted, basis, observers) catch |err| {
                 if (self.store().fenced or err == error.OutOfMemory or err == error.StorageUnavailable) return err;
                 return workspaceRejection(a, err);
             };
@@ -6958,7 +6948,7 @@ pub fn Service(comptime Types: type) type {
 
         const WorkspaceExecution = union(enum) { observation: json.Value, admitted: Admission };
 
-        fn workspaceExecute(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, authorized: workspace.Authorized, basis: ?workspace.ReadObservation, histories: *ObserverHistories) !WorkspaceExecution {
+        fn workspaceExecute(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, authorized: workspace.Authorized, basis: ?workspace.ReadObservation, observers: ObserverScope) !WorkspaceExecution {
             const command = authorized.command;
             switch (command) {
                 .placement => return error.InvalidState,
@@ -7160,7 +7150,7 @@ pub fn Service(comptime Types: type) type {
                             defer residual.deinit();
                             return .{ .observation = try self.controllerResidualObservation(a, .from(residual.value)) };
                         }
-                        if (basis) |frozen| return .{ .observation = try self.renderWorkspaceWorkObservationIn(a, frozen.works.works.items[0].?.work, frozen.works.works.items[0].?.occurrence, frozen.works.event_watermark, try histories.get(task_id, frozen.works.event_watermark)) };
+                        if (basis) |frozen| return .{ .observation = try self.renderWorkspaceWorkObservationIn(a, frozen.works.works.items[0].?.work, frozen.works.works.items[0].?.occurrence, frozen.works.event_watermark, try observers.at(task_id, frozen.works.event_watermark)) };
                         var value = try self.workspaceWork(a, task_id, try wp.identity(request.work, .work));
                         defer value.deinit();
                         return .{ .observation = try self.workspaceWorkObservation(a, value.value) };
@@ -7173,7 +7163,7 @@ pub fn Service(comptime Types: type) type {
                             if (basis) |frozen| {
                                 const item = frozen.works.works.items[i];
                                 if (item) |observed| {
-                                    try result.array.append(try self.renderWorkspaceWorkObservationIn(a, observed.work, observed.occurrence, frozen.works.event_watermark, try histories.get(task_id, frozen.works.event_watermark)));
+                                    try result.array.append(try self.renderWorkspaceWorkObservationIn(a, observed.work, observed.occurrence, frozen.works.event_watermark, try observers.at(task_id, frozen.works.event_watermark)));
                                 } else {
                                     var missing = json.object();
                                     try json.put(a, &missing, "work", try values.toJson(wc.Ref, a, ref));
@@ -7191,7 +7181,7 @@ pub fn Service(comptime Types: type) type {
                                 continue;
                             };
                             defer value.deinit();
-                            try result.array.append(try self.workspaceWorkObservationIn(a, value.value, try histories.get(task_id, parent.value.event_high)));
+                            try result.array.append(try self.workspaceWorkObservationIn(a, value.value, parent.value.event_high, try observers.at(task_id, parent.value.event_high)));
                         }
                         return .{ .observation = result };
                     },
@@ -7225,12 +7215,12 @@ pub fn Service(comptime Types: type) type {
                             if (basis) |frozen| {
                                 const observed = frozen.wait.works.items[i].?;
                                 ready = ready or observed.work.event_watermark > request.after or observed.work.terminal();
-                                try selected.array.append(try self.renderWorkspaceWorkObservationIn(a, observed.work, observed.occurrence, frozen.wait.event_watermark, try histories.get(task_id, frozen.wait.event_watermark)));
+                                try selected.array.append(try self.renderWorkspaceWorkObservationIn(a, observed.work, observed.occurrence, frozen.wait.event_watermark, try observers.at(task_id, frozen.wait.event_watermark)));
                             } else {
                                 var work = try self.workspaceWork(a, task_id, try wp.identity(ref, .work));
                                 defer work.deinit();
                                 ready = ready or work.value.event_watermark > request.after or work.value.terminal();
-                                try selected.array.append(try self.workspaceWorkObservationIn(a, work.value, try histories.get(task_id, parent.value.event_high)));
+                                try selected.array.append(try self.workspaceWorkObservationIn(a, work.value, parent.value.event_high, try observers.at(task_id, parent.value.event_high)));
                             }
                         }
                         try json.put(a, &result, "ready", .{ .bool = ready });
@@ -7365,8 +7355,18 @@ pub fn Service(comptime Types: type) type {
                     if (self.workspace_replay) |replay_only| {
                         var parent = try self.task(a, task_id);
                         defer parent.deinit();
-                        try self.validateWorkspaceWorkSnapshot(a, parent.value, value.value, replay_only.records);
+                        try self.validateWorkspaceWorkSnapshotIn(parent.value, value.value, replay_only.records, replay_only.checked);
                         try self.validateHistoricalOccurrence(a, value.value);
+                        break :blk try self.renderWorkspaceWorkObservationIn(a, value.value.work, value.value.occurrence, value.value.work.event_watermark, .{
+                            .historical = try replay_only.checked.observer_successors.histories.get(task_id, value.value.work.event_watermark),
+                        });
+                    }
+                    var parent = try self.task(a, task_id);
+                    defer parent.deinit();
+                    if (value.value.work.event_watermark == parent.value.event_high) {
+                        var observers = CurrentObservers.init(a, task_id, parent.value.event_high);
+                        defer observers.deinit();
+                        break :blk try self.renderWorkspaceWorkObservationIn(a, value.value.work, value.value.occurrence, parent.value.event_high, .{ .current = &observers });
                     }
                     break :blk try self.renderWorkspaceWorkObservation(a, value.value.work, value.value.occurrence, value.value.work.event_watermark);
                 },
@@ -7791,26 +7791,26 @@ pub fn Service(comptime Types: type) type {
         fn workspaceWorkObservation(self: *Self, a: std.mem.Allocator, value: workspace.Work) !json.Value {
             var parent = try self.task(a, value.task);
             defer parent.deinit();
-            var observers = HistoricalObservers.init(a, value.task, parent.value.event_high);
+            var observers = CurrentObservers.init(a, value.task, parent.value.event_high);
             defer observers.deinit();
-            return self.workspaceWorkObservationIn(a, value, &observers);
+            return self.workspaceWorkObservationIn(a, value, parent.value.event_high, .{ .current = &observers });
         }
 
-        fn workspaceWorkObservationIn(self: *Self, a: std.mem.Allocator, value: workspace.Work, observers: *HistoricalObservers) !json.Value {
+        fn workspaceWorkObservationIn(self: *Self, a: std.mem.Allocator, value: workspace.Work, observed_at: u64, observers: WorkObservers) !json.Value {
             var pending: ?contracts.Decoded(occurrence.Occurrence) = null;
             defer if (pending) |*saved| saved.deinit();
             if (value.current_occurrence) |id| pending = try self.record(occurrence.Occurrence, a, "occurrence", id, value.task);
-            return self.renderWorkspaceWorkObservationIn(a, value, if (pending) |saved| saved.value else null, observers.watermark, observers);
+            return self.renderWorkspaceWorkObservationIn(a, value, if (pending) |saved| saved.value else null, observed_at, observers);
         }
 
         fn renderWorkspaceWorkObservation(self: *Self, a: std.mem.Allocator, value: workspace.Work, pending: ?occurrence.Occurrence, observed_at: u64) !json.Value {
             var observers = HistoricalObservers.init(a, value.task, observed_at);
             defer observers.deinit();
-            return self.renderWorkspaceWorkObservationIn(a, value, pending, observed_at, &observers);
+            return self.renderWorkspaceWorkObservationIn(a, value, pending, observed_at, .{ .historical = &observers });
         }
 
-        fn renderWorkspaceWorkObservationIn(self: *Self, a: std.mem.Allocator, value: workspace.Work, pending: ?occurrence.Occurrence, observed_at: u64, observers: *HistoricalObservers) !json.Value {
-            if (!std.meta.eql(value.task, observers.task) or observed_at != observers.watermark) return error.InvalidArchive;
+        fn renderWorkspaceWorkObservationIn(self: *Self, a: std.mem.Allocator, value: workspace.Work, pending: ?occurrence.Occurrence, observed_at: u64, observers: WorkObservers) !json.Value {
+            const observation_blocked = try observers.blocked(self, value, observed_at);
             var result = json.object();
             try json.put(a, &result, "interpretation_evidence", try self.workspaceInterpretationEvidence(
                 a,
@@ -7830,7 +7830,6 @@ pub fn Service(comptime Types: type) type {
             try json.put(a, &result, "runtime_capsule", try values.toJson(?state.Reference, a, value.runtime_capsule));
             try json.put(a, &result, "runtime_trace", try values.toJson(?kosmos.RuntimeInstrumentation.Output, a, if (value.runtime_trace) |trace| trace.output else null));
             try json.put(a, &result, "guard", try values.toJson(?workspace.Guard, a, value.guard));
-            const observation_blocked = try observers.blocked(self, value);
             try json.put(a, &result, "observation_blocked", .{ .bool = observation_blocked });
             if (value.observer) |observer| {
                 var observed = json.object();
@@ -9346,7 +9345,7 @@ pub fn Service(comptime Types: type) type {
 
         // Validate the receipt's operation before interpreting any declared
         // publication. Neither the receipt kind nor an empty list can bypass it.
-        fn validateWorkspaceAdmission(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, command: workspace.PublicationCommand, admission: WorkspaceAdmission, records: []const state.ArchiveRecord, successors: *ObserverSuccessors) !void {
+        fn validateWorkspaceAdmission(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, command: workspace.PublicationCommand, admission: WorkspaceAdmission, records: []const state.ArchiveRecord, checked: *SnapshotValidation) !void {
             errdefer std.debug.print("workspace admission: {s} at {d}\n", .{ @tagName(command), event_value.seq });
             const items = event_value.workspace_publications.items;
             const kind: @FieldType(wc.Ref, "kind") = switch (command) {
@@ -9384,7 +9383,7 @@ pub fn Service(comptime Types: type) type {
                     .expected = selection,
                 }),
                 .semantic => |selected| blk: {
-                    try self.validateSemanticPublication(parent, selected, admission, records, event_value.controller_read);
+                    try self.validateSemanticPublication(parent, selected, admission, records, event_value.controller_read, checked);
                     break :blk try operation(workspace.SemanticRequest, a, .{
                         .task = parent.id,
                         .command = selected.command,
@@ -9447,7 +9446,7 @@ pub fn Service(comptime Types: type) type {
                         defer view.deinit();
                         if (event_value.seq == 0 or view.value.event_cut != event_value.seq - 1) return error.InvalidArchive;
                     }
-                    if (!start.origin) try self.validateWorkspaceInitialInput(a, work.value, successors);
+                    if (!start.origin) try self.validateWorkspaceInitialInput(a, work.value, &checked.observer_successors);
                     if (start.observer) |observer| break :blk try operation(
                         workspace.ObserveRequest,
                         a,
@@ -9462,7 +9461,7 @@ pub fn Service(comptime Types: type) type {
                     if (!std.meta.eql(items[1].work, target) or std.meta.eql(items[0].work, target)) return error.InvalidArchive;
                     var child = try self.retainedWorkspaceWork(a, parent.id, admission.work);
                     defer child.deinit();
-                    try self.validateWorkspaceInitialInput(a, child.value, successors);
+                    try self.validateWorkspaceInitialInput(a, child.value, &checked.observer_successors);
                     break :blk try operation(workspace.DelegationRequest, a, .{ .task = parent.id, .command = selection });
                 },
             };
@@ -10032,7 +10031,7 @@ pub fn Service(comptime Types: type) type {
                             .checkpoint = selected.checkpoint.digest,
                         });
                     }
-                    try self.validateWorkspaceAdmission(a, parent, event_value, command.?.value, (admission orelse return error.InvalidArchive).value, records, &checked.observer_successors);
+                    try self.validateWorkspaceAdmission(a, parent, event_value, command.?.value, (admission orelse return error.InvalidArchive).value, records, checked);
                     if (command.?.value == .context) if (event_value.controller_read) |cut|
                         try checked.controller_values.put(checked.allocator, admission.?.value.work, cut);
                     if (event_value.residual_publications.items.len != @as(usize, if (command.?.value == .residual) 1 else 0)) return error.InvalidArchive;
@@ -10279,15 +10278,6 @@ pub fn Service(comptime Types: type) type {
             };
         }
 
-        fn validateWorkspaceRead(self: *Self, a: std.mem.Allocator, parent: state.Task, command: wc.Command, basis: workspace.ReadObservation, records: []const state.ArchiveRecord, controller_read: ?state.ControllerReadCut) !void {
-            var checked: SnapshotValidation = .{
-                .allocator = a,
-                .observer_successors = .init(a, parent.id),
-            };
-            defer checked.deinit();
-            return self.validateWorkspaceReadIn(a, parent, command, basis, records, controller_read, &checked);
-        }
-
         fn validateWorkspaceReadIn(self: *Self, a: std.mem.Allocator, parent: state.Task, command: wc.Command, basis: workspace.ReadObservation, records: []const state.ArchiveRecord, controller_read: ?state.ControllerReadCut, checked: *SnapshotValidation) !void {
             if (!workspaceIsRead(command)) return error.InvalidArchive;
             try validateControllerReadCut(basis, controller_read);
@@ -10421,7 +10411,7 @@ pub fn Service(comptime Types: type) type {
             }
         }
 
-        fn validateWorkspaceReply(self: *Self, a: std.mem.Allocator, parent: state.Task, pending: occurrence.Occurrence, entry: registry.Entry, request: data.invocation.Request, saved: workspace.ReplyObservation, reply: []const u8, records: []const state.ArchiveRecord) anyerror!void {
+        fn validateWorkspaceReply(self: *Self, a: std.mem.Allocator, parent: state.Task, pending: occurrence.Occurrence, entry: registry.Entry, request: data.invocation.Request, saved: workspace.ReplyObservation, reply: []const u8, records: []const state.ArchiveRecord, checked: *SnapshotValidation) anyerror!void {
             if (pending.work != null or !std.meta.eql(saved.id, pending.id) or !std.meta.eql(saved.task, parent.id) or !std.meta.eql(saved.request, pending.request_object)) return error.InvalidArchive;
             const acquired = switch (pending.state) {
                 .settled_reply => |r| r,
@@ -10490,20 +10480,15 @@ pub fn Service(comptime Types: type) type {
                         const id = try json.text(event_data.value.object.get("occurrence_id") orelse return error.InvalidArchive);
                         if (!same(id, &std.fmt.bytesToHex(pending.id, .lower))) return error.InvalidArchive;
                     }
-                    var checked: SnapshotValidation = .{
-                        .allocator = a,
-                        .observer_successors = .init(a, parent.id),
-                    };
-                    defer checked.deinit();
-                    try self.validateWorkspaceReadIn(a, parent, command, basis, records, controller_read, &checked);
-                    break :blk try self.workspaceCommandFromIn(a, &operation_id, parent.id, authorized.value, basis, &checked.observer_successors.histories);
+                    try self.validateWorkspaceReadIn(a, parent, command, basis, records, controller_read, checked);
+                    break :blk try self.workspaceCommandFromIn(a, &operation_id, parent.id, authorized.value, basis, .{ .historical = &checked.observer_successors.histories });
                 },
                 .admitted => |admitted| blk: {
                     if (workspaceIsRead(command) or workspaceCompiles(command)) return error.InvalidArchive;
                     if (self.workspace_replay != null) return error.InvalidArchive;
-                    self.workspace_replay = .{ .replayed = admitted.replayed, .records = records };
+                    self.workspace_replay = .{ .replayed = admitted.replayed, .records = records, .checked = checked };
                     defer self.workspace_replay = null;
-                    const result = try self.workspaceCommandAuthorized(a, &operation_id, parent.id, authorized.value);
+                    const result = try self.workspaceCommandFromIn(a, &operation_id, parent.id, authorized.value, null, .{ .historical = &checked.observer_successors.histories });
                     if (result.disposition == .rejected) return error.InvalidArchive;
                     break :blk result;
                 },
@@ -10764,6 +10749,7 @@ pub fn Service(comptime Types: type) type {
             input: build_job.Input,
             records: []const state.ArchiveRecord,
             controller_read: ?state.ControllerReadCut,
+            checked: *SnapshotValidation,
         ) !void {
             if (command == .derive and input == .derive) {
                 const inspect: wc.Command = .{ .program = .{ .inspect = .{
@@ -10773,7 +10759,7 @@ pub fn Service(comptime Types: type) type {
                     } },
                     .page = .{},
                 } } };
-                try self.validateWorkspaceRead(a, parent, inspect, input.derive.basis, records, controller_read);
+                try self.validateWorkspaceReadIn(a, parent, inspect, input.derive.basis, records, controller_read, checked);
                 return;
             }
             if (command != .validate or input != .validate or controller_read != null) return error.InvalidArchive;
@@ -10795,6 +10781,7 @@ pub fn Service(comptime Types: type) type {
             admission: WorkspaceAdmission,
             records: []const state.ArchiveRecord,
             controller_read: ?state.ControllerReadCut,
+            checked: *SnapshotValidation,
         ) !void {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
@@ -10805,7 +10792,7 @@ pub fn Service(comptime Types: type) type {
             defer a.free(input_bytes);
             var input = try contracts.decodeOwned(build_job.Input, a, input_bytes);
             defer input.deinit();
-            try self.validateSemanticInput(a, parent, selected.command, input.value, records, controller_read);
+            try self.validateSemanticInput(a, parent, selected.command, input.value, records, controller_read, checked);
             phase = "frozen input";
             const frozen = try self.workspacePrepareSemanticBuild(
                 a,
@@ -12710,27 +12697,32 @@ pub fn Service(comptime Types: type) type {
             const a = arena.allocator();
             var parent = try self.task(a, task_id);
             defer parent.deinit();
-            phase = "occurrence provenance";
-            try self.validateOccurrenceProvenance(a, parent.value, records);
-            phase = "record bodies";
-            try self.validateWorkspaceRecordBodies(a, task_id, records);
+            phase = "archive records";
+            try self.validateWorkspaceArchive(a, parent.value, records, .records);
         }
 
-        // Archive admission has already checked occurrence provenance before
-        // replaying captured projections. Keep that ordering without checking
-        // the complete occurrence history a second time here.
-        fn validateWorkspaceRecordBodies(self: *Self, allocator: std.mem.Allocator, task_id: state.TaskId, records: []const state.ArchiveRecord) !void {
-            var phase: []const u8 = "task and controller";
-            errdefer std.debug.print("workspace record bodies: {s}\n", .{phase});
+        fn validateWorkspaceArchive(self: *Self, allocator: std.mem.Allocator, parent: state.Task, records: []const state.ArchiveRecord, mode: enum { records, inspect, retain }) !void {
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             const a = arena.allocator();
             var checked: SnapshotValidation = .{
                 .allocator = a,
-                .observer_successors = .init(a, task_id),
+                .observer_successors = .init(a, parent.id),
                 .semantic_sources = true,
             };
             defer checked.deinit();
+            try self.validateOccurrenceProvenance(a, parent, records, &checked);
+            if (mode != .records)
+                try self.validateCapturedProjections(parent, records, if (mode == .inspect) .inspect else .retain, &checked);
+            try self.validateWorkspaceRecordBodies(a, parent.id, records, &checked);
+        }
+
+        fn validateWorkspaceRecordBodies(self: *Self, allocator: std.mem.Allocator, task_id: state.TaskId, records: []const state.ArchiveRecord, checked: *SnapshotValidation) !void {
+            var phase: []const u8 = "task and controller";
+            errdefer std.debug.print("workspace record bodies: {s}\n", .{phase});
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatibleApplication(parent.value);
@@ -12738,7 +12730,7 @@ pub fn Service(comptime Types: type) type {
             if (!std.meta.eql(runtime_cut.runtime, parent.value.controller_runtime) or
                 runtime_cut.realization_revision != parent.value.realization_revision) return error.InvalidArchive;
             phase = "publications";
-            try self.validateWorkspacePublications(a, parent.value, records, &checked);
+            try self.validateWorkspacePublications(a, parent.value, records, checked);
             phase = "receipts";
             if (parent.value.controller_epoch != try self.controllerEpochAt(a, parent.value, parent.value.event_high)) return error.InvalidArchive;
             var receipts = try self.store().database.prepare("SELECT o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?", &.{.{ .blob = &task_id }});
@@ -12764,7 +12756,7 @@ pub fn Service(comptime Types: type) type {
                 var publication = try self.store().database.prepare("SELECT revision FROM events WHERE task=? AND seq=?", &.{ .{ .blob = &task_id }, .{ .integer = std.math.cast(i64, observed.value.work.event_watermark) orelse return error.InvalidArchive } });
                 defer publication.deinit();
                 if (try publication.step() != .row or try publication.integer(0) != std.math.cast(i64, receipt_value.value.revision) orelse return error.InvalidArchive) return error.InvalidArchive;
-                try self.validateWorkspaceWorkSnapshotIn(parent.value, observed.value, records, &checked);
+                try self.validateWorkspaceWorkSnapshotIn(parent.value, observed.value, records, checked);
                 try self.validateHistoricalOccurrence(frame, observed.value);
             }
             var controller_ids: std.AutoHashMap(state.Digest, void) = .init(a);
@@ -12815,7 +12807,7 @@ pub fn Service(comptime Types: type) type {
                 const frame = record_arena.allocator();
                 phase = @tagName(row.kind);
                 switch (row.kind) {
-                    .controller_succession => try self.validateControllerSuccession(self.allocator, parent.value, row.id, records),
+                    .controller_succession => try self.validateControllerSuccession(self.allocator, parent.value, row.id, records, checked),
                     .controller_residual => try self.validateControllerResidual(self.allocator, parent.value, row.id, records),
                     .workspace_trial => {
                         var work = try self.workspaceWork(frame, task_id, row.id);
@@ -12850,17 +12842,17 @@ pub fn Service(comptime Types: type) type {
                     .workspace_value => {
                         var record_value = try self.record(workspace.Value, frame, "workspace_value", row.id, task_id);
                         defer record_value.deinit();
-                        const admitted = try self.workspaceValueReferenceIn(frame, task_id, try wp.reference(frame, .value, record_value.value.artifact.digest), &checked);
+                        const admitted = try self.workspaceValueReferenceIn(frame, task_id, try wp.reference(frame, .value, record_value.value.artifact.digest), checked);
                         const descriptor_bytes = try self.store().object(frame, admitted.schema, null);
                         var descriptor = try data.schema.decode(frame, descriptor_bytes);
                         defer descriptor.deinit();
                         try data.schema.validateValue(frame, descriptor.descriptor, try self.store().object(frame, admitted.value, null));
                         for (record_value.value.derivation.sources.items) |ref| {
-                            const source = try self.workspaceValueReferenceIn(frame, task_id, try wp.reference(frame, .value, ref.digest), &checked);
+                            const source = try self.workspaceValueReferenceIn(frame, task_id, try wp.reference(frame, .value, ref.digest), checked);
                             if (!std.meta.eql(source.artifact, ref)) return error.InvalidArchive;
                         }
                         const derivation = record_value.value.derivation;
-                        if (derivation.inspection) |origin| try self.validateWorkspaceWorkSnapshotIn(parent.value, origin.observation, records, &checked);
+                        if (derivation.inspection) |origin| try self.validateWorkspaceWorkSnapshotIn(parent.value, origin.observation, records, checked);
                         if (derivation.semantic_source) |origin| {
                             const request: wc.Command = .{ .program = .{ .inspect = .{
                                 .target = .{ .semantic_source = .{
@@ -12869,7 +12861,7 @@ pub fn Service(comptime Types: type) type {
                                 } },
                                 .page = .{},
                             } } };
-                            try self.validateWorkspaceReadIn(frame, parent.value, request, origin.basis, records, checked.controller_values.get(record_value.value.artifact.digest), &checked);
+                            try self.validateWorkspaceReadIn(frame, parent.value, request, origin.basis, records, checked.controller_values.get(record_value.value.artifact.digest), checked);
                         }
                         if (derivation.kind == .computation or derivation.kind == .trial) {
                             var work = try self.workspaceWork(frame, task_id, derivation.work orelse return error.InvalidArchive);
@@ -12961,7 +12953,7 @@ pub fn Service(comptime Types: type) type {
                 defer saved.deinit();
                 const value = saved.value;
                 for (0..std.math.cast(usize, value.port_generation) orelse return error.InvalidArchive) |i| if (!generations.contains(.{ .work = value.id, .generation = i + 1 })) return error.InvalidArchive;
-                try self.validateWorkspaceWorkSnapshotIn(parent.value, try self.freezeWorkspaceWork(frame, task_id, try wp.reference(frame, .work, value.id), true), records, &checked);
+                try self.validateWorkspaceWorkSnapshotIn(parent.value, try self.freezeWorkspaceWork(frame, task_id, try wp.reference(frame, .work, value.id), true), records, checked);
             }
         }
 
@@ -13018,15 +13010,6 @@ pub fn Service(comptime Types: type) type {
                 matches += 1;
             };
             if (matches != 1) return error.InvalidArchive;
-        }
-
-        fn validateWorkspaceWorkSnapshot(self: *Self, a: std.mem.Allocator, parent: state.Task, snapshot: workspace.WorkObservation, records: []const state.ArchiveRecord) !void {
-            var checked: SnapshotValidation = .{
-                .allocator = a,
-                .observer_successors = .init(a, parent.id),
-            };
-            defer checked.deinit();
-            return self.validateWorkspaceWorkSnapshotIn(parent, snapshot, records, &checked);
         }
 
         const SnapshotValidation = struct {
@@ -14042,6 +14025,92 @@ pub fn Service(comptime Types: type) type {
         ) !bool {
             return prefix.blocked(source.work, source.execution_revision, std.math.maxInt(u64), source.outer_operation orelse source.runtime_capsule);
         }
+
+        const ObserverScope = union(enum) {
+            current: *CurrentObservers,
+            historical: *ObserverHistories,
+
+            fn at(scope: ObserverScope, task_id: state.TaskId, watermark: u64) !WorkObservers {
+                return switch (scope) {
+                    .current => |index| if (std.meta.eql(index.task, task_id) and index.watermark == watermark)
+                        .{ .current = index }
+                    else
+                        error.InvalidArchive,
+                    .historical => |histories| .{ .historical = try histories.get(task_id, watermark) },
+                };
+            }
+        };
+
+        const WorkObservers = union(enum) {
+            current: *CurrentObservers,
+            historical: *HistoricalObservers,
+
+            fn blocked(observers: WorkObservers, service: *Self, source: workspace.Work, observed_at: u64) !bool {
+                switch (observers) {
+                    inline .current, .historical => |index| {
+                        if (observed_at != index.watermark) return error.InvalidArchive;
+                        return index.blocked(service, source);
+                    },
+                }
+            }
+        };
+
+        const CurrentObservers = struct {
+            const Key = struct {
+                source: state.Digest,
+                level: @FieldType(wc.GuestViewSelection, "level"),
+            };
+            allocator: std.mem.Allocator,
+            task: state.TaskId,
+            watermark: u64,
+            loaded: bool = false,
+            revisions: std.AutoHashMapUnmanaged(Key, ?u64) = .empty,
+
+            fn init(a: std.mem.Allocator, task_id: state.TaskId, watermark: u64) CurrentObservers {
+                return .{ .allocator = a, .task = task_id, .watermark = watermark };
+            }
+
+            fn deinit(index: *CurrentObservers) void {
+                index.revisions.deinit(index.allocator);
+            }
+
+            fn load(index: *CurrentObservers, service: *Self) !void {
+                const a = index.allocator;
+                var parent = try service.task(a, index.task);
+                defer parent.deinit();
+                if (index.watermark != parent.value.event_high) return error.InvalidArchive;
+                for (parent.value.observer_heads.items) |id| {
+                    var saved = try service.retainedWorkspaceWork(a, index.task, id);
+                    defer saved.deinit();
+                    const observer = saved.value.observer orelse return error.CorruptState;
+                    if (!service.activeObserver(saved.value)) return error.CorruptState;
+                    if (observer.selection.policy.delivery != .lossless) continue;
+                    const entry = try index.revisions.getOrPut(a, .{
+                        .source = observer.source_work,
+                        .level = observer.selection.source.level,
+                    });
+                    if (!entry.found_existing) {
+                        entry.value_ptr.* = observer.consumed_revision;
+                    } else if (!std.meta.eql(entry.value_ptr.*, observer.consumed_revision)) {
+                        entry.value_ptr.* = null;
+                    }
+                }
+                index.loaded = true;
+            }
+
+            fn blocked(index: *CurrentObservers, service: *Self, source: workspace.Work) !bool {
+                if (!std.meta.eql(source.task, index.task) or source.event_watermark > index.watermark)
+                    return error.InvalidArchive;
+                if (!index.loaded) try index.load(service);
+                const levels = [_]@FieldType(wc.GuestViewSelection, "level"){ .guest_cut, .outer_execution };
+                for (levels) |level| {
+                    const consumed = index.revisions.get(.{ .source = source.id, .level = level }) orelse continue;
+                    if (consumed == null or consumed.? != try service.observerSourceRevision(index.allocator, source, level))
+                        return true;
+                }
+                return false;
+            }
+        };
 
         const ObserverHistories = struct {
             const Key = struct { task: state.TaskId, watermark: u64 };

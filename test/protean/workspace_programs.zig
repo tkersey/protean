@@ -4061,7 +4061,7 @@ test "collected history rejects rehashed result substitution and false absence" 
     }
     const original = observed orelse return error.MissingReadObservation;
     try std.testing.expect(original.state == .settled_reply);
-    try service.validateWorkspace(scratch, parent.receipt.task);
+    const current_history_reads = try archiveHistoryReads(&service, scratch, parent.receipt.task);
     const original_evidence = (try namespace.store.recordBytes(scratch, "workspace_reply", original.id, original.task)).?;
     const acquired_bytes = try namespace.store.object(scratch, try namespace.store.objectReference(original.state.settled_reply.reply, null), null);
     const acquired = try data.invocation.decode(data.invocation.Result, scratch, acquired_bytes);
@@ -4313,6 +4313,25 @@ test "collected history rejects rehashed result substitution and false absence" 
         try std.testing.expectEqual(.rejected, inspected.disposition);
         namespace.store.rollback();
     }
+    for (0..3) |read| {
+        const command: contracts.workspace.Command = .{ .work = if (read % 2 == 0)
+            .{ .inspect = .{ .work = refs[0] } }
+        else
+            .{ .collect = .{ .works = .{ .items = &refs } } } };
+        _ = try service.message(scratch, try std.fmt.allocPrint(scratch, "archive-history-read-{d}", .{read}), parent.receipt.task, command);
+        var captured = false;
+        for (0..64) |_| {
+            _ = try service.pump(scratch);
+            var replies = try namespace.store.database.prepare("SELECT count(*) FROM records WHERE task=? AND kind='workspace_reply'", &.{.{ .blob = &parent.receipt.task }});
+            defer replies.deinit();
+            try std.testing.expect(try replies.step() == .row);
+            if (try replies.integer(0) != read + 2) continue;
+            captured = true;
+            break;
+        }
+        try std.testing.expect(captured);
+        if (read != 1) try std.testing.expectEqual(current_history_reads, try archiveHistoryReads(&service, scratch, parent.receipt.task));
+    }
 }
 
 const WorkspaceCleanupApplication = struct {
@@ -4530,8 +4549,12 @@ const ReconstructionModel = struct {
 const ControllerOverlayTrace = struct {
     scans: usize = 0,
     rows: usize = 0,
+    current_watermark: ?u64 = null,
+    current_scans: usize = 0,
     extern "c" fn sqlite3_db_handle(?*anyopaque) ?*anyopaque;
     extern "c" fn sqlite3_sql(?*anyopaque) ?[*:0]const u8;
+    extern "c" fn sqlite3_expanded_sql(?*anyopaque) ?[*:0]u8;
+    extern "c" fn sqlite3_free(?*anyopaque) void;
     extern "c" fn sqlite3_trace_v2(?*anyopaque, c_uint, ?*const fn (c_uint, ?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) c_int, ?*anyopaque) c_int;
 
     fn observe(kind: c_uint, context: ?*anyopaque, statement: ?*anyopaque, sql: ?*anyopaque) callconv(.c) c_int {
@@ -4542,10 +4565,36 @@ const ControllerOverlayTrace = struct {
             std.mem.span(sqlite3_sql(statement) orelse return 0);
         if (std.mem.eql(u8, text, "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq<=? ORDER BY e.seq")) {
             if (kind == 1) self.scans += 1 else if (kind == 4) self.rows += 1;
+            if (kind == 1) if (self.current_watermark) |watermark| {
+                const expanded = sqlite3_expanded_sql(statement) orelse return 0;
+                defer sqlite3_free(expanded);
+                var buffer: [80]u8 = undefined;
+                const suffix = std.fmt.bufPrint(&buffer, " AND e.seq<={d} ORDER BY e.seq", .{watermark}) catch unreachable;
+                if (std.mem.endsWith(u8, std.mem.span(expanded), suffix)) self.current_scans += 1;
+            };
         }
         return 0;
     }
 };
+
+fn archiveHistoryReads(service: anytype, a: std.mem.Allocator, task: [16]u8) !usize {
+    var parent = try service.task(a, task);
+    defer parent.deinit();
+    var statement = try service.namespace.store.database.prepare("SELECT count(*) FROM records WHERE task=? AND kind='workspace_reply'", &.{.{ .blob = &task }});
+    defer statement.deinit();
+    try std.testing.expect(try statement.step() == .row);
+    const replies = try statement.integer(0);
+    const database = ControllerOverlayTrace.sqlite3_db_handle(statement.handle);
+    var trace: ControllerOverlayTrace = .{ .current_watermark = parent.value.event_high };
+    try std.testing.expectEqual(@as(c_int, 0), ControllerOverlayTrace.sqlite3_trace_v2(database, 1 | 4, ControllerOverlayTrace.observe, &trace));
+    defer std.debug.assert(ControllerOverlayTrace.sqlite3_trace_v2(database, 0, null, null) == 0);
+    try service.validateWorkspace(a, task);
+    std.debug.print("archive history queries: replies={d} events={d} current_scans={d} total_scans={d} decoded_event_rows={d}\n", .{
+        replies, parent.value.event_high, trace.current_scans, trace.scans, trace.rows,
+    });
+    try std.testing.expect(trace.current_scans > 0);
+    return trace.current_scans;
+}
 
 fn reconstructionRuntimeAction(service: anytype, a: std.mem.Allocator) !void {
     const task = (try service.submit(a, "runtime-controller-task", .{ .items = &.{ 2, 3 } })).receipt.task;
