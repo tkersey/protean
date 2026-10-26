@@ -9870,9 +9870,11 @@ pub fn Service(comptime Types: type) type {
                 .output = work.checkpoint,
                 .context = storage.digest(segment_context),
             };
-            if (self.compiler_facts) |facts| if (facts.entries.contains(segment_fact)) return;
             var prepared = try self.inspectionRuntime(self.allocator, work);
             defer prepared.deinit();
+            const fact_bytes = try contracts.encodeOwned(CompilerFact, a, segment_fact);
+            const fact_key = storage.digest(fact_bytes);
+            if (try self.validatedGuestSegment(fact_key, segment_fact, work.outcome)) return;
             var execution = if (initial_checkpoint) |checkpoint|
                 try kosmos.Session.restore(self.allocator, &prepared, checkpoint)
             else
@@ -9889,7 +9891,23 @@ pub fn Service(comptime Types: type) type {
                 finished.checkpoint.?.len != expected_checkpoint.bytes or
                 !std.meta.eql(storage.digest(outcome), work.outcome.digest) or outcome.len != work.outcome.bytes)
                 return error.InvalidArchive;
-            try self.retainCompilerFact(segment_fact);
+            const store_value = self.store();
+            if (store_value.guest_segments.count() == 1024)
+                store_value.guest_segments.clearRetainingCapacity();
+            try store_value.guest_segments.put(store_value.allocator, fact_key, {});
+        }
+
+        fn validatedGuestSegment(
+            self: *Self,
+            key: state.Digest,
+            fact: CompilerFact,
+            outcome: state.Reference,
+        ) !bool {
+            if (!self.store().guest_segments.contains(key)) return false;
+            try self.store().objectRange(fact.input, 0, &.{});
+            try self.store().objectRange(fact.output, 0, &.{});
+            try self.store().objectRange(outcome, 0, &.{});
+            return true;
         }
 
         fn workspacePublicationAt(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, id: state.Digest, watermark: u64) !u64 {
