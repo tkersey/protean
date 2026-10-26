@@ -108,6 +108,8 @@ job's cache key. Native setup verifies every restored archive/source/package;
 a cache hit is not authentication. The downstream witness starts with fresh
 sources and metadata, optionally seeding untrusted cached archives and reusing
 compiler caches.
+The fresh consumer directory contains its acquired sources, allowing Zig to
+reuse matching compiler outputs across temporary paths on both native platforms.
 
 Only the executed adaptive executable, manifest, program/contracts, runbooks,
 and approved example resources are packaged as the native artifact. Retired
