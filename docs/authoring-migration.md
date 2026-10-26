@@ -66,7 +66,7 @@ uncommitted local-module development checks do not qualify a dependency tuple.
 
 ## Typed recursive participants with Horos 7
 
-Protean 6.0.1 selects Horos 7's canonical `library.hyper` interface. The recursive
+Protean 7.0.0 selects Horos 7's canonical `library.hyper` interface. The recursive
 participant fixture promises its effectful task schema before constructing the
 reciprocal pair, then completes the task with its actual peer captures. Its
 retained `ana` emitter uses typed state, named fields and typed Need operations;
