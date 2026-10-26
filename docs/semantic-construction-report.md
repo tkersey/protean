@@ -75,6 +75,22 @@ while old replies remain reproducible through export and import. Scheduler
 pumping treats current semantic or guard-policy denial as a local blocked step;
 ordinary control and unrelated work remain available. Explicit operations retain
 their policy errors, and cancellation retains its cleanup authority.
+Reopening compares frozen application settings using the original semantic-policy
+snapshot while admitting the explicit current policy separately. The retained
+profile bytes and resource identity remain unchanged.
+
+Guard creation and archive admission share the same initial state. A new guard
+has no accumulated agreement evidence; only completed comparisons advance that
+history.
+
+New mutable semantic-source materializations and direct derivations bind their
+read cut to the preceding journal position. Compiler attempts publish their
+attempt and occurrence at that read position before dispatch. Archive admission
+requires exactly one matching binding. The attempt retains the suspended
+checkpoint that produced its request; admission checks it against the request's
+state digest and the journal's controller/checkpoint at that position. Delayed
+completion keeps the original read cut. Existing immutable values and operation
+replays retain their historical provenance.
 
 Root guest publications and controller activations establish the execution
 ordinal in the existing event stream. Each retains compact before/after
@@ -89,7 +105,7 @@ root ordinal at that exact watermark.
 The native witness rejects a coherently rehashed command, receipt, and read cut
 while admitting an earlier selection after later execution progress. This checks
 archive consistency; it does not authenticate an arbitrarily rewritten unsigned
-history. Native state format 19 requires the publication evidence, while older
+history. Native state format 20 requires the publication evidence, while older
 namespaces retain their compatible executables.
 
 Live controller offers use the task's retained runtime and realization revision
@@ -144,7 +160,7 @@ Scoped facts survive response projection and restore any enclosing facts afterwa
 
 The implementation rebases onto accepted controller reconstruction
 `2e40ce45d0f4b9b2ee81838386d5f1e0693ea228`. Package/host 7.0.0, application 8.0.0,
-workspace contract 4, and native state format 19 retain historical executable
+workspace contract 4, and native state format 20 retain historical executable
 bindings; they do not migrate old state implicitly. Horos is 6.1.0 and Kosmos is 9.1.0. The
 [dependency lock](../conformance/protean/dependencies.lock.json) records exact
 source commits and archive identities. Downloaded GitHub archives match the

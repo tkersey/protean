@@ -88,6 +88,13 @@ fn exerciseGuard(
         task,
         .{ .guard = command },
     ));
+    {
+        var initial = try service.workspaceWork(a, task, id);
+        defer initial.deinit();
+        var forged = initial.value.guard.?;
+        forged.agreed_segments = 41;
+        try guardEvidenceTamper(a, service, initial.value, forged);
+    }
     try pumpGuardWitness(a, service, task, id, before.value.checkpoint);
     var agreed = try service.workspaceWork(a, task, id);
     defer agreed.deinit();
@@ -98,7 +105,10 @@ fn exerciseGuard(
     agreed.deinit();
     agreed = try service.workspaceWork(a, task, id);
     try std.testing.expectEqual(@as(u64, 2), agreed.value.guard.?.agreed_segments);
-    try guardAgreementTamper(a, service, agreed.value, prior_continuation);
+    try std.testing.expect(!std.meta.eql(prior_continuation, agreed.value.guard.?.continuation.?));
+    var forged = agreed.value.guard.?;
+    forged.continuation = prior_continuation;
+    try guardEvidenceTamper(a, service, agreed.value, forged);
     const remove: @FieldType(contracts.workspace.Work, "unguard") = .{
         .expected = .{
             .work = command.expected.work,
@@ -192,7 +202,7 @@ fn rewritePublicationReceipts(a: std.mem.Allocator, service: anytype, work: nati
     try std.testing.expect(replaced != 0);
 }
 
-fn guardAgreementTamper(a: std.mem.Allocator, service: anytype, work: native.workspace.Work, earlier: native.testing.state.Reference) !void {
+fn guardEvidenceTamper(a: std.mem.Allocator, service: anytype, work: native.workspace.Work, guard: native.workspace.Guard) !void {
     var manifest_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
     const index = try service.namespace.store.archiveIndex(a, work.task, .{
@@ -202,11 +212,10 @@ fn guardAgreementTamper(a: std.mem.Allocator, service: anytype, work: native.wor
     var facts = try service.prepareWorkspaceValidation(work.task);
     defer facts.deinit();
     try service.validateWorkspaceRecordsPrepared(service.allocator, work.task, index.records.items, &facts);
-    try std.testing.expect(!std.meta.eql(earlier, work.guard.?.continuation.?));
     try service.namespace.store.begin();
     defer service.namespace.store.rollback();
     var forged = work;
-    forged.guard.?.continuation = earlier;
+    forged.guard = guard;
     try rewriteWorkspacePublication(a, service, forged);
     try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(service.allocator, work.task, index.records.items, &facts));
 }
@@ -1762,21 +1771,27 @@ fn runTransformer(
         var request = std.heap.ArenaAllocator.init(service.allocator);
         defer request.deinit();
         const scratch = request.allocator();
-        const materialized = try service.workspaceCommand(
-            scratch,
-            try std.fmt.allocPrint(scratch, "{s}-semantic-source", .{label}),
-            task,
-            .{ .context = .{ .materialize = .{
-                .input = .{ .semantic_source = .{
-                    .subject = ancestor,
-                    .module = .{ .selected = .{} },
-                    .references = true,
-                } },
-                .sources = .{ .items = &.{} },
-            } } },
-        );
+        const operation_id = try std.fmt.allocPrint(scratch, "{s}-semantic-source", .{label});
+        const command: contracts.workspace.Command = .{ .context = .{ .materialize = .{
+            .input = .{ .semantic_source = .{
+                .subject = ancestor,
+                .module = .{ .selected = .{} },
+                .references = true,
+            } },
+            .sources = .{ .items = &.{} },
+        } } };
+        const materialized = try service.workspaceCommand(scratch, operation_id, task, command);
         const reference = try semanticReference(scratch, materialized, "value");
-        if (expected_layout) try semanticContextWitness(scratch, service, task, reference, label);
+        if (expected_layout) {
+            try semanticContextWitness(scratch, service, task, reference, label);
+            const replay = try service.workspaceCommand(scratch, operation_id, task, command);
+            try std.testing.expectEqualDeep(reference, try semanticReference(scratch, replay, "value"));
+            if (ancestor == .work) {
+                const current = try service.workspaceCommand(scratch, try std.fmt.allocPrint(scratch, "{s}-semantic-source-current", .{label}), task, command);
+                try std.testing.expect(!std.meta.eql(try nativeIdentity(reference), try nativeIdentity(try semanticReference(scratch, current, "value"))));
+                try expectSemanticAdmissionPosition(scratch, service, task, operation_id);
+            }
+        }
         break :materialize try workspaceRef(a, reference.kind, try nativeIdentity(reference));
     };
     const started_ms = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
@@ -1848,6 +1863,62 @@ fn semanticContextWitness(
     try std.testing.expect(selected.selected_view != null);
     try std.testing.expect(service.compiler_facts == null);
     try semanticBasisShapeWitness(a, service, task, input);
+}
+
+fn expectSemanticAdmissionPosition(allocator: std.mem.Allocator, service: anytype, task: [16]u8, operation_id: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const S = native.testing.state;
+    const store = &service.namespace.store;
+    const original = receipt: {
+        var query = try store.database.prepare("SELECT o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?", &.{.{ .blob = &task }});
+        defer query.deinit();
+        while (try query.step() == .row) {
+            const decoded = try contracts.decodeOwned(S.Receipt, a, try query.bytes(0));
+            if (std.mem.eql(u8, decoded.value.client_operation_id.bytes, operation_id)) break :receipt decoded.value;
+        }
+        return error.MissingAdmission;
+    };
+    const event = event: {
+        var query = try store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.revision=?", &.{ .{ .blob = &task }, .{ .integer = @intCast(original.revision) } });
+        defer query.deinit();
+        try std.testing.expect(try query.step() == .row);
+        break :event (try contracts.decodeOwned(S.Event, a, try query.bytes(0))).value;
+    };
+    var current = try service.task(a, task);
+    defer current.deinit();
+    var forged_task = current.value;
+    forged_task.revision += 1;
+    forged_task.event_high += 1;
+    var appended = event;
+    appended.seq = forged_task.event_high;
+    appended.revision = forged_task.revision;
+    var receipt = original;
+    receipt.id = @splat(123);
+    receipt.client_operation_id.bytes = "semantic-admission-position-forged";
+    receipt.revision = forged_task.revision;
+    const Key = struct { principal: S.Name, tenant: S.Name, operation_id: S.Name };
+    const key_bytes = try contracts.encodeOwned(Key, a, .{
+        .principal = .{ .bytes = service.profile.authority.principal },
+        .tenant = .{ .bytes = service.profile.authority.tenant },
+        .operation_id = receipt.client_operation_id,
+    });
+    var digest: [32]u8 = undefined;
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update("agent.native.operation.v1\x00");
+    hash.update(key_bytes);
+    hash.final(&digest);
+    var facts = try service.prepareWorkspaceValidation(task);
+    defer facts.deinit();
+    try store.begin();
+    defer store.rollback();
+    try store.putTask(forged_task, current.value.revision);
+    try store.putEvent(appended);
+    try store.putReceipt(&std.fmt.bytesToHex(digest, .lower), receipt.request_digest, try contracts.encodeOwned(S.Receipt, a, receipt));
+    std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &digest, .{});
+    const index = try store.archiveIndex(a, task, .{ .digest = digest, .bytes = service.assets.manifest.len });
+    try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(a, task, index.records.items, &facts));
 }
 
 fn semanticBasisShapeWitness(a: std.mem.Allocator, service: anytype, task: [16]u8, input: contracts.workspace.Ref) !void {
@@ -1956,6 +2027,7 @@ fn generatedFromProducer(
         } } },
     );
     const candidate = try semanticReference(a, derived, "candidate");
+    if (expected_layout and ancestor == .work) try expectSemanticAdmissionPosition(a, service, task, try std.fmt.allocPrint(a, "{s}-derive", .{label}));
     const construction_ns = std.math.cast(u64, @max(0, std.Io.Clock.awake.now(std.testing.io).nanoseconds - construction_started.nanoseconds)) orelse std.math.maxInt(u64);
     phase = "construction timing";
     try expectCompilerTime(a, service, task, derived);

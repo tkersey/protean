@@ -4387,10 +4387,26 @@ pub fn Service(comptime Types: type) type {
             errdefer self.allocator.free(retained_profile);
             const controller_context = try self.currentControllerContext(a, initial, pending);
             const work: Work = .{ .owner_epoch = self.owner_epoch, .task = value.id, .subject_work = pending.work, .subject_residual = pending.residual, .occurrence = pending.id, .attempt = attempt, .request = retained, .prepared = retained_prepared, .profile = retained_profile, .entry = entry, .operation = operation_kind, .controller_projection = (try self.projectionBindingAt(a, initial, pending, controller_context)).controller, .cleanup = subject.cleanup };
+            var compiler_input: ?contracts.Decoded(build_job.Input) = null;
+            defer if (compiler_input) |*input| input.deinit();
+            if (operation_kind == .workspace_build)
+                compiler_input = try contracts.decodeOwned(build_job.Input, a, prepared orelse return error.CorruptState);
+            const reads_mutable = if (compiler_input) |input|
+                input.value == .derive and input.value.derive.basis != .immutable
+            else
+                false;
             try self.store().begin();
             defer self.store().rollback();
-            try self.store().createRecord(state.Attempt, "attempt", attempt, value.id, .{ .id = attempt, .task = value.id, .occurrence = pending.id, .request = try self.store().putObject(request_bytes), .profile = value.profile, .capability = try name(entry.declaration.identity), .operation = operation_kind, .inference = entry.declaration.inference, .prepared = if (prepared) |body| try self.store().putObject(body) else null, .controller_context = controller_context, .controller_read = controller_read });
+            try self.store().createRecord(state.Attempt, "attempt", attempt, value.id, .{ .id = attempt, .task = value.id, .occurrence = pending.id, .request = try self.store().putObject(request_bytes), .profile = value.profile, .capability = try name(entry.declaration.identity), .operation = operation_kind, .inference = entry.declaration.inference, .prepared = if (prepared) |body| try self.store().putObject(body) else null, .controller_context = controller_context, .controller_read = controller_read, .dispatch_checkpoint = if (reads_mutable) initial.checkpoint else null });
             try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, value.id, pending);
+            if (reads_mutable) {
+                const input = compiler_input.?;
+                try validateSemanticReadPosition(input.value.derive.basis, try std.math.add(u64, initial.event_high, 1));
+                try validateControllerReadCut(input.value.derive.basis, controller_read);
+                const event_data = try std.fmt.allocPrint(a, "{{\"attempt_id\":\"{s}\",\"occurrence_id\":\"{s}\"}}", .{ std.fmt.bytesToHex(attempt, .lower), std.fmt.bytesToHex(pending.id, .lower) });
+                defer a.free(event_data);
+                try self.subjectPublicationEvent(&value, .workspace_read, event_data, &.{}, &.{}, null, controller_read, null);
+            }
             try self.effectSchedule(a, &value, pending, .active, null);
             try self.persist(a, value, initial.revision, "effect.dispatch", .preserve);
             self.work = work;
@@ -9296,13 +9312,7 @@ pub fn Service(comptime Types: type) type {
                             );
                             defer a.free(actual_selection);
                             if (!same(requested, actual_selection)) return error.InvalidArchive;
-                            const watermark = switch (origin.basis) {
-                                .immutable => 0,
-                                .controller => |b| b.event_watermark,
-                                .works => |b| b.event_watermark,
-                                else => return error.InvalidArchive,
-                            };
-                            if (watermark >= event_seq) return error.InvalidArchive;
+                            try validateSemanticReadPosition(origin.basis, event_seq);
                             try validateControllerReadCut(origin.basis, controller_read);
                             return;
                         },
@@ -9412,7 +9422,7 @@ pub fn Service(comptime Types: type) type {
                     .expected = selection,
                 }),
                 .semantic => |selected| blk: {
-                    try self.validateSemanticPublication(parent, selected, admission, records, event_value.controller_read, checked);
+                    try self.validateSemanticPublication(parent, selected, admission, records, event_value.seq, event_value.controller_read, checked);
                     break :blk try operation(workspace.SemanticRequest, a, .{
                         .task = parent.id,
                         .command = selected.command,
@@ -10178,11 +10188,19 @@ pub fn Service(comptime Types: type) type {
             }
         }
 
+        const CompilerReadPosition = struct {
+            occurrence: state.Digest,
+            event_watermark: u64,
+            controller_read: ?state.ControllerReadCut,
+            root: state.RootCut,
+        };
+
         fn capturedControllerReads(
             self: *Self,
             a: std.mem.Allocator,
             task_id: state.TaskId,
             records: []const state.ArchiveRecord,
+            compiler_reads: *std.AutoHashMap(state.Digest, CompilerReadPosition),
         ) ![]state.ControllerReadCut {
             var captured_reads: std.ArrayList(state.ControllerReadCut) = .empty;
             errdefer captured_reads.deinit(a);
@@ -10199,6 +10217,39 @@ pub fn Service(comptime Types: type) type {
                 if (!std.meta.eql(attempt.value.task, task_id) or
                     !std.meta.eql(attempt.value.id, row.id)) return error.InvalidArchive;
                 if (attempt.value.controller_read) |read| try captured_reads.append(a, read);
+                if (attempt.value.operation == .workspace_build) {
+                    const bytes = try self.store().object(self.allocator, attempt.value.prepared orelse return error.InvalidArchive, null);
+                    defer self.allocator.free(bytes);
+                    var input = try contracts.decodeOwned(build_job.Input, self.allocator, bytes);
+                    defer input.deinit();
+                    if (input.value == .derive and input.value.derive.basis != .immutable) {
+                        const at = switch (input.value.derive.basis) {
+                            .controller => |read| read.event_watermark,
+                            .works => |read| read.event_watermark,
+                            else => return error.InvalidArchive,
+                        };
+                        try validateControllerReadCut(input.value.derive.basis, attempt.value.controller_read);
+                        const checkpoint = attempt.value.dispatch_checkpoint orelse return error.InvalidArchive;
+                        const checkpoint_bytes = try self.store().object(self.allocator, checkpoint, null);
+                        defer self.allocator.free(checkpoint_bytes);
+                        const request_bytes = try self.store().object(self.allocator, attempt.value.request, null);
+                        defer self.allocator.free(request_bytes);
+                        var request = try data.invocation.decode(data.invocation.Request, self.allocator, request_bytes);
+                        defer request.deinit();
+                        if (!std.meta.eql(data.invocation.stateDigest(checkpoint_bytes), request.value.binding.pending_state_digest)) return error.InvalidArchive;
+                        var route = try self.record(workspace.ExecutionRoute, self.allocator, "execution_route", attempt.value.occurrence, task_id);
+                        defer route.deinit();
+                        if (route.value.work != null or route.value.residual != null) return error.InvalidArchive;
+                        const entry = try compiler_reads.getOrPut(attempt.value.id);
+                        if (entry.found_existing) return error.InvalidArchive;
+                        entry.value_ptr.* = .{
+                            .occurrence = attempt.value.occurrence,
+                            .event_watermark = at,
+                            .controller_read = attempt.value.controller_read,
+                            .root = .{ .controller = route.value.controller, .checkpoint = checkpoint.digest },
+                        };
+                    } else if (attempt.value.dispatch_checkpoint != null) return error.InvalidArchive;
+                } else if (attempt.value.dispatch_checkpoint != null) return error.InvalidArchive;
             }
             std.mem.sort(state.ControllerReadCut, captured_reads.items, {}, struct {
                 fn less(
@@ -10214,7 +10265,9 @@ pub fn Service(comptime Types: type) type {
 
         fn validateWorkspacePublications(self: *Self, a: std.mem.Allocator, parent: state.Task, records: []const state.ArchiveRecord, checked: *SnapshotValidation) !void {
             var root_history: state.RootHistory = .init(parent);
-            const captured_reads = try self.capturedControllerReads(a, parent.id, records);
+            var compiler_reads: std.AutoHashMap(state.Digest, CompilerReadPosition) = .init(a);
+            defer compiler_reads.deinit();
+            const captured_reads = try self.capturedControllerReads(a, parent.id, records, &compiler_reads);
             defer a.free(captured_reads);
             var captured_read: usize = 0;
             var prefix: @import("workspace_observers.zig").PublicationPrefix = .init(a);
@@ -10296,21 +10349,31 @@ pub fn Service(comptime Types: type) type {
                     defer parsed.deinit();
                     const text = try json.text(parsed.value.object.get("occurrence_id") orelse return error.InvalidArchive);
                     const id = try wp.identity(.{ .kind = .work, .id = .{ .bytes = text } }, .work);
-                    try requireArchiveRecord(records, .workspace_reply, id);
-                    var evidence = try self.record(workspace.ReplyObservation, a, "workspace_reply", id, parent.id);
-                    defer evidence.deinit();
-                    if (evidence.value.evidence != .read) return error.InvalidArchive;
-                    const at = switch (evidence.value.evidence.read) {
-                        .immutable => return error.InvalidArchive,
-                        .semantic_policy => |value| value.event_watermark,
-                        .scope => |value| value,
-                        .controller => |value| value.event_watermark,
-                        .residual => |value| value.event_watermark,
-                        .works => |value| value.event_watermark,
-                        .wait => |value| value.event_watermark,
-                    };
-                    if (event_value.seq == 0 or at != event_value.seq - 1) return error.InvalidArchive;
-                    try validateControllerReadCut(evidence.value.evidence.read, event_value.controller_read);
+                    if (parsed.value.object.get("attempt_id")) |attempt_text| {
+                        const attempt_id = try wp.identity(.{ .kind = .work, .id = .{ .bytes = try json.text(attempt_text) } }, .work);
+                        const read = (compiler_reads.fetchRemove(attempt_id) orelse return error.InvalidArchive).value;
+                        if (!std.meta.eql(read.occurrence, id) or event_value.seq == 0 or
+                            read.event_watermark != event_value.seq - 1 or
+                            !std.meta.eql(read.controller_read, event_value.controller_read)) return error.InvalidArchive;
+                        try requireArchiveRecord(records, .occurrence, id);
+                        try root_history.observeCut(read.root);
+                    } else {
+                        try requireArchiveRecord(records, .workspace_reply, id);
+                        var evidence = try self.record(workspace.ReplyObservation, a, "workspace_reply", id, parent.id);
+                        defer evidence.deinit();
+                        if (evidence.value.evidence != .read) return error.InvalidArchive;
+                        const at = switch (evidence.value.evidence.read) {
+                            .immutable => return error.InvalidArchive,
+                            .semantic_policy => |value| value.event_watermark,
+                            .scope => |value| value,
+                            .controller => |value| value.event_watermark,
+                            .residual => |value| value.event_watermark,
+                            .works => |value| value.event_watermark,
+                            .wait => |value| value.event_watermark,
+                        };
+                        if (event_value.seq == 0 or at != event_value.seq - 1) return error.InvalidArchive;
+                        try validateControllerReadCut(evidence.value.evidence.read, event_value.controller_read);
+                    }
                 }
                 if (event_value.workspace_publications.items.len != 0 and event_value.kind != .workspace and event_value.kind != .workspace_progress) return error.InvalidArchive;
                 if (event_value.workspace_publications.items.len != 0) {
@@ -10349,7 +10412,7 @@ pub fn Service(comptime Types: type) type {
                     try prefix.put(retained, event_value.seq);
                 }
             }
-            if (admissions.count() != 0) return error.InvalidArchive;
+            if (admissions.count() != 0 or compiler_reads.count() != 0) return error.InvalidArchive;
             for (records) |row| {
                 if (row.kind == .workspace_port_reply and !replies.contains(row.id)) return error.InvalidArchive;
                 if (row.kind == .controller_residual) {
@@ -10977,6 +11040,16 @@ pub fn Service(comptime Types: type) type {
             );
         }
 
+        fn validateSemanticReadPosition(basis: workspace.ReadObservation, event_seq: u64) !void {
+            const watermark = switch (basis) {
+                .immutable => return,
+                .controller => |read| read.event_watermark,
+                .works => |read| read.event_watermark,
+                else => return error.InvalidArchive,
+            };
+            if (event_seq == 0 or watermark != event_seq - 1) return error.InvalidArchive;
+        }
+
         fn validateSemanticInput(
             self: *Self,
             a: std.mem.Allocator,
@@ -11016,6 +11089,7 @@ pub fn Service(comptime Types: type) type {
             selected: @FieldType(workspace.PublicationCommand, "semantic"),
             admission: WorkspaceAdmission,
             records: []const state.ArchiveRecord,
+            event_seq: u64,
             controller_read: ?state.ControllerReadCut,
             checked: *SnapshotValidation,
         ) !void {
@@ -11028,6 +11102,7 @@ pub fn Service(comptime Types: type) type {
             defer a.free(input_bytes);
             var input = try contracts.decodeOwned(build_job.Input, a, input_bytes);
             defer input.deinit();
+            if (input.value == .derive) try validateSemanticReadPosition(input.value.derive.basis, event_seq);
             try self.validateSemanticInput(a, parent, selected.command, input.value, records, controller_read, checked);
             phase = "frozen input";
             const frozen = try self.workspacePrepareSemanticBuild(
@@ -11930,11 +12005,11 @@ pub fn Service(comptime Types: type) type {
             defer program.deinit();
             if (!std.meta.eql(program.value.description.image, description.guest))
                 return error.GuestIdentityMismatch;
-            return .{
-                .candidate = candidate.value.artifact,
-                .code = description.code,
-                .revision = 0,
-            };
+            return initialGuard(candidate.value.artifact, description.code);
+        }
+
+        fn initialGuard(candidate: state.Reference, code: state.Reference) workspace.Guard {
+            return .{ .candidate = candidate, .code = code, .revision = 0 };
         }
 
         fn runtimeProvenance(work: workspace.Work) kosmos.RuntimeCapsule.Provenance {
@@ -11963,8 +12038,8 @@ pub fn Service(comptime Types: type) type {
                     const guard = item.guard orelse return error.InvalidArchive;
                     if (item.control.delivery == .dispatching or item.control.delivery == .unknown)
                         return error.InvalidArchive;
-                    if (prior.guard != null or guard.revision != 0 or
-                        guard.disposition != .ready or guard.pending_control != null or
+                    if (prior.guard != null or
+                        !equalGuards(guard, initialGuard(guard.candidate, guard.code)) or
                         selection.realization_revision != prior.realization_revision or
                         !std.meta.eql(
                             try wp.identity(selection.candidate, .candidate),

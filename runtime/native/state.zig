@@ -514,6 +514,7 @@ pub const Attempt = struct {
     operation: AttemptOperation = .environment,
     controller_context: ?ControllerContext = null,
     controller_read: ?ControllerReadCut = null,
+    dispatch_checkpoint: ?Reference = null,
 };
 pub const Capture = struct {
     task: TaskId,

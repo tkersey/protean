@@ -623,7 +623,9 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
   }
   const config = {workspace: 'adaptive-controlled', snapshot_root: root, endpoint: `https://127.0.0.1:${server.address().port}/v1/responses`, audience: 'controlled-adaptive',
     profiles: [profile('analysis', 'fixture-model-a'), profile('deep', 'fixture-model-b')], initial_profile: 'analysis', initial_effort: 'medium', skills};
-  const configuration = adaptive => ({schema: 'adaptive-agent.configuration.v3', adaptive, tools: null});
+  const initialSemanticPolicy = {roots: ['11'.repeat(32)], checkers: ['qualification-initial-checker'], guard: true};
+  const configuration = adaptive => ({schema: 'adaptive-agent.configuration.v3', adaptive, tools: null,
+    semantic_construction: suite === 'controls' ? initialSemanticPolicy : null});
   await writeFile(configPath, JSON.stringify(configuration(config)));
   const invoke = async (...args) => {
     const timeout = suite === 'runtime' && process.platform === 'darwin' ? undefined : 30000;
@@ -718,7 +720,10 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       const refused = await execute(app.command, ['resume', '--state-dir', state, '--task-id', accepted.task_id, '--config', changedConfig, '--test-provider', '--trust-root', trust],
         {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 10000});
       assert.equal(refused.status, 64); assert.equal(requests.length, 13);
-      await launch(['--profile-task', accepted.task_id]);
+      const revokedConfig = join(app.data, 'revoked-semantic-policy.json');
+      await writeFile(revokedConfig, JSON.stringify({...configuration(config),
+        semantic_construction: {roots: ['22'.repeat(32)], checkers: ['qualification-current-checker'], guard: false}}));
+      await launch(['--profile-task', accepted.task_id, '--config', revokedConfig]);
       const reopenedDescription = await client.call('describe');
       assert.equal(reopenedDescription.profile.resource_identity, description.profile.resource_identity);
       const reopened = await client.call('task.status', {task_id: accepted.task_id});
@@ -757,6 +762,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       const eviction = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2];
       const seen = new Set();
       const frozenProfileBytes = archive.object(archive.task.profile), frozenProfile = JSON.parse(frozenProfileBytes.toString('utf8'));
+      assert.deepEqual(frozenProfile.semantic_construction, initialSemanticPolicy);
       for (const [kind, id, ref] of archive.manifest[6]) {
         if (kind !== 4) continue;
         const capture = decodeValue(archive.schemas.get('capture'), archive.object(ref));

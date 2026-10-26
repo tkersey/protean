@@ -1849,6 +1849,154 @@ fn expectDeriveCapturePrefixBound(
     _ = try service.exportCheckpoint(a, task, prefix_path);
 }
 
+fn expectWorkDeriveDispatchBound(
+    service: anytype,
+    allocator: std.mem.Allocator,
+    program_document: []const u8,
+    program_id: [32]u8,
+    proposal: []const u8,
+    archive_path: []const u8,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const S = native.testing.state;
+    const B = native.testing.workspace_build;
+    const work_id: S.Digest = @splat(73);
+    const parent = try service.submit(a, "work-derive-dispatch", .{ .program = .{ .derive = .{
+        .ancestor = .{ .work = .{
+            .expected = .{ .work = try workspaceRef(a, .work, work_id), .execution_revision = 1, .control_revision = 1 },
+            .realization_revision = 0,
+        } },
+        .program = try workspaceRef(a, .program, program_id),
+        .proposal = .{ .json_text = .{ .bytes = proposal } },
+    } } });
+    const task = parent.receipt.task;
+    var diagnostic: native.program_construction.Diagnostic = .{};
+    _ = try service.workspaceBuild(a, "work-derive-guest", task, program_document, &diagnostic);
+    var builder = source.Builder.init(allocator);
+    defer builder.deinit();
+    const module = try gcd(&builder);
+    const entry = &builder.functions.items[@intCast(module.entry)];
+    for (0..32) |_| entry.body = try builder.term(.{ .yield_then = entry.body.? });
+    const document = try native.source_records.encode(a, builder.module(module.entry, module.failure));
+    const source_program = try service.workspaceBuild(a, "work-derive-source", task, document, &diagnostic);
+    {
+        const WorkIdentity = struct {
+            var assigned = false;
+            fn random(_: ?*anyopaque, buffer: []u8) std.Io.RandomSecureError!void {
+                if (!assigned and buffer.len == 32) {
+                    @memset(buffer, 73);
+                    assigned = true;
+                } else try std.testing.io.randomSecure(buffer);
+            }
+        };
+        WorkIdentity.assigned = false;
+        const original = service.io;
+        defer service.io = original;
+        var vtable = original.vtable.*;
+        vtable.randomSecure = WorkIdentity.random;
+        service.io.vtable = &vtable;
+        const started = try service.workspaceStart(a, "work-derive-source-start", task, source_program.receipt.workspace.?, try contracts.encodeOwned(struct { u64, u64 }, a, .{ 1071, 462 }), .{});
+        try std.testing.expectEqualDeep(work_id, started.receipt.workspace.?);
+    }
+    const before_request = try service.task(a, task);
+    try std.testing.expect(before_request.value.current_occurrence == null);
+    try std.testing.expectEqual(@as(u64, 0), before_request.value.execution_revision);
+    const earlier = before_request.value.event_high;
+    const store = &service.namespace.store;
+    for (0..64) |_| {
+        const step = try service.pump(a);
+        if (step != .work) continue;
+        try std.testing.expectEqual(.workspace_build, step.work.operation);
+        try std.testing.expectEqualDeep(task, step.work.task);
+        const attempt_id = step.work.attempt;
+        const saved = (try contracts.decodeOwned(S.Attempt, a, (try store.recordBytes(a, "attempt", attempt_id, task)).?)).value;
+        const input = (try contracts.decodeOwned(B.Input, a, try store.object(a, saved.prepared.?, null))).value;
+        try std.testing.expect(input == .derive and input.derive.basis == .works);
+        try std.testing.expect(input.derive.basis.works.event_watermark > earlier);
+        try std.testing.expectEqual(earlier, input.derive.basis.works.works.items[0].?.work.event_watermark);
+        const worker = try native.testing.Worker.init(allocator, service.io);
+        defer worker.deinit(allocator) catch unreachable;
+        try worker.start(step.work, service.profile.authority, null);
+        _ = try service.workspaceControl(a, "work-derive-source-advance", task, work_id, 1, 1, .advance);
+        const advanced = try service.workspaceWork(a, task, work_id);
+        try std.testing.expect(advanced.value.execution_revision > 1);
+        while (!worker.finished()) try service.io.sleep(.fromMilliseconds(1), .awake);
+        try worker.join();
+        try service.completeWork(a, step.work, worker.result.?);
+        try worker.release();
+        const captured = (try contracts.decodeOwned(S.Capture, a, (try store.recordBytes(a, "capture", attempt_id, task)).?)).value;
+        const output = (try contracts.decodeOwned(B.Output, a, try store.object(a, captured.response.?, null))).value;
+        try std.testing.expect(output == .derived);
+        _ = try service.exportCheckpoint(a, task, archive_path);
+        var forged_input = input;
+        forged_input.derive.basis.works.event_watermark = earlier;
+        const forged_bytes = try contracts.encodeOwned(B.Input, a, forged_input);
+        try store.begin();
+        defer store.rollback();
+        var forged_attempt = saved;
+        forged_attempt.prepared = try store.putObject(forged_bytes);
+        var forged_capture = captured;
+        forged_capture.request = forged_attempt.prepared.?;
+        try store.database.run("DELETE FROM records WHERE kind='attempt' AND id=? AND task=?", &.{ .{ .blob = &attempt_id }, .{ .blob = &task } });
+        try store.createRecord(S.Attempt, "attempt", attempt_id, task, forged_attempt);
+        try store.putRecord(S.Capture, "capture", attempt_id, task, forged_capture);
+        try service.namespace.commit("test.forge-work-derive-dispatch");
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspace(a, task));
+        try std.testing.expectError(error.InvalidArchive, service.exportCheckpoint(a, task, try std.fmt.allocPrint(a, "{s}-forged", .{archive_path})));
+        var events: [2]S.Event = undefined;
+        const positions = [_]u64{ earlier + 1, input.derive.basis.works.event_watermark + 1 };
+        for (positions, &events) |seq, *event| {
+            var query = try store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq=?", &.{ .{ .blob = &task }, .{ .integer = @intCast(seq) } });
+            defer query.deinit();
+            try std.testing.expect(try query.step() == .row);
+            event.* = (try contracts.decodeOwned(S.Event, a, try query.bytes(0))).value;
+        }
+        try std.testing.expectEqual(.execution, events[0].kind);
+        try std.testing.expectEqual(.workspace_read, events[1].kind);
+        try std.testing.expect(events[0].seq < events[1].seq);
+        try store.begin();
+        for (events, 0..) |event, i| {
+            var moved = events[1 - i];
+            moved.seq = event.seq;
+            moved.revision = event.revision;
+            try store.database.run("DELETE FROM events WHERE task=? AND seq=?", &.{ .{ .blob = &task }, .{ .integer = @intCast(event.seq) } });
+            try store.putEvent(moved);
+        }
+        try service.namespace.commit("test.move-work-derive-before-request");
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspace(a, task));
+        try std.testing.expectError(error.InvalidArchive, service.exportCheckpoint(a, task, try std.fmt.allocPrint(a, "{s}-moved", .{archive_path})));
+        try store.begin();
+        forged_attempt.dispatch_checkpoint = try store.objectReference(events[0].root_publication.?.before.checkpoint, null);
+        try store.database.run("DELETE FROM records WHERE kind='attempt' AND id=? AND task=?", &.{ .{ .blob = &attempt_id }, .{ .blob = &task } });
+        try store.createRecord(S.Attempt, "attempt", attempt_id, task, forged_attempt);
+        try service.namespace.commit("test.forge-work-derive-dispatch-checkpoint");
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspace(a, task));
+        try std.testing.expectError(error.InvalidArchive, service.exportCheckpoint(a, task, try std.fmt.allocPrint(a, "{s}-checkpoint", .{archive_path})));
+        try store.begin();
+        for (events) |event| {
+            try store.database.run("DELETE FROM events WHERE task=? AND seq=?", &.{ .{ .blob = &task }, .{ .integer = @intCast(event.seq) } });
+            try store.putEvent(event);
+        }
+        try store.database.run("DELETE FROM records WHERE kind='attempt' AND id=? AND task=?", &.{ .{ .blob = &attempt_id }, .{ .blob = &task } });
+        try store.createRecord(S.Attempt, "attempt", attempt_id, task, saved);
+        try store.putRecord(S.Capture, "capture", attempt_id, task, captured);
+        try service.namespace.commit("test.restore-work-derive-dispatch");
+        for (0..64) |_| {
+            try std.testing.expect(try service.pump(a) != .work);
+            const current = try service.task(a, task);
+            if (!current.value.terminal()) continue;
+            try std.testing.expectEqual(.completed, current.value.outcome_kind);
+            try service.validateWorkspace(a, task);
+            _ = try service.exportCheckpoint(a, task, try std.fmt.allocPrint(a, "{s}-completed", .{archive_path}));
+            return;
+        }
+        return error.UnsettledSemanticCapture;
+    }
+    return error.MissingSemanticCapture;
+}
+
 fn captureSemanticSuccess(
     service: anytype,
     a: std.mem.Allocator,
@@ -2535,6 +2683,14 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
             .selected = read_source.value.selected.module,
             .steps = &.{},
         } },
+    );
+    try expectWorkDeriveDispatchBound(
+        &service,
+        a,
+        document,
+        seed_program.receipt.workspace.?,
+        proposal,
+        try std.fmt.allocPrint(scratch, "{s}/work-derive-dispatch.par", .{path_buffer[0..length]}),
     );
     const successful_derive: contracts.workspace.Command = .{ .program = .{ .derive = .{
         .ancestor = .{ .controller = .{ .cut = .{ .epoch = 0, .execution_revision = 1 } } },

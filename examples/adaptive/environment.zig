@@ -187,6 +187,17 @@ pub fn configure(a: std.mem.Allocator, io: std.Io, options: native.configuration
             a,
             parsed.value.object.get("semantic_construction").?,
         );
+        if (frozen) |saved| {
+            const saved_profile = try native.json.parse(a, saved.profile, .{
+                .bytes = saved.profile.len,
+                .tokens = saved.profile.len,
+                .members = saved.profile.len,
+            });
+            try native.json.put(a, &parsed.value, "semantic_construction", native.json.get(
+                saved_profile.value,
+                "semantic_construction",
+            ) orelse .null);
+        }
         configuration_digest = try hex(a, try native.json.canonical(a, parsed.value));
     }
     var resources: std.ArrayList([]const u8) = .empty;
