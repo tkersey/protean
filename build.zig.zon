@@ -3,8 +3,8 @@
     .version = "7.0.0",
     .dependencies = .{
         .horos = .{
-            .url = "git+https://github.com/tkersey/horos#f0b4f0efcc16c3c6ed3fbb6073ffefef9c32657d",
-            .hash = "horos-7.0.0-flclaMUfUwCGz-WSIPVusV64_1a4FUg1M99gtr6KwxW-",
+            .url = "git+https://github.com/tkersey/horos#2c9811c2a95a2fba6d8094a2c8d2c452038321ea",
+            .hash = "horos-7.0.0-flclaGhGUwA5_cmqxOQe3EuJJROu3t4phNv94fdVMS15",
         },
     },
     .minimum_zig_version = "0.17.0",

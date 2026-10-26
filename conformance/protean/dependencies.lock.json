@@ -3,39 +3,39 @@
   "status": "development-integration",
   "boundary": {
     "repository": "tkersey/horos",
-    "commit": "f0b4f0efcc16c3c6ed3fbb6073ffefef9c32657d",
-    "gitTree": "aa387e8b29bb42e937316f123ec6bfbd64709116",
+    "commit": "2c9811c2a95a2fba6d8094a2c8d2c452038321ea",
+    "gitTree": "fe59b0ca1e9da25dd871170f8c38cf2c044e7e3a",
     "version": "7.0.0",
     "source": {
-      "inventorySha256": "0b7269b5aefbfec2b4231888cc83c9055079a48c8a3172c4e16c4218b4702117",
-      "entries": 450,
-      "bytes": 10146756
+      "inventorySha256": "3d90c1a14095788dd731b9f9db79445b7826aca24aa80fb59780218582e88f0b",
+      "entries": 451,
+      "bytes": 10156647
     },
     "archive": {
-      "url": "https://github.com/tkersey/horos/archive/f0b4f0efcc16c3c6ed3fbb6073ffefef9c32657d.tar.gz",
-      "sha256": "a74d2b51aeede8b0fab5cafc82caab068ae62b42174deaaf98800f604fed01ea",
-      "bytes": 1842395,
+      "url": "https://github.com/tkersey/horos/archive/2c9811c2a95a2fba6d8094a2c8d2c452038321ea.tar.gz",
+      "sha256": "beddec94de40569485eb14ed6d4e1533505067ebbb6d446f85a1d27a41c5f390",
+      "bytes": 1843473,
       "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
     "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree.",
     "package": {
-      "zigHash": "horos-7.0.0-flclaMUfUwCGz-WSIPVusV64_1a4FUg1M99gtr6KwxW-",
+      "zigHash": "horos-7.0.0-flclaGhGUwA5_cmqxOQe3EuJJROu3t4phNv94fdVMS15",
       "defaultProfile": "zig-managed",
       "profiles": {
         "zig-managed": {
-          "inventorySha256": "cf0b83f963be50843b6f69a9444de01f7e2223fc9a150b7a87318397f5af3bb1",
-          "entries": 427,
-          "bytes": 5447621
+          "inventorySha256": "4b7984d3c5449847c70611f8afdfde65af5d8667e7ce4a71b01bc6770c4c52ae",
+          "entries": 428,
+          "bytes": 5457512
         },
         "archive-extracted": {
-          "inventorySha256": "6750cd90f8b8d05eb1d800a53d9d4b2db3f0c7d1bbe70d2b3f9fb7e78223e1f9",
-          "entries": 427,
-          "bytes": 5447621
+          "inventorySha256": "e989bbb31ae10a741e0a7f08a21362d3c9c7dc721033f3083eb076a29518a152",
+          "entries": 428,
+          "bytes": 5457512
         }
       },
       "archive": {
-        "sha256": "1fbbf96a23173f859bef81db3f3546dcaaaf4d811818a88f71025a9ceea1cda2",
-        "bytes": 1045686
+        "sha256": "f7fe9f21466ce8a4072d1bc9f8ce0aaf1d27e9e74c543354785f894b3643d94b",
+        "bytes": 1047282
       }
     },
     "api": {
@@ -82,7 +82,7 @@
         },
         {
           "path": "src/authoring.zig",
-          "sha256": "47906a0ba9956d40cf097ee507b2079a07d0601c1393a093d4bcdf2faf3efc74"
+          "sha256": "f352574e7e2c5823eda73378610fc061dcf150fc1768913dbce857659822c18c"
         },
         {
           "path": "src/data/native_shape.zig",
@@ -97,18 +97,18 @@
   },
   "world": {
     "repository": "tkersey/kosmos",
-    "commit": "e881f73378ba0a34ad923ed2e837aded1c65421b",
-    "gitTree": "1891ea6dae440b82e38134148f30f483648449df",
+    "commit": "c3bfbe42f8f6579c403daa24b85cadb146781f9d",
+    "gitTree": "3102c1ebd1f1488c35a29fa4fc648cd4d7515998",
     "version": "9.1.0",
     "source": {
-      "inventorySha256": "bc6c5d7084d6fba39823364c59a4fd6a39507ad0868f5c851a1405f86032d21b",
+      "inventorySha256": "2f4e49934dcb14e6fe9f38115ac5bf52ccd32d28f6704c6a8a23447df211559f",
       "entries": 215,
       "bytes": 3391005
     },
     "archive": {
-      "url": "https://github.com/tkersey/kosmos/archive/e881f73378ba0a34ad923ed2e837aded1c65421b.tar.gz",
-      "sha256": "768b0084f74b573f91ee096a4b67ee24d67348410433e6d69dda55c6aa33d099",
-      "bytes": 764012,
+      "url": "https://github.com/tkersey/kosmos/archive/c3bfbe42f8f6579c403daa24b85cadb146781f9d.tar.gz",
+      "sha256": "f493f04cf4d4664919315468d2bd7a072efe09ed0e2b9c375e61d5d314887dc3",
+      "bytes": 764040,
       "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
     "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree."
