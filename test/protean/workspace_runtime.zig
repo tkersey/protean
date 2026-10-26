@@ -151,6 +151,7 @@ fn rewriteWorkspacePublication(a: std.mem.Allocator, service: anytype, work: nat
     for (publications) |*publication| if (std.meta.eql(publication.work, work.id)) {
         publication.guard = work.guard;
         publication.observer = work.observer;
+        publication.guest_work = work.guest_work;
         publication.observation = observation.digest;
     };
     const encoded = try contracts.encodeOwned(native.testing.state.Event, a, event.value);
@@ -208,6 +209,27 @@ fn guardAgreementTamper(a: std.mem.Allocator, service: anytype, work: native.wor
     forged.guard.?.continuation = earlier;
     try rewriteWorkspacePublication(a, service, forged);
     try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(service.allocator, work.task, index.records.items, &facts));
+}
+
+fn guestWorkTamper(a: std.mem.Allocator, service: anytype, work: native.workspace.Work) !void {
+    try std.testing.expect(work.guest_work > 1);
+    var manifest_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(service.assets.manifest, &manifest_digest, .{});
+    const index = try service.namespace.store.archiveIndex(a, work.task, .{
+        .digest = manifest_digest,
+        .bytes = service.assets.manifest.len,
+    });
+    var facts = try service.prepareWorkspaceValidation(work.task);
+    defer facts.deinit();
+    try service.validateWorkspaceRecordsPrepared(service.allocator, work.task, index.records.items, &facts);
+    for ([_]u64{ 1, work.guest_work + 1 }) |count| {
+        try service.namespace.store.begin();
+        defer service.namespace.store.rollback();
+        var forged = work;
+        forged.guest_work = count;
+        try rewriteWorkspacePublication(a, service, forged);
+        try std.testing.expectError(error.InvalidArchive, service.validateWorkspaceRecordsPrepared(service.allocator, work.task, index.records.items, &facts));
+    }
 }
 
 const FailOneAllocationSize = struct {
@@ -3236,7 +3258,10 @@ fn prefixPublication(a: std.mem.Allocator, index: usize) !native.testing.state.W
                     .nodes = .{ .all = .{} },
                     .level = if (index % 3 == 2) .guest_cut else .outer_execution,
                 },
-                .policy = .{ .delivery = if (index % 3 == 1) .sampled else .lossless },
+                .policy = .{
+                    .delivery = if (index % 3 == 1) .sampled else .lossless,
+                    .granularity = if (index % 2 == 0) .one_guest_step else .publication,
+                },
                 .previous = if (index < 3) null else try workspaceRef(a, .work, prefixIdentity(index - 3)),
             },
             .source = empty,
@@ -3257,6 +3282,7 @@ fn expectPublicationPrefix(
         const source_id = prefixIdentity(10000 + source_index);
         var lossless: usize = 0;
         var outer = false;
+        var quantum: u64 = 256;
         for (publications) |item| {
             scanned.* += 1;
             const observer = item.observer orelse continue;
@@ -3269,6 +3295,7 @@ fn expectPublicationPrefix(
                 if (std.mem.eql(u8, previous.id.bytes, &text)) break true;
             } else false;
             if (successor) continue;
+            if (observer.selection.policy.granularity == .one_guest_step) quantum = 1;
             if (observer.selection.source.level == .outer_execution) outer = true;
             if (observer.selection.policy.delivery == .lossless) {
                 lossless += 1;
@@ -3280,6 +3307,7 @@ fn expectPublicationPrefix(
             }
         }
         try std.testing.expectEqual(outer, prefix.hasOuter(source_id));
+        try std.testing.expectEqual(quantum, prefix.guestQuantum(source_id));
         const active = prefix.lossless(source_id);
         try std.testing.expectEqual(lossless, if (active) |set| set.count() else 0);
         if (active) |set| {
@@ -6164,6 +6192,7 @@ test "runtime selection current observer ownership bounds retained fold reads" {
     const started = try service.workspaceStart(scratch, "current-observer-selection", parent.receipt.task, program, input, .{});
     var work = try service.workspaceWork(scratch, parent.receipt.task, started.receipt.workspace.?);
     defer work.deinit();
+    try guestWorkTamper(scratch, &service, work.value);
     const selection = try observerSelection(&service, scratch, parent.receipt.task, program, work.value);
     try observerCurrentOwnershipWitness(&service, scratch, parent.receipt.task, program, input, selection);
     try service.park(scratch);

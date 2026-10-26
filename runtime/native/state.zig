@@ -681,7 +681,19 @@ pub fn visitWorkspaceReceipt(a: std.mem.Allocator, store: anytype, receipt: Rece
     return error.CorruptState;
 }
 
-pub fn visitWorkspaceCommand(a: std.mem.Allocator, store: anytype, event: Event, collector: anytype) anyerror!void {
+pub fn visitWorkspaceEvent(a: std.mem.Allocator, store: anytype, event_ref: Reference, event: Event, collector: anytype) anyerror!void {
+    for (event.workspace_publications.items) |publication| {
+        const ref = try store.objectReference(publication.observation, null);
+        const bytes = try store.object(a, ref, null);
+        defer a.free(bytes);
+        const T = @import("workspace_state.zig").WorkObservation;
+        var decoded = try contracts.decodeOwned(T, a, bytes);
+        defer decoded.deinit();
+        if (!std.meta.eql(decoded.value.work.task, event.task) or
+            !std.meta.eql(decoded.value.work.id, publication.work)) return error.CorruptState;
+        try collector.typed(Reference, event_ref, ref);
+        try collector.typed(T, ref, decoded.value);
+    }
     const ref = event.workspace_command orelse return;
     const bytes = try store.object(a, ref, null);
     defer a.free(bytes);

@@ -74,7 +74,7 @@ pub const PublicationPrefix = struct {
     const Set = std.AutoHashMapUnmanaged(state.Digest, void);
     const Active = std.AutoArrayHashMapUnmanaged(state.Digest, void);
     const Position = struct { publication: state.WorkPublication, seq: u64 };
-    const Source = struct { lossless: Active = .empty, outer: Set = .empty };
+    const Source = struct { lossless: Active = .empty, outer: Set = .empty, single_step: Set = .empty };
 
     latest: std.AutoHashMap(state.Digest, Position),
     successors: Set = .empty,
@@ -91,6 +91,7 @@ pub const PublicationPrefix = struct {
         while (entries.next()) |entry| {
             entry.lossless.deinit(a);
             entry.outer.deinit(a);
+            entry.single_step.deinit(a);
         }
         self.sources.deinit(a);
         self.outer_history.deinit(a);
@@ -102,6 +103,7 @@ pub const PublicationPrefix = struct {
         const group = self.sources.getPtr(source) orelse return;
         _ = group.lossless.swapRemove(id);
         _ = group.outer.remove(id);
+        _ = group.single_step.remove(id);
     }
 
     pub fn put(self: *PublicationPrefix, item: state.WorkPublication, seq: u64) !void {
@@ -122,6 +124,8 @@ pub const PublicationPrefix = struct {
                     try entry.value_ptr.lossless.put(a, item.work, {});
                 if (observer.selection.source.level == .outer_execution)
                     try entry.value_ptr.outer.put(a, item.work, {});
+                if (observer.selection.policy.granularity == .one_guest_step)
+                    try entry.value_ptr.single_step.put(a, item.work, {});
             }
         }
         if (item.outer_operation orelse item.runtime_capsule) |capsule| {
@@ -173,6 +177,11 @@ pub const PublicationPrefix = struct {
     pub fn hasOuter(self: *const PublicationPrefix, id: state.Digest) bool {
         const group = self.sources.get(id) orelse return false;
         return group.outer.count() != 0;
+    }
+
+    pub fn guestQuantum(self: *const PublicationPrefix, id: state.Digest) u64 {
+        const group = self.sources.get(id) orelse return 256;
+        return if (group.single_step.count() != 0) 1 else 256;
     }
 
     pub fn lossless(self: *PublicationPrefix, id: state.Digest) ?*Active {

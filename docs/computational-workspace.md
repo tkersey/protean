@@ -180,6 +180,10 @@ lossless subscription. Sampling can continue when the source revision advances.
 Historical replies retain the blocking state of their original event prefix.
 The envelope reports `one_guest_step` only for an observed segment containing at
 most one guest step; an already pending larger segment retains its actual scope.
+Archive admission checks the count by privately executing the retained segment
+with its original control and guest allowance, comparing the resulting checkpoint
+and outcome. This execution does not dispatch external effects. Publications
+retain their immutable work observations through collection and transfer.
 
 Interpretations are ordinary built programs and retained work. They can consume
 initial inputs, authorized snapshots or semantic slices, implement alternative

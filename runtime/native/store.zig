@@ -582,7 +582,7 @@ pub const Store = struct {
                     try this.store.retainValueDirect(V, ref, item);
                 }
             }{ .store = self };
-            if (T == state.Reconciliation) try state.visitReconciliationHistory(self.allocator, self, value, &history) else if (T == state.Event) try state.visitWorkspaceCommand(self.allocator, self, value, &history) else try state.visitWorkspaceReceipt(self.allocator, self, value, &history);
+            if (T == state.Reconciliation) try state.visitReconciliationHistory(self.allocator, self, value, &history) else if (T == state.Event) try state.visitWorkspaceEvent(self.allocator, self, parent, value, &history) else try state.visitWorkspaceReceipt(self.allocator, self, value, &history);
         }
     }
     fn retainValueDirect(self: *Store, comptime T: type, parent: state.Reference, value: T) !void {

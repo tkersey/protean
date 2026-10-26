@@ -682,7 +682,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         defer decoded.deinit();
         try collector.visit(state.Event, decoded.value);
         try root_history.observe(decoded.value);
-        try state.visitWorkspaceCommand(a, store, decoded.value, &collector);
+        try state.visitWorkspaceEvent(a, store, row.body, decoded.value, &collector);
         if (!same(&decoded.value.task, &value.id) or decoded.value.seq != row.seq or decoded.value.revision != row.revision) return error.CorruptState;
         try @import("schemas.zig").validateEventData(store.allocator, decoded.value.kind, decoded.value.data.bytes);
         const identity = try validateEventFacts(store, archive, value, &admissions, decoded.value);

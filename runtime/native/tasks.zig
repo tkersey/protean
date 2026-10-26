@@ -183,7 +183,7 @@ pub fn Service(comptime Types: type) type {
         workspace_replay: ?struct { replayed: bool, records: []const state.ArchiveRecord, checked: *SnapshotValidation } = null,
 
         const CompilerFact = struct {
-            kind: enum { program, candidate, runtime, output },
+            kind: enum { program, candidate, runtime, output, guest_segment },
             input: state.Reference,
             output: state.Reference,
             context: state.Digest = @splat(0),
@@ -2952,6 +2952,9 @@ pub fn Service(comptime Types: type) type {
             const event_data = try std.fmt.allocPrint(a, "{{\"workspace_id\":\"{s}\"}}", .{std.fmt.bytesToHex(id, .lower)});
             defer a.free(event_data);
             const observed = try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, id), true);
+            const snapshot = try contracts.encodeOwned(workspace.WorkObservation, a, observed);
+            defer a.free(snapshot);
+            _ = try self.store().putObject(snapshot);
             try self.publicationEvent(parent, .workspace_progress, event_data, &.{try workPublication(a, observed)}, null);
         }
         fn persistOccurrence(self: *Self, a: std.mem.Allocator, parent: state.Task, previous: u64, transition: []const u8, pending: occurrence.Occurrence, wake: bool) !void {
@@ -9764,6 +9767,129 @@ pub fn Service(comptime Types: type) type {
             const actual_bytes = try contracts.encodeOwned(workspace.ControlObservation, a, actual);
             defer a.free(actual_bytes);
             if (!same(expected_bytes, actual_bytes)) return error.InvalidArchive;
+            try self.validateWorkspaceGuestWork(parent.id, item, prior, prefix);
+        }
+
+        fn validateWorkspaceGuestWork(
+            self: *Self,
+            task_id: state.TaskId,
+            item: state.WorkPublication,
+            prior: ?state.WorkPublication,
+            prefix: *const @import("workspace_observers.zig").PublicationPrefix,
+        ) !void {
+            const advanced = if (prior) |before| item.execution_revision != before.execution_revision else true;
+            const pending = item.outer_operation != null or
+                if (item.guard) |guard| guard.pending_control != null else false;
+            if (!advanced and !pending) return;
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var observed = try contracts.decodeOwned(workspace.WorkObservation, a, try self.store().acquiredObject(a, item.observation, null));
+            defer observed.deinit();
+            const work = observed.value.work;
+            if (!std.meta.eql(work.task, task_id) or
+                !try samePublication(a, item, try workPublication(a, observed.value)))
+                return error.InvalidArchive;
+            var current = try self.workspaceWork(a, task_id, item.work);
+            defer current.deinit();
+            inline for (.{ "program", "input", "input_value", "origin_work", "delegation", "trial" }) |field|
+                if (!std.meta.eql(@field(work, field), @field(current.value, field))) return error.InvalidArchive;
+            var control: data.invocation.Control = .none;
+            var quantum: u64 = 256;
+            var frozen_control: ?contracts.Decoded(data.invocation.Control) = null;
+            defer if (frozen_control) |*decoded| decoded.deinit();
+            var initial_checkpoint: ?[]const u8 = null;
+            if (prior) |before| {
+                initial_checkpoint = try self.store().object(a, before.checkpoint orelse return error.InvalidArchive, null);
+                quantum = prefix.guestQuantum(item.work);
+                var initial = try contracts.decodeOwned(workspace.WorkObservation, a, try self.store().acquiredObject(a, before.observation, null));
+                defer initial.deinit();
+                if (!try samePublication(a, before, try workPublication(a, initial.value)))
+                    return error.InvalidArchive;
+                const cancellation = item.control.cancellation;
+                if (before.control.delivery == .settled_reply) {
+                    try self.validateHistoricalOccurrence(a, initial.value);
+                    const acquired = initial.value.occurrence orelse return error.InvalidArchive;
+                    const reply = switch (acquired.state) {
+                        .settled_reply => |value| value.reply,
+                        .admitted => |value| if (value == .reply) value.reply.reply else return error.InvalidArchive,
+                        else => return error.InvalidArchive,
+                    };
+                    control = .{ .reply = try self.store().acquiredObject(a, reply, null) };
+                    if (cancellation != null and !before.control.cancellation_applied) quantum = 0;
+                } else if (cancellation != null and !before.control.cancellation_applied) {
+                    control = .{ .cancel = .{ .text = cancellation.?.bytes } };
+                } else if (before.control.outcome == .yielded) control = .resume_yield;
+                if (initial.value.work.outer_operation) |operation_value| {
+                    quantum = operation_value.guest_quantum;
+                    frozen_control = try contracts.decodeOwned(data.invocation.Control, a, try self.store().object(a, operation_value.control, null));
+                    control = frozen_control.?.value;
+                } else if (cancellation == null) if (before.guard) |guard| if (guard.pending_control) |ref| {
+                    frozen_control = try contracts.decodeOwned(data.invocation.Control, a, try self.store().object(a, ref, null));
+                    control = frozen_control.?.value;
+                    quantum = guard.guest_quantum;
+                };
+            }
+            if (quantum > 256) return error.InvalidArchive;
+            const encoded_control = try contracts.encodeOwned(data.invocation.Control, a, control);
+            if (work.outer_operation) |operation_value| {
+                const retained = try self.store().object(a, operation_value.control, null);
+                if (operation_value.guest_quantum != quantum or !same(retained, encoded_control))
+                    return error.InvalidArchive;
+            }
+            if (work.guard) |guard| if (guard.pending_control) |ref| {
+                const retained = try self.store().object(a, ref, null);
+                if (guard.guest_quantum != quantum or !same(retained, encoded_control))
+                    return error.InvalidArchive;
+            };
+            if (!advanced) return;
+            var program = try self.workspaceProgram(a, task_id, work.program);
+            defer program.deinit();
+            var packaged = try self.program.retainRuntime();
+            defer packaged.deinit();
+            const segment_context = try contracts.encodeOwned(struct {
+                program: state.Reference,
+                runtime: state.Digest,
+                initial: bool,
+                control: contracts.Bytes(null),
+                quantum: u64,
+                guest_work: u64,
+                outcome: state.Reference,
+            }, a, .{
+                .program = program.value.artifact,
+                .runtime = if (work.runtime) |runtime| runtime.digest else packaged.identity,
+                .initial = prior == null,
+                .control = .{ .bytes = encoded_control },
+                .quantum = quantum,
+                .guest_work = item.guest_work,
+                .outcome = work.outcome,
+            });
+            const segment_fact: CompilerFact = .{
+                .kind = .guest_segment,
+                .input = if (prior) |before| before.checkpoint.? else work.input,
+                .output = work.checkpoint,
+                .context = storage.digest(segment_context),
+            };
+            if (self.compiler_facts) |facts| if (facts.entries.contains(segment_fact)) return;
+            var prepared = try self.inspectionRuntime(self.allocator, work);
+            defer prepared.deinit();
+            var execution = if (initial_checkpoint) |checkpoint|
+                try kosmos.Session.restore(self.allocator, &prepared, checkpoint)
+            else
+                try kosmos.Session.start(self.allocator, &prepared, try self.store().object(a, work.input, null));
+            defer execution.deinit();
+            _ = try kosmos.invocation.advance(&execution, control, quantum);
+            if (execution.transitions != item.guest_work) return error.InvalidArchive;
+            var finished = try kosmos.invocation.finishPublication(a, &execution, .receipt, null);
+            defer finished.outcome.deinit();
+            defer self.allocator.free(finished.checkpoint.?);
+            const outcome = try data.invocation.encodeOwned(data.invocation.Outcome, a, finished.outcome.record);
+            const expected_checkpoint = item.checkpoint orelse return error.InvalidArchive;
+            if (!std.meta.eql(storage.digest(finished.checkpoint.?), expected_checkpoint.digest) or
+                finished.checkpoint.?.len != expected_checkpoint.bytes or
+                !std.meta.eql(storage.digest(outcome), work.outcome.digest) or outcome.len != work.outcome.bytes)
+                return error.InvalidArchive;
+            try self.retainCompilerFact(segment_fact);
         }
 
         fn workspacePublicationAt(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, id: state.Digest, watermark: u64) !u64 {
@@ -13453,7 +13579,11 @@ pub fn Service(comptime Types: type) type {
                 residual_count = 1;
             }
             if (related) |id| {
-                publications[publication_count] = try workPublication(a, try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, id), true));
+                const observed = try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, id), true);
+                const snapshot = try contracts.encodeOwned(workspace.WorkObservation, a, observed);
+                defer a.free(snapshot);
+                _ = try self.store().putObject(snapshot);
+                publications[publication_count] = try workPublication(a, observed);
                 publication_count += 1;
             }
             const command_ref: ?state.Reference = if (command) |value| blk: {
