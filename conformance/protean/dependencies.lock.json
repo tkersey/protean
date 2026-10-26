@@ -3,7 +3,7 @@
   "status": "development-integration",
   "boundary": {
     "repository": "tkersey/horos",
-    "commit": "f60b116b170d8e175db440095fb4d60384aa90bd",
+    "commit": "6eacf326bc469da2e9d0e76e9bfd99be0bacf919",
     "gitTree": "7b0506ebb70f42095a25fdbcf0bafa97e8e0767e",
     "version": "6.1.0",
     "source": {
@@ -12,12 +12,12 @@
       "bytes": 10007926
     },
     "archive": {
-      "url": "https://github.com/tkersey/horos/archive/f60b116b170d8e175db440095fb4d60384aa90bd.tar.gz",
-      "sha256": "56d1903d0a57c77d6556f85b2706050d68bab77c69526d6aa06709477c84a78b",
-      "bytes": 1818503,
-      "origin": "GitHub archive of the exact feature-branch commit; extracted source inventory matches the committed source."
+      "url": "https://github.com/tkersey/horos/archive/6eacf326bc469da2e9d0e76e9bfd99be0bacf919.tar.gz",
+      "sha256": "440d15c0973495855a0edd83943590a29652f82c948d29ddfe2050180c9c2b42",
+      "bytes": 1818431,
+      "origin": "GitHub archive of the exact merged commit; extracted source inventory matches the committed source."
     },
-    "authentication": "Published feature-branch head and downloaded GitHub archive authenticated against the committed source inventory.",
+    "authentication": "Merged main commit and downloaded GitHub archive authenticated against the committed source inventory.",
     "package": {
       "zigHash": "horos-6.1.0-flclaI_oUACkxu1EAM9yvkna4zx9pszWIC7QSQS1SV6X",
       "defaultProfile": "zig-managed",
@@ -97,21 +97,21 @@
   },
   "world": {
     "repository": "tkersey/kosmos",
-    "commit": "c6de0fa718ab322c53127db7e8fd3fb3197837a7",
-    "gitTree": "12b92ac5ecee5869cac7e95691071b08ef06db43",
+    "commit": "d893378773a563a577bee53c6d6473280c851db7",
+    "gitTree": "d9b25fad338fc565693fd02e4d62ecd57602a422",
     "version": "9.1.0",
     "source": {
-      "inventorySha256": "16ad6d025611260bf8a81574a707ea86f08b4d56305d3b85201c7c469de82580",
+      "inventorySha256": "0f3d3d8d4f489051919606d2c3f70b8ad075534b0e63dc2624c967f783a8ebab",
       "entries": 214,
       "bytes": 3380929
     },
     "archive": {
-      "url": "https://github.com/tkersey/kosmos/archive/c6de0fa718ab322c53127db7e8fd3fb3197837a7.tar.gz",
-      "sha256": "2b48486918c1cd2f44806bf3782aab047bb7ce76d987fd645eb121c295dce42c",
-      "bytes": 760929,
-      "origin": "GitHub archive of the exact feature-branch commit; extracted source inventory matches the committed source."
+      "url": "https://github.com/tkersey/kosmos/archive/d893378773a563a577bee53c6d6473280c851db7.tar.gz",
+      "sha256": "a7f3b163180a4753221dfb7c4efa672d9504a71b59c49f7da1088d32e6928bfe",
+      "bytes": 760926,
+      "origin": "GitHub archive of the exact merged commit; extracted source inventory matches the committed source."
     },
-    "authentication": "Published feature-branch head and downloaded GitHub archive authenticated against the committed source inventory."
+    "authentication": "Merged main commit and downloaded GitHub archive authenticated against the committed source inventory."
   },
   "toolchain": {
     "zig": {
@@ -127,10 +127,10 @@
     "pullRequests": []
   },
   "limitations": [
-    "Feature branches and exact dependency archives are published for qualification; no release or merge is implied.",
+    "Exact merged dependency commits and authenticated archives are selected; no published release or live deployment is implied.",
     "Controlled-provider qualification does not establish live-provider availability or model quality; existing saved tasks retain their original executable and image bindings."
   ],
   "notes": [
-    "Exact GitHub source archives are authenticated against the committed source inventories; native dependency setup independently verifies transport and extracted contents."
+    "Exact GitHub source archives are authenticated against the merged source inventories; native dependency setup independently verifies transport and extracted contents."
   ]
 }
