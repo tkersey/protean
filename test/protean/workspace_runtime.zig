@@ -2032,7 +2032,11 @@ fn generatedFromProducer(
     phase = "construction timing";
     try expectCompilerTime(a, service, task, derived);
     phase = "reference guard";
-    if (guard_input) |input| try exerciseGuard(a, service, task, program, input, candidate);
+    if (guard_input) |input| {
+        var scratch = std.heap.ArenaAllocator.init(service.allocator);
+        defer scratch.deinit();
+        try exerciseGuard(scratch.allocator(), service, task, program, input, candidate);
+    }
     phase = "independent validation";
     const validation_started = std.Io.Clock.awake.now(std.testing.io);
     const validated = try service.workspaceCommand(
@@ -2050,7 +2054,11 @@ fn generatedFromProducer(
     if (ancestor == .runtime)
         try std.testing.expect(!std.meta.eql(try nativeIdentity(ancestor.runtime), try nativeIdentity(runtime)));
     phase = "helper correspondence";
-    try helperCorrespondence(a, service, task, ancestor, runtime, expected_layout);
+    {
+        var scratch = std.heap.ArenaAllocator.init(service.allocator);
+        defer scratch.deinit();
+        try helperCorrespondence(scratch.allocator(), service, task, ancestor, runtime, expected_layout);
+    }
     return .{
         .candidate = candidate,
         .runtime = runtime,
@@ -3064,8 +3072,16 @@ fn exerciseGenerated(
         .realization_revision = parent.value.realization_revision,
     } } }, "packaged-controller");
     const generated = try generatedRuntime(a, service, task, program, ancestor, "generated", input);
-    try expectValidationResourceOutcome(a, service, task, generated);
-    try exerciseWrongCandidate(a, service, task, program, input, ancestor, generated.result);
+    {
+        var scratch = std.heap.ArenaAllocator.init(service.allocator);
+        defer scratch.deinit();
+        try expectValidationResourceOutcome(scratch.allocator(), service, task, generated);
+    }
+    {
+        var scratch = std.heap.ArenaAllocator.init(service.allocator);
+        defer scratch.deinit();
+        try exerciseWrongCandidate(scratch.allocator(), service, task, program, input, ancestor, generated.result);
+    }
     const reused = try generatedFromProducer(
         a,
         service,
