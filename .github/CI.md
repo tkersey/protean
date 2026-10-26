@@ -101,6 +101,8 @@ the executable must belong to exactly one group. The standard Zig test runner
 still checks each test's result, logged errors and allocator leaks; skipped or
 interrupted tests leave qualification incomplete. Explicit group selection keeps
 the same compile-filtered execution used by the Linux lanes.
+Native runtime scenarios occupy at most two fresh fixture contexts, including
+cleanup. Their independent qualification overlaps the adaptive/placement chain.
 
 Transport archives are cached separately **per lane and dependency lock**.
 Authoring can publish a Horos-only archive cache without occupying the native

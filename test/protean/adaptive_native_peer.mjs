@@ -373,25 +373,30 @@ export async function verifyAdaptiveNative({app, applicationPath, group = 'all'}
 
 export async function verifyAdaptiveRuntime({app, applicationPath, scenarios, sourcePeer}) {
   if (scenarios) return verifyAdaptiveNativeSuite({app, applicationPath, suite: 'runtime', runtimeScenarios: scenarios, sourcePeer});
-  // Each group owns its provider, task namespaces, placement peers and signing
-  // fixtures. Bound concurrency at two; the large runtime constructors should
-  // not all compete for the same runner's memory. Await both cleanup paths.
-  const groups = [
-    ['tools-runtime-mobility'],
-    ['tools-runtime-guest-mobility', 'tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe'],
-  ];
-  const results = await Promise.allSettled(groups.map(async (runtimeScenarios, index) => {
-    const data = join(app.data, `runtime-${index}`), controller = join(app.controller, `runtime-${index}`);
-    await Promise.all([mkdir(data), mkdir(controller)]);
-    const started = performance.now();
-    const result = await verifyAdaptiveNativeSuite({app: {...app, data, controller}, applicationPath,
-      suite: 'runtime', runtimeScenarios, sourcePeer});
-    return {...result, elapsed_ms: performance.now() - started};
-  }));
+  const scenariosToRun = ['tools-runtime-mobility', 'tools-runtime-guest-mobility',
+    'tools-runtime-ordinary', 'tools-runtime-specialized', 'tools-runtime-reframe'];
+  const results = new Array(scenariosToRun.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < scenariosToRun.length) {
+      const index = next++;
+      const started = performance.now();
+      try {
+        const data = join(app.data, `runtime-${index}`), controller = join(app.controller, `runtime-${index}`);
+        await Promise.all([mkdir(data), mkdir(controller)]);
+        const result = await verifyAdaptiveNativeSuite({app: {...app, data, controller}, applicationPath,
+          suite: 'runtime', runtimeScenarios: [scenariosToRun[index]], sourcePeer});
+        results[index] = {status: 'fulfilled', value: {...result, elapsed_ms: performance.now() - started}};
+      } catch (reason) {
+        results[index] = {status: 'rejected', reason};
+      }
+    }
+  };
+  await Promise.all([worker(), worker()]);
   const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
   if (failures.length) throw new AggregateError(failures, 'native runtime qualification failed');
   return {tool_construction: results.flatMap(result => result.value.tool_construction),
-    groups: results.map((result, index) => ({scenarios: groups[index], elapsed_ms: result.value.elapsed_ms}))};
+    groups: results.map((result, index) => ({scenarios: [scenariosToRun[index]], elapsed_ms: result.value.elapsed_ms}))};
 }
 
 // Keep native command timeouts and exit-status assertions without blocking the

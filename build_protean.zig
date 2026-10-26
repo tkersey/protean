@@ -470,8 +470,6 @@ pub fn build(b: *std.Build) void {
             const placement_peer = nativeCheckCommand(b);
             placement_peer.addArgs(&.{ "node", "test/protean/native_placement.mjs" });
             placement_peer.addFileArg2(adaptive_product.executable.getEmittedBin(), .{ .make_absolute = true });
-            // Run CPU-heavy deployment fixtures in order so qualification
-            // does not compete with itself for host resources.
             placement_peer.step.dependOn(&adaptive_peer.step);
             b.step("check-native-placement", "Qualify authenticated placement between native processes").dependOn(&placement_peer.step);
             native_executable.dependOn(&placement_peer.step);
@@ -481,7 +479,6 @@ pub fn build(b: *std.Build) void {
             runtime_peer.addFileArg2(adaptive_application, .{ .make_absolute = true });
             runtime_peer.addArg("");
             runtime_peer.addArtifactArg(mobility_peer);
-            runtime_peer.step.dependOn(&placement_peer.step);
             b.step("check-native-runtime", "Qualify scripted optional runtime choices through native inference and workspace boundaries").dependOn(&runtime_peer.step);
             native_executable.dependOn(&runtime_peer.step);
             const retention_check = b.step("check-workspace-runtime-retention", "Resume an old task with its retained original executable after installing the new product");
