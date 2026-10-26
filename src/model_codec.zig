@@ -5,8 +5,27 @@ const contracts = @import("protean_contracts");
 pub const json = contracts.json;
 
 pub const FieldKind = enum { text, signed_integer, unsigned_integer, boolean, enumeration };
-const StructuredKind = enum { text, signed_integer, unsigned_integer, boolean, enumeration, product, sequence };
-const SumKind = enum { text, signed_integer, unsigned_integer, boolean, enumeration, product, sequence, sum };
+const StructuredKind = enum {
+    text,
+    signed_integer,
+    unsigned_integer,
+    boolean,
+    enumeration,
+    product,
+    sequence,
+    optional,
+};
+const SumKind = enum {
+    text,
+    signed_integer,
+    unsigned_integer,
+    boolean,
+    enumeration,
+    product,
+    sequence,
+    sum,
+    optional,
+};
 fn vector(comptime T: type) bool {
     return contracts.native.wrapped(T) and T.protean_value_kind == .vector;
 }
@@ -15,6 +34,7 @@ fn structured(comptime T: type) bool {
 }
 fn nodeCount(comptime T: type) usize {
     if (vector(T)) return 1 + nodeCount(T.Child);
+    if (@typeInfo(T) == .optional) return 1 + nodeCount(@typeInfo(T).optional.child);
     if (@typeInfo(T) == .@"union") {
         var count: usize = 1;
         for (@typeInfo(T).@"union".field_types) |Child| count += nodeCount(Child);
@@ -39,6 +59,9 @@ const Maxima = struct {
         if (vector(T)) {
             self.nested = true;
             self.inspect("", T.Child);
+        } else if (@typeInfo(T) == .optional) {
+            self.nested = true;
+            self.inspect("", @typeInfo(T).optional.child);
         } else if (@typeInfo(T) == .@"union") {
             self.nested = true;
             self.sums = true;
@@ -70,6 +93,7 @@ fn checkField(comptime name: []const u8, comptime T: type) void {
     if (vector(T)) return checkField(name, T.Child);
     switch (@typeInfo(T)) {
         .@"struct" => checkPayload(T),
+        .optional => |info| checkField(name, info.child),
         .@"union" => |info| {
             if (info.tag_type == null) @compileError("Protean model codec requires a tagged union: " ++ name);
             for (info.field_names, info.field_types) |field, Child| checkField(field, Child);
@@ -175,6 +199,7 @@ pub fn Profile(comptime Answer: type) type {
                     .@"enum" => .enumeration,
                     .@"struct" => .product,
                     .@"union" => .sum,
+                    .optional => .optional,
                     else => unreachable,
                 },
                 .bit_width = if (@typeInfo(T) == .int) @bitSizeOf(T) else 0,
@@ -185,10 +210,23 @@ pub fn Profile(comptime Answer: type) type {
         }
 
         fn appendNodes(comptime name: []const u8, comptime T: type, nodes: []Node, cursor: *usize) void {
-            nodes[cursor.*] = .{ .field = fieldValue(name, T), .children = if (vector(T)) 1 else if (@typeInfo(T) == .@"union") @intCast(@typeInfo(T).@"union".field_names.len) else if (structured(T)) @intCast(@typeInfo(T).@"struct".field_names.len) else 0, .maximum_items = if (vector(T)) T.max_length else null };
+            nodes[cursor.*] = .{
+                .field = fieldValue(name, T),
+                .children = if (vector(T) or @typeInfo(T) == .optional)
+                    1
+                else if (@typeInfo(T) == .@"union")
+                    @intCast(@typeInfo(T).@"union".field_names.len)
+                else if (structured(T))
+                    @intCast(@typeInfo(T).@"struct".field_names.len)
+                else
+                    0,
+                .maximum_items = if (vector(T)) T.max_length else null,
+            };
             cursor.* += 1;
             if (vector(T)) {
                 appendNodes("", T.Child, nodes, cursor);
+            } else if (@typeInfo(T) == .optional) {
+                appendNodes("", @typeInfo(T).optional.child, nodes, cursor);
             } else if (@typeInfo(T) == .@"union") {
                 for (@typeInfo(T).@"union".field_names, @typeInfo(T).@"union".field_types) |field, Child| appendNodes(field, Child, nodes, cursor);
             } else if (structured(T)) {

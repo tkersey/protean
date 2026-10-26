@@ -80,7 +80,7 @@ test "outgoing structural accounting agrees with independent frame scanning" {
     try std.testing.expectError(error.Capacity, parse(a, "{\"x\":[0]}", .{ .tokens = 5 }));
 }
 
-pub fn parse(allocator: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!std.json.Parsed(Value) {
+fn scan(allocator: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!void {
     if (bytes.len > limits.bytes) return error.Capacity;
     if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidJson;
     // Scan before tree allocation. Scanner stack allocation is also bounded by
@@ -111,19 +111,65 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8, limits: Limits) Er
         }
         if (tokens > limits.tokens) return error.Capacity;
     }
-    var parsed = std.json.parseFromSlice(Value, allocator, bytes, .{
+}
+
+fn parseOptions(limits: Limits) std.json.ParseOptions {
+    return .{
         .allocate = .alloc_always,
         .parse_numbers = false,
         .duplicate_field_behavior = .@"error",
         .max_value_len = limits.bytes,
-    }) catch |err| return switch (err) {
+    };
+}
+
+fn parseError(err: anyerror) Error {
+    return switch (err) {
         error.DuplicateField => error.DuplicateKey,
         error.OutOfMemory => error.OutOfMemory,
         else => error.InvalidJson,
     };
+}
+
+pub fn parse(allocator: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!std.json.Parsed(Value) {
+    try scan(allocator, bytes, limits);
+    var parsed = std.json.parseFromSlice(Value, allocator, bytes, parseOptions(limits)) catch |err| return parseError(err);
     errdefer parsed.deinit();
     try memberBounds(allocator, parsed.value, limits.members);
     return parsed;
+}
+
+pub fn parseInto(allocator: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Value {
+    try scan(allocator, bytes, limits);
+    const value = std.json.parseFromSliceLeaky(Value, allocator, bytes, parseOptions(limits)) catch |err| return parseError(err);
+    try memberBounds(allocator, value, limits.members);
+    return value;
+}
+
+test "owned and arena JSON parsing share admission" {
+    const cases = [_]struct { bytes: []const u8, limits: Limits = .{}, failure: ?Error = null }{
+        .{ .bytes = "{\"n\":18446744073709551615,\"s\":\"雪\",\"a\":[true,null]}" },
+        .{ .bytes = "[[[]]]", .limits = .{ .depth = 3 } },
+        .{ .bytes = "[[[]]]", .limits = .{ .depth = 2 }, .failure = error.Capacity },
+        .{ .bytes = "{\"a\":1,\"a\":2}", .failure = error.DuplicateKey },
+        .{ .bytes = "{\"a\":1,\"b\":2}", .limits = .{ .members = 1 }, .failure = error.Capacity },
+        .{ .bytes = "[0,1,2]", .limits = .{ .tokens = 3 }, .failure = error.Capacity },
+        .{ .bytes = "null", .limits = .{ .bytes = 3 }, .failure = error.Capacity },
+        .{ .bytes = "\"\\ud800\"", .failure = error.InvalidJson },
+        .{ .bytes = "\"\xff\"", .failure = error.InvalidJson },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parse(std.testing.allocator, case.bytes, case.limits));
+            try std.testing.expectError(failure, parseInto(arena.allocator(), case.bytes, case.limits));
+        } else {
+            var owned = try parse(std.testing.allocator, case.bytes, case.limits);
+            defer owned.deinit();
+            const direct = try parseInto(arena.allocator(), case.bytes, case.limits);
+            try std.testing.expectEqualStrings(try canonical(arena.allocator(), owned.value), try canonical(arena.allocator(), direct));
+        }
+    }
 }
 
 fn memberBounds(allocator: std.mem.Allocator, value: Value, maximum: usize) Error!void {

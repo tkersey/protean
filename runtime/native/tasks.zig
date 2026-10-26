@@ -21,6 +21,30 @@ const wc = contracts.workspace;
 const construction = @import("program_construction.zig");
 const archive_api = @import("archive.zig");
 
+const GuestSegmentProofs = struct {
+    mutex: std.atomic.Mutex = .unlocked,
+    keys: [1024]?state.Digest = @splat(null),
+
+    fn contains(self: *@This(), key: state.Digest) bool {
+        if (!self.mutex.tryLock()) return false;
+        defer self.mutex.unlock();
+        const existing = self.keys[index(key)] orelse return false;
+        return std.meta.eql(existing, key);
+    }
+
+    fn retain(self: *@This(), key: state.Digest) void {
+        if (!self.mutex.tryLock()) return;
+        defer self.mutex.unlock();
+        self.keys[index(key)] = key;
+    }
+
+    fn index(key: state.Digest) usize {
+        return std.mem.readInt(u16, key[0..2], .little) % 1024;
+    }
+};
+
+var guest_segment_proofs: GuestSegmentProofs = .{};
+
 /// Terminal execution and settled cleanup are distinct Kosmos observations.
 pub fn cleanupComplete(outcome: data.invocation.Outcome) bool {
     return switch (outcome) {
@@ -44,6 +68,7 @@ pub const Profile = struct {
     /// references are retained by the task and therefore included in archives.
     resources: []const []const u8 = &.{},
     placement: ?*const @import("placement.zig").Configuration = null,
+    semantic_construction: ?SemanticPolicy = null,
 
     pub fn validate(self: Profile) !void {
         _ = try name(self.id);
@@ -58,6 +83,7 @@ pub const Profile = struct {
         return registry.resourceIdentity(image, storage.digest(self.bytes), refs);
     }
 };
+pub const SemanticPolicy = @import("configuration.zig").SemanticPolicy;
 pub const FrozenInputs = struct {
     profile_id: []const u8,
     profile: []const u8,
@@ -173,11 +199,276 @@ pub fn Service(comptime Types: type) type {
         placement_pending: std.ArrayList(struct { task: state.TaskId, id: state.Digest, kind: PlacementKind }) = .empty,
         placement_job: ?struct { task: state.TaskId, id: state.Digest, kind: PlacementKind, job: *@import("placement_job.zig").Job } = null,
         checked_workspace_programs: std.AutoHashMapUnmanaged(state.Digest, u64) = .empty,
-        checked_workspace_runtimes: std.AutoHashMapUnmanaged(state.Digest, u64) = .empty,
+        checked_workspace_runtimes: std.AutoHashMapUnmanaged(CompilerFact, u64) = .empty,
         runtime_cache: ?struct { epoch: u64, artifact: kosmos.RuntimeArtifact } = null,
+        compiler_facts: ?*CompilerFacts = null,
         // Import may use ordinary mutation projections only through an existing
         // matching receipt. Missing receipts must never execute a new mutation.
-        workspace_replay: ?struct { replayed: bool, records: []const state.ArchiveRecord } = null,
+        workspace_replay: ?struct { replayed: bool, records: []const state.ArchiveRecord, checked: *SnapshotValidation } = null,
+
+        const CompilerFact = struct {
+            kind: enum { program, candidate, runtime, output, guest_segment },
+            input: state.Reference,
+            output: state.Reference,
+            context: state.Digest = @splat(0),
+        };
+
+        pub const CompilerFacts = struct {
+            allocator: std.mem.Allocator,
+            entries: std.AutoHashMapUnmanaged(CompilerFact, void) = .empty,
+            sources: std.AutoHashMapUnmanaged(state.Digest, []u8) = .empty,
+            values: std.AutoHashMapUnmanaged(state.Digest, construction.SemanticValue) = .empty,
+
+            pub fn deinit(facts: *CompilerFacts) void {
+                var sources = facts.sources.valueIterator();
+                while (sources.next()) |bytes| facts.allocator.free(bytes.*);
+                facts.sources.deinit(facts.allocator);
+                var semantic_values = facts.values.valueIterator();
+                while (semantic_values.next()) |value| {
+                    facts.allocator.free(value.schema);
+                    facts.allocator.free(value.value);
+                }
+                facts.values.deinit(facts.allocator);
+                facts.entries.deinit(facts.allocator);
+            }
+        };
+
+        const SemanticRendering = union(enum) {
+            source: struct { guest: state.Reference, section: wc.SemanticSection, page: wc.Page },
+            value: struct { module: wc.SemanticModule, references: bool },
+        };
+
+        fn semanticRenderingKey(a: std.mem.Allocator, runtime: *const kosmos.RuntimeArtifact, selection: SemanticRendering) !state.Digest {
+            const runtime_bytes = try runtime.encode(a);
+            defer a.free(runtime_bytes);
+            const Key = struct { runtime: state.Reference, selection: SemanticRendering };
+            const bytes = try contracts.encodeOwned(Key, a, .{ .runtime = compilerReference(runtime_bytes), .selection = selection });
+            defer a.free(bytes);
+            return storage.digest(bytes);
+        }
+
+        fn renderSemanticSource(self: *Self, a: std.mem.Allocator, runtime: *const kosmos.RuntimeArtifact, guest: state.Reference, section: wc.SemanticSection, page: wc.Page) !json.Value {
+            const key = try semanticRenderingKey(a, runtime, .{ .source = .{ .guest = guest, .section = section, .page = page } });
+            if (self.compiler_facts) |facts| if (facts.sources.get(key)) |bytes| {
+                return std.json.parseFromSliceLeaky(json.Value, a, bytes, .{ .allocate = .alloc_always, .parse_numbers = false });
+            };
+            if (self.store().transaction) return error.CompilerPreparationRequired;
+            const result = try construction.semanticSource(a, runtime, guest, section, page);
+            if (self.compiler_facts) |facts| {
+                const bytes = try json.canonical(facts.allocator, result);
+                errdefer facts.allocator.free(bytes);
+                try facts.sources.put(facts.allocator, key, bytes);
+            }
+            return result;
+        }
+
+        fn renderSemanticValue(self: *Self, a: std.mem.Allocator, runtime: *const kosmos.RuntimeArtifact, module: wc.SemanticModule, references: bool) !construction.SemanticValue {
+            const key = try semanticRenderingKey(a, runtime, .{ .value = .{ .module = module, .references = references } });
+            if (self.compiler_facts) |facts| if (facts.values.get(key)) |value| {
+                const schema = try a.dupe(u8, value.schema);
+                errdefer a.free(schema);
+                return .{ .schema = schema, .value = try a.dupe(u8, value.value) };
+            };
+            if (self.store().transaction) return error.CompilerPreparationRequired;
+            const result = try construction.semanticModuleValue(a, runtime, module, references);
+            errdefer {
+                a.free(result.schema);
+                a.free(result.value);
+            }
+            if (self.compiler_facts) |facts| {
+                const schema = try facts.allocator.dupe(u8, result.schema);
+                errdefer facts.allocator.free(schema);
+                const value = try facts.allocator.dupe(u8, result.value);
+                errdefer facts.allocator.free(value);
+                try facts.values.put(facts.allocator, key, .{ .schema = schema, .value = value });
+            }
+            return result;
+        }
+
+        fn compilerFact(self: *Self, fact: CompilerFact) !bool {
+            if (self.compiler_facts) |facts| if (facts.entries.contains(fact)) return true;
+            if (self.store().transaction) return error.CompilerPreparationRequired;
+            return false;
+        }
+
+        fn retainCompilerFact(self: *Self, fact: CompilerFact) !void {
+            if (self.compiler_facts) |facts| try facts.entries.put(facts.allocator, fact, {});
+        }
+
+        fn compilerReference(bytes: []const u8) state.Reference {
+            return .{ .digest = storage.digest(bytes), .bytes = bytes.len };
+        }
+
+        fn prepareSemanticRead(self: *Self, a: std.mem.Allocator, manifest: state.Archive, source: anytype, parent: state.Task, selection: @FieldType(wc.InspectionTarget, "semantic_source"), page: wc.Page, basis: workspace.ReadObservation) !void {
+            var runtime: ?state.Reference = null;
+            var guest: state.Reference = undefined;
+            switch (selection.subject) {
+                .runtime => |selected| {
+                    const key = try workspace.custodyId(a, parent.id, try wp.identity(selected, .runtime));
+                    const ref = archive_api.record(manifest, .workspace_runtime, key) orelse return error.InvalidArchive;
+                    var saved = try contracts.decodeOwned(workspace.Runtime, a, try source.object(a, ref, null));
+                    defer saved.deinit();
+                    runtime = saved.value.artifact;
+                    const program_key = try workspace.custodyId(a, parent.id, saved.value.program);
+                    const program_ref = archive_api.record(manifest, .workspace_program, program_key) orelse return error.InvalidArchive;
+                    var program = try contracts.decodeOwned(workspace.Program, a, try source.object(a, program_ref, null));
+                    defer program.deinit();
+                    guest = program.value.description.image;
+                },
+                .work => {
+                    if (basis != .works or basis.works.works.items.len == 0) return error.InvalidArchive;
+                    const observed = basis.works.works.items[0] orelse return error.InvalidArchive;
+                    runtime = observed.work.runtime;
+                    const key = try workspace.custodyId(a, parent.id, observed.work.program);
+                    const ref = archive_api.record(manifest, .workspace_program, key) orelse return error.InvalidArchive;
+                    var program = try contracts.decodeOwned(workspace.Program, a, try source.object(a, ref, null));
+                    defer program.deinit();
+                    guest = program.value.description.image;
+                },
+                .controller => {
+                    if (basis != .controller) return error.InvalidArchive;
+                    runtime = basis.controller.runtime;
+                    guest = parent.image;
+                    if (basis.controller.binding) |id| {
+                        const ref = archive_api.record(manifest, .controller_binding, id) orelse return error.InvalidArchive;
+                        var binding = try contracts.decodeOwned(state.ControllerBinding, a, try source.object(a, ref, null));
+                        defer binding.deinit();
+                        guest = binding.value.image;
+                    }
+                },
+            }
+            var admitted = if (runtime) |ref|
+                try kosmos.RuntimeArtifact.init(a, try source.object(a, ref, null), ref.digest)
+            else
+                try self.program.retainRuntime();
+            defer admitted.deinit();
+            _ = try self.renderSemanticSource(a, &admitted, guest, selection.section, page);
+        }
+
+        fn prepareSemanticRenderings(self: *Self, manifest: state.Archive, source: anytype) !void {
+            for (manifest.records.items) |row| {
+                if (row.kind != .workspace_value and row.kind != .workspace_reply) continue;
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const bytes = try source.object(a, row.body, null);
+                if (row.kind == .workspace_value) {
+                    var saved = try contracts.decodeOwned(workspace.Value, a, bytes);
+                    defer saved.deinit();
+                    const origin = saved.value.derivation.semantic_source orelse continue;
+                    var admitted = try kosmos.RuntimeArtifact.init(a, try source.object(a, origin.runtime, null), origin.runtime.digest);
+                    defer admitted.deinit();
+                    const rendered = try self.renderSemanticValue(a, &admitted, origin.selection.module, origin.selection.references);
+                    a.free(rendered.schema);
+                    a.free(rendered.value);
+                    continue;
+                }
+                var saved = try contracts.decodeOwned(workspace.ReplyObservation, a, bytes);
+                defer saved.deinit();
+                if (saved.value.evidence != .read) continue;
+                var request = try data.invocation.decode(data.invocation.Request, a, try source.object(a, saved.value.request, null));
+                defer request.deinit();
+                const entry = try self.handlers.resolve(request.value, request.value.binding.program_identity);
+                const authorize = entry.declaration.workspace orelse return error.InvalidArchive;
+                var parent = try contracts.decodeOwned(state.Task, a, try source.object(a, manifest.task, null));
+                defer parent.deinit();
+                const read = struct {
+                    fn object(context: *anyopaque, allocator: std.mem.Allocator, ref: state.Reference, limit: usize) ![]u8 {
+                        const selected: @TypeOf(source) = @ptrCast(@alignCast(context));
+                        return selected.object(allocator, ref, limit);
+                    }
+                }.object;
+                const authorized_bytes = try authorize(.{
+                    .allocator = a,
+                    .task = parent.value.id,
+                    .tenant = parent.value.tenant.bytes,
+                    .profile = self.profile.bytes,
+                    .application = self.application.image_identity,
+                    .resources = parent.value.resources.items,
+                    .objects = .validating(source, read),
+                }, request.value.binding.payload);
+                var authorized = try contracts.decodeOwned(workspace.Authorized, a, authorized_bytes);
+                defer authorized.deinit();
+                const command = authorized.value.command;
+                if (command != .program or command.program != .inspect or command.program.inspect.target != .semantic_source) continue;
+                try self.prepareSemanticRead(a, manifest, source, parent.value, command.program.inspect.target.semantic_source, command.program.inspect.page, saved.value.evidence.read);
+            }
+        }
+
+        fn prepareCompilerFacts(self: *Self, manifest: state.Archive, source: anytype) !void {
+            if (self.store().transaction or self.compiler_facts == null) return error.InvalidState;
+            for (manifest.records.items) |row| {
+                if (row.kind != .workspace_runtime) continue;
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                var saved = try contracts.decodeOwned(workspace.Runtime, a, try source.object(a, row.body, null));
+                defer saved.deinit();
+                if (saved.value.validation) |validation| try self.requireSemanticPolicy(validation.root, validation.checker.bytes);
+            }
+            for (manifest.events.items) |row| {
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                var event_value = try contracts.decodeOwned(state.Event, a, try source.object(a, row.body, null));
+                defer event_value.deinit();
+                const reference = event_value.value.workspace_command orelse continue;
+                var command = try contracts.decodeOwned(workspace.PublicationCommand, a, try source.object(a, reference, null));
+                defer command.deinit();
+                if (command.value != .semantic) continue;
+                const selected = command.value.semantic;
+                try self.validateCompilerOutput(event_value.value.task, try source.object(a, selected.input, null), try source.object(a, selected.output, null));
+            }
+            for (manifest.records.items) |row| {
+                if (row.kind != .capture) continue;
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                var captured = try contracts.decodeOwned(state.Capture, a, try source.object(a, row.body, null));
+                defer captured.deinit();
+                const output = captured.value.response orelse continue;
+                const attempt_ref = archive_api.record(manifest, .attempt, row.id) orelse return error.InvalidArchive;
+                var attempt = try contracts.decodeOwned(state.Attempt, a, try source.object(a, attempt_ref, null));
+                defer attempt.deinit();
+                if (attempt.value.operation != .workspace_build) continue;
+                try self.validateCompilerOutput(attempt.value.task, try source.object(a, captured.value.request, null), try source.object(a, output, null));
+            }
+            for (manifest.records.items) |row| {
+                if (row.kind != .workspace_program and row.kind != .workspace_candidate and row.kind != .workspace_runtime) continue;
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const bytes = try source.object(a, row.body, null);
+                switch (row.kind) {
+                    .workspace_program => {
+                        var saved = try contracts.decodeOwned(workspace.Program, a, bytes);
+                        defer saved.deinit();
+                        if (comptime @TypeOf(source) == *storage.Store) {
+                            if (self.checked_workspace_programs.get(saved.value.artifact.digest) == self.store().integrity_epoch) continue;
+                        }
+                        try self.validateProgramCompiler(a, saved.value, source);
+                    },
+                    .workspace_candidate => {
+                        var saved = try contracts.decodeOwned(workspace.Candidate, a, bytes);
+                        defer saved.deinit();
+                        try self.validateCandidateCompiler(a, saved.value, source);
+                    },
+                    .workspace_runtime => {
+                        var saved = try contracts.decodeOwned(workspace.Runtime, a, bytes);
+                        defer saved.deinit();
+                        if (comptime @TypeOf(source) == *storage.Store) {
+                            if (self.checked_workspace_runtimes.get(try runtimeCompilerFact(a, saved.value.artifact, saved.value.validation)) == self.store().integrity_epoch) continue;
+                        }
+                        const code = try source.object(a, saved.value.artifact, null);
+                        var admitted = try kosmos.RuntimeArtifact.init(a, code, saved.value.artifact.digest);
+                        defer admitted.deinit();
+                        try self.validateRuntimeCompiler(a, saved.value.artifact, saved.value.validation, &admitted, source);
+                    },
+                    else => unreachable,
+                }
+            }
+            try self.prepareSemanticRenderings(manifest, source);
+        }
 
         pub fn init(a: std.mem.Allocator, io: std.Io, namespace: *Namespace, assets: discovery.Assets, application: *const discovery.Application, handlers: registry.Registry, profile: Profile) !Self {
             try profile.validate();
@@ -381,6 +672,8 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn workspaceWorkSettled(self: *Self, a: std.mem.Allocator, child: workspace.Work, require_disposal: bool, require_park: bool) !bool {
+            if (require_disposal and child.observer != null and !child.observer.?.stopped and
+                child.observer.?.successor == null) return false;
             if (child.terminal()) {
                 const outcome_bytes = try self.store().object(a, child.outcome, null);
                 defer a.free(outcome_bytes);
@@ -444,6 +737,11 @@ pub fn Service(comptime Types: type) type {
                     if (!try self.hasLocalCustody(a, id, work_id)) continue;
                     var child = try self.workspaceWork(a, id, work_id);
                     defer child.deinit();
+                    if (try self.stopLocalWorkspaceObserver(a, child.value)) {
+                        const updated = try self.workspaceWork(a, id, work_id);
+                        child.deinit();
+                        child = updated;
+                    }
                     if (child.value.terminal()) continue;
                     const Identity = struct { instance: contracts.Bytes(null), task: state.TaskId, work: state.Digest };
                     const identity = try operation(Identity, a, .{ .instance = .{ .bytes = instance }, .task = id, .work = work_id });
@@ -585,7 +883,25 @@ pub fn Service(comptime Types: type) type {
             }
         };
         fn remoteDisposed(value: @import("placement.zig").WorkState) bool {
-            return (value.outcome == .completed or value.outcome == .failed or value.outcome == .cancelled) and value.cleanup_complete;
+            return !value.observer_active and (value.outcome == .completed or
+                value.outcome == .failed or value.outcome == .cancelled) and value.cleanup_complete;
+        }
+        fn stopRemoteObserverOne(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            work_id: state.Digest,
+        ) !bool {
+            var child = try self.retainedWorkspaceWork(a, task_id, work_id);
+            defer child.deinit();
+            if (!self.activeObserver(child.value)) return false;
+            var remote = try self.remoteWorkState(a, task_id, work_id);
+            defer remote.deinit();
+            if (remote.latest) |saved| if (!saved.value.report.?.value.work_state.?.observer_active)
+                return false;
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            return self.settleRemoteWork(a, parent.value, work_id);
         }
         fn remoteWorkState(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: state.Digest) !RemoteWorkState {
             const p = @import("placement.zig");
@@ -660,13 +976,15 @@ pub fn Service(comptime Types: type) type {
                     const prior = switch (saved.value.control.value.command) {
                         .cancel => |v| v.expected,
                         .pump => |v| v.expected,
-                        .park => |v| v,
+                        .park, .stop_observing => |v| v,
                         else => null,
                     };
                     if (prior == null) return false;
                     if (prior) |revision| if (revision.execution_revision == expected.execution_revision and revision.control_revision == expected.control_revision) return false;
                 }
-                if (cancellation_revision) |revision| {
+                if (current.observer_active) {
+                    command = .{ .stop_observing = expected };
+                } else if (cancellation_revision) |revision| {
                     const acknowledged = try self.remoteCancellationAcknowledged(a, parent.id, work_id, revision);
                     if (acknowledged and current.explicitly_parked) return false;
                     command = if (current.cancellation == null or !acknowledged) .{ .cancel = .{ .expected = expected, .reason = parent.cancellation.? } } else .{ .pump = .{ .expected = expected, .base_quantum = 65536 } };
@@ -802,6 +1120,8 @@ pub fn Service(comptime Types: type) type {
         fn settleWorkspaceOne(self: *Self, a: std.mem.Allocator, parent: state.Task, controller: bool) !bool {
             const ids = try self.workspaceIds(a, parent.id);
             defer a.free(ids);
+            if (controller and (parent.cancellation != null or parent.terminal()) and
+                try self.stopWorkspaceObserverOne(a, parent.id, parent.observer_heads.items)) return true;
             for (ids) |id| {
                 if (!try self.hasLocalCustody(a, parent.id, id)) {
                     if (controller and (parent.cancellation != null or parent.terminal()) and try self.settleRemoteWork(a, parent, id)) return true;
@@ -809,6 +1129,8 @@ pub fn Service(comptime Types: type) type {
                 }
                 var child = try self.workspaceWork(a, parent.id, id);
                 defer child.deinit();
+                if (self.shutdown_cancel_requested and
+                    try self.stopLocalWorkspaceObserver(a, child.value)) return true;
                 if (child.value.terminal()) continue;
                 if (!controller or parent.cancellation == null) {
                     if (child.value.cancellation != null and child.value.schedule != .parked) try self.subjectAdd(.{ .task = parent.id, .work = id });
@@ -831,6 +1153,42 @@ pub fn Service(comptime Types: type) type {
                 return true;
             }
             return false;
+        }
+
+        fn stopWorkspaceObserverOne(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            ids: []const state.Digest,
+        ) !bool {
+            for (ids) |id| {
+                if (!try self.hasLocalCustody(a, task_id, id)) {
+                    if (try self.stopRemoteObserverOne(a, task_id, id)) return true;
+                    continue;
+                }
+                var child = try self.workspaceWork(a, task_id, id);
+                defer child.deinit();
+                if (try self.stopLocalWorkspaceObserver(a, child.value)) return true;
+            }
+            return false;
+        }
+
+        fn stopLocalWorkspaceObserver(
+            self: *Self,
+            a: std.mem.Allocator,
+            child: workspace.Work,
+        ) !bool {
+            if (!self.activeObserver(child)) return false;
+            const operation_id = try std.fmt.allocPrint(a, "stop-cancelled-observer-{s}-{d}", .{
+                std.fmt.bytesToHex(child.id, .lower), child.control_revision,
+            });
+            defer a.free(operation_id);
+            _ = try self.workspaceStopObserving(a, operation_id, child.task, .{
+                .work = try wp.reference(a, .work, child.id),
+                .execution_revision = child.execution_revision,
+                .control_revision = child.control_revision,
+            });
+            return true;
         }
 
         // Only a newer parent cancellation overrides an explicit child park.
@@ -949,11 +1307,11 @@ pub fn Service(comptime Types: type) type {
             return self.publicationEvent(value, kind, bytes, &.{}, null);
         }
         fn publicationEvent(self: *Self, value: *state.Task, kind: state.EventType, bytes: []const u8, publications: []const state.WorkPublication, command: ?state.Reference) !void {
-            return self.subjectPublicationEvent(value, kind, bytes, publications, &.{}, command);
+            return self.subjectPublicationEvent(value, kind, bytes, publications, &.{}, command, null, null);
         }
-        fn subjectPublicationEvent(self: *Self, value: *state.Task, kind: state.EventType, bytes: []const u8, publications: []const state.WorkPublication, residuals: []const state.ResidualPublication, command: ?state.Reference) !void {
+        fn subjectPublicationEvent(self: *Self, value: *state.Task, kind: state.EventType, bytes: []const u8, publications: []const state.WorkPublication, residuals: []const state.ResidualPublication, command: ?state.Reference, controller_read: ?state.ControllerReadCut, root_publication: ?state.RootPublication) !void {
             value.event_high = try std.math.add(u64, value.event_high, 1);
-            try self.store().putEvent(.{ .task = value.id, .seq = value.event_high, .revision = value.revision, .kind = kind, .data = .{ .bytes = bytes }, .workspace_publications = .{ .items = publications }, .workspace_command = command, .residual_publications = .{ .items = residuals } });
+            try self.store().putEvent(.{ .task = value.id, .seq = value.event_high, .revision = value.revision, .kind = kind, .data = .{ .bytes = bytes }, .workspace_publications = .{ .items = publications }, .workspace_command = command, .residual_publications = .{ .items = residuals }, .controller_read = controller_read, .root_publication = root_publication });
         }
         fn messageEvent(self: *Self, a: std.mem.Allocator, value: *state.Task, kind: state.EventType, item: state.Message) !void {
             const body = try state.messageData(a, item, item.disposition);
@@ -1151,21 +1509,29 @@ pub fn Service(comptime Types: type) type {
         }
         fn rootDriver(self: *Self, a: std.mem.Allocator, value: state.Task, instance: data.invocation.Instance) !*evaluator.Driver {
             const reference = try self.rootImage(a, value);
-            if (std.meta.eql(reference, value.image)) return evaluator.Driver.start(self.allocator, self.program, instance);
+            if (value.controller_runtime == null and std.meta.eql(reference, value.image))
+                return evaluator.Driver.start(self.allocator, self.program, instance);
             const image = try self.store().object(a, reference, null);
             defer a.free(image);
-            var runtime = try self.program.retainRuntime();
+            var runtime = try self.controllerRuntime(a, value.id, reference, value.controller_runtime);
             defer runtime.deinit();
             return evaluator.Driver.openSelected(self.allocator, image, instance, &runtime);
         }
 
+        fn controllerRuntime(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, image: state.Reference, reference: ?state.Reference) !kosmos.RuntimeArtifact {
+            const ref = reference orelse return self.program.retainRuntime();
+            var selected = try self.workspaceRuntime(a, task_id, ref.digest, null);
+            defer selected.record.deinit();
+            errdefer selected.admitted.deinit();
+            var program = try self.workspaceProgram(a, task_id, selected.record.value.program);
+            defer program.deinit();
+            if (!std.meta.eql(ref, selected.record.value.artifact) or
+                !std.meta.eql(image, program.value.description.image)) return error.InvalidRuntime;
+            return selected.admitted;
+        }
+
         fn rootIdentity(id: state.TaskId) state.Digest {
-            var hash = std.crypto.hash.sha2.Sha256.init(.{});
-            hash.update("protean.controller.outer.v1\x00");
-            hash.update(&id);
-            var result: state.Digest = undefined;
-            hash.final(&result);
-            return result;
+            return state.controllerExecutionIdentity(id);
         }
         fn rootProvenance(value: state.Task) kosmos.RuntimeCapsule.Provenance {
             return .{ .execution = rootIdentity(value.id), .custody = storage.digest(&value.id), .publication = .{ .digest = value.checkpoint.digest, .bytes = value.checkpoint.bytes } };
@@ -1240,7 +1606,9 @@ pub fn Service(comptime Types: type) type {
             for (pending.dependencies.items, record_value.dependencies) |ref, expected| if (!std.meta.eql(ref.digest, expected.digest) or ref.bytes != expected.bytes) return error.InvalidArchive;
             const image = try self.store().object(a, effective_image, null);
             defer a.free(image);
-            var prepared = try self.program.prepare(a, image);
+            var runtime = try self.controllerRuntime(a, parent.id, effective_image, if (residual) |retired| retired.runtime else value.controller_runtime);
+            defer runtime.deinit();
+            var prepared = try kosmos.Prepared.initWithRuntime(a, image, &runtime);
             defer prepared.deinit();
             if (!std.meta.eql(record_value.artifact.digest, prepared.runtime.identity) or record_value.artifact.bytes != prepared.runtime.core.?.encoded_length) return error.InvalidArchive;
             const code = try self.store().object(a, .{ .digest = record_value.artifact.digest, .bytes = record_value.artifact.bytes }, null);
@@ -1312,7 +1680,7 @@ pub fn Service(comptime Types: type) type {
         fn resident(self: *Self, a: std.mem.Allocator, value: state.Task) !*evaluator.Driver {
             try self.compatible(value);
             if (self.active) |active| {
-                if (active.subject == .root and same(&active.task, &value.id) and active.execution_revision == value.execution_revision) return active.driver;
+                if (active.subject == .root and same(&active.task, &value.id) and active.execution_revision == value.execution_revision and active.realization_revision == value.realization_revision) return active.driver;
                 try self.retire(a);
             }
             var pending = try self.rootOperation(a, value);
@@ -1335,7 +1703,7 @@ pub fn Service(comptime Types: type) type {
                     }
                 };
                 var owner: Owner = .{ .task = value, .reference = operation_value.capsule };
-                var runtime = try self.program.retainRuntime();
+                var runtime = try self.controllerRuntime(a, value.id, try self.rootImage(a, value), value.controller_runtime);
                 defer runtime.deinit();
                 const image = try self.store().object(a, try self.rootImage(a, value), null);
                 defer a.free(image);
@@ -1345,7 +1713,7 @@ pub fn Service(comptime Types: type) type {
                 defer a.free(checkpoint);
                 break :restored try self.rootDriver(a, value, .{ .state = checkpoint });
             };
-            self.active = .{ .task = value.id, .execution_revision = value.execution_revision, .driver = driver, .root_control = root_control, .root_cut_ready = root_cut_ready };
+            self.active = .{ .task = value.id, .execution_revision = value.execution_revision, .realization_revision = value.realization_revision, .driver = driver, .root_control = root_control, .root_cut_ready = root_cut_ready };
             if (pending) |saved| if (saved.value.pending) |operation_value| {
                 self.active.?.root_quantum = operation_value.guest_quantum;
                 self.active.?.outer_operation = operation_value.capsule;
@@ -2108,7 +2476,15 @@ pub fn Service(comptime Types: type) type {
                 const id = self.runnable.items[self.runnable_cursor];
                 self.runnable_cursor += 1;
                 if (self.runnable_cursor == self.runnable.items.len) self.runnable_cursor = 0;
-                const step = if (id.residual) |residual_id| try self.pumpControllerResidual(a, id.task, residual_id) else if (id.work) |work_id| try self.pumpWorkspace(a, id.task, work_id) else try self.pumpTask(a, id.task);
+                const step = (if (id.residual) |residual_id|
+                    self.pumpControllerResidual(a, id.task, residual_id)
+                else if (id.work) |work_id|
+                    self.pumpWorkspace(a, id.task, work_id)
+                else
+                    self.pumpTask(a, id.task)) catch |err| switch (err) {
+                    error.ObservationBlocked, error.SemanticPolicyDenied, error.GuardPolicyDenied => .idle,
+                    else => return err,
+                };
                 if (step != .idle) return step;
             }
             return .idle;
@@ -2273,6 +2649,7 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn advance(self: *Self, a: std.mem.Allocator, initial: state.Task, control: data.invocation.Control, consumed: ?occurrence.Occurrence) !Step {
+            if (initial.cancellation == null) try self.requireRuntimePolicy(a, initial.id, initial.controller_runtime);
             try self.requireCustody(a, initial.id, null);
             const driver = try self.resident(a, initial);
             const quantum: u64 = if (control == .reply and initial.cancellation != null and !initial.cancellation_applied) 0 else 256;
@@ -2288,6 +2665,7 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn pumpRoot(self: *Self, a: std.mem.Allocator, initial: state.Task) anyerror!Step {
+            if (initial.cancellation == null) try self.requireRuntimePolicy(a, initial.id, initial.controller_runtime);
             const driver = try self.resident(a, initial);
             var decoded = try contracts.decodeOwned(data.invocation.Control, a, self.active.?.root_control orelse return error.CorruptState);
             defer decoded.deinit();
@@ -2345,6 +2723,10 @@ pub fn Service(comptime Types: type) type {
             defer self.store().rollback();
             value.checkpoint = try self.store().putObject(checkpoint);
             value.outcome = try self.store().putObject(encoded);
+            try self.subjectPublicationEvent(&value, .execution, "{}", &.{}, &.{}, null, null, .{
+                .before = .from(initial),
+                .after = .from(value),
+            });
             // Terminal state has no remaining guest cleanup. Its checkpoint
             // and outcome are now owned by the transaction, so release the
             // physical evaluator before materializing potentially much larger
@@ -2590,10 +2972,13 @@ pub fn Service(comptime Types: type) type {
             if (schedule != .queued or work.value.schedule != .parked) work.value.schedule = schedule;
             work.value.blocker = blocker;
             work.value.event_watermark = try std.math.add(u64, parent.event_high, 1);
-            try self.store().putRecord(workspace.Work, "workspace_work", id, parent.id, work.value);
+            try self.writeWorkspaceWork(&work.value, .replace);
             const event_data = try std.fmt.allocPrint(a, "{{\"workspace_id\":\"{s}\"}}", .{std.fmt.bytesToHex(id, .lower)});
             defer a.free(event_data);
             const observed = try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, id), true);
+            const snapshot = try contracts.encodeOwned(workspace.WorkObservation, a, observed);
+            defer a.free(snapshot);
+            _ = try self.store().putObject(snapshot);
             try self.publicationEvent(parent, .workspace_progress, event_data, &.{try workPublication(a, observed)}, null);
         }
         fn persistOccurrence(self: *Self, a: std.mem.Allocator, parent: state.Task, previous: u64, transition: []const u8, pending: occurrence.Occurrence, wake: bool) !void {
@@ -2685,6 +3070,21 @@ pub fn Service(comptime Types: type) type {
             try json.put(a, &control, "task", json.string(try a.dupe(u8, &std.fmt.bytesToHex(parent.id, .lower))));
             try json.put(a, &control, "controller_epoch", try json.number(a, epoch));
             try json.put(a, &control, "expected_handoff_identity", json.string(try a.dupe(u8, &std.fmt.bytesToHex(handoff, .lower))));
+            const runtime_cut: ControllerRuntimeCut = if (event_cut == parent.event_high and
+                epoch == parent.controller_epoch and
+                std.meta.eql(parent.controller, @as(?state.Digest, binding_id)))
+                .{ .runtime = parent.controller_runtime, .realization_revision = parent.realization_revision }
+            else if (parent.realization_revision != 0 or
+                !std.meta.eql(parent.controller, @as(?state.Digest, binding_id)))
+                try self.controllerRuntimeAt(a, parent, event_cut)
+            else
+                ControllerRuntimeCut{};
+            try json.put(a, &control, "realization_target", try values.toJson(wc.ControllerRealizationTarget, a, .{ .action = .{
+                .interaction = .{ .bytes = try a.dupe(u8, &std.fmt.bytesToHex(handoff, .lower)) },
+                .epoch = epoch,
+                .realization_revision = runtime_cut.realization_revision,
+            } }));
+
             try json.put(a, &control, "program", try values.toJson(wc.Ref, a, try wp.reference(a, .program, binding.program)));
             try json.put(a, &control, "event_cut", try json.number(a, event_cut));
             try json.put(a, &control, "policy_identity", json.string(try a.dupe(u8, &std.fmt.bytesToHex(parent.profile.digest, .lower))));
@@ -2877,7 +3277,7 @@ pub fn Service(comptime Types: type) type {
                 }
             };
         }
-        fn validateControllerSuccession(self: *Self, allocator: std.mem.Allocator, parent: state.Task, id: state.Digest, records: []const state.ArchiveRecord) !void {
+        fn validateControllerSuccession(self: *Self, allocator: std.mem.Allocator, parent: state.Task, id: state.Digest, records: []const state.ArchiveRecord, checked: *SnapshotValidation) !void {
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             const a = arena.allocator();
@@ -2949,7 +3349,7 @@ pub fn Service(comptime Types: type) type {
                 var view = try contracts.decodeOwned(contracts.controller.OwnerView, a, input[carry.len..]);
                 defer view.deinit();
                 if (!std.meta.eql(view.value.task, parent.id) or view.value.event_cut != operation_value.event_cut or view.value.next_message != operation_value.next_message or !std.meta.eql(view.value.policy, operation_value.policy.digest) or !same(view.value.input.bytes, try self.store().object(a, parent.input, null))) return error.InvalidArchive;
-                try self.validateControllerView(a, parent, view.value, operation_value.view_works.items, records);
+                try self.validateControllerViewIn(a, parent, view.value, operation_value.view_works.items, records, checked);
                 if (operation_value.conversion_work) |work_id| {
                     try requireArchiveRecord(records, .workspace_work, work_id);
                     var work = try self.workspaceWork(a, parent.id, work_id);
@@ -3012,6 +3412,8 @@ pub fn Service(comptime Types: type) type {
             }
             var operation_value = try self.record(state.ControllerSuccession, a, "controller_succession", residual.succession, parent.id);
             defer operation_value.deinit();
+            const runtime_cut = try self.controllerRuntimeAt(a, parent, (operation_value.value.activation_event orelse return error.InvalidArchive) -| 1);
+            if (!std.meta.eql(residual.runtime, runtime_cut.runtime)) return error.InvalidArchive;
             if (operation_value.value.phase != .activated or !std.meta.eql(operation_value.value.residual, id) or !std.meta.eql(operation_value.value.predecessor, residual.controller) or !std.meta.eql(operation_value.value.checkpoint, residual.initial_checkpoint)) return error.InvalidArchive;
             const binding = try self.controllerBinding(a, parent, residual.controller);
             const image = try self.store().object(a, binding.image, null);
@@ -3039,7 +3441,7 @@ pub fn Service(comptime Types: type) type {
         fn validateResidualObservation(self: *Self, a: std.mem.Allocator, observed: state.ControllerResidualObservation) !void {
             var current = try self.record(state.ControllerResidual, a, "controller_residual", observed.id, observed.task);
             defer current.deinit();
-            inline for (.{ "controller", "succession", "initial_checkpoint" }) |field| if (!std.meta.eql(@field(observed, field), @field(current.value, field))) return error.InvalidArchive;
+            inline for (.{ "controller", "succession", "initial_checkpoint", "runtime" }) |field| if (!std.meta.eql(@field(observed, field), @field(current.value, field))) return error.InvalidArchive;
             if (observed.execution_revision > current.value.execution_revision or observed.control_revision > current.value.control_revision or observed.control_revision == 0) return error.InvalidArchive;
             if (observed.execution_revision == current.value.execution_revision) inline for (.{ "checkpoint", "outcome", "outcome_kind", "current_occurrence", "cancellation_applied" }) |field| {
                 if (!std.meta.eql(@field(observed, field), @field(current.value, field))) return error.InvalidArchive;
@@ -3066,7 +3468,7 @@ pub fn Service(comptime Types: type) type {
         fn residualProgressEvent(self: *Self, a: std.mem.Allocator, parent: *state.Task, value: state.ControllerResidual) !void {
             const bytes = try std.fmt.allocPrint(a, "{{\"workspace_id\":\"{s}\"}}", .{std.fmt.bytesToHex(value.id, .lower)});
             defer a.free(bytes);
-            try self.subjectPublicationEvent(parent, .workspace_progress, bytes, &.{}, &.{try self.residualPublication(a, value)}, null);
+            try self.subjectPublicationEvent(parent, .workspace_progress, bytes, &.{}, &.{try self.residualPublication(a, value)}, null, null, null);
         }
         fn controllerResidualControl(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, id: state.Digest, execution: u64, control: u64, command: workspace.Command) !Admission {
             const request = try operation(workspace.ResidualControlRequest, a, .{ .task = task_id, .residual = id, .execution = execution, .control = control, .command = command });
@@ -3150,6 +3552,8 @@ pub fn Service(comptime Types: type) type {
             value.controller_epoch = epoch;
             value.controller_interaction = null;
             value.controller_succession = null;
+            value.controller_runtime = null;
+            value.realization_revision = 0;
             value.checkpoint = boot.checkpoint;
             value.outcome = boot.outcome;
             value.outcome_kind = .requested;
@@ -3162,7 +3566,7 @@ pub fn Service(comptime Types: type) type {
             operation_value.activation_event = try std.math.add(u64, value.event_high, 1);
             operation_value.residual = residual_id;
             const binding: state.ControllerBinding = .{ .id = binding_id, .task = value.id, .epoch = epoch, .activated_at = operation_value.activation_event.?, .program = initial.successor.?, .image = program.value.description.image, .program_identity = request.value.binding.program_identity, .predecessor = old.id };
-            const residual: state.ControllerResidual = .{ .id = residual_id, .task = parent.id, .controller = old.id, .succession = initial.id, .initial_checkpoint = parent.checkpoint, .checkpoint = parent.checkpoint, .outcome = parent.outcome, .outcome_kind = parent.outcome_kind, .current_occurrence = parent.current_occurrence, .execution_revision = parent.execution_revision };
+            const residual: state.ControllerResidual = .{ .id = residual_id, .task = parent.id, .controller = old.id, .succession = initial.id, .runtime = parent.controller_runtime, .initial_checkpoint = parent.checkpoint, .checkpoint = parent.checkpoint, .outcome = parent.outcome, .outcome_kind = parent.outcome_kind, .current_occurrence = parent.current_occurrence, .execution_revision = parent.execution_revision };
             try self.store().begin();
             defer self.store().rollback();
             if (behavior) |decision| {
@@ -3175,7 +3579,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().createRecord(occurrence.Occurrence, "occurrence", occurrence_id, value.id, .{ .id = occurrence_id, .task = value.id, .request = request.value.request_identity, .request_object = try self.store().putObject(outcome.value.requested.request) });
             try self.store().createRecord(workspace.ExecutionRoute, "execution_route", occurrence_id, value.id, .{ .id = occurrence_id, .task = value.id, .work = null, .image = binding.image, .program_identity = binding.program_identity, .controller = binding_id, .controller_epoch = epoch });
             try self.putRootOperation(a, .{ .id = rootIdentity(value.id), .task = value.id, .execution_revision = value.execution_revision, .pending = null });
-            try self.subjectPublicationEvent(&value, .controller, event_data, &.{}, &.{try self.residualPublication(a, residual)}, null);
+            try self.subjectPublicationEvent(&value, .controller, event_data, &.{}, &.{try self.residualPublication(a, residual)}, null, null, .{ .before = .from(parent), .after = .from(value) });
             try self.persistScheduled(a, value, parent.revision, "controller.activate", .preserve, &.{ .{ .task = value.id, .residual = residual_id }, .{ .task = value.id } });
             return .progressed;
         }
@@ -3208,7 +3612,7 @@ pub fn Service(comptime Types: type) type {
             const binding = try self.controllerBinding(a, parent, value.controller);
             const image = try self.store().object(a, binding.image, null);
             defer a.free(image);
-            var runtime = try self.program.retainRuntime();
+            var runtime = try self.controllerRuntime(a, parent.id, binding.image, value.runtime);
             defer runtime.deinit();
             var root_control: ?[]u8 = null;
             errdefer if (root_control) |bytes| self.allocator.free(bytes);
@@ -3413,7 +3817,7 @@ pub fn Service(comptime Types: type) type {
                 defer a.free(operation_id);
                 const input = try self.store().object(a, operation_value.conversion_input orelse return error.CorruptState, null);
                 defer a.free(input);
-                _ = self.workspaceStartAdmitted(a, operation_id, parent.id, operation_value.converter orelse return error.CorruptState, input, .{ .stop = .terminal, .continuation = .owner_scheduled }, null, null, null, .{ .none = .{} }, operation_value) catch |err| return self.controllerPreparationFailure(a, parent, operation_value, err);
+                _ = self.workspaceStartAdmitted(a, operation_id, parent.id, operation_value.converter orelse return error.CorruptState, input, .{ .stop = .terminal, .continuation = .owner_scheduled }, null, null, null, .{ .none = .{} }, operation_value, null) catch |err| return self.controllerPreparationFailure(a, parent, operation_value, err);
                 return .progressed;
             }
             var conversion = try self.workspaceWork(a, parent.id, operation_value.conversion_work.?);
@@ -3508,7 +3912,13 @@ pub fn Service(comptime Types: type) type {
             a.free(work.runtime_dependencies.items);
             if (work.runtime_trace) |trace| a.free(trace.dependencies.items);
             if (work.outer_operation) |pending| a.free(pending.dependencies.items);
+            if (work.guard) |guard| {
+                if (guard.reference_operation) |pending| a.free(pending.dependencies.items);
+                if (guard.failure) |failure| a.free(failure.bytes);
+            }
             if (work.cancellation) |reason| a.free(reason.bytes);
+            if (work.observer) |observer|
+                @import("workspace_observers.zig").freeObserver(a, observer);
         }
         fn controllerView(self: *Self, allocator: std.mem.Allocator, parent: state.Task) !struct { bytes: []u8, works: []workspace.WorkObservation } {
             var arena = std.heap.ArenaAllocator.init(allocator);
@@ -3537,18 +3947,15 @@ pub fn Service(comptime Types: type) type {
                 for (snapshots[0..initialized]) |snapshot| freeControllerViewWork(allocator, snapshot);
                 allocator.free(snapshots);
             }
+            var observers = CurrentObservers.init(a, parent.id, parent.event_high);
+            defer observers.deinit();
             for (ids, works, snapshots) |id, *out, *snapshot| {
                 snapshot.* = try self.freezeWorkspaceWork(allocator, parent.id, try wp.reference(a, .work, id), true);
                 initialized += 1;
                 const child = snapshot.work;
-                out.* = .{ .work = try wp.reference(a, .work, id), .execution_revision = child.execution_revision, .control_revision = child.control_revision, .event_watermark = child.event_watermark, .observation = .{ .bytes = try json.canonical(a, try self.renderWorkspaceWorkObservation(a, child, snapshot.occurrence, parent.event_high)) } };
+                out.* = .{ .work = try wp.reference(a, .work, id), .execution_revision = child.execution_revision, .control_revision = child.control_revision, .event_watermark = child.event_watermark, .observation = .{ .bytes = try json.canonical(a, try self.renderWorkspaceWorkObservationIn(a, child, snapshot.occurrence, parent.event_high, .{ .current = &observers })) } };
             }
             return .{ .works = snapshots, .bytes = try contracts.encodeOwned(contracts.controller.OwnerView, allocator, .{ .task = parent.id, .event_cut = parent.event_high, .next_message = parent.next_message, .policy = parent.profile.digest, .input_schema = .{ .bytes = try values.schemaBytes(Types.Input, a) }, .input = .{ .bytes = try self.store().object(a, parent.input, null) }, .messages = .{ .items = messages }, .works = .{ .items = works } }) };
-        }
-        fn validateControllerView(self: *Self, a: std.mem.Allocator, parent: state.Task, view: contracts.controller.OwnerView, snapshots: []const workspace.WorkObservation, records: []const state.ArchiveRecord) anyerror!void {
-            var checked: SnapshotValidation = .empty;
-            defer checked.deinit(a);
-            return self.validateControllerViewIn(a, parent, view, snapshots, records, &checked);
         }
         fn validateControllerViewIn(self: *Self, a: std.mem.Allocator, parent: state.Task, view: contracts.controller.OwnerView, snapshots: []const workspace.WorkObservation, records: []const state.ArchiveRecord, checked: *SnapshotValidation) anyerror!void {
             if (!std.meta.eql(view.task, parent.id) or view.event_cut > parent.event_high or view.next_message == 0 or view.next_message > parent.next_message or !std.meta.eql(view.policy, parent.profile.digest) or !same(view.input.bytes, try self.store().object(a, parent.input, null)) or !same(view.input_schema.bytes, try values.schemaBytes(Types.Input, a))) return error.InvalidArchive;
@@ -3573,9 +3980,9 @@ pub fn Service(comptime Types: type) type {
             for (ids, view.works.items, snapshots) |id, fact, snapshot| {
                 const child = snapshot.work;
                 if (!std.meta.eql(id, try wp.identity(fact.work, .work)) or !std.meta.eql(id, child.id) or fact.execution_revision != child.execution_revision or fact.control_revision != child.control_revision or fact.event_watermark != child.event_watermark or child.event_watermark != try self.workspacePublicationAt(a, parent.id, id, view.event_cut)) return error.InvalidArchive;
-                try self.validateWorkspaceWorkSnapshotIn(a, parent, snapshot, records, checked);
+                try self.validateWorkspaceWorkSnapshotIn(parent, snapshot, records, checked);
                 try self.validateHistoricalOccurrence(a, snapshot);
-                if (!same(fact.observation.bytes, try json.canonical(a, try self.renderWorkspaceWorkObservation(a, child, snapshot.occurrence, view.event_cut)))) return error.InvalidArchive;
+                if (!same(fact.observation.bytes, try json.canonical(a, try self.renderWorkspaceWorkObservationIn(a, child, snapshot.occurrence, view.event_cut, .{ .historical = try checked.observer_successors.histories.get(parent.id, view.event_cut) })))) return error.InvalidArchive;
             }
         }
         fn validateControllerMessageCut(self: *Self, a: std.mem.Allocator, parent: state.Task, event_cut: u64, expected_next_message: u64) !void {
@@ -3818,6 +4225,25 @@ pub fn Service(comptime Types: type) type {
             };
         }
 
+        fn controllerOverlayCurrent(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            interaction: state.ControllerInteraction,
+        ) !bool {
+            if (interaction.next_message != parent.next_message or
+                interaction.epoch != parent.controller_epoch) return false;
+            const bytes = try self.store().object(a, interaction.overlay, null);
+            defer a.free(bytes);
+            var overlay = try json.parseAsset(a, bytes, bytes.len);
+            defer overlay.deinit();
+            const control = json.get(overlay.value, "control") orelse
+                return error.InvalidControllerBinding;
+            const target = try values.fromJson(wc.ControllerTarget, a, json.get(control, "realization_target") orelse return error.InvalidControllerBinding);
+            if (target != .action) return error.InvalidControllerBinding;
+            return target.action.realization_revision == parent.realization_revision;
+        }
+
         fn refreshControllerOverlay(self: *Self, a: std.mem.Allocator, parent: state.Task, pending: occurrence.Occurrence) !bool {
             if (pending.work != null or pending.residual != null) return false;
             var route = try self.record(workspace.ExecutionRoute, a, "execution_route", pending.id, parent.id);
@@ -3826,7 +4252,7 @@ pub fn Service(comptime Types: type) type {
             var saved = try self.record(state.ControllerInteraction, a, "controller_interaction", id, parent.id);
             defer saved.deinit();
             if (!std.meta.eql(saved.value.model, pending.id) or !std.meta.eql(saved.value.controller, parent.controller orelse return error.InvalidControllerBinding)) return error.InvalidControllerBinding;
-            if (saved.value.next_message == parent.next_message and saved.value.epoch == parent.controller_epoch) return false;
+            if (try self.controllerOverlayCurrent(a, parent, saved.value)) return false;
             if (pending.state != .ready) return error.UnsettledOccurrence;
             const overlay = try self.controllerOverlay(a, parent, saved.value.controller, id, parent.event_high, parent.next_message, parent.controller_epoch);
             defer a.free(overlay);
@@ -3930,12 +4356,12 @@ pub fn Service(comptime Types: type) type {
                             error.MissingArtifact, error.CorruptObject => .missing_artifact,
                             else => .incompatible_profile,
                         }) else null;
-                    return self.dispatchAcquisition(a, initial, dispatched, entry, request_bytes, prepared, .environment);
+                    return self.dispatchAcquisition(a, initial, dispatched, entry, request_bytes, prepared, .environment, null);
                 },
             }
         }
 
-        fn dispatchAcquisition(self: *Self, a: std.mem.Allocator, initial: state.Task, pending: occurrence.Occurrence, entry: registry.Entry, request_bytes: []const u8, prepared: ?[]const u8, operation_kind: state.AttemptOperation) !Step {
+        fn dispatchAcquisition(self: *Self, a: std.mem.Allocator, initial: state.Task, pending: occurrence.Occurrence, entry: registry.Entry, request_bytes: []const u8, prepared: ?[]const u8, operation_kind: state.AttemptOperation, controller_read: ?state.ControllerReadCut) !Step {
             try self.requireCustody(a, initial.id, pending.work);
             if (self.work != null) return .idle;
             const subject = try self.occurrenceSubject(a, initial, pending);
@@ -3961,10 +4387,26 @@ pub fn Service(comptime Types: type) type {
             errdefer self.allocator.free(retained_profile);
             const controller_context = try self.currentControllerContext(a, initial, pending);
             const work: Work = .{ .owner_epoch = self.owner_epoch, .task = value.id, .subject_work = pending.work, .subject_residual = pending.residual, .occurrence = pending.id, .attempt = attempt, .request = retained, .prepared = retained_prepared, .profile = retained_profile, .entry = entry, .operation = operation_kind, .controller_projection = (try self.projectionBindingAt(a, initial, pending, controller_context)).controller, .cleanup = subject.cleanup };
+            var compiler_input: ?contracts.Decoded(build_job.Input) = null;
+            defer if (compiler_input) |*input| input.deinit();
+            if (operation_kind == .workspace_build)
+                compiler_input = try contracts.decodeOwned(build_job.Input, a, prepared orelse return error.CorruptState);
+            const reads_mutable = if (compiler_input) |input|
+                input.value == .derive and input.value.derive.basis != .immutable
+            else
+                false;
             try self.store().begin();
             defer self.store().rollback();
-            try self.store().createRecord(state.Attempt, "attempt", attempt, value.id, .{ .id = attempt, .task = value.id, .occurrence = pending.id, .request = try self.store().putObject(request_bytes), .profile = value.profile, .capability = try name(entry.declaration.identity), .operation = operation_kind, .inference = entry.declaration.inference, .prepared = if (prepared) |body| try self.store().putObject(body) else null, .controller_context = controller_context });
+            try self.store().createRecord(state.Attempt, "attempt", attempt, value.id, .{ .id = attempt, .task = value.id, .occurrence = pending.id, .request = try self.store().putObject(request_bytes), .profile = value.profile, .capability = try name(entry.declaration.identity), .operation = operation_kind, .inference = entry.declaration.inference, .prepared = if (prepared) |body| try self.store().putObject(body) else null, .controller_context = controller_context, .controller_read = controller_read, .dispatch_checkpoint = if (reads_mutable) initial.checkpoint else null });
             try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, value.id, pending);
+            if (reads_mutable) {
+                const input = compiler_input.?;
+                try validateSemanticReadPosition(input.value.derive.basis, try std.math.add(u64, initial.event_high, 1));
+                try validateControllerReadCut(input.value.derive.basis, controller_read);
+                const event_data = try std.fmt.allocPrint(a, "{{\"attempt_id\":\"{s}\",\"occurrence_id\":\"{s}\"}}", .{ std.fmt.bytesToHex(attempt, .lower), std.fmt.bytesToHex(pending.id, .lower) });
+                defer a.free(event_data);
+                try self.subjectPublicationEvent(&value, .workspace_read, event_data, &.{}, &.{}, null, controller_read, null);
+            }
             try self.effectSchedule(a, &value, pending, .active, null);
             try self.persist(a, value, initial.revision, "effect.dispatch", .preserve);
             self.work = work;
@@ -4517,7 +4959,7 @@ pub fn Service(comptime Types: type) type {
             }
         }
 
-        fn validateOccurrenceProvenance(self: *Self, a: std.mem.Allocator, value: state.Task, records: []const state.ArchiveRecord) !void {
+        fn validateOccurrenceProvenance(self: *Self, a: std.mem.Allocator, value: state.Task, records: []const state.ArchiveRecord, checked: *SnapshotValidation) !void {
             var residual_occurrences: std.AutoHashMap(state.Digest, state.Digest) = .init(a);
             defer residual_occurrences.deinit();
             for (records) |row| if (row.kind == .controller_residual) {
@@ -4691,7 +5133,7 @@ pub fn Service(comptime Types: type) type {
                             try requireArchiveRecord(records, .workspace_reply, saved.id);
                             var evidence = try contracts.decodeOwned(workspace.ReplyObservation, temporary, bytes);
                             defer evidence.deinit();
-                            try self.validateWorkspaceReply(temporary, value, saved, entry, request.value, evidence.value, reply_value.?, records);
+                            try self.validateWorkspaceReply(temporary, value, saved, entry, request.value, evidence.value, reply_value.?, records, checked);
                         } else {
                             try requireArchiveRecord(records, .attempt, reply.attempt);
                             try requireArchiveRecord(records, .capture, reply.attempt);
@@ -4769,7 +5211,7 @@ pub fn Service(comptime Types: type) type {
         /// objects and usage through the same pure adapter, without acquisition.
         /// Uninterpreted bytes remain private evidence, bound to the exact
         /// original attempt; transfer never claims that interpretation succeeds.
-        fn validateCapturedProjections(self: *Self, value: state.Task, records: []const state.ArchiveRecord, mode: enum { inspect, retain }) !void {
+        fn validateCapturedProjections(self: *Self, value: state.Task, records: []const state.ArchiveRecord, mode: enum { inspect, retain }, checked: *SnapshotValidation) !void {
             // Retained unsuccessful/rearmed attempts also need request/profile
             // coherence, even though they have no acquired response.
             for (records) |row| {
@@ -4793,18 +5235,47 @@ pub fn Service(comptime Types: type) type {
                     const authorized_bytes = try self.authorizeWorkspace(temporary, value, entry, request.value.binding.payload);
                     var authorized = try contracts.decodeOwned(workspace.Authorized, temporary, authorized_bytes);
                     defer authorized.deinit();
-                    if (authorized.value.command != .program or authorized.value.command.program != .build) return error.InvalidArchive;
-                    const frozen = try self.workspacePrepareBuild(temporary, value, authorized.value);
+                    if (!workspaceCompiles(authorized.value.command)) return error.InvalidArchive;
+                    const retained_input = try self.store().object(
+                        temporary,
+                        attempt.value.prepared.?,
+                        null,
+                    );
+                    var job = try contracts.decodeOwned(build_job.Input, temporary, retained_input);
+                    defer job.deinit();
+                    if (job.value != .program) {
+                        try self.validateSemanticInput(
+                            temporary,
+                            value,
+                            authorized.value.command.program,
+                            job.value,
+                            records,
+                            attempt.value.controller_read,
+                            checked,
+                        );
+                    }
+                    if (job.value == .program and attempt.value.controller_read != null) return error.InvalidArchive;
+                    const frozen = if (job.value == .program)
+                        try self.workspacePrepareBuild(temporary, value, authorized.value)
+                    else
+                        try self.workspacePrepareSemanticBuild(
+                            temporary,
+                            value,
+                            authorized.value.command.program,
+                            if (job.value == .derive) job.value.derive.basis else null,
+                        );
                     if (!same(frozen, try self.store().object(temporary, attempt.value.prepared.?, null))) return error.InvalidArchive;
                     continue;
                 }
-                if (entry.declaration.kind != .leaf or !same(&request.value.request_identity, &saved.value.request) or
+                if (attempt.value.controller_read != null or entry.declaration.kind != .leaf or !same(&request.value.request_identity, &saved.value.request) or
                     !std.meta.eql(attempt.value.request, saved.value.request_object) or !std.meta.eql(attempt.value.profile, value.profile) or !same(attempt.value.capability.bytes, entry.declaration.identity) or
                     attempt.value.inference != entry.declaration.inference or (attempt.value.prepared != null) != (entry.declaration.capture != null)) return error.InvalidArchive;
                 const attempt_binding = try self.projectionBindingAt(temporary, value, saved.value, attempt.value.controller_context);
                 if (entry.declaration.capture) |adapter| {
                     const prepared = try self.store().object(temporary, attempt.value.prepared.?, null);
-                    const replayed = try self.store().project([]u8, temporary, self.handlers, attempt_binding, struct {
+                    var replay_arena = std.heap.ArenaAllocator.init(self.allocator);
+                    defer replay_arena.deinit();
+                    const replayed = try self.store().project([]u8, replay_arena.allocator(), self.handlers, attempt_binding, struct {
                         adapter: registry.CaptureAdapter,
                         payload: []const u8,
                         pub fn run(this: @This(), context: registry.ProjectionContext) ![]u8 {
@@ -4861,7 +5332,9 @@ pub fn Service(comptime Types: type) type {
                 const adapter = entry.declaration.capture orelse return error.IncompatibleProfile;
                 const rendered = try self.store().object(temporary, capture_value.request, null);
                 const response = try self.store().object(temporary, capture_value.response.?, null);
-                const result = try self.interpretProjection(temporary, value, saved.value, adapter, try entry.payload(temporary, request.value.binding.payload), rendered, response);
+                var interpretation_arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer interpretation_arena.deinit();
+                const result = try self.interpretProjection(interpretation_arena.allocator(), value, saved.value, adapter, try entry.payload(temporary, request.value.binding.payload), rendered, response);
                 if (result.objects.len != projection.objects.items.len or result.output_tokens != projection.output_tokens) return error.CorruptState;
                 for (result.objects, projection.objects.items) |object, reference| {
                     if (object.len != reference.bytes or !same(&storage.digest(object), &reference.digest)) return error.CorruptState;
@@ -4883,22 +5356,7 @@ pub fn Service(comptime Types: type) type {
             if (attempt.operation != .workspace_build or raw.disposition != .complete or raw.response == null or raw.reconciliation != null) return error.InvalidArchive;
             const prepared = try self.store().object(a, raw.request, null);
             const response = try self.store().object(a, raw.response.?, null);
-            const task_name = std.fmt.bytesToHex(parent.id, .lower);
-            const expected = try build_job.run(.{ .allocator = a, .io = self.io, .authority = &self.profile.authority, .task_id = &task_name, .profile = self.profile.bytes, .environment = null }, prepared);
-            var checked_output = try contracts.decodeOwned(build_job.Output, a, expected);
-            defer checked_output.deinit();
-            var recorded_output = try contracts.decodeOwned(build_job.Output, a, response);
-            defer recorded_output.deinit();
-            // Recompilation proves every semantic output byte. Elapsed time is
-            // historical accounting, not a reproducible compiler assertion or
-            // imported authority. The stored projection below still binds it.
-            switch (checked_output.value) {
-                inline else => |*v| v.compiler_nanoseconds = 0,
-            }
-            switch (recorded_output.value) {
-                inline else => |*v| v.compiler_nanoseconds = 0,
-            }
-            if (!same(try contracts.encodeOwned(build_job.Output, a, checked_output.value), try contracts.encodeOwned(build_job.Output, a, recorded_output.value))) return error.InvalidArchive;
+            try self.validateCompilerOutput(parent.id, prepared, response);
             const projection = raw.projection orelse return;
             if (projection.objects.items.len != 0 or projection.output_tokens != null) return error.InvalidArchive;
             const acquired = switch (pending.state) {
@@ -4914,6 +5372,22 @@ pub fn Service(comptime Types: type) type {
             defer bound.deinit();
             var reply = try contracts.decodeOwned(wc.Reply, a, bound.value.value);
             defer reply.deinit();
+            var frozen_input = try contracts.decodeOwned(build_job.Input, a, prepared);
+            defer frozen_input.deinit();
+            if (frozen_input.value != .program) {
+                const observed = try self.retainedSemanticObservation(
+                    a,
+                    parent.id,
+                    frozen_input.value,
+                    output.value,
+                    raw.response.?,
+                );
+                const expected_reply = try self.workspaceSemanticReply(a, parent.id, observed);
+                const encoded = try contracts.encodeOwned(wc.Reply, a, expected_reply);
+                defer a.free(encoded);
+                if (!same(encoded, bound.value.value)) return error.InvalidArchive;
+                return;
+            }
             var program: ?contracts.Decoded(workspace.Program) = null;
             defer if (program) |*item| item.deinit();
             if (output.value == .compiled) {
@@ -4922,11 +5396,13 @@ pub fn Service(comptime Types: type) type {
                 const artifact = program.?.value.description;
                 var input = try contracts.decodeOwned(build_job.Input, a, prepared);
                 defer input.deinit();
-                if (!std.meta.eql(artifact.source, state.Reference{ .digest = storage.digest(input.value.source.bytes), .bytes = input.value.source.bytes.len }) or
-                    @backingInt(artifact.source_kind) != @backingInt(input.value.kind) or !std.meta.eql(artifact.image, state.Reference{ .digest = storage.digest(output.value.compiled.image.bytes), .bytes = output.value.compiled.image.bytes.len })) return error.InvalidArchive;
-                const exposures = try contracts.encodeOwned(contracts.Vector(wc.Exposure, null), a, input.value.exposures);
+                if (input.value != .program) return error.InvalidArchive;
+                const built = input.value.program;
+                if (!std.meta.eql(artifact.source, state.Reference{ .digest = storage.digest(built.source.bytes), .bytes = built.source.bytes.len }) or
+                    @backingInt(artifact.source_kind) != @backingInt(built.kind) or !std.meta.eql(artifact.image, state.Reference{ .digest = storage.digest(output.value.compiled.image.bytes), .bytes = output.value.compiled.image.bytes.len })) return error.InvalidArchive;
+                const exposures = try contracts.encodeOwned(contracts.Vector(wc.Exposure, null), a, built.exposures);
                 if (!same(exposures, try contracts.encodeOwned(contracts.Vector(wc.Exposure, null), a, artifact.exposures))) return error.InvalidArchive;
-                const catalog: ?state.Reference = if (input.value.catalog) |bytes| .{ .digest = storage.digest(bytes.bytes), .bytes = bytes.bytes.len } else null;
+                const catalog: ?state.Reference = if (built.catalog) |bytes| .{ .digest = storage.digest(bytes.bytes), .bytes = bytes.bytes.len } else null;
                 if (!std.meta.eql(catalog, artifact.catalog)) return error.InvalidArchive;
             } else if (reply.value.program != null) return error.InvalidArchive;
             const replayed = try self.workspaceBuildReply(a, if (program) |item| item.value.artifact else null, output.value);
@@ -5263,6 +5739,12 @@ pub fn Service(comptime Types: type) type {
                         try json.put(a, &item, "name", json.string(try a.dupe(u8, peer.name)));
                         try json.put(a, &item, "site", try values.toJson(p.Site, a, peer.site));
                         try json.put(a, &item, "transport", .{ .bool = peer.channel != null });
+                        try json.put(a, &item, "compatibility", try values.toJson(
+                            p.Compatibility,
+                            a,
+                            peer.compatibility,
+                        ));
+                        try json.put(a, &item, "guarded_transfer", .{ .bool = false });
                         try sites.append(item);
                     }
                     try json.put(a, &observation, "sites", .{ .array = sites });
@@ -5557,7 +6039,9 @@ pub fn Service(comptime Types: type) type {
             var outcome = try data.invocation.decode(data.invocation.Outcome, scratch.allocator(), outcome_bytes);
             defer outcome.deinit();
             const observed: p.WorkState = .{ .observed_at = self.store().head.generation, .execution_revision = observed_work.value.execution_revision, .control_revision = observed_work.value.control_revision, .outcome = observed_work.value.outcome_kind, .cleanup_complete = cleanupComplete(outcome.value), .cancellation = observed_work.value.cancellation, .explicitly_parked = try self.workspaceExplicitlyParked(a, observed_work.value), .park_complete = try self.workspaceWorkSettled(a, observed_work.value, false, true) };
-            const report = try p.sign(p.Report, a, self.profile.placement.?.signing_key, .{ .control = try p.digest(p.Control, a, value), .executor = site, .custody_epoch = head.epoch, .reply = reply, .work_state = observed });
+            var lifecycle = observed;
+            lifecycle.observer_active = self.activeObserver(observed_work.value);
+            const report = try p.sign(p.Report, a, self.profile.placement.?.signing_key, .{ .control = try p.digest(p.Control, a, value), .executor = site, .custody_epoch = head.epoch, .reply = reply, .work_state = lifecycle });
             const result = try contracts.encodeOwned(p.Signed(p.Report), a, report);
             errdefer a.free(result);
             try self.placementPutControl(a, peer, .{ .id = id, .task = value.subject.task, .control = signed, .route = .{ .items = route }, .report = report }, result, "placement.control-report");
@@ -5766,6 +6250,7 @@ pub fn Service(comptime Types: type) type {
         pub fn placementCompatibility(self: *Self, a: std.mem.Allocator, subject: @import("placement.zig").Subject) !@import("placement.zig").Compatibility {
             var parent = try self.task(a, subject.task);
             defer parent.deinit();
+            try self.requireObserverMobility(a, parent.value, subject.work);
             // Compatibility belongs to the admitted artifact. Inspecting it
             // must not restore execution or acquire a publication obligation.
             var selected: ?SelectedRuntime = null;
@@ -5773,15 +6258,31 @@ pub fn Service(comptime Types: type) type {
             if (subject.work) |id| {
                 var child = try self.workspaceWork(a, subject.task, id);
                 defer child.deinit();
+                if (child.value.guard != null) return error.GuardedMobilityUnsupported;
                 if (child.value.runtime) |ref| {
                     selected = try self.workspaceRuntime(a, subject.task, ref.digest, child.value.program);
                     if (!std.meta.eql(ref, selected.?.record.value.artifact)) return error.InvalidRuntime;
                 }
+            } else if (parent.value.controller_runtime) |ref| {
+                selected = try self.workspaceRuntime(a, subject.task, ref.digest, null);
+                var program = try self.workspaceProgram(a, subject.task, selected.?.record.value.program);
+                defer program.deinit();
+                if (!std.meta.eql(ref, selected.?.record.value.artifact) or
+                    !std.meta.eql(try self.rootImage(a, parent.value), program.value.description.image)) return error.InvalidRuntime;
             }
             var packaged = try self.program.retainRuntime();
             defer packaged.deinit();
             const manifest = if (selected) |runtime| runtime.admitted.content.value.manifest else packaged.content.value.manifest;
-            return .{ .base = storage.digest(manifest.requirements.base), .admission = storage.digest(manifest.requirements.admission), .bridge = storage.digest(manifest.requirements.bridge), .semantics = manifest.source, .private_state = storage.digest(kosmos.RuntimeCapsule.identity) };
+            const validation = if (selected) |runtime| runtime.record.value.validation else null;
+            return .{
+                .base = storage.digest(manifest.requirements.base),
+                .admission = storage.digest(manifest.requirements.admission),
+                .bridge = storage.digest(manifest.requirements.bridge),
+                .semantics = manifest.source,
+                .private_state = storage.digest(kosmos.RuntimeCapsule.identity),
+                .semantic_root = if (validation) |fact| fact.root else null,
+                .semantic_checker = if (validation) |fact| storage.digest(fact.checker.bytes) else null,
+            };
         }
 
         pub fn placementCut(self: *Self, a: std.mem.Allocator, subject: @import("placement.zig").Subject) !@import("placement.zig").Cut {
@@ -5797,7 +6298,66 @@ pub fn Service(comptime Types: type) type {
             defer parent.deinit();
             var saved = try self.rootOperation(a, parent.value);
             defer if (saved) |*item| item.deinit();
-            return .{ .execution = parent.value.execution_revision, .control = parent.value.revision, .realization = 0, .checkpoint = p.ObjectIdentity.from(parent.value.checkpoint), .outer = p.ObjectIdentity.optional(if (saved != null and saved.?.value.pending != null) saved.?.value.pending.?.capsule else null) };
+            return .{
+                .execution = parent.value.execution_revision,
+                .control = parent.value.revision,
+                .realization = parent.value.realization_revision,
+                .checkpoint = p.ObjectIdentity.from(parent.value.checkpoint),
+                .outer = p.ObjectIdentity.optional(if (saved != null and
+                    saved.?.value.pending != null) saved.?.value.pending.?.capsule else null),
+                .runtime = p.ObjectIdentity.optional(parent.value.controller_runtime),
+            };
+        }
+
+        fn activeObserver(_: *Self, work: workspace.Work) bool {
+            const observer = work.observer orelse return false;
+            return !observer.stopped and observer.successor == null;
+        }
+
+        fn observerHeadIndex(parent: state.Task, id: state.Digest) ?usize {
+            for (parent.observer_heads.items, 0..) |head, index|
+                if (std.meta.eql(head, id)) return index;
+            return null;
+        }
+
+        fn observerHeadOrder(_: void, left: state.Digest, right: state.Digest) bool {
+            return std.mem.order(u8, &left, &right) == .lt;
+        }
+
+        fn observerHeadsAfter(a: std.mem.Allocator, parent: state.Task, removed: ?state.Digest, added: ?state.Digest) ![]state.Digest {
+            var heads: std.ArrayList(state.Digest) = .empty;
+            errdefer heads.deinit(a);
+            for (parent.observer_heads.items, 0..) |head, index| {
+                if (index != 0 and !observerHeadOrder({}, parent.observer_heads.items[index - 1], head))
+                    return error.CorruptState;
+                if (removed) |id| if (std.meta.eql(head, id)) continue;
+                if (added) |id| if (std.meta.eql(head, id)) return error.CorruptState;
+                try heads.append(a, head);
+            }
+            if (added) |id| try heads.append(a, id);
+            std.mem.sort(state.Digest, heads.items, {}, observerHeadOrder);
+            return heads.toOwnedSlice(a);
+        }
+
+        fn requireObserverMobility(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            work_id: ?state.Digest,
+        ) !void {
+            if (parent.observer_heads.items.len != 0) try self.compatible(parent);
+            for (parent.observer_heads.items) |id| {
+                var work = try self.retainedWorkspaceWork(a, parent.id, id);
+                defer work.deinit();
+                const observer = work.value.observer orelse return error.CorruptState;
+                if (!self.activeObserver(work.value)) return error.CorruptState;
+                if (work_id) |selected| {
+                    if (!std.meta.eql(selected, id) and
+                        !std.meta.eql(selected, observer.source_work)) continue;
+                    return error.ActiveObserverMobilityUnsupported;
+                } else if (observer.selection.policy.continuation == .owner_scheduled)
+                    return error.ScheduledObserverMobilityUnsupported;
+            }
         }
 
         fn requireMovableControllerDependency(self: *Self, a: std.mem.Allocator, subject: @import("placement.zig").Subject) !void {
@@ -5873,6 +6433,17 @@ pub fn Service(comptime Types: type) type {
             // Retire before publication. If retirement fails, nothing has been
             // offered and the sole source retains its prior ownership.
             if (self.active) |active| if (std.meta.eql(active.task, subject.task) and ((active.subject != .work and subject.work == null) or (active.subject == .work and std.meta.eql(@as(?state.Digest, active.subject.work), subject.work)))) try self.retire(a);
+            var compiler_facts: CompilerFacts = .{ .allocator = self.allocator };
+            defer compiler_facts.deinit();
+            const prior_compiler_facts = self.compiler_facts;
+            if (self.compiler_facts == null) self.compiler_facts = &compiler_facts;
+            defer self.compiler_facts = prior_compiler_facts;
+            {
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const manifest = try self.store().archiveIndex(arena.allocator(), subject.task, compilerReference(self.assets.manifest));
+                try self.prepareCompilerFacts(manifest, self.store());
+            }
             try self.store().begin();
             defer self.store().rollback();
             // Enabling placement on an existing local task first records its
@@ -5898,9 +6469,7 @@ pub fn Service(comptime Types: type) type {
             const snapshot_a = snapshot_arena.allocator();
             const manifest = try archive_api.prepare(snapshot_a, self.store(), subject.task, self.assets.manifest);
             try self.validateArchiveAdmissions(snapshot_a, parent.value, manifest);
-            try self.validateOccurrenceProvenance(snapshot_a, parent.value, manifest.records.items);
-            try self.validateCapturedProjections(parent.value, manifest.records.items, .inspect);
-            try self.validateWorkspaceRecordBodies(snapshot_a, subject.task, manifest.records.items);
+            try self.validateWorkspaceArchive(snapshot_a, parent.value, manifest.records.items, .inspect);
             try archive_api.retainAssets(snapshot_a, self.store(), self.assets.manifest);
             const snapshot: p.Snapshot = .{ .id = frozen.id, .task = subject.task, .work = subject.work, .frozen = .{ .intent = intent, .manifest = manifest } };
             if (try self.store().recordBytes(snapshot_a, "placement_snapshot", snapshot.id, snapshot.task)) |bytes| {
@@ -6028,6 +6597,11 @@ pub fn Service(comptime Types: type) type {
         pub fn exportCheckpoint(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, path: []const u8) !archive_api.Exported {
             try self.archiveAccess();
             try self.retire(a);
+            var compiler_facts: CompilerFacts = .{ .allocator = self.allocator };
+            defer compiler_facts.deinit();
+            const prior_compiler_facts = self.compiler_facts;
+            if (self.compiler_facts == null) self.compiler_facts = &compiler_facts;
+            defer self.compiler_facts = prior_compiler_facts;
             _ = try self.store().auditRetention(self.handlers, self.application.image_identity);
             var value = try self.task(a, task_id);
             defer value.deinit();
@@ -6037,9 +6611,7 @@ pub fn Service(comptime Types: type) type {
                 defer arena.deinit();
                 const index = try self.store().archiveIndex(arena.allocator(), task_id, .{ .digest = storage.digest(self.assets.manifest), .bytes = self.assets.manifest.len });
                 try self.validateArchiveAdmissions(arena.allocator(), value.value, index);
-                try self.validateOccurrenceProvenance(arena.allocator(), value.value, index.records.items);
-                try self.validateCapturedProjections(value.value, index.records.items, .inspect);
-                try self.validateWorkspaceRecordBodies(arena.allocator(), task_id, index.records.items);
+                try self.validateWorkspaceArchive(arena.allocator(), value.value, index.records.items, .inspect);
             }
             return archive_api.write(self.allocator, self.io, self.store(), task_id, self.assets.manifest, path, self.namespace.directory);
         }
@@ -6102,10 +6674,21 @@ pub fn Service(comptime Types: type) type {
             var tasks_present = try self.store().database.prepare("SELECT 1 FROM tasks LIMIT 1", &.{});
             defer tasks_present.deinit();
             if (try tasks_present.step() == .row) return error.NonEmptyNamespace;
+            var compiler_facts: CompilerFacts = .{ .allocator = self.allocator };
+            defer compiler_facts.deinit();
+            const prior_compiler_facts = self.compiler_facts;
+            if (self.compiler_facts == null) self.compiler_facts = &compiler_facts;
+            defer self.compiler_facts = prior_compiler_facts;
+            try self.prepareCompilerFacts(reader.manifest.value, &reader);
             try self.store().begin();
             defer self.store().rollback();
             try reader.acquire(self.store());
-            var inspected = try archive_api.inspect(a, self.store(), reader.manifest.value, null);
+            var inspected = inspected: {
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const result = try archive_api.inspect(arena.allocator(), self.store(), reader.manifest.value, null);
+                break :inspected .{ .task = result.task, .current = result.current };
+            };
             defer inspected.task.deinit();
             var value = inspected.task.value;
             if (!same(value.principal.bytes, self.profile.authority.principal) or !same(value.tenant.bytes, self.profile.authority.tenant)) return error.Denied;
@@ -6132,9 +6715,7 @@ pub fn Service(comptime Types: type) type {
             // original operation identities and all related input history.
             try self.store().restoreArchiveIndex(a, reader.manifest.value, value);
             try self.validateArchiveAdmissions(a, value, reader.manifest.value);
-            try self.validateOccurrenceProvenance(a, value, reader.manifest.value.records.items);
-            try self.validateCapturedProjections(value, reader.manifest.value.records.items, .retain);
-            try self.validateWorkspaceRecordBodies(a, value.id, reader.manifest.value.records.items);
+            try self.validateWorkspaceArchive(a, value, reader.manifest.value.records.items, .retain);
             // This transaction contains untrusted, unpublished archive data.
             // Reuse the closure validator without treating semantic rejection
             // as corruption of the committed namespace. Store integrity and
@@ -6345,7 +6926,23 @@ pub fn Service(comptime Types: type) type {
         }
         fn workspaceCommandFrom(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, admitted: workspace.Authorized, basis: ?workspace.ReadObservation) !wc.Reply {
             try self.allowed();
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            var observers = CurrentObservers.init(a, task_id, parent.value.event_high);
+            defer observers.deinit();
+            return self.workspaceCommandFromIn(a, operation_id, task_id, admitted, basis, .{ .current = &observers });
+        }
+
+        fn workspaceCommandFromIn(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, admitted: workspace.Authorized, basis: ?workspace.ReadObservation, observers: ObserverScope) !wc.Reply {
+            try self.allowed();
             const command = admitted.command;
+            var compiler_facts: CompilerFacts = .{ .allocator = self.allocator };
+            defer compiler_facts.deinit();
+            const prior_compiler_facts = self.compiler_facts;
+            if (command == .context and
+                (command.context == .materialize or command.context == .select) and
+                self.compiler_facts == null) self.compiler_facts = &compiler_facts;
+            defer self.compiler_facts = prior_compiler_facts;
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatible(parent.value);
@@ -6353,7 +6950,7 @@ pub fn Service(comptime Types: type) type {
                 if (self.store().fenced or err == error.OutOfMemory or err == error.StorageUnavailable) return err;
                 return workspaceRejection(a, err);
             };
-            const executed = self.workspaceExecute(a, operation_id, task_id, admitted, basis) catch |err| {
+            const executed = self.workspaceExecute(a, operation_id, task_id, admitted, basis, observers) catch |err| {
                 if (self.store().fenced or err == error.OutOfMemory or err == error.StorageUnavailable) return err;
                 return workspaceRejection(a, err);
             };
@@ -6373,7 +6970,15 @@ pub fn Service(comptime Types: type) type {
             else
                 null;
             const evidence: ?wc.Ref = if (!rejected and observation == .object) blk: {
-                const result = if (command == .context and command.context == .materialize) observation.object.get("value") else if (command == .work) observation.object.get("result") else null;
+                const result = if (command == .context and command.context == .materialize)
+                    observation.object.get("value")
+                else if (command == .work)
+                    observation.object.get("result")
+                else if (command == .program and
+                    (command.program == .derive or command.program == .validate))
+                    observation.object.get("runtime") orelse observation.object.get("candidate")
+                else
+                    null;
                 break :blk if (result) |ref| try values.fromJson(wc.Ref, a, ref) else null;
             } else null;
             return .{ .disposition = if (rejected) .rejected else .observed, .observation_json = .{ .bytes = try json.canonical(a, observation) }, .selected_view = selected, .program = program, .evidence = evidence };
@@ -6386,7 +6991,7 @@ pub fn Service(comptime Types: type) type {
 
         const WorkspaceExecution = union(enum) { observation: json.Value, admitted: Admission };
 
-        fn workspaceExecute(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, authorized: workspace.Authorized, basis: ?workspace.ReadObservation) !WorkspaceExecution {
+        fn workspaceExecute(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, authorized: workspace.Authorized, basis: ?workspace.ReadObservation, observers: ObserverScope) !WorkspaceExecution {
             const command = authorized.command;
             switch (command) {
                 .placement => return error.InvalidState,
@@ -6406,6 +7011,7 @@ pub fn Service(comptime Types: type) type {
                     },
                     .describe => |request| {
                         const description = switch (request.section) {
+                            .semantic_candidates => try self.workspaceSemanticContract(a, basis),
                             .source_records => try @import("source_records.zig").describe(a),
                             .values => try a.dupe(u8, "Runtime values use JSON arrays for products and sequences, {\"tag\":ordinal,\"value\":payload} for sums, {} for unit, booleans, exact decimal strings for 64-bit integers, UTF-8 strings for text, and base64url strings for bytes. Supply the actual program input schema reference. Program source uses the separately described Horos record transport."),
                             .bindings => try a.dupe(u8, "Pure source records require no environmental adapter. No effect request grants authority. Workspace observations and input ports do not restrict the controller's next action."),
@@ -6435,6 +7041,9 @@ pub fn Service(comptime Types: type) type {
                                 try json.put(a, &observation, "binding", try values.toJson(state.ControllerBinding, a, binding));
                                 const epoch = if (basis) |frozen| frozen.controller.epoch else parent.value.controller_epoch;
                                 try json.put(a, &observation, "controller_epoch", try json.number(a, epoch));
+                                try json.put(a, &observation, "execution_revision", try json.number(a, if (basis) |frozen| frozen.controller.execution_revision else parent.value.execution_revision));
+                                try json.put(a, &observation, "realization_revision", try json.number(a, if (basis) |frozen| frozen.controller.realization_revision else parent.value.realization_revision));
+                                try json.put(a, &observation, "selected_runtime", try values.toJson(?state.Reference, a, if (basis) |frozen| frozen.controller.runtime else parent.value.controller_runtime));
                                 var residuals: json.Value = .{ .array = .init(a) };
                                 const residual_ids = if (basis) |frozen| frozen.controller.residuals.items else try self.controllerResidualIds(a, task_id);
                                 defer if (basis == null) a.free(residual_ids);
@@ -6475,14 +7084,38 @@ pub fn Service(comptime Types: type) type {
                         return .{ .admitted = admitted };
                     },
                     .inspect => |request| {
-                        if (request.program.kind == .runtime) {
-                            var selected = try self.workspaceRuntime(a, task_id, try wp.identity(request.program, .runtime), null);
+                        if (request.target == .semantic_source) {
+                            return .{ .observation = try self.workspaceSemanticSource(
+                                a,
+                                task_id,
+                                request.target.semantic_source,
+                                request.page,
+                                basis,
+                            ) };
+                        }
+                        const ref = request.target.program;
+                        if (ref.kind == .candidate) {
+                            var candidate = try self.workspaceCandidate(
+                                a,
+                                task_id,
+                                try wp.identity(ref, .candidate),
+                            );
+                            defer candidate.deinit();
+                            const text = try json.canonical(
+                                a,
+                                try self.workspaceCandidateObservation(a, candidate.value),
+                            );
+                            defer a.free(text);
+                            return .{ .observation = try wp.page(a, text, request.page) };
+                        }
+                        if (ref.kind == .runtime) {
+                            var selected = try self.workspaceRuntime(a, task_id, try wp.identity(ref, .runtime), null);
                             defer selected.deinit();
                             const text = try json.canonical(a, try self.workspaceRuntimeObservation(a, selected.record.value));
                             defer a.free(text);
                             return .{ .observation = try wp.page(a, text, request.page) };
                         }
-                        const id = try wp.identity(request.program, .program);
+                        const id = try wp.identity(ref, .program);
                         var program_value = try self.workspaceProgram(a, task_id, id);
                         defer program_value.deinit();
                         const observed = try self.workspaceProgramObservation(a, id, program_value.value.description);
@@ -6491,8 +7124,21 @@ pub fn Service(comptime Types: type) type {
                         return .{ .observation = try wp.page(a, text, request.page) };
                     },
                     .specialize => |request| return .{ .admitted = try self.workspaceSpecializeWithHooks(a, operation_id, task_id, try wp.identity(request.program, .program), request.hooks) },
+                    .derive, .validate => return .{ .admitted = try self.workspaceSemanticCommand(
+                        a,
+                        operation_id,
+                        task_id,
+                        program,
+                    ) },
                 },
                 .work => |work_command| switch (work_command) {
+                    .stop_observing => |selection| return .{ .admitted = try self.workspaceStopObserving(a, operation_id, task_id, selection) },
+                    .observe => |selection| return .{ .admitted = try self.workspaceObserve(
+                        a,
+                        operation_id,
+                        task_id,
+                        selection,
+                    ) },
                     .start => |request| {
                         const program_id = try wp.identity(request.program, .program);
                         var program = try self.workspaceProgram(a, task_id, program_id);
@@ -6522,10 +7168,23 @@ pub fn Service(comptime Types: type) type {
                             defer selected.deinit();
                             break :blk selected.record.value.artifact;
                         } else null;
-                        return .{ .admitted = try self.workspaceStartAdmitted(a, operation_id, task_id, program_id, input, request.policy, origin, null, selected, request.trial, null) };
+                        return .{ .admitted = try self.workspaceStartAdmitted(a, operation_id, task_id, program_id, input, request.policy, origin, null, selected, request.trial, null, null) };
                     },
                     .pump => |request| return .{ .admitted = try self.workspacePump(a, operation_id, task_id, request) },
                     .realize => |request| return .{ .admitted = try self.workspaceRealize(a, operation_id, task_id, request) },
+                    .realize_controller => |request| return .{ .admitted = try self.workspaceRealizeController(a, operation_id, task_id, request) },
+                    .guard => |request| return .{ .admitted = try self.workspaceGuard(
+                        a,
+                        operation_id,
+                        task_id,
+                        .{ .guard = request },
+                    ) },
+                    .unguard => |request| return .{ .admitted = try self.workspaceGuard(
+                        a,
+                        operation_id,
+                        task_id,
+                        .{ .unguard = request },
+                    ) },
                     .request_cut => |request| return .{ .admitted = try self.workspaceRequestCut(a, operation_id, task_id, request) },
                     .inspect => |request| {
                         if (request.work.kind == .residual) {
@@ -6534,18 +7193,20 @@ pub fn Service(comptime Types: type) type {
                             defer residual.deinit();
                             return .{ .observation = try self.controllerResidualObservation(a, .from(residual.value)) };
                         }
-                        if (basis) |frozen| return .{ .observation = try self.renderWorkspaceWorkObservation(a, frozen.works.works.items[0].?.work, frozen.works.works.items[0].?.occurrence, frozen.works.event_watermark) };
+                        if (basis) |frozen| return .{ .observation = try self.renderWorkspaceWorkObservationIn(a, frozen.works.works.items[0].?.work, frozen.works.works.items[0].?.occurrence, frozen.works.event_watermark, try observers.at(task_id, frozen.works.event_watermark)) };
                         var value = try self.workspaceWork(a, task_id, try wp.identity(request.work, .work));
                         defer value.deinit();
                         return .{ .observation = try self.workspaceWorkObservation(a, value.value) };
                     },
                     .collect => |request| {
+                        var parent = try self.task(a, task_id);
+                        defer parent.deinit();
                         var result: json.Value = .{ .array = .init(a) };
                         for (request.works.items, 0..) |ref, i| {
                             if (basis) |frozen| {
                                 const item = frozen.works.works.items[i];
                                 if (item) |observed| {
-                                    try result.array.append(try self.renderWorkspaceWorkObservation(a, observed.work, observed.occurrence, frozen.works.event_watermark));
+                                    try result.array.append(try self.renderWorkspaceWorkObservationIn(a, observed.work, observed.occurrence, frozen.works.event_watermark, try observers.at(task_id, frozen.works.event_watermark)));
                                 } else {
                                     var missing = json.object();
                                     try json.put(a, &missing, "work", try values.toJson(wc.Ref, a, ref));
@@ -6563,7 +7224,7 @@ pub fn Service(comptime Types: type) type {
                                 continue;
                             };
                             defer value.deinit();
-                            try result.array.append(try self.workspaceWorkObservation(a, value.value));
+                            try result.array.append(try self.workspaceWorkObservationIn(a, value.value, parent.value.event_high, try observers.at(task_id, parent.value.event_high)));
                         }
                         return .{ .observation = result };
                     },
@@ -6597,12 +7258,12 @@ pub fn Service(comptime Types: type) type {
                             if (basis) |frozen| {
                                 const observed = frozen.wait.works.items[i].?;
                                 ready = ready or observed.work.event_watermark > request.after or observed.work.terminal();
-                                try selected.array.append(try self.renderWorkspaceWorkObservation(a, observed.work, observed.occurrence, frozen.wait.event_watermark));
+                                try selected.array.append(try self.renderWorkspaceWorkObservationIn(a, observed.work, observed.occurrence, frozen.wait.event_watermark, try observers.at(task_id, frozen.wait.event_watermark)));
                             } else {
                                 var work = try self.workspaceWork(a, task_id, try wp.identity(ref, .work));
                                 defer work.deinit();
                                 ready = ready or work.value.event_watermark > request.after or work.value.terminal();
-                                try selected.array.append(try self.workspaceWorkObservation(a, work.value));
+                                try selected.array.append(try self.workspaceWorkObservationIn(a, work.value, parent.value.event_high, try observers.at(task_id, parent.value.event_high)));
                             }
                         }
                         try json.put(a, &result, "ready", .{ .bool = ready });
@@ -6702,11 +7363,22 @@ pub fn Service(comptime Types: type) type {
             const bytes = try self.store().object(a, receipt_value.workspace_observation orelse return error.CorruptState, null);
             defer a.free(bytes);
             var observation = switch (receipt_value.workspace_kind orelse return error.CorruptState) {
+                .controller => blk: {
+                    if (!std.meta.eql(receipt_value.workspace.?, rootIdentity(task_id))) return error.InvalidArchive;
+                    var fact = try contracts.decodeOwned(workspace.ControllerRealization, a, bytes);
+                    defer fact.deinit();
+                    break :blk try values.toJson(workspace.ControllerRealization, a, fact.value);
+                },
                 .residual => blk: {
                     var residual = try contracts.decodeOwned(state.ControllerResidual, a, bytes);
                     defer residual.deinit();
                     if (!std.meta.eql(residual.value.task, task_id) or !std.meta.eql(residual.value.id, receipt_value.workspace.?)) return error.InvalidArchive;
                     break :blk try self.controllerResidualObservation(a, .from(residual.value));
+                },
+                .candidate => blk: {
+                    var selected = try contracts.decodeOwned(workspace.SemanticObservation, a, bytes);
+                    defer selected.deinit();
+                    break :blk try self.workspaceSemanticObservation(a, task_id, selected.value);
                 },
                 .runtime => blk: {
                     var selected = try contracts.decodeOwned(workspace.Runtime, a, bytes);
@@ -6726,8 +7398,18 @@ pub fn Service(comptime Types: type) type {
                     if (self.workspace_replay) |replay_only| {
                         var parent = try self.task(a, task_id);
                         defer parent.deinit();
-                        try self.validateWorkspaceWorkSnapshot(a, parent.value, value.value, replay_only.records);
+                        try self.validateWorkspaceWorkSnapshotIn(parent.value, value.value, replay_only.records, replay_only.checked);
                         try self.validateHistoricalOccurrence(a, value.value);
+                        break :blk try self.renderWorkspaceWorkObservationIn(a, value.value.work, value.value.occurrence, value.value.work.event_watermark, .{
+                            .historical = try replay_only.checked.observer_successors.histories.get(task_id, value.value.work.event_watermark),
+                        });
+                    }
+                    var parent = try self.task(a, task_id);
+                    defer parent.deinit();
+                    if (value.value.work.event_watermark == parent.value.event_high) {
+                        var observers = CurrentObservers.init(a, task_id, parent.value.event_high);
+                        defer observers.deinit();
+                        break :blk try self.renderWorkspaceWorkObservationIn(a, value.value.work, value.value.occurrence, parent.value.event_high, .{ .current = &observers });
                     }
                     break :blk try self.renderWorkspaceWorkObservation(a, value.value.work, value.value.occurrence, value.value.work.event_watermark);
                 },
@@ -6738,6 +7420,383 @@ pub fn Service(comptime Types: type) type {
             try json.put(a, &observation, "replayed", .{ .bool = admitted.replayed });
             try json.put(a, &observation, "receipt_revision", try json.number(a, receipt_value.revision));
             return observation;
+        }
+
+        const SemanticRuntime = struct {
+            admitted: kosmos.RuntimeArtifact,
+            guest: state.Reference,
+            reference: ?state.Digest = null,
+
+            fn deinit(value: *SemanticRuntime) void {
+                value.admitted.deinit();
+            }
+        };
+
+        fn requireSemanticPolicy(self: *Self, root: state.Digest, checker: []const u8) !void {
+            const policy = self.profile.semantic_construction orelse return error.SemanticPolicyDenied;
+            const root_allowed = for (policy.roots) |permitted| {
+                if (std.meta.eql(permitted, root)) break true;
+            } else false;
+            const checker_allowed = for (policy.checkers) |permitted| {
+                if (same(permitted, checker)) break true;
+            } else false;
+            if (!root_allowed or !checker_allowed) return error.SemanticPolicyDenied;
+        }
+
+        fn requireRuntimePolicy(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, reference: ?state.Reference) !void {
+            const ref = reference orelse return;
+            if (self.runtime_cache) |*cached| {
+                if (cached.epoch == self.store().integrity_epoch and std.meta.eql(cached.artifact.identity, ref.digest))
+                    return self.requireSemanticPolicy(kosmos.RuntimeCompiler.approvedRootIdentity(&cached.artifact), kosmos.RuntimeCompiler.checker_identity);
+            }
+            var selected = try self.workspaceRuntime(a, task_id, ref.digest, null);
+            defer selected.deinit();
+            try self.requireSemanticPolicy(kosmos.RuntimeCompiler.approvedRootIdentity(&selected.admitted), kosmos.RuntimeCompiler.checker_identity);
+        }
+
+        fn workspaceSemanticPolicy(self: *Self, a: std.mem.Allocator) !?workspace.SemanticPolicyObservation {
+            const policy = self.profile.semantic_construction orelse return null;
+            const checkers = try a.alloc(state.Name, policy.checkers.len);
+            for (policy.checkers, checkers) |checker, *checker_name|
+                checker_name.* = .{ .bytes = checker };
+            return .{
+                .roots = .{ .items = policy.roots },
+                .checkers = .{ .items = checkers },
+                .guard = policy.guard,
+            };
+        }
+
+        fn workspaceSemanticContract(
+            self: *Self,
+            a: std.mem.Allocator,
+            basis: ?workspace.ReadObservation,
+        ) ![]u8 {
+            const selected = if (basis) |frozen| blk: {
+                if (frozen != .semantic_policy) return error.InvalidArchive;
+                break :blk frozen.semantic_policy.policy;
+            } else try self.workspaceSemanticPolicy(a);
+            defer if (basis == null) if (selected) |policy| a.free(policy.checkers.items);
+            var result = json.object();
+            const schema = try @import("source_records.zig").describeRecord(
+                construction.CandidateDocument,
+                a,
+            );
+            defer a.free(schema);
+            try json.put(a, &result, "contract", json.string("protean-semantic-candidate/1"));
+            try json.put(a, &result, "checker_identity", json.string(
+                kosmos.RuntimeCompiler.checker_identity,
+            ));
+            try json.put(a, &result, "proposal_schema", json.string(try a.dupe(u8, schema)));
+            const indexed_schema = try @import("source_records.zig").describeRecord(
+                @import("source_records.zig").IndexedDocument,
+                a,
+            );
+            defer a.free(indexed_schema);
+            try json.put(a, &result, "indexed_source_schema", json.string(
+                try a.dupe(u8, indexed_schema),
+            ));
+            var roots: json.Value = .{ .array = .init(a) };
+            var checkers: json.Value = .{ .array = .init(a) };
+            if (selected) |policy| {
+                for (policy.roots.items) |root| try roots.array.append(json.string(
+                    try a.dupe(u8, &std.fmt.bytesToHex(root, .lower)),
+                ));
+                for (policy.checkers.items) |checker| try checkers.array.append(
+                    json.string(try a.dupe(u8, checker.bytes)),
+                );
+            }
+            try json.put(a, &result, "approved_roots", roots);
+            try json.put(a, &result, "checkers", checkers);
+            try json.put(a, &result, "derived_use_permitted", .{
+                .bool = selected != null,
+            });
+            try json.put(a, &result, "controller_realization", .{
+                .bool = selected != null,
+            });
+            try json.put(a, &result, "controller_realization_target", json.string("work.realize_controller accepts an exact cut or the current control.realization_target from the authenticated controller action; pending outer evaluation or controller adoption must settle first"));
+            try json.put(a, &result, "reference_guarded", .{
+                .bool = if (selected) |policy| policy.guard else false,
+            });
+            return json.canonical(a, result);
+        }
+
+        pub fn workspaceCandidate(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            digest: state.Digest,
+        ) !contracts.Decoded(workspace.Candidate) {
+            const id = try workspaceContentCustody(a, task_id, digest);
+            var saved = try self.record(workspace.Candidate, a, "workspace_candidate", id, task_id);
+            errdefer saved.deinit();
+            const value = saved.value;
+            const bytes = try contracts.encodeOwned(workspace.CandidateArtifact, a, value.description);
+            defer a.free(bytes);
+            if (!std.meta.eql(value.task, task_id) or !std.meta.eql(value.id, id) or
+                !std.meta.eql(value.artifact, state.Reference{
+                    .digest = storage.digest(bytes),
+                    .bytes = bytes.len,
+                }) or !std.meta.eql(value.artifact.digest, digest) or
+                value.description.version != 1) return error.InvalidCandidate;
+            var program = try self.workspaceProgram(a, task_id, value.program);
+            defer program.deinit();
+            if (!std.meta.eql(program.value.description.image, value.description.guest))
+                return error.InvalidCandidate;
+            const code = try self.store().object(a, value.description.code, null);
+            defer a.free(code);
+            var admitted = try kosmos.RuntimeArtifact.init(a, code, value.description.code.digest);
+            defer admitted.deinit();
+            const lineage = admitted.content.value.lineage orelse return error.InvalidCandidate;
+            if (!std.meta.eql(lineage.parent, value.description.ancestor.digest))
+                return error.InvalidCandidate;
+            const guest = try self.store().object(a, value.description.guest, null);
+            defer a.free(guest);
+            const guest_image = try data.program_image.Admitted.decode(a, guest);
+            defer guest_image.deinit();
+            if (!std.meta.eql(admitted.content.value.guest, @as(?state.Digest, guest_image.identity())) or
+                !std.meta.eql(kosmos.RuntimeCompiler.approvedRootIdentity(&admitted), value.description.root) or
+                !same(admitted.content.value.manifest.compiler.policy, value.description.checker.bytes))
+                return error.InvalidCandidate;
+            return saved;
+        }
+
+        fn validateCandidateProduction(
+            self: *Self,
+            a: std.mem.Allocator,
+            candidate: workspace.Candidate,
+        ) !void {
+            const d = candidate.description;
+            const proposal_bytes = try self.store().object(a, d.proposal, null);
+            defer a.free(proposal_bytes);
+            if (d.producer) |producer| {
+                const expected = try self.workspaceProposal(a, candidate.task, .{ .reference = try wp.reference(a, .value, producer.digest) });
+                defer a.free(expected);
+                if (!same(proposal_bytes, expected)) return error.InvalidCandidate;
+            }
+            try self.validateCandidateCompiler(a, candidate, self.store());
+        }
+
+        fn validateCandidateCompiler(self: *Self, a: std.mem.Allocator, candidate: workspace.Candidate, source: anytype) !void {
+            const d = candidate.description;
+            const descriptor = try contracts.encodeOwned(workspace.CandidateArtifact, a, d);
+            defer a.free(descriptor);
+            if (!std.meta.eql(candidate.artifact, compilerReference(descriptor))) return error.InvalidCandidate;
+            const fact: CompilerFact = .{ .kind = .candidate, .input = candidate.artifact, .output = d.code };
+            if (try self.compilerFact(fact)) return;
+            const ancestor_bytes = try source.object(a, d.ancestor, null);
+            defer a.free(ancestor_bytes);
+            var ancestor = try kosmos.RuntimeArtifact.init(a, ancestor_bytes, d.ancestor.digest);
+            defer ancestor.deinit();
+            const guest_bytes = try source.object(a, d.guest, null);
+            defer a.free(guest_bytes);
+            const guest = try data.program_image.Admitted.decode(a, guest_bytes);
+            defer guest.deinit();
+            const proposal_bytes = try source.object(a, d.proposal, null);
+            defer a.free(proposal_bytes);
+            var document = try @import("source_records.zig").decodeRecord(
+                construction.CandidateDocument,
+                a,
+                proposal_bytes,
+            );
+            defer document.deinit();
+            if (document.value.version != 1) return error.InvalidCandidate;
+            const code = try kosmos.RuntimeCompiler.deriveRecord(
+                a,
+                &ancestor,
+                guest,
+                document.value.proposal,
+                .{ .horos_package = @import("native_options").horos_identity },
+            );
+            defer a.free(code);
+            if (!std.meta.eql(d.code, state.Reference{
+                .digest = storage.digest(code),
+                .bytes = code.len,
+            })) return error.InvalidCandidate;
+            try self.retainCompilerFact(fact);
+        }
+
+        fn workspaceCandidateObservation(
+            self: *Self,
+            a: std.mem.Allocator,
+            candidate: workspace.Candidate,
+        ) !json.Value {
+            _ = self;
+            var result = json.object();
+            try json.put(a, &result, "candidate", try values.toJson(
+                wc.Ref,
+                a,
+                try wp.reference(a, .candidate, candidate.artifact.digest),
+            ));
+            try json.put(a, &result, "construction", json.string("admitted"));
+            try json.put(a, &result, "validation", json.string("not_requested"));
+            try json.put(a, &result, "runtime_authority", .{ .bool = false });
+            try json.put(a, &result, "program", try values.toJson(
+                wc.Ref,
+                a,
+                try wp.reference(a, .program, candidate.program),
+            ));
+            try json.put(a, &result, "proposal", try values.toJson(
+                wc.Ref,
+                a,
+                try wp.reference(a, .source, candidate.description.proposal.digest),
+            ));
+            try json.put(a, &result, "artifact", try values.toJson(
+                workspace.CandidateArtifact,
+                a,
+                candidate.description,
+            ));
+            return result;
+        }
+
+        fn workspaceSemanticSource(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            selection: @FieldType(wc.InspectionTarget, "semantic_source"),
+            page: wc.Page,
+            basis: ?workspace.ReadObservation,
+        ) !json.Value {
+            var resolved = try self.semanticRuntime(a, task_id, selection.subject, basis);
+            defer resolved.deinit();
+            var result = try self.renderSemanticSource(
+                a,
+                &resolved.admitted,
+                resolved.guest,
+                selection.section,
+                page,
+            );
+            const subject: wc.SemanticTarget = if (resolved.reference) |identity| blk: {
+                const ref = try wp.reference(a, .runtime, identity);
+                try json.put(a, &result, "runtime", try values.toJson(wc.Ref, a, ref));
+                break :blk .{ .runtime = ref };
+            } else selection.subject;
+            try json.put(a, &result, "subject", try values.toJson(wc.SemanticTarget, a, subject));
+            try json.put(a, &result, "runtime_identity", json.string(
+                try a.dupe(u8, &std.fmt.bytesToHex(resolved.admitted.identity, .lower)),
+            ));
+            try json.put(a, &result, "guest_image", try values.toJson(
+                state.Reference,
+                a,
+                resolved.guest,
+            ));
+            return result;
+        }
+
+        fn semanticRuntime(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            subject: wc.SemanticTarget,
+            basis: ?workspace.ReadObservation,
+        ) !SemanticRuntime {
+            if (basis) |frozen| switch (subject) {
+                .runtime => if (frozen != .immutable) return error.InvalidArchive,
+                .controller => if (frozen != .controller) return error.InvalidArchive,
+                .work => if (frozen != .works or frozen.works.works.items.len != 1 or
+                    frozen.works.works.items[0] == null) return error.InvalidArchive,
+            };
+            switch (subject) {
+                .runtime => |ref| {
+                    var selected = try self.workspaceRuntime(
+                        a,
+                        task_id,
+                        try wp.identity(ref, .runtime),
+                        null,
+                    );
+                    errdefer selected.admitted.deinit();
+                    defer selected.record.deinit();
+                    var program = try self.workspaceProgram(a, task_id, selected.record.value.program);
+                    defer program.deinit();
+                    return .{
+                        .admitted = selected.admitted,
+                        .guest = program.value.description.image,
+                        .reference = selected.admitted.identity,
+                    };
+                },
+                .work => |selection| {
+                    const observed = if (basis) |frozen|
+                        frozen.works.works.items[0] orelse return error.ArtifactUnavailable
+                    else
+                        try self.freezeWorkspaceWork(a, task_id, selection.expected.work, false);
+                    const work = observed.work;
+                    if (!std.meta.eql(work.id, try wp.identity(selection.expected.work, .work)) or
+                        work.execution_revision != selection.expected.execution_revision or
+                        work.control_revision != selection.expected.control_revision or
+                        work.realization_revision != selection.realization_revision)
+                    {
+                        return error.StaleRevision;
+                    }
+                    var program = try self.workspaceProgram(a, task_id, work.program);
+                    defer program.deinit();
+                    if (work.runtime) |ref| {
+                        var selected = try self.workspaceRuntime(
+                            a,
+                            task_id,
+                            ref.digest,
+                            work.program,
+                        );
+                        selected.record.deinit();
+                        return .{
+                            .admitted = selected.admitted,
+                            .guest = program.value.description.image,
+                            .reference = selected.admitted.identity,
+                        };
+                    }
+                    return .{
+                        .admitted = try self.program.retainRuntime(),
+                        .guest = program.value.description.image,
+                    };
+                },
+                .controller => |selection| {
+                    return self.semanticControllerRuntime(a, task_id, selection, basis);
+                },
+            }
+        }
+
+        fn semanticControllerRuntime(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            selection: wc.ControllerTarget,
+            basis: ?workspace.ReadObservation,
+        ) !SemanticRuntime {
+            var saved = try self.task(a, task_id);
+            defer saved.deinit();
+            const parent = saved.value;
+            const epoch = if (basis) |frozen| frozen.controller.epoch else parent.controller_epoch;
+            const execution = if (basis) |frozen|
+                frozen.controller.execution_revision
+            else
+                parent.execution_revision;
+            const realization = if (basis) |frozen|
+                frozen.controller.realization_revision
+            else
+                parent.realization_revision;
+            switch (selection) {
+                .cut => |cut| if (epoch != cut.epoch or execution != cut.execution_revision or
+                    realization != cut.realization_revision) return error.StaleRevision,
+                .action => |action| {
+                    const id = try wp.identity(.{ .kind = .controller, .id = action.interaction }, .controller);
+                    const interaction = if (basis) |frozen|
+                        frozen.controller.interaction
+                    else
+                        parent.controller_interaction;
+                    if (!std.meta.eql(interaction, @as(?state.Digest, id)) or
+                        action.epoch != epoch or action.realization_revision != realization)
+                        return error.StaleController;
+                },
+            }
+            const binding = if (basis) |frozen| frozen.controller.binding else parent.controller;
+            const guest = if (binding) |id|
+                (try self.controllerBinding(a, parent, id)).image
+            else
+                parent.image;
+            const runtime = if (basis) |frozen| frozen.controller.runtime else parent.controller_runtime;
+            return .{
+                .admitted = try self.controllerRuntime(a, task_id, guest, runtime),
+                .guest = guest,
+                .reference = if (runtime) |ref| ref.digest else null,
+            };
         }
 
         fn workspaceProgramObservation(self: *Self, a: std.mem.Allocator, id: state.Digest, artifact: workspace.ProgramArtifact) !json.Value {
@@ -6773,16 +7832,37 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn workspaceWorkObservation(self: *Self, a: std.mem.Allocator, value: workspace.Work) !json.Value {
+            var parent = try self.task(a, value.task);
+            defer parent.deinit();
+            var observers = CurrentObservers.init(a, value.task, parent.value.event_high);
+            defer observers.deinit();
+            return self.workspaceWorkObservationIn(a, value, parent.value.event_high, .{ .current = &observers });
+        }
+
+        fn workspaceWorkObservationIn(self: *Self, a: std.mem.Allocator, value: workspace.Work, observed_at: u64, observers: WorkObservers) !json.Value {
             var pending: ?contracts.Decoded(occurrence.Occurrence) = null;
             defer if (pending) |*saved| saved.deinit();
             if (value.current_occurrence) |id| pending = try self.record(occurrence.Occurrence, a, "occurrence", id, value.task);
-            var parent = try self.task(a, value.task);
-            defer parent.deinit();
-            return self.renderWorkspaceWorkObservation(a, value, if (pending) |saved| saved.value else null, parent.value.event_high);
+            return self.renderWorkspaceWorkObservationIn(a, value, if (pending) |saved| saved.value else null, observed_at, observers);
         }
 
         fn renderWorkspaceWorkObservation(self: *Self, a: std.mem.Allocator, value: workspace.Work, pending: ?occurrence.Occurrence, observed_at: u64) !json.Value {
+            var observers = HistoricalObservers.init(self.allocator, value.task, observed_at);
+            defer observers.deinit();
+            return self.renderWorkspaceWorkObservationIn(a, value, pending, observed_at, .{
+                .historical = .{ .index = &observers, .watermark = observed_at },
+            });
+        }
+
+        fn renderWorkspaceWorkObservationIn(self: *Self, a: std.mem.Allocator, value: workspace.Work, pending: ?occurrence.Occurrence, observed_at: u64, observers: WorkObservers) !json.Value {
+            const observation_blocked = try observers.blocked(self, value, observed_at);
             var result = json.object();
+            try json.put(a, &result, "interpretation_evidence", try self.workspaceInterpretationEvidence(
+                a,
+                value,
+                pending,
+                observed_at,
+            ));
             try json.put(a, &result, "work", try values.toJson(wc.Ref, a, try wp.reference(a, .work, value.id)));
             try json.put(a, &result, "program", try values.toJson(wc.Ref, a, try wp.reference(a, .program, value.program)));
             try json.put(a, &result, "execution_revision", try json.number(a, value.execution_revision));
@@ -6794,6 +7874,33 @@ pub fn Service(comptime Types: type) type {
             try json.put(a, &result, "outer_operation", try values.toJson(?state.Reference, a, if (value.outer_operation) |operation_value| operation_value.capsule else null));
             try json.put(a, &result, "runtime_capsule", try values.toJson(?state.Reference, a, value.runtime_capsule));
             try json.put(a, &result, "runtime_trace", try values.toJson(?kosmos.RuntimeInstrumentation.Output, a, if (value.runtime_trace) |trace| trace.output else null));
+            try json.put(a, &result, "guard", try values.toJson(?workspace.Guard, a, value.guard));
+            try json.put(a, &result, "observation_blocked", .{ .bool = observation_blocked });
+            if (value.observer) |observer| {
+                var observed = json.object();
+                try json.put(a, &observed, "source", try values.toJson(wc.GuestViewSelection, a, observer.selection.source));
+                try json.put(a, &observed, "policy", try values.toJson(wc.ObserverPolicy, a, observer.selection.policy));
+                try json.put(a, &observed, "previous", try values.toJson(
+                    ?wc.Ref,
+                    a,
+                    observer.selection.previous,
+                ));
+                try json.put(a, &observed, "successor", try values.toJson(
+                    ?wc.Ref,
+                    a,
+                    if (observer.successor) |id| try wp.reference(a, .work, id) else null,
+                ));
+                try json.put(a, &observed, "consumed_revision", try values.toJson(?u64, a, observer.consumed_revision));
+                try json.put(a, &observed, "gap_first", try values.toJson(?u64, a, observer.gap_first));
+                try json.put(a, &observed, "gap_last", try values.toJson(?u64, a, observer.gap_last));
+                try json.put(a, &observed, "stopped", .{ .bool = observer.stopped });
+                try json.put(a, &observed, "incomplete", try values.toJson(
+                    @TypeOf(observer.incomplete),
+                    a,
+                    observer.incomplete,
+                ));
+                try json.put(a, &result, "observer", observed);
+            }
             try json.put(a, &result, "event_watermark", try json.number(a, observed_at));
             try json.put(a, &result, "outcome", json.string(@tagName(value.outcome_kind)));
             try json.put(a, &result, "schedule", json.string(@tagName(value.schedule)));
@@ -6850,6 +7957,98 @@ pub fn Service(comptime Types: type) type {
                 try json.put(a, &result, "result_preview", try @import("dynamic_values.zig").preview(a, schema, bytes));
             }
             return result;
+        }
+
+        fn workspaceInterpretationEvidence(
+            self: *Self,
+            a: std.mem.Allocator,
+            work: workspace.Work,
+            pending: ?occurrence.Occurrence,
+            observed_at: u64,
+        ) !json.Value {
+            var program = try self.workspaceProgram(a, work.task, work.program);
+            defer program.deinit();
+            const input = work.input_value orelse return error.CorruptState;
+            const bytes = try self.store().object(a, input, null);
+            defer a.free(bytes);
+            var artifact = try contracts.decodeOwned(workspace.ValueArtifact, a, bytes);
+            defer artifact.deinit();
+            var result = json.object();
+            try json.put(a, &result, "evidence_class", json.string("experimental"));
+            try json.put(a, &result, "analysis_checker", .null);
+            try json.put(a, &result, "program", try values.toJson(
+                wc.Ref,
+                a,
+                try wp.reference(a, .program, work.program),
+            ));
+            try json.put(a, &result, "executable", try values.toJson(
+                state.Reference,
+                a,
+                program.value.description.image,
+            ));
+            try json.put(a, &result, "work", try values.toJson(
+                wc.Ref,
+                a,
+                try wp.reference(a, .work, work.id),
+            ));
+            try json.put(a, &result, "input", try values.toJson(
+                wc.Ref,
+                a,
+                try wp.reference(a, .value, input.digest),
+            ));
+            try json.put(a, &result, "input_provenance", try values.toJson(
+                wc.Ref,
+                a,
+                try wp.reference(a, .provenance, artifact.value.provenance.digest),
+            ));
+            try json.put(a, &result, "result", if (work.result_value) |ref|
+                try values.toJson(wc.Ref, a, try wp.reference(a, .value, ref.digest))
+            else
+                .null);
+            try json.put(a, &result, "observed_control_trace", try workspaceInterpretationTrace(
+                a,
+                work,
+                pending,
+                observed_at,
+            ));
+            try json.put(a, &result, "scope", json.string("actual_program_execution"));
+            try json.put(a, &result, "interpretation_claims", json.string("not_independently_checked"));
+            try json.put(a, &result, "coverage", json.string("committed_publications_only"));
+            try json.put(a, &result, "reference_semantics", json.string(
+                "input_provenance_does_not_certify_use",
+            ));
+            try json.put(a, &result, "stopping_disposition", json.string(@tagName(work.outcome_kind)));
+            return result;
+        }
+
+        fn workspaceInterpretationTrace(
+            a: std.mem.Allocator,
+            work: workspace.Work,
+            pending: ?occurrence.Occurrence,
+            observed_at: u64,
+        ) !json.Value {
+            return values.toJson(
+                struct {
+                    task: state.TaskId,
+                    through_event: u64,
+                    execution_revision: u64,
+                    control_revision: u64,
+                    checkpoint: state.Reference,
+                    control: workspace.ControlObservation,
+                },
+                a,
+                .{
+                    .task = work.task,
+                    .through_event = observed_at,
+                    .execution_revision = work.execution_revision,
+                    .control_revision = work.control_revision,
+                    .checkpoint = work.checkpoint,
+                    .control = workspace.ControlObservation.from(.{
+                        .work = work,
+                        .occurrence = pending,
+                    }),
+                },
+            );
         }
 
         fn workspacePortObservation(self: *Self, a: std.mem.Allocator, port: workspace.Port) !json.Value {
@@ -6979,7 +8178,7 @@ pub fn Service(comptime Types: type) type {
             value.control_revision = try std.math.add(u64, value.control_revision, 1);
             value.event_watermark = try std.math.add(u64, parent.value.event_high, 1);
             value.schedule = .queued;
-            try self.store().putRecord(workspace.Work, "workspace_work", value.id, task_id, value);
+            try self.writeWorkspaceWork(&value, .replace);
             const admitted = try self.workspaceCommit(a, parent.value, operation_id, request_digest, value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, task_id), .{ .interact = interaction });
             return admitted;
         }
@@ -6987,14 +8186,29 @@ pub fn Service(comptime Types: type) type {
         const WorkspaceSource = union(enum) { text: []u8, value: WorkspaceValueReference };
 
         fn workspaceSource(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, ref: wc.Ref) ![]u8 {
+            if (ref.kind == .value) {
+                const source = try self.workspaceValueReference(a, task_id, ref);
+                const records = @import("source_records.zig");
+                const schema = try values.schemaBytes(records.Document, a);
+                defer a.free(schema);
+                if (!std.meta.eql(source.schema, state.Reference{
+                    .digest = storage.digest(schema),
+                    .bytes = schema.len,
+                })) return error.SchemaMismatch;
+                const bytes = try self.store().object(a, source.value, null);
+                defer a.free(bytes);
+                var document = try contracts.decodeOwned(records.Document, a, bytes);
+                defer document.deinit();
+                if (document.value.version != 1) return error.UnsupportedVersion;
+                return records.encode(a, document.value.module);
+            }
             return switch (try self.resolveWorkspaceSource(a, task_id, ref)) {
                 .text => |text| text,
-                // Runtime value JSON has no named-record objects: its only
-                // objects are unit {} and sums {tag,value}. Neither is a
-                // source Document {version,module} or a Recipe
-                // {instances,bindings,entry}. Do not expand incompatible data
-                // on the owner before handing construction to the worker.
-                .value => error.InvalidParams,
+                .value => |source| self.workspaceSource(
+                    a,
+                    task_id,
+                    try wp.reference(a, .value, source.artifact.digest),
+                ),
             };
         }
 
@@ -7021,7 +8235,9 @@ pub fn Service(comptime Types: type) type {
                 defer record_value.deinit();
                 if (!std.meta.eql(record_value.value.description.provenance.digest, id)) continue;
                 const checked = try self.workspaceValueReference(a, task_id, try wp.reference(a, .value, record_value.value.artifact.digest));
-                if (record_value.value.derivation.frozen_input != null) {
+                if (record_value.value.derivation.frozen_input != null or
+                    record_value.value.derivation.semantic_source != null)
+                {
                     return .{ .value = checked };
                 }
                 const origin = record_value.value.derivation.acquisition orelse continue;
@@ -7042,6 +8258,31 @@ pub fn Service(comptime Types: type) type {
                 defer program.deinit();
                 if (std.meta.eql(program.value.description.source.digest, id)) return .{ .text = try self.store().object(a, program.value.description.source, null) };
             }
+            var candidates = try self.store().database.prepare(
+                "SELECT id FROM records WHERE task=? AND kind='workspace_candidate' ORDER BY id",
+                &.{.{ .blob = &task_id }},
+            );
+            defer candidates.deinit();
+            while (try candidates.step() == .row) {
+                const key = try candidates.bytes(0);
+                if (key.len != 32) return error.CorruptState;
+                var saved = try self.record(
+                    workspace.Candidate,
+                    a,
+                    "workspace_candidate",
+                    key[0..32].*,
+                    task_id,
+                );
+                defer saved.deinit();
+                if (!std.meta.eql(saved.value.description.proposal.digest, id)) continue;
+                var candidate = try self.workspaceCandidate(a, task_id, saved.value.artifact.digest);
+                defer candidate.deinit();
+                return .{ .text = try self.store().object(
+                    a,
+                    candidate.value.description.proposal,
+                    null,
+                ) };
+            }
             return error.ArtifactUnavailable;
         }
         const WorkspaceValueReference = struct { artifact: state.Reference, value: state.Reference, schema: state.Reference, provenance: state.Reference };
@@ -7056,32 +8297,46 @@ pub fn Service(comptime Types: type) type {
                 if (same(try query.bytes(1), "workspace_value")) {
                     var value = try self.record(workspace.Value, a, "workspace_value", key[0..32].*, task_id);
                     defer value.deinit();
+                    const declared = if (ref.kind == .schema) value.value.description.schema else value.value.description.provenance;
+                    if (!std.meta.eql(declared.digest, id)) continue;
                     const checked = try self.workspaceValueReference(a, task_id, try wp.reference(a, .value, value.value.artifact.digest));
                     const candidate = if (ref.kind == .schema) checked.schema else checked.provenance;
                     if (std.meta.eql(candidate.digest, id)) return candidate;
                 } else if (ref.kind == .schema) {
                     var saved = try self.record(workspace.Program, a, "workspace_program", key[0..32].*, task_id);
                     defer saved.deinit();
+                    if (workspaceProgramDescriptor(saved.value.description, id) == null) continue;
                     var program = try self.workspaceProgram(a, task_id, saved.value.artifact.digest);
                     defer program.deinit();
-                    inline for (.{ "input_schema", "result_schema", "failure_schema" }) |field| {
-                        const candidate = @field(program.value.description, field);
-                        if (std.meta.eql(candidate.digest, id)) return candidate;
-                    }
-                    for (program.value.description.controller_schemas.items) |candidate| if (std.meta.eql(candidate.digest, id)) return candidate;
-                    for (program.value.description.ports.items) |port| inline for (.{ "argument", "observation", "payload", "command" }) |field| {
-                        const candidate = @field(port, field);
-                        if (std.meta.eql(candidate.digest, id)) return candidate;
-                    };
+                    if (workspaceProgramDescriptor(program.value.description, id)) |candidate| return candidate;
                 }
             }
             return error.ArtifactUnavailable;
+        }
+
+        fn workspaceProgramDescriptor(program: workspace.ProgramArtifact, id: state.Digest) ?state.Reference {
+            inline for (.{ "input_schema", "result_schema", "failure_schema" }) |field| {
+                const candidate = @field(program, field);
+                if (std.meta.eql(candidate.digest, id)) return candidate;
+            }
+            for (program.controller_schemas.items) |candidate| if (std.meta.eql(candidate.digest, id)) return candidate;
+            for (program.ports.items) |port| inline for (.{ "argument", "observation", "payload", "command" }) |field| {
+                const candidate = @field(port, field);
+                if (std.meta.eql(candidate.digest, id)) return candidate;
+            };
+            return null;
         }
 
         fn workspaceDerivationObservation(self: *Self, a: std.mem.Allocator, derivation: workspace.Derivation) !json.Value {
             _ = self;
             var result = json.object();
             try json.put(a, &result, "kind", json.string(@tagName(derivation.kind)));
+            if (derivation.kind == .computation or derivation.kind == .trial or
+                derivation.kind == .judgment or derivation.kind == .hypothesis)
+            {
+                try json.put(a, &result, "evidence_class", json.string("experimental"));
+                try json.put(a, &result, "analysis_checker", .null);
+            }
             var sources: json.Value = .{ .array = .init(a) };
             for (derivation.sources.items) |ref| try sources.array.append(try values.toJson(wc.Ref, a, try wp.reference(a, .value, ref.digest)));
             try json.put(a, &result, "sources", sources);
@@ -7096,8 +8351,25 @@ pub fn Service(comptime Types: type) type {
             }
             if (derivation.frozen_input) |ref| try json.put(a, &result, "frozen_input", try values.toJson(state.Reference, a, ref));
             if (derivation.inspection) |origin| {
-                try json.put(a, &result, "inspection", try values.toJson(wc.GuestViewSelection, a, .{ .expected = .{ .work = try wp.reference(a, .work, origin.observation.work.id), .execution_revision = origin.observation.work.execution_revision, .control_revision = origin.observation.work.control_revision }, .realization_revision = origin.observation.work.realization_revision, .nodes = origin.nodes }));
+                try json.put(a, &result, "inspection", try values.toJson(wc.GuestViewSelection, a, .{ .level = origin.level, .expected = .{ .work = try wp.reference(a, .work, origin.observation.work.id), .execution_revision = origin.observation.work.execution_revision, .control_revision = origin.observation.work.control_revision }, .realization_revision = origin.observation.work.realization_revision, .nodes = origin.nodes, .disclosure = origin.disclosure }));
                 try json.put(a, &result, "checkpoint", try values.toJson(state.Reference, a, origin.observation.work.checkpoint));
+            }
+            if (derivation.semantic_source) |origin| {
+                try json.put(a, &result, "semantic_source", try values.toJson(
+                    @TypeOf(origin.selection),
+                    a,
+                    origin.selection,
+                ));
+                try json.put(a, &result, "semantic_runtime", try values.toJson(
+                    state.Reference,
+                    a,
+                    origin.runtime,
+                ));
+                try json.put(a, &result, "guest_image", try values.toJson(
+                    state.Reference,
+                    a,
+                    origin.guest,
+                ));
             }
             return result;
         }
@@ -7158,7 +8430,15 @@ pub fn Service(comptime Types: type) type {
             var derivation = try contracts.decodeOwned(workspace.Derivation, a, provenance);
             defer derivation.deinit();
             try json.put(a, &result, "derivation", try self.workspaceDerivationObservation(a, derivation.value));
-            if (derivation.value.acquisition != null or derivation.value.frozen_input != null) try json.put(a, &result, "source", try values.toJson(wc.Ref, a, try wp.reference(a, .source, value.provenance.digest)));
+            if (derivation.value.acquisition != null or derivation.value.frozen_input != null or
+                derivation.value.semantic_source != null)
+            {
+                try json.put(a, &result, "source", try values.toJson(
+                    wc.Ref,
+                    a,
+                    try wp.reference(a, .source, value.provenance.digest),
+                ));
+            }
             return result;
         }
 
@@ -7201,10 +8481,38 @@ pub fn Service(comptime Types: type) type {
             if (try self.replay(a, operation_id, request)) |prior| return prior;
             try self.requireCustody(a, task_id, null);
             if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
+            var compiler_facts: CompilerFacts = .{ .allocator = self.allocator };
+            defer compiler_facts.deinit();
+            const prior_compiler_facts = self.compiler_facts;
+            if (self.compiler_facts == null) self.compiler_facts = &compiler_facts;
+            defer self.compiler_facts = prior_compiler_facts;
+            try self.prepareWorkspaceContext(a, task_id, command);
+            var semantic = if (command == .materialize and
+                command.materialize.input == .semantic_source)
+                try self.prepareSemanticValue(a, parent.value, command.materialize.input.semantic_source)
+            else
+                null;
+            defer if (semantic) |*prepared| prepared.deinit(a);
             try self.store().begin();
             defer self.store().rollback();
             const artifact: state.Reference, const kind: @FieldType(wc.Ref, "kind") = switch (command) {
                 .materialize => |materialize| blk: {
+                    if (semantic) |prepared| {
+                        if (materialize.sources.items.len != 0) return error.InvalidMaterialization;
+                        _ = try self.store().putObject(prepared.runtime);
+                        const result = try self.workspacePublishValue(
+                            a,
+                            task_id,
+                            try self.store().putObject(prepared.schema),
+                            try self.store().putObject(prepared.value),
+                            .{
+                                .kind = .inspection,
+                                .sources = .{ .items = &.{} },
+                                .semantic_source = prepared.origin,
+                            },
+                        );
+                        break :blk .{ result, .value };
+                    }
                     if (materialize.input == .guest_view) {
                         if (materialize.sources.items.len != 0) return error.InvalidMaterialization;
                         const selection = materialize.input.guest_view;
@@ -7217,7 +8525,7 @@ pub fn Service(comptime Types: type) type {
                         defer prepared.deinit();
                         const code = try prepared.runtime.encode(a);
                         defer a.free(code);
-                        const origin: workspace.Inspection = .{ .observation = observed, .nodes = selection.nodes, .runtime_code = try self.store().putObject(code) };
+                        const origin: workspace.Inspection = .{ .level = selection.level, .observation = observed, .nodes = selection.nodes, .disclosure = selection.disclosure, .runtime_code = try self.store().putObject(code) };
                         const derived = try self.workspaceInspectionBytes(a, task_id, origin);
                         defer a.free(derived.schema);
                         defer a.free(derived.value);
@@ -7290,7 +8598,124 @@ pub fn Service(comptime Types: type) type {
             return self.workspaceCommit(a, parent.value, operation_id, request, artifact.digest, kind, artifact, .{ .context = .{ .command = command, .snapshot = snapshot, .input = input } });
         }
 
+        fn prepareWorkspaceContext(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, command: wc.Context) !void {
+            switch (command) {
+                .materialize => |materialize| switch (materialize.input) {
+                    .value => |input| {
+                        for (materialize.sources.items) |ref| _ = try self.workspaceValueReference(a, task_id, ref);
+                        switch (input) {
+                            .reference => |ref| _ = try self.workspaceValueReference(a, task_id, ref),
+                            .inline_json => |value| _ = try self.workspaceOwnedDescriptor(a, task_id, value.schema),
+                        }
+                    },
+                    .guest_view => |selection| {
+                        if (materialize.sources.items.len != 0) return error.InvalidMaterialization;
+                        const observed = try self.freezeWorkspaceWork(a, task_id, selection.expected.work, false);
+                        try inspectionSelection(observed.work, selection);
+                        var prepared = try self.inspectionRuntime(a, observed.work);
+                        prepared.deinit();
+                    },
+                    .snapshot, .authorized_input, .semantic_source => {},
+                },
+                .select => |selection| for (selection.values.items) |ref| {
+                    _ = try self.workspaceValueReference(a, task_id, ref);
+                },
+                else => return error.InvalidState,
+            }
+        }
+
+        const PreparedSemanticValue = struct {
+            schema: []u8,
+            value: []u8,
+            runtime: []u8,
+            origin: workspace.SemanticSource,
+            basis: contracts.Decoded(workspace.ReadObservation),
+
+            fn deinit(prepared: *PreparedSemanticValue, a: std.mem.Allocator) void {
+                a.free(prepared.schema);
+                a.free(prepared.value);
+                a.free(prepared.runtime);
+                prepared.basis.deinit();
+            }
+        };
+
+        fn prepareSemanticValue(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            selection: @FieldType(wc.Materialization, "semantic_source"),
+        ) !PreparedSemanticValue {
+            const request: wc.Command = .{ .program = .{ .inspect = .{
+                .target = .{ .semantic_source = .{
+                    .subject = selection.subject,
+                    .section = .{ .summary = .{} },
+                } },
+                .page = .{},
+            } } };
+            const basis_bytes = try self.workspaceReadBasis(a, parent, request);
+            defer a.free(basis_bytes);
+            var basis = try contracts.decodeOwned(workspace.ReadObservation, a, basis_bytes);
+            errdefer basis.deinit();
+            const resolved = try self.semanticRuntime(a, parent.id, selection.subject, basis.value);
+            var admitted = resolved.admitted;
+            defer admitted.deinit();
+            const runtime = try admitted.encode(a);
+            errdefer a.free(runtime);
+            const derived = try self.renderSemanticValue(
+                a,
+                &admitted,
+                selection.module,
+                selection.references,
+            );
+            return .{
+                .schema = derived.schema,
+                .value = derived.value,
+                .runtime = runtime,
+                .basis = basis,
+                .origin = .{
+                    .selection = selection,
+                    .basis = basis.value,
+                    .guest = resolved.guest,
+                    .runtime = .{ .digest = storage.digest(runtime), .bytes = runtime.len },
+                },
+            };
+        }
+
+        fn semanticValueBytes(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            origin: workspace.SemanticSource,
+        ) !construction.SemanticValue {
+            var resolved = try self.semanticRuntime(
+                a,
+                task_id,
+                origin.selection.subject,
+                origin.basis,
+            );
+            defer resolved.deinit();
+            if (!std.meta.eql(origin.guest, resolved.guest) or
+                !std.meta.eql(origin.runtime.digest, resolved.admitted.identity))
+            {
+                return error.InvalidArchive;
+            }
+            const bytes = try self.store().object(a, origin.runtime, null);
+            defer a.free(bytes);
+            var retained = try kosmos.RuntimeArtifact.init(a, bytes, origin.runtime.digest);
+            defer retained.deinit();
+            return self.renderSemanticValue(
+                a,
+                &retained,
+                origin.selection.module,
+                origin.selection.references,
+            );
+        }
+
         fn workspaceValueReference(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, ref: wc.Ref) !WorkspaceValueReference {
+            return self.workspaceValueReferenceIn(a, task_id, ref, null);
+        }
+
+        fn workspaceValueReferenceIn(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, ref: wc.Ref, checked: ?*SnapshotValidation) !WorkspaceValueReference {
             const id = try wp.identity(ref, .value);
             const key = try workspaceContentCustody(a, task_id, id);
             var saved = try self.record(workspace.Value, a, "workspace_value", key, task_id);
@@ -7301,7 +8726,30 @@ pub fn Service(comptime Types: type) type {
             const provenance = try contracts.encodeOwned(workspace.Derivation, a, saved.value.derivation);
             defer a.free(provenance);
             if (saved.value.description.version != 1 or !std.meta.eql(storage.digest(encoded), id) or encoded.len != saved.value.artifact.bytes or !std.meta.eql(storage.digest(provenance), saved.value.description.provenance.digest)) return error.CorruptState;
-            if (saved.value.derivation.inspection) |origin| {
+            if (saved.value.derivation.semantic_source) |origin| {
+                const d = saved.value.derivation;
+                if (d.kind != .inspection or d.sources.items.len != 0 or d.program != null or
+                    d.work != null or d.acquisition != null or d.frozen_input != null or
+                    d.delegation != null or d.capture != null or d.inspection != null)
+                {
+                    return error.InvalidArchive;
+                }
+                const fact: SnapshotValidation.Key = .{ .kind = .semantic_source, .task = task_id, .identity = id };
+                const facts = if (checked) |context| if (context.semantic_sources) context else null else null;
+                if (facts == null or !facts.?.facts.contains(fact)) {
+                    const derived = try self.semanticValueBytes(a, task_id, origin);
+                    defer a.free(derived.schema);
+                    defer a.free(derived.value);
+                    if (!std.meta.eql(saved.value.description.schema, state.Reference{
+                        .digest = storage.digest(derived.schema),
+                        .bytes = derived.schema.len,
+                    }) or !std.meta.eql(saved.value.description.value, state.Reference{
+                        .digest = storage.digest(derived.value),
+                        .bytes = derived.value.len,
+                    })) return error.InvalidArchive;
+                    if (facts) |validated| try validated.facts.put(validated.allocator, fact, .checked);
+                }
+            } else if (saved.value.derivation.inspection) |origin| {
                 const d = saved.value.derivation;
                 if (d.kind != .inspection or d.sources.items.len != 0 or d.program != null or d.work != null or d.acquisition != null or d.frozen_input != null or d.delegation != null or d.capture != null) return error.InvalidArchive;
                 const derived = try self.workspaceInspectionBytes(a, task_id, origin);
@@ -7335,7 +8783,7 @@ pub fn Service(comptime Types: type) type {
             } else if (saved.value.derivation.kind == .acquisition) return error.CorruptState;
             if (saved.value.derivation.delegation != null or saved.value.derivation.capture != null) try self.validateDelegatedValue(a, task_id, saved.value);
             const origin = saved.value.derivation;
-            if (origin.program == null and origin.work == null and origin.acquisition == null and origin.frozen_input == null and origin.delegation == null and origin.capture == null and origin.inspection == null) {
+            if (origin.program == null and origin.work == null and origin.acquisition == null and origin.frozen_input == null and origin.delegation == null and origin.capture == null and origin.inspection == null and origin.semantic_source == null) {
                 const expected: @TypeOf(origin.kind) = if (origin.sources.items.len == 0) .hypothesis else .judgment;
                 if (origin.kind != expected) return error.InvalidArchive;
             }
@@ -7361,7 +8809,8 @@ pub fn Service(comptime Types: type) type {
             return self.program.prepare(a, image);
         }
 
-        fn workspaceInspectionBytes(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, origin: workspace.Inspection) !struct { schema: []u8, value: []u8 } {
+        const InspectionValue = struct { schema: []u8, value: []u8 };
+        fn workspaceInspectionBytes(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, origin: workspace.Inspection) !InspectionValue {
             const work = origin.observation.work;
             if (!std.meta.eql(work.task, task_id)) return error.Denied;
             try self.validateWorkspacePublication(a, task_id, origin.observation);
@@ -7370,12 +8819,14 @@ pub fn Service(comptime Types: type) type {
             const code = try self.store().object(a, origin.runtime_code, null);
             defer a.free(code);
             if (!std.meta.eql(prepared.runtime.identity, origin.runtime_code.digest)) return error.InvalidRuntime;
+            if (origin.level == .outer_execution)
+                return self.workspaceOuterInspection(a, &prepared, origin);
             const checkpoint = try self.store().object(a, work.checkpoint, null);
             defer a.free(checkpoint);
             var mask: ?[]bool = null;
             defer if (mask) |items| a.free(items);
             if (origin.nodes == .selected) {
-                var decoded = try data.state_image.decodeGraph(a, checkpoint);
+                var decoded = try data.state_image.decodeGraphBorrowed(a, checkpoint, .{});
                 defer decoded.deinit();
                 mask = try a.alloc(bool, decoded.state.nodes.len);
                 @memset(mask.?, false);
@@ -7384,7 +8835,22 @@ pub fn Service(comptime Types: type) type {
                     mask.?[@intCast(node)] = true;
                 }
             }
-            const disclosure = try operation(struct { task: state.TaskId, work: state.Digest, checkpoint: state.Reference, scope: wc.NodeScope }, a, .{ .task = task_id, .work = work.id, .checkpoint = work.checkpoint, .scope = origin.nodes });
+            const disclosure = try operation(struct {
+                task: state.TaskId,
+                work: state.Digest,
+                checkpoint: state.Reference,
+                scope: wc.NodeScope,
+                disclosure: ?wc.Disclosure,
+            }, a, .{ .task = task_id, .work = work.id, .checkpoint = work.checkpoint, .scope = origin.nodes, .disclosure = origin.disclosure });
+            if (origin.disclosure) |selected| return self.workspaceDetailedInspection(
+                a,
+                &prepared,
+                work,
+                checkpoint,
+                mask,
+                selected,
+                disclosure,
+            );
             var view = try kosmos.RuntimeViews.capture(a, prepared.guest.core.?.admitted(), checkpoint, .{
                 .guest = prepared.guest.core.?.admitted().identity(),
                 .core = prepared.runtime.content.value.manifest.source,
@@ -7399,6 +8865,85 @@ pub fn Service(comptime Types: type) type {
             const schema = try kosmos.RuntimeViews.schemaBytes(a);
             errdefer a.free(schema);
             return .{ .schema = schema, .value = try kosmos.RuntimeViews.encode(a, view.value) };
+        }
+
+        fn workspaceOuterInspection(
+            self: *Self,
+            a: std.mem.Allocator,
+            prepared: *kosmos.Prepared,
+            origin: workspace.Inspection,
+        ) !InspectionValue {
+            if (origin.disclosure) |selected| if (selected.snapshot)
+                return error.InvalidDisclosure;
+            const work = origin.observation.work;
+            const ref = if (work.outer_operation) |pending| pending.capsule else work.runtime_capsule orelse return error.OuterCutUnavailable;
+            const bytes = try self.store().object(a, ref, null);
+            defer a.free(bytes);
+            var capsule = try kosmos.RuntimeCapsule.read(a, bytes);
+            defer capsule.deinit();
+            if (capsule.value.record.kind != .outer_execution)
+                return error.OuterCutUnavailable;
+            var graph = try data.state_image.decodeGraphBorrowed(a, capsule.value.checkpoint, .{});
+            defer graph.deinit();
+            var mask: ?[]bool = null;
+            defer if (mask) |selected| a.free(selected);
+            if (origin.nodes == .selected) {
+                mask = try a.alloc(bool, graph.state.nodes.len);
+                @memset(mask.?, false);
+                for (origin.nodes.selected.items) |node| {
+                    if (node >= mask.?.len) return error.InvalidDisclosure;
+                    mask.?[@intCast(node)] = true;
+                }
+            }
+            const disclosure = try @import("workspace_observers.zig").disclosure(a, graph.state.nodes.len, mask, origin.disclosure orelse .{});
+            defer disclosure.deinit(a);
+            const identity = try operation(workspace.Inspection, a, origin);
+            var view = try kosmos.RuntimeCapsule.inspectOuter(a, prepared.guest.core.?.admitted(), &prepared.runtime, bytes, disclosure.value, identity);
+            defer view.deinit();
+            const schema = try kosmos.RuntimeCapsule.outerViewSchemaBytes(a);
+            errdefer a.free(schema);
+            return .{ .schema = schema, .value = try kosmos.RuntimeCapsule.encodeOuterView(a, view.value) };
+        }
+
+        fn workspaceDetailedInspection(
+            _: *Self,
+            a: std.mem.Allocator,
+            prepared: *kosmos.Prepared,
+            work: workspace.Work,
+            checkpoint: []const u8,
+            nodes: ?[]const bool,
+            selected: wc.Disclosure,
+            disclosure: state.Digest,
+        ) !InspectionValue {
+            var graph = try data.state_image.decodeGraphBorrowed(a, checkpoint, .{});
+            defer graph.deinit();
+            const scope = try @import("workspace_observers.zig").disclosure(
+                a,
+                graph.state.nodes.len,
+                nodes,
+                selected,
+            );
+            defer scope.deinit(a);
+            var view = try kosmos.RuntimeViews.captureDetailed(
+                a,
+                prepared.guest.core.?.admitted(),
+                checkpoint,
+                .{
+                    .guest = prepared.guest.core.?.admitted().identity(),
+                    .core = prepared.runtime.content.value.manifest.source,
+                    .realization = prepared.runtime.identity,
+                    .checkpoint = work.checkpoint.digest,
+                    .execution = work.id,
+                    .guest_revision = work.execution_revision,
+                    .realization_revision = work.realization_revision,
+                    .disclosure = disclosure,
+                },
+                scope.value,
+            );
+            defer view.deinit();
+            const schema = try kosmos.RuntimeViews.detailedSchemaBytes(a);
+            errdefer a.free(schema);
+            return .{ .schema = schema, .value = try kosmos.RuntimeViews.encodeDetailed(a, view.value) };
         }
 
         fn validateDelegatedValue(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, value: workspace.Value) !void {
@@ -7506,13 +9051,18 @@ pub fn Service(comptime Types: type) type {
 
         fn workspaceIsRead(command: wc.Command) bool {
             return switch (command) {
-                .program => |p| p != .build and p != .specialize and p != .adopt,
+                .program => |p| p != .build and p != .specialize and p != .adopt and
+                    p != .derive and p != .validate,
                 .work => |w| w == .inspect or w == .collect or w == .wait,
                 .context => |c| c == .inspect or c == .expand,
                 .placement => false,
             };
         }
 
+        fn workspaceCompiles(command: wc.Command) bool {
+            return command == .program and (command.program == .build or
+                command.program == .derive or command.program == .validate);
+        }
         fn appendWorkspaceReference(output: *wp.Range, id: state.Digest) !void {
             if (output.total > 1) try output.append(",");
             // Ref's canonical JSON has only a fixed tag and hexadecimal ID.
@@ -7595,11 +9145,25 @@ pub fn Service(comptime Types: type) type {
             var saved = if (retained) try self.retainedWorkspaceWork(a, task_id, try wp.identity(ref, .work)) else try self.workspaceWork(a, task_id, try wp.identity(ref, .work));
             defer saved.deinit();
             var work = saved.value;
+            if (work.observer) |observer| work.observer =
+                try @import("workspace_observers.zig").copyObserver(a, observer);
+            errdefer if (work.observer) |observer|
+                @import("workspace_observers.zig").freeObserver(a, observer);
             work.inputs.items = try a.dupe(state.Reference, work.inputs.items);
+            errdefer a.free(work.inputs.items);
             work.runtime_dependencies.items = try a.dupe(state.Reference, work.runtime_dependencies.items);
+            errdefer a.free(work.runtime_dependencies.items);
             if (work.runtime_trace) |*trace| trace.dependencies.items = try a.dupe(state.Reference, trace.dependencies.items);
+            errdefer if (work.runtime_trace) |trace| a.free(trace.dependencies.items);
             if (work.outer_operation) |*pending| pending.dependencies.items = try a.dupe(state.Reference, pending.dependencies.items);
+            errdefer if (work.outer_operation) |pending| a.free(pending.dependencies.items);
             if (work.cancellation) |reason| work.cancellation = .{ .bytes = try a.dupe(u8, reason.bytes) };
+            errdefer if (work.cancellation) |reason| a.free(reason.bytes);
+            if (work.guard) |guard| work.guard = try copyWorkspaceGuard(a, guard);
+            errdefer if (work.guard) |guard| {
+                if (guard.failure) |failure| a.free(failure.bytes);
+                if (guard.reference_operation) |reference| a.free(reference.dependencies.items);
+            };
             var pending: ?occurrence.Occurrence = null;
             if (work.current_occurrence) |id| {
                 var decoded = try self.record(occurrence.Occurrence, a, "occurrence", id, task_id);
@@ -7609,10 +9173,20 @@ pub fn Service(comptime Types: type) type {
             return .{ .work = work, .occurrence = pending };
         }
 
+        fn copyWorkspaceGuard(a: std.mem.Allocator, original: workspace.Guard) !workspace.Guard {
+            var guard = original;
+            if (guard.failure) |failure|
+                guard.failure = .{ .bytes = try a.dupe(u8, failure.bytes) };
+            errdefer if (guard.failure) |failure| a.free(failure.bytes);
+            if (guard.reference_operation) |*pending|
+                pending.dependencies.items = try a.dupe(state.Reference, pending.dependencies.items);
+            return guard;
+        }
+
         fn workPublication(a: std.mem.Allocator, observed: workspace.WorkObservation) !state.WorkPublication {
             const bytes = try contracts.encodeOwned(workspace.WorkObservation, a, observed);
             defer a.free(bytes);
-            return .{ .work = observed.work.id, .execution_revision = observed.work.execution_revision, .control_revision = observed.work.control_revision, .runtime = observed.work.runtime, .realization_revision = observed.work.realization_revision, .runtime_capsule = observed.work.runtime_capsule, .runtime_trace = observed.work.runtime_trace != null, .outer_operation = if (observed.work.outer_operation) |pending| pending.capsule else null, .checkpoint = observed.work.checkpoint, .observation = storage.digest(bytes), .control = workspace.ControlObservation.from(observed) };
+            return .{ .observer = observed.work.observer, .work = observed.work.id, .execution_revision = observed.work.execution_revision, .control_revision = observed.work.control_revision, .runtime = observed.work.runtime, .realization_revision = observed.work.realization_revision, .runtime_capsule = observed.work.runtime_capsule, .runtime_trace = observed.work.runtime_trace != null, .outer_cursor = observed.work.outer_cursor, .guard = observed.work.guard, .guest_work = observed.work.guest_work, .outer_operation = if (observed.work.outer_operation) |pending| pending.capsule else null, .checkpoint = observed.work.checkpoint, .observation = storage.digest(bytes), .control = workspace.ControlObservation.from(observed) };
         }
 
         fn samePublication(a: std.mem.Allocator, declared: state.WorkPublication, observed: state.WorkPublication) !bool {
@@ -7629,9 +9203,13 @@ pub fn Service(comptime Types: type) type {
             return if (value.cancellation != null or (value.policy.continuation == .owner_scheduled and value.policy.stop != .next_slice and (value.outcome != .yielded or value.policy.stop == .terminal))) .queued else .parked;
         }
 
-        fn delegatedControl(before: workspace.ControlObservation, has_outer: bool, policy: workspace.RunPolicy) workspace.ControlObservation {
+        fn delegatedControl(before: workspace.ControlObservation, has_outer: bool, guard: ?workspace.Guard, policy: workspace.RunPolicy) workspace.ControlObservation {
             var after = before;
             after.policy = policy;
+            if (guard) |binding| if (binding.disposition == .diverged) {
+                after.schedule = .parked;
+                return after;
+            };
             if (!has_outer and before.delivery == .not_sent and (before.instrument or before.trial)) after.delivery = .ready;
             const cancel_ready = before.cancellation != null and !before.cancellation_applied and
                 (after.delivery == .ready or after.delivery == .awaiting or after.delivery == .not_sent);
@@ -7697,7 +9275,7 @@ pub fn Service(comptime Types: type) type {
 
         // Replay proves receipt stability only after admission. At the archive
         // boundary, derive the content relationship from the retained command.
-        fn validateWorkspaceContextOutput(self: *Self, a: std.mem.Allocator, parent: state.Task, context: @FieldType(workspace.PublicationCommand, "context"), identity: state.Digest, event_seq: u64) !void {
+        fn validateWorkspaceContextOutput(self: *Self, a: std.mem.Allocator, parent: state.Task, context: @FieldType(workspace.PublicationCommand, "context"), identity: state.Digest, event_seq: u64, controller_read: ?state.ControllerReadCut) !void {
             switch (context.command) {
                 .select => |selection| {
                     const refs = try a.alloc(state.Reference, selection.values.items.len);
@@ -7715,16 +9293,40 @@ pub fn Service(comptime Types: type) type {
                     var sources: std.ArrayList(state.Reference) = .empty;
                     defer sources.deinit(a);
                     switch (materialize.input) {
+                        .semantic_source => |selection| {
+                            if (materialize.sources.items.len != 0) return error.InvalidArchive;
+                            var retained = try self.record(workspace.Value, a, "workspace_value", try workspaceContentCustody(a, parent.id, identity), parent.id);
+                            defer retained.deinit();
+                            const origin = retained.value.derivation.semantic_source orelse
+                                return error.InvalidArchive;
+                            const requested = try contracts.encodeOwned(
+                                @TypeOf(selection),
+                                a,
+                                selection,
+                            );
+                            defer a.free(requested);
+                            const actual_selection = try contracts.encodeOwned(
+                                @TypeOf(selection),
+                                a,
+                                origin.selection,
+                            );
+                            defer a.free(actual_selection);
+                            if (!same(requested, actual_selection)) return error.InvalidArchive;
+                            try validateSemanticReadPosition(origin.basis, event_seq);
+                            try validateControllerReadCut(origin.basis, controller_read);
+                            return;
+                        },
                         .guest_view => |selection| {
                             if (materialize.sources.items.len != 0) return error.InvalidArchive;
                             var retained = try self.record(workspace.Value, a, "workspace_value", try workspaceContentCustody(a, parent.id, identity), parent.id);
                             defer retained.deinit();
                             const origin = retained.value.derivation.inspection orelse return error.InvalidArchive;
                             try inspectionSelection(origin.observation.work, selection);
+                            if (origin.level != selection.level) return error.InvalidArchive;
                             if (origin.observation.work.event_watermark >= event_seq) return error.InvalidArchive;
-                            const requested_scope = try contracts.encodeOwned(wc.NodeScope, a, selection.nodes);
+                            const requested_scope = try contracts.encodeOwned(struct { nodes: wc.NodeScope, values: ?wc.Disclosure }, a, .{ .nodes = selection.nodes, .values = selection.disclosure });
                             defer a.free(requested_scope);
-                            const retained_scope = try contracts.encodeOwned(wc.NodeScope, a, origin.nodes);
+                            const retained_scope = try contracts.encodeOwned(struct { nodes: wc.NodeScope, values: ?wc.Disclosure }, a, .{ .nodes = origin.nodes, .values = origin.disclosure });
                             defer a.free(retained_scope);
                             if (!same(requested_scope, retained_scope)) return error.InvalidArchive;
                             // Value access already reconstructs the exact bytes
@@ -7782,12 +9384,15 @@ pub fn Service(comptime Types: type) type {
 
         // Validate the receipt's operation before interpreting any declared
         // publication. Neither the receipt kind nor an empty list can bypass it.
-        fn validateWorkspaceAdmission(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, command: workspace.PublicationCommand, admission: WorkspaceAdmission) !void {
+        fn validateWorkspaceAdmission(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, command: workspace.PublicationCommand, admission: WorkspaceAdmission, records: []const state.ArchiveRecord, checked: *SnapshotValidation) !void {
+            errdefer std.debug.print("workspace admission: {s} at {d}\n", .{ @tagName(command), event_value.seq });
             const items = event_value.workspace_publications.items;
             const kind: @FieldType(wc.Ref, "kind") = switch (command) {
                 .build => .program,
+                .realize_controller => .controller,
                 .residual => .residual,
                 .specialize => .runtime,
+                .semantic => .candidate,
                 .context => |context| switch (context.command) {
                     .materialize => .value,
                     .select => .view,
@@ -7797,13 +9402,32 @@ pub fn Service(comptime Types: type) type {
             };
             if (admission.kind != kind) return error.InvalidArchive;
             const count: usize = switch (command) {
-                .build, .context, .specialize, .residual => 0,
+                .build, .context, .specialize, .semantic, .residual, .realize_controller => 0,
                 .delegate => 2,
+                .start => |start| if (start.observer) |observer|
+                    if (observer.selection.previous != null) 2 else 1
+                else
+                    1,
                 else => 1,
             };
             if (items.len != count) return error.InvalidArchive;
             if (count != 0 and !std.meta.eql(items[0].work, admission.work)) return error.InvalidArchive;
             const request = switch (command) {
+                .realize_controller => |selection| blk: {
+                    try self.validateControllerRealization(a, parent, event_value, selection, admission);
+                    break :blk try operation(workspace.ControllerRealizeRequest, a, .{ .task = parent.id, .command = selection.command });
+                },
+                .stop_observing => |selection| try operation(workspace.StopObservingRequest, a, .{
+                    .task = parent.id,
+                    .expected = selection,
+                }),
+                .semantic => |selected| blk: {
+                    try self.validateSemanticPublication(parent, selected, admission, records, event_value.seq, event_value.controller_read, checked);
+                    break :blk try operation(workspace.SemanticRequest, a, .{
+                        .task = parent.id,
+                        .command = selected.command,
+                    });
+                },
                 .residual => |selection| try operation(workspace.ResidualControlRequest, a, .{ .task = parent.id, .residual = admission.work, .execution = selection.execution, .control = selection.control, .command = selection.command }),
                 .specialize => |selection| blk: {
                     var selected = try self.workspaceRuntime(a, parent.id, admission.work, selection.program);
@@ -7817,6 +9441,14 @@ pub fn Service(comptime Types: type) type {
                     if (!std.meta.eql(try wp.identity(selection.expected.work, .work), admission.work)) return error.InvalidArchive;
                     break :blk try operation(workspace.PumpRequest, a, .{ .task = parent.id, .command = selection });
                 },
+                .guard => |selection| try operation(workspace.GuardRequest, a, .{
+                    .task = parent.id,
+                    .command = .{ .guard = selection },
+                }),
+                .unguard => |selection| try operation(workspace.GuardRequest, a, .{
+                    .task = parent.id,
+                    .command = .{ .unguard = selection },
+                }),
                 .request_cut => |selection| blk: {
                     if (!std.meta.eql(try wp.identity(selection.expected.work, .work), admission.work)) return error.InvalidArchive;
                     break :blk try operation(workspace.CutRequest, a, .{ .task = parent.id, .command = selection });
@@ -7829,10 +9461,15 @@ pub fn Service(comptime Types: type) type {
                     break :blk try operation(workspace.BuildRequest, a, .{ .task = parent.id, .source = .{ .bytes = try self.store().object(a, artifact.source, null) }, .source_kind = @fromBackingInt(@intCast(@backingInt(artifact.source_kind))), .catalog = artifact.catalog, .exposures = artifact.exposures, .role = if (artifact.controller != null) .controller else .computation });
                 },
                 .context => |context| blk: {
-                    try self.validateWorkspaceContextOutput(a, parent, context, admission.work, event_value.seq);
+                    try self.validateWorkspaceContextOutput(a, parent, context, admission.work, event_value.seq, event_value.controller_read);
                     break :blk try operation(workspace.ContextRequest, a, .{ .task = parent.id, .command = context.command, .snapshot = context.snapshot, .input = context.input });
                 },
                 .start => |start| blk: {
+                    if (count == 2) {
+                        const previous = start.observer.?.selection.previous.?;
+                        if (!std.meta.eql(items[1].work, try wp.identity(previous, .work)) or
+                            std.meta.eql(items[0].work, items[1].work)) return error.InvalidArchive;
+                    }
                     var work = try self.retainedWorkspaceWork(a, parent.id, admission.work);
                     defer work.deinit();
                     if ((start.trial == .none) != (work.value.trial == null)) return error.InvalidArchive;
@@ -7848,7 +9485,12 @@ pub fn Service(comptime Types: type) type {
                         defer view.deinit();
                         if (event_value.seq == 0 or view.value.event_cut != event_value.seq - 1) return error.InvalidArchive;
                     }
-                    if (!start.origin) try self.validateWorkspaceInitialInput(a, work.value);
+                    if (!start.origin) try self.validateWorkspaceInitialInput(a, work.value, &checked.observer_successors);
+                    if (start.observer) |observer| break :blk try operation(
+                        workspace.ObserveRequest,
+                        a,
+                        .{ .task = parent.id, .selection = observer.selection },
+                    );
                     break :blk try operation(workspace.StartRequest, a, .{ .task = parent.id, .program = work.value.program, .input = .{ .bytes = try self.store().object(a, work.value.input, null) }, .policy = start.policy, .origin = if (start.origin) work.value.input_value else null, .runtime = start.runtime, .trial = start.trial });
                 },
                 .control => |control| try operation(workspace.ControlRequest, a, .{ .task = parent.id, .work = admission.work, .execution = control.execution, .control = control.control, .command = control.command }),
@@ -7858,7 +9500,7 @@ pub fn Service(comptime Types: type) type {
                     if (!std.meta.eql(items[1].work, target) or std.meta.eql(items[0].work, target)) return error.InvalidArchive;
                     var child = try self.retainedWorkspaceWork(a, parent.id, admission.work);
                     defer child.deinit();
-                    try self.validateWorkspaceInitialInput(a, child.value);
+                    try self.validateWorkspaceInitialInput(a, child.value, &checked.observer_successors);
                     break :blk try operation(workspace.DelegationRequest, a, .{ .task = parent.id, .command = selection });
                 },
             };
@@ -7867,17 +9509,28 @@ pub fn Service(comptime Types: type) type {
 
         /// An originless admission derives this identity from the constructor;
         /// equal schema/payload bytes do not authorize different ancestry.
-        fn validateWorkspaceInitialInput(self: *Self, a: std.mem.Allocator, work: workspace.Work) !void {
+        fn validateWorkspaceInitialInput(self: *Self, a: std.mem.Allocator, work: workspace.Work, successors: *ObserverSuccessors) !void {
+            try self.validateObserver(a, work, successors);
             const ref = work.input_value orelse return error.InvalidArchive;
             const input = try self.workspaceValueReference(a, work.task, try wp.reference(a, .value, ref.digest));
-            const provenance = try contracts.encodeOwned(workspace.Derivation, a, .{ .kind = .hypothesis, .sources = .{ .items = &.{} } });
+            const inputs = if (work.observer) |observer|
+                &[_]state.Reference{ observer.source, observer.accumulator }
+            else
+                &.{};
+            const provenance = try contracts.encodeOwned(workspace.Derivation, a, .{
+                .kind = if (work.observer != null) .judgment else .hypothesis,
+                .sources = .{ .items = inputs },
+            });
             defer a.free(provenance);
             if (!std.meta.eql(input.provenance, state.Reference{ .digest = storage.digest(provenance), .bytes = provenance.len })) return error.InvalidArchive;
         }
 
-        fn validateWorkspaceControl(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, item: state.WorkPublication, prior: ?state.WorkPublication, command: ?workspace.PublicationCommand, admission: ?WorkspaceAdmission) !void {
+        fn validateWorkspaceControl(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, item: state.WorkPublication, prior: ?state.WorkPublication, command: ?workspace.PublicationCommand, admission: ?WorkspaceAdmission, outer_observed: bool, prefix: *@import("workspace_observers.zig").PublicationPrefix, histories: *ObserverHistories) !void {
+            if (try self.validateObserverSuccessionPublication(a, event_value, item, prior, command)) return;
             const actual = item.control;
             const execution_changed = if (prior) |before| item.execution_revision != before.execution_revision else true;
+            if (!execution_changed and item.guest_work != prior.?.guest_work)
+                return error.InvalidArchive;
             if (execution_changed) {
                 var required = false;
                 if (item.runtime) |runtime| {
@@ -7921,10 +9574,12 @@ pub fn Service(comptime Types: type) type {
                     const pumping = item.outer_operation != null and !std.meta.eql(item.outer_operation, before.outer_operation);
                     if (!pumping and (command == null or (command.? != .realize and command.? != .request_cut)))
                         if (!std.meta.eql(item.runtime_capsule, before.runtime_capsule)) return error.InvalidArchive;
-                } else if (item.runtime_capsule != null) return error.InvalidArchive;
+                } else if (item.runtime_capsule != null and !outer_observed) return error.InvalidArchive;
                 expected.policy = before.control.policy;
                 expected.cancellation = before.control.cancellation;
                 expected.blocker = before.control.blocker;
+                if (execution_changed and expected.blocker == .observation_blocked)
+                    expected.blocker = null;
                 expected.schedule = before.control.schedule;
                 if (actual.instrument != before.control.instrument or actual.trial != before.control.trial) return error.InvalidArchive;
                 if (item.execution_revision == before.execution_revision and (actual.outcome != before.control.outcome or actual.port != before.control.port or actual.cancellation_applied != before.control.cancellation_applied)) return error.InvalidArchive;
@@ -7936,8 +9591,28 @@ pub fn Service(comptime Types: type) type {
                 if (actual.cancellation_applied) return error.InvalidArchive;
             }
 
+            try validateGuardProgress(item, prior, command);
+            const guarded_progress = if (prior) |before|
+                guardProgress(item, before)
+            else
+                false;
+            try validateObserverPublication(a, item, prior, command);
+            const observer_progress = try self.validateObserverPreparationProgress(
+                a,
+                parent.id,
+                event_value.seq,
+                item,
+                prior,
+                command,
+                histories,
+            );
             if (command) |decoded| switch (decoded) {
-                .build, .context, .specialize, .residual => return error.InvalidArchive,
+                .stop_observing => {},
+                .build, .context, .specialize, .semantic, .residual, .realize_controller => return error.InvalidArchive,
+                .guard, .unguard => {
+                    const before = prior orelse return error.InvalidArchive;
+                    try validateGuardSelection(item, before, decoded);
+                },
                 .realize => |selection| {
                     const before = prior orelse return error.InvalidArchive;
                     if (before.outer_operation != null or selection.execution != before.execution_revision or selection.control != before.control_revision or selection.realization != before.realization_revision or
@@ -7953,6 +9628,9 @@ pub fn Service(comptime Types: type) type {
                         selection.base_quantum == 0 or selection.base_quantum > 1048576) return error.InvalidArchive;
                     if (execution_changed) {
                         expected.schedule = publicationSchedule(expected);
+                    } else if (guarded_progress) {
+                        if (actual.delivery != before.control.delivery) return error.InvalidArchive;
+                        expected.schedule = guardSchedule(item.guard.?, expected.policy);
                     } else if (before.outer_operation == null and trialControlReady(before.control)) {
                         if (item.outer_operation != null or actual.delivery != .ready) return error.InvalidArchive;
                         expected.delivery = .ready;
@@ -7986,7 +9664,11 @@ pub fn Service(comptime Types: type) type {
                     if (before.control.outcome == .completed or before.control.outcome == .failed or before.control.outcome == .cancelled) return error.InvalidArchive;
                     const advanced = item.execution_revision > before.execution_revision;
                     if (control.command == .advance) {
-                        if (!advanced and before.outer_operation == null and trialControlReady(before.control)) {
+                        if (!advanced and guarded_progress) {
+                            if (item.control_revision != before.control_revision or
+                                actual.delivery != before.control.delivery) return error.InvalidArchive;
+                            expected.schedule = guardSchedule(item.guard.?, expected.policy);
+                        } else if (!advanced and before.outer_operation == null and trialControlReady(before.control)) {
                             if (item.control_revision -| before.control_revision != 1 or item.outer_operation != null or actual.delivery != .ready) return error.InvalidArchive;
                             expected.delivery = .ready;
                             expected.schedule = .queued;
@@ -8007,7 +9689,7 @@ pub fn Service(comptime Types: type) type {
                             },
                             .delegate => |policy| {
                                 if (advanced) return error.InvalidArchive;
-                                const delegated = delegatedControl(before.control, before.outer_operation != null, policy);
+                                const delegated = delegatedControl(before.control, before.outer_operation != null, before.guard, policy);
                                 expected.policy = delegated.policy;
                                 expected.delivery = delegated.delivery;
                                 expected.schedule = delegated.schedule;
@@ -8016,6 +9698,13 @@ pub fn Service(comptime Types: type) type {
                                 if (expected.cancellation == null) expected.cancellation = reason;
                                 if (advanced) {
                                     expected.schedule = publicationSchedule(expected);
+                                } else if (actual.blocker == .observation_blocked) {
+                                    if (actual.delivery != before.control.delivery or
+                                        !std.meta.eql(item.outer_operation, before.outer_operation))
+                                        return error.InvalidArchive;
+                                    if (!try observationBlockedAt(before, prefix)) return error.InvalidArchive;
+                                    expected.schedule = .queued;
+                                    expected.blocker = .observation_blocked;
                                 } else {
                                     if (actual.delivery != before.control.delivery) return error.InvalidArchive;
                                     expected.schedule = if (item.outer_operation != null) .queued else switch (actual.delivery orelse return error.InvalidArchive) {
@@ -8060,9 +9749,16 @@ pub fn Service(comptime Types: type) type {
                 if (item.execution_revision > before.execution_revision) {
                     if (item.control_revision != before.control_revision) return error.InvalidArchive;
                     expected.schedule = publicationSchedule(expected);
+                } else if (guarded_progress) {
+                    if (item.control_revision != before.control_revision or
+                        actual.delivery != before.control.delivery) return error.InvalidArchive;
+                    expected.schedule = guardSchedule(item.guard.?, expected.policy);
                 } else if (item.outer_operation != null and before.outer_operation != null and item.control_revision == before.control_revision) {
                     if (actual.delivery != before.control.delivery) return error.InvalidArchive;
                     expected.schedule = if (expected.cancellation != null or expected.policy.continuation == .owner_scheduled) .queued else .parked;
+                } else if (observer_progress) {
+                    if (item.control_revision != before.control_revision or
+                        actual.delivery != before.control.delivery) return error.InvalidArchive;
                 } else if (item.control_revision > before.control_revision) {
                     if (item.execution_revision != before.execution_revision or !try self.workspaceStoppedAt(a, parent.id, event_value.seq - 1) or actual.delivery != before.control.delivery) return error.InvalidArchive;
                     expected.schedule = .parked;
@@ -8105,6 +9801,169 @@ pub fn Service(comptime Types: type) type {
             const actual_bytes = try contracts.encodeOwned(workspace.ControlObservation, a, actual);
             defer a.free(actual_bytes);
             if (!same(expected_bytes, actual_bytes)) return error.InvalidArchive;
+            try self.validateWorkspaceGuestWork(parent.id, item, prior, command, prefix);
+        }
+
+        fn validateWorkspaceGuestWork(
+            self: *Self,
+            task_id: state.TaskId,
+            item: state.WorkPublication,
+            prior: ?state.WorkPublication,
+            command: ?workspace.PublicationCommand,
+            prefix: *const @import("workspace_observers.zig").PublicationPrefix,
+        ) !void {
+            const advanced = if (prior) |before| item.execution_revision != before.execution_revision else true;
+            const pending = item.outer_operation != null or
+                if (item.guard) |guard| guard.pending_control != null else false;
+            if (!advanced and !pending) return;
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var observed = try contracts.decodeOwned(workspace.WorkObservation, a, try self.store().acquiredObject(a, item.observation, null));
+            defer observed.deinit();
+            const work = observed.value.work;
+            if (!std.meta.eql(work.task, task_id) or
+                !try samePublication(a, item, try workPublication(a, observed.value)))
+                return error.InvalidArchive;
+            var current = try self.workspaceWork(a, task_id, item.work);
+            defer current.deinit();
+            inline for (.{ "program", "input", "input_value", "origin_work", "delegation", "trial" }) |field|
+                if (!std.meta.eql(@field(work, field), @field(current.value, field))) return error.InvalidArchive;
+            var control: data.invocation.Control = .none;
+            var quantum: u64 = 256;
+            var frozen_control: ?contracts.Decoded(data.invocation.Control) = null;
+            defer if (frozen_control) |*decoded| decoded.deinit();
+            var initial_checkpoint: ?[]const u8 = null;
+            if (prior) |before| {
+                initial_checkpoint = try self.store().object(a, before.checkpoint orelse return error.InvalidArchive, null);
+                quantum = prefix.guestQuantum(item.work);
+                var initial = try contracts.decodeOwned(workspace.WorkObservation, a, try self.store().acquiredObject(a, before.observation, null));
+                defer initial.deinit();
+                if (!try samePublication(a, before, try workPublication(a, initial.value)))
+                    return error.InvalidArchive;
+                const cancellation = item.control.cancellation;
+                const cancel_requested = if (command) |selected|
+                    selected == .control and selected.control.command == .cancel
+                else
+                    false;
+                if (before.control.delivery == .settled_reply) {
+                    try self.validateHistoricalOccurrence(a, initial.value);
+                    const acquired = initial.value.occurrence orelse return error.InvalidArchive;
+                    const reply = switch (acquired.state) {
+                        .settled_reply => |value| value.reply,
+                        .admitted => |value| if (value == .reply) value.reply.reply else return error.InvalidArchive,
+                        else => return error.InvalidArchive,
+                    };
+                    control = .{ .reply = try self.store().acquiredObject(a, reply, null) };
+                    if (cancellation != null and !before.control.cancellation_applied) quantum = 0;
+                } else if (cancellation != null and
+                    (!before.control.cancellation_applied or cancel_requested))
+                {
+                    control = .{ .cancel = .{ .text = cancellation.?.bytes } };
+                } else if (before.control.outcome == .yielded) control = .resume_yield;
+                if (initial.value.work.outer_operation) |operation_value| {
+                    quantum = operation_value.guest_quantum;
+                    frozen_control = try contracts.decodeOwned(data.invocation.Control, a, try self.store().object(a, operation_value.control, null));
+                    control = frozen_control.?.value;
+                } else if (cancellation == null) if (before.guard) |guard| if (guard.pending_control) |ref| {
+                    frozen_control = try contracts.decodeOwned(data.invocation.Control, a, try self.store().object(a, ref, null));
+                    control = frozen_control.?.value;
+                    quantum = guard.guest_quantum;
+                };
+            }
+            if (quantum > 256) return error.InvalidArchive;
+            const encoded_control = try contracts.encodeOwned(data.invocation.Control, a, control);
+            if (work.outer_operation) |operation_value| {
+                const retained = try self.store().object(a, operation_value.control, null);
+                if (operation_value.guest_quantum != quantum or !same(retained, encoded_control))
+                    return error.InvalidArchive;
+            }
+            if (work.guard) |guard| if (guard.pending_control) |ref| {
+                const retained = try self.store().object(a, ref, null);
+                if (guard.guest_quantum != quantum or !same(retained, encoded_control))
+                    return error.InvalidArchive;
+            };
+            if (!advanced) return;
+            var program = try self.workspaceProgram(a, task_id, work.program);
+            defer program.deinit();
+            var packaged = try self.program.retainRuntime();
+            defer packaged.deinit();
+            const input_reference = if (prior) |before| before.checkpoint.? else work.input;
+            const segment_fact = try guestSegmentFact(.{
+                .input = .{ .digest = input_reference.digest, .bytes = input_reference.bytes },
+                .image = .{
+                    .digest = program.value.description.image.digest,
+                    .bytes = program.value.description.image.bytes,
+                },
+                .runtime = if (work.runtime) |runtime| runtime.digest else packaged.identity,
+                .initial = prior == null,
+                .control = storage.digest(encoded_control),
+                .quantum = quantum,
+            }, work);
+            var prepared = try self.inspectionRuntime(self.allocator, work);
+            defer prepared.deinit();
+            const fact_key = try guestSegmentKey(segment_fact);
+            if (try self.validatedGuestSegment(fact_key, segment_fact, work.outcome)) return;
+            var execution = if (initial_checkpoint) |checkpoint|
+                try kosmos.Session.restore(self.allocator, &prepared, checkpoint)
+            else
+                try kosmos.Session.start(self.allocator, &prepared, try self.store().object(a, work.input, null));
+            defer execution.deinit();
+            _ = try kosmos.invocation.advance(&execution, control, quantum);
+            if (execution.transitions != item.guest_work) return error.InvalidArchive;
+            var finished = try kosmos.invocation.finishPublication(a, &execution, .receipt, null);
+            defer finished.outcome.deinit();
+            defer self.allocator.free(finished.checkpoint.?);
+            const outcome = try data.invocation.encodeOwned(data.invocation.Outcome, a, finished.outcome.record);
+            const expected_checkpoint = item.checkpoint orelse return error.InvalidArchive;
+            if (!std.meta.eql(storage.digest(finished.checkpoint.?), expected_checkpoint.digest) or
+                finished.checkpoint.?.len != expected_checkpoint.bytes or
+                !std.meta.eql(storage.digest(outcome), work.outcome.digest) or outcome.len != work.outcome.bytes)
+                return error.InvalidArchive;
+            guest_segment_proofs.retain(fact_key);
+        }
+
+        fn guestSegmentFact(
+            segment: evaluator.Driver.Segment,
+            work: workspace.Work,
+        ) !CompilerFact {
+            var hash = std.crypto.hash.sha2.Sha256.init(.{});
+            var writer: data.wire.Writer = .{ .hasher = &hash };
+            try data.record.write(struct {
+                execution: evaluator.Driver.Segment,
+                guest_work: u64,
+                outcome: state.Reference,
+            }, .{
+                .execution = segment,
+                .guest_work = work.guest_work,
+                .outcome = work.outcome,
+            }, &writer);
+            return .{
+                .kind = .guest_segment,
+                .input = .{ .digest = segment.input.digest, .bytes = segment.input.bytes },
+                .output = work.checkpoint,
+                .context = hash.finalResult(),
+            };
+        }
+
+        fn guestSegmentKey(fact: CompilerFact) !state.Digest {
+            var hash = std.crypto.hash.sha2.Sha256.init(.{});
+            var writer: data.wire.Writer = .{ .hasher = &hash };
+            try data.record.write(CompilerFact, fact, &writer);
+            return hash.finalResult();
+        }
+
+        fn validatedGuestSegment(
+            self: *Self,
+            key: state.Digest,
+            fact: CompilerFact,
+            outcome: state.Reference,
+        ) !bool {
+            if (!guest_segment_proofs.contains(key)) return false;
+            try self.store().objectRange(fact.input, 0, &.{});
+            try self.store().objectRange(fact.output, 0, &.{});
+            try self.store().objectRange(outcome, 0, &.{});
+            return true;
         }
 
         fn workspacePublicationAt(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, id: state.Digest, watermark: u64) !u64 {
@@ -8320,14 +10179,101 @@ pub fn Service(comptime Types: type) type {
                 defer succession.deinit();
                 const original = succession.value;
                 if (original.phase != .activated or original.activation_event != event_value.seq or !std.meta.eql(original.residual, value.id) or !std.meta.eql(original.predecessor, value.controller) or !std.meta.eql(original.checkpoint, value.initial_checkpoint) or !std.meta.eql(original.checkpoint, value.checkpoint) or !std.meta.eql(original.outcome, value.outcome) or !std.meta.eql(value.current_occurrence, original.handoff)) return error.InvalidArchive;
+                const publication = event_value.root_publication orelse return error.InvalidArchive;
+                const boot = original.boot orelse return error.InvalidArchive;
+                if (!std.meta.eql(publication.after.controller, try self.controllerAt(a, parent, event_value.seq)) or
+                    !std.meta.eql(publication.after.checkpoint, boot.checkpoint.digest))
+                    return error.InvalidArchive;
                 try self.validateResidualObservation(a, value);
             }
         }
 
-        fn validateWorkspacePublications(self: *Self, a: std.mem.Allocator, parent: state.Task, records: []const state.ArchiveRecord) !void {
-            const Position = struct { publication: state.WorkPublication, seq: u64 };
-            var latest: std.AutoHashMap(state.Digest, Position) = .init(a);
-            defer latest.deinit();
+        const CompilerReadPosition = struct {
+            occurrence: state.Digest,
+            event_watermark: u64,
+            controller_read: ?state.ControllerReadCut,
+            root: state.RootCut,
+        };
+
+        fn capturedControllerReads(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            records: []const state.ArchiveRecord,
+            compiler_reads: *std.AutoHashMap(state.Digest, CompilerReadPosition),
+        ) ![]state.ControllerReadCut {
+            var captured_reads: std.ArrayList(state.ControllerReadCut) = .empty;
+            errdefer captured_reads.deinit(a);
+            for (records) |row| {
+                if (row.kind != .attempt) continue;
+                var attempt = try self.record(
+                    state.Attempt,
+                    self.allocator,
+                    "attempt",
+                    row.id,
+                    task_id,
+                );
+                defer attempt.deinit();
+                if (!std.meta.eql(attempt.value.task, task_id) or
+                    !std.meta.eql(attempt.value.id, row.id)) return error.InvalidArchive;
+                if (attempt.value.controller_read) |read| try captured_reads.append(a, read);
+                if (attempt.value.operation == .workspace_build) {
+                    const bytes = try self.store().object(self.allocator, attempt.value.prepared orelse return error.InvalidArchive, null);
+                    defer self.allocator.free(bytes);
+                    var input = try contracts.decodeOwned(build_job.Input, self.allocator, bytes);
+                    defer input.deinit();
+                    if (input.value == .derive and input.value.derive.basis != .immutable) {
+                        const at = switch (input.value.derive.basis) {
+                            .controller => |read| read.event_watermark,
+                            .works => |read| read.event_watermark,
+                            else => return error.InvalidArchive,
+                        };
+                        try validateControllerReadCut(input.value.derive.basis, attempt.value.controller_read);
+                        const checkpoint = attempt.value.dispatch_checkpoint orelse return error.InvalidArchive;
+                        const checkpoint_bytes = try self.store().object(self.allocator, checkpoint, null);
+                        defer self.allocator.free(checkpoint_bytes);
+                        const request_bytes = try self.store().object(self.allocator, attempt.value.request, null);
+                        defer self.allocator.free(request_bytes);
+                        var request = try data.invocation.decode(data.invocation.Request, self.allocator, request_bytes);
+                        defer request.deinit();
+                        if (!std.meta.eql(data.invocation.stateDigest(checkpoint_bytes), request.value.binding.pending_state_digest)) return error.InvalidArchive;
+                        var route = try self.record(workspace.ExecutionRoute, self.allocator, "execution_route", attempt.value.occurrence, task_id);
+                        defer route.deinit();
+                        if (route.value.work != null or route.value.residual != null) return error.InvalidArchive;
+                        const entry = try compiler_reads.getOrPut(attempt.value.id);
+                        if (entry.found_existing) return error.InvalidArchive;
+                        entry.value_ptr.* = .{
+                            .occurrence = attempt.value.occurrence,
+                            .event_watermark = at,
+                            .controller_read = attempt.value.controller_read,
+                            .root = .{ .controller = route.value.controller, .checkpoint = checkpoint.digest },
+                        };
+                    } else if (attempt.value.dispatch_checkpoint != null) return error.InvalidArchive;
+                } else if (attempt.value.dispatch_checkpoint != null) return error.InvalidArchive;
+            }
+            std.mem.sort(state.ControllerReadCut, captured_reads.items, {}, struct {
+                fn less(
+                    _: void,
+                    left: state.ControllerReadCut,
+                    right: state.ControllerReadCut,
+                ) bool {
+                    return left.event_watermark < right.event_watermark;
+                }
+            }.less);
+            return captured_reads.toOwnedSlice(a);
+        }
+
+        fn validateWorkspacePublications(self: *Self, a: std.mem.Allocator, parent: state.Task, records: []const state.ArchiveRecord, checked: *SnapshotValidation) !void {
+            var root_history: state.RootHistory = .init(parent);
+            var compiler_reads: std.AutoHashMap(state.Digest, CompilerReadPosition) = .init(a);
+            defer compiler_reads.deinit();
+            const captured_reads = try self.capturedControllerReads(a, parent.id, records, &compiler_reads);
+            defer a.free(captured_reads);
+            var captured_read: usize = 0;
+            var prefix: @import("workspace_observers.zig").PublicationPrefix = .init(a);
+            defer prefix.deinit();
+            var successor_ids: std.AutoHashMap(state.Digest, state.Digest) = .init(a);
+            defer successor_ids.deinit();
             var admissions: std.AutoHashMap(u64, WorkspaceAdmission) = .init(a);
             defer admissions.deinit();
             var replies: std.AutoHashMap(state.Digest, void) = .init(a);
@@ -8351,20 +10297,38 @@ pub fn Service(comptime Types: type) type {
                 var saved = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
                 defer saved.deinit();
                 const event_value = saved.value;
+                while (captured_read < captured_reads.len and
+                    captured_reads[captured_read].event_watermark < event_value.seq)
+                {
+                    try root_history.observeRead(captured_reads[captured_read]);
+                    captured_read += 1;
+                }
+                try root_history.observe(event_value);
+                errdefer std.debug.print("workspace publication: {s} at {d}\n", .{ @tagName(event_value.kind), event_value.seq });
                 var command: ?contracts.Decoded(workspace.PublicationCommand) = null;
                 defer if (command) |*decoded| decoded.deinit();
                 const admission = if (event_value.kind == .workspace) admissions.fetchRemove(event_value.revision) else null;
                 if (event_value.kind == .workspace) {
                     const ref = event_value.workspace_command orelse return error.InvalidArchive;
                     command = try contracts.decodeOwned(workspace.PublicationCommand, a, try self.store().object(a, ref, null));
-                    try self.validateWorkspaceAdmission(a, parent, event_value, command.?.value, (admission orelse return error.InvalidArchive).value);
+                    if ((event_value.controller_read != null) != publicationReadsController(command.?.value)) return error.InvalidArchive;
+                    if (command.?.value == .realize_controller) {
+                        const selected = command.?.value.realize_controller;
+                        try root_history.observeCut(.{
+                            .controller = selected.controller,
+                            .checkpoint = selected.checkpoint.digest,
+                        });
+                    }
+                    try self.validateWorkspaceAdmission(a, parent, event_value, command.?.value, (admission orelse return error.InvalidArchive).value, records, checked);
+                    if (command.?.value == .context) if (event_value.controller_read) |cut|
+                        try checked.controller_values.put(checked.allocator, admission.?.value.work, cut);
                     if (event_value.residual_publications.items.len != @as(usize, if (command.?.value == .residual) 1 else 0)) return error.InvalidArchive;
                     if (command.?.value == .interact) {
                         const reply = try self.workspaceInteractionReply(a, parent.id, command.?.value.interact);
                         try requireArchiveRecord(records, .workspace_port_reply, reply.id);
                         if ((try replies.getOrPut(reply.id)).found_existing) return error.InvalidArchive;
                     }
-                } else if (event_value.workspace_command != null) return error.InvalidArchive;
+                } else if (event_value.workspace_command != null or (event_value.kind != .workspace_read and event_value.controller_read != null)) return error.InvalidArchive;
 
                 if (event_value.kind == .workspace_progress and event_value.workspace_publications.items.len == 0 and event_value.residual_publications.items.len == 0) return error.InvalidArchive;
                 if (event_value.kind == .controller and event_value.residual_publications.items.len != 1) return error.InvalidArchive;
@@ -8385,19 +10349,31 @@ pub fn Service(comptime Types: type) type {
                     defer parsed.deinit();
                     const text = try json.text(parsed.value.object.get("occurrence_id") orelse return error.InvalidArchive);
                     const id = try wp.identity(.{ .kind = .work, .id = .{ .bytes = text } }, .work);
-                    try requireArchiveRecord(records, .workspace_reply, id);
-                    var evidence = try self.record(workspace.ReplyObservation, a, "workspace_reply", id, parent.id);
-                    defer evidence.deinit();
-                    if (evidence.value.evidence != .read) return error.InvalidArchive;
-                    const at = switch (evidence.value.evidence.read) {
-                        .immutable => return error.InvalidArchive,
-                        .scope => |value| value,
-                        .controller => |value| value.event_watermark,
-                        .residual => |value| value.event_watermark,
-                        .works => |value| value.event_watermark,
-                        .wait => |value| value.event_watermark,
-                    };
-                    if (event_value.seq == 0 or at != event_value.seq - 1) return error.InvalidArchive;
+                    if (parsed.value.object.get("attempt_id")) |attempt_text| {
+                        const attempt_id = try wp.identity(.{ .kind = .work, .id = .{ .bytes = try json.text(attempt_text) } }, .work);
+                        const read = (compiler_reads.fetchRemove(attempt_id) orelse return error.InvalidArchive).value;
+                        if (!std.meta.eql(read.occurrence, id) or event_value.seq == 0 or
+                            read.event_watermark != event_value.seq - 1 or
+                            !std.meta.eql(read.controller_read, event_value.controller_read)) return error.InvalidArchive;
+                        try requireArchiveRecord(records, .occurrence, id);
+                        try root_history.observeCut(read.root);
+                    } else {
+                        try requireArchiveRecord(records, .workspace_reply, id);
+                        var evidence = try self.record(workspace.ReplyObservation, a, "workspace_reply", id, parent.id);
+                        defer evidence.deinit();
+                        if (evidence.value.evidence != .read) return error.InvalidArchive;
+                        const at = switch (evidence.value.evidence.read) {
+                            .immutable => return error.InvalidArchive,
+                            .semantic_policy => |value| value.event_watermark,
+                            .scope => |value| value,
+                            .controller => |value| value.event_watermark,
+                            .residual => |value| value.event_watermark,
+                            .works => |value| value.event_watermark,
+                            .wait => |value| value.event_watermark,
+                        };
+                        if (event_value.seq == 0 or at != event_value.seq - 1) return error.InvalidArchive;
+                        try validateControllerReadCut(evidence.value.evidence.read, event_value.controller_read);
+                    }
                 }
                 if (event_value.workspace_publications.items.len != 0 and event_value.kind != .workspace and event_value.kind != .workspace_progress) return error.InvalidArchive;
                 if (event_value.workspace_publications.items.len != 0) {
@@ -8409,21 +10385,34 @@ pub fn Service(comptime Types: type) type {
                 }
                 for (event_value.workspace_publications.items) |item| {
                     try requireArchiveRecord(records, .workspace_work, item.work);
-                    if (latest.get(item.work)) |prior| {
+                    try prefix.validateOuterCursor(item);
+                    if (prefix.latest.get(item.work)) |prior| {
                         if (prior.seq >= event_value.seq) return error.InvalidArchive;
                         inline for (.{ "execution_revision", "control_revision" }) |field| {
                             const before = @field(prior.publication, field);
                             const after = @field(item, field);
                             if (after < before or after - before > 1) return error.InvalidArchive;
                         }
-                    } else if (item.execution_revision != 1 or item.control_revision != 1) return error.InvalidArchive;
-                    try self.validateWorkspaceControl(a, parent, event_value, item, if (latest.get(item.work)) |prior| prior.publication else null, if (command) |decoded| decoded.value else null, if (admission) |entry| entry.value else null);
+                        if (parent.observers_present)
+                            try validateObservedAdvance(prior.publication, item, &prefix);
+                    } else {
+                        if (item.execution_revision != 1 or item.control_revision != 1) return error.InvalidArchive;
+                        if (item.observer) |observer| if (observer.selection.previous) |previous| {
+                            const entry = try successor_ids.getOrPut(try wp.identity(previous, .work));
+                            if (entry.found_existing) return error.InvalidArchive;
+                            entry.value_ptr.* = item.work;
+                        };
+                    }
+                    try self.validateWorkspaceControl(a, parent, event_value, item, if (prefix.latest.get(item.work)) |prior| prior.publication else null, if (command) |decoded| decoded.value else null, if (admission) |entry| entry.value else null, parent.observers_present and prefix.hasOuter(item.work), &prefix, &checked.observer_successors.histories);
                     var retained = item;
+                    if (item.observer) |observer| retained.observer =
+                        try @import("workspace_observers.zig").copyObserver(a, observer);
                     if (item.control.cancellation) |reason| retained.control.cancellation = .{ .bytes = try a.dupe(u8, reason.bytes) };
-                    try latest.put(item.work, .{ .publication = retained, .seq = event_value.seq });
+                    if (item.guard) |guard| retained.guard = try copyWorkspaceGuard(a, guard);
+                    try prefix.put(retained, event_value.seq);
                 }
             }
-            if (admissions.count() != 0) return error.InvalidArchive;
+            if (admissions.count() != 0 or compiler_reads.count() != 0) return error.InvalidArchive;
             for (records) |row| {
                 if (row.kind == .workspace_port_reply and !replies.contains(row.id)) return error.InvalidArchive;
                 if (row.kind == .controller_residual) {
@@ -8434,9 +10423,27 @@ pub fn Service(comptime Types: type) type {
                 }
                 if (row.kind != .workspace_work) continue;
                 const current = try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, row.id), true);
-                const last = latest.get(row.id) orelse return error.InvalidArchive;
+                const last = prefix.latest.get(row.id) orelse return error.InvalidArchive;
                 if (last.seq != current.work.event_watermark or !try samePublication(a, last.publication, try workPublication(a, current))) return error.InvalidArchive;
+                if (current.work.observer) |observer|
+                    if (!std.meta.eql(observer.successor, successor_ids.get(row.id))) return error.InvalidArchive;
             }
+            var active_count: usize = 0;
+            var publications = prefix.latest.iterator();
+            while (publications.next()) |entry| {
+                const observer = entry.value_ptr.publication.observer orelse continue;
+                if (!observer.stopped and !successor_ids.contains(entry.key_ptr.*)) active_count += 1;
+            }
+            if (active_count != parent.observer_heads.items.len) return error.InvalidArchive;
+            for (parent.observer_heads.items, 0..) |id, index| {
+                if (index != 0 and !observerHeadOrder({}, parent.observer_heads.items[index - 1], id))
+                    return error.InvalidArchive;
+                const latest = prefix.latest.get(id) orelse return error.InvalidArchive;
+                const observer = latest.publication.observer orelse return error.InvalidArchive;
+                if (observer.stopped or successor_ids.contains(id)) return error.InvalidArchive;
+            }
+            for (captured_reads[captured_read..]) |read| try root_history.observeRead(read);
+            try root_history.finish(parent);
         }
 
         fn workspaceReadBasis(self: *Self, allocator: std.mem.Allocator, parent: state.Task, command: wc.Command) ![]u8 {
@@ -8476,8 +10483,35 @@ pub fn Service(comptime Types: type) type {
                     else => return error.InvalidState,
                 },
                 .program => |p| {
-                    if (p == .build or p == .specialize or p == .adopt) return error.InvalidState;
-                    if (p == .describe and p.describe.section == .current_controller) basis = .{ .controller = .{ .binding = parent.controller, .epoch = parent.controller_epoch, .residuals = .{ .items = try self.controllerResidualIds(a, parent.id) }, .event_watermark = parent.event_high } };
+                    if (p == .build or p == .specialize or p == .adopt or
+                        p == .derive or p == .validate) return error.InvalidState;
+                    if (p == .describe and p.describe.section == .semantic_candidates)
+                        basis = .{ .semantic_policy = .{
+                            .policy = try self.workspaceSemanticPolicy(a),
+                            .event_watermark = parent.event_high,
+                        } };
+                    const semantic = if (p == .inspect and p.inspect.target == .semantic_source)
+                        p.inspect.target.semantic_source.subject
+                    else
+                        null;
+                    if (semantic != null and semantic.? == .work) {
+                        one[0] = semantic.?.work.expected.work;
+                        refs = &one;
+                    }
+                    if ((p == .describe and p.describe.section == .current_controller) or
+                        (semantic != null and semantic.? == .controller))
+                    {
+                        basis = .{ .controller = .{
+                            .binding = parent.controller,
+                            .epoch = parent.controller_epoch,
+                            .execution_revision = parent.execution_revision,
+                            .runtime = parent.controller_runtime,
+                            .realization_revision = parent.realization_revision,
+                            .interaction = parent.controller_interaction,
+                            .residuals = .{ .items = try self.controllerResidualIds(a, parent.id) },
+                            .event_watermark = parent.event_high,
+                        } };
+                    }
                 },
                 .placement => return error.InvalidState,
             }
@@ -8526,8 +10560,26 @@ pub fn Service(comptime Types: type) type {
             } else if (work.current_occurrence != null) return error.InvalidArchive;
         }
 
-        fn validateWorkspaceRead(self: *Self, a: std.mem.Allocator, parent: state.Task, command: wc.Command, basis: workspace.ReadObservation, records: []const state.ArchiveRecord) !void {
+        fn validateControllerReadCut(basis: workspace.ReadObservation, controller_read: ?state.ControllerReadCut) !void {
+            if (basis == .controller) {
+                const cut = controller_read orelse return error.InvalidArchive;
+                if (cut.event_watermark != basis.controller.event_watermark or
+                    cut.execution_revision != basis.controller.execution_revision) return error.InvalidArchive;
+            } else if (controller_read != null) return error.InvalidArchive;
+        }
+
+        fn publicationReadsController(command: workspace.PublicationCommand) bool {
+            return switch (command) {
+                .realize_controller => true,
+                .semantic => |selected| selected.command == .derive and selected.command.derive.ancestor == .controller,
+                .context => |selected| selected.command == .materialize and selected.command.materialize.input == .semantic_source and selected.command.materialize.input.semantic_source.subject == .controller,
+                else => false,
+            };
+        }
+
+        fn validateWorkspaceReadIn(self: *Self, a: std.mem.Allocator, parent: state.Task, command: wc.Command, basis: workspace.ReadObservation, records: []const state.ArchiveRecord, controller_read: ?state.ControllerReadCut, checked: *SnapshotValidation) !void {
             if (!workspaceIsRead(command)) return error.InvalidArchive;
+            try validateControllerReadCut(basis, controller_read);
             if (command == .work and command.work == .inspect and command.work.inspect.work.kind == .residual) {
                 if (basis != .residual or basis.residual.event_watermark > parent.event_high or !std.meta.eql(basis.residual.value.id, try wp.identity(command.work.inspect.work, .residual)) or !std.meta.eql(basis.residual.value.task, parent.id)) return error.InvalidArchive;
                 try requireArchiveRecord(records, .controller_residual, basis.residual.value.id);
@@ -8566,18 +10618,49 @@ pub fn Service(comptime Types: type) type {
                     },
                     else => return error.InvalidArchive,
                 },
-                .program => |p| if (p == .describe and p.describe.section == .current_controller) {
-                    expected = .controller;
+                .program => |p| {
+                    if (p == .describe and p.describe.section == .current_controller) {
+                        expected = .controller;
+                    }
+                    if (p == .describe and p.describe.section == .semantic_candidates)
+                        expected = .semantic_policy;
+                    if (p == .inspect and p.inspect.target == .semantic_source) {
+                        switch (p.inspect.target.semantic_source.subject) {
+                            .runtime => {},
+                            .controller => expected = .controller,
+                            .work => |selected| {
+                                one[0] = selected.expected.work;
+                                refs = &one;
+                                expected = .works;
+                            },
+                        }
+                    }
                 },
                 .placement => return error.InvalidArchive,
             }
             if (std.meta.activeTag(basis) != expected) return error.InvalidArchive;
             switch (basis) {
                 .immutable => {},
+                .semantic_policy => |observed| {
+                    if (observed.event_watermark > parent.event_high) return error.InvalidArchive;
+                },
                 .residual => return error.InvalidArchive,
                 .controller => |observed| {
                     if (!std.meta.eql(observed.binding, try self.controllerAt(a, parent, observed.event_watermark))) return error.InvalidArchive;
                     if (observed.epoch != try self.controllerEpochAt(a, parent, observed.event_watermark)) return error.InvalidArchive;
+                    const runtime_cut = try self.controllerRuntimeAt(a, parent, observed.event_watermark);
+                    if (!std.meta.eql(runtime_cut.runtime, observed.runtime) or
+                        runtime_cut.realization_revision != observed.realization_revision) return error.InvalidArchive;
+                    if (observed.execution_revision > parent.execution_revision) {
+                        return error.InvalidArchive;
+                    }
+                    if (observed.interaction) |id| {
+                        try requireArchiveRecord(records, .controller_interaction, id);
+                        var interaction = try self.record(state.ControllerInteraction, a, "controller_interaction", id, parent.id);
+                        defer interaction.deinit();
+                        if (!std.meta.eql(observed.binding, @as(?state.Digest, interaction.value.controller)))
+                            return error.InvalidArchive;
+                    }
                     if (observed.binding) |id| {
                         try requireArchiveRecord(records, .controller_binding, id);
                         if (observed.epoch < (try self.controllerBinding(a, parent, id)).epoch) return error.InvalidArchive;
@@ -8619,7 +10702,7 @@ pub fn Service(comptime Types: type) type {
                         };
                         if (!std.meta.eql(snapshot.work.id, id) or snapshot.work.event_watermark > watermark) return error.InvalidArchive;
                         try requireArchiveRecord(records, .workspace_work, id);
-                        try self.validateWorkspaceWorkSnapshot(a, parent, snapshot, records);
+                        try self.validateWorkspaceWorkSnapshotIn(parent, snapshot, records, checked);
                         if (snapshot.work.event_watermark != try self.workspacePublicationAt(a, parent.id, id, watermark)) return error.InvalidArchive;
                         try self.validateHistoricalOccurrence(a, snapshot);
                     }
@@ -8627,7 +10710,7 @@ pub fn Service(comptime Types: type) type {
             }
         }
 
-        fn validateWorkspaceReply(self: *Self, a: std.mem.Allocator, parent: state.Task, pending: occurrence.Occurrence, entry: registry.Entry, request: data.invocation.Request, saved: workspace.ReplyObservation, reply: []const u8, records: []const state.ArchiveRecord) anyerror!void {
+        fn validateWorkspaceReply(self: *Self, a: std.mem.Allocator, parent: state.Task, pending: occurrence.Occurrence, entry: registry.Entry, request: data.invocation.Request, saved: workspace.ReplyObservation, reply: []const u8, records: []const state.ArchiveRecord, checked: *SnapshotValidation) anyerror!void {
             if (pending.work != null or !std.meta.eql(saved.id, pending.id) or !std.meta.eql(saved.task, parent.id) or !std.meta.eql(saved.request, pending.request_object)) return error.InvalidArchive;
             const acquired = switch (pending.state) {
                 .settled_reply => |r| r,
@@ -8670,8 +10753,10 @@ pub fn Service(comptime Types: type) type {
                     break :placement_reply try placementReplyCopy(a, action.value.reply);
                 },
                 .read => |basis| blk: {
+                    var controller_read: ?state.ControllerReadCut = null;
                     const watermark: ?u64 = switch (basis) {
                         .immutable => null,
+                        .semantic_policy => |observed| observed.event_watermark,
                         .scope => |at| at,
                         .controller => |observed| observed.event_watermark,
                         .residual => |observed| observed.event_watermark,
@@ -8688,32 +10773,28 @@ pub fn Service(comptime Types: type) type {
                         var event_value = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
                         defer event_value.deinit();
                         if (event_value.value.kind != .workspace_read) return error.InvalidArchive;
+                        controller_read = event_value.value.controller_read;
                         var event_data = try json.parse(a, event_value.value.data.bytes, .{});
                         defer event_data.deinit();
                         const id = try json.text(event_data.value.object.get("occurrence_id") orelse return error.InvalidArchive);
                         if (!same(id, &std.fmt.bytesToHex(pending.id, .lower))) return error.InvalidArchive;
                     }
-                    try self.validateWorkspaceRead(a, parent, command, basis, records);
-                    break :blk try self.workspaceCommandFrom(a, &operation_id, parent.id, authorized.value, basis);
+                    try self.validateWorkspaceReadIn(a, parent, command, basis, records, controller_read, checked);
+                    break :blk try self.workspaceCommandFromIn(a, &operation_id, parent.id, authorized.value, basis, .{ .historical = &checked.observer_successors.histories });
                 },
                 .admitted => |admitted| blk: {
-                    if (workspaceIsRead(command) or (command == .program and command.program == .build)) return error.InvalidArchive;
+                    if (workspaceIsRead(command) or workspaceCompiles(command)) return error.InvalidArchive;
                     if (self.workspace_replay != null) return error.InvalidArchive;
-                    self.workspace_replay = .{ .replayed = admitted.replayed, .records = records };
+                    self.workspace_replay = .{ .replayed = admitted.replayed, .records = records, .checked = checked };
                     defer self.workspace_replay = null;
-                    const result = try self.workspaceCommandAuthorized(a, &operation_id, parent.id, authorized.value);
+                    const result = try self.workspaceCommandFromIn(a, &operation_id, parent.id, authorized.value, null, .{ .historical = &checked.observer_successors.histories });
                     if (result.disposition == .rejected) return error.InvalidArchive;
                     break :blk result;
                 },
                 .rejected => |failure| blk: {
                     if (failure.stage == .authorization or failure.code.bytes.len == 0) return error.InvalidArchive;
                     if (failure.stage == .preparation) {
-                        if (command != .program or command.program != .build) return error.InvalidArchive;
-                        _ = self.workspacePrepareBuild(a, parent, authorized.value) catch |err| {
-                            if (!same(failure.code.bytes, @errorName(err))) return error.InvalidArchive;
-                            break :blk try workspaceRejection(a, err);
-                        };
-                        return error.InvalidArchive;
+                        if (!workspaceCompiles(command)) return error.InvalidArchive;
                     }
                     const key = try self.operationKey(a, &operation_id);
                     if (try self.store().savedReceipt(a, &key)) |committed| {
@@ -8738,7 +10819,7 @@ pub fn Service(comptime Types: type) type {
             var command = try contracts.decodeOwned(workspace.Authorized, a, authorized);
             defer command.deinit();
             const operation_id = std.fmt.bytesToHex(pending.id, .lower);
-            if (command.value.command == .program and command.value.command.program == .build) {
+            if (workspaceCompiles(command.value.command)) {
                 if (self.work != null) return .idle;
                 const prepared = self.workspacePrepareBuild(a, initial, command.value) catch |err| {
                     return self.rejectWorkspace(a, initial, pending, .preparation, err);
@@ -8746,7 +10827,7 @@ pub fn Service(comptime Types: type) type {
                 defer a.free(prepared);
                 const request_bytes = try self.store().object(a, pending.request_object, null);
                 defer a.free(request_bytes);
-                return self.dispatchAcquisition(a, initial, pending, entry, request_bytes, prepared, .workspace_build);
+                return self.dispatchAcquisition(a, initial, pending, entry, request_bytes, prepared, .workspace_build, if (command.value.command.program == .derive and command.value.command.program.derive.ancestor == .controller) .from(initial) else null);
             }
             if (command.value.command == .work and command.value.command.work == .wait) {
                 const selection = command.value.command.work.wait;
@@ -8806,6 +10887,9 @@ pub fn Service(comptime Types: type) type {
             return self.settleWorkspaceReply(a, initial, pending, observation, evidence);
         }
         fn workspacePrepareBuild(self: *Self, a: std.mem.Allocator, parent: state.Task, authorized: workspace.Authorized) ![]u8 {
+            if (authorized.command.program != .build) {
+                return self.workspacePrepareSemanticBuild(a, parent, authorized.command.program, null);
+            }
             const build = authorized.command.program.build;
             const source = switch (build.source) {
                 .json_text => |text| try a.dupe(u8, text.bytes),
@@ -8826,9 +10910,602 @@ pub fn Service(comptime Types: type) type {
                 for (value.imports.items) |item| if (item.native_result != null) a.free(item.result.bytes);
                 a.free(value.imports.items);
             };
-            return contracts.encodeOwned(build_job.Input, a, .{ .source = .{ .bytes = source }, .kind = build.source_kind, .catalog = if (catalog) |bytes| .{ .bytes = bytes } else null, .exposures = build.exposures, .controller = contract });
+            return contracts.encodeOwned(build_job.Input, a, .{ .program = .{
+                .source = .{ .bytes = source },
+                .kind = build.source_kind,
+                .catalog = if (catalog) |bytes| .{ .bytes = bytes } else null,
+                .exposures = build.exposures,
+                .controller = contract,
+            } });
         }
 
+        fn workspacePrepareSemanticBuild(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            command: wc.Program,
+            frozen: ?workspace.ReadObservation,
+        ) ![]u8 {
+            switch (command) {
+                .derive => |selected| {
+                    const inspect: wc.Command = .{ .program = .{ .inspect = .{
+                        .target = .{ .semantic_source = .{
+                            .subject = selected.ancestor,
+                            .section = .{ .summary = .{} },
+                        } },
+                        .page = .{},
+                    } } };
+                    const basis_bytes = if (frozen) |basis|
+                        try contracts.encodeOwned(workspace.ReadObservation, a, basis)
+                    else
+                        try self.workspaceReadBasis(a, parent, inspect);
+                    defer a.free(basis_bytes);
+                    var basis = try contracts.decodeOwned(workspace.ReadObservation, a, basis_bytes);
+                    defer basis.deinit();
+                    var ancestor = try self.semanticRuntime(a, parent.id, selected.ancestor, basis.value);
+                    defer ancestor.deinit();
+                    const root = kosmos.RuntimeCompiler.approvedRootIdentity(&ancestor.admitted);
+                    const checker = kosmos.RuntimeCompiler.checker_identity;
+                    try self.requireSemanticPolicy(root, checker);
+                    return self.freezeSemanticDerive(a, parent.id, selected, ancestor.admitted, root, checker, basis.value);
+                },
+                .validate => |selected| {
+                    var candidate = try self.workspaceCandidate(
+                        a,
+                        parent.id,
+                        try wp.identity(selected.candidate, .candidate),
+                    );
+                    defer candidate.deinit();
+                    const d = candidate.value.description;
+                    try self.requireSemanticPolicy(d.root, d.checker.bytes);
+                    const ancestor = try self.store().object(a, d.ancestor, null);
+                    defer a.free(ancestor);
+                    const code = try self.store().object(a, d.code, null);
+                    defer a.free(code);
+                    return contracts.encodeOwned(build_job.Input, a, .{ .validate = .{
+                        .ancestor = .{ .bytes = ancestor },
+                        .candidate = .{ .bytes = code },
+                        .candidate_ref = candidate.value.artifact,
+                        .program = candidate.value.program,
+                        .guest = d.guest,
+                        .root = d.root,
+                        .checker = d.checker,
+                    } });
+                },
+                else => return error.InvalidState,
+            }
+        }
+
+        fn freezeSemanticDerive(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            selected: @FieldType(wc.Program, "derive"),
+            ancestor: kosmos.RuntimeArtifact,
+            root: state.Digest,
+            checker: []const u8,
+            basis: workspace.ReadObservation,
+        ) ![]u8 {
+            const program_id = try wp.identity(selected.program, .program);
+            var program = try self.workspaceProgram(a, task_id, program_id);
+            defer program.deinit();
+            const image = try self.store().object(a, program.value.description.image, null);
+            defer a.free(image);
+            const root_bytes = try ancestor.encode(a);
+            defer a.free(root_bytes);
+            const proposal = try self.workspaceProposal(a, task_id, selected.proposal);
+            defer a.free(proposal);
+            const producer = if (selected.proposal == .reference and
+                selected.proposal.reference.kind == .value)
+                (try self.workspaceValueReference(a, task_id, selected.proposal.reference)).artifact
+            else
+                null;
+            return contracts.encodeOwned(build_job.Input, a, .{ .derive = .{
+                .ancestor = .{ .bytes = root_bytes },
+                .guest = .{ .bytes = image },
+                .program = program_id,
+                .proposal = .{ .bytes = proposal },
+                .producer = producer,
+                .root = root,
+                .checker = try name(checker),
+                .subject = selected.ancestor,
+                .basis = basis,
+            } });
+        }
+
+        fn workspaceProposal(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            input: wc.SourceInput,
+        ) ![]u8 {
+            if (input == .json_text) return a.dupe(u8, input.json_text.bytes);
+            if (input.reference.kind == .source) return self.workspaceSource(a, task_id, input.reference);
+            const source = try self.workspaceValueReference(a, task_id, input.reference);
+            const schema = try values.schemaBytes(construction.CandidateDocument, a);
+            defer a.free(schema);
+            if (!std.meta.eql(source.schema, state.Reference{
+                .digest = storage.digest(schema),
+                .bytes = schema.len,
+            })) return error.SchemaMismatch;
+            const bytes = try self.store().object(a, source.value, null);
+            defer a.free(bytes);
+            var document = try contracts.decodeOwned(construction.CandidateDocument, a, bytes);
+            defer document.deinit();
+            if (document.value.version != 1) return error.UnsupportedVersion;
+            return @import("source_records.zig").encodeRecord(
+                construction.CandidateDocument,
+                a,
+                document.value,
+            );
+        }
+
+        fn validateSemanticReadPosition(basis: workspace.ReadObservation, event_seq: u64) !void {
+            const watermark = switch (basis) {
+                .immutable => return,
+                .controller => |read| read.event_watermark,
+                .works => |read| read.event_watermark,
+                else => return error.InvalidArchive,
+            };
+            if (event_seq == 0 or watermark != event_seq - 1) return error.InvalidArchive;
+        }
+
+        fn validateSemanticInput(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            command: wc.Program,
+            input: build_job.Input,
+            records: []const state.ArchiveRecord,
+            controller_read: ?state.ControllerReadCut,
+            checked: *SnapshotValidation,
+        ) !void {
+            if (command == .derive and input == .derive) {
+                const inspect: wc.Command = .{ .program = .{ .inspect = .{
+                    .target = .{ .semantic_source = .{
+                        .subject = command.derive.ancestor,
+                        .section = .{ .summary = .{} },
+                    } },
+                    .page = .{},
+                } } };
+                try self.validateWorkspaceReadIn(a, parent, inspect, input.derive.basis, records, controller_read, checked);
+                return;
+            }
+            if (command != .validate or input != .validate or controller_read != null) return error.InvalidArchive;
+            var candidate = try self.workspaceCandidate(
+                a,
+                parent.id,
+                try wp.identity(command.validate.candidate, .candidate),
+            );
+            defer candidate.deinit();
+            if (!std.meta.eql(candidate.value.artifact, input.validate.candidate_ref))
+                return error.InvalidArchive;
+            try requireArchiveRecord(records, .workspace_candidate, candidate.value.id);
+        }
+
+        fn validateSemanticPublication(
+            self: *Self,
+            parent: state.Task,
+            selected: @FieldType(workspace.PublicationCommand, "semantic"),
+            admission: WorkspaceAdmission,
+            records: []const state.ArchiveRecord,
+            event_seq: u64,
+            controller_read: ?state.ControllerReadCut,
+            checked: *SnapshotValidation,
+        ) !void {
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var phase: []const u8 = "input";
+            errdefer std.debug.print("semantic publication: {s}\n", .{phase});
+            const input_bytes = try self.store().object(a, selected.input, null);
+            defer a.free(input_bytes);
+            var input = try contracts.decodeOwned(build_job.Input, a, input_bytes);
+            defer input.deinit();
+            if (input.value == .derive) try validateSemanticReadPosition(input.value.derive.basis, event_seq);
+            try self.validateSemanticInput(a, parent, selected.command, input.value, records, controller_read, checked);
+            phase = "frozen input";
+            const frozen = try self.workspacePrepareSemanticBuild(
+                a,
+                parent,
+                selected.command,
+                if (input.value == .derive) input.value.derive.basis else null,
+            );
+            defer a.free(frozen);
+            if (!same(frozen, input_bytes)) return error.InvalidArchive;
+            const output_bytes = try self.store().object(a, selected.output, null);
+            defer a.free(output_bytes);
+            phase = "compiler output";
+            try self.validateCompilerOutput(parent.id, input_bytes, output_bytes);
+            phase = "retained observation";
+            var output = try contracts.decodeOwned(build_job.Output, a, output_bytes);
+            defer output.deinit();
+            const observed = try self.retainedSemanticObservation(
+                a,
+                parent.id,
+                input.value,
+                output.value,
+                selected.output,
+            );
+            const expected = try contracts.encodeOwned(workspace.SemanticObservation, a, observed);
+            defer a.free(expected);
+            const reference = admission.observation orelse return error.InvalidArchive;
+            if (!std.meta.eql(reference, state.Reference{
+                .digest = storage.digest(expected),
+                .bytes = expected.len,
+            }) or !std.meta.eql(admission.work, if (observed.candidate) |ref| ref.digest else reference.digest))
+                return error.InvalidArchive;
+        }
+
+        fn validateCompilerOutput(
+            self: *Self,
+            task_id: state.TaskId,
+            input: []const u8,
+            output: []const u8,
+        ) !void {
+            const fact: CompilerFact = .{ .kind = .output, .input = compilerReference(input), .output = compilerReference(output) };
+            if (try self.compilerFact(fact)) return;
+            const a = self.allocator;
+            var frozen = try contracts.decodeOwned(build_job.Input, a, input);
+            defer frozen.deinit();
+            var actual = try contracts.decodeOwned(build_job.Output, a, output);
+            defer actual.deinit();
+            if (actual.value == .validation) switch (actual.value.validation.outcome) {
+                .resource_exhausted, .interrupted, .unavailable_dependency => {
+                    if (frozen.value != .validate or actual.value.validation.code.bytes.len == 0) return error.InvalidArchive;
+                    try self.retainCompilerFact(fact);
+                    return;
+                },
+                else => {},
+            };
+            const task_name = std.fmt.bytesToHex(task_id, .lower);
+            const expected_bytes = try build_job.run(.{
+                .allocator = a,
+                .io = self.io,
+                .authority = &self.profile.authority,
+                .task_id = &task_name,
+                .profile = self.profile.bytes,
+                .environment = null,
+            }, input);
+            defer a.free(expected_bytes);
+            var expected = try contracts.decodeOwned(build_job.Output, a, expected_bytes);
+            defer expected.deinit();
+            switch (expected.value) {
+                inline else => |*value| value.compiler_nanoseconds = 0,
+            }
+            switch (actual.value) {
+                inline else => |*value| value.compiler_nanoseconds = 0,
+            }
+            const expected_value = try contracts.encodeOwned(build_job.Output, a, expected.value);
+            defer a.free(expected_value);
+            const actual_value = try contracts.encodeOwned(build_job.Output, a, actual.value);
+            defer a.free(actual_value);
+            if (!same(expected_value, actual_value)) return error.InvalidArchive;
+            try self.retainCompilerFact(fact);
+            if (frozen.value == .derive and actual.value == .derived) {
+                const description = semanticCandidateDescription(frozen.value.derive, actual.value.derived.artifact.bytes);
+                const bytes = try contracts.encodeOwned(workspace.CandidateArtifact, a, description);
+                defer a.free(bytes);
+                try self.retainCompilerFact(.{ .kind = .candidate, .input = compilerReference(bytes), .output = description.code });
+            } else if (frozen.value == .validate and actual.value == .validation and actual.value.validation.outcome == .validated) {
+                const selected = frozen.value.validate;
+                try self.retainCompilerFact(try runtimeCompilerFact(a, compilerReference(selected.candidate.bytes), .{
+                    .candidate = selected.candidate_ref,
+                    .ancestor = compilerReference(selected.ancestor.bytes),
+                    .guest = selected.guest,
+                    .root = selected.root,
+                    .checker = selected.checker,
+                }));
+            }
+        }
+
+        fn workspaceSemanticCommand(
+            self: *Self,
+            a: std.mem.Allocator,
+            operation_id: []const u8,
+            task_id: state.TaskId,
+            command: wc.Program,
+        ) !Admission {
+            const request = try operation(workspace.SemanticRequest, a, .{
+                .task = task_id,
+                .command = command,
+            });
+            if (try self.replay(a, operation_id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
+            const input_bytes = try self.workspacePrepareSemanticBuild(a, parent.value, command, null);
+            defer a.free(input_bytes);
+            const task_name = std.fmt.bytesToHex(task_id, .lower);
+            if (self.store().transaction) return error.CompilerPreparationRequired;
+            const output_bytes = try build_job.run(.{
+                .allocator = a,
+                .io = self.io,
+                .authority = &self.profile.authority,
+                .task_id = &task_name,
+                .profile = self.profile.bytes,
+                .environment = null,
+            }, input_bytes);
+            defer a.free(output_bytes);
+            var input = try contracts.decodeOwned(build_job.Input, a, input_bytes);
+            defer input.deinit();
+            var output = try contracts.decodeOwned(build_job.Output, a, output_bytes);
+            defer output.deinit();
+            try self.store().begin();
+            defer self.store().rollback();
+            const observed = try self.workspaceStoreSemantic(
+                a,
+                task_id,
+                input.value,
+                output.value,
+                output_bytes,
+            );
+            const observed_bytes = try contracts.encodeOwned(workspace.SemanticObservation, a, observed);
+            defer a.free(observed_bytes);
+            const observation = try self.store().putObject(observed_bytes);
+            return self.workspaceCommit(a, parent.value, operation_id, request, if (observed.candidate) |ref| ref.digest else observation.digest, .candidate, observation, .{ .semantic = .{
+                .command = command,
+                .input = try self.store().putObject(input_bytes),
+                .output = observed.output,
+            } });
+        }
+
+        fn workspaceStoreSemantic(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            input: build_job.Input,
+            output: build_job.Output,
+            output_bytes: []const u8,
+        ) !workspace.SemanticObservation {
+            const result: workspace.SemanticObservation = .{
+                .candidate = null,
+                .runtime = null,
+                .output = try self.store().putObject(output_bytes),
+            };
+            switch (output) {
+                .rejected => return result,
+                .derived => |derived| {
+                    if (input != .derive) return error.InvalidCandidate;
+                    var observed = result;
+                    observed.candidate = try self.workspaceStoreCandidate(
+                        a,
+                        task_id,
+                        input.derive,
+                        derived.artifact.bytes,
+                    );
+                    return observed;
+                },
+                .validation => |validation| {
+                    if (input != .validate) return error.InvalidCandidate;
+                    var observed = result;
+                    observed.candidate = input.validate.candidate_ref;
+                    if (validation.outcome == .validated) {
+                        observed.runtime = try self.workspaceStoreValidation(a, task_id, input.validate);
+                    }
+                    return observed;
+                },
+                .compiled => return error.InvalidCandidate,
+            }
+        }
+
+        fn workspaceStoreCandidate(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            input: build_job.DeriveInput,
+            code: []const u8,
+        ) !state.Reference {
+            var admitted = try kosmos.RuntimeArtifact.init(a, code, storage.digest(code));
+            defer admitted.deinit();
+            const lineage = admitted.content.value.lineage orelse return error.InvalidCandidate;
+            if (!std.meta.eql(lineage.parent, storage.digest(input.ancestor.bytes)) or
+                !std.meta.eql(lineage.root, input.root) or !same(lineage.checker, input.checker.bytes))
+                return error.InvalidCandidate;
+            _ = try self.store().putObject(input.ancestor.bytes);
+            _ = try self.store().putObject(input.guest.bytes);
+            _ = try self.store().putObject(input.proposal.bytes);
+            _ = try self.store().putObject(code);
+            const description = semanticCandidateDescription(input, code);
+            const bytes = try contracts.encodeOwned(workspace.CandidateArtifact, a, description);
+            defer a.free(bytes);
+            const artifact = try self.store().putObject(bytes);
+            const id = try workspaceContentCustody(a, task_id, artifact.digest);
+            const value: workspace.Candidate = .{
+                .id = id,
+                .task = task_id,
+                .program = input.program,
+                .artifact = artifact,
+                .description = description,
+            };
+            if (try self.store().recordBytes(a, "workspace_candidate", id, task_id)) |prior| {
+                defer a.free(prior);
+                var saved = try contracts.decodeOwned(workspace.Candidate, a, prior);
+                defer saved.deinit();
+                var canonical = value;
+                canonical.program = saved.value.program;
+                const expected = try contracts.encodeOwned(workspace.Candidate, a, canonical);
+                defer a.free(expected);
+                if (!same(prior, expected)) return error.InvalidCandidate;
+            } else try self.store().createRecord(
+                workspace.Candidate,
+                "workspace_candidate",
+                id,
+                task_id,
+                value,
+            );
+            return artifact;
+        }
+
+        fn semanticCandidateDescription(
+            input: build_job.DeriveInput,
+            code: []const u8,
+        ) workspace.CandidateArtifact {
+            return .{
+                .ancestor = .{
+                    .digest = storage.digest(input.ancestor.bytes),
+                    .bytes = input.ancestor.bytes.len,
+                },
+                .guest = .{
+                    .digest = storage.digest(input.guest.bytes),
+                    .bytes = input.guest.bytes.len,
+                },
+                .proposal = .{
+                    .digest = storage.digest(input.proposal.bytes),
+                    .bytes = input.proposal.bytes.len,
+                },
+                .code = .{ .digest = storage.digest(code), .bytes = code.len },
+                .producer = input.producer,
+                .root = input.root,
+                .checker = input.checker,
+            };
+        }
+
+        fn retainedSemanticObservation(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            input: build_job.Input,
+            output: build_job.Output,
+            output_ref: state.Reference,
+        ) !workspace.SemanticObservation {
+            var result: workspace.SemanticObservation = .{
+                .candidate = null,
+                .runtime = null,
+                .output = output_ref,
+            };
+            switch (output) {
+                .rejected => {},
+                .derived => |derived| {
+                    if (input != .derive) return error.InvalidArchive;
+                    const description = semanticCandidateDescription(input.derive, derived.artifact.bytes);
+                    const bytes = try contracts.encodeOwned(workspace.CandidateArtifact, a, description);
+                    defer a.free(bytes);
+                    var candidate = try self.workspaceCandidate(a, task_id, storage.digest(bytes));
+                    defer candidate.deinit();
+                    result.candidate = candidate.value.artifact;
+                },
+                .validation => |validation| {
+                    if (input != .validate) return error.InvalidArchive;
+                    var candidate = try self.workspaceCandidate(
+                        a,
+                        task_id,
+                        input.validate.candidate_ref.digest,
+                    );
+                    defer candidate.deinit();
+                    if (!std.meta.eql(candidate.value.artifact, input.validate.candidate_ref))
+                        return error.InvalidArchive;
+                    result.candidate = candidate.value.artifact;
+                    if (validation.outcome == .validated) {
+                        var runtime = try self.workspaceRuntime(
+                            a,
+                            task_id,
+                            candidate.value.description.code.digest,
+                            candidate.value.program,
+                        );
+                        defer runtime.deinit();
+                        result.runtime = runtime.record.value.artifact;
+                    }
+                },
+                .compiled => return error.InvalidArchive,
+            }
+            return result;
+        }
+
+        fn workspaceStoreValidation(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            input: build_job.ValidateInput,
+        ) !state.Reference {
+            var candidate = try self.workspaceCandidate(a, task_id, input.candidate_ref.digest);
+            defer candidate.deinit();
+            const d = candidate.value.description;
+            if (!std.meta.eql(d.root, input.root) or !std.meta.eql(d.guest, input.guest) or
+                !std.meta.eql(d.code.digest, storage.digest(input.candidate.bytes)) or
+                !std.meta.eql(d.ancestor.digest, storage.digest(input.ancestor.bytes)) or
+                !same(d.checker.bytes, input.checker.bytes)) return error.InvalidCandidate;
+            const id = try workspaceContentCustody(a, task_id, d.code.digest);
+            const value: workspace.Runtime = .{
+                .id = id,
+                .task = task_id,
+                .program = candidate.value.program,
+                .artifact = d.code,
+                .validation = .{
+                    .candidate = candidate.value.artifact,
+                    .ancestor = d.ancestor,
+                    .guest = d.guest,
+                    .root = d.root,
+                    .checker = d.checker,
+                },
+            };
+            if (try self.store().recordBytes(a, "workspace_runtime", id, task_id)) |prior| {
+                defer a.free(prior);
+                var saved = try contracts.decodeOwned(workspace.Runtime, a, prior);
+                defer saved.deinit();
+                var canonical = value;
+                const validation = saved.value.validation orelse return error.InvalidRuntime;
+                canonical.program = saved.value.program;
+                canonical.validation.?.candidate = validation.candidate;
+                const expected = try contracts.encodeOwned(workspace.Runtime, a, canonical);
+                defer a.free(expected);
+                if (!same(prior, expected)) return error.InvalidRuntime;
+            } else try self.store().createRecord(
+                workspace.Runtime,
+                "workspace_runtime",
+                id,
+                task_id,
+                value,
+            );
+            return d.code;
+        }
+
+        fn workspaceSemanticObservation(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            observed: workspace.SemanticObservation,
+        ) !json.Value {
+            const output_bytes = try self.store().object(a, observed.output, null);
+            defer a.free(output_bytes);
+            var decoded = try contracts.decodeOwned(build_job.Output, a, output_bytes);
+            defer decoded.deinit();
+            const output = decoded.value;
+            var result = json.object();
+            if (observed.candidate) |ref| {
+                var candidate = try self.workspaceCandidate(a, task_id, ref.digest);
+                defer candidate.deinit();
+                result = try self.workspaceCandidateObservation(a, candidate.value);
+            }
+            switch (output) {
+                .rejected => |failure| {
+                    try json.put(a, &result, "error", json.string(try a.dupe(u8, failure.code.bytes)));
+                    try json.put(a, &result, "construction", json.string("rejected"));
+                },
+                .derived => {},
+                .validation => |validation| {
+                    try json.put(a, &result, "validation", json.string(@tagName(validation.outcome)));
+                    try json.put(a, &result, "diagnostic", json.string(
+                        try a.dupe(u8, validation.code.bytes),
+                    ));
+                },
+                .compiled => return error.InvalidCandidate,
+            }
+            if (observed.runtime) |ref| {
+                try json.put(a, &result, "runtime", try values.toJson(
+                    wc.Ref,
+                    a,
+                    try wp.reference(a, .runtime, ref.digest),
+                ));
+                try json.put(a, &result, "runtime_authority", .{ .bool = true });
+            }
+            const compiler_nanoseconds = switch (output) {
+                inline else => |value| value.compiler_nanoseconds,
+            };
+            try json.put(a, &result, "compiler_nanoseconds", try json.number(a, compiler_nanoseconds));
+            return result;
+        }
         fn workspaceBuildReply(self: *Self, a: std.mem.Allocator, program: ?state.Reference, output: build_job.Output) !wc.Reply {
             var observation = json.object();
             if (output == .rejected) {
@@ -8858,11 +11535,21 @@ pub fn Service(comptime Types: type) type {
             defer a.free(response);
             var output = try contracts.decodeOwned(build_job.Output, a, response);
             defer output.deinit();
+            if (input.value != .program) return self.interpretWorkspaceSemantic(
+                a,
+                initial,
+                pending,
+                attempt,
+                raw,
+                input.value,
+                output.value,
+                response,
+            );
             var parent = initial;
             parent.revision = try std.math.add(u64, parent.revision, 1);
             try self.store().begin();
             defer self.store().rollback();
-            const program: ?state.Reference = if (output.value == .compiled) try self.workspaceStoreProgram(a, initial.id, input.value.source.bytes, @fromBackingInt(@intCast(@backingInt(input.value.kind))), if (input.value.catalog) |bytes| .{ .digest = storage.digest(bytes.bytes), .bytes = bytes.bytes.len } else null, input.value.exposures.items, output.value.compiled) else null;
+            const program: ?state.Reference = if (output.value == .compiled) try self.workspaceStoreProgram(a, initial.id, input.value.program.source.bytes, @fromBackingInt(@intCast(@backingInt(input.value.program.kind))), if (input.value.program.catalog) |bytes| .{ .digest = storage.digest(bytes.bytes), .bytes = bytes.bytes.len } else null, input.value.program.exposures.items, output.value.compiled) else null;
             const reply = try self.workspaceBuildReply(a, program, output.value);
             const payload = try contracts.encodeOwned(wc.Reply, a, reply);
             defer a.free(payload);
@@ -8878,6 +11565,79 @@ pub fn Service(comptime Types: type) type {
             try self.persist(a, parent, initial.revision, "workspace.build", .preserve);
             if (program) |saved| try self.checked_workspace_programs.put(self.allocator, saved.digest, self.store().integrity_epoch);
             return .progressed;
+        }
+
+        fn interpretWorkspaceSemantic(
+            self: *Self,
+            a: std.mem.Allocator,
+            initial: state.Task,
+            pending: occurrence.Occurrence,
+            attempt: state.Attempt,
+            raw: state.Capture,
+            input: build_job.Input,
+            output: build_job.Output,
+            response: []const u8,
+        ) !Step {
+            switch (output) {
+                .derived => {
+                    if (input != .derive) return error.InvalidCandidate;
+                    var guest = try self.workspaceProgram(a, initial.id, input.derive.program);
+                    guest.deinit();
+                },
+                .validation => {
+                    if (input != .validate) return error.InvalidCandidate;
+                    var candidate = try self.workspaceCandidate(a, initial.id, input.validate.candidate_ref.digest);
+                    candidate.deinit();
+                },
+                .rejected => {},
+                .compiled => return error.InvalidCandidate,
+            }
+            var parent = initial;
+            parent.revision = try std.math.add(u64, parent.revision, 1);
+            try self.store().begin();
+            defer self.store().rollback();
+            const observed = try self.workspaceStoreSemantic(a, initial.id, input, output, response);
+            const reply = try self.workspaceSemanticReply(a, initial.id, observed);
+            const payload = try contracts.encodeOwned(wc.Reply, a, reply);
+            defer a.free(payload);
+            const bound = try data.invocation.encodeOwned(data.invocation.Result, a, .{
+                .request_identity = pending.request,
+                .value = payload,
+            });
+            defer a.free(bound);
+            const next = try occurrence.acquired(pending, .{
+                .id = pending.id,
+                .task = initial.id,
+                .request = pending.request,
+            }, attempt.id, storage.digest(bound));
+            var projected = raw;
+            projected.projection = .{
+                .reply = try self.store().putObject(bound),
+                .objects = .{ .items = &.{} },
+                .output_tokens = null,
+            };
+            try self.store().putRecord(state.Capture, "capture", attempt.id, initial.id, projected);
+            try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, initial.id, next);
+            try self.persist(a, parent, initial.revision, "workspace.semantic", .preserve);
+            return .progressed;
+        }
+
+        fn workspaceSemanticReply(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            observed: workspace.SemanticObservation,
+        ) !wc.Reply {
+            const observation = try self.workspaceSemanticObservation(a, task_id, observed);
+            return .{
+                .disposition = if (observation.object.contains("error")) .rejected else .admitted,
+                .observation_json = .{ .bytes = try json.canonical(a, observation) },
+                .evidence = if (observation.object.get("runtime") orelse
+                    observation.object.get("candidate")) |ref|
+                    try values.fromJson(wc.Ref, a, ref)
+                else
+                    null,
+            };
         }
 
         fn workspaceWaitReady(self: *Self, a: std.mem.Allocator, parent: state.Task, selection: @FieldType(wc.Work, "wait")) !bool {
@@ -8955,7 +11715,9 @@ pub fn Service(comptime Types: type) type {
             if (evidence == .read and evidence.read != .immutable) {
                 var event_data = json.object();
                 try json.put(a, &event_data, "occurrence_id", json.string(try a.dupe(u8, &std.fmt.bytesToHex(pending.id, .lower))));
-                try self.event(&parent, .workspace_read, try json.canonical(a, event_data));
+                const cut: ?state.ControllerReadCut = if (evidence.read == .controller) .from(fresh.value) else null;
+                try validateControllerReadCut(evidence.read, cut);
+                try self.subjectPublicationEvent(&parent, .workspace_read, try json.canonical(a, event_data), &.{}, &.{}, null, cut, null);
             }
             try self.effectSchedule(a, &parent, pending, .queued, null);
             try self.persistOccurrence(a, parent, fresh.value.revision, "workspace.reply", pending, true);
@@ -8971,12 +11733,35 @@ pub fn Service(comptime Types: type) type {
             }
         };
 
-        fn retainValidatedRuntime(self: *Self, admitted: *const kosmos.RuntimeArtifact) !void {
+        fn retainValidatedRuntime(self: *Self, admitted: *const kosmos.RuntimeArtifact, fact: CompilerFact) !void {
             var retained = try admitted.clone();
             errdefer retained.deinit();
-            try self.checked_workspace_runtimes.put(self.allocator, admitted.identity, self.store().integrity_epoch);
+            try self.checked_workspace_runtimes.put(self.allocator, fact, self.store().integrity_epoch);
             if (self.runtime_cache) |*cached| cached.artifact.deinit();
             self.runtime_cache = .{ .epoch = self.store().integrity_epoch, .artifact = retained };
+        }
+
+        fn runtimeCompilerFact(a: std.mem.Allocator, reference: state.Reference, validation: ?workspace.ValidationFact) !CompilerFact {
+            const bytes = try contracts.encodeOwned(?workspace.ValidationFact, a, validation);
+            defer a.free(bytes);
+            return .{ .kind = .runtime, .input = reference, .output = if (validation) |fact| fact.ancestor else .{ .digest = @splat(0), .bytes = 0 }, .context = storage.digest(bytes) };
+        }
+
+        fn validateRuntimeCompiler(self: *Self, a: std.mem.Allocator, reference: state.Reference, validation: ?workspace.ValidationFact, admitted: *const kosmos.RuntimeArtifact, source: anytype) !void {
+            const fact = try runtimeCompilerFact(a, reference, validation);
+            if (try self.compilerFact(fact)) return;
+            if (admitted.content.value.lineage != null) {
+                const declared = validation orelse return error.InvalidRuntime;
+                const bytes = try source.object(a, declared.ancestor, null);
+                defer a.free(bytes);
+                var ancestor = try kosmos.RuntimeArtifact.init(a, bytes, declared.ancestor.digest);
+                defer ancestor.deinit();
+                try kosmos.RuntimeCompiler.validateAgainst(a, admitted, &ancestor);
+            } else {
+                if (validation != null) return error.InvalidRuntime;
+                try kosmos.RuntimeCompiler.validate(a, admitted);
+            }
+            try self.retainCompilerFact(fact);
         }
 
         fn workspaceRuntime(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, digest: state.Digest, program_id: ?state.Digest) !SelectedRuntime {
@@ -9006,19 +11791,41 @@ pub fn Service(comptime Types: type) type {
             errdefer admitted.deinit();
             const bound = admitted.content.value.guest orelse return error.InvalidRuntime;
             if (!std.mem.eql(u8, &bound, &guest.identity()) or !same(admitted.content.value.manifest.compiler.horos_package, @import("native_options").horos_identity)) return error.InvalidRuntime;
-            if (self.checked_workspace_runtimes.get(digest) != self.store().integrity_epoch) {
-                // Validation owns and releases its large temporary arenas.
-                // A caller's response arena may intentionally ignore free.
-                try kosmos.RuntimeCompiler.validate(self.allocator, &admitted);
+            const fact = try runtimeCompilerFact(a, saved.value.artifact, saved.value.validation);
+            if (admitted.content.value.lineage != null) {
+                try self.validateDerivedRuntime(a, saved.value, &admitted);
+            } else if (saved.value.validation != null) return error.InvalidRuntime;
+            if (self.checked_workspace_runtimes.get(fact) != self.store().integrity_epoch) {
+                try self.validateRuntimeCompiler(self.allocator, saved.value.artifact, saved.value.validation, &admitted, self.store());
             }
-            try self.retainValidatedRuntime(&admitted);
+            try self.retainValidatedRuntime(&admitted, fact);
             return .{ .record = saved, .admitted = admitted };
+        }
+
+        fn validateDerivedRuntime(
+            self: *Self,
+            a: std.mem.Allocator,
+            value: workspace.Runtime,
+            admitted: *const kosmos.RuntimeArtifact,
+        ) !void {
+            const fact = value.validation orelse return error.InvalidRuntime;
+            if (fact.version != 1) return error.InvalidRuntime;
+            var candidate = try self.workspaceCandidate(a, value.task, fact.candidate.digest);
+            defer candidate.deinit();
+            const d = candidate.value.description;
+            if (!std.meta.eql(candidate.value.artifact, fact.candidate) or
+                !std.meta.eql(d.code, value.artifact) or
+                !std.meta.eql(d.ancestor, fact.ancestor) or !std.meta.eql(d.root, fact.root) or
+                !std.meta.eql(d.guest, fact.guest) or !same(d.checker.bytes, fact.checker.bytes))
+                return error.InvalidRuntime;
+            if (!std.meta.eql(admitted.identity, value.artifact.digest)) return error.InvalidRuntime;
         }
 
         fn workspaceRuntimeObservation(self: *Self, a: std.mem.Allocator, saved: workspace.Runtime) !json.Value {
             var selected = try self.workspaceRuntime(a, saved.task, saved.artifact.digest, saved.program);
             defer selected.deinit();
-            if (!std.meta.eql(saved, selected.record.value)) return error.InvalidRuntime;
+            if (!data.record.equal(workspace.Runtime, saved, selected.record.value))
+                return error.InvalidRuntime;
             const bundle = selected.admitted.content.value;
             var result = json.object();
             try json.put(a, &result, "runtime", try values.toJson(wc.Ref, a, try wp.reference(a, .runtime, saved.artifact.digest)));
@@ -9057,12 +11864,13 @@ pub fn Service(comptime Types: type) type {
             // Compiler and proof scratch ends before the next phase. Keeping it
             // in the caller's response arena retains completed work, including
             // independently decoded proofs, until that entire request ends.
+            if (self.store().transaction) return error.CompilerPreparationRequired;
             const bytes = try kosmos.RuntimeCompiler.compile(self.allocator, .{ .guest = guest, .horos_package = @import("native_options").horos_identity, .hooks = .{ .control = hooks.control, .storage = hooks.storage } });
             defer self.allocator.free(bytes);
             var admitted = try kosmos.RuntimeArtifact.init(self.allocator, bytes, storage.digest(bytes));
             defer admitted.deinit();
-            try kosmos.RuntimeCompiler.validate(self.allocator, &admitted);
-            try self.retainValidatedRuntime(&admitted);
+            try self.validateRuntimeCompiler(self.allocator, compilerReference(bytes), null, &admitted, self.store());
+            try self.retainValidatedRuntime(&admitted, try runtimeCompilerFact(a, compilerReference(bytes), null));
             try self.store().begin();
             defer self.store().rollback();
             const artifact = try self.store().putObject(bytes);
@@ -9093,8 +11901,366 @@ pub fn Service(comptime Types: type) type {
             return work;
         }
 
+        pub fn workspaceGuard(
+            self: *Self,
+            a: std.mem.Allocator,
+            operation_id: []const u8,
+            task_id: state.TaskId,
+            command: @FieldType(workspace.GuardRequest, "command"),
+        ) !Admission {
+            const request = try operation(workspace.GuardRequest, a, .{
+                .task = task_id,
+                .command = command,
+            });
+            if (try self.replay(a, operation_id, request)) |prior| return prior;
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            if (command == .guard and self.workspaceParentStopped(parent.value))
+                return error.InvalidState;
+            const expected = switch (command) {
+                inline else => |selection| selection.expected,
+            };
+            var work = try self.guardWork(a, task_id, expected, command == .guard);
+            defer work.deinit();
+            if (command == .guard and
+                (work.value.terminal() or work.value.outer_operation != null))
+                return error.GuestCutUnavailable;
+            switch (command) {
+                .guard => |selection| {
+                    if (work.value.cancellation != null) return error.InvalidState;
+                    if (work.value.guard != null) return error.GuardAlreadyActive;
+                    if (selection.realization_revision != work.value.realization_revision)
+                        return error.StaleRevision;
+                    work.value.guard = try self.workspaceGuardBinding(
+                        a,
+                        work.value,
+                        selection.candidate,
+                    );
+                },
+                .unguard => |selection| {
+                    const guard = work.value.guard orelse return error.GuardUnavailable;
+                    if (selection.guard_revision != guard.revision) return error.StaleRevision;
+                    work.value.guard = null;
+                },
+            }
+            work.value.control_revision = try std.math.add(u64, work.value.control_revision, 1);
+            work.value.event_watermark = try std.math.add(u64, parent.value.event_high, 1);
+            try self.store().begin();
+            defer self.store().rollback();
+            const id = work.value.id;
+            try self.writeWorkspaceWork(&work.value, .replace);
+            const publication: workspace.PublicationCommand = switch (command) {
+                .guard => |selection| .{ .guard = selection },
+                .unguard => |selection| .{ .unguard = selection },
+            };
+            const snapshot = try self.snapshotRecord(workspace.Work, a, "workspace_work", id, task_id);
+            return self.workspaceCommit(
+                a,
+                parent.value,
+                operation_id,
+                request,
+                work.value.id,
+                .work,
+                snapshot,
+                publication,
+            );
+        }
+
+        fn guardWork(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            expected: wc.Expected,
+            enabling: bool,
+        ) !contracts.Decoded(workspace.Work) {
+            if (enabling) return self.runtimeWork(a, task_id, expected);
+            const id = try wp.identity(expected.work, .work);
+            try self.requireCustody(a, task_id, id);
+            var work = try self.workspaceWork(a, task_id, id);
+            errdefer work.deinit();
+            if (work.value.execution_revision != expected.execution_revision or
+                work.value.control_revision != expected.control_revision)
+                return error.StaleRevision;
+            return work;
+        }
+
+        fn workspaceGuardBinding(
+            self: *Self,
+            a: std.mem.Allocator,
+            work: workspace.Work,
+            candidate_ref: wc.Ref,
+        ) !workspace.Guard {
+            const policy = self.profile.semantic_construction orelse
+                return error.SemanticPolicyDenied;
+            if (!policy.guard) return error.GuardPolicyDenied;
+            var candidate = try self.workspaceCandidate(
+                a,
+                work.task,
+                try wp.identity(candidate_ref, .candidate),
+            );
+            defer candidate.deinit();
+            const description = candidate.value.description;
+            try self.requireSemanticPolicy(description.root, description.checker.bytes);
+            var program = try self.workspaceProgram(a, work.task, work.program);
+            defer program.deinit();
+            if (!std.meta.eql(program.value.description.image, description.guest))
+                return error.GuestIdentityMismatch;
+            return initialGuard(candidate.value.artifact, description.code);
+        }
+
+        fn initialGuard(candidate: state.Reference, code: state.Reference) workspace.Guard {
+            return .{ .candidate = candidate, .code = code, .revision = 0 };
+        }
+
         fn runtimeProvenance(work: workspace.Work) kosmos.RuntimeCapsule.Provenance {
             return .{ .execution = work.id, .custody = storage.digest(&work.task), .publication = .{ .digest = work.checkpoint.digest, .bytes = work.checkpoint.bytes } };
+        }
+
+        fn validateGuardSelection(
+            item: state.WorkPublication,
+            prior: state.WorkPublication,
+            command: workspace.PublicationCommand,
+        ) !void {
+            const expected = switch (command) {
+                .guard => |selection| selection.expected,
+                .unguard => |selection| selection.expected,
+                else => return error.InvalidArchive,
+            };
+            if (!std.meta.eql(try wp.identity(expected.work, .work), item.work) or
+                expected.execution_revision != prior.execution_revision or
+                expected.control_revision != prior.control_revision or
+                item.execution_revision != prior.execution_revision or
+                item.control_revision -| prior.control_revision != 1 or
+                item.control.delivery != prior.control.delivery)
+                return error.InvalidArchive;
+            switch (command) {
+                .guard => |selection| {
+                    const guard = item.guard orelse return error.InvalidArchive;
+                    if (item.control.delivery == .dispatching or item.control.delivery == .unknown)
+                        return error.InvalidArchive;
+                    if (prior.guard != null or
+                        !equalGuards(guard, initialGuard(guard.candidate, guard.code)) or
+                        selection.realization_revision != prior.realization_revision or
+                        !std.meta.eql(
+                            try wp.identity(selection.candidate, .candidate),
+                            guard.candidate.digest,
+                        )) return error.InvalidArchive;
+                },
+                .unguard => |selection| {
+                    const guard = prior.guard orelse return error.InvalidArchive;
+                    if (item.guard != null or selection.guard_revision != guard.revision)
+                        return error.InvalidArchive;
+                },
+                else => unreachable,
+            }
+        }
+
+        fn guardProgress(item: state.WorkPublication, prior: state.WorkPublication) bool {
+            const next = item.guard orelse return false;
+            const before = prior.guard orelse return false;
+            return next.revision > before.revision and
+                item.execution_revision == prior.execution_revision;
+        }
+
+        fn guardSchedule(guard: workspace.Guard, policy: workspace.RunPolicy) state.Schedule {
+            return if (guard.disposition == .diverged or guard.failure != null or
+                policy.continuation == .explicit_only) .parked else .queued;
+        }
+
+        fn validateGuardProgress(
+            item: state.WorkPublication,
+            prior: ?state.WorkPublication,
+            command: ?workspace.PublicationCommand,
+        ) !void {
+            if (command) |selected| if (selected == .guard or selected == .unguard) return;
+            const before = prior orelse {
+                if (item.guard != null) return error.InvalidArchive;
+                return;
+            };
+            if (equalGuards(item.guard, before.guard)) {
+                if (item.guard != null and item.execution_revision != before.execution_revision)
+                    return error.InvalidArchive;
+                return;
+            }
+            if (item.control.cancellation != null and item.guard == null) return;
+            const old = before.guard orelse return error.InvalidArchive;
+            const next = item.guard orelse return error.InvalidArchive;
+            if (next.revision -| old.revision != 1 or
+                !std.meta.eql(next.candidate, old.candidate) or
+                !std.meta.eql(next.code, old.code) or
+                next.reference_nanoseconds < old.reference_nanoseconds or
+                next.candidate_nanoseconds < old.candidate_nanoseconds)
+                return error.InvalidArchive;
+            if (item.execution_revision != before.execution_revision) {
+                if (next.disposition != .agreed or next.pending_control != null or
+                    next.reference_operation != null or next.candidate_segment != null or
+                    next.agreed_segments -| old.agreed_segments != 1 or !next.initialized)
+                    return error.InvalidArchive;
+            } else {
+                if ((next.disposition != .incomplete and next.disposition != .diverged) or
+                    next.pending_control == null or next.agreed_segments != old.agreed_segments)
+                    return error.InvalidArchive;
+                if (old.pending_control) |ref|
+                    if (!std.meta.eql(ref, next.pending_control.?)) return error.InvalidArchive;
+            }
+        }
+
+        fn equalGuards(left: ?workspace.Guard, right: ?workspace.Guard) bool {
+            var lhs = left orelse return right == null;
+            var rhs = right orelse return false;
+            if ((lhs.failure == null) != (rhs.failure == null)) return false;
+            if (lhs.failure) |failure| if (!same(failure.bytes, rhs.failure.?.bytes)) return false;
+            if ((lhs.reference_operation == null) != (rhs.reference_operation == null)) return false;
+            if (lhs.reference_operation) |*pending| {
+                const other = &rhs.reference_operation.?;
+                if (!std.meta.eql(pending.capsule, other.capsule) or
+                    !std.meta.eql(pending.control, other.control) or
+                    pending.guest_quantum != other.guest_quantum or
+                    pending.dependencies.items.len != other.dependencies.items.len) return false;
+                for (pending.dependencies.items, other.dependencies.items) |left_ref, right_ref|
+                    if (!std.meta.eql(left_ref, right_ref)) return false;
+                lhs.reference_operation = null;
+                rhs.reference_operation = null;
+            }
+            lhs.failure = null;
+            rhs.failure = null;
+            return std.meta.eql(lhs, rhs);
+        }
+
+        fn validateGuardSnapshot(
+            self: *Self,
+            a: std.mem.Allocator,
+            snapshot: workspace.WorkObservation,
+            records: []const state.ArchiveRecord,
+        ) !void {
+            var phase: []const u8 = "candidate";
+            errdefer std.debug.print("guard snapshot: {s}\n", .{phase});
+            const work = snapshot.work;
+            const guard = work.guard orelse return error.InvalidArchive;
+            if (work.outer_operation != null or work.cancellation != null)
+                return error.InvalidArchive;
+            var candidate = try self.workspaceCandidate(a, work.task, guard.candidate.digest);
+            defer candidate.deinit();
+            if (!std.meta.eql(candidate.value.artifact, guard.candidate) or
+                !std.meta.eql(candidate.value.description.code, guard.code))
+                return error.InvalidArchive;
+            var current = try self.workspaceWork(a, work.task, work.id);
+            defer current.deinit();
+            if (current.value.guard) |active|
+                if (std.meta.eql(active.candidate, guard.candidate))
+                    try self.requireGuardPolicy(a, current.value);
+            try requireArchiveRecord(records, .workspace_candidate, candidate.value.id);
+            var program = try self.workspaceProgram(a, work.task, work.program);
+            defer program.deinit();
+            if (!std.meta.eql(
+                candidate.value.description.guest,
+                program.value.description.image,
+            )) return error.InvalidArchive;
+            if (guard.initialized and guard.continuation == null) return error.InvalidArchive;
+            if (guard.continuation != null and guard.disposition != .agreed) {
+                phase = "candidate continuation";
+                var candidate_execution = try self.workspaceGuardExperiment(a, work);
+                defer candidate_execution.deinit();
+                if (guard.initialized != (candidate_execution.stage == .advanced))
+                    return error.InvalidArchive;
+            }
+            phase = "reference";
+            try self.validateGuardReference(a, work);
+            phase = "pending control";
+            if (guard.pending_control) |ref| {
+                const bytes = try self.store().object(a, ref, null);
+                defer a.free(bytes);
+                var control = try contracts.decodeOwned(data.invocation.Control, a, bytes);
+                defer control.deinit();
+                try validateGuardControl(snapshot, control.value);
+                if (guard.guest_quantum != 1 and guard.guest_quantum != 256)
+                    return error.InvalidArchive;
+            } else if (guard.disposition == .incomplete or guard.disposition == .diverged)
+                return error.InvalidArchive;
+        }
+
+        fn validateGuardAgreement(self: *Self, a: std.mem.Allocator, work: workspace.Work, reference: *kosmos.Session) !void {
+            const guard = work.guard orelse return;
+            if (guard.disposition != .agreed) return;
+            if (!guard.initialized or guard.continuation == null) return error.InvalidArchive;
+            var candidate = try self.workspaceGuardExperiment(a, work);
+            defer candidate.deinit();
+            if (candidate.stage != .advanced or candidate.phase != .ready)
+                return error.InvalidArchive;
+            var completed = try candidate.completedSegment(a);
+            defer completed.deinit();
+            const observation = if (reference.view) |view| view.event.value.observation else .progressed;
+            const expected = try contracts.encodeOwned(@TypeOf(observation), a, observation);
+            defer a.free(expected);
+            if (!std.meta.eql(storage.digest(completed.checkpoint), work.checkpoint.digest) or
+                completed.checkpoint.len != work.checkpoint.bytes or
+                completed.guest_work != work.guest_work or !same(completed.observation, expected))
+                return error.InvalidArchive;
+        }
+
+        fn validateGuardReference(self: *Self, a: std.mem.Allocator, work: workspace.Work) !void {
+            const guard = work.guard.?;
+            if (guard.candidate_segment) |segment| {
+                if (!guard.initialized or guard.pending_control == null or guard.continuation == null or
+                    (guard.disposition != .incomplete and guard.disposition != .diverged)) return error.InvalidArchive;
+                var candidate = try self.workspaceGuardExperiment(a, work);
+                defer candidate.deinit();
+                if (candidate.phase != .ready or candidate.stage != .advanced or
+                    candidate.guest_work != segment.guest_work) return error.InvalidArchive;
+                const checkpoint = try self.store().object(a, segment.checkpoint, null);
+                defer a.free(checkpoint);
+                const observation = try self.store().object(a, segment.observation, null);
+                defer a.free(observation);
+                var completed = try candidate.completedSegment(a);
+                defer completed.deinit();
+                if (!same(checkpoint, completed.checkpoint) or
+                    !same(observation, completed.observation) or
+                    segment.guest_work != completed.guest_work) return error.InvalidArchive;
+            }
+            if (guard.reference_operation) |pending| {
+                if (guard.candidate_segment == null or guard.pending_control == null or
+                    !std.meta.eql(pending.control, guard.pending_control.?) or
+                    pending.guest_quantum != guard.guest_quantum) return error.InvalidArchive;
+                const bytes = try self.store().object(a, pending.capsule, null);
+                defer a.free(bytes);
+                const dependencies = try capsuleDependencies(a, bytes);
+                defer a.free(dependencies);
+                if (dependencies.len != pending.dependencies.items.len) return error.InvalidArchive;
+                for (dependencies, pending.dependencies.items) |wanted, actual|
+                    if (!std.meta.eql(wanted, actual)) return error.InvalidArchive;
+                try self.validatePublishedCapsuleTrace(a, work, pending.capsule, work.runtime, null, pending);
+            }
+        }
+
+        fn validateGuardControl(
+            snapshot: workspace.WorkObservation,
+            control: data.invocation.Control,
+        ) !void {
+            switch (control) {
+                .reply => |reply| {
+                    const pending = snapshot.occurrence orelse return error.InvalidArchive;
+                    if (pending.state != .settled_reply) return error.InvalidArchive;
+                    const expected = pending.state.settled_reply.reply;
+                    if (!std.meta.eql(expected, storage.digest(reply))) return error.InvalidArchive;
+                },
+                .resume_yield => if (snapshot.work.outcome_kind != .yielded)
+                    return error.InvalidArchive,
+                .none => if (snapshot.work.current_occurrence != null or
+                    snapshot.work.outcome_kind == .yielded) return error.InvalidArchive,
+                .cancel => return error.InvalidArchive,
+            }
+        }
+
+        fn requireGuardPolicy(self: *Self, a: std.mem.Allocator, work: workspace.Work) !void {
+            const guard = work.guard orelse return error.GuardUnavailable;
+            const policy = self.profile.semantic_construction orelse return error.GuardPolicyDenied;
+            if (!policy.guard) return error.GuardPolicyDenied;
+            var candidate = try self.workspaceCandidate(a, work.task, guard.candidate.digest);
+            defer candidate.deinit();
+            try self.requireSemanticPolicy(
+                candidate.value.description.root,
+                candidate.value.description.checker.bytes,
+            );
         }
 
         pub fn workspaceRequestCut(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, command: @FieldType(wc.Work, "request_cut")) !Admission {
@@ -9111,6 +12277,16 @@ pub fn Service(comptime Types: type) type {
                 .outer_execution => .outer_execution,
             }, runtimeProvenance(work.value));
             defer capsule_receipt.deinit();
+            if (parent.value.observers_present) {
+                var published = work.value;
+                published.runtime_capsule = .{
+                    .digest = storage.digest(capsule_receipt.bytes()),
+                    .bytes = capsule_receipt.bytes().len,
+                };
+                if (try self.observerSourceRevision(a, published, .outer_execution) !=
+                    try self.observerSourceRevision(a, work.value, .outer_execution))
+                    try self.observerAdvanceAllowedFor(a, work.value, .outer_execution);
+            }
             const code = try driver.runtimeBytes(a);
             defer a.free(code);
             try self.store().begin();
@@ -9121,8 +12297,278 @@ pub fn Service(comptime Types: type) type {
             defer a.free(work.value.runtime_dependencies.items);
             work.value.control_revision = try std.math.add(u64, work.value.control_revision, 1);
             work.value.event_watermark = parent.value.event_high + 1;
-            try self.store().putRecord(workspace.Work, "workspace_work", work.value.id, task_id, work.value);
+            try self.writeWorkspaceWork(&work.value, .replace);
             return self.workspaceCommit(a, parent.value, operation_id, request, work.value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", work.value.id, task_id), .{ .request_cut = command });
+        }
+
+        const ControllerRuntimeCut = struct {
+            runtime: ?state.Reference = null,
+            realization_revision: u64 = 0,
+        };
+        fn controllerRuntimeAt(self: *Self, a: std.mem.Allocator, parent: state.Task, watermark: u64) !ControllerRuntimeCut {
+            var result: ControllerRuntimeCut = .{};
+            var rows = try self.store().database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? AND e.seq<=? ORDER BY e.seq", &.{ .{ .blob = &parent.id }, .{ .integer = std.math.cast(i64, watermark) orelse return error.InvalidArchive } });
+            defer rows.deinit();
+            while (try rows.step() == .row) {
+                var event_value = try contracts.decodeOwned(state.Event, a, try rows.bytes(0));
+                defer event_value.deinit();
+                if (event_value.value.kind == .controller) {
+                    result = .{};
+                    continue;
+                }
+                const reference = event_value.value.workspace_command orelse continue;
+                const bytes = try self.store().object(a, reference, null);
+                defer a.free(bytes);
+                var command = try contracts.decodeOwned(workspace.PublicationCommand, a, bytes);
+                defer command.deinit();
+                if (command.value != .realize_controller) continue;
+                const selected = command.value.realize_controller;
+                if (selected.cut.realization_revision != result.realization_revision)
+                    return error.InvalidArchive;
+                result = .{ .runtime = selected.runtime, .realization_revision = try std.math.add(u64, result.realization_revision, 1) };
+            }
+            return result;
+        }
+
+        fn validateControllerRealization(self: *Self, a: std.mem.Allocator, parent: state.Task, event_value: state.Event, selected: workspace.ControllerRealization, admission: WorkspaceAdmission) !void {
+            if (!std.meta.eql(admission.work, rootIdentity(parent.id)) or event_value.seq == 0)
+                return error.InvalidArchive;
+            const cut = event_value.controller_read orelse return error.InvalidArchive;
+            if (cut.event_watermark != event_value.seq - 1 or
+                cut.execution_revision != selected.cut.execution_revision)
+                return error.InvalidArchive;
+            const receipt_body = try contracts.encodeOwned(workspace.ControllerRealization, a, selected);
+            defer a.free(receipt_body);
+            if (!std.meta.eql(admission.observation, @as(?state.Reference, .{ .digest = storage.digest(receipt_body), .bytes = receipt_body.len })))
+                return error.InvalidArchive;
+            const prior = try self.controllerRuntimeAt(a, parent, event_value.seq - 1);
+            if (selected.cut.realization_revision != prior.realization_revision or
+                selected.cut.epoch != try self.controllerEpochAt(a, parent, event_value.seq - 1) or
+                !std.meta.eql(selected.controller, try self.controllerAt(a, parent, event_value.seq - 1)) or
+                selected.cut.execution_revision > parent.execution_revision)
+                return error.InvalidArchive;
+            switch (selected.command.expected) {
+                .cut => |expected| if (!std.meta.eql(expected, selected.cut)) return error.InvalidArchive,
+                .action => |expected| {
+                    if (expected.epoch != selected.cut.epoch or
+                        expected.realization_revision != selected.cut.realization_revision)
+                        return error.InvalidArchive;
+                    var historical = parent;
+                    historical.controller = selected.controller;
+                    historical.controller_epoch = selected.cut.epoch;
+                    historical.execution_revision = selected.cut.execution_revision;
+                    historical.realization_revision = selected.cut.realization_revision;
+                    historical.controller_runtime = prior.runtime;
+                    historical.checkpoint = selected.checkpoint;
+                    historical.current_occurrence = selected.occurrence;
+                    historical.controller_interaction = try wp.identity(.{ .kind = .controller, .id = expected.interaction }, .controller);
+                    var current = try self.record(occurrence.Occurrence, a, "occurrence", selected.occurrence orelse return error.InvalidArchive, parent.id);
+                    defer current.deinit();
+                    if (current.value.work != null or current.value.residual != null)
+                        return error.InvalidArchive;
+                    try self.validateControllerAction(a, historical, current.value, selected.command);
+                },
+            }
+            if (selected.command.runtime == .selected) {
+                if (selected.runtime == null or !std.meta.eql(selected.runtime.?.digest, try wp.identity(selected.command.runtime.selected, .runtime))) return error.InvalidArchive;
+            } else if (selected.runtime != null) return error.InvalidArchive;
+            const guest = if (selected.controller) |id|
+                (try self.controllerBinding(a, parent, id)).image
+            else
+                parent.image;
+            if (selected.dependencies.items.len != 3 or
+                !std.meta.eql(selected.dependencies.items[2], guest)) return error.InvalidArchive;
+            const bytes = try self.store().object(a, guest, null);
+            defer a.free(bytes);
+            const refs = [_]?state.Reference{ prior.runtime, selected.runtime };
+            const capsules = [_]state.Reference{ selected.source, selected.target };
+            for (refs, capsules, selected.dependencies.items[0..2]) |ref, capsule_ref, code_ref| {
+                var runtime = try self.controllerRuntime(a, parent.id, guest, ref);
+                defer runtime.deinit();
+                if (!std.meta.eql(runtime.identity, code_ref.digest)) return error.InvalidArchive;
+                var prepared = try kosmos.Prepared.initWithRuntime(a, bytes, &runtime);
+                defer prepared.deinit();
+                const capsule = try self.store().object(a, capsule_ref, null);
+                defer a.free(capsule);
+                var envelope = try kosmos.RuntimeCapsule.read(a, capsule);
+                defer envelope.deinit();
+                const record_value = envelope.value.record;
+                if (record_value.operation != null or
+                    !std.meta.eql(record_value.provenance.execution, rootIdentity(parent.id)) or
+                    !std.meta.eql(record_value.provenance.custody, storage.digest(&parent.id)) or
+                    record_value.provenance.publication == null or
+                    !std.meta.eql(record_value.provenance.publication.?.digest, selected.checkpoint.digest) or
+                    record_value.provenance.publication.?.bytes != selected.checkpoint.bytes or
+                    !std.meta.eql(record_value.artifact.digest, code_ref.digest) or
+                    record_value.artifact.bytes != code_ref.bytes) return error.InvalidArchive;
+                const Check = struct {
+                    fn claim(_: *anyopaque, _: kosmos.RuntimeCapsule.Reference, _: kosmos.RuntimeCapsule.Record, _: kosmos.RuntimeCapsule.Reference) !void {}
+                };
+                var context: u8 = 0;
+                var candidate = try kosmos.RuntimeCapsule.restore(a, &prepared.guest, &runtime, capsule, .{ .context = &context, .claim = Check.claim });
+                defer candidate.deinit();
+                const checkpoint = try candidate.checkpoint(a);
+                defer a.free(checkpoint);
+                if (!std.meta.eql(storage.digest(checkpoint), selected.checkpoint.digest) or
+                    checkpoint.len != selected.checkpoint.bytes) return error.InvalidArchive;
+            }
+        }
+
+        fn controllerRealizationCut(self: *Self, a: std.mem.Allocator, operation_id: []const u8, parent: state.Task, command: @FieldType(wc.Work, "realize_controller")) !wc.ControllerCut {
+            if (command.expected == .cut) return command.expected.cut;
+            const expected = command.expected.action;
+            const interaction_id = try wp.identity(.{ .kind = .controller, .id = expected.interaction }, .controller);
+            if (parent.controller_interaction == null or
+                !std.meta.eql(parent.controller_interaction.?, interaction_id) or
+                parent.controller_epoch != expected.epoch or
+                parent.realization_revision != expected.realization_revision)
+                return error.StaleController;
+            const id = parent.current_occurrence orelse return error.ControllerActionRequired;
+            if (!same(operation_id, &std.fmt.bytesToHex(id, .lower)))
+                return error.ControllerActionRequired;
+            var current = try self.record(occurrence.Occurrence, a, "occurrence", id, parent.id);
+            defer current.deinit();
+            if ((current.value.state != .ready and current.value.state != .dispatching) or current.value.work != null or
+                current.value.residual != null) return error.ControllerActionRequired;
+            try self.validateControllerAction(a, parent, current.value, command);
+            return .{ .epoch = parent.controller_epoch, .execution_revision = parent.execution_revision, .realization_revision = parent.realization_revision };
+        }
+
+        fn validateControllerAction(self: *Self, a: std.mem.Allocator, parent: state.Task, current: occurrence.Occurrence, command: @FieldType(wc.Work, "realize_controller")) !void {
+            if (command.expected != .action) return error.ControllerActionRequired;
+            const id = try wp.identity(.{ .kind = .controller, .id = command.expected.action.interaction }, .controller);
+            var interaction = try self.record(state.ControllerInteraction, a, "controller_interaction", id, parent.id);
+            defer interaction.deinit();
+            if (!std.meta.eql(parent.controller, @as(?state.Digest, interaction.value.controller)) or
+                interaction.value.epoch != command.expected.action.epoch or
+                interaction.value.model == null) return error.StaleController;
+            const bytes = try self.store().object(a, current.request_object, null);
+            defer a.free(bytes);
+            var request_value = try data.invocation.decode(data.invocation.Request, a, bytes);
+            defer request_value.deinit();
+            const entry = try self.handlers.resolve(request_value.value, try self.occurrenceImage(a, parent, current));
+            if (entry.declaration.kind != .workspace) return error.ControllerActionRequired;
+            const admitted = try self.authorizeWorkspaceOccurrence(a, parent, current, entry, request_value.value.binding.payload);
+            defer a.free(admitted);
+            var authorized = try contracts.decodeOwned(workspace.Authorized, a, admitted);
+            defer authorized.deinit();
+            if (authorized.value.command != .work or
+                authorized.value.command.work != .realize_controller) return error.ControllerActionRequired;
+            const actual = try contracts.encodeOwned(@TypeOf(command), a, authorized.value.command.work.realize_controller);
+            defer a.free(actual);
+            const expected = try contracts.encodeOwned(@TypeOf(command), a, command);
+            defer a.free(expected);
+            if (!same(actual, expected)) return error.ControllerActionRequired;
+        }
+
+        pub fn workspaceRealizeController(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, command: @FieldType(wc.Work, "realize_controller")) !Admission {
+            const request = try operation(workspace.ControllerRealizeRequest, a, .{ .task = task_id, .command = command });
+            if (try self.replay(a, operation_id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, null);
+            var saved = try self.task(a, task_id);
+            defer saved.deinit();
+            const parent = saved.value;
+            if (self.workspaceParentStopped(parent)) return error.InvalidState;
+            if (parent.controller_succession != null) return error.ControllerHandoffPending;
+            const cut = try self.controllerRealizationCut(a, operation_id, parent, command);
+            if (cut.epoch != parent.controller_epoch or
+                cut.execution_revision != parent.execution_revision or
+                cut.realization_revision != parent.realization_revision)
+                return error.StaleRevision;
+            var pending = try self.rootOperation(a, parent);
+            defer if (pending) |*value| value.deinit();
+            if (pending != null and pending.?.value.pending != null) return error.GuestCutUnavailable;
+            if (self.active) |active| if (active.subject == .root and
+                std.meta.eql(active.task, task_id) and active.root_control != null)
+                return error.GuestCutUnavailable;
+            if (parent.current_occurrence) |id| {
+                var current = try self.record(occurrence.Occurrence, a, "occurrence", id, task_id);
+                defer current.deinit();
+                if (current.value.state == .unknown) return error.UnresolvedDelivery;
+                if (current.value.state == .dispatching) {
+                    if (!same(operation_id, &std.fmt.bytesToHex(id, .lower)))
+                        return error.UnresolvedDelivery;
+                    const bytes = try self.store().object(a, current.value.request_object, null);
+                    defer a.free(bytes);
+                    var request_value = try data.invocation.decode(data.invocation.Request, a, bytes);
+                    defer request_value.deinit();
+                    const entry = try self.handlers.resolve(request_value.value, try self.occurrenceImage(a, parent, current.value));
+                    if (entry.declaration.kind != .workspace) return error.UnresolvedDelivery;
+                }
+                if (current.value.residual != null or current.value.work != null)
+                    return error.InvalidState;
+            }
+            const image = try self.rootImage(a, parent);
+            var selected: ?SelectedRuntime = if (command.runtime == .selected)
+                try self.workspaceRuntime(a, task_id, try wp.identity(command.runtime.selected, .runtime), null)
+            else
+                null;
+            defer if (selected) |*value| value.deinit();
+            const target = if (selected) |value| value.record.value.artifact else null;
+            var runtime = try self.controllerRuntime(a, task_id, image, target);
+            defer runtime.deinit();
+            if (target != null) try self.requireSemanticPolicy(kosmos.RuntimeCompiler.approvedRootIdentity(&runtime), kosmos.RuntimeCompiler.checker_identity);
+            const driver = try self.resident(a, parent);
+            const source_code = try driver.runtimeBytes(a);
+            defer a.free(source_code);
+            const target_code = try runtime.encode(a);
+            defer a.free(target_code);
+            const Publisher = struct {
+                host: *Self,
+                a: std.mem.Allocator,
+                parent: state.Task,
+                command: @FieldType(wc.Work, "realize_controller"),
+                cut: wc.ControllerCut,
+                operation_id: []const u8,
+                request: state.Digest,
+                runtime: ?state.Reference,
+                source_code: []const u8,
+                target_code: []const u8,
+                result: ?Admission = null,
+                failure: ?anyerror = null,
+                fn publish(context: *anyopaque, _: kosmos.RuntimeCapsule.Binding, source_capsule: []const u8, target_capsule: []const u8) kosmos.RuntimeCapsule.SwitchDecision {
+                    const publication: *@This() = @ptrCast(@alignCast(context));
+                    publication.result = publication.commit(source_capsule, target_capsule) catch |err| {
+                        publication.failure = err;
+                        return if (publication.host.store().fenced) .uncertain else .rejected;
+                    };
+                    return .committed;
+                }
+                fn commit(publication: *@This(), source_capsule: []const u8, target_capsule: []const u8) !Admission {
+                    const host = publication.host;
+                    try host.store().begin();
+                    defer host.store().rollback();
+                    const dependencies = [_]state.Reference{
+                        try host.store().putObject(publication.source_code),
+                        try host.store().putObject(publication.target_code),
+                        try host.rootImage(publication.a, publication.parent),
+                    };
+                    const fact: workspace.ControllerRealization = .{
+                        .command = publication.command,
+                        .cut = publication.cut,
+                        .occurrence = publication.parent.current_occurrence,
+                        .controller = publication.parent.controller,
+                        .checkpoint = publication.parent.checkpoint,
+                        .runtime = publication.runtime,
+                        .source = try host.store().putObject(source_capsule),
+                        .target = try host.store().putObject(target_capsule),
+                        .dependencies = .{ .items = &dependencies },
+                    };
+                    const bytes = try contracts.encodeOwned(workspace.ControllerRealization, publication.a, fact);
+                    defer publication.a.free(bytes);
+                    const observation = try host.store().putObject(bytes);
+                    var next = publication.parent;
+                    next.controller_runtime = publication.runtime;
+                    next.realization_revision = try std.math.add(u64, next.realization_revision, 1);
+                    return host.workspaceCommit(publication.a, next, publication.operation_id, publication.request, rootIdentity(next.id), .controller, observation, .{ .realize_controller = fact });
+                }
+            };
+            var publisher: Publisher = .{ .host = self, .a = a, .parent = parent, .command = command, .cut = cut, .operation_id = operation_id, .request = request, .runtime = target, .source_code = source_code, .target_code = target_code };
+            const decision = try driver.realize(try driver.runtimeBinding(), &runtime, rootProvenance(parent), .{ .context = &publisher, .publish = Publisher.publish });
+            if (publisher.failure) |err| return err;
+            if (decision != .committed) return error.PublicationUncertain;
+            self.active.?.realization_revision = cut.realization_revision + 1;
+            return publisher.result orelse return error.CorruptState;
         }
 
         pub fn workspaceRealize(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, command: @FieldType(wc.Work, "realize")) !Admission {
@@ -9132,13 +12578,16 @@ pub fn Service(comptime Types: type) type {
             const work_id = try wp.identity(command.expected.work, .work);
             const request = try operation(workspace.RealizeRequest, a, .{ .task = task_id, .work = work_id, .execution = command.expected.execution_revision, .control = command.expected.control_revision, .realization = command.realization_revision, .runtime = target });
             if (try self.replay(a, operation_id, request)) |prior| return prior;
+            if (selected) |*item| try self.requireSemanticPolicy(kosmos.RuntimeCompiler.approvedRootIdentity(&item.admitted), kosmos.RuntimeCompiler.checker_identity);
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
             var work = try self.runtimeWork(a, task_id, command.expected);
             defer work.deinit();
+            if (work.value.guard != null) return error.GuardActive;
             if (work.value.outer_operation != null) return error.GuestCutUnavailable;
             if (work.value.realization_revision != command.realization_revision) return error.StaleRevision;
+            try self.observerAdvanceAllowed(a, work.value);
             var program = try self.workspaceProgram(a, task_id, work.value.program);
             defer program.deinit();
             if (selected) |item| if (!std.meta.eql(item.record.value.program, work.value.program)) {
@@ -9193,7 +12642,7 @@ pub fn Service(comptime Types: type) type {
                     next.realization_revision = try std.math.add(u64, next.realization_revision, 1);
                     next.control_revision = try std.math.add(u64, next.control_revision, 1);
                     next.event_watermark = publication.parent.event_high + 1;
-                    try host.store().putRecord(workspace.Work, "workspace_work", next.id, next.task, next);
+                    try host.writeWorkspaceWork(&next, .replace);
                     const dependencies = [_]state.Reference{ source_code_ref, target_code_ref, next.runtime_dependencies.items[1] };
                     return host.workspaceCommit(publication.a, publication.parent, publication.operation_id, publication.request, next.id, .work, try host.snapshotRecord(workspace.Work, publication.a, "workspace_work", next.id, next.task), .{ .realize = .{ .execution = publication.work.execution_revision, .control = publication.work.control_revision, .realization = publication.work.realization_revision, .runtime = publication.target, .source = before, .target = after, .dependencies = .{ .items = &dependencies } } });
                 }
@@ -9369,7 +12818,15 @@ pub fn Service(comptime Types: type) type {
 
         fn validateWorkspaceProgram(self: *Self, a: std.mem.Allocator, saved: workspace.Program) !void {
             if (self.checked_workspace_programs.get(saved.artifact.digest)) |epoch| if (epoch == self.store().integrity_epoch) return;
+            try self.validateProgramCompiler(a, saved, self.store());
+            try self.checked_workspace_programs.put(self.allocator, saved.artifact.digest, self.store().integrity_epoch);
+        }
+
+        fn validateProgramCompiler(self: *Self, a: std.mem.Allocator, saved: workspace.Program, objects: anytype) !void {
             const artifact = saved.description;
+            const artifact_bytes = try contracts.encodeOwned(workspace.ProgramArtifact, a, artifact);
+            defer a.free(artifact_bytes);
+            if (!std.meta.eql(saved.artifact, compilerReference(artifact_bytes))) return error.InvalidArchive;
             const contract = if (artifact.controller != null) contracts.controller.identity else switch (artifact.source_kind) {
                 .source_records => @import("source_records.zig").identity,
                 .component_recipe => construction.component_identity,
@@ -9396,14 +12853,22 @@ pub fn Service(comptime Types: type) type {
                             if (pair[0].bytes != schema.len or !std.meta.eql(pair[0].digest, storage.digest(schema))) return error.CorruptState;
                         }
                     } else return error.CorruptState;
-                    try self.checked_workspace_programs.put(self.allocator, saved.artifact.digest, self.store().integrity_epoch);
                     return;
                 }
             }
-            const source = try self.store().object(a, artifact.source, null);
+            const context: state.Digest = if (artifact.controller != null) blk: {
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const scratch = arena.allocator();
+                const frozen_contract = try self.controllerContract(scratch);
+                break :blk storage.digest(try contracts.encodeOwned(contracts.controller.Contract, scratch, frozen_contract));
+            } else @splat(0);
+            const fact: CompilerFact = .{ .kind = .program, .input = saved.artifact, .output = artifact.image, .context = context };
+            if (try self.compilerFact(fact)) return;
+            const source = try objects.object(a, artifact.source, null);
             defer a.free(source);
             var diagnostic: construction.Diagnostic = .{};
-            var built = try self.workspaceCompile(self.allocator, source, artifact.source_kind, artifact.catalog, artifact.exposures.items, if (artifact.controller != null) .controller else .computation, &diagnostic);
+            var built = try self.workspaceCompileFrom(self.allocator, source, artifact.source_kind, artifact.catalog, artifact.exposures.items, if (artifact.controller != null) .controller else .computation, &diagnostic, objects);
             defer built.deinit();
             inline for (.{ .{ artifact.image, built.image }, .{ artifact.input_schema, built.interface.input.bytes }, .{ artifact.result_schema, built.interface.output.bytes }, .{ artifact.failure_schema, built.interface.failure.bytes } }) |pair| {
                 if (pair[0].bytes != pair[1].len or !std.meta.eql(pair[0].digest, storage.digest(pair[1]))) return error.CorruptState;
@@ -9422,7 +12887,7 @@ pub fn Service(comptime Types: type) type {
             const declared_controller = try contracts.encodeOwned(?contracts.controller.Descriptor, a, artifact.controller);
             defer a.free(declared_controller);
             if (!same(actual_controller, declared_controller)) return error.CorruptState;
-            try self.checked_workspace_programs.put(self.allocator, saved.artifact.digest, self.store().integrity_epoch);
+            try self.retainCompilerFact(fact);
         }
 
         pub fn workspaceWork(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, work_id: state.Digest) !contracts.Decoded(workspace.Work) {
@@ -9437,17 +12902,20 @@ pub fn Service(comptime Types: type) type {
             defer a.free(bytes);
             var saved = try contracts.decodeOwned(workspace.Work, a, bytes);
             errdefer saved.deinit();
-            if (saved.value.version != 2 or !std.meta.eql(saved.value.id, work_id) or !std.meta.eql(saved.value.task, task_id)) return error.CorruptState;
+            if (saved.value.version != 3 or !std.meta.eql(saved.value.id, work_id) or !std.meta.eql(saved.value.task, task_id)) return error.CorruptState;
             return saved;
         }
 
         pub fn validateWorkspace(self: *Self, allocator: std.mem.Allocator, task_id: state.TaskId) !void {
+            var phase: []const u8 = "task and archive index";
+            errdefer std.debug.print("workspace validation: {s}\n", .{phase});
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             const a = arena.allocator();
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             const index = try self.store().archiveIndex(a, task_id, .{ .digest = storage.digest(self.assets.manifest), .bytes = self.assets.manifest.len });
+            phase = "records";
             try self.validateWorkspaceRecords(a, task_id, index.records.items);
         }
         fn validateDelegation(self: *Self, a: std.mem.Allocator, parent: state.Task, row: state.ArchiveRecord, records: []const state.ArchiveRecord) !void {
@@ -9506,58 +12974,113 @@ pub fn Service(comptime Types: type) type {
             } else if (value.model != null or value.inputs.items.len != 0 or value.snapshot == null) return error.InvalidArchive;
         }
 
+        pub fn prepareWorkspaceValidation(self: *Self, task_id: state.TaskId) !CompilerFacts {
+            if (self.store().transaction) return error.InvalidState;
+            var facts: CompilerFacts = .{ .allocator = self.allocator };
+            errdefer facts.deinit();
+            const prior = self.compiler_facts;
+            self.compiler_facts = &facts;
+            defer self.compiler_facts = prior;
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const manifest = try self.store().archiveIndex(arena.allocator(), task_id, compilerReference(self.assets.manifest));
+            try self.prepareCompilerFacts(manifest, self.store());
+            return facts;
+        }
+
+        pub fn validateWorkspaceRecordsPrepared(self: *Self, allocator: std.mem.Allocator, task_id: state.TaskId, records: []const state.ArchiveRecord, facts: *CompilerFacts) !void {
+            const prior = self.compiler_facts;
+            self.compiler_facts = facts;
+            defer self.compiler_facts = prior;
+            try self.validateWorkspaceRecords(allocator, task_id, records);
+        }
+
         pub fn validateWorkspaceRecords(self: *Self, allocator: std.mem.Allocator, task_id: state.TaskId, records: []const state.ArchiveRecord) !void {
+            var phase: []const u8 = "task";
+            errdefer std.debug.print("workspace records: {s}\n", .{phase});
+            var compiler_facts: CompilerFacts = .{ .allocator = self.allocator };
+            defer compiler_facts.deinit();
+            const prior_compiler_facts = self.compiler_facts;
+            if (self.compiler_facts == null) self.compiler_facts = &compiler_facts;
+            defer self.compiler_facts = prior_compiler_facts;
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             const a = arena.allocator();
             var parent = try self.task(a, task_id);
             defer parent.deinit();
-            try self.validateOccurrenceProvenance(a, parent.value, records);
-            try self.validateWorkspaceRecordBodies(a, task_id, records);
+            phase = "archive records";
+            try self.validateWorkspaceArchive(a, parent.value, records, .records);
         }
 
-        // Archive admission has already checked occurrence provenance before
-        // replaying captured projections. Keep that ordering without checking
-        // the complete occurrence history a second time here.
-        fn validateWorkspaceRecordBodies(self: *Self, allocator: std.mem.Allocator, task_id: state.TaskId, records: []const state.ArchiveRecord) !void {
+        fn validateWorkspaceArchive(self: *Self, allocator: std.mem.Allocator, parent: state.Task, records: []const state.ArchiveRecord, mode: enum { records, inspect, retain }) !void {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var checked: SnapshotValidation = .{
+                .allocator = a,
+                .observer_successors = .init(self.allocator, parent.id),
+                .semantic_sources = true,
+            };
+            defer checked.deinit();
+            try self.validateOccurrenceProvenance(a, parent, records, &checked);
+            if (mode != .records)
+                try self.validateCapturedProjections(parent, records, if (mode == .inspect) .inspect else .retain, &checked);
+            try self.validateWorkspaceRecordBodies(a, parent.id, records, &checked);
+        }
+
+        fn validateWorkspaceRecordBodies(self: *Self, allocator: std.mem.Allocator, task_id: state.TaskId, records: []const state.ArchiveRecord, checked: *SnapshotValidation) !void {
+            var phase: []const u8 = "task and controller";
+            errdefer std.debug.print("workspace record bodies: {s}\n", .{phase});
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             const a = arena.allocator();
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatibleApplication(parent.value);
-            try self.validateWorkspacePublications(a, parent.value, records);
+            const runtime_cut = try self.controllerRuntimeAt(a, parent.value, parent.value.event_high);
+            if (!std.meta.eql(runtime_cut.runtime, parent.value.controller_runtime) or
+                runtime_cut.realization_revision != parent.value.realization_revision) return error.InvalidArchive;
+            phase = "publications";
+            try self.validateWorkspacePublications(a, parent.value, records, checked);
+            phase = "receipts";
             if (parent.value.controller_epoch != try self.controllerEpochAt(a, parent.value, parent.value.event_high)) return error.InvalidArchive;
             var receipts = try self.store().database.prepare("SELECT o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?", &.{.{ .blob = &task_id }});
             defer receipts.deinit();
             while (try receipts.step() == .row) {
-                var receipt_value = try contracts.decodeOwned(state.Receipt, a, try receipts.bytes(0));
+                var receipt_arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer receipt_arena.deinit();
+                const frame = receipt_arena.allocator();
+                var receipt_value = try contracts.decodeOwned(state.Receipt, frame, try receipts.bytes(0));
                 defer receipt_value.deinit();
                 if (receipt_value.value.method == .workspace and receipt_value.value.workspace_kind == .residual) {
-                    var residual = try contracts.decodeOwned(state.ControllerResidual, a, try self.store().object(a, receipt_value.value.workspace_observation orelse return error.InvalidArchive, null));
+                    var residual = try contracts.decodeOwned(state.ControllerResidual, frame, try self.store().object(frame, receipt_value.value.workspace_observation orelse return error.InvalidArchive, null));
                     defer residual.deinit();
                     if (!std.meta.eql(receipt_value.value.workspace, residual.value.id) or !std.meta.eql(residual.value.task, task_id)) return error.InvalidArchive;
-                    try self.validateResidualObservation(a, .from(residual.value));
-                    if (residual.value.outer_operation) |pending| _ = try self.validateControllerOperation(a, parent.value, pending, residual.value, true);
+                    try self.validateResidualObservation(frame, .from(residual.value));
+                    if (residual.value.outer_operation) |pending| _ = try self.validateControllerOperation(frame, parent.value, pending, residual.value, true);
                     continue;
                 }
                 if (receipt_value.value.method != .workspace or receipt_value.value.workspace_kind != .work) continue;
-                var observed = try contracts.decodeOwned(workspace.WorkObservation, a, try self.store().object(a, receipt_value.value.workspace_observation orelse return error.InvalidArchive, null));
+                var observed = try contracts.decodeOwned(workspace.WorkObservation, frame, try self.store().object(frame, receipt_value.value.workspace_observation orelse return error.InvalidArchive, null));
                 defer observed.deinit();
                 if (!std.meta.eql(receipt_value.value.task, task_id) or !std.meta.eql(receipt_value.value.workspace orelse return error.InvalidArchive, observed.value.work.id)) return error.InvalidArchive;
                 var publication = try self.store().database.prepare("SELECT revision FROM events WHERE task=? AND seq=?", &.{ .{ .blob = &task_id }, .{ .integer = std.math.cast(i64, observed.value.work.event_watermark) orelse return error.InvalidArchive } });
                 defer publication.deinit();
                 if (try publication.step() != .row or try publication.integer(0) != std.math.cast(i64, receipt_value.value.revision) orelse return error.InvalidArchive) return error.InvalidArchive;
-                try self.validateWorkspaceWorkSnapshot(a, parent.value, observed.value, records);
-                try self.validateHistoricalOccurrence(a, observed.value);
+                try self.validateWorkspaceWorkSnapshotIn(parent.value, observed.value, records, checked);
+                try self.validateHistoricalOccurrence(frame, observed.value);
             }
             var controller_ids: std.AutoHashMap(state.Digest, void) = .init(a);
+            phase = "controller bindings";
             var controller_cursor = parent.value.controller;
             var controller_epoch: ?u64 = null;
             var controller_activation: ?u64 = null;
             while (controller_cursor) |id| {
+                var binding_arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer binding_arena.deinit();
+                const frame = binding_arena.allocator();
                 try requireArchiveRecord(records, .controller_binding, id);
-                const binding = try self.controllerBinding(a, parent.value, id);
+                const binding = try self.controllerBinding(frame, parent.value, id);
                 if (controller_epoch) |epoch| if (binding.epoch >= epoch) return error.InvalidArchive;
                 if (binding.activated_at == 0 or binding.activated_at > parent.value.event_high) return error.InvalidArchive;
                 if (controller_activation) |at| if (binding.activated_at >= at) return error.InvalidArchive;
@@ -9566,13 +13089,13 @@ pub fn Service(comptime Types: type) type {
                 if (binding.predecessor != null) {
                     var matching: usize = 0;
                     for (records) |row| if (row.kind == .controller_succession) {
-                        var operation_value = try self.record(state.ControllerSuccession, a, "controller_succession", row.id, task_id);
+                        var operation_value = try self.record(state.ControllerSuccession, frame, "controller_succession", row.id, task_id);
                         defer operation_value.deinit();
                         if (operation_value.value.phase == .activated and operation_value.value.activation_event == binding.activated_at and operation_value.value.activated_epoch == binding.epoch and std.meta.eql(operation_value.value.predecessor, binding.predecessor.?) and std.meta.eql(operation_value.value.successor, binding.program)) matching += 1;
                     };
                     if (matching != 1) return error.InvalidArchive;
                 }
-                var image = try data.program_image.decode(self.allocator, try self.store().object(a, binding.image, null));
+                var image = try data.program_image.decode(self.allocator, try self.store().object(frame, binding.image, null));
                 defer image.deinit();
                 if (!std.meta.eql(image.identity, binding.program_identity)) return error.InvalidArchive;
                 try controller_ids.put(id, {});
@@ -9589,138 +13112,171 @@ pub fn Service(comptime Types: type) type {
             }
             const Generation = struct { work: state.Digest, generation: u64 };
             var generations: std.AutoHashMap(Generation, void) = .init(a);
-            for (records) |row| switch (row.kind) {
-                .controller_succession => try self.validateControllerSuccession(self.allocator, parent.value, row.id, records),
-                .controller_residual => try self.validateControllerResidual(self.allocator, parent.value, row.id, records),
-                .workspace_trial => {
-                    var work = try self.workspaceWork(a, task_id, row.id);
-                    defer work.deinit();
-                    if (!std.meta.eql(work.value.trial, row.id)) return error.InvalidArchive;
-                },
-                .controller_interaction => try self.validateControllerInteraction(self.allocator, parent.value, row.id, records),
-                .root_operation => {
-                    var saved = try self.record(state.RootOperation, a, "root_operation", row.id, task_id);
-                    defer saved.deinit();
-                    _ = try self.validateRootOperation(a, parent.value, saved.value);
-                },
-                .workspace_runtime => {
-                    var record_value = try self.record(workspace.Runtime, a, "workspace_runtime", row.id, task_id);
-                    defer record_value.deinit();
-                    var admitted = try self.workspaceRuntime(a, task_id, record_value.value.artifact.digest, record_value.value.program);
-                    defer admitted.deinit();
-                },
-                .workspace_program => {
-                    var record_value = try self.record(workspace.Program, a, "workspace_program", row.id, task_id);
-                    defer record_value.deinit();
-                    var admitted = try self.workspaceProgram(a, task_id, record_value.value.artifact.digest);
-                    defer admitted.deinit();
-                },
-                .workspace_value => {
-                    var record_value = try self.record(workspace.Value, a, "workspace_value", row.id, task_id);
-                    defer record_value.deinit();
-                    const admitted = try self.workspaceValueReference(a, task_id, try wp.reference(a, .value, record_value.value.artifact.digest));
-                    const descriptor_bytes = try self.store().object(a, admitted.schema, null);
-                    var descriptor = try data.schema.decode(a, descriptor_bytes);
-                    defer descriptor.deinit();
-                    try data.schema.validateValue(a, descriptor.descriptor, try self.store().object(a, admitted.value, null));
-                    for (record_value.value.derivation.sources.items) |ref| {
-                        const source = try self.workspaceValueReference(a, task_id, try wp.reference(a, .value, ref.digest));
-                        if (!std.meta.eql(source.artifact, ref)) return error.InvalidArchive;
-                    }
-                    const derivation = record_value.value.derivation;
-                    if (derivation.inspection) |origin| try self.validateWorkspaceWorkSnapshot(a, parent.value, origin.observation, records);
-                    if (derivation.kind == .computation or derivation.kind == .trial) {
-                        var work = try self.workspaceWork(a, task_id, derivation.work orelse return error.InvalidArchive);
+            for (records) |row| {
+                var record_arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer record_arena.deinit();
+                const frame = record_arena.allocator();
+                phase = @tagName(row.kind);
+                switch (row.kind) {
+                    .controller_succession => try self.validateControllerSuccession(self.allocator, parent.value, row.id, records, checked),
+                    .controller_residual => try self.validateControllerResidual(self.allocator, parent.value, row.id, records),
+                    .workspace_trial => {
+                        var work = try self.workspaceWork(frame, task_id, row.id);
                         defer work.deinit();
-                        var program = try self.workspaceProgram(a, task_id, work.value.program);
-                        defer program.deinit();
-                        if ((derivation.kind == .trial) != (work.value.trial != null)) return error.InvalidArchive;
-                        if (work.value.result_value == null or !std.meta.eql(work.value.result_value.?, admitted.artifact) or
-                            work.value.result == null or !std.meta.eql(work.value.result.?, admitted.value) or
-                            derivation.program == null or !std.meta.eql(derivation.program.?, program.value.artifact) or
-                            !std.meta.eql(admitted.schema, program.value.description.result_schema) or
-                            derivation.sources.items.len != work.value.inputs.items.len + 1 or work.value.input_value == null or
-                            !std.meta.eql(derivation.sources.items[0], work.value.input_value.?)) return error.InvalidArchive;
-                        for (derivation.sources.items[1..], work.value.inputs.items) |left, right| if (!std.meta.eql(left, right)) return error.InvalidArchive;
-                    } else if (derivation.delegation != null) {
-                        try self.validateDelegatedValue(a, task_id, record_value.value);
-                    } else if (derivation.program != null or derivation.work != null or derivation.capture != null) return error.InvalidArchive;
-                },
-                .workspace_view => {
-                    var record_value = try self.record(workspace.View, a, "workspace_view", row.id, task_id);
-                    defer record_value.deinit();
-                    _ = try self.workspaceViewObservation(a, task_id, record_value.value.artifact.digest, .{ .maximum = 1 });
-                },
-                .workspace_port => {
-                    var port = try self.record(workspace.Port, a, "workspace_port", row.id, task_id);
-                    defer port.deinit();
-                    try requireArchiveRecord(records, .occurrence, port.value.occurrence);
-                    var route = try self.record(workspace.ExecutionRoute, a, "execution_route", port.value.occurrence, task_id);
-                    defer route.deinit();
-                    if (route.value.port == null or !std.meta.eql(route.value.port.?, row.body)) return error.InvalidArchive;
-                    const entry = try generations.getOrPut(.{ .work = port.value.work, .generation = port.value.generation });
-                    if (entry.found_existing) return error.InvalidArchive;
-                },
-                .workspace_port_reply => {
-                    var answer = try self.record(workspace.PortReply, a, "workspace_port_reply", row.id, task_id);
-                    defer answer.deinit();
-                    var port = try contracts.decodeOwned(workspace.Port, a, try self.store().object(a, answer.value.port, null));
-                    defer port.deinit();
-                    var pending = try self.record(occurrence.Occurrence, a, "occurrence", port.value.occurrence, task_id);
-                    defer pending.deinit();
-                    const acquired = switch (pending.value.state) {
-                        .settled_reply => |reply| reply,
-                        .admitted => |admitted| if (admitted == .reply) admitted.reply else return error.InvalidArchive,
-                        else => return error.InvalidArchive,
-                    };
-                    if (!std.meta.eql(acquired.attempt, row.id) or !std.meta.eql(acquired.reply, answer.value.reply.digest)) return error.InvalidArchive;
-                },
-                .execution_route => {
-                    try requireArchiveRecord(records, .occurrence, row.id);
-                },
-                .workspace_reply => {
-                    try requireArchiveRecord(records, .occurrence, row.id);
-                    var pending = try self.record(occurrence.Occurrence, a, "occurrence", row.id, task_id);
-                    defer pending.deinit();
-                    if (pending.value.work != null or !(pending.value.state == .settled_reply or (pending.value.state == .admitted and pending.value.state.admitted == .reply))) return error.InvalidArchive;
-                },
-                .workspace_delegation => try self.validateDelegation(a, parent.value, row, records),
-                .workspace_wait => {
-                    var wait = try self.record(workspace.Wait, a, "workspace_wait", row.id, task_id);
-                    defer wait.deinit();
-                    try requireArchiveRecord(records, .occurrence, wait.value.id);
-                    var pending = try self.record(occurrence.Occurrence, a, "occurrence", wait.value.id, task_id);
-                    defer pending.deinit();
-                    if (pending.value.work != null or !std.meta.eql(wait.value.request, pending.value.request_object)) return error.InvalidArchive;
-                    var request = try data.invocation.decode(data.invocation.Request, a, try self.store().object(a, wait.value.request, null));
-                    defer request.deinit();
-                    const entry = try self.handlers.resolve(request.value, try self.occurrenceImage(a, parent.value, pending.value));
-                    if (entry.declaration.kind != .workspace) return error.InvalidArchive;
-                    var authorized = try contracts.decodeOwned(workspace.Authorized, a, try self.authorizeWorkspaceOccurrence(a, parent.value, pending.value, entry, request.value.binding.payload));
-                    defer authorized.deinit();
-                    if (authorized.value.command != .work or authorized.value.command.work != .wait) return error.InvalidArchive;
-                    const expected = try contracts.encodeOwned(@TypeOf(wait.value.selection), a, authorized.value.command.work.wait);
-                    const actual = try contracts.encodeOwned(@TypeOf(wait.value.selection), a, wait.value.selection);
-                    if (!same(actual, expected)) return error.InvalidArchive;
-                    for (wait.value.selection.works.items) |ref| {
-                        var work = try self.workspaceWork(a, task_id, try wp.identity(ref, .work));
-                        work.deinit();
-                    }
-                },
-                else => {},
-            };
+                        if (!std.meta.eql(work.value.trial, row.id)) return error.InvalidArchive;
+                    },
+                    .controller_interaction => try self.validateControllerInteraction(self.allocator, parent.value, row.id, records),
+                    .root_operation => {
+                        var saved = try self.record(state.RootOperation, frame, "root_operation", row.id, task_id);
+                        defer saved.deinit();
+                        _ = try self.validateRootOperation(frame, parent.value, saved.value);
+                    },
+                    .workspace_runtime => {
+                        var record_value = try self.record(workspace.Runtime, frame, "workspace_runtime", row.id, task_id);
+                        defer record_value.deinit();
+                        var admitted = try self.workspaceRuntime(frame, task_id, record_value.value.artifact.digest, record_value.value.program);
+                        defer admitted.deinit();
+                    },
+                    .workspace_candidate => {
+                        var saved = try self.record(workspace.Candidate, frame, "workspace_candidate", row.id, task_id);
+                        defer saved.deinit();
+                        var candidate = try self.workspaceCandidate(frame, task_id, saved.value.artifact.digest);
+                        defer candidate.deinit();
+                        try self.validateCandidateProduction(frame, candidate.value);
+                    },
+                    .workspace_program => {
+                        var record_value = try self.record(workspace.Program, frame, "workspace_program", row.id, task_id);
+                        defer record_value.deinit();
+                        var admitted = try self.workspaceProgram(frame, task_id, record_value.value.artifact.digest);
+                        defer admitted.deinit();
+                    },
+                    .workspace_value => {
+                        var record_value = try self.record(workspace.Value, frame, "workspace_value", row.id, task_id);
+                        defer record_value.deinit();
+                        const admitted = try self.workspaceValueReferenceIn(frame, task_id, try wp.reference(frame, .value, record_value.value.artifact.digest), checked);
+                        const descriptor_bytes = try self.store().object(frame, admitted.schema, null);
+                        var descriptor = try data.schema.decode(frame, descriptor_bytes);
+                        defer descriptor.deinit();
+                        try data.schema.validateValue(frame, descriptor.descriptor, try self.store().object(frame, admitted.value, null));
+                        for (record_value.value.derivation.sources.items) |ref| {
+                            const source = try self.workspaceValueReferenceIn(frame, task_id, try wp.reference(frame, .value, ref.digest), checked);
+                            if (!std.meta.eql(source.artifact, ref)) return error.InvalidArchive;
+                        }
+                        const derivation = record_value.value.derivation;
+                        if (derivation.inspection) |origin| try self.validateWorkspaceWorkSnapshotIn(parent.value, origin.observation, records, checked);
+                        if (derivation.semantic_source) |origin| {
+                            const request: wc.Command = .{ .program = .{ .inspect = .{
+                                .target = .{ .semantic_source = .{
+                                    .subject = origin.selection.subject,
+                                    .section = .{ .summary = .{} },
+                                } },
+                                .page = .{},
+                            } } };
+                            try self.validateWorkspaceReadIn(frame, parent.value, request, origin.basis, records, checked.controller_values.get(record_value.value.artifact.digest), checked);
+                        }
+                        if (derivation.kind == .computation or derivation.kind == .trial) {
+                            var work = try self.workspaceWork(frame, task_id, derivation.work orelse return error.InvalidArchive);
+                            defer work.deinit();
+                            var program = try self.workspaceProgram(frame, task_id, work.value.program);
+                            defer program.deinit();
+                            if ((derivation.kind == .trial) != (work.value.trial != null)) return error.InvalidArchive;
+                            if (work.value.result_value == null or !std.meta.eql(work.value.result_value.?, admitted.artifact) or
+                                work.value.result == null or !std.meta.eql(work.value.result.?, admitted.value) or
+                                derivation.program == null or !std.meta.eql(derivation.program.?, program.value.artifact) or
+                                !std.meta.eql(admitted.schema, program.value.description.result_schema) or
+                                derivation.sources.items.len != work.value.inputs.items.len + 1 or work.value.input_value == null or
+                                !std.meta.eql(derivation.sources.items[0], work.value.input_value.?)) return error.InvalidArchive;
+                            for (derivation.sources.items[1..], work.value.inputs.items) |left, right| if (!std.meta.eql(left, right)) return error.InvalidArchive;
+                        } else if (derivation.delegation != null) {
+                            try self.validateDelegatedValue(frame, task_id, record_value.value);
+                        } else if (derivation.program != null or derivation.work != null or derivation.capture != null) return error.InvalidArchive;
+                    },
+                    .workspace_view => {
+                        var record_value = try self.record(workspace.View, frame, "workspace_view", row.id, task_id);
+                        defer record_value.deinit();
+                        _ = try self.workspaceViewObservation(frame, task_id, record_value.value.artifact.digest, .{ .maximum = 1 });
+                    },
+                    .workspace_port => {
+                        var port = try self.record(workspace.Port, frame, "workspace_port", row.id, task_id);
+                        defer port.deinit();
+                        try requireArchiveRecord(records, .occurrence, port.value.occurrence);
+                        var route = try self.record(workspace.ExecutionRoute, frame, "execution_route", port.value.occurrence, task_id);
+                        defer route.deinit();
+                        if (route.value.port == null or !std.meta.eql(route.value.port.?, row.body)) return error.InvalidArchive;
+                        const entry = try generations.getOrPut(.{ .work = port.value.work, .generation = port.value.generation });
+                        if (entry.found_existing) return error.InvalidArchive;
+                    },
+                    .workspace_port_reply => {
+                        var answer = try self.record(workspace.PortReply, frame, "workspace_port_reply", row.id, task_id);
+                        defer answer.deinit();
+                        var port = try contracts.decodeOwned(workspace.Port, frame, try self.store().object(frame, answer.value.port, null));
+                        defer port.deinit();
+                        var pending = try self.record(occurrence.Occurrence, frame, "occurrence", port.value.occurrence, task_id);
+                        defer pending.deinit();
+                        const acquired = switch (pending.value.state) {
+                            .settled_reply => |reply| reply,
+                            .admitted => |admitted| if (admitted == .reply) admitted.reply else return error.InvalidArchive,
+                            else => return error.InvalidArchive,
+                        };
+                        if (!std.meta.eql(acquired.attempt, row.id) or !std.meta.eql(acquired.reply, answer.value.reply.digest)) return error.InvalidArchive;
+                    },
+                    .execution_route => {
+                        try requireArchiveRecord(records, .occurrence, row.id);
+                    },
+                    .workspace_reply => {
+                        try requireArchiveRecord(records, .occurrence, row.id);
+                        var pending = try self.record(occurrence.Occurrence, frame, "occurrence", row.id, task_id);
+                        defer pending.deinit();
+                        if (pending.value.work != null or !(pending.value.state == .settled_reply or (pending.value.state == .admitted and pending.value.state.admitted == .reply))) return error.InvalidArchive;
+                    },
+                    .workspace_delegation => try self.validateDelegation(frame, parent.value, row, records),
+                    .workspace_wait => {
+                        var wait = try self.record(workspace.Wait, frame, "workspace_wait", row.id, task_id);
+                        defer wait.deinit();
+                        try requireArchiveRecord(records, .occurrence, wait.value.id);
+                        var pending = try self.record(occurrence.Occurrence, frame, "occurrence", wait.value.id, task_id);
+                        defer pending.deinit();
+                        if (pending.value.work != null or !std.meta.eql(wait.value.request, pending.value.request_object)) return error.InvalidArchive;
+                        var request = try data.invocation.decode(data.invocation.Request, frame, try self.store().object(frame, wait.value.request, null));
+                        defer request.deinit();
+                        const entry = try self.handlers.resolve(request.value, try self.occurrenceImage(frame, parent.value, pending.value));
+                        if (entry.declaration.kind != .workspace) return error.InvalidArchive;
+                        var authorized = try contracts.decodeOwned(workspace.Authorized, frame, try self.authorizeWorkspaceOccurrence(frame, parent.value, pending.value, entry, request.value.binding.payload));
+                        defer authorized.deinit();
+                        if (authorized.value.command != .work or authorized.value.command.work != .wait) return error.InvalidArchive;
+                        const expected = try contracts.encodeOwned(@TypeOf(wait.value.selection), frame, authorized.value.command.work.wait);
+                        const actual = try contracts.encodeOwned(@TypeOf(wait.value.selection), frame, wait.value.selection);
+                        if (!same(actual, expected)) return error.InvalidArchive;
+                        for (wait.value.selection.works.items) |ref| {
+                            var work = try self.workspaceWork(frame, task_id, try wp.identity(ref, .work));
+                            work.deinit();
+                        }
+                    },
+                    else => {},
+                }
+            }
             for (records) |row| {
                 if (row.kind != .workspace_work) continue;
-                var saved = try self.workspaceWork(a, task_id, row.id);
+                var work_arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer work_arena.deinit();
+                const frame = work_arena.allocator();
+                var saved = try self.workspaceWork(frame, task_id, row.id);
                 defer saved.deinit();
                 const value = saved.value;
                 for (0..std.math.cast(usize, value.port_generation) orelse return error.InvalidArchive) |i| if (!generations.contains(.{ .work = value.id, .generation = i + 1 })) return error.InvalidArchive;
-                try self.validateWorkspaceWorkSnapshot(a, parent.value, try self.freezeWorkspaceWork(a, task_id, try wp.reference(a, .work, value.id), true), records);
+                try self.validateWorkspaceWorkSnapshotIn(parent.value, try self.freezeWorkspaceWork(frame, task_id, try wp.reference(frame, .work, value.id), true), records, checked);
             }
         }
 
         fn validateWorkspaceInputs(self: *Self, a: std.mem.Allocator, value: workspace.Work) !void {
             var count: usize = 0;
+            if (value.observer) |observer| {
+                if (value.inputs.items.len < 2 or
+                    !std.meta.eql(value.inputs.items[0], observer.source) or
+                    !std.meta.eql(value.inputs.items[1], observer.accumulator))
+                    return error.InvalidArchive;
+                count = 2;
+            }
             if (value.trial) |id| {
                 var trial = try self.record(workspace.Trial, a, "workspace_trial", id, value.task);
                 defer trial.deinit();
@@ -9767,44 +13323,67 @@ pub fn Service(comptime Types: type) type {
             if (matches != 1) return error.InvalidArchive;
         }
 
-        fn validateWorkspaceWorkSnapshot(self: *Self, a: std.mem.Allocator, parent: state.Task, snapshot: workspace.WorkObservation, records: []const state.ArchiveRecord) !void {
-            var checked: SnapshotValidation = .empty;
-            defer checked.deinit(a);
-            return self.validateWorkspaceWorkSnapshotIn(a, parent, snapshot, records, &checked);
-        }
+        const SnapshotValidation = struct {
+            const Key = struct {
+                kind: enum { snapshot, semantic_source },
+                task: state.TaskId,
+                identity: state.Digest,
+            };
+            allocator: std.mem.Allocator,
+            facts: std.AutoHashMapUnmanaged(Key, enum { visiting, checked }) = .empty,
+            observer_successors: ObserverSuccessors,
+            semantic_sources: bool = false,
+            controller_values: std.AutoHashMapUnmanaged(state.Digest, state.ControllerReadCut) = .empty,
 
-        const SnapshotValidation = std.AutoHashMapUnmanaged(state.Digest, enum { visiting, checked });
+            fn deinit(self: *SnapshotValidation) void {
+                self.facts.deinit(self.allocator);
+                self.controller_values.deinit(self.allocator);
+                self.observer_successors.deinit();
+            }
+        };
 
-        fn validateWorkspaceWorkSnapshotIn(self: *Self, a: std.mem.Allocator, parent: state.Task, snapshot: workspace.WorkObservation, records: []const state.ArchiveRecord, checked: *SnapshotValidation) anyerror!void {
+        fn validateWorkspaceWorkSnapshotIn(self: *Self, parent: state.Task, snapshot: workspace.WorkObservation, records: []const state.ArchiveRecord, checked: *SnapshotValidation) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
             const bytes = try contracts.encodeOwned(workspace.WorkObservation, a, snapshot);
             defer a.free(bytes);
-            const key = storage.digest(bytes);
-            if (checked.get(key)) |prior| return if (prior == .checked) {} else error.InvalidArchive;
-            try checked.put(a, key, .visiting);
-            errdefer _ = checked.remove(key);
+            const key: SnapshotValidation.Key = .{ .kind = .snapshot, .task = parent.id, .identity = storage.digest(bytes) };
+            if (checked.facts.get(key)) |prior| return if (prior == .checked) {} else error.InvalidArchive;
+            try checked.facts.put(checked.allocator, key, .visiting);
+            errdefer _ = checked.facts.remove(key);
             try self.validateWorkspaceWorkSnapshotBody(a, parent, snapshot, records, checked);
-            checked.getPtr(key).?.* = .checked;
+            checked.facts.getPtr(key).?.* = .checked;
         }
 
         fn validateWorkspaceWorkSnapshotBody(self: *Self, a: std.mem.Allocator, parent: state.Task, snapshot: workspace.WorkObservation, records: []const state.ArchiveRecord, checked: *SnapshotValidation) anyerror!void {
+            var phase: []const u8 = "publication";
+            errdefer std.debug.print("work snapshot: {s}\n", .{phase});
             const value = snapshot.work;
             try self.validateWorkspacePublication(a, parent.id, snapshot);
+            phase = "guard";
+            if (value.guard != null) try self.validateGuardSnapshot(a, snapshot, records);
+            phase = "current work and observer";
             // A checkpoint certifies execution, not native custody facts. Those
             // facts either remain immutable or grow monotonically in the owner.
             var current = try self.workspaceWork(a, parent.id, value.id);
             defer current.deinit();
+            try self.validateObserver(a, value, &checked.observer_successors);
+            if (value.observer != null and !parent.observers_present) return error.InvalidArchive;
             inline for (.{ "version", "program", "input", "input_value", "origin_work", "delegation", "trial" }) |field|
                 if (!std.meta.eql(@field(value, field), @field(current.value, field))) return error.InvalidArchive;
             inline for (.{ "execution_revision", "control_revision", "realization_revision", "port_generation", "event_watermark" }) |field|
                 if (@field(value, field) > @field(current.value, field)) return error.InvalidArchive;
             if (value.realization_revision == current.value.realization_revision and !std.meta.eql(value.runtime, current.value.runtime)) return error.InvalidArchive;
             if (value.runtime) |ref| {
+                phase = "selected runtime";
                 var selected = try self.workspaceRuntime(a, parent.id, ref.digest, value.program);
                 defer selected.deinit();
                 if (!std.meta.eql(ref, selected.record.value.artifact)) return error.InvalidArchive;
                 try requireArchiveRecord(records, .workspace_runtime, selected.record.value.id);
             }
             if (value.outer_operation) |pending| {
+                phase = "outer operation";
                 try self.validatePublishedCapsuleTrace(a, value, pending.capsule, value.runtime, null, pending);
                 const capsule_bytes = try self.store().object(a, pending.capsule, null);
                 defer a.free(capsule_bytes);
@@ -9814,6 +13393,7 @@ pub fn Service(comptime Types: type) type {
                 for (dependencies, pending.dependencies.items) |wanted, actual| if (!std.meta.eql(wanted, actual)) return error.InvalidArchive;
             }
             if (value.runtime_capsule) |ref| {
+                phase = "runtime capsule";
                 if (value.outer_operation) |pending| {
                     if (!std.meta.eql(ref, pending.capsule)) return error.InvalidArchive;
                 } else try self.validatePublishedCapsule(a, value, ref, value.runtime);
@@ -9825,6 +13405,7 @@ pub fn Service(comptime Types: type) type {
                 for (dependencies, value.runtime_dependencies.items) |wanted, actual| if (!std.meta.eql(wanted, actual)) return error.InvalidArchive;
             } else if (value.runtime_dependencies.items.len != 0) return error.InvalidArchive;
             if (value.runtime_trace) |trace| {
+                phase = "runtime trace";
                 try self.validatePublishedCapsuleTrace(a, value, trace.capsule, value.runtime, trace.output, null);
                 const bytes = try self.store().object(a, trace.capsule, null);
                 defer a.free(bytes);
@@ -9833,6 +13414,7 @@ pub fn Service(comptime Types: type) type {
                 if (dependencies.len != trace.dependencies.items.len) return error.InvalidArchive;
                 for (dependencies, trace.dependencies.items) |wanted, actual| if (!std.meta.eql(wanted, actual)) return error.InvalidArchive;
             }
+            phase = "inputs";
             try self.validateWorkspaceInputs(a, value);
             inline for (.{ "result", "result_value", "answer_value", "instrument_occurrence" }) |field| {
                 if (@field(value, field) != null and !std.meta.eql(@field(value, field), @field(current.value, field))) return error.InvalidArchive;
@@ -9844,7 +13426,7 @@ pub fn Service(comptime Types: type) type {
             if (value.cancellation_applied and !current.value.cancellation_applied) return error.InvalidArchive;
             if (value.terminal() and value.execution_revision != current.value.execution_revision) return error.InvalidArchive;
             if (value.execution_revision == current.value.execution_revision) {
-                inline for (.{ "checkpoint", "outcome", "outcome_kind", "current_occurrence", "current_port", "port_generation", "result", "result_value", "answer_value" }) |field|
+                inline for (.{ "checkpoint", "outcome", "outcome_kind", "current_occurrence", "current_port", "port_generation", "result", "result_value", "answer_value", "guest_work" }) |field|
                     if (!std.meta.eql(@field(value, field), @field(current.value, field))) return error.InvalidArchive;
             }
             if (value.execution_revision == 0 or value.control_revision == 0 or value.event_watermark > parent.event_high or
@@ -9863,11 +13445,11 @@ pub fn Service(comptime Types: type) type {
                 if (!std.meta.eql(view.value.task, parent.id) or view.value.event_cut >= value.event_watermark or !std.meta.eql(view.value.policy, parent.profile.digest)) return error.InvalidArchive;
                 try self.validateControllerViewIn(a, parent, view.value, trial.value.view_works.items, records, checked);
                 for (trial.value.selection.synthetic.responses.items, trial.value.responses.items, 0..) |selection, response, i| {
-                    if (!same(selection.identity.bytes, response.identity.bytes) or !std.meta.eql((try self.workspaceValueReference(a, parent.id, selection.payload)).artifact, response.payload) or !std.meta.eql((try self.workspaceValueReference(a, parent.id, selection.response)).artifact, response.response) or !std.meta.eql(value.inputs.items[i * 2], response.payload) or !std.meta.eql(value.inputs.items[i * 2 + 1], response.response)) return error.InvalidArchive;
-                    const payload = try self.workspaceValueReference(a, parent.id, selection.payload);
+                    if (!same(selection.identity.bytes, response.identity.bytes) or !std.meta.eql((try self.workspaceValueReferenceIn(a, parent.id, selection.payload, checked)).artifact, response.payload) or !std.meta.eql((try self.workspaceValueReferenceIn(a, parent.id, selection.response, checked)).artifact, response.response) or !std.meta.eql(value.inputs.items[i * 2], response.payload) or !std.meta.eql(value.inputs.items[i * 2 + 1], response.response)) return error.InvalidArchive;
+                    const payload = try self.workspaceValueReferenceIn(a, parent.id, selection.payload, checked);
                     for (trial.value.selection.synthetic.responses.items[0..i]) |prior| {
                         if (!same(selection.identity.bytes, prior.identity.bytes)) continue;
-                        const previous = try self.workspaceValueReference(a, parent.id, prior.payload);
+                        const previous = try self.workspaceValueReferenceIn(a, parent.id, prior.payload, checked);
                         if (std.meta.eql(payload.schema, previous.schema) and std.meta.eql(payload.value, previous.value)) return error.InvalidArchive;
                     }
                 }
@@ -9881,9 +13463,9 @@ pub fn Service(comptime Types: type) type {
                 if (!std.meta.eql(delegation.value.instrument, value.id)) return error.InvalidArchive;
                 if (value.instrument_occurrence) |id| try requireArchiveRecord(records, .occurrence, id);
             }
-            const input = try self.workspaceValueReference(a, parent.id, try wp.reference(a, .value, (value.input_value orelse return error.InvalidArchive).digest));
+            const input = try self.workspaceValueReferenceIn(a, parent.id, try wp.reference(a, .value, (value.input_value orelse return error.InvalidArchive).digest), checked);
             if (!std.meta.eql(input.value, value.input) or !std.meta.eql(input.schema, program.value.description.input_schema)) return error.InvalidArchive;
-            for (value.inputs.items) |ref| _ = try self.workspaceValueReference(a, parent.id, try wp.reference(a, .value, ref.digest));
+            for (value.inputs.items) |ref| _ = try self.workspaceValueReferenceIn(a, parent.id, try wp.reference(a, .value, ref.digest), checked);
             var prepared = try self.inspectionRuntime(self.allocator, value);
             defer prepared.deinit();
             const checkpoint = try self.store().object(a, value.checkpoint, null);
@@ -9893,6 +13475,7 @@ pub fn Service(comptime Types: type) type {
             var finished = try kosmos.invocation.finishPublication(a, &candidate, .receipt, null);
             defer finished.outcome.deinit();
             defer self.allocator.free(finished.checkpoint.?);
+            try self.validateGuardAgreement(a, value, &candidate);
             const publication = .{ .outcome = try data.invocation.encodeOwned(data.invocation.Outcome, a, finished.outcome.record), .checkpoint = finished.checkpoint.? };
             defer a.free(publication.outcome);
             if (!std.meta.eql(storage.digest(publication.outcome), value.outcome.digest) or publication.outcome.len != value.outcome.bytes or
@@ -9913,7 +13496,7 @@ pub fn Service(comptime Types: type) type {
                 },
                 .completed => |bytes| {
                     if (value.result == null or value.result_value == null or !std.meta.eql(value.result.?, state.Reference{ .digest = storage.digest(bytes), .bytes = bytes.len })) return error.InvalidArchive;
-                    const result = try self.workspaceValueReference(a, parent.id, try wp.reference(a, .value, value.result_value.?.digest));
+                    const result = try self.workspaceValueReferenceIn(a, parent.id, try wp.reference(a, .value, value.result_value.?.digest), checked);
                     if (!std.meta.eql(result.artifact, value.result_value.?) or !std.meta.eql(result.value, value.result.?) or !std.meta.eql(result.schema, program.value.description.result_schema)) return error.InvalidArchive;
                     var retained = try self.record(workspace.Value, a, "workspace_value", try workspaceContentCustody(a, parent.id, result.artifact.digest), parent.id);
                     defer retained.deinit();
@@ -9996,6 +13579,12 @@ pub fn Service(comptime Types: type) type {
             };
         }
         fn workspaceCompile(self: *Self, a: std.mem.Allocator, source: []const u8, kind: @FieldType(workspace.ProgramArtifact, "source_kind"), catalog: ?state.Reference, exposures: []const wc.Exposure, role: wc.ProgramRole, diagnostic: *construction.Diagnostic) !construction.Built {
+            if (self.store().transaction) return error.CompilerPreparationRequired;
+            return self.workspaceCompileFrom(a, source, kind, catalog, exposures, role, diagnostic, self.store());
+        }
+
+        fn workspaceCompileFrom(self: *Self, a: std.mem.Allocator, source: []const u8, kind: @FieldType(workspace.ProgramArtifact, "source_kind"), catalog: ?state.Reference, exposures: []const wc.Exposure, role: wc.ProgramRole, diagnostic: *construction.Diagnostic, objects: anytype) !construction.Built {
+            if (self.store().transaction) return error.CompilerPreparationRequired;
             if (role == .controller) {
                 if (kind != .source_records or catalog != null or exposures.len != 0) return error.InvalidConstruction;
                 const contract = try self.controllerContract(a);
@@ -10018,7 +13607,7 @@ pub fn Service(comptime Types: type) type {
             if (exposures.len != 0) return error.InvalidExposure;
             diagnostic.phase = .authority;
             const ref = catalog orelse return error.UnavailableCatalog;
-            const bytes = try self.store().object(a, ref, null);
+            const bytes = try objects.object(a, ref, null);
             defer a.free(bytes);
             diagnostic.phase = .compilation;
             const built = try construction.buildComponent(a, bytes, source);
@@ -10129,7 +13718,11 @@ pub fn Service(comptime Types: type) type {
                 residual_count = 1;
             }
             if (related) |id| {
-                publications[publication_count] = try workPublication(a, try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, id), true));
+                const observed = try self.freezeWorkspaceWork(a, parent.id, try wp.reference(a, .work, id), true);
+                const snapshot = try contracts.encodeOwned(workspace.WorkObservation, a, observed);
+                defer a.free(snapshot);
+                _ = try self.store().putObject(snapshot);
+                publications[publication_count] = try workPublication(a, observed);
                 publication_count += 1;
             }
             const command_ref: ?state.Reference = if (command) |value| blk: {
@@ -10141,7 +13734,7 @@ pub fn Service(comptime Types: type) type {
             // work/delegation or captured build reply. Only work progress has
             // the retained publication facts needed for a journal projection.
             if (operation_id != null or publication_count != 0 or residual_count != 0)
-                try self.subjectPublicationEvent(&parent, if (operation_id != null) .workspace else .workspace_progress, event_data, publications[0..publication_count], residuals[0..residual_count], command_ref);
+                try self.subjectPublicationEvent(&parent, if (operation_id != null) .workspace else .workspace_progress, event_data, publications[0..publication_count], residuals[0..residual_count], command_ref, if (command != null and publicationReadsController(command.?)) .from(initial) else null, null);
             const saved: state.Receipt = .{ .id = receipt_id, .client_operation_id = try name(operation_id orelse "workspace.progress"), .method = .workspace, .request_digest = request, .task = parent.id, .revision = parent.revision, .disposition = .accepted, .workspace = identity, .workspace_kind = kind, .workspace_observation = frozen };
             if (operation_id) |op| {
                 const bytes = try contracts.encodeOwned(state.Receipt, a, saved);
@@ -10240,27 +13833,1149 @@ pub fn Service(comptime Types: type) type {
             defer a.free(record_bytes);
             const input = try contracts.encodeOwned(instrument.Input, a, .{ .delegation = .{ .digest = storage.digest(record_bytes), .bytes = record_bytes.len } });
             defer a.free(input);
-            return self.workspaceStartAdmitted(a, operation_id, task_id, program.digest, input, .{ .stop = .terminal, .continuation = .owner_scheduled }, null, .{ .record = record_value, .request = request, .policy = selection.policy, .command = selection }, null, .{ .none = .{} }, null);
+            return self.workspaceStartAdmitted(a, operation_id, task_id, program.digest, input, .{ .stop = .terminal, .continuation = .owner_scheduled }, null, .{ .record = record_value, .request = request, .policy = selection.policy, .command = selection }, null, .{ .none = .{} }, null, null);
+        }
+
+        pub fn workspaceStopObserving(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: []const u8,
+            task_id: state.TaskId,
+            expected: wc.Expected,
+        ) !Admission {
+            const request = try operation(workspace.StopObservingRequest, a, .{
+                .task = task_id,
+                .expected = expected,
+            });
+            if (try self.replay(a, id, request)) |prior| return prior;
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            const work_id = try wp.identity(expected.work, .work);
+            try self.requireCustody(a, task_id, work_id);
+            var saved = try self.workspaceWork(a, task_id, work_id);
+            defer saved.deinit();
+            if (saved.value.execution_revision != expected.execution_revision or
+                saved.value.control_revision != expected.control_revision)
+                return error.StaleRevision;
+            var value = saved.value;
+            if (value.observer == null or
+                value.observer.?.successor != null)
+                return error.InvalidObserverInput;
+            if (!value.observer.?.stopped and
+                observerHeadIndex(parent.value, value.id) == null) return error.CorruptState;
+            const heads = try observerHeadsAfter(a, parent.value, value.id, null);
+            defer a.free(heads);
+            parent.value.observer_heads.items = heads;
+            value.observer.?.stopped = true;
+            value.control_revision = try std.math.add(u64, value.control_revision, 1);
+            value.event_watermark = try std.math.add(u64, parent.value.event_high, 1);
+            try self.store().begin();
+            defer self.store().rollback();
+            try self.writeWorkspaceWork(&value, .replace);
+            const frozen = try self.snapshotRecord(
+                workspace.Work,
+                a,
+                "workspace_work",
+                value.id,
+                task_id,
+            );
+            return self.workspaceCommit(
+                a,
+                parent.value,
+                id,
+                request,
+                value.id,
+                .work,
+                frozen,
+                .{ .stop_observing = expected },
+            );
+        }
+
+        fn validateObserverSuccessionPublication(
+            self: *Self,
+            a: std.mem.Allocator,
+            event_value: state.Event,
+            item: state.WorkPublication,
+            prior: ?state.WorkPublication,
+            command: ?workspace.PublicationCommand,
+        ) !bool {
+            const before = prior orelse return false;
+            const selected = command orelse return false;
+            if (selected != .start) return false;
+            const observer = selected.start.observer orelse return error.InvalidArchive;
+            const previous = observer.selection.previous orelse return error.InvalidArchive;
+            const publications = event_value.workspace_publications.items;
+            if (publications.len != 2 or !std.meta.eql(publications[1].work, item.work) or
+                !std.meta.eql(try wp.identity(previous, .work), item.work)) return error.InvalidArchive;
+            const reference = observer.previous orelse return error.InvalidArchive;
+            const bytes = try self.store().object(a, reference, null);
+            defer a.free(bytes);
+            var retained = try contracts.decodeOwned(workspace.Work, a, bytes);
+            defer retained.deinit();
+            const predecessor = retained.value;
+            var snapshot: workspace.WorkObservation = .{ .work = predecessor, .occurrence = null };
+            if (!try samePublication(a, before, try workPublication(a, snapshot)))
+                return error.InvalidArchive;
+            if (predecessor.observer == null or predecessor.observer.?.successor != null or
+                predecessor.outcome_kind != .completed or predecessor.cancellation != null)
+                return error.InvalidArchive;
+            const previous_bytes = try contracts.encodeOwned(workspace.Work, a, predecessor);
+            defer a.free(previous_bytes);
+            const previous_reference: state.Reference = .{ .digest = storage.digest(previous_bytes), .bytes = previous_bytes.len };
+            if (!std.meta.eql(observer.previous, @as(?state.Reference, previous_reference)))
+                return error.InvalidArchive;
+            snapshot.work.observer.?.successor = publications[0].work;
+            snapshot.work.control_revision = try std.math.add(u64, predecessor.control_revision, 1);
+            snapshot.work.event_watermark = event_value.seq;
+            if (!try samePublication(a, item, try workPublication(a, snapshot)))
+                return error.InvalidArchive;
+            return true;
+        }
+
+        fn validateObserverPublication(
+            a: std.mem.Allocator,
+            item: state.WorkPublication,
+            prior: ?state.WorkPublication,
+            command: ?workspace.PublicationCommand,
+        ) !void {
+            const observer = item.observer orelse {
+                if (prior != null and prior.?.observer != null) return error.InvalidArchive;
+                if (command) |selected| switch (selected) {
+                    .start => |start| if (start.observer != null) return error.InvalidArchive,
+                    .stop_observing => return error.InvalidArchive,
+                    else => {},
+                };
+                return;
+            };
+            const completed = item.control.outcome == .completed;
+            if (observer.consumed_revision != @as(?u64, if (completed)
+                observer.source_revision
+            else
+                null)) return error.InvalidArchive;
+            if (prior) |before| {
+                var expected = before.observer orelse return error.InvalidArchive;
+                expected.consumed_revision = observer.consumed_revision;
+                if (!std.meta.eql(expected.incomplete, observer.incomplete)) {
+                    if (command != null or expected.stopped or !completed or
+                        before.control.outcome != .completed or observer.incomplete == null or
+                        expected.selection.policy.continuation != .owner_scheduled)
+                        return error.InvalidArchive;
+                    expected.incomplete = observer.incomplete;
+                }
+                if (command != null and command.? == .stop_observing) {
+                    const selected = command.?.stop_observing;
+                    if (!std.meta.eql(try wp.identity(selected.work, .work), item.work) or
+                        selected.execution_revision != before.execution_revision or
+                        selected.control_revision != before.control_revision or
+                        item.control_revision -| before.control_revision != 1 or
+                        item.execution_revision != before.execution_revision)
+                        return error.InvalidArchive;
+                    expected.stopped = true;
+                }
+                const bytes = try contracts.encodeOwned(workspace.Observer, a, expected);
+                defer a.free(bytes);
+                const actual = try contracts.encodeOwned(workspace.Observer, a, observer);
+                defer a.free(actual);
+                if (!same(bytes, actual)) return error.InvalidArchive;
+            } else {
+                if (observer.stopped or observer.successor != null or observer.incomplete != null or
+                    command == null or command.? != .start)
+                    return error.InvalidArchive;
+                var expected = command.?.start.observer orelse return error.InvalidArchive;
+                expected.consumed_revision = observer.consumed_revision;
+                const requested = try contracts.encodeOwned(workspace.Observer, a, expected);
+                defer a.free(requested);
+                const actual = try contracts.encodeOwned(workspace.Observer, a, observer);
+                defer a.free(actual);
+                if (!same(requested, actual)) return error.InvalidArchive;
+            }
+        }
+
+        const ObserverSuccessors = struct {
+            const Entry = struct { id: state.Digest, duplicate: bool };
+            allocator: std.mem.Allocator,
+            task: state.TaskId,
+            entries: std.AutoHashMapUnmanaged(state.Digest, Entry) = .empty,
+            loaded: bool = false,
+            histories: ObserverHistories,
+
+            fn init(a: std.mem.Allocator, task_id: state.TaskId) ObserverSuccessors {
+                return .{ .allocator = a, .task = task_id, .histories = .{ .allocator = a } };
+            }
+
+            fn deinit(self: *ObserverSuccessors) void {
+                self.entries.deinit(self.allocator);
+                self.histories.deinit();
+            }
+
+            fn next(self: *ObserverSuccessors, service: *Self, id: state.Digest) !?state.Digest {
+                if (!self.loaded) try self.load(service);
+                const entry = self.entries.get(id) orelse return null;
+                if (entry.duplicate) return error.InvalidArchive;
+                return entry.id;
+            }
+
+            fn load(self: *ObserverSuccessors, service: *Self) !void {
+                var entries: std.AutoHashMapUnmanaged(state.Digest, Entry) = .empty;
+                errdefer entries.deinit(self.allocator);
+                const ids = try service.workspaceIds(self.allocator, self.task);
+                defer self.allocator.free(ids);
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                for (ids) |id| {
+                    _ = arena.reset(.retain_capacity);
+                    var other = try service.retainedWorkspaceWork(arena.allocator(), self.task, id);
+                    defer other.deinit();
+                    const observer = other.value.observer orelse continue;
+                    const prior = observer.selection.previous orelse continue;
+                    const entry = try entries.getOrPut(self.allocator, try wp.identity(prior, .work));
+                    if (entry.found_existing) entry.value_ptr.duplicate = true else entry.value_ptr.* = .{ .id = other.value.id, .duplicate = false };
+                }
+                self.entries = entries;
+                self.loaded = true;
+            }
+        };
+
+        fn validateObservedAdvance(
+            before: state.WorkPublication,
+            after: state.WorkPublication,
+            prefix: *@import("workspace_observers.zig").PublicationPrefix,
+        ) !void {
+            if (before.execution_revision == after.execution_revision and
+                std.meta.eql(
+                    before.outer_operation orelse before.runtime_capsule,
+                    after.outer_operation orelse after.runtime_capsule,
+                )) return;
+            const active = prefix.lossless(before.work) orelse return;
+            var outer: ?struct { before: u64, after: u64 } = null;
+            for (active.keys()) |id| {
+                const observer = prefix.latest.get(id).?.publication.observer.?;
+                if (observer.selection.source.level == .guest_cut and
+                    before.execution_revision == after.execution_revision) continue;
+                var cursor = before.execution_revision;
+                if (observer.selection.source.level == .outer_execution) {
+                    if (outer == null) outer = .{
+                        .before = try prefix.outerRevision(before.work, std.math.maxInt(u64), before.outer_operation orelse before.runtime_capsule),
+                        .after = try prefix.outerRevision(after.work, std.math.maxInt(u64), after.outer_operation orelse after.runtime_capsule),
+                    };
+                    cursor = outer.?.before;
+                    if (cursor == outer.?.after) continue;
+                }
+                if (observer.consumed_revision == null or observer.consumed_revision.? != cursor)
+                    return error.InvalidArchive;
+            }
+        }
+
+        fn pumpObserver(self: *Self, a: std.mem.Allocator, work: workspace.Work) !Step {
+            const observer = work.observer.?;
+            const subject: workspace.Subject = .{ .task = work.task, .work = work.id };
+            var parent = try self.task(a, work.task);
+            defer parent.deinit();
+            if (self.workspaceParentStopped(parent.value) or observer.stopped or
+                observer.selection.policy.continuation != .owner_scheduled or
+                observer.successor != null)
+            {
+                self.subjectRemove(subject);
+                return .progressed;
+            }
+            var source = try self.workspaceWork(a, work.task, observer.source_work);
+            defer source.deinit();
+            const consumed = observer.consumed_revision orelse return error.InvalidObserverInput;
+            const revision = try self.observerSourceRevision(
+                a,
+                source.value,
+                observer.selection.source.level,
+            );
+            if (revision -| consumed < observer.selection.policy.cadence)
+                return .idle;
+            if (observer.incomplete) |incomplete| if (incomplete.revision == revision)
+                return .idle;
+            var selection = observer.selection;
+            selection.source.expected.execution_revision = source.value.execution_revision;
+            selection.source.expected.control_revision = source.value.control_revision;
+            selection.source.realization_revision = source.value.realization_revision;
+            selection.previous = try wp.reference(a, .work, work.id);
+            const identity = try operation(struct { revision: u64, request: workspace.ObserveRequest }, a, .{
+                .revision = revision,
+                .request = .{ .task = work.task, .selection = selection },
+            });
+            const operation_id = try std.fmt.allocPrint(a, "observe-{s}", .{
+                std.fmt.bytesToHex(identity, .lower),
+            });
+            defer a.free(operation_id);
+            _ = self.workspaceObserve(a, operation_id, work.task, selection) catch |err| {
+                const diagnostic: @FieldType(workspace.Observer.Incomplete, "diagnostic") =
+                    switch (err) {
+                        error.InvalidDisclosure => .invalid_disclosure,
+                        error.OuterCutUnavailable => .outer_cut_unavailable,
+                        else => return err,
+                    };
+                return self.recordObserverIncomplete(
+                    a,
+                    parent.value,
+                    work,
+                    source.value,
+                    revision,
+                    diagnostic,
+                );
+            };
+            self.subjectRemove(subject);
+            return .progressed;
+        }
+
+        fn recordObserverIncomplete(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            work: workspace.Work,
+            source: workspace.Work,
+            revision: u64,
+            diagnostic: @FieldType(workspace.Observer.Incomplete, "diagnostic"),
+        ) !Step {
+            var prepared = try self.inspectionRuntime(a, source);
+            defer prepared.deinit();
+            const code = try prepared.runtime.encode(a);
+            defer a.free(code);
+            var pending: ?contracts.Decoded(occurrence.Occurrence) = null;
+            defer if (pending) |*value| value.deinit();
+            if (source.current_occurrence) |id|
+                pending = try self.record(occurrence.Occurrence, a, "occurrence", id, source.task);
+            const snapshot = try contracts.encodeOwned(workspace.WorkObservation, a, .{
+                .work = source,
+                .occurrence = if (pending) |value| value.value else null,
+            });
+            defer a.free(snapshot);
+            try self.store().begin();
+            defer self.store().rollback();
+            var value = work;
+            value.observer.?.incomplete = .{
+                .publication = source.event_watermark,
+                .revision = revision,
+                .source = try self.store().putObject(snapshot),
+                .runtime_code = try self.store().putObject(code),
+                .diagnostic = diagnostic,
+            };
+            value.event_watermark = try std.math.add(u64, parent.event_high, 1);
+            try self.writeWorkspaceWork(&value, .replace);
+            _ = try self.workspaceCommit(a, parent, null, @splat(0), value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, value.task), null);
+            return .progressed;
+        }
+
+        fn validateObserverPreparationProgress(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            watermark: u64,
+            item: state.WorkPublication,
+            prior: ?state.WorkPublication,
+            command: ?workspace.PublicationCommand,
+            histories: *ObserverHistories,
+        ) !bool {
+            const observer = item.observer orelse return false;
+            const before = prior orelse return false;
+            const previous = before.observer orelse return error.InvalidArchive;
+            if (std.meta.eql(previous.incomplete, observer.incomplete)) return false;
+            const incomplete = observer.incomplete orelse return error.InvalidArchive;
+            if (previous.incomplete) |failed| if (failed.revision >= incomplete.revision)
+                return error.InvalidArchive;
+            if (command != null or item.execution_revision != before.execution_revision or
+                item.control_revision != before.control_revision or
+                incomplete.publication != try self.workspacePublicationAt(
+                    a,
+                    task_id,
+                    observer.source_work,
+                    watermark -| 1,
+                )) return error.InvalidArchive;
+            var expected = before;
+            expected.observer.?.incomplete = incomplete;
+            expected.observation = item.observation;
+            if (!try samePublication(a, expected, item)) return error.InvalidArchive;
+            try self.validateObserverIncompleteAt(
+                a,
+                task_id,
+                item.control.outcome,
+                watermark,
+                observer,
+                histories,
+            );
+            return true;
+        }
+
+        fn validateObserverIncomplete(
+            self: *Self,
+            a: std.mem.Allocator,
+            work: workspace.Work,
+            histories: *ObserverHistories,
+        ) !void {
+            const observer = work.observer orelse return;
+            return self.validateObserverIncompleteAt(
+                a,
+                work.task,
+                work.outcome_kind,
+                work.event_watermark,
+                observer,
+                histories,
+            );
+        }
+
+        fn validateObserverIncompleteAt(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            outcome: state.Outcome,
+            watermark: u64,
+            observer: workspace.Observer,
+            histories: *ObserverHistories,
+        ) !void {
+            const incomplete = observer.incomplete orelse return;
+            const consumed = observer.consumed_revision orelse return error.InvalidArchive;
+            if (outcome != .completed or incomplete.publication >= watermark or
+                incomplete.revision -| consumed < observer.selection.policy.cadence or
+                observer.selection.policy.continuation != .owner_scheduled)
+                return error.InvalidArchive;
+            var query = try self.store().database.prepare(
+                "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+                    "WHERE e.task=? AND e.seq=?",
+                &.{ .{ .blob = &task_id }, .{
+                    .integer = std.math.cast(i64, incomplete.publication) orelse
+                        return error.InvalidArchive,
+                } },
+            );
+            defer query.deinit();
+            if (try query.step() != .row) return error.InvalidArchive;
+            var event_value = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+            defer event_value.deinit();
+            for (event_value.value.workspace_publications.items) |publication| {
+                if (!std.meta.eql(publication.work, observer.source_work)) continue;
+                if (!std.meta.eql(publication.observation, incomplete.source.digest))
+                    return error.InvalidArchive;
+                const bytes = try self.store().object(a, incomplete.source, null);
+                defer a.free(bytes);
+                var source = try contracts.decodeOwned(workspace.WorkObservation, a, bytes);
+                defer source.deinit();
+                if (!std.meta.eql(source.value.work.id, observer.source_work) or
+                    source.value.work.event_watermark != incomplete.publication)
+                    return error.InvalidArchive;
+                try self.validateWorkspacePublication(a, task_id, source.value);
+                try histories.validateCursor(self, a, source.value.work);
+                if (incomplete.revision != try self.observerSourceRevision(
+                    a,
+                    source.value.work,
+                    observer.selection.source.level,
+                )) return error.InvalidArchive;
+                return self.validateObserverPreparationCut(a, observer, source.value);
+            }
+            return error.InvalidArchive;
+        }
+
+        fn validateObserverPreparationCut(
+            self: *Self,
+            a: std.mem.Allocator,
+            observer: workspace.Observer,
+            source: workspace.WorkObservation,
+        ) !void {
+            const incomplete = observer.incomplete.?;
+            var prepared = try self.inspectionRuntime(a, source.work);
+            defer prepared.deinit();
+            const code = try self.store().object(a, incomplete.runtime_code, null);
+            defer a.free(code);
+            if (!std.meta.eql(prepared.runtime.identity, incomplete.runtime_code.digest))
+                return error.InvalidArchive;
+            if (incomplete.diagnostic == .outer_cut_unavailable) {
+                if (observer.selection.source.level != .outer_execution or
+                    source.work.outer_operation != null)
+                    return error.InvalidArchive;
+                if (source.work.runtime_capsule) |ref| {
+                    const bytes = try self.store().object(a, ref, null);
+                    defer a.free(bytes);
+                    var capsule = try kosmos.RuntimeCapsule.read(a, bytes);
+                    defer capsule.deinit();
+                    if (capsule.value.record.kind != .guest_cut) return error.InvalidArchive;
+                }
+                return;
+            }
+            const disclosed = self.workspaceInspectionBytes(a, source.work.task, .{
+                .level = observer.selection.source.level,
+                .observation = source,
+                .nodes = observer.selection.source.nodes,
+                .disclosure = observer.selection.source.disclosure,
+                .runtime_code = incomplete.runtime_code,
+            }) catch |err| switch (err) {
+                error.InvalidDisclosure => return,
+                else => return err,
+            };
+            a.free(disclosed.schema);
+            a.free(disclosed.value);
+            return error.InvalidArchive;
+        }
+
+        fn observerAdvanceAllowed(self: *Self, a: std.mem.Allocator, source: workspace.Work) !void {
+            return self.observerAdvanceAllowedFor(a, source, null);
+        }
+
+        fn observerAdvanceAllowedFor(
+            self: *Self,
+            a: std.mem.Allocator,
+            source: workspace.Work,
+            level: ?@FieldType(wc.GuestViewSelection, "level"),
+        ) !void {
+            var parent = try self.task(a, source.task);
+            defer parent.deinit();
+            if (parent.value.observer_heads.items.len != 0) try self.compatible(parent.value);
+            for (parent.value.observer_heads.items) |id| {
+                var saved = try self.retainedWorkspaceWork(a, source.task, id);
+                defer saved.deinit();
+                const observer = saved.value.observer orelse return error.CorruptState;
+                if (!self.activeObserver(saved.value)) return error.CorruptState;
+                if (observer.selection.policy.delivery != .lossless or
+                    (level != null and observer.selection.source.level != level.?) or
+                    !std.meta.eql(observer.source_work, source.id)) continue;
+                if (observer.consumed_revision == null or
+                    observer.consumed_revision.? !=
+                        try self.observerSourceRevision(a, source, observer.selection.source.level))
+                    return error.ObservationBlocked;
+            }
+        }
+
+        fn observationBlockedAt(
+            source: state.WorkPublication,
+            prefix: *@import("workspace_observers.zig").PublicationPrefix,
+        ) !bool {
+            return prefix.blocked(source.work, source.execution_revision, std.math.maxInt(u64), source.outer_operation orelse source.runtime_capsule);
+        }
+
+        const ObserverScope = union(enum) {
+            current: *CurrentObservers,
+            historical: *ObserverHistories,
+
+            fn at(scope: ObserverScope, task_id: state.TaskId, watermark: u64) !WorkObservers {
+                return switch (scope) {
+                    .current => |index| if (std.meta.eql(index.task, task_id) and index.watermark == watermark)
+                        .{ .current = index }
+                    else
+                        error.InvalidArchive,
+                    .historical => |histories| .{ .historical = try histories.get(task_id, watermark) },
+                };
+            }
+        };
+
+        const WorkObservers = union(enum) {
+            current: *CurrentObservers,
+            historical: HistoricalRead,
+
+            fn blocked(observers: WorkObservers, service: *Self, source: workspace.Work, observed_at: u64) !bool {
+                switch (observers) {
+                    inline .current, .historical => |index| {
+                        if (observed_at != index.watermark) return error.InvalidArchive;
+                        return index.blocked(service, source);
+                    },
+                }
+            }
+        };
+
+        const CurrentObservers = struct {
+            const Key = struct {
+                source: state.Digest,
+                level: @FieldType(wc.GuestViewSelection, "level"),
+            };
+            allocator: std.mem.Allocator,
+            task: state.TaskId,
+            watermark: u64,
+            loaded: bool = false,
+            revisions: std.AutoHashMapUnmanaged(Key, ?u64) = .empty,
+
+            fn init(a: std.mem.Allocator, task_id: state.TaskId, watermark: u64) CurrentObservers {
+                return .{ .allocator = a, .task = task_id, .watermark = watermark };
+            }
+
+            fn deinit(index: *CurrentObservers) void {
+                index.revisions.deinit(index.allocator);
+            }
+
+            fn load(index: *CurrentObservers, service: *Self) !void {
+                const a = index.allocator;
+                var parent = try service.task(a, index.task);
+                defer parent.deinit();
+                if (index.watermark != parent.value.event_high) return error.InvalidArchive;
+                for (parent.value.observer_heads.items) |id| {
+                    var saved = try service.retainedWorkspaceWork(a, index.task, id);
+                    defer saved.deinit();
+                    const observer = saved.value.observer orelse return error.CorruptState;
+                    if (!service.activeObserver(saved.value)) return error.CorruptState;
+                    if (observer.selection.policy.delivery != .lossless) continue;
+                    const entry = try index.revisions.getOrPut(a, .{
+                        .source = observer.source_work,
+                        .level = observer.selection.source.level,
+                    });
+                    if (!entry.found_existing) {
+                        entry.value_ptr.* = observer.consumed_revision;
+                    } else if (!std.meta.eql(entry.value_ptr.*, observer.consumed_revision)) {
+                        entry.value_ptr.* = null;
+                    }
+                }
+                index.loaded = true;
+            }
+
+            fn blocked(index: *CurrentObservers, service: *Self, source: workspace.Work) !bool {
+                if (!std.meta.eql(source.task, index.task) or source.event_watermark > index.watermark)
+                    return error.InvalidArchive;
+                if (!index.loaded) try index.load(service);
+                const levels = [_]@FieldType(wc.GuestViewSelection, "level"){ .guest_cut, .outer_execution };
+                for (levels) |level| {
+                    const consumed = index.revisions.get(.{ .source = source.id, .level = level }) orelse continue;
+                    if (consumed == null or consumed.? != try service.observerSourceRevision(index.allocator, source, level))
+                        return true;
+                }
+                return false;
+            }
+        };
+
+        const ObserverHistories = struct {
+            allocator: std.mem.Allocator,
+            entries: std.AutoHashMapUnmanaged(state.TaskId, *HistoricalObservers) = .empty,
+
+            fn deinit(histories: *ObserverHistories) void {
+                const a = histories.allocator;
+                var iterator = histories.entries.valueIterator();
+                while (iterator.next()) |index| {
+                    index.*.deinit();
+                    a.destroy(index.*);
+                }
+                histories.entries.deinit(a);
+            }
+
+            fn validateCursor(histories: *ObserverHistories, service: *Self, a: std.mem.Allocator, work: workspace.Work) !void {
+                var parent = try service.task(a, work.task);
+                defer parent.deinit();
+                const read = try histories.get(work.task, parent.value.event_high);
+                const index = read.index;
+                try index.load(service);
+                if (work.event_watermark > index.watermark) return error.InvalidArchive;
+                const cursor = index.history.outerCursorAt(work.id, work.event_watermark);
+                if (!std.meta.eql(work.outer_cursor, cursor))
+                    return error.InvalidArchive;
+            }
+
+            fn get(
+                histories: *ObserverHistories,
+                task_id: state.TaskId,
+                watermark: u64,
+            ) !HistoricalRead {
+                const a = histories.allocator;
+                if (histories.entries.get(task_id)) |index|
+                    return .{ .index = index, .watermark = watermark };
+                const index = try a.create(HistoricalObservers);
+                errdefer a.destroy(index);
+                index.* = .init(a, task_id, std.math.maxInt(u64));
+                try histories.entries.put(a, task_id, index);
+                return .{ .index = index, .watermark = watermark };
+            }
+        };
+
+        const HistoricalRead = struct {
+            index: *HistoricalObservers,
+            watermark: u64,
+
+            fn blocked(read: HistoricalRead, service: *Self, source: workspace.Work) !bool {
+                const index = read.index;
+                if (!std.meta.eql(source.task, index.task) or
+                    source.event_watermark > read.watermark)
+                    return error.InvalidArchive;
+                try index.prepare(service);
+                if (read.watermark > index.watermark) return error.InvalidArchive;
+                if (!index.observers_present.?) return false;
+                try index.load(service);
+                return index.history.blocked(
+                    source.id,
+                    source.execution_revision,
+                    source.event_watermark,
+                    read.watermark,
+                    if (source.outer_operation) |pending|
+                        pending.capsule
+                    else
+                        source.runtime_capsule,
+                );
+            }
+        };
+
+        const HistoricalObservers = struct {
+            const History = @import("workspace_observers.zig").PublicationHistory;
+            allocator: std.mem.Allocator,
+            task: state.TaskId,
+            watermark: u64,
+            loaded: bool = false,
+            observers_present: ?bool = null,
+            history: History,
+
+            fn init(a: std.mem.Allocator, task_id: state.TaskId, watermark: u64) HistoricalObservers {
+                return .{
+                    .allocator = a,
+                    .task = task_id,
+                    .watermark = watermark,
+                    .history = .init(a),
+                };
+            }
+
+            fn deinit(index: *HistoricalObservers) void {
+                index.history.deinit();
+            }
+
+            fn prepare(index: *HistoricalObservers, service: *Self) !void {
+                if (index.observers_present != null) return;
+                var parent = try service.task(index.allocator, index.task);
+                defer parent.deinit();
+                index.watermark = @min(index.watermark, parent.value.event_high);
+                index.observers_present = parent.value.observers_present;
+            }
+
+            fn load(index: *HistoricalObservers, service: *Self) !void {
+                if (index.loaded) return;
+                try index.prepare(service);
+                var history = History.init(index.allocator);
+                errdefer history.deinit();
+                var builder = History.Builder.init(service.allocator, &history);
+                defer builder.deinit();
+                var rows = try service.store().database.prepare(
+                    "SELECT e.seq, o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+                        "WHERE e.task=? AND e.seq<=? ORDER BY e.seq",
+                    &.{ .{ .blob = &index.task }, .{ .integer = std.math.cast(i64, index.watermark) orelse return error.InvalidArchive } },
+                );
+                defer rows.deinit();
+                while (try rows.step() == .row) {
+                    var event_value = try contracts.decodeOwned(
+                        state.Event,
+                        service.allocator,
+                        try rows.bytes(1),
+                    );
+                    defer event_value.deinit();
+                    if (event_value.value.seq != try rows.integer(0)) return error.InvalidArchive;
+                    for (event_value.value.workspace_publications.items) |item|
+                        try builder.put(item, event_value.value.seq);
+                }
+                index.history.deinit();
+                index.history = history;
+                index.loaded = true;
+            }
+        };
+
+        fn observerSourceRevision(
+            _: *Self,
+            _: std.mem.Allocator,
+            work: workspace.Work,
+            level: @FieldType(wc.GuestViewSelection, "level"),
+        ) !u64 {
+            if (level == .guest_cut) return work.execution_revision;
+            return (try workspaceOuterCursor(work)).revision;
+        }
+
+        fn workspaceOuterCursor(work: workspace.Work) !workspace.OuterCursor {
+            var cursor = work.outer_cursor;
+            const capsule = (if (work.outer_operation) |pending| pending.capsule else work.runtime_capsule) orelse return cursor;
+            if (cursor.last) |previous| {
+                if (!std.meta.eql(previous, capsule.digest))
+                    cursor.revision = try std.math.add(u64, cursor.revision, 1);
+            }
+            cursor.last = capsule.digest;
+            return cursor;
+        }
+
+        fn writeWorkspaceWork(self: *Self, work: *workspace.Work, mode: enum { create, replace }) !void {
+            work.outer_cursor = try workspaceOuterCursor(work.*);
+            switch (mode) {
+                .create => try self.store().createRecord(workspace.Work, "workspace_work", work.id, work.task, work.*),
+                .replace => try self.store().putRecord(workspace.Work, "workspace_work", work.id, work.task, work.*),
+            }
+        }
+
+        fn observerGuestQuantum(self: *Self, a: std.mem.Allocator, source: workspace.Work) !u64 {
+            var parent = try self.task(a, source.task);
+            defer parent.deinit();
+            if (parent.value.observer_heads.items.len != 0) try self.compatible(parent.value);
+            for (parent.value.observer_heads.items) |id| {
+                var saved = try self.retainedWorkspaceWork(a, source.task, id);
+                defer saved.deinit();
+                const observer = saved.value.observer orelse return error.CorruptState;
+                if (!self.activeObserver(saved.value)) return error.CorruptState;
+                if (observer.selection.policy.granularity == .one_guest_step and
+                    std.meta.eql(observer.source_work, source.id)) return 1;
+            }
+            return 256;
+        }
+
+        fn retainObservedOuter(self: *Self, a: std.mem.Allocator, value: *workspace.Work) !void {
+            var parent = try self.task(a, value.task);
+            defer parent.deinit();
+            if (parent.value.observer_heads.items.len != 0) try self.compatible(parent.value);
+            for (parent.value.observer_heads.items) |id| {
+                var work = try self.retainedWorkspaceWork(a, value.task, id);
+                defer work.deinit();
+                const observer = work.value.observer orelse return error.CorruptState;
+                if (!self.activeObserver(work.value)) return error.CorruptState;
+                if (observer.selection.source.level != .outer_execution or
+                    !std.meta.eql(observer.source_work, value.id)) continue;
+                const driver = self.active.?.driver;
+                const capsule = try driver.retainCapsule(runtimeProvenance(value.*));
+                const code = try driver.runtimeBytes(a);
+                defer a.free(code);
+                _ = try self.store().putObject(code);
+                value.runtime_capsule = try self.store().putObject(capsule);
+                value.runtime_dependencies = .{ .items = try capsuleDependencies(a, capsule) };
+                return;
+            }
+        }
+
+        pub fn workspaceObserve(
+            self: *Self,
+            a: std.mem.Allocator,
+            operation_id: []const u8,
+            task_id: state.TaskId,
+            selection: wc.Observe,
+        ) !Admission {
+            const request = try operation(workspace.ObserveRequest, a, .{
+                .task = task_id,
+                .selection = selection,
+            });
+            if (try self.replay(a, operation_id, request)) |prior| return prior;
+            try self.requireCustody(a, task_id, try wp.identity(selection.source.expected.work, .work));
+            try @import("workspace_observers.zig").validatePolicy(selection.policy);
+            const key = storage.digest(operation_id);
+            const view_id = try std.fmt.allocPrint(a, "observe-view-{s}", .{
+                std.fmt.bytesToHex(key, .lower),
+            });
+            defer a.free(view_id);
+            const view = try self.workspaceContextMutation(a, view_id, task_id, .{
+                .materialize = .{
+                    .input = .{ .guest_view = selection.source },
+                    .sources = .{ .items = &.{} },
+                },
+            }, null, null);
+            const view_ref = try wp.reference(a, .value, view.receipt.workspace.?);
+            const disclosed = try self.workspaceValueReference(a, task_id, view_ref);
+            const custody = try workspaceContentCustody(a, task_id, disclosed.artifact.digest);
+            var saved = try self.record(workspace.Value, a, "workspace_value", custody, task_id);
+            defer saved.deinit();
+            const source = saved.value.derivation.inspection orelse
+                return error.InvalidObserverInput;
+            var current_source = try self.workspaceWork(a, task_id, source.observation.work.id);
+            defer current_source.deinit();
+            try inspectionSelection(current_source.value, selection.source);
+            const source_revision = try self.observerSourceRevision(
+                a,
+                source.observation.work,
+                selection.source.level,
+            );
+            if (source_revision != try self.observerSourceRevision(
+                a,
+                current_source.value,
+                selection.source.level,
+            )) return error.StaleRevision;
+            const accumulator = try self.workspaceValueReference(a, task_id, selection.accumulator);
+            var observer: workspace.Observer = .{
+                .selection = selection,
+                .source = disclosed.artifact,
+                .source_work = source.observation.work.id,
+                .source_revision = source_revision,
+                .accumulator = accumulator.artifact,
+            };
+            try self.bindObserverPrevious(a, task_id, &observer);
+            const input = try self.observerInput(a, task_id, observer);
+            defer a.free(input);
+            return self.workspaceStartAdmitted(
+                a,
+                operation_id,
+                task_id,
+                try wp.identity(selection.program, .program),
+                input,
+                .{ .stop = .terminal, .continuation = .owner_scheduled },
+                null,
+                null,
+                null,
+                .{ .none = .{} },
+                null,
+                observer,
+            );
+        }
+
+        fn bindObserverPrevious(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            observer: *workspace.Observer,
+        ) !void {
+            const ref = observer.selection.previous orelse return;
+            var prior = try self.workspaceWork(a, task_id, try wp.identity(ref, .work));
+            defer prior.deinit();
+            const before = prior.value.observer orelse return error.InvalidObserverInput;
+            const program = try wp.identity(observer.selection.program, .program);
+            if (prior.value.outcome_kind != .completed or prior.value.cancellation != null or
+                !std.meta.eql(prior.value.program, program) or
+                !std.meta.eql(before.source_work, observer.source_work))
+                return error.InvalidObserverInput;
+            try observerScope(a, before.selection.source, observer.selection.source);
+            const consumed = before.consumed_revision orelse return error.InvalidObserverInput;
+            const next = observer.source_revision;
+            if (next <= consumed) return error.DuplicateObservation;
+            if (observer.selection.policy.delivery == .lossless and next != consumed + 1)
+                return error.ObservationGap;
+            const snapshot = try contracts.encodeOwned(workspace.Work, a, prior.value);
+            defer a.free(snapshot);
+            observer.previous = .{ .digest = storage.digest(snapshot), .bytes = snapshot.len };
+            observer.accumulator = prior.value.result_value orelse
+                return error.InvalidObserverInput;
+            if (next > consumed + 1) {
+                observer.gap_first = consumed + 1;
+                observer.gap_last = next - 1;
+            }
+        }
+
+        fn observerInput(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            observer: workspace.Observer,
+        ) ![]u8 {
+            const helpers = @import("workspace_observers.zig");
+            const envelope = try self.observerEnvelope(a, task_id, observer);
+            defer a.free(envelope);
+            const program_id = try wp.identity(observer.selection.program, .program);
+            var program = try self.workspaceProgram(a, task_id, program_id);
+            defer program.deinit();
+            const view_ref = try wp.reference(a, .value, observer.source.digest);
+            const disclosed = try self.workspaceValueReference(a, task_id, view_ref);
+            const view = .{
+                .schema = try self.store().object(a, disclosed.schema, null),
+                .value = try self.store().object(a, disclosed.value, null),
+            };
+            defer a.free(view.schema);
+            defer a.free(view.value);
+            const accumulator_ref = try wp.reference(a, .value, observer.accumulator.digest);
+            const accumulator = try self.workspaceValueReference(a, task_id, accumulator_ref);
+            const schema = try self.store().object(a, accumulator.schema, null);
+            defer a.free(schema);
+            const bytes = try self.store().object(a, accumulator.value, null);
+            defer a.free(bytes);
+            const input_schema = try self.store().object(
+                a,
+                program.value.description.input_schema,
+                null,
+            );
+            defer a.free(input_schema);
+            const output_schema = try self.store().object(
+                a,
+                program.value.description.result_schema,
+                null,
+            );
+            defer a.free(output_schema);
+            if (observer.previous == null) return helpers.input(
+                a,
+                input_schema,
+                output_schema,
+                view.schema,
+                view.value,
+                envelope,
+                schema,
+                bytes,
+            );
+            const acc_schema = try helpers.fieldSchema(a, schema, 0);
+            defer a.free(acc_schema);
+            var decoded = try @import("dynamic_values.zig").decode(a, schema, bytes);
+            defer decoded.deinit();
+            const acc_bytes = try @import("dynamic_values.zig").encode(
+                a,
+                acc_schema,
+                decoded.value.array.items[0],
+            );
+            defer a.free(acc_bytes);
+            return helpers.input(
+                a,
+                input_schema,
+                output_schema,
+                view.schema,
+                view.value,
+                envelope,
+                acc_schema,
+                acc_bytes,
+            );
+        }
+
+        fn observerEnvelope(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            observer: workspace.Observer,
+        ) ![]u8 {
+            const id = try workspaceContentCustody(a, task_id, observer.source.digest);
+            var value = try self.record(workspace.Value, a, "workspace_value", id, task_id);
+            defer value.deinit();
+            const observed = value.value.derivation.inspection.?.observation;
+            var prior_cursor: ?u64 = null;
+            var granularity: @FieldType(wc.ObserverPolicy, "granularity") = .publication;
+            if (observer.previous) |ref| {
+                const bytes = try self.store().object(a, ref, null);
+                defer a.free(bytes);
+                var before = try contracts.decodeOwned(workspace.Work, a, bytes);
+                defer before.deinit();
+                const previous = before.value.observer orelse return error.InvalidObserverInput;
+                prior_cursor = previous.consumed_revision orelse return error.InvalidObserverInput;
+                if (previous.selection.policy.granularity == .one_guest_step and
+                    observer.selection.source.level == .guest_cut and
+                    observed.work.guest_work <= 1 and
+                    observer.source_revision -| prior_cursor.? == 1) granularity = .one_guest_step;
+            }
+            return contracts.encodeOwned(workspace.ObserverEnvelope, a, .{
+                .selection = observer.selection.source,
+                .publication = observed.work.event_watermark,
+                .cursor = observer.source_revision,
+                .prior_cursor = prior_cursor,
+                .guest_work_delta = if (observer.selection.source.level == .guest_cut)
+                    observed.work.guest_work
+                else
+                    null,
+                .gap_first = observer.gap_first,
+                .gap_last = observer.gap_last,
+                .granularity = granularity,
+                .disclosed_value = observer.source,
+                .control = workspace.ControlObservation.from(observed),
+            });
+        }
+
+        fn validateObserver(
+            self: *Self,
+            a: std.mem.Allocator,
+            work: workspace.Work,
+            successors: *ObserverSuccessors,
+        ) !void {
+            try successors.histories.validateCursor(self, a, work);
+            const observer = work.observer orelse return;
+            if (observer.successor != null and
+                !std.meta.eql(observer.successor, try successors.next(self, work.id))) return error.InvalidArchive;
+            @import("workspace_observers.zig").validatePolicy(observer.selection.policy) catch
+                return error.InvalidArchive;
+            try self.validateObserverIncomplete(a, work, &successors.histories);
+            if ((observer.previous == null) != (observer.selection.previous == null))
+                return error.InvalidArchive;
+            const custody = try workspaceContentCustody(a, work.task, observer.source.digest);
+            var saved = try self.record(workspace.Value, a, "workspace_value", custody, work.task);
+            defer saved.deinit();
+            const origin = saved.value.derivation.inspection orelse return error.InvalidArchive;
+            if (!std.meta.eql(origin.observation.work.task, work.task)) return error.InvalidArchive;
+            try successors.histories.validateCursor(self, a, origin.observation.work);
+            try inspectionSelection(origin.observation.work, observer.selection.source);
+            var selected = observer.selection.source;
+            selected.level = origin.level;
+            selected.nodes = origin.nodes;
+            selected.disclosure = origin.disclosure;
+            try observerScope(a, selected, observer.selection.source);
+            const source_revision = try self.observerSourceRevision(
+                a,
+                origin.observation.work,
+                observer.selection.source.level,
+            );
+            if (!std.meta.eql(origin.observation.work.id, observer.source_work) or
+                source_revision != observer.source_revision)
+                return error.InvalidArchive;
+            if (!std.meta.eql(work.program, try wp.identity(observer.selection.program, .program)))
+                return error.InvalidArchive;
+            if (observer.consumed_revision != @as(?u64, if (work.outcome_kind == .completed)
+                observer.source_revision
+            else
+                null))
+                return error.InvalidArchive;
+            const expected = try self.observerInput(a, work.task, observer);
+            defer a.free(expected);
+            if (!std.meta.eql(storage.digest(expected), work.input.digest) or
+                expected.len != work.input.bytes) return error.InvalidArchive;
+            if (observer.previous) |previous| {
+                const bytes = try self.store().object(a, previous, null);
+                defer a.free(bytes);
+                var prior = try contracts.decodeOwned(workspace.Work, a, bytes);
+                defer prior.deinit();
+                const previous_id = try wp.identity(observer.selection.previous.?, .work);
+                if (!std.meta.eql(try successors.next(self, previous_id), @as(?state.Digest, work.id)))
+                    return error.InvalidArchive;
+                if (!std.meta.eql(prior.value.task, work.task) or
+                    !std.meta.eql(prior.value.id, previous_id) or
+                    !std.meta.eql(prior.value.result_value, observer.accumulator) or
+                    prior.value.outcome_kind != .completed or prior.value.cancellation != null)
+                    return error.InvalidArchive;
+                try self.validateWorkspacePublication(a, work.task, .{
+                    .work = prior.value,
+                    .occurrence = null,
+                });
+                try successors.histories.validateCursor(self, a, prior.value);
+                const before = prior.value.observer orelse return error.InvalidArchive;
+                const consumed = before.consumed_revision orelse return error.InvalidArchive;
+                if (!std.meta.eql(prior.value.program, work.program) or
+                    !std.meta.eql(before.source_work, observer.source_work) or
+                    observer.source_revision <= consumed) return error.InvalidArchive;
+                try observerScope(a, before.selection.source, observer.selection.source);
+                const skipped = observer.source_revision - consumed > 1;
+                if (observer.selection.policy.delivery == .lossless and skipped)
+                    return error.InvalidArchive;
+                if (observer.gap_first != @as(?u64, if (skipped) consumed + 1 else null) or
+                    observer.gap_last != @as(?u64, if (skipped)
+                        observer.source_revision - 1
+                    else
+                        null)) return error.InvalidArchive;
+            } else {
+                const initial = try self.workspaceValueReference(a, work.task, observer.selection.accumulator);
+                if (!std.meta.eql(initial.artifact, observer.accumulator) or
+                    observer.gap_first != null or observer.gap_last != null)
+                    return error.InvalidArchive;
+            }
+        }
+
+        fn observerScope(
+            a: std.mem.Allocator,
+            before: wc.GuestViewSelection,
+            after: wc.GuestViewSelection,
+        ) !void {
+            var expected = before;
+            expected.expected = after.expected;
+            expected.realization_revision = after.realization_revision;
+            const old = try contracts.encodeOwned(wc.GuestViewSelection, a, expected);
+            defer a.free(old);
+            const new = try contracts.encodeOwned(wc.GuestViewSelection, a, after);
+            defer a.free(new);
+            if (!same(old, new)) return error.InvalidObserverInput;
         }
 
         pub fn workspaceStart(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, program_id: state.Digest, input: []const u8, policy: workspace.RunPolicy) !Admission {
             return self.workspaceStartValue(a, operation_id, task_id, program_id, input, policy, null);
         }
         fn workspaceStartValue(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, program_id: state.Digest, input: []const u8, policy: workspace.RunPolicy, origin: ?state.Reference) !Admission {
-            return self.workspaceStartAdmitted(a, operation_id, task_id, program_id, input, policy, origin, null, null, .{ .none = .{} }, null);
+            return self.workspaceStartAdmitted(a, operation_id, task_id, program_id, input, policy, origin, null, null, .{ .none = .{} }, null, null);
         }
         const StartDelegation = struct { record: workspace.Delegation, request: state.Digest, policy: workspace.RunPolicy, command: @FieldType(wc.Work, "delegate") };
-        fn workspaceStartAdmitted(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, program_id: state.Digest, input: []const u8, policy: workspace.RunPolicy, origin: ?state.Reference, delegated: ?StartDelegation, runtime: ?state.Reference, trial: wc.Trial, preparation: ?state.ControllerSuccession) !Admission {
+        fn workspaceStartAdmitted(self: *Self, a: std.mem.Allocator, operation_id: []const u8, task_id: state.TaskId, program_id: state.Digest, input: []const u8, policy: workspace.RunPolicy, origin: ?state.Reference, delegated: ?StartDelegation, runtime: ?state.Reference, trial: wc.Trial, preparation: ?state.ControllerSuccession, observer: ?workspace.Observer) !Admission {
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try self.compatible(parent.value);
             const Request = workspace.StartRequest;
-            const request = if (delegated) |bound| bound.request else try operation(Request, a, .{ .task = task_id, .program = program_id, .input = .{ .bytes = input }, .policy = policy, .origin = origin, .runtime = runtime, .trial = trial });
+            const request = if (delegated) |bound| bound.request else if (observer) |bound|
+                try operation(workspace.ObserveRequest, a, .{
+                    .task = task_id,
+                    .selection = bound.selection,
+                })
+            else
+                try operation(Request, a, .{ .task = task_id, .program = program_id, .input = .{ .bytes = input }, .policy = policy, .origin = origin, .runtime = runtime, .trial = trial });
             if (try self.replay(a, operation_id, request)) |prior| {
                 if (preparation != null) return error.OperationConflict;
                 return prior;
             }
             try self.requireCustody(a, task_id, null);
+            var predecessor: ?contracts.Decoded(workspace.Work) = null;
+            defer if (predecessor) |*prior| prior.deinit();
+            if (observer) |bound| if (bound.selection.previous) |previous| {
+                const previous_id = try wp.identity(previous, .work);
+                try self.requireCustody(a, task_id, previous_id);
+                predecessor = try self.workspaceWork(a, task_id, previous_id);
+                const prior = predecessor.?.value;
+                const prior_observer = prior.observer orelse return error.InvalidObserverInput;
+                if (prior_observer.successor != null) return error.DuplicateObservation;
+                if (!prior_observer.stopped and observerHeadIndex(parent.value, prior.id) == null)
+                    return error.CorruptState;
+            };
             if (self.workspaceParentStopped(parent.value)) return error.InvalidState;
             var artifact = try self.workspaceProgram(a, task_id, program_id);
             defer artifact.deinit();
@@ -10288,13 +15003,26 @@ pub fn Service(comptime Types: type) type {
             }
             const image = try self.store().object(a, artifact.value.description.image, null);
             defer a.free(image);
+            const trial_view = if (trial != .none) try self.controllerView(a, parent.value) else null;
+            defer if (trial_view) |view| {
+                a.free(view.bytes);
+                freeControllerViewWorks(a, view.works);
+            };
             try self.runnable.ensureUnusedCapacity(self.allocator, 1);
             try self.retire(a);
             var id: state.Digest = undefined;
             if (delegated) |bound| id = bound.record.instrument else try self.io.randomSecure(&id);
+            const heads = if (observer != null)
+                try observerHeadsAfter(a, parent.value, if (predecessor) |prior| prior.value.id else null, id)
+            else
+                null;
+            defer if (heads) |items| a.free(items);
             var selected: ?SelectedRuntime = if (runtime) |ref| try self.workspaceRuntime(a, task_id, ref.digest, program_id) else null;
             defer if (selected) |*value| value.deinit();
-            if (selected) |value| if (!std.meta.eql(runtime.?, value.record.value.artifact)) return error.InvalidRuntime;
+            if (selected) |value| {
+                if (!std.meta.eql(runtime.?, value.record.value.artifact)) return error.InvalidRuntime;
+                try self.requireSemanticPolicy(kosmos.RuntimeCompiler.approvedRootIdentity(&value.admitted), kosmos.RuntimeCompiler.checker_identity);
+            }
             var packaged = try self.program.retainRuntime();
             defer packaged.deinit();
             const driver = try evaluator.Driver.openSelected(self.allocator, image, .{ .initial_args = input }, if (selected) |*value| &value.admitted else &packaged);
@@ -10317,18 +15045,16 @@ pub fn Service(comptime Types: type) type {
                 target.value.policy = bound.policy;
                 target.value.event_watermark = parent.value.event_high + 1;
                 target.value.schedule = .parked;
-                try self.store().putRecord(workspace.Work, "workspace_work", target.value.id, task_id, target.value);
+                try self.writeWorkspaceWork(&target.value, .replace);
                 try self.store().createRecord(workspace.Delegation, "workspace_delegation", record_value.id, task_id, record_value);
                 delegation_ref = try self.snapshotRecord(workspace.Delegation, a, "workspace_delegation", record_value.id, task_id);
             }
-            const trial_ref: ?state.Digest = if (trial != .none) blk: {
-                const view = try self.controllerView(a, parent.value);
-                defer a.free(view.bytes);
-                defer freeControllerViewWorks(a, view.works);
+            const trial_ref: ?state.Digest = if (trial_view) |view| blk: {
                 try self.store().createRecord(workspace.Trial, "workspace_trial", id, task_id, .{ .id = id, .task = task_id, .selection = trial, .view = try self.store().putObject(view.bytes), .view_works = .{ .items = view.works }, .policy = parent.value.profile, .responses = .{ .items = responses } });
                 break :blk id;
             } else null;
             var saved: workspace.Work = .{
+                .observer = observer,
                 .id = id,
                 .task = task_id,
                 .trial = trial_ref,
@@ -10358,18 +15084,37 @@ pub fn Service(comptime Types: type) type {
                 saved.inputs.items = inputs;
             }
             defer if (trial_ref != null) a.free(saved.inputs.items);
-            saved.input_value = origin orelse try self.workspacePublishValue(a, task_id, artifact.value.description.input_schema, saved.input, .{ .kind = .hypothesis, .sources = .{ .items = &.{} } });
+            const observer_inputs = if (observer) |bound|
+                &[_]state.Reference{ bound.source, bound.accumulator }
+            else
+                &.{};
+            if (observer != null) saved.inputs = .{ .items = observer_inputs };
+            saved.input_value = origin orelse try self.workspacePublishValue(a, task_id, artifact.value.description.input_schema, saved.input, .{
+                .kind = if (observer != null) .judgment else .hypothesis,
+                .sources = .{ .items = observer_inputs },
+            });
             try self.workspacePublication(a, &saved, publication);
             defer if (saved.runtime_trace) |trace| a.free(trace.dependencies.items);
-            try self.store().createRecord(workspace.Work, "workspace_work", id, task_id, saved);
+            try self.writeWorkspaceWork(&saved, .create);
             try self.createCustody(a, task_id, id);
+            if (predecessor) |*prior| {
+                prior.value.observer.?.successor = id;
+                prior.value.control_revision = try std.math.add(u64, prior.value.control_revision, 1);
+                prior.value.event_watermark = try std.math.add(u64, parent.value.event_high, 1);
+                try self.writeWorkspaceWork(&prior.value, .replace);
+            }
             if (preparation) |initial| {
                 var prepared = initial;
                 if (!std.meta.eql(parent.value.controller_succession, prepared.id) or prepared.conversion_work != null or prepared.phase != .preparing) return error.StaleController;
                 prepared.conversion_work = id;
                 try self.store().putRecord(state.ControllerSuccession, "controller_succession", prepared.id, task_id, prepared);
             }
-            const admitted = try self.workspaceCommitRelated(a, parent.value, operation_id, request, id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", id, task_id), if (delegated) |bound| bound.record.work else null, if (delegated) |bound| .{ .delegate = bound.command } else .{ .start = .{ .policy = policy, .origin = origin != null, .runtime = runtime, .trial = trial } });
+            if (heads) |items| {
+                parent.value.observers_present = true;
+                parent.value.observer_heads.items = items;
+            }
+            const admitted = try self.workspaceCommitRelated(a, parent.value, operation_id, request, id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", id, task_id), if (delegated) |bound| bound.record.work else if (predecessor) |prior| prior.value.id else null, if (delegated) |bound| .{ .delegate = bound.command } else .{ .start = .{ .policy = policy, .origin = origin != null, .runtime = runtime, .trial = trial, .observer = observer } });
+            if (predecessor) |prior| self.subjectRemove(.{ .task = task_id, .work = prior.value.id });
             self.active.?.execution_revision = saved.execution_revision;
             return admitted;
         }
@@ -10385,6 +15130,8 @@ pub fn Service(comptime Types: type) type {
         }
 
         fn workspacePublication(self: *Self, a: std.mem.Allocator, value: *workspace.Work, publication: evaluator.Driver.Publication) !void {
+            value.guest_work = publication.guest_work;
+            if (value.blocker == .observation_blocked) value.blocker = null;
             value.runtime_capsule = null;
             value.runtime_trace = null;
             value.outer_operation = null;
@@ -10403,6 +15150,8 @@ pub fn Service(comptime Types: type) type {
                 .yielded => value.outcome_kind = .yielded,
                 .completed => |bytes| {
                     value.outcome_kind = .completed;
+                    if (value.observer) |*observer| observer.consumed_revision =
+                        observer.source_revision;
                     value.result = try self.store().putObject(bytes);
                     var program = try self.workspaceProgram(a, value.task, value.program);
                     defer program.deinit();
@@ -10448,6 +15197,8 @@ pub fn Service(comptime Types: type) type {
             // No unbound external request is dispatched. A run policy grants
             // continued computation, never the authority to invent an answer.
             value.schedule = publicationSchedule(workspace.ControlObservation.from(.{ .work = value.*, .occurrence = null }));
+            if (publication.segment) |segment|
+                guest_segment_proofs.retain(try guestSegmentKey(try guestSegmentFact(segment, value.*)));
         }
 
         fn workspaceResident(self: *Self, a: std.mem.Allocator, value: workspace.Work) !*evaluator.Driver {
@@ -10665,6 +15416,8 @@ pub fn Service(comptime Types: type) type {
             var saved = try self.workspaceWork(a, task_id, work_id);
             defer saved.deinit();
             const subject: workspace.Subject = .{ .task = task_id, .work = work_id };
+            if (saved.value.outcome_kind == .completed and saved.value.observer != null)
+                return self.pumpObserver(a, saved.value);
             if (saved.value.terminal() and saved.value.answer_value != null) {
                 // Completion and delivery are distinct durable transitions.
                 // The retained answer plus its current delegation is the
@@ -10711,7 +15464,7 @@ pub fn Service(comptime Types: type) type {
                     value.event_watermark = try std.math.add(u64, parent.value.event_high, 1);
                     try self.store().begin();
                     defer self.store().rollback();
-                    try self.store().putRecord(workspace.Work, "workspace_work", value.id, task_id, value);
+                    try self.writeWorkspaceWork(&value, .replace);
                     _ = try self.workspaceCommit(a, parent.value, null, @splat(0), value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, task_id), null);
                     return .progressed;
                 }
@@ -10732,6 +15485,12 @@ pub fn Service(comptime Types: type) type {
         fn workspaceRunnable(self: *Self, a: std.mem.Allocator, parent: state.Task, child: workspace.Work) !bool {
             if (!try self.hasLocalCustody(a, parent.id, child.id)) return false;
             if (!child.terminal()) return child.schedule != .parked;
+            if (child.observer) |observer| {
+                if (child.outcome_kind == .completed and !observer.stopped and
+                    observer.selection.policy.continuation == .owner_scheduled and
+                    !self.workspaceParentStopped(parent))
+                    return observer.successor == null;
+            }
             return child.answer_value != null and try self.delegationCurrent(a, parent, child);
         }
 
@@ -10771,15 +15530,15 @@ pub fn Service(comptime Types: type) type {
             try self.store().begin();
             defer self.store().rollback();
             if (pending.value.state == .not_sent) try self.store().putRecord(occurrence.Occurrence, "occurrence", id, parent.id, try occurrence.rearm(pending.value, .{ .id = id, .task = parent.id, .work = value.id, .request = pending.value.request }));
-            try self.store().putRecord(workspace.Work, "workspace_work", value.id, parent.id, value);
+            try self.writeWorkspaceWork(&value, .replace);
             const admitted = try self.workspaceCommit(a, parent, operation_id, request, value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, parent.id), command);
             return admitted;
         }
 
         fn workspacePumpWork(self: *Self, a: std.mem.Allocator, parent: state.Task, initial: workspace.Work, base_quantum: u64, operation_id: ?[]const u8, request: state.Digest, command: ?workspace.PublicationCommand) !Admission {
+            if (initial.cancellation == null) try self.requireRuntimePolicy(a, initial.task, initial.runtime);
             try self.requireCustody(a, initial.task, initial.id);
             try self.runnable.ensureUnusedCapacity(self.allocator, 1);
-            const driver = try self.workspaceResident(a, initial);
             var control = workspaceContinuation(initial);
             var decoded: ?contracts.Decoded(data.invocation.Control) = null;
             defer if (decoded) |*value| value.deinit();
@@ -10797,8 +15556,12 @@ pub fn Service(comptime Types: type) type {
                         control = .{ .reply = reply_bytes.? };
                     } else if (control != .cancel or (occurrence_value.value.state != .ready and occurrence_value.value.state != .awaiting and occurrence_value.value.state != .not_sent)) return error.WaitingInput;
                 }
-                break :blk @as(u64, if (control == .reply and initial.cancellation != null and !initial.cancellation_applied) 0 else 256);
+                break :blk @as(u64, if (control == .reply and initial.cancellation != null and !initial.cancellation_applied) 0 else try self.observerGuestQuantum(a, initial));
             };
+            try self.observerAdvanceAllowed(a, initial);
+            if (initial.guard != null and initial.cancellation == null)
+                return self.workspaceGuardAdvance(a, parent, initial, control, try self.observerGuestQuantum(a, initial), base_quantum, operation_id, request, command);
+            const driver = try self.workspaceResident(a, initial);
             if (initial.outer_operation) |pending| {
                 const bytes = try self.store().object(a, pending.control, null);
                 defer a.free(bytes);
@@ -10816,8 +15579,9 @@ pub fn Service(comptime Types: type) type {
             if (progress == .event and progress.event.value == .cut) {
                 // The operation already applied its control. Publish the cut
                 // with a read-only zero-quantum observation, never another reply.
-                const publication = try driver.drive(a, .none, 0);
+                var publication = try driver.drive(a, .none, 0);
                 defer a.free(publication.outcome);
+                publication.guest_work = progress.event.value.cut.guest_work;
                 return self.workspaceFinish(a, parent, initial, control, publication, elapsed, operation_id, request, command);
             }
             if (progress != .suspended) return error.InvalidRuntimeProgress;
@@ -10840,7 +15604,7 @@ pub fn Service(comptime Types: type) type {
             value.native_publication_nanoseconds +|= elapsed;
             value.event_watermark = try std.math.add(u64, parent.event_high, 1);
             value.schedule = if (value.cancellation != null or value.policy.continuation == .owner_scheduled) .queued else .parked;
-            try self.store().putRecord(workspace.Work, "workspace_work", value.id, value.task, value);
+            try self.writeWorkspaceWork(&value, .replace);
             const admitted = try self.workspaceCommit(a, parent, operation_id, request, value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, value.task), command);
             self.active.?.outer_operation = value.outer_operation.?.capsule;
             return admitted;
@@ -10855,14 +15619,328 @@ pub fn Service(comptime Types: type) type {
             return null;
         }
 
+        const GuardOperation = struct {
+            operation_id: ?[]const u8,
+            request: state.Digest,
+            command: ?workspace.PublicationCommand,
+        };
+
+        fn workspaceGuardExperiment(
+            self: *Self,
+            a: std.mem.Allocator,
+            work: workspace.Work,
+        ) !kosmos.RuntimeExperiment.Experiment {
+            var phase: []const u8 = "program";
+            errdefer std.debug.print("guard experiment: {s}\n", .{phase});
+            const guard = work.guard orelse return error.GuardUnavailable;
+            var program = try self.workspaceProgram(a, work.task, work.program);
+            defer program.deinit();
+            const image = try self.store().object(a, program.value.description.image, null);
+            defer a.free(image);
+            const code = try self.store().object(a, guard.code, null);
+            defer a.free(code);
+            phase = "candidate artifact admission";
+            var candidate = try kosmos.RuntimeArtifact.init(a, code, guard.code.digest);
+            defer candidate.deinit();
+            phase = "continuation bytes";
+            const ref = guard.continuation orelse work.checkpoint;
+            const bytes = try self.store().object(a, ref, null);
+            defer a.free(bytes);
+            phase = "continuation restore";
+            if (guard.continuation != null)
+                return kosmos.RuntimeExperiment.Experiment.restore(a, image, &candidate, bytes);
+            phase = "initial experiment";
+            return kosmos.RuntimeExperiment.Experiment.init(a, image, &candidate, bytes);
+        }
+
+        fn workspaceGuardAdvance(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            initial: workspace.Work,
+            control: data.invocation.Control,
+            quantum: u64,
+            base_quantum: u64,
+            operation_id: ?[]const u8,
+            request: state.Digest,
+            command: ?workspace.PublicationCommand,
+        ) !Admission {
+            const operation_value: GuardOperation = .{
+                .operation_id = operation_id,
+                .request = request,
+                .command = command,
+            };
+            var work = initial;
+            const guard = &work.guard.?;
+            try self.requireGuardPolicy(a, work);
+            if (guard.disposition == .diverged) return error.GuardDiverged;
+            const bytes = try contracts.encodeOwned(data.invocation.Control, a, control);
+            defer a.free(bytes);
+            if (guard.pending_control) |owned| {
+                if (!std.meta.eql(owned.digest, storage.digest(bytes)) or owned.bytes != bytes.len)
+                    return error.GuardControlMismatch;
+            } else guard.guest_quantum = quantum;
+            _ = try self.workspaceConsumed(a, initial, control);
+            if (guard.candidate_segment != null)
+                return self.workspaceGuardReference(a, parent, work, control, bytes, base_quantum, operation_value);
+            var candidate = self.workspaceGuardExperiment(a, work) catch |err|
+                return self.workspaceGuardFailure(a, parent, work, bytes, err, operation_value);
+            defer candidate.deinit();
+            if (guard.initialized and candidate.phase == .ready)
+                try beginGuardCandidate(a, &candidate, control, guard.guest_quantum);
+            const started = std.Io.Clock.awake.now(self.io);
+            var progress = candidate.pump(base_quantum) catch |err|
+                return self.workspaceGuardFailure(a, parent, work, bytes, err, operation_value);
+            defer if (progress == .complete) progress.complete.deinit();
+            guard.candidate_nanoseconds +|= std.math.cast(u64, @max(
+                0,
+                std.Io.Clock.awake.now(self.io).nanoseconds - started.nanoseconds,
+            )) orelse std.math.maxInt(u64);
+            guard.failure = null;
+            if (progress == .complete and progress.complete.stage == .initialized) {
+                if (!try self.guardInitialMatches(a, work, progress.complete))
+                    return self.workspaceGuardDiverged(
+                        a,
+                        parent,
+                        work,
+                        bytes,
+                        &candidate,
+                        operation_value,
+                    );
+                guard.initialized = true;
+                try beginGuardCandidate(a, &candidate, control, guard.guest_quantum);
+            } else if (progress == .complete) {
+                const capsule = try candidate.checkpointOuter(a);
+                defer a.free(capsule);
+                guard.disposition = .incomplete;
+                return self.workspaceGuardRetain(a, parent, work, bytes, .{
+                    .candidate = capsule,
+                    .segment = progress.complete,
+                }, operation_value);
+            }
+            const capsule = try candidate.checkpointOuter(a);
+            defer a.free(capsule);
+            guard.disposition = .incomplete;
+            return self.workspaceGuardRetain(a, parent, work, bytes, .{ .candidate = capsule }, operation_value);
+        }
+
+        fn guardInitialMatches(
+            self: *Self,
+            a: std.mem.Allocator,
+            work: workspace.Work,
+            segment: kosmos.RuntimeExperiment.Segment,
+        ) !bool {
+            const checkpoint = try self.store().object(a, work.checkpoint, null);
+            defer a.free(checkpoint);
+            return same(checkpoint, segment.checkpoint) and segment.guest_work == 0;
+        }
+
+        fn beginGuardCandidate(
+            a: std.mem.Allocator,
+            candidate: *kosmos.RuntimeExperiment.Experiment,
+            control: data.invocation.Control,
+            quantum: u64,
+        ) !void {
+            if (control == .reply) {
+                var reply = try data.invocation.decode(data.invocation.Result, a, control.reply);
+                defer reply.deinit();
+                return candidate.begin(.{ .answer = reply.value.value }, quantum);
+            }
+            return candidate.begin(switch (control) {
+                .none => .none,
+                .resume_yield => .resume_yield,
+                .cancel => |reason| .{ .cancel = reason },
+                .reply => unreachable,
+            }, quantum);
+        }
+
+        fn workspaceGuardFailure(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            work: workspace.Work,
+            control: []const u8,
+            failure: anyerror,
+            operation_value: GuardOperation,
+        ) !Admission {
+            var next = work;
+            next.guard.?.disposition = .incomplete;
+            next.guard.?.failure = try name(@errorName(failure));
+            return self.workspaceGuardRetain(a, parent, next, control, .{}, operation_value);
+        }
+
+        fn workspaceGuardDiverged(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            work: workspace.Work,
+            control: []const u8,
+            candidate: *kosmos.RuntimeExperiment.Experiment,
+            operation_value: GuardOperation,
+        ) !Admission {
+            var next = work;
+            next.guard.?.disposition = .diverged;
+            const capsule = try candidate.checkpointOuter(a);
+            defer a.free(capsule);
+            return self.workspaceGuardRetain(a, parent, next, control, .{ .candidate = capsule }, operation_value);
+        }
+
+        const GuardRetention = struct {
+            candidate: ?[]const u8 = null,
+            segment: ?kosmos.RuntimeExperiment.Segment = null,
+            reference: ?[]const u8 = null,
+            code: ?[]const u8 = null,
+        };
+
+        fn workspaceGuardRetain(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            initial: workspace.Work,
+            control: []const u8,
+            retained: GuardRetention,
+            operation_value: GuardOperation,
+        ) !Admission {
+            var work = initial;
+            const guard = &work.guard.?;
+            guard.revision = try std.math.add(u64, guard.revision, 1);
+            work.event_watermark = try std.math.add(u64, parent.event_high, 1);
+            work.schedule = if (guard.disposition == .diverged or guard.failure != null or
+                work.policy.continuation == .explicit_only) .parked else .queued;
+            try self.store().begin();
+            defer self.store().rollback();
+            if (retained.candidate) |bytes| guard.continuation = try self.store().putObject(bytes);
+            guard.pending_control = try self.store().putObject(control);
+            if (retained.segment) |segment| guard.candidate_segment = .{
+                .checkpoint = try self.store().putObject(segment.checkpoint),
+                .observation = try self.store().putObject(segment.observation),
+                .guest_work = segment.guest_work,
+            };
+            if (retained.code) |bytes| _ = try self.store().putObject(bytes);
+            if (retained.reference) |bytes| guard.reference_operation = .{
+                .capsule = try self.store().putObject(bytes),
+                .dependencies = .{ .items = try capsuleDependencies(a, bytes) },
+                .control = guard.pending_control.?,
+                .guest_quantum = guard.guest_quantum,
+            };
+            defer if (retained.reference != null) a.free(guard.reference_operation.?.dependencies.items);
+            try self.store().putRecord(
+                workspace.Work,
+                "workspace_work",
+                work.id,
+                work.task,
+                work,
+            );
+            return self.workspaceCommit(
+                a,
+                parent,
+                operation_value.operation_id,
+                operation_value.request,
+                work.id,
+                .work,
+                try self.snapshotRecord(
+                    workspace.Work,
+                    a,
+                    "workspace_work",
+                    work.id,
+                    work.task,
+                ),
+                operation_value.command,
+            );
+        }
+
+        fn workspaceGuardReference(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            initial: workspace.Work,
+            control: data.invocation.Control,
+            encoded: []const u8,
+            base_quantum: u64,
+            operation_value: GuardOperation,
+        ) !Admission {
+            var work = initial;
+            const guard = &work.guard.?;
+            var provisional = work;
+            provisional.outer_operation = guard.reference_operation;
+            const driver = try self.workspaceResident(a, provisional);
+            errdefer self.retire(a) catch self.store().fence();
+            const started = std.Io.Clock.awake.now(self.io);
+            if (guard.reference_operation == null) try driver.beginAdvance(control, guard.guest_quantum);
+            var progress = try driver.pump(base_quantum);
+            defer progress.deinit();
+            const elapsed = std.math.cast(u64, @max(
+                0,
+                std.Io.Clock.awake.now(self.io).nanoseconds - started.nanoseconds,
+            )) orelse std.math.maxInt(u64);
+            guard.reference_nanoseconds +|= elapsed;
+            if (progress == .event and progress.event.value == .cut)
+                return self.workspaceGuardCompare(a, parent, work, control, encoded, driver, elapsed, operation_value);
+            if (progress != .suspended) return error.InvalidRuntimeProgress;
+            const capsule = try driver.retainCapsule(runtimeProvenance(work));
+            const code = try driver.runtimeBytes(a);
+            defer a.free(code);
+            const admitted = try self.workspaceGuardRetain(a, parent, work, encoded, .{ .reference = capsule, .code = code }, operation_value);
+            self.active.?.outer_operation = .{ .digest = storage.digest(capsule), .bytes = capsule.len };
+            return admitted;
+        }
+
+        fn workspaceGuardCompare(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            initial: workspace.Work,
+            control: data.invocation.Control,
+            encoded: []const u8,
+            driver: *evaluator.Driver,
+            elapsed: u64,
+            operation_value: GuardOperation,
+        ) !Admission {
+            var work = initial;
+            const guard = &work.guard.?;
+            const started = std.Io.Clock.awake.now(self.io);
+            var observed = try driver.runtimeObservation(a);
+            defer observed.deinit();
+            const segment = guard.candidate_segment.?;
+            var publication = try driver.drive(a, .none, 0);
+            publication.guest_work = observed.guest_work;
+            defer a.free(publication.outcome);
+            const preparation_elapsed = std.math.cast(u64, @max(
+                0,
+                std.Io.Clock.awake.now(self.io).nanoseconds - started.nanoseconds,
+            )) orelse std.math.maxInt(u64);
+            guard.reference_nanoseconds +|= preparation_elapsed;
+            const agrees = std.meta.eql(storage.digest(publication.checkpoint), segment.checkpoint.digest) and
+                publication.checkpoint.len == segment.checkpoint.bytes and
+                std.meta.eql(storage.digest(observed.observation), segment.observation.digest) and
+                observed.observation.len == segment.observation.bytes and observed.guest_work == segment.guest_work;
+            if (!agrees) {
+                try self.retire(a);
+                guard.disposition = .diverged;
+                return self.workspaceGuardRetain(a, parent, work, encoded, .{}, operation_value);
+            }
+            guard.pending_control = null;
+            guard.reference_operation = null;
+            guard.candidate_segment = null;
+            guard.disposition = .agreed;
+            guard.revision = try std.math.add(u64, guard.revision, 1);
+            guard.agreed_segments = try std.math.add(u64, guard.agreed_segments, 1);
+            errdefer self.store().fence();
+            return self.workspaceFinish(a, parent, work, control, publication, elapsed +| preparation_elapsed, operation_value.operation_id, operation_value.request, operation_value.command);
+        }
+
         fn workspaceAdvance(self: *Self, a: std.mem.Allocator, parent: state.Task, initial: workspace.Work, control: data.invocation.Control, operation_id: ?[]const u8, request: state.Digest, command: ?workspace.PublicationCommand) !Admission {
+            if (initial.cancellation == null) try self.requireRuntimePolicy(a, initial.task, initial.runtime);
             try self.requireCustody(a, initial.task, initial.id);
+            try self.observerAdvanceAllowed(a, initial);
+            if (initial.guard != null and initial.cancellation == null)
+                return self.workspaceGuardAdvance(a, parent, initial, control, try self.observerGuestQuantum(a, initial), 65536, operation_id, request, command);
             if (initial.outer_operation != null) return self.workspacePumpWork(a, parent, initial, 65536, operation_id, request, command);
             try self.runnable.ensureUnusedCapacity(self.allocator, 1);
             const driver = try self.workspaceResident(a, initial);
             _ = try self.workspaceConsumed(a, initial, control);
             const native_started = std.Io.Clock.awake.now(self.io);
-            const publication = try driver.drive(a, control, if (control == .reply and initial.cancellation != null and !initial.cancellation_applied) 0 else 256);
+            const publication = try driver.drive(a, control, if (control == .reply and initial.cancellation != null and !initial.cancellation_applied) 0 else try self.observerGuestQuantum(a, initial));
             defer a.free(publication.outcome);
             errdefer self.store().fence();
             const elapsed = std.math.cast(u64, @max(0, std.Io.Clock.awake.now(self.io).nanoseconds - native_started.nanoseconds)) orelse std.math.maxInt(u64);
@@ -10872,6 +15950,7 @@ pub fn Service(comptime Types: type) type {
         fn workspaceFinish(self: *Self, a: std.mem.Allocator, parent: state.Task, initial: workspace.Work, control: data.invocation.Control, publication: evaluator.Driver.Publication, elapsed: u64, operation_id: ?[]const u8, request: state.Digest, command: ?workspace.PublicationCommand) !Admission {
             const consumed = try self.workspaceConsumed(a, initial, control);
             var value = initial;
+            if (value.cancellation != null) value.guard = null;
             value.native_publication_nanoseconds +|= elapsed;
             if (control == .cancel) value.cancellation_applied = true;
             if (consumed != null) {
@@ -10885,6 +15964,8 @@ pub fn Service(comptime Types: type) type {
             if (consumed) |prior| try self.store().putRecord(occurrence.Occurrence, "occurrence", prior.id, value.task, prior);
             try self.workspacePublication(a, &value, publication);
             defer if (value.runtime_trace) |trace| a.free(trace.dependencies.items);
+            if (parent.observers_present) try self.retainObservedOuter(a, &value);
+            defer if (value.runtime_capsule != null) a.free(value.runtime_dependencies.items);
             if (value.outcome_kind == .completed and value.delegation != null) {
                 value.answer_value = try self.workspaceInstrumentAnswer(a, parent, value);
                 if (value.answer_value) |answer| {
@@ -10897,10 +15978,50 @@ pub fn Service(comptime Types: type) type {
                 defer program.deinit();
                 value.result_value = try self.workspaceResultValue(a, value, program.value);
             }
-            try self.store().putRecord(workspace.Work, "workspace_work", value.id, value.task, value);
+            try self.writeWorkspaceWork(&value, .replace);
             const admitted = try self.workspaceCommit(a, parent, operation_id, request, value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, value.task), command);
             self.active.?.execution_revision = value.execution_revision;
             self.active.?.outer_operation = null;
+            return admitted;
+        }
+
+        fn workspaceObservationCancellation(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            initial: workspace.Work,
+            reason: state.Reason,
+            operation_id: []const u8,
+            request: state.Digest,
+            command: workspace.PublicationCommand,
+        ) !?Admission {
+            if (reason.bytes.len > 256 or !std.unicode.utf8ValidateSlice(reason.bytes))
+                return error.InvalidParams;
+            const observation_waiting = waiting: {
+                self.observerAdvanceAllowed(a, initial) catch |err| switch (err) {
+                    error.ObservationBlocked => break :waiting true,
+                    else => return err,
+                };
+                break :waiting false;
+            };
+            if (!observation_waiting) return null;
+            var value = initial;
+            if (value.cancellation == null) value.cancellation = reason;
+            value.guard = null;
+            value.schedule = .queued;
+            value.blocker = .observation_blocked;
+            value.control_revision = try std.math.add(u64, value.control_revision, 1);
+            value.event_watermark = try std.math.add(u64, parent.event_high, 1);
+            try self.runnable.ensureUnusedCapacity(self.allocator, 1);
+            try self.store().begin();
+            defer self.store().rollback();
+            try self.writeWorkspaceWork(&value, .replace);
+            const admitted = try self.workspaceCommit(a, parent, operation_id, request, value.id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", value.id, value.task), command);
+            if (self.work) |*active| if (std.meta.eql(active.subject_work, value.id) and
+                std.meta.eql(active.task, value.task))
+            {
+                active.cancel_requested = true;
+            };
             return admitted;
         }
 
@@ -10919,6 +16040,15 @@ pub fn Service(comptime Types: type) type {
             if (value.execution_revision != expected_execution or value.control_revision != expected_control) return error.StaleRevision;
             if (value.terminal()) return error.InvalidState;
             if (command != .park and command != .cancel and self.workspaceParentStopped(parent.value)) return error.InvalidState;
+            if (command == .cancel) if (try self.workspaceObservationCancellation(
+                a,
+                parent.value,
+                value,
+                command.cancel,
+                operation_id,
+                request,
+                publication_command,
+            )) |admitted| return admitted;
             if (value.outer_operation != null and (command == .advance or command == .cancel)) {
                 if (command == .cancel) {
                     if (command.cancel.bytes.len > 256 or !std.unicode.utf8ValidateSlice(command.cancel.bytes)) return error.InvalidParams;
@@ -10928,6 +16058,7 @@ pub fn Service(comptime Types: type) type {
                 return self.workspacePumpWork(a, parent.value, value, 65536, operation_id, request, publication_command);
             }
             if (command == .cancel) {
+                value.guard = null;
                 if (command.cancel.bytes.len > 256 or !std.unicode.utf8ValidateSlice(command.cancel.bytes)) return error.InvalidParams;
                 if (value.cancellation == null) value.cancellation = command.cancel;
                 value.control_revision = try std.math.add(u64, value.control_revision, 1);
@@ -10944,7 +16075,7 @@ pub fn Service(comptime Types: type) type {
                         try self.runnable.ensureUnusedCapacity(self.allocator, 2);
                         try self.store().begin();
                         defer self.store().rollback();
-                        try self.store().putRecord(workspace.Work, "workspace_work", work_id, task_id, value);
+                        try self.writeWorkspaceWork(&value, .replace);
                         const admitted = try self.workspaceCommit(a, parent.value, operation_id, request, work_id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", work_id, task_id), publication_command);
                         if (self.work) |*active| if (std.meta.eql(active.subject_work, work_id) and std.meta.eql(active.task, task_id)) {
                             active.cancel_requested = true;
@@ -10983,12 +16114,12 @@ pub fn Service(comptime Types: type) type {
                         var pending = try self.record(occurrence.Occurrence, a, "occurrence", id, task_id);
                         defer pending.deinit();
                         before.delivery = std.meta.activeTag(pending.value.state);
-                        const delegated = delegatedControl(before, value.outer_operation != null, policy);
+                        const delegated = delegatedControl(before, value.outer_operation != null, value.guard, policy);
                         if (delegated.delivery != before.delivery) {
                             rearmed = try occurrence.rearm(pending.value, .{ .id = id, .task = task_id, .work = work_id, .request = pending.value.request });
                         }
                     }
-                    const delegated = delegatedControl(before, value.outer_operation != null, policy);
+                    const delegated = delegatedControl(before, value.outer_operation != null, value.guard, policy);
                     value.policy = delegated.policy;
                     value.schedule = delegated.schedule;
                 },
@@ -10997,7 +16128,7 @@ pub fn Service(comptime Types: type) type {
             try self.store().begin();
             defer self.store().rollback();
             if (rearmed) |pending| try self.store().putRecord(occurrence.Occurrence, "occurrence", pending.id, task_id, pending);
-            try self.store().putRecord(workspace.Work, "workspace_work", work_id, task_id, value);
+            try self.writeWorkspaceWork(&value, .replace);
             const admitted = try self.workspaceCommit(a, parent.value, operation_id, request, work_id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", work_id, task_id), publication_command);
             return admitted;
         }
@@ -11014,7 +16145,7 @@ pub fn Service(comptime Types: type) type {
             saved.value.event_watermark = try std.math.add(u64, parent.value.event_high, 1);
             try self.store().begin();
             defer self.store().rollback();
-            try self.store().putRecord(workspace.Work, "workspace_work", work_id, task_id, saved.value);
+            try self.writeWorkspaceWork(&saved.value, .replace);
             _ = try self.workspaceCommit(a, parent.value, null, @splat(0), work_id, .work, try self.snapshotRecord(workspace.Work, a, "workspace_work", work_id, task_id), null);
         }
 

@@ -189,11 +189,11 @@ fn eventFields(kind: state.EventType) []const EventField {
         .blocked => &.{ .{ .name = "delivery", .kind = .delivery, .optional = true }, .{ .name = "reason", .kind = .name, .optional = true } },
         .imported => &.{.{ .name = "archive_sha256", .kind = .digest }},
         .reconciled => &.{.{ .name = "reconciliation_id", .kind = .digest }},
-        .workspace_read => &.{.{ .name = "occurrence_id", .kind = .digest }},
+        .workspace_read => &.{ .{ .name = "occurrence_id", .kind = .digest }, .{ .name = "attempt_id", .kind = .digest, .optional = true } },
         .workspace, .workspace_progress => &.{.{ .name = "workspace_id", .kind = .digest }},
         .controller => &.{ .{ .name = "operation", .kind = .digest }, .{ .name = "phase", .kind = .name }, .{ .name = "epoch", .kind = .counter } },
         .controller_requested => &.{.{ .name = "operation", .kind = .digest }},
-        .accepted, .input_accepted, .cancellation_requested, .parked, .resumed, .delivery_unknown, .completed, .failed, .cancelled => &.{},
+        .accepted, .input_accepted, .cancellation_requested, .parked, .resumed, .delivery_unknown, .completed, .failed, .cancelled, .execution => &.{},
     };
 }
 fn questionReferenceSchema(a: std.mem.Allocator) !json.Value {

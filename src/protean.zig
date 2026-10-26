@@ -1,5 +1,5 @@
 //! Public staged Protean authoring; runtime execution belongs to Kosmos.
-pub const package_version = "6.0.0";
+pub const package_version = "7.0.0";
 pub const Context = @import("authoring.zig").Context;
 pub const system = @import("authoring.zig").system;
 pub const compile = @import("authoring.zig").compile;

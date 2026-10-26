@@ -102,8 +102,15 @@ is an external caller, not a runtime dependency.
 
 SQLite, the existing C shim, libc and OS facilities remain admitted native
 dependencies. Zig and setup/build tools are authoring dependencies; JavaScript
-qualification controllers stay outside the deployed product boundary. Distributed
-adaptive mobility is future work; checkpoint copying does not transfer custody.
+qualification controllers stay outside the deployed product boundary. Placement
+transfers custody through authenticated peers; checkpoint copying does not.
+
+Active observer subscriptions remain co-located with their source work. Moving
+either work separately rejects before freezing. A controller move also rejects
+while an active subscription uses `owner_scheduled` continuation. Explicit-only
+subscriptions may stay at the source when their controller moves; task shutdown
+stops them through signed remote controls. Stopped or superseded observer work
+remains portable with its original source and result provenance.
 
 ## Frozen configuration
 
@@ -115,6 +122,19 @@ working directory. The `adaptive` object contains:
 - `workspace`, `snapshot_root`, `endpoint`, `audience`;
 - `profiles`, `initial_profile`, `initial_effort`;
 - `skills`.
+
+The optional `semantic_construction` field defaults to `null`. An operator can
+enable derived runtime admission with
+`{"roots":["<64 lowercase hex digits>"],"checkers":["<exact checker identity>"],"guard":true}`.
+The roots must name the actual ancestors approved by the operator.
+`program.inspect` semantic-source summaries report `root_identity`, and
+`program.describe` with `semantic_candidates` reports `checker_identity` and the
+active allowlists. Construction and execution also require the ordinary `tools`
+permissions. A constructed candidate remains inert until validation succeeds;
+`guard` separately permits bounded comparison against the trusted reference.
+The policy contributes to the frozen profile identity. Restart and destination
+import require an explicit current `--config` containing the approved policy;
+restoring or importing frozen profile bytes alone never installs native trust.
 
 There are no model/work/control/question/build/run allowances. Old unversioned
 and v2 configurations require their original compatible build.
@@ -316,7 +336,7 @@ The output retains every acquired evidence entry in its original order, tagged
 `source` or `workspace`, plus constructed program references in `programs`.
 Claims may share evidence; a claim cannot repeat an index. These checks establish
 membership and structural support, not the truth of model-written statements.
-The new image uses context v7 and native state format 13 in a **new namespace**.
+Application 8.0.0 uses context v7 and native state format 20 in a **new namespace**.
 Keep an existing task's namespace, original image, and exact executable together;
 continue it with that executable. Do not point the new binary at its old namespace
 or transplant the old continuation. Building this repository does not update an

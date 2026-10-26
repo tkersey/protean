@@ -101,6 +101,9 @@ pub const ProjectionReferences = struct {
             pub fn reply(_: *@This(), _: @import("occurrence.zig").Acquired) !void {
                 @compileError("host occurrence replies require the host dependency codec");
             }
+            pub fn observerSource(_: *@This(), _: state.Reference) !void {
+                @compileError("host observer evidence requires the host dependency codec");
+            }
         }{ .collector = self, .parent = .{ .digest = @import("store.zig").digest(bytes), .bytes = bytes.len } };
         try state.visitReferencesAs(T, Ref, decoded.value, &sink);
     }

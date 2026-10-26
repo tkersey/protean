@@ -83,8 +83,10 @@ without deleting unrelated local data.
 
 CI qualifies Linux and retains only the adaptive executable, its build metadata,
 program/contracts, and example configuration. Each job and the complete workflow
-must finish within 600 seconds, for both cold and warm qualification. Exact-head results belong to the PR;
-a previous run does not qualify a changed candidate.
+must finish within 600 seconds. Compiled artifacts are reused only when their
+complete input keys match; changed inputs rebuild, and every selected test runs.
+Exact-head results belong to the PR; a previous run does not qualify a changed
+candidate.
 
 ## Retired applications
 

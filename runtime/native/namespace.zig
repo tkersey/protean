@@ -281,6 +281,11 @@ test "namespace excludes a second owner and recovers the SQLite commit to seal g
     try first.store.begin();
     const ref = try first.store.putObject("acquired before disconnect");
     _ = try first.store.commit("acquire");
+    {
+        var statement = try first.database.prepare("SELECT 1", &.{});
+        defer statement.deinit();
+        try std.testing.expectError(error.Busy, first.close());
+    }
     // Deliberately leave the old seal, as a kill between commit and rename does.
     try first.close();
     live = false;

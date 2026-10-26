@@ -135,6 +135,17 @@ fn writeSchema(comptime T: type, writer: anytype) void {
             writer.raw(std.fmt.comptimePrint("{d}", .{std.math.maxInt(T)}));
             writer.byte('}');
         },
+        .optional => |info| {
+            writer.raw("{\"anyOf\":[{\"type\":\"null\"},");
+            if (comptime taggedOptional(T)) {
+                writer.raw("{\"type\":\"object\",\"properties\":{\"tag\":{\"const\":\"some\"},\"value\":");
+            }
+            writeSchema(info.child, writer);
+            if (comptime taggedOptional(T)) {
+                writer.raw("},\"required\":[\"tag\",\"value\"],\"additionalProperties\":false}");
+            }
+            writer.raw("]}");
+        },
         .@"enum" => |info| {
             writer.raw("{\"type\":\"string\",\"enum\":[");
             inline for (info.field_names, 0..) |field_name, index| {
@@ -277,6 +288,21 @@ fn writePositiveDecimalRange(comptime maximum: u64, writer: anytype) void {
     writer.raw(digits);
 }
 
+fn DecimalRange(comptime maximum: u64) type {
+    return struct {
+        const length = blk: {
+            var writer = CountingWriter{};
+            writePositiveDecimalRange(maximum, &writer);
+            break :blk writer.length;
+        };
+        const value = blk: {
+            var writer = FixedWriter(length){};
+            writePositiveDecimalRange(maximum, &writer);
+            break :blk writer.finish();
+        };
+    };
+}
+
 fn writeClientSchema(comptime T: type, writer: anytype) void {
     _ = comptime native.info(T);
     if (comptime isText(T)) {
@@ -325,10 +351,10 @@ fn writeClientSchema(comptime T: type, writer: anytype) void {
             if (info.bits != 64) @compileError("unsupported client integer width");
             writer.raw("{\"type\":\"string\",\"pattern\":\"");
             writer.raw("^(0|");
-            writePositiveDecimalRange(std.math.maxInt(T), writer);
+            writer.raw(&DecimalRange(std.math.maxInt(T)).value);
             if (info.signedness == .signed) {
                 writer.raw("|-(");
-                writePositiveDecimalRange(@as(u64, std.math.maxInt(T)) + 1, writer);
+                writer.raw(&DecimalRange(@as(u64, std.math.maxInt(T)) + 1).value);
                 writer.byte(')');
             }
             writer.raw(")(?![\\\\s\\\\S])");
@@ -402,6 +428,11 @@ fn maximumValueBytes(comptime T: type) ?usize {
     return switch (@typeInfo(T)) {
         .void => 2,
         .bool => 5,
+        .optional => |info| @max(
+            4,
+            (maximumValueBytes(info.child) orelse return null) +
+                @as(usize, if (taggedOptional(T)) 23 else 0),
+        ),
         .int => @max(
             std.fmt.comptimePrint("{d}", .{std.math.minInt(T)}).len,
             std.fmt.comptimePrint("{d}", .{std.math.maxInt(T)}).len,

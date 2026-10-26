@@ -3,9 +3,10 @@
 import assert from 'node:assert/strict';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
-import {dirname, join, resolve} from 'node:path';
+import {basename, dirname, join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {pathToFileURL} from 'node:url';
+import {ProteanClient} from '../support/stdio-client.mts';
 
 const usage = 'usage: installations.mjs [ARCHIVE_SEED_DIRECTORY [REFERENCE_EXECUTABLE]]';
 if (process.argv.length === 3 && process.argv[2] === '--help') { console.log(usage); process.exit(0); }
@@ -21,12 +22,14 @@ const library = realpathSync(JSON.parse(description.match(/^\s*\.lib_dir = (".*"
 assert.equal(execFileSync(zig, ['version'], {encoding: 'utf8'}).trim(), '0.17.0');
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'Protean downstream ü ')));
 const cache = resolve(process.env.ZIG_GLOBAL_CACHE_DIR ?? join(scratch, 'global-cache'));
-const local = join(scratch, 'local-cache'), inputs = join(scratch, 'inputs');
-mkdirSync(cache, {recursive: true}); mkdirSync(local); mkdirSync(inputs);
+const local = process.platform === 'linux' ? join(cache, 'downstream-local') : join(scratch, 'local-cache');
+const inputs = join(scratch, 'inputs');
+const sandboxPath = value => process.platform === 'linux' ? value.replaceAll(scratch, '/tmp/Protean downstream ü') : value;
+mkdirSync(cache, {recursive: true}); mkdirSync(local, {recursive: true}); mkdirSync(inputs);
 // Package managers may expose the selected library through a directory link.
 const libraryAlias = join(scratch, 'selected-zig-lib');
 symlinkSync(library, libraryAlias, 'dir');
-const env = {...process.env, PATH: '/usr/bin:/bin', ZIG_GLOBAL_CACHE_DIR: cache, ZIG_LOCAL_CACHE_DIR: local, ZIG_LIB_DIR: libraryAlias};
+const env = {...process.env, PATH: '/usr/bin:/bin', ZIG_GLOBAL_CACHE_DIR: sandboxPath(cache), ZIG_LOCAL_CACHE_DIR: sandboxPath(local), ZIG_LIB_DIR: sandboxPath(libraryAlias)};
 delete env.NODE_OPTIONS; delete env.NODE_TEST_CONTEXT; delete env.TAR_OPTIONS;
 let prefix;
 if (process.platform === 'darwin') {
@@ -43,15 +46,19 @@ if (process.platform === 'darwin') {
   // Expose those regular sidecar files without mounting an executable directory.
   for (const path of new Set([join(dirname(zig), 'LICENSE'), resolve(dirname(zig), '../LICENSE'), resolve(library, '../LICENSE'), resolve(library, '../../LICENSE')]))
     if (lstatSync(path, {throwIfNoEntry: false})?.isFile()) prefix.push('--ro-bind', path, path);
-  prefix.push('--bind', scratch, scratch);
+  prefix.push('--bind', scratch, sandboxPath(scratch));
   if (!cache.startsWith(scratch + '/')) prefix.push('--bind', cache, cache);
 } else throw new Error('unsupported downstream qualification platform');
 
 function run(executable, args, cwd = scratch, {failure = false, diagnostic, timeout = 300000} = {}) {
   timeout = deadline === null ? undefined : Math.min(timeout, Math.floor(deadline - performance.now()));
   assert(timeout === undefined || timeout > 0, 'independent installation exceeded its nine-minute budget');
-  const command = [...prefix, ...(process.platform === 'linux' ? ['--chdir', cwd] : []), executable, ...args];
+  const command = [...prefix, ...(process.platform === 'linux' ? ['--chdir', sandboxPath(cwd)] : []), sandboxPath(executable), ...args.map(sandboxPath)];
+  const operation = `${basename(executable)} ${args[0] ?? ''}${failure ? ' negative' : ''}`;
+  const started = performance.now();
+  console.error(`downstream ${operation}: started`);
   const result = spawnSync(command[0], command.slice(1), {cwd, env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout});
+  console.error(`downstream ${operation}: ${Math.round(performance.now() - started)} ms, status ${result.status}, signal ${result.signal}`);
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.signal, null, result.stderr);
   if (failure) {
@@ -84,7 +91,7 @@ try {
     const target = join(exportRoot, file); mkdirSync(dirname(target), {recursive: true}); copyFileSync(join(root, file), target);
   }
   const packageHash = run(zig, ['fetch', exportRoot]);
-  assert.match(packageHash, /^protean-6\.0\.0-[A-Za-z0-9_-]+$/);
+  assert.match(packageHash, /^protean-7\.0\.0-[A-Za-z0-9_-]+$/);
   const packageDir = join(scratch, 'package'); mkdirSync(packageDir);
   run('/usr/bin/tar', ['-xzf', join(cache, 'p', `${packageHash}.tar.gz`), '-C', packageDir]);
   const source = join(packageDir, packageHash);
@@ -121,10 +128,47 @@ try {
     const expected = JSON.parse(execFileSync(resolve(reference), ['describe-build'], {encoding: 'utf8'}));
     for (const key of Object.keys(identity)) assert.deepEqual(identity[key], expected[key], key);
   }
-  const demo = JSON.parse(run(executable, ['demo', '--offline', '--state-dir', join(scratch, 'state')]));
-  assert.equal(demo.output.result.tag, 'report');
-  assert.equal(demo.output.model_calls, '14');
-  console.log(JSON.stringify({downstream: 'public addNativeSystem', node_free_acquisition_build_install: true, package: packageHash, target: manifest.target, program: manifest.program_sha256, identity, elapsed_seconds: (performance.now() - started) / 1000}));
+  const launch = join(scratch, 'installed-launch');
+  const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+  const command = [...prefix, ...(process.platform === 'linux' ? ['--chdir', sandboxPath(scratch)] : []), sandboxPath(executable)];
+  writeFileSync(launch, `#!/bin/sh\nexec ${command.map(quote).join(' ')} "$@"\n`, {mode: 0o700});
+  const client = new ProteanClient(launch, ['--offline', '--state-dir', sandboxPath(join(scratch, 'state'))], {cwd: scratch, env});
+  const executionDeadline = Math.min(performance.now() + 30_000, deadline ?? Infinity);
+  const request = (method, params) => {
+    const remaining = Math.floor(executionDeadline - performance.now());
+    assert(remaining > 0, 'installed execution exceeded its bounded witness budget');
+    return client.call(method, params, remaining);
+  };
+  const executionStarted = performance.now();
+  let installedExecution;
+  try {
+    const initialized = await request('initialize', {protocol_versions: ['agent-host/2.1'], client_info: {name: 'installed-witness', version: '1'}});
+    assert.equal(initialized.protocol_version, 'agent-host/2.1');
+    const description = await request('describe');
+    const task = await request('task.submit', {client_operation_id: 'installed-start', application_id: 'adaptive-agent', profile_id: description.profile.id,
+      input: {schema_id: 'adaptive-agent.input.v2', value: {task: 'Exercise the independently installed application.'}}});
+    let current;
+    do {
+      current = await request('task.status', {task_id: task.task_id});
+      assert.equal(current.blocker, null);
+      assert.equal(current.result_available, false);
+      if (BigInt(current.revision) > BigInt(task.revision)) break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (true);
+    await request('task.cancel', {client_operation_id: 'installed-cancel', task_id: task.task_id});
+    let cancelled;
+    do {
+      cancelled = await request('task.result', {task_id: task.task_id});
+      if (cancelled.ready && cancelled.associated_work_disposed) break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (true);
+    assert.equal(cancelled.status, 'cancelled');
+    assert.equal(cancelled.outcome.cleanup_complete, true);
+    assert.deepEqual(await client.close(), {code: 0, signal: null});
+    installedExecution = {admission_revision: task.revision, execution_revision: current.revision, cancellation_revision: cancelled.revision, elapsed_ms: performance.now() - executionStarted};
+    console.error(`downstream installed execution: ${Math.round(installedExecution.elapsed_ms)} ms`);
+  } finally { await client.close(); }
+  console.log(JSON.stringify({downstream: 'public addNativeSystem', node_free_acquisition_build_install: true, package: packageHash, target: manifest.target, program: manifest.program_sha256, identity, installed_execution: installedExecution, elapsed_seconds: (performance.now() - started) / 1000}));
 } finally {
   rmSync(scratch, {recursive: true, force: true});
 }

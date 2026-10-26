@@ -59,6 +59,7 @@ runtime/native/worker.zig
 runtime/native/workspace_build.zig
 runtime/native/workspace_driver.zig
 runtime/native/workspace_instrument.zig
+runtime/native/workspace_observers.zig
 runtime/native/workspace_projection.zig
 runtime/native/workspace_state.zig
 src/adaptive_controls.zig

@@ -6,6 +6,7 @@ import {dirname, join, posix} from 'node:path';
 
 const [operation, profile, argument, key] = process.argv.slice(2);
 const profiles = {
+  'mobility-helper': ['build-runtime-mobility-peer', [], 'runtime_mobility_peer.zig', ['verification/runtime-mobility-peer']],
   product: ['protean', [], null, ['executables/protean', 'protean/adaptive/application.json', 'protean/adaptive/program.bpi3']],
   owners: ['build-native-owner-tasks-check', [], 'native_owner_tests.zig', ['verification/native-owner-tasks']],
   'owner-adaptive': ['build-native-owner-adaptive-check', ['-Dadaptive-owner-group=capture'], 'native_adaptive_tests.zig', ['verification/native-owner-adaptive']],
@@ -62,7 +63,9 @@ if (operation === 'key') {
   const host = environment.match(/^\s*\.target = "([^"]+)",$/m)?.[1];
   assert(host);
   const options = Object.fromEntries(['ZIG_LIB_DIR', 'ZIG_LIBC', 'NIX_CFLAGS_COMPILE', 'NIX_CFLAGS_LINK', 'NIX_LDFLAGS', 'C_INCLUDE_PATH', 'CPLUS_INCLUDE_PATH', 'LIBRARY_PATH', 'CC', 'PKG_CONFIG'].map(name => [name, process.env[name] ?? null]));
-  const inputs = {compiler: argument, host, options, recipe, files: [...files].sort().map(file => [file, ...fileIdentity(file)])};
+  const nativeCapabilities = process.platform === 'linux' && process.arch === 'x64' ? null :
+    digest(execFileSync('zig', ['targets'], {maxBuffer: 4 * 1024 * 1024}));
+  const inputs = {compiler: argument, host, nativeCapabilities, options, recipe, files: [...files].sort().map(file => [file, ...fileIdentity(file)])};
   console.log(`protean-compiled-v3-${process.platform}-${process.arch}-safe-${profile}-${digest(JSON.stringify(inputs))}`);
 } else if (operation === 'build') {
   const result = spawnSync('zig', ['build', ...recipe, '--prefix', argument], {stdio: 'inherit'});

@@ -52,6 +52,7 @@ pub fn Record(comptime kind: []const u8) type {
         .origin => state.Origin,
         .workspace_program => @import("workspace_state.zig").Program,
         .workspace_runtime => @import("workspace_state.zig").Runtime,
+        .workspace_candidate => @import("workspace_state.zig").Candidate,
         .workspace_work => @import("workspace_state.zig").Work,
         .workspace_trial => @import("workspace_state.zig").Trial,
         .workspace_value => @import("workspace_state.zig").Value,
@@ -306,6 +307,9 @@ pub const Store = struct {
             }
             pub fn reply(_: *@This(), _: occurrence.Acquired) !void {
                 @compileError("context dependencies cannot contain host occurrence replies");
+            }
+            pub fn observerSource(_: *@This(), _: state.Reference) !void {
+                @compileError("context dependencies cannot contain host observer evidence");
             }
         }{ .store = self, .parent = parent };
         try state.visitReferencesAs(T, Ref, value, &sink);
@@ -578,7 +582,7 @@ pub const Store = struct {
                     try this.store.retainValueDirect(V, ref, item);
                 }
             }{ .store = self };
-            if (T == state.Reconciliation) try state.visitReconciliationHistory(self.allocator, self, value, &history) else if (T == state.Event) try state.visitWorkspaceCommand(self.allocator, self, value, &history) else try state.visitWorkspaceReceipt(self.allocator, self, value, &history);
+            if (T == state.Reconciliation) try state.visitReconciliationHistory(self.allocator, self, value, &history) else if (T == state.Event) try state.visitWorkspaceEvent(self.allocator, self, parent, value, &history) else try state.visitWorkspaceReceipt(self.allocator, self, value, &history);
         }
     }
     fn retainValueDirect(self: *Store, comptime T: type, parent: state.Reference, value: T) !void {
@@ -590,6 +594,12 @@ pub const Store = struct {
             }
             pub fn reply(this: *@This(), acquired: occurrence.Acquired) !void {
                 try this.add(try this.store.objectReference(acquired.reply, null));
+            }
+            pub fn observerSource(this: *@This(), ref: state.Reference) !void {
+                try state.visitObserverSource(this.store.allocator, this.store, ref, this);
+            }
+            pub fn typed(this: *@This(), comptime V: type, ref: state.Reference, item: V) !void {
+                try this.store.retainValueDirect(V, ref, item);
             }
         }{ .store = self, .parent = parent };
         try state.visitReferences(T, value, &sink);
@@ -643,6 +653,8 @@ pub const Store = struct {
         if (comptime std.mem.eql(u8, kind, "placement_action")) @compileError("placement observations are immutable");
         if (comptime std.mem.eql(u8, kind, "placement_succession")) @compileError("placement succession proofs are immutable");
         if (comptime std.mem.eql(u8, kind, "workspace_runtime")) @compileError("immutable runtime records are created once");
+        if (comptime std.mem.eql(u8, kind, "workspace_candidate"))
+            @compileError("immutable candidate records are created once");
         if (comptime std.mem.eql(u8, kind, "artifact") or std.mem.eql(u8, kind, "attempt") or std.mem.eql(u8, kind, "origin") or std.mem.eql(u8, kind, "workspace_program") or std.mem.eql(u8, kind, "workspace_value") or std.mem.eql(u8, kind, "workspace_view") or std.mem.eql(u8, kind, "workspace_port") or std.mem.eql(u8, kind, "workspace_port_reply") or std.mem.eql(u8, kind, "execution_route") or std.mem.eql(u8, kind, "workspace_wait") or std.mem.eql(u8, kind, "workspace_delegation") or std.mem.eql(u8, kind, "workspace_reply")) @compileError("immutable native records are created once");
         try self.writing();
         errdefer self.rollback();

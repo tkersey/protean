@@ -299,7 +299,7 @@ pub fn Adapter(comptime P: type) type {
             const selected = A.select(ctx.allocator, policy, prepared.value.request) catch |err| return .{ .definitely_not_sent = err };
             // Selection is re-admitted under the frozen catalog at acquisition,
             // rather than reading the newest mutable launch configuration.
-            const body = json.parse(ctx.allocator, prepared.value.body.bytes, .{ .bytes = selected.transport.request_bytes orelse prepared.value.body.bytes.len, .tokens = prepared.value.body.bytes.len, .members = prepared.value.body.bytes.len }) catch |err| return .{ .definitely_not_sent = err };
+            const body = json.parseAsset(ctx.allocator, prepared.value.body.bytes, selected.transport.request_bytes orelse prepared.value.body.bytes.len) catch |err| return .{ .definitely_not_sent = err };
             const reasoning = json.get(body.value, "reasoning") orelse return .{ .definitely_not_sent = error.InvalidPreparedRequest };
             const maximum = json.get(body.value, "max_output_tokens");
             if (!jsonTextEquals(body.value, "model", selected.transport.model.bytes) or

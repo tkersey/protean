@@ -7,7 +7,7 @@ import {once} from 'node:events';
 import {DatabaseSync} from 'node:sqlite';
 import {mkdir, writeFile, readFile, unlink} from 'node:fs/promises';
 import {execFile} from 'node:child_process';
-import {join} from 'node:path';
+import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {ProteanClient} from '../support/stdio-client.mts';
 import {certificates} from '../support/tls.mjs';
@@ -39,6 +39,28 @@ import {workspaceMetrics, armViolations, evaluateCase} from '../../tools/evaluat
   assert.deepEqual(armViolations('pure', placementReads), placementReads);
   assert.deepEqual(armViolations('ordinary', placementReads), placementReads);
   for (const arm of ['generic', 'retained', 'runtime']) assert.deepEqual(armViolations(arm, placementReads), []);
+  const construction = [
+    {name: 'program', arguments: {command: {tag: 'derive'}}},
+    {name: 'program', arguments: {command: {tag: 'validate'}}},
+    work('guard'),
+  ];
+  assert.deepEqual(armViolations('specialization', construction), construction);
+  assert.deepEqual(armViolations('interpretation', construction), construction);
+  assert.deepEqual(armViolations('construction', construction), []);
+  assert.deepEqual(armViolations('interpretation', runtime), runtime.slice(0, 3));
+  assert.deepEqual(armViolations('specialization', runtime), runtime.slice(3));
+  assert.deepEqual(armViolations('interpretation', [remote(work('realize_controller'))]), [remote(work('realize_controller'))]);
+  const newReplacement = ['realize_controller', 'guard'].map(work);
+  for (const actions of [newReplacement, newReplacement.map(remote)]) {
+    assert.deepEqual(armViolations('generic', [...actions, work('pump')]), actions);
+  }
+  const observe = work('observe');
+  for (const action of [observe, remote(observe)]) {
+    for (const arm of ['generic', 'specialization', 'pure']) assert.deepEqual(armViolations(arm, [action]), [action]);
+    for (const arm of ['interpretation', 'construction', 'runtime', 'retained']) assert.deepEqual(armViolations(arm, [action]), []);
+  }
+  const inspections = [work('inspect'), remote(work('inspect')), ...placementReads];
+  for (const arm of ['generic', 'specialization', 'interpretation', 'construction']) assert.deepEqual(armViolations(arm, inspections), []);
 }
 import {contract, assertAdaptiveCaptures} from './adaptive_capture_checks.mjs';
 import {runtimeTrace} from './runtime_trace.mjs';
@@ -47,6 +69,112 @@ import {runtimePlacementFixture, placementRequest} from './runtime_placement_fix
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const reference = bytes => [[...createHash('sha256').update(bytes).digest()], BigInt(bytes.length)];
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+export function verifyCandidateMetrics(measuredBytes, application) {
+  const archive = readArchive(measuredBytes);
+  const store = bytes => { const ref = reference(bytes); archive.objects.set(Buffer.from(ref[0]).toString('hex'), bytes); return ref; };
+  const record = (name, value) => store(Buffer.from(encodeValue(archive.schemas.get(name), value)));
+  const code = store(Buffer.from('shared candidate code'));
+  const candidateRefs = ['first', 'second', 'failed'].map(name => store(Buffer.from(name)));
+  const none = {tag: 0, value: null}, some = value => ({tag: 1, value});
+  const task = archive.task.id, program = code[0];
+  archive.manifest[6] = candidateRefs.map(ref => [31, ref[0], record('workspace_candidate', [ref[0], task, program, ref,
+    [1, code, code, ref, code, none, code[0], 'fixture']])]);
+  archive.manifest[6].push([18, code[0], record('workspace_runtime', [code[0], task, program, code,
+    some([1, candidateRefs[0], code, code, code[0], 'fixture'])])]);
+  const receipt = decodeValue(archive.schemas.get('receipt'), archive.object(archive.manifest[8][0][2]));
+  const observationSchema = {root: 0, types: [{product: [1, 1, 3]}, {sum: [2, 3]}, 'unit', {product: [4, 6]}, {array: {element: 5, length: 32}}, 'u8', 'u64']};
+  archive.manifest[8] = [0, 1, 1, 2].map(index => {
+    const observation = store(Buffer.from(encodeValue(observationSchema, [some(candidateRefs[index]), index === 2 ? none : some(code), code])));
+    const retained = [...receipt];
+    retained[10] = some(candidateRefs[index][0]);
+    retained[11] = some(10);
+    retained[12] = some(observation);
+    return [receipt[0], receipt[1], record('receipt', retained)];
+  });
+  const observed = workspaceMetrics(archive, application);
+  assert.equal(observed.candidate_artifacts, 3);
+  assert.equal(observed.admitted_runtimes, 1);
+  assert.equal(observed.distinct_candidate_code_bytes, Number(code[1]));
+  assert.equal(observed.validated_candidates, 2);
+  assert.equal(observed.unvalidated_candidates, 1);
+  const semanticReceipts = archive.manifest[8];
+  archive.manifest[8] = [];
+  const runtimeOnly = workspaceMetrics(archive, application);
+  assert.equal(runtimeOnly.validated_candidates, 1);
+  assert.equal(runtimeOnly.unvalidated_candidates, 2);
+  for (const [ordinal, index] of [0, 1, 1, 2].entries()) {
+    const id = reference(Buffer.from(`validation attempt ${ordinal}`))[0];
+    const observation = {candidate: {kind: 'candidate', id: Buffer.from(candidateRefs[index][0]).toString('hex')},
+      validation: index === 2 ? 'rejected' : 'validated', compiler_nanoseconds: 3,
+      ...(index === 2 ? {} : {runtime: {kind: 'runtime', id: Buffer.from(code[0]).toString('hex')}})};
+    const reply = encodeValue(contract(application, 'WorkspaceReply'), [0, JSON.stringify(observation), none, none, none]);
+    const payload = Buffer.from(encodeValue(resultSchema, [id, reply]));
+    const header = Buffer.alloc(20);
+    header.write('ABL_ERS3');
+    header.writeBigUInt64LE(BigInt(payload.length), 12);
+    const bound = store(Buffer.concat([header, payload]));
+    archive.manifest[6].push([5, id, record('attempt', [id, task, id, code, code, 'fixture.workspace', false, none, 1, none, none, none])],
+      [4, id, record('capture', [task, id, id, code, none, 0, some([bound, [], none]), none])]);
+  }
+  const captured = workspaceMetrics(archive, application);
+  assert.equal(captured.validated_candidates, 2);
+  assert.equal(captured.unvalidated_candidates, 1);
+  assert.equal(captured.builds, 4);
+  assert.equal(captured.compiler_nanoseconds, 12);
+  assert.equal(captured.distinct_candidate_code_bytes, Number(code[1]));
+  archive.manifest[8] = semanticReceipts;
+  const combined = workspaceMetrics(archive, application);
+  assert.equal(combined.validated_candidates, 2);
+  assert.equal(combined.unvalidated_candidates, 1);
+}
+export async function verifyEvaluationFailures({directory, taskId, measuredBytes, application}) {
+  const metrics = workspaceMetrics(readArchive(measuredBytes), application);
+  for (const failure of ['success', 'task.submit', 'task.status', 'task.result', 'artifact.read', 'close', 'close-code', 'close-signal', 'export']) {
+    const output = join(directory, 'evaluation-failure-' + failure); await mkdir(output);
+    const config = join(output, 'approved semantic config.json');
+    let closed = false, launch, exported;
+    class FailingClient {
+      constructor(binary, args) { launch = {binary, args}; }
+      child = {pid: process.pid};
+      async initialize() { await mkdir(join(output, 'state')); }
+      async call(method) {
+        if (method === failure) throw new Error('injected ' + failure);
+        if (method === 'describe') return {profile: {id: 'fixture'}};
+        if (method === 'task.submit') return {task_id: taskId};
+        if (method === 'task.status') return {status: 'completed'};
+        if (method === 'task.result' && ['success', 'close', 'close-code', 'close-signal', 'export'].includes(failure)) return {ready: true, outcome: {value: {fixture: true}}};
+        if (method === 'task.result') return {ready: true, outcome: {value_ref: {artifact_id: 'fixture', sha256: 'fixture', bytes: '1'}}};
+        throw new Error('unexpected ' + method);
+      }
+      async close() {
+        closed = true;
+        if (failure === 'close') throw new Error('injected close');
+        return {code: failure === 'close-code' ? 2 : failure === 'close-signal' ? null : 0, signal: failure === 'close-signal' ? 'SIGKILL' : null};
+      }
+    }
+    const report = await evaluateCase({subject: {id: failure, arm: 'pure', config, prompt: 'fixture'}, build: {fixture: true}, output, binary: 'fixture', credential: 'unused', application, seconds: 1}, {
+      Client: FailingClient,
+      runCommand: async (binary, args) => {
+        exported = {binary, args};
+        if (failure === 'export') throw new Error('injected export');
+        await writeFile(args.at(-1), measuredBytes);
+      },
+    });
+    assert(closed);
+    assert.deepEqual(launch, {binary: 'fixture', args: ['--config', config, '--authorize-inference', '--credential-file', resolve('unused'), '--state-dir', join(output, 'state')]});
+    assert.deepEqual(exported, failure === 'task.submit' ? undefined : {binary: 'fixture', args: ['export-checkpoint', '--config', config, '--state-dir', join(output, 'state'), '--task-id', taskId, '--output', join(output, 'task.agnx')]});
+    if (failure === 'success') assert.deepEqual(report.errors, []);
+    else if (failure === 'close-code' || failure === 'close-signal') {
+      assert(report.errors.some(error => error.stage === 'close' && error.message === (failure === 'close-code' ? 'Native process exited with code 2, signal null' : 'Native process exited with code null, signal SIGKILL')));
+    } else assert(report.errors.some(error => error.message === 'injected ' + failure));
+    assert.equal(report.task?.task_id ?? null, failure === 'task.submit' ? null : taskId);
+    assert(report.elapsed_ms >= 0);
+    if (failure === 'task.submit' || failure === 'export') {
+      assert.equal(report.metrics, null); assert.equal(report.arm_violations, null);
+    } else assert.equal(report.metrics.controller.calls, metrics.controller.calls);
+    assert.deepEqual(JSON.parse(await readFile(join(output, 'report.json'), 'utf8')), report);
+  }
+}
 async function within(promise, milliseconds, message) {
   let timer;
   try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), milliseconds); })]); }
@@ -211,7 +339,9 @@ function* workspaceTrace(subject, scenario) {
   const builtCall = subject.body.input.find(item => item.type === 'function_call' && item.name === 'program' && JSON.parse(item.arguments).command.tag === 'build' && subject.body.input.some(output => output.type === 'function_call_output' && output.call_id === item.call_id && strings(output).some(text => text.includes(subject.program.id))));
   assert(builtCall, 'the source-selected program build and its retained reference survive view selection, restart, and instruction eviction');
   const secondInput = yield* materialize(subject.inputs[1].id);
-  for (let n = 0; n < 11; n++) yield* run(n % 2 ? firstInput : secondInput, n % 2 ? [['1','1'],['2','2'],['3','3'],['4','4']] : [['80','1']]);
+  assert.deepEqual(yield* materialize(subject.inputs[0].id), firstInput);
+  assert.deepEqual(yield* materialize(subject.inputs[1].id), secondInput);
+  for (let n = 0; n < 3; n++) yield* run(n % 2 ? firstInput : secondInput, n % 2 ? [['1','1'],['2','2'],['3','3'],['4','4']] : [['80','1']]);
   yield ['report', {summary: 'The same admitted program continued auditing both inputs after restart.', claims: [
     {kind: 'observation', statement: 'The source range and second computed audit are acquired.', reasoning: '', evidence_indices: [subject.sourceIndex, subject.resultIndices.at(-1)]},
     {kind: 'inference', statement: 'The retained program supports comparing both audit results.', reasoning: 'The first and last computed values retain that program as provenance.', evidence_indices: [subject.resultIndices[0], subject.resultIndices.at(-1)]},
@@ -493,7 +623,9 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
   }
   const config = {workspace: 'adaptive-controlled', snapshot_root: root, endpoint: `https://127.0.0.1:${server.address().port}/v1/responses`, audience: 'controlled-adaptive',
     profiles: [profile('analysis', 'fixture-model-a'), profile('deep', 'fixture-model-b')], initial_profile: 'analysis', initial_effort: 'medium', skills};
-  const configuration = adaptive => ({schema: 'adaptive-agent.configuration.v3', adaptive, tools: null});
+  const initialSemanticPolicy = {roots: ['11'.repeat(32)], checkers: ['qualification-initial-checker'], guard: true};
+  const configuration = adaptive => ({schema: 'adaptive-agent.configuration.v3', adaptive, tools: null,
+    semantic_construction: suite === 'controls' ? initialSemanticPolicy : null});
   await writeFile(configPath, JSON.stringify(configuration(config)));
   const invoke = async (...args) => {
     const timeout = suite === 'runtime' && process.platform === 'darwin' ? undefined : 30000;
@@ -508,7 +640,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       client.closed.then(exit => console.error(JSON.stringify({runtime_fixture: scenario, process_exit: exit})));
     }
     const initialized = await client.initialize(versions);
-    assert.equal(initialized.server_info.version, '6.0.0');
+    assert.equal(initialized.server_info.version, '7.0.0');
     assert.equal(initialized.protocol_version, 'agent-host/2.1');
     assert.equal(Object.hasOwn(initialized.capabilities, 'task_reconciliation'), true);
     return client;
@@ -588,7 +720,10 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       const refused = await execute(app.command, ['resume', '--state-dir', state, '--task-id', accepted.task_id, '--config', changedConfig, '--test-provider', '--trust-root', trust],
         {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 10000});
       assert.equal(refused.status, 64); assert.equal(requests.length, 13);
-      await launch(['--profile-task', accepted.task_id]);
+      const revokedConfig = join(app.data, 'revoked-semantic-policy.json');
+      await writeFile(revokedConfig, JSON.stringify({...configuration(config),
+        semantic_construction: {roots: ['22'.repeat(32)], checkers: ['qualification-current-checker'], guard: false}}));
+      await launch(['--profile-task', accepted.task_id, '--config', revokedConfig]);
       const reopenedDescription = await client.call('describe');
       assert.equal(reopenedDescription.profile.resource_identity, description.profile.resource_identity);
       const reopened = await client.call('task.status', {task_id: accepted.task_id});
@@ -627,6 +762,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       const eviction = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2];
       const seen = new Set();
       const frozenProfileBytes = archive.object(archive.task.profile), frozenProfile = JSON.parse(frozenProfileBytes.toString('utf8'));
+      assert.deepEqual(frozenProfile.semantic_construction, initialSemanticPolicy);
       for (const [kind, id, ref] of archive.manifest[6]) {
         if (kind !== 4) continue;
         const capture = decodeValue(archive.schemas.get('capture'), archive.object(ref));
@@ -911,7 +1047,29 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       const selectedInputs = name === 'tools-runtime-specialized' ? [
         ...inputs, {...inputs[0], id: 'batch', description: 'Sixteen source records retain exact batch cardinality and order.', rows: Array.from({length: 16}, (_, i) => row(2000 + i, 10, 100, 1))},
       ] : inputs;
-      await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: ['tools-reuse', 'tools-reverse'].includes(name) ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, reconstruct: name === 'tools-runtime-mobility', inputs: selectedInputs}}));
+      let semanticConstruction = null;
+      if (['tools-runtime-specialized', 'tools-runtime-guest-mobility'].includes(name)) {
+        assert(sourcePeer, 'selected runtimes require the independent policy fixture');
+        const sourcePath = join(app.data, `${name}-source.json`);
+        const specialized = name === 'tools-runtime-specialized';
+        await writeFile(sourcePath, specialized ? JSON.stringify(coverageRecipe) : toolSubject.mobility.transport);
+        const policyArgs = ['specialized-policy', specialized ? 'component-recipe' : 'mobility', sourcePath];
+        if (specialized) {
+          const catalog = asset.resources.find(resource => resource.id === 'tool-construction.catalog');
+          assert(catalog);
+          const catalogPath = join(app.data, `${name}-catalog.bin`);
+          await writeFile(catalogPath, Buffer.from(catalog.base64url, 'base64url'));
+          policyArgs.push(catalogPath);
+        }
+        const policy = await execute(sourcePeer, policyArgs, {encoding: 'utf8', maxBuffer: 16 << 20});
+        assert.equal(policy.status, 0, policy.error ?? policy.stderr);
+        semanticConstruction = JSON.parse(policy.stdout);
+        assert.equal(semanticConstruction.roots.length, 1);
+        assert.match(semanticConstruction.roots[0], /^[0-9a-f]{64}$/);
+        assert.equal(semanticConstruction.checkers.length, 1);
+        assert.equal(semanticConstruction.guard, false);
+      }
+      await writeFile(selectedConfig, JSON.stringify({schema: 'adaptive-agent.configuration.v3', adaptive: {...config, skills: ['tools-reuse', 'tools-reverse'].includes(name) ? config.skills.filter(skill => ['invariant-review', 'repository-orientation'].includes(skill.id)) : []}, tools: {build: !['tools-foreign', 'tools-disabled'].includes(name), run: true, reconstruct: name === 'tools-runtime-mobility', inputs: selectedInputs}, semantic_construction: semanticConstruction}));
       const placement = ['tools-runtime-mobility', 'tools-runtime-guest-mobility'].includes(name) ? await runtimePlacementFixture(app, selectedConfig, trust, selectedState) : null;
       toolSubject.placement = placement;
       // Each scenario selects its own initial directory. A prior controller
@@ -1064,9 +1222,12 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         retainedProgram = toolSubject.program; retainedState = selectedState;
       }
       if (name === 'tools-reuse') {
-        assert(alternateIndex > 38, 'materialization, retained work and restart all ran');
+        assert.equal(toolSubject.results.length, 4);
+        assert.equal(toolSubject.actions.filter(action => action.name === 'work' && action.arguments.command.tag === 'start').length, 4);
+        assert(BigInt(result.outcome.value.model_calls) > 16n);
+        assert(BigInt(result.outcome.value.work_calls) > 12n);
         assert.equal(result.outcome.value.model_calls, String(alternateIndex));
-        assert.equal(result.outcome.value.evidence.length, 15, 'twelve results, two inputs, and the source remain retained');
+        assert.equal(result.outcome.value.evidence.length, 9);
         assert.deepEqual(result.outcome.value.result.value.claims[0].evidence_indices, [String(toolSubject.sourceIndex), String(toolSubject.resultIndices.at(-1))]);
         assert.equal(result.outcome.value.evidence[toolSubject.sourceIndex].tag, 'source');
         assert.equal(result.outcome.value.control.selection.control_revision, '6');
@@ -1144,15 +1305,16 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         assert.deepEqual(metrics.actions, toolSubject.actions, 'archived actions preserve actual provider execution order across restart');
         assert.equal(metrics.actions.at(-1).name, 'report');
         assert.equal(metrics.delegated.calls, 0);
-        assert.equal(metrics.work_items, 12);
+        assert.equal(metrics.work_items, 4);
         assert(metrics.builds >= 1 && metrics.compiler_nanoseconds > 0 && metrics.native_publication_nanoseconds > 0);
-        assert(metrics.checkpoint_publications >= 12 && metrics.current_checkpoint_bytes > 0);
+        assert(metrics.checkpoint_publications >= 4 && metrics.current_checkpoint_bytes > 0);
         assert(armViolations('pure', metrics.actions).some(action => action.name === 'work' && action.arguments.command.tag === 'inspect'), 'accepted normalized inspection remains an arm violation');
         assert.equal(metrics.actions.filter(action => action.name === 'program' && action.arguments.command.tag === 'build').length, 4);
         // CapturedResponse deliberately carries raw transport bytes. Exercise
         // the evaluator over that domain with the archive's actual codecs.
         const measuredBytes = await readFile(measured);
         const application = JSON.parse(await readFile(applicationPath, 'utf8'));
+        verifyCandidateMetrics(measuredBytes, application);
         for (const [body, input, output, missing] of [
           ['<html>502 Bad Gateway</html>', 0, 0, 1, 0],
           ['', 0, 0, 1, 0], ['null', 0, 0, 1, 0], ['{}', 0, 0, 1, 0],
@@ -1201,45 +1363,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
             assert.deepEqual(rejected.controller, observed.controller, 'rejected output retains its actual cost observations');
           }
         }
-        for (const failure of ['task.submit', 'task.status', 'task.result', 'artifact.read', 'close', 'close-code', 'close-signal', 'export']) {
-          const output = join(app.data, 'evaluation-failure-' + failure); await mkdir(output);
-          let closed = false;
-          class FailingClient {
-            child = {pid: process.pid};
-            async initialize() { await mkdir(join(output, 'state')); }
-            async call(method) {
-              if (method === failure) throw new Error('injected ' + failure);
-              if (method === 'describe') return {profile: {id: 'fixture'}};
-              if (method === 'task.submit') return {task_id: task.task_id};
-              if (method === 'task.status') return {status: 'completed'};
-              if (method === 'task.result' && ['close', 'close-code', 'close-signal', 'export'].includes(failure)) return {ready: true, outcome: {value: {fixture: true}}};
-              if (method === 'task.result') return {ready: true, outcome: {value_ref: {artifact_id: 'fixture', sha256: 'fixture', bytes: '1'}}};
-              throw new Error('unexpected ' + method);
-            }
-            async close() {
-              closed = true;
-              if (failure === 'close') throw new Error('injected close');
-              return {code: failure === 'close-code' ? 2 : failure === 'close-signal' ? null : 0, signal: failure === 'close-signal' ? 'SIGKILL' : null};
-            }
-          }
-          const report = await evaluateCase({subject: {id: failure, arm: 'pure', config: 'fixture', prompt: 'fixture'}, build: {fixture: true}, output, binary: 'fixture', credential: 'unused', application, seconds: 1}, {
-            Client: FailingClient,
-            runCommand: async (_binary, args) => {
-              if (failure === 'export') throw new Error('injected export');
-              await writeFile(args.at(-1), measuredBytes);
-            },
-          });
-          assert(closed);
-          if (failure === 'close-code' || failure === 'close-signal') {
-            assert(report.errors.some(error => error.stage === 'close' && error.message === (failure === 'close-code' ? 'Native process exited with code 2, signal null' : 'Native process exited with code null, signal SIGKILL')));
-          } else assert(report.errors.some(error => error.message === 'injected ' + failure));
-          assert.equal(report.task?.task_id ?? null, failure === 'task.submit' ? null : task.task_id);
-          assert(report.elapsed_ms >= 0);
-          if (failure === 'task.submit' || failure === 'export') {
-            assert.equal(report.metrics, null); assert.equal(report.arm_violations, null);
-          } else assert.equal(report.metrics.controller.calls, metrics.controller.calls);
-          assert.deepEqual(JSON.parse(await readFile(join(output, 'report.json'), 'utf8')), report);
-        }
+        await verifyEvaluationFailures({directory: app.data, taskId: task.task_id, measuredBytes, application});
       }
     }
     return {tool_construction: toolRuns};

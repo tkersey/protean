@@ -8,6 +8,10 @@ const preflight = @import("source_preflight.zig");
 const contracts = @import("protean_contracts");
 pub const driver = @import("workspace_driver.zig");
 pub const controller = @import("controller_construction.zig");
+pub const CandidateDocument = struct {
+    version: u32,
+    proposal: @import("kosmos").RuntimeCompiler.RecordProposal,
+};
 
 pub const PortInterface = struct {
     identity: contracts.Utf8,
@@ -115,6 +119,161 @@ pub fn hypotheticalReply(a: std.mem.Allocator) ![]u8 {
     return records.encode(a, try @import("kosmos").RuntimeAnalysis.example(&builder));
 }
 
+pub fn semanticSource(
+    a: std.mem.Allocator,
+    runtime: *const @import("kosmos").RuntimeArtifact,
+    guest: @import("state.zig").Reference,
+    section: contracts.workspace.SemanticSection,
+    page: contracts.workspace.Page,
+) !@import("json.zig").Value {
+    var exported = try @import("kosmos").RuntimeCompiler.exportSource(a, runtime);
+    defer exported.deinit();
+    const bundle = exported.value;
+    return switch (section) {
+        .summary => blk: {
+            const text = try semanticSummary(a, bundle, guest);
+            defer a.free(text);
+            break :blk @import("workspace_projection.zig").page(a, text, page);
+        },
+        .generic => semanticModulePage(a, bundle.generic.module, page),
+        .selected => semanticModulePage(a, bundle.selected.module, page),
+        .helper => |index| blk: {
+            if (index >= bundle.helpers.len) return error.InvalidReference;
+            break :blk semanticModulePage(a, bundle.helpers[index].source.module, page);
+        },
+        .evidence => blk: {
+            const evidence = .{
+                .builtin = bundle.evidence,
+                .construction = bundle.construction,
+                .lineage = bundle.lineage,
+            };
+            break :blk records.pageRecord(@TypeOf(evidence), a, evidence, page);
+        },
+        .slice => |selection| blk: {
+            var extracted = try horos.source.slice.extract(a, bundle.generic.module, .{
+                .entry = selection.function,
+                .require_pure = true,
+            });
+            defer extracted.deinit();
+            break :blk semanticModulePage(a, extracted.module(), page);
+        },
+    };
+}
+
+fn semanticModulePage(
+    a: std.mem.Allocator,
+    module: horos.source.Module,
+    page: contracts.workspace.Page,
+) !@import("json.zig").Value {
+    return records.pageRecord(records.Document, a, .{ .version = 1, .module = module }, page);
+}
+
+fn semanticSummary(
+    a: std.mem.Allocator,
+    bundle: @import("kosmos").RuntimeCompiler.SourceBundle,
+    guest: @import("state.zig").Reference,
+) ![]u8 {
+    const json = @import("json.zig");
+    const values = @import("values.zig");
+    var result = json.object();
+    try json.put(a, &result, "contract", json.string("protean-semantic-source/1"));
+    const root = if (bundle.lineage) |lineage| lineage.root else bundle.realization;
+    try json.put(a, &result, "root_identity", json.string(
+        try a.dupe(u8, &std.fmt.bytesToHex(root, .lower)),
+    ));
+    try json.put(a, &result, "runtime_identity", json.string(
+        try a.dupe(u8, &std.fmt.bytesToHex(bundle.realization, .lower)),
+    ));
+    inline for (.{ "image", "emitter" }) |field| {
+        const id = @field(bundle, field);
+        try json.put(a, &result, field, json.string(try a.dupe(u8, &std.fmt.bytesToHex(id, .lower))));
+    }
+    try json.put(a, &result, "guest_image", try values.toJson(@TypeOf(guest), a, guest));
+    try json.put(a, &result, "lineage", try records.project(
+        @TypeOf(bundle.lineage),
+        a,
+        bundle.lineage,
+    ));
+    inline for (.{ "generic", "selected" }) |field| {
+        try json.put(a, &result, field, try semanticModuleSummary(a, @field(bundle, field)));
+    }
+    var helpers: json.Value = .{ .array = .init(a) };
+    for (bundle.helpers) |helper| {
+        var item = try semanticModuleSummary(a, helper.source);
+        try json.put(a, &item, "role", json.string(@tagName(helper.role)));
+        try json.put(a, &item, "image", json.string(
+            try a.dupe(u8, &std.fmt.bytesToHex(helper.image, .lower)),
+        ));
+        try helpers.array.append(item);
+    }
+    try json.put(a, &result, "helpers", helpers);
+    inline for (.{ "requirements", "bridge", "generic_roles", "selected_roles", "generic_pure_entries", "generic_entries", "selected_entries", "parameters", "anchors", "branch_returns", "template_entries" }) |field| {
+        const value = @field(bundle, field);
+        try json.put(a, &result, field, try records.project(@TypeOf(value), a, value));
+    }
+    return json.canonical(a, result);
+}
+
+fn semanticModuleSummary(
+    a: std.mem.Allocator,
+    value: @import("kosmos").RuntimeCompiler.SourceModule,
+) !@import("json.zig").Value {
+    const json = @import("json.zig");
+    var result = json.object();
+    try json.put(a, &result, "digest", json.string(
+        try a.dupe(u8, &std.fmt.bytesToHex(value.digest, .lower)),
+    ));
+    try json.put(a, &result, "functions", try json.number(a, value.module.functions.len));
+    try json.put(a, &result, "entry", try json.number(a, value.module.entry));
+    try json.put(a, &result, "executable", .{ .bool = true });
+    return result;
+}
+
+pub const SemanticValue = struct { schema: []u8, value: []u8 };
+
+pub fn semanticModuleValue(
+    a: std.mem.Allocator,
+    runtime: *const @import("kosmos").RuntimeArtifact,
+    selection: contracts.workspace.SemanticModule,
+    references: bool,
+) !SemanticValue {
+    var exported = try @import("kosmos").RuntimeCompiler.exportSource(a, runtime);
+    defer exported.deinit();
+    var extracted: ?horos.source.slice.Output = null;
+    defer if (extracted) |*owned| owned.deinit();
+    const module = switch (selection) {
+        .generic => exported.value.generic.module,
+        .selected => exported.value.selected.module,
+        .helper => |index| blk: {
+            if (index >= exported.value.helpers.len) return error.InvalidReference;
+            break :blk exported.value.helpers[index].source.module;
+        },
+        .slice => |selected| blk: {
+            extracted = try horos.source.slice.extract(a, exported.value.generic.module, .{
+                .entry = selected.function,
+                .require_pure = true,
+            });
+            break :blk extracted.?.module();
+        },
+    };
+    if (references) {
+        var indexed = try @import("kosmos").RuntimeCompiler.sourceReferences(a, module);
+        defer indexed.deinit();
+        const schema = try @import("values.zig").schemaBytes(records.IndexedDocument, a);
+        errdefer a.free(schema);
+        const value = try contracts.encodeOwned(records.IndexedDocument, a, .{
+            .version = 1,
+            .module = module,
+            .references = indexed.value,
+        });
+        return .{ .schema = schema, .value = value };
+    }
+    const schema = try @import("values.zig").schemaBytes(records.Document, a);
+    errdefer a.free(schema);
+    const value = try contracts.encodeOwned(records.Document, a, .{ .version = 1, .module = module });
+    return .{ .schema = schema, .value = value };
+}
+
 /// The exact canonical descriptors come from compiled code, never model claims.
 pub fn interfaceOf(a: std.mem.Allocator, program: data.activation.Program) !contracts.tool_construction.Interface {
     const entry = program.functions[@intCast(program.roots.entry)];
@@ -152,6 +311,7 @@ fn buildBody(a: std.mem.Allocator, text: []const u8, exposures: []const contract
     diagnostic.phase = .preflight;
     try preflight.validate(a, document.module, &diagnostic.source);
     diagnostic.phase = .authority;
+    try rejectSemanticBridge(document.module);
     var registry = protean.admission.Registry.init(a);
     defer registry.deinit();
     var controller_generated: ?controller.Generated = if (controller_contract) |contract| try controller.generate(a, document.module, contract) else null;
@@ -170,6 +330,8 @@ fn buildBody(a: std.mem.Allocator, text: []const u8, exposures: []const contract
     const module = if (controller_generated) |g| g.module else if (generated) |g| g.module else document.module;
     if (controller_generated == null) for (document.module.effects.len..module.effects.len) |id| try registry.classify(id, .read);
     if (generated) |g| try registry.speculate(g.body, g.controls);
+    if (controller_generated != null or generated != null)
+        try preserveConstructors(a, document.module, module);
     try protean.admission.verify(a, module, &registry);
     try canceled(cancellation);
     diagnostic.phase = .compilation;
@@ -201,6 +363,28 @@ fn buildBody(a: std.mem.Allocator, text: []const u8, exposures: []const contract
     diagnostic.phase = .complete;
     const descriptor = if (controller_generated) |g| try g.describe(output, compiled.program) else null;
     return .{ .arena = arena, .image = image, .interface = interface, .ports = ports, .controller = descriptor };
+}
+
+fn preserveConstructors(a: std.mem.Allocator, before: horos.source.Module, after: horos.source.Module) !void {
+    const constructors = horos.source.constructor_bindings;
+    for (before.values) |value| {
+        if (constructors.raw(value) == null) continue;
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var work: u64 = std.math.maxInt(u64);
+        const old = try constructors.derive(a, arena.allocator(), before, &work);
+        const new = try constructors.admit(a, arena.allocator(), after, &work);
+        try constructors.validate(before, old, new, .{}, &work);
+        return;
+    }
+}
+
+fn rejectSemanticBridge(module: horos.source.Module) !void {
+    for (module.effects) |effect| {
+        if (std.mem.startsWith(u8, effect.identity, "kosmos.semantic-service")) {
+            return error.ForbiddenEffect;
+        }
+    }
 }
 
 fn canceled(flag: ?*const std.atomic.Value(bool)) !void {

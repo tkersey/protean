@@ -5,6 +5,7 @@ const horos = @import("horos");
 const source = horos.source;
 const p = horos.data.program;
 const Id = p.Id;
+const constructors = source.constructor_bindings;
 
 pub const Role = enum { internal, model, interaction, read, simulation, approval, commit, write, mobility };
 pub const Error = std.mem.Allocator.Error || error{
@@ -136,37 +137,61 @@ pub fn verify(allocator: std.mem.Allocator, module: source.Module, registry: *co
     defer arena.deinit();
     const scratch = arena.allocator();
     try checkCatalogs(module, registry);
-    var ordinary = Walker.init(scratch, module, registry, null);
+    const origins = try Origins.init(scratch, module);
+    var ordinary = Walker.init(scratch, module, registry, origins, null);
     for (module.functions, 0..) |_, id| try ordinary.push(.function, id, id);
     for (module.handlers, 0..) |_, id| try ordinary.push(.handler, id, 0);
     try ordinary.run();
     try checkExports(scratch, module, registry);
     for (registry.speculations.items) |item| {
-        var speculative = Walker.init(scratch, module, registry, item.allowed);
+        var speculative = Walker.init(scratch, module, registry, origins, item.allowed);
         try speculative.push(.function, item.body, item.body);
         try speculative.run();
     }
-    try checkMultiOrigins(scratch, module, registry);
+    try checkMultiOrigins(scratch, module, registry, origins);
 }
 
-fn checkMultiOrigins(a: std.mem.Allocator, m: source.Module, r: *const Registry) Error!void {
+const Origins = struct {
+    bindings: []const constructors.Binding = &.{},
+
+    fn init(a: std.mem.Allocator, module: source.Module) Error!Origins {
+        for (module.values) |value| {
+            if (constructors.raw(value) == null) continue;
+            var work: u64 = std.math.maxInt(u64);
+            return .{ .bindings = constructors.admit(a, a, module, &work) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.UnprovenComputationOrigin,
+            } };
+        }
+        return .{};
+    }
+
+    fn function(self: Origins, value: source.ast.Value) ?Id {
+        if (value.expression == .lambda) return value.expression.lambda;
+        const index = constructors.raw(value) orelse return null;
+        if (index >= self.bindings.len) return null;
+        return self.bindings[@intCast(index)].function;
+    }
+};
+
+fn checkMultiOrigins(a: std.mem.Allocator, m: source.Module, r: *const Registry, origins: Origins) Error!void {
     // The actual module determines all multi origins. Registry omission never
     // exempts a raw handle, clone, or multi computation from role checks.
     for (m.terms) |term| switch (term) {
         .handle => |h| if (try multiHandler(m, h.handler)) {
-            try checkMultiValue(a, m, r, h.body, h.handler, h.state);
+            try checkMultiValue(a, m, r, origins, h.body, h.handler, h.state);
         },
         .resume_with => |h| if (try multiHandler(m, h.handler)) {
             if (h.resumption >= m.values.len) return error.InvalidSource;
             const schema_id = m.values[@intCast(h.resumption)].schema;
-            try checkResumptionOrigins(a, m, r, schema_id);
+            try checkResumptionOrigins(a, m, r, origins, schema_id);
             if (schema_id >= m.schemas.len) return error.InvalidSource;
             const shape = m.schemas[@intCast(schema_id)];
             if (shape != .internal or shape.internal != .resumption) return error.InvalidSource;
             // A packaged continuation can be consumed outside its creator's
             // handler subtree. Inspect this successor and its carried state as
             // well; the original admitted row bounds its external effects.
-            var successor = Walker.init(a, m, r, shape.internal.resumption.effects);
+            var successor = Walker.init(a, m, r, origins, shape.internal.resumption.effects);
             try successor.push(.schema, schema_id, 0);
             try successor.push(.handler, h.handler, 0);
             try successor.values(h.state, 0);
@@ -177,20 +202,23 @@ fn checkMultiOrigins(a: std.mem.Allocator, m: source.Module, r: *const Registry)
     for (m.values) |value_item| {
         if (value_item.schema >= m.schemas.len) return error.InvalidSource;
         const shape = m.schemas[@intCast(value_item.schema)];
-        if (value_item.expression == .lambda and shape == .internal and
-            shape.internal == .computation and shape.internal.computation.use == .multi)
-            try checkMultiBody(a, m, r, value_item.expression.lambda, null, &.{});
+        if (shape == .internal and shape.internal == .computation and
+            shape.internal.computation.use == .multi)
+        {
+            if (origins.function(value_item)) |function|
+                try checkMultiBody(a, m, r, origins, function, null, &.{});
+        }
         if (value_item.expression == .primitive and
             value_item.expression.primitive.opcode == .clone_resumption)
         {
             const operands = value_item.expression.primitive.operands;
             if (operands.len != 1 or operands[0] >= m.values.len) return error.InvalidSource;
-            try checkResumptionOrigins(a, m, r, m.values[@intCast(operands[0])].schema);
+            try checkResumptionOrigins(a, m, r, origins, m.values[@intCast(operands[0])].schema);
         }
     }
 }
 
-fn checkResumptionOrigins(a: std.mem.Allocator, m: source.Module, r: *const Registry, id: Id) Error!void {
+fn checkResumptionOrigins(a: std.mem.Allocator, m: source.Module, r: *const Registry, origins: Origins, id: Id) Error!void {
     if (id >= m.schemas.len) return error.InvalidSource;
     const shape = m.schemas[@intCast(id)];
     if (shape != .internal or shape.internal != .resumption) return error.InvalidSource;
@@ -201,7 +229,7 @@ fn checkResumptionOrigins(a: std.mem.Allocator, m: source.Module, r: *const Regi
     for (m.handlers, 0..) |handler, handler_id| {
         for (handler.clauses) |clause| {
             if (clause.resumption != id) continue;
-            var producer = Walker.init(a, m, r, signature.effects);
+            var producer = Walker.init(a, m, r, origins, signature.effects);
             try producer.push(.handler, handler_id, 0);
             try producer.push(.schema, id, 0);
             try producer.run();
@@ -214,7 +242,7 @@ fn checkResumptionOrigins(a: std.mem.Allocator, m: source.Module, r: *const Regi
         if (h.handler >= m.handlers.len) return error.InvalidSource;
         for (m.handlers[@intCast(h.handler)].clauses) |clause| {
             if (clause.effect == signature.effect) {
-                try checkMultiValue(a, m, r, h.body, h.handler, h.state);
+                try checkMultiValue(a, m, r, origins, h.body, h.handler, h.state);
                 break;
             }
         }
@@ -225,17 +253,19 @@ fn checkMultiValue(
     a: std.mem.Allocator,
     m: source.Module,
     r: *const Registry,
+    origins: Origins,
     body: Id,
     handler_id: ?Id,
     state: []const Id,
 ) Error!void {
     if (body >= m.values.len) return error.InvalidSource;
     const value_item = m.values[@intCast(body)];
-    if (value_item.expression == .lambda)
-        return checkMultiBody(a, m, r, value_item.expression.lambda, handler_id, state);
+    if (origins.function(value_item)) |function|
+        return checkMultiBody(a, m, r, origins, function, handler_id, state);
     for (m.values) |origin| {
-        if (origin.schema == value_item.schema and origin.expression == .lambda)
-            try checkMultiBody(a, m, r, origin.expression.lambda, handler_id, state);
+        if (origin.schema != value_item.schema) continue;
+        if (origins.function(origin)) |function|
+            try checkMultiBody(a, m, r, origins, function, handler_id, state);
     }
 }
 
@@ -243,11 +273,12 @@ fn checkMultiBody(
     a: std.mem.Allocator,
     m: source.Module,
     r: *const Registry,
+    origins: Origins,
     body: Id,
     handler_id: ?Id,
     state: []const Id,
 ) Error!void {
-    var speculative = Walker.init(a, m, r, r.allowedFor(body));
+    var speculative = Walker.init(a, m, r, origins, r.allowedFor(body));
     try speculative.push(.function, body, body);
     if (handler_id) |h| try speculative.push(.handler, h, body);
     try speculative.values(state, body);
@@ -313,11 +344,12 @@ const Walker = struct {
     module: source.Module,
     registry: *const Registry,
     speculative: ?[]const Id,
+    origins: Origins,
     queue: std.ArrayList(Node) = .empty,
     seen: std.AutoHashMapUnmanaged(Node, void) = .empty,
 
-    fn init(a: std.mem.Allocator, m: source.Module, r: *const Registry, s: ?[]const Id) Walker {
-        return .{ .allocator = a, .module = m, .registry = r, .speculative = s };
+    fn init(a: std.mem.Allocator, m: source.Module, r: *const Registry, origins: Origins, s: ?[]const Id) Walker {
+        return .{ .allocator = a, .module = m, .registry = r, .speculative = s, .origins = origins };
     }
 
     fn push(self: *Walker, kind: Kind, id: Id, owner: Id) Error!void {
@@ -368,8 +400,9 @@ const Walker = struct {
                     // Captured callables require the same origin closure even
                     // when this branch retains rather than invokes the value.
                     for (self.module.values) |origin| {
-                        if (origin.schema == id and origin.expression == .lambda)
-                            try self.push(.function, origin.expression.lambda, origin.expression.lambda);
+                        if (origin.schema != id) continue;
+                        if (self.origins.function(origin)) |function_id|
+                            try self.push(.function, function_id, function_id);
                     }
                 },
                 .cell => |c| try self.push(.capture, c.element, 0),
@@ -540,7 +573,13 @@ const Walker = struct {
                 try self.push(.function, callee, callee);
             },
             .primitive => |op| {
-                if (op.opcode == .computation) return error.UnprovenComputationOrigin;
+                if (op.opcode == .computation) {
+                    const callee = self.origins.function(v) orelse return error.UnprovenComputationOrigin;
+                    if (self.speculative == null and self.registry.isPrivate(callee) and
+                        !hasSite(self.registry.private_lambdas.items, owner, id, callee))
+                        return error.PrivateFunctionBypass;
+                    try self.push(.function, callee, callee);
+                }
                 try self.values(op.operands, owner);
                 for (op.failures) |failure| {
                     if (failure.value >= self.module.constants.len) return error.InvalidSource;
@@ -553,12 +592,13 @@ const Walker = struct {
         try self.push(.value, value_id, owner);
         if (value_id >= self.module.values.len) return error.InvalidSource;
         const v = self.module.values[@intCast(value_id)];
-        if (self.speculative == null or v.expression == .lambda) return;
+        if (self.speculative == null or self.origins.function(v) != null) return;
         // Conservative source-origin closure for higher-order values. A row
         // alone cannot disclose effects hidden by a callee's local handlers.
         for (self.module.values) |origin| {
-            if (origin.schema == v.schema and origin.expression == .lambda)
-                try self.push(.function, origin.expression.lambda, origin.expression.lambda);
+            if (origin.schema != v.schema) continue;
+            if (self.origins.function(origin)) |function_id|
+                try self.push(.function, function_id, function_id);
         }
     }
 

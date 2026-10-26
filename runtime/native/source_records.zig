@@ -8,6 +8,11 @@ const values = @import("values.zig");
 
 pub const identity = "protean-horos-source-records/1";
 pub const Document = struct { version: u32, module: horos.source.Module };
+pub const IndexedDocument = struct {
+    version: u32,
+    module: horos.source.Module,
+    references: @import("kosmos").RuntimeCompiler.SourceReferences,
+};
 const Error = values.Error;
 
 pub const Owned = struct {
@@ -22,36 +27,55 @@ pub const Owned = struct {
 /// All fields are explicit, including nullable and defaulted native fields.
 /// Grammar depth follows record types, not algorithm recursion or record count.
 pub fn decode(a: std.mem.Allocator, bytes: []const u8) !Owned {
+    var decoded = try decodeRecord(Document, a, bytes);
+    errdefer decoded.deinit();
+    if (decoded.value.version != 1) return error.UnsupportedVersion;
+    return .{ .arena = decoded.arena, .module = decoded.value.module };
+}
+
+pub fn decodeRecord(
+    comptime T: type,
+    a: std.mem.Allocator,
+    bytes: []const u8,
+) !contracts.Decoded(T) {
     var arena = std.heap.ArenaAllocator.init(a);
     errdefer arena.deinit();
     const scratch = arena.allocator();
     var parsed = try json.parse(scratch, bytes, .{
         .bytes = bytes.len,
-        .depth = comptime depth(Document),
+        .depth = comptime depth(T),
         .tokens = bytes.len,
         .members = bytes.len,
     });
     defer parsed.deinit();
-    const document = try fromJson(Document, scratch, parsed.value);
-    if (document.version != 1) return error.UnsupportedVersion;
-    return .{ .arena = arena, .module = document.module };
+    const value = try fromJson(T, scratch, parsed.value);
+    return .{ .arena = arena, .value = value };
 }
 
 pub fn encode(a: std.mem.Allocator, module: horos.source.Module) ![]u8 {
+    return encodeRecord(Document, a, .{ .version = 1, .module = module });
+}
+
+pub fn encodeRecord(comptime T: type, a: std.mem.Allocator, value: T) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    return json.canonical(a, try toJson(Document, arena.allocator(), .{ .version = 1, .module = module }));
+    return json.canonical(a, try toJson(T, arena.allocator(), value));
 }
 
 pub fn describe(a: std.mem.Allocator) ![]u8 {
+    return describeRecord(Document, a);
+}
+
+pub fn describeRecord(comptime T: type, a: std.mem.Allocator) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    return json.canonical(a, try schema(Document, arena.allocator()));
+    return json.canonical(a, try schema(T, arena.allocator()));
 }
 
 fn depth(comptime T: type) usize {
     return switch (@typeInfo(T)) {
         .optional => |info| depth(info.child),
+        .array => |info| 1 + depth(info.child),
         .pointer => |info| if (info.child == u8) 0 else 1 + depth(info.child),
         inline .@"struct", .@"union" => |info| blk: {
             var maximum: usize = 0;
@@ -73,6 +97,13 @@ fn fromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
             if (value != .array) return error.InvalidParams;
             const result = try a.alloc(info.child, value.array.items.len);
             for (result, value.array.items) |*slot, child| slot.* = try fromJson(info.child, a, child);
+            break :blk result;
+        },
+        .array => |info| blk: {
+            if (value != .array or value.array.items.len != info.len) return error.InvalidParams;
+            var result: T = undefined;
+            for (&result, value.array.items) |*slot, child|
+                slot.* = try fromJson(info.child, a, child);
             break :blk result;
         },
         .@"struct" => |info| blk: {
@@ -100,6 +131,117 @@ pub fn project(comptime T: type, a: std.mem.Allocator, value: T) std.mem.Allocat
     return toJson(T, a, value);
 }
 
+pub fn pageRecord(
+    comptime T: type,
+    a: std.mem.Allocator,
+    value: T,
+    requested: contracts.workspace.Page,
+) !json.Value {
+    var range = try @import("workspace_projection.zig").Range.init(a, requested);
+    defer range.deinit(a);
+    try appendRecord(T, &range, value);
+    return range.finish(a);
+}
+
+fn appendRecord(
+    comptime T: type,
+    range: *@import("workspace_projection.zig").Range,
+    value: T,
+) anyerror!void {
+    switch (@typeInfo(T)) {
+        .void => try range.append("{}"),
+        .bool => try range.append(if (value) "true" else "false"),
+        .int => |info| {
+            var buffer: [64]u8 = undefined;
+            if (info.bits == 64) try range.append("\"");
+            try range.append(try std.fmt.bufPrint(&buffer, "{d}", .{value}));
+            if (info.bits == 64) try range.append("\"");
+        },
+        .@"enum" => try appendName(range, @tagName(value)),
+        .optional => |info| if (value) |child|
+            try appendRecord(info.child, range, child)
+        else
+            try range.append("null"),
+        .pointer => |info| {
+            if (info.child == u8) return appendBytes(range, value);
+            try appendSequence(info.child, range, value);
+        },
+        .array => |info| try appendSequence(info.child, range, &value),
+        .@"struct" => |info| {
+            try range.append("{");
+            inline for (comptime sortedNames(T), 0..) |name, index| {
+                if (index != 0) try range.append(",");
+                try appendName(range, name);
+                try range.append(":");
+                try appendRecord(@FieldType(T, name), range, @field(value, name));
+            }
+            _ = info;
+            try range.append("}");
+        },
+        .@"union" => |info| {
+            try range.append("{\"tag\":");
+            try appendName(range, @tagName(value));
+            try range.append(",\"value\":");
+            inline for (info.field_names, info.field_types) |name, Child| {
+                if (std.mem.eql(u8, @tagName(value), name))
+                    try appendRecord(Child, range, @field(value, name));
+            }
+            try range.append("}");
+        },
+        else => @compileError("unsupported source-record field: " ++ @typeName(T)),
+    }
+}
+
+fn sortedNames(comptime T: type) [@typeInfo(T).@"struct".field_names.len][]const u8 {
+    var names: [@typeInfo(T).@"struct".field_names.len][]const u8 = undefined;
+    for (@typeInfo(T).@"struct".field_names, 0..) |name, index| names[index] = name;
+    for (@min(1, names.len)..names.len) |end| {
+        var index = end;
+        while (index > 0 and std.mem.order(u8, names[index], names[index - 1]) == .lt) {
+            std.mem.swap([]const u8, &names[index], &names[index - 1]);
+            index -= 1;
+        }
+    }
+    return names;
+}
+
+fn appendName(range: *@import("workspace_projection.zig").Range, name: []const u8) !void {
+    try range.append("\"");
+    for (name) |byte| {
+        if (byte == '"' or byte == '\\') try range.append("\\");
+        try range.append(&.{byte});
+    }
+    try range.append("\"");
+}
+
+fn appendSequence(
+    comptime T: type,
+    range: *@import("workspace_projection.zig").Range,
+    value: []const T,
+) !void {
+    try range.append("[");
+    for (value, 0..) |child, index| {
+        if (index != 0) try range.append(",");
+        try appendRecord(T, range, child);
+    }
+    try range.append("]");
+}
+
+fn appendBytes(range: *@import("workspace_projection.zig").Range, value: []const u8) !void {
+    try range.append("\"");
+    var offset: usize = 0;
+    var buffer: [4096]u8 = undefined;
+    while (offset < value.len) {
+        const count = @min(3072, value.len - offset);
+        try range.append(std.base64.url_safe_no_pad.Encoder.encode(
+            &buffer,
+            value[offset..][0..count],
+        ));
+        offset += count;
+    }
+    try range.append("\"");
+}
+
 fn toJson(comptime T: type, a: std.mem.Allocator, value: T) std.mem.Allocator.Error!json.Value {
     return switch (@typeInfo(T)) {
         .void, .bool, .int, .@"enum" => values.toJson(T, a, value),
@@ -107,6 +249,11 @@ fn toJson(comptime T: type, a: std.mem.Allocator, value: T) std.mem.Allocator.Er
         .pointer => |info| blk: {
             comptime if (info.size != .slice or !info.attrs.@"const") @compileError("source transport only admits immutable slices");
             if (info.child == u8) break :blk try values.toJson(contracts.Bytes(null), a, .{ .bytes = value });
+            var array: std.array_list.Managed(json.Value) = .init(a);
+            for (value) |child| try array.append(try toJson(info.child, a, child));
+            break :blk .{ .array = array };
+        },
+        .array => |info| blk: {
             var array: std.array_list.Managed(json.Value) = .init(a);
             for (value) |child| try array.append(try toJson(info.child, a, child));
             break :blk .{ .array = array };
@@ -175,6 +322,13 @@ fn schema(comptime T: type, a: std.mem.Allocator) std.mem.Allocator.Error!json.V
             try json.put(a, &result, "items", try schema(info.child, a));
             return result;
         },
+        .array => |info| {
+            var result = try typed(a, "array");
+            try json.put(a, &result, "items", try schema(info.child, a));
+            try json.put(a, &result, "minItems", try json.number(a, info.len));
+            try json.put(a, &result, "maxItems", try json.number(a, info.len));
+            return result;
+        },
         .void, .@"struct" => {
             var result = try typed(a, "object");
             var properties = json.object();
@@ -226,10 +380,59 @@ test "source-record projection owns decoded memory and derives its schema from t
     const expected = try encode(a, original);
     defer a.free(expected);
     try std.testing.expectEqualStrings(expected, again);
+    for ([_]u32{ 1, 37, 4096 }) |maximum| {
+        var offset: u64 = 0;
+        while (offset < expected.len) {
+            var page_arena = std.heap.ArenaAllocator.init(a);
+            defer page_arena.deinit();
+            const scratch = page_arena.allocator();
+            const request: contracts.workspace.Page = .{
+                .offset = offset,
+                .maximum = maximum,
+            };
+            const selected = try pageRecord(Document, scratch, .{
+                .version = 1,
+                .module = original,
+            }, request);
+            const full = try @import("workspace_projection.zig").page(scratch, expected, request);
+            try std.testing.expectEqualStrings(
+                try json.canonical(scratch, full),
+                try json.canonical(scratch, selected),
+            );
+            offset += selected.object.get("text").?.string.len;
+        }
+    }
     const description = try describe(a);
     defer a.free(description);
     var parsed = try json.parseAsset(a, description, description.len);
     defer parsed.deinit();
     const module_properties = parsed.value.object.get("properties").?.object.get("module").?.object.get("properties").?;
     inline for (@typeInfo(horos.source.Module).@"struct".field_names) |name| try std.testing.expect(module_properties.object.contains(name));
+    const descriptor = try values.schemaBytes(Document, a);
+    defer a.free(descriptor);
+    var schema_value = try @import("horos_data").schema.decode(a, descriptor);
+    defer schema_value.deinit();
+    const encoded_value = try contracts.encodeOwned(Document, a, .{ .version = 1, .module = original });
+    defer a.free(encoded_value);
+    try @import("horos_data").schema.validateValue(a, schema_value.descriptor, encoded_value);
+    var document = try contracts.decodeOwned(Document, a, encoded_value);
+    defer document.deinit();
+    const projected = try encode(a, document.value.module);
+    defer a.free(projected);
+    try std.testing.expectEqualStrings(expected, projected);
+    const Record = struct { bytes: []const u8, digest: [32]u8 };
+    const record: Record = .{ .bytes = &@as([24577]u8, @splat(255)), .digest = @splat(17) };
+    const full_record = try encodeRecord(Record, a, record);
+    defer a.free(full_record);
+    const record_request: contracts.workspace.Page = .{ .offset = 4093, .maximum = 128 };
+    var storage: [4096]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    const bounded = try pageRecord(Record, fixed.allocator(), record, record_request);
+    try std.testing.expectEqualStrings(
+        full_record[4093..][0..128],
+        bounded.object.get("text").?.string,
+    );
+    var record_decoded = try decodeRecord(Record, a, full_record);
+    defer record_decoded.deinit();
+    try std.testing.expectEqualDeep(record, record_decoded.value);
 }

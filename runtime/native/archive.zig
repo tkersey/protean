@@ -276,6 +276,9 @@ const Collector = struct {
     pub fn reply(self: *Collector, value: occurrence.Acquired) !void {
         try self.add(try self.store.objectReference(value.reply, null));
     }
+    pub fn observerSource(self: *Collector, ref: state.Reference) !void {
+        try state.visitObserverSource(self.allocator, self.store, ref, self);
+    }
 };
 
 pub const Inspected = struct { task: contracts.Decoded(state.Task), objects: []state.Reference, current: ?occurrence.Occurrence };
@@ -308,6 +311,7 @@ fn admissionMethod(kind: state.EventType) ?state.Method {
         .workspace_progress,
         .workspace_read,
         .controller,
+        .execution,
         .input_required,
         .message_consumed,
         .message_not_consumed,
@@ -457,6 +461,10 @@ fn validateEventFacts(store: *storage.Store, archive: state.Archive, task: state
             return null;
         },
         .workspace_progress, .workspace_read, .accepted, .cancellation_requested, .resumed => return null,
+        .execution => {
+            if (admission != null) return error.InvalidArchive;
+            return null;
+        },
         // These may precede later progress and have no retained receipt or
         // immutable record of the historical schedule/blocker. Their shape and
         // journal range remain checked; current state cannot refute old state.
@@ -664,6 +672,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
     defer questions.deinit();
     var settlements = RecordEvents.init(a);
     defer settlements.deinit();
+    var root_history: state.RootHistory = .init(value);
     for (archive.events.items) |row| {
         if (row.seq != next or row.revision == 0 or row.revision < revision or row.revision > value.revision) return error.CorruptState;
         try collector.add(row.body);
@@ -672,7 +681,8 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         var decoded = try contracts.decodeOwned(state.Event, store.allocator, bytes);
         defer decoded.deinit();
         try collector.visit(state.Event, decoded.value);
-        try state.visitWorkspaceCommand(a, store, decoded.value, &collector);
+        try root_history.observe(decoded.value);
+        try state.visitWorkspaceEvent(a, store, row.body, decoded.value, &collector);
         if (!same(&decoded.value.task, &value.id) or decoded.value.seq != row.seq or decoded.value.revision != row.revision) return error.CorruptState;
         try @import("schemas.zig").validateEventData(store.allocator, decoded.value.kind, decoded.value.data.bytes);
         const identity = try validateEventFacts(store, archive, value, &admissions, decoded.value);
@@ -732,6 +742,7 @@ pub fn inspect(a: std.mem.Allocator, store: *storage.Store, archive: state.Archi
         revision = row.revision;
     }
     if (next - 1 != value.event_high) return error.CorruptState;
+    try root_history.finish(value);
     // Supplied events must agree with their facts, and facts whose events are
     // known to be retained must be represented. Prefix pruning may cut through
     // a revision, so only later revisions are certain when the floor is >1.

@@ -39,6 +39,8 @@ pub const Compatibility = struct {
     bridge: Digest,
     semantics: Digest,
     private_state: Digest,
+    semantic_root: ?Digest = null,
+    semantic_checker: ?Digest = null,
 };
 /// A signed observation may name an object that exists only at another site.
 /// Its identity is not a local retention edge or authority to import that object.
@@ -116,9 +118,11 @@ pub const WorkState = struct {
     cancellation: ?state.Reason,
     explicitly_parked: bool = false,
     park_complete: bool = false,
+    observer_active: bool = false,
 
     pub fn parkSettled(self: WorkState) bool {
-        return self.cancellation == null and self.explicitly_parked and self.park_complete;
+        return !self.observer_active and self.cancellation == null and
+            self.explicitly_parked and self.park_complete;
     }
 };
 pub const Report = struct {
@@ -298,9 +302,9 @@ pub fn controlId(control: Control) Digest {
 pub fn commandWork(command: contracts.workspace.Work) !contracts.workspace.Ref {
     return switch (command) {
         .inspect => |value| value.work,
-        .advance, .park => |value| value.work,
-        inline .pump, .delegate, .interact, .cancel, .realize, .request_cut => |value| value.expected.work,
-        .start, .wait, .collect => error.InvalidRemoteCommand,
+        .advance, .park, .stop_observing => |value| value.work,
+        inline .pump, .delegate, .interact, .cancel, .realize, .request_cut, .guard, .unguard => |value| value.expected.work,
+        .start, .observe, .wait, .collect, .realize_controller => error.InvalidRemoteCommand,
     };
 }
 pub const Custody = struct {

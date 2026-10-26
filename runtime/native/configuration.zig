@@ -2,6 +2,12 @@
 //! task data; credentials and compiled adapter handles remain process-local.
 const std = @import("std");
 const c = @import("native_c");
+const json = @import("json.zig");
+pub const SemanticPolicy = struct {
+    roots: []const [32]u8,
+    checkers: []const []const u8,
+    guard: bool = false,
+};
 pub const Options = struct {
     offline: bool,
     /// Reclaimable temporary allocations, separate from the profile arena.
@@ -16,7 +22,65 @@ pub const Admitted = struct {
     bytes: []const u8,
     resources: []const []const u8 = &.{},
     environment: ?*anyopaque = null,
+    semantic_construction: ?SemanticPolicy = null,
 };
+
+pub fn semanticPolicy(a: std.mem.Allocator, value: json.Value) !?SemanticPolicy {
+    if (value == .null) return null;
+    try @import("protocol.zig").closed(value, .{ .required = &.{ "roots", "checkers", "guard" } });
+    const roots = value.object.get("roots").?;
+    const checkers = value.object.get("checkers").?;
+    const guard = value.object.get("guard").?;
+    if (roots != .array or checkers != .array or guard != .bool or
+        roots.array.items.len == 0 or checkers.array.items.len == 0)
+        return error.InvalidConfiguration;
+    const root_ids = try a.alloc([32]u8, roots.array.items.len);
+    errdefer a.free(root_ids);
+    for (roots.array.items, root_ids, 0..) |text, *id, index| {
+        const bytes = try json.text(text);
+        if (bytes.len != 64) return error.InvalidConfiguration;
+        _ = std.fmt.hexToBytes(id, bytes) catch return error.InvalidConfiguration;
+        if (!std.mem.eql(u8, bytes, &std.fmt.bytesToHex(id.*, .lower)))
+            return error.InvalidConfiguration;
+        for (root_ids[0..index]) |prior|
+            if (std.meta.eql(prior, id.*)) return error.InvalidConfiguration;
+    }
+    const names = try a.alloc([]const u8, checkers.array.items.len);
+    errdefer a.free(names);
+    for (checkers.array.items, names, 0..) |text, *name, index| {
+        name.* = try json.text(text);
+        if (name.*.len == 0 or name.*.len > 128) return error.InvalidConfiguration;
+        for (name.*) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidConfiguration;
+        for (names[0..index]) |prior|
+            if (std.mem.eql(u8, prior, name.*)) return error.InvalidConfiguration;
+    }
+    return .{ .roots = root_ids, .checkers = names, .guard = guard.bool };
+}
+
+test "semantic policy admits only explicit exact roots and checkers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = @as([32]u8, @splat(23));
+    const document = try std.fmt.allocPrint(
+        a,
+        "{{\"roots\":[\"{s}\"],\"checkers\":[\"operator-selected-checker\"],\"guard\":true}}",
+        .{std.fmt.bytesToHex(root, .lower)},
+    );
+    var parsed = try json.parse(a, document, .{});
+    defer parsed.deinit();
+    const admitted = (try semanticPolicy(a, parsed.value)).?;
+    try std.testing.expectEqualDeep(root, admitted.roots[0]);
+    try std.testing.expectEqualStrings("operator-selected-checker", admitted.checkers[0]);
+    try std.testing.expect(admitted.guard);
+    try std.testing.expect((try semanticPolicy(a, .null)) == null);
+    const duplicate = parsed.value.object.get("roots").?.array.items[0];
+    try parsed.value.object.getPtr("roots").?.array.append(duplicate);
+    try std.testing.expectError(error.InvalidConfiguration, semanticPolicy(a, parsed.value));
+    _ = parsed.value.object.getPtr("roots").?.array.pop();
+    try parsed.value.object.getPtr("checkers").?.array.append(json.string("operator-selected-checker"));
+    try std.testing.expectError(error.InvalidConfiguration, semanticPolicy(a, parsed.value));
+}
 
 /// Explicit files only. Refuse symlinks and nonregular entries; secret
 /// inputs additionally require the current user's private file permissions.
