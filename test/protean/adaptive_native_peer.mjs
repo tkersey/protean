@@ -113,7 +113,7 @@ export function verifyCandidateMetrics(measuredBytes, application) {
     header.write('ABL_ERS3');
     header.writeBigUInt64LE(BigInt(payload.length), 12);
     const bound = store(Buffer.concat([header, payload]));
-    archive.manifest[6].push([5, id, record('attempt', [id, task, id, code, code, 'fixture.workspace', false, none, 1, none, none])],
+    archive.manifest[6].push([5, id, record('attempt', [id, task, id, code, code, 'fixture.workspace', false, none, 1, none, none, none])],
       [4, id, record('capture', [task, id, id, code, none, 0, some([bound, [], none]), none])]);
   }
   const captured = workspaceMetrics(archive, application);
