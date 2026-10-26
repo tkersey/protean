@@ -95,6 +95,13 @@ or oversized snapshots. OS, architecture, compiler version, lane and locked
 inputs remain part of the cache key. Setup-Zig's destructive automatic cache
 post-hook stays disabled.
 
+Local workspace checks compile each test root once and execute its existing
+independent qualification groups concurrently in fresh processes. Every test in
+the executable must belong to exactly one group. The standard Zig test runner
+still checks each test's result, logged errors and allocator leaks; skipped or
+interrupted tests leave qualification incomplete. Explicit group selection keeps
+the same compile-filtered execution used by the Linux lanes.
+
 Transport archives are cached separately **per lane and dependency lock**.
 Authoring can publish a Horos-only archive cache without occupying the native
 job's cache key. Native setup verifies every restored archive/source/package;

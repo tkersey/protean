@@ -50,6 +50,7 @@ test {
     _ = @import("host.zig");
     _ = @import("driver.zig");
     _ = @import("workspace_build.zig");
+    _ = @import("guest_segment_proofs.zig");
 }
 
 // Private history internals are exposed only to the repository's test graph.

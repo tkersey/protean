@@ -30,14 +30,31 @@ const Graph = struct {
         return g.testModuleFiltered(step, module_value, &.{});
     }
     fn testModuleFiltered(g: Graph, step: *std.Build.Step, module_value: *std.Build.Module, filters: []const []const u8) *std.Build.Step.Compile {
+        const tests = g.compileTests(module_value, filters);
+        const run = g.b.addRunArtifact(tests);
+        run.has_side_effects = true;
+        step.dependOn(&run.step);
+        return tests;
+    }
+    fn compileTests(g: Graph, module_value: *std.Build.Module, filters: []const []const u8) *std.Build.Step.Compile {
         const tests = g.b.addTest(.{
             .root_module = module_value,
             .filters = filters,
             .use_llvm = if (g.b.graph.host.result.os.tag == .linux and g.b.graph.host.result.cpu.arch == .x86_64) g.optimize != .debug else null,
         });
         tests.step.dependOn(g.gate);
-        const run = g.b.addRunArtifact(tests);
+        return tests;
+    }
+    fn testModuleGrouped(g: Graph, step: *std.Build.Step, module_value: *std.Build.Module, groups: []const []const []const u8, selected: ?usize) *std.Build.Step.Compile {
+        if (selected) |index| return g.testModuleFiltered(step, module_value, groups[index]);
+        const tests = g.compileTests(module_value, &.{});
+        const run = nodeCommand(g.b);
+        run.addArg("node");
+        run.addFileArg2(g.b.path("tools/native/qualification_tests.mjs"), .{});
+        run.addArtifactArg(tests);
+        run.addArg(std.json.Stringify.valueAlloc(g.b.allocator, groups, .{}) catch @panic("out of memory"));
         run.has_side_effects = true;
+        run.expectExitCode(0);
         step.dependOn(&run.step);
         return tests;
     }
@@ -351,11 +368,11 @@ pub fn build(b: *std.Build) void {
         const workspace_checks = b.step("check-workspace-programs", "Execute general source-record programs through native Kosmos");
         const workspace_general = b.step("check-workspace-general", "Qualify workspace execution, inputs and provenance");
         const workspace_group = b.option(enum { execution, retention, history }, "workspace-group", "Select independent workspace qualification cases (default: all)");
-        const workspace_general_tests = native_graph.testModuleFiltered(workspace_general, workspace_programs, if (workspace_group) |group| switch (group) {
-            .execution => &.{ "BUILD-", "WORK-C", "WORK-06", "WORK-08", "exposure carries", "workspace commands", "CTX-01", "deep recursive workspace" },
-            .retention => &.{ "WORK-01", "AUT-07", "OWN-02" },
-            .history => &.{ "collected history", "WORK-14", "delegated model interpretation" },
-        } else &.{});
+        const workspace_general_tests = native_graph.testModuleGrouped(workspace_general, workspace_programs, &.{
+            &.{ "BUILD-", "WORK-C", "WORK-06", "WORK-08", "exposure carries", "workspace commands", "CTX-01", "deep recursive workspace" },
+            &.{ "WORK-01", "AUT-07", "OWN-02" },
+            &.{ "collected history", "WORK-14", "delegated model interpretation" },
+        }, if (workspace_group) |group| @backingInt(group) else null);
         b.step("build-workspace-general-check", "Build the retained workspace test executable")
             .dependOn(&b.addInstallArtifact(workspace_general_tests, .{
             .dest_dir = .{ .override = .{ .custom = "verification" } },
@@ -367,19 +384,19 @@ pub fn build(b: *std.Build) void {
         workspace_runtime_module.addImport("protean_native", checked_environment);
         const workspace_runtime_checks = b.step("check-workspace-runtime", "Qualify runtime selection and bilateral workspace custody");
         const runtime_workspace_group = b.option(enum { selection, custody, succession }, "runtime-workspace-group", "Select independent runtime workspace qualification cases (default: all)");
-        const workspace_runtime_tests = native_graph.testModuleFiltered(workspace_runtime_checks, workspace_runtime_module, if (runtime_workspace_group) |group| switch (group) {
-            .selection => &.{ "runtime selection", "terminal parent cancellation", "scheduler bounds" },
-            .custody => &.{
+        const workspace_runtime_tests = native_graph.testModuleGrouped(workspace_runtime_checks, workspace_runtime_module, &.{
+            &.{ "runtime selection", "terminal parent cancellation", "scheduler bounds" },
+            &.{
                 "native placement carries a suspended evaluator with exclusive per-work custody",
             },
-            .succession => &.{
+            &.{
                 "delayed controls",
                 "controller succession precedes",
                 "controller succession preserves",
                 "native placement carries the current cut",
                 "frozen controller",
             },
-        } else &.{});
+        }, if (runtime_workspace_group) |group| @backingInt(group) else null);
         b.step("build-workspace-runtime-check", "Build the retained runtime workspace test executable")
             .dependOn(&b.addInstallArtifact(workspace_runtime_tests, .{
             .dest_dir = .{ .override = .{ .custom = "verification" } },
@@ -623,7 +640,7 @@ pub fn build(b: *std.Build) void {
         scheduler_benchmark.dependOn(&missing.step);
     }
     const pure = nodeCommand(b);
-    pure.addArgs(&.{ "node", "--test", "test/protean/values.test.mjs" });
+    pure.addArgs(&.{ "node", "--test", "test/protean/values.test.mjs", "test/protean/qualification_tests.test.mjs" });
     pure.has_side_effects = true;
     check.dependOn(&pure.step);
     aggregate.dependOn(check);

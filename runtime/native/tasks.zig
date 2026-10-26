@@ -21,29 +21,7 @@ const wc = contracts.workspace;
 const construction = @import("program_construction.zig");
 const archive_api = @import("archive.zig");
 
-const GuestSegmentProofs = struct {
-    mutex: std.atomic.Mutex = .unlocked,
-    keys: [1024]?state.Digest = @splat(null),
-
-    fn contains(self: *@This(), key: state.Digest) bool {
-        if (!self.mutex.tryLock()) return false;
-        defer self.mutex.unlock();
-        const existing = self.keys[index(key)] orelse return false;
-        return std.meta.eql(existing, key);
-    }
-
-    fn retain(self: *@This(), key: state.Digest) void {
-        if (!self.mutex.tryLock()) return;
-        defer self.mutex.unlock();
-        self.keys[index(key)] = key;
-    }
-
-    fn index(key: state.Digest) usize {
-        return std.mem.readInt(u16, key[0..2], .little) % 1024;
-    }
-};
-
-var guest_segment_proofs: GuestSegmentProofs = .{};
+var guest_segment_proofs: @import("guest_segment_proofs.zig") = .{};
 
 /// Terminal execution and settled cleanup are distinct Kosmos observations.
 pub fn cleanupComplete(outcome: data.invocation.Outcome) bool {

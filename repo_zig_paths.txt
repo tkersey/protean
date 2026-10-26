@@ -23,6 +23,7 @@ runtime/native/discovery.zig
 runtime/native/driver.zig
 runtime/native/dynamic_values.zig
 runtime/native/entry.zig
+runtime/native/guest_segment_proofs.zig
 runtime/native/hash.zig
 runtime/native/hash_abi.zig
 runtime/native/host.zig
