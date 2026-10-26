@@ -9767,7 +9767,7 @@ pub fn Service(comptime Types: type) type {
             const actual_bytes = try contracts.encodeOwned(workspace.ControlObservation, a, actual);
             defer a.free(actual_bytes);
             if (!same(expected_bytes, actual_bytes)) return error.InvalidArchive;
-            try self.validateWorkspaceGuestWork(parent.id, item, prior, prefix);
+            try self.validateWorkspaceGuestWork(parent.id, item, prior, command, prefix);
         }
 
         fn validateWorkspaceGuestWork(
@@ -9775,6 +9775,7 @@ pub fn Service(comptime Types: type) type {
             task_id: state.TaskId,
             item: state.WorkPublication,
             prior: ?state.WorkPublication,
+            command: ?workspace.PublicationCommand,
             prefix: *const @import("workspace_observers.zig").PublicationPrefix,
         ) !void {
             const advanced = if (prior) |before| item.execution_revision != before.execution_revision else true;
@@ -9807,6 +9808,10 @@ pub fn Service(comptime Types: type) type {
                 if (!try samePublication(a, before, try workPublication(a, initial.value)))
                     return error.InvalidArchive;
                 const cancellation = item.control.cancellation;
+                const cancel_requested = if (command) |selected|
+                    selected == .control and selected.control.command == .cancel
+                else
+                    false;
                 if (before.control.delivery == .settled_reply) {
                     try self.validateHistoricalOccurrence(a, initial.value);
                     const acquired = initial.value.occurrence orelse return error.InvalidArchive;
@@ -9817,7 +9822,9 @@ pub fn Service(comptime Types: type) type {
                     };
                     control = .{ .reply = try self.store().acquiredObject(a, reply, null) };
                     if (cancellation != null and !before.control.cancellation_applied) quantum = 0;
-                } else if (cancellation != null and !before.control.cancellation_applied) {
+                } else if (cancellation != null and
+                    (!before.control.cancellation_applied or cancel_requested))
+                {
                     control = .{ .cancel = .{ .text = cancellation.?.bytes } };
                 } else if (before.control.outcome == .yielded) control = .resume_yield;
                 if (initial.value.work.outer_operation) |operation_value| {

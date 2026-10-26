@@ -3165,6 +3165,7 @@ fn expectInstrumentAnswerBound(service: anytype, a: std.mem.Allocator, child: na
             forged.checkpoint = try store.putObject(checkpoint.bytes());
             forged.outcome = try store.putObject(published.outcome.encoded);
             forged.result = try store.putObject(completed.value.completed);
+            forged.guest_work = published.guest_work;
         }
         var result = original_result.value;
         result.description.value = forged.result.?;
@@ -3185,9 +3186,15 @@ fn expectInstrumentAnswerBound(service: anytype, a: std.mem.Allocator, child: na
         try std.testing.expect(try events.step() == .row);
         var event_value = (try contracts.decodeOwned(native.testing.state.Event, a, try events.bytes(0))).value;
         const publications = try a.dupe(native.testing.state.WorkPublication, event_value.workspace_publications.items);
-        const observation = try contracts.encodeOwned(native.workspace.WorkObservation, a, .{ .work = forged, .occurrence = null });
+        const observation = try store.putObject(try contracts.encodeOwned(
+            native.workspace.WorkObservation,
+            a,
+            .{ .work = forged, .occurrence = null },
+        ));
         for (publications) |*item| if (std.meta.eql(item.work, child.id)) {
-            std.crypto.hash.sha2.Sha256.hash(observation, &item.observation, .{});
+            item.observation = observation.digest;
+            item.checkpoint = forged.checkpoint;
+            item.guest_work = forged.guest_work;
         };
         event_value.workspace_publications.items = publications;
         const event_ref = try store.putObject(try contracts.encodeOwned(native.testing.state.Event, a, event_value));
