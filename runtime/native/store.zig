@@ -195,7 +195,7 @@ pub const Store = struct {
 
     pub fn deinit(self: *Store) void {
         self.context_cache.deinit(self.allocator);
-        self.guest_segments.deinit(self.allocator);
+        self.guest_segments.clearAndFree(self.allocator);
     }
 
     /// Run a pure projection under one read snapshot, releasing it before the
