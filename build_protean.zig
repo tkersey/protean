@@ -547,11 +547,13 @@ pub fn build(b: *std.Build) void {
                 _ = suite.import_table.swapRemove("adaptive_application");
             }
             const checks = b.step("check-native-owner-" ++ group[0], "Qualify native " ++ group[0] ++ " contracts");
-            const filters: []const []const u8 = if (comptime std.mem.eql(u8, group[0], "adaptive")) if (adaptive_group) |selected| switch (selected) {
-                .capture => &.{ "adaptive copied capture", "adaptive report correction" },
-                .control => &.{ "authored inference", "authored skill", "authored report", "report model arguments", "compiled catalog", "adaptive snapshot", "adaptive provider", "adaptive malformed", "adaptive workspace" },
-            } else &.{} else &.{};
-            const tests = native_graph.testModuleFiltered(checks, suite, filters);
+            const tests = if (comptime std.mem.eql(u8, group[0], "adaptive"))
+                native_graph.testModuleGrouped(checks, suite, &.{
+                    &.{ "adaptive copied capture", "adaptive report correction" },
+                    &.{ "authored inference", "authored skill", "authored report", "report model arguments", "compiled catalog", "adaptive snapshot", "adaptive provider", "adaptive malformed", "adaptive workspace" },
+                }, if (adaptive_group) |selected| @backingInt(selected) else null)
+            else
+                native_graph.testModule(checks, suite);
             if (comptime std.mem.eql(u8, group[0], "tasks")) {
                 if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64)
                     tests.use_llvm = false;

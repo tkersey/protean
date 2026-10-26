@@ -95,7 +95,7 @@ or oversized snapshots. OS, architecture, compiler version, lane and locked
 inputs remain part of the cache key. Setup-Zig's destructive automatic cache
 post-hook stays disabled.
 
-Local workspace checks compile each test root once and execute its existing
+Local workspace and adaptive checks compile each test root once and execute its existing
 independent qualification groups concurrently in fresh processes. Every test in
 the executable must belong to exactly one group. The standard Zig test runner
 still checks each test's result, logged errors and allocator leaks; skipped or
