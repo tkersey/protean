@@ -4,6 +4,13 @@ const std = @import("std");
 const kosmos = @import("kosmos");
 const data = @import("horos_data");
 
+const SegmentOrigin = struct {
+    input: kosmos.RuntimeCapsule.Reference,
+    image: kosmos.RuntimeCapsule.Reference,
+    runtime: [32]u8,
+    initial: bool,
+};
+
 const Storage = struct {
     parent: std.mem.Allocator,
     program: *Program,
@@ -13,11 +20,13 @@ const Storage = struct {
     checkpoint: ?*kosmos.Checkpoint,
     capsule: ?*kosmos.CapsuleReceipt,
     capsule_provenance: ?kosmos.RuntimeCapsule.Provenance,
+    segment_origin: ?SegmentOrigin,
 };
 
 const ProgramStorage = struct {
     parent: std.mem.Allocator,
     prepared: kosmos.Prepared,
+    image: kosmos.RuntimeCapsule.Reference,
     residents: usize = 0,
 };
 
@@ -34,7 +43,7 @@ pub const Program = opaque {
     pub fn openSelected(a: std.mem.Allocator, image: []const u8, runtime: ?*const kosmos.RuntimeArtifact) !*Program {
         const owner = try a.create(ProgramStorage);
         errdefer a.destroy(owner);
-        owner.* = .{ .parent = a, .prepared = undefined };
+        owner.* = .{ .parent = a, .prepared = undefined, .image = kosmos.RuntimeCapsule.reference(image) };
         owner.prepared = if (runtime) |selected| try kosmos.Prepared.initWithRuntime(a, image, selected) else try kosmos.Prepared.init(a, image);
         return @ptrCast(owner);
     }
@@ -80,7 +89,7 @@ pub const Driver = opaque {
         errdefer program.close() catch unreachable;
         const owner = try a.create(Storage);
         errdefer a.destroy(owner);
-        owner.* = .{ .parent = a, .program = program, .own_program = true, .resident = try kosmos.Resident.restoreCapsule(a, &program.storage().prepared, bytes, verifier), .live = true, .checkpoint = null, .capsule = null, .capsule_provenance = envelope.value.record.provenance };
+        owner.* = .{ .parent = a, .program = program, .own_program = true, .resident = try kosmos.Resident.restoreCapsule(a, &program.storage().prepared, bytes, verifier), .live = true, .checkpoint = null, .capsule = null, .capsule_provenance = envelope.value.record.provenance, .segment_origin = null };
         program.storage().residents += 1;
         return @ptrCast(owner);
     }
@@ -108,6 +117,7 @@ pub const Driver = opaque {
     pub fn realize(self: *Driver, expected: kosmos.RuntimeCapsule.Binding, selected: *const kosmos.RuntimeArtifact, provenance: kosmos.RuntimeCapsule.Provenance, publisher: kosmos.RuntimeCapsule.SwitchOwner) !kosmos.RuntimeCapsule.SwitchDecision {
         const owner = self.storage();
         if (!owner.live) return error.InvalidState;
+        owner.segment_origin = null;
         const decision = try owner.resident.realize(expected, selected, provenance, publisher);
         if (decision == .committed) self.clearReceipt();
         return decision;
@@ -115,6 +125,7 @@ pub const Driver = opaque {
     pub fn resolveRealization(self: *Driver, publisher: kosmos.RuntimeCapsule.SwitchOwner) !kosmos.RuntimeCapsule.SwitchDecision {
         const owner = self.storage();
         if (!owner.live) return error.InvalidState;
+        owner.segment_origin = null;
         const decision = try owner.resident.resolveRealization(publisher);
         if (decision == .committed) self.clearReceipt();
         return decision;
@@ -131,6 +142,7 @@ pub const Driver = opaque {
     pub fn beginAdvance(self: *Driver, control: data.invocation.Control, guest_quantum: u64) !void {
         const owner = self.storage();
         if (!owner.live) return error.InvalidState;
+        owner.segment_origin = null;
         try owner.resident.beginAdvance(control, guest_quantum);
         self.clearReceipt();
     }
@@ -138,6 +150,7 @@ pub const Driver = opaque {
     pub fn pump(self: *Driver, base_quantum: u64) !kosmos.Session.Pump {
         const owner = self.storage();
         if (!owner.live) return error.InvalidState;
+        owner.segment_origin = null;
         const result = try owner.resident.pump(base_quantum);
         self.clearReceipt();
         return result;
@@ -171,8 +184,26 @@ pub const Driver = opaque {
         owner.checkpoint = null;
         owner.capsule = null;
         owner.capsule_provenance = null;
+        owner.segment_origin = .{
+            .input = kosmos.RuntimeCapsule.reference(switch (instance) {
+                .initial_args => |args| args,
+                .state => |state| state,
+            }),
+            .image = program.storage().image,
+            .runtime = prepared.runtime.identity,
+            .initial = instance == .initial_args,
+        };
         return @ptrCast(owner);
     }
+
+    pub const Segment = struct {
+        input: kosmos.RuntimeCapsule.Reference,
+        image: kosmos.RuntimeCapsule.Reference,
+        runtime: [32]u8,
+        initial: bool,
+        control: [32]u8,
+        quantum: u64,
+    };
 
     /// The outcome belongs to output. The checkpoint remains owned here until
     /// the next successful drive or retirement, including after storage fails.
@@ -181,16 +212,34 @@ pub const Driver = opaque {
         checkpoint: []const u8,
         trace: ?kosmos.RuntimeInstrumentation.Output = null,
         guest_work: u64 = 0,
+        segment: ?Segment = null,
     };
 
     pub fn drive(self: *Driver, output: std.mem.Allocator, control: data.invocation.Control, quantum: u64) !Publication {
         const owner = self.storage();
         if (!owner.live) return error.InvalidState;
+        const segment: ?Segment = if (owner.segment_origin) |origin| blk: {
+            var hash = std.crypto.hash.sha2.Sha256.init(.{});
+            var writer: data.wire.Writer = .{ .hasher = &hash };
+            try data.record.writeAlloc(data.invocation.Control, owner.parent, control, &writer);
+            break :blk .{
+                .input = origin.input,
+                .image = origin.image,
+                .runtime = origin.runtime,
+                .initial = origin.initial,
+                .control = hash.finalResult(),
+                .quantum = quantum,
+            };
+        } else null;
         var published = try owner.resident.publish(.{ .encoded = output }, control, .{ .quantum = quantum, .checkpoint = .receipt });
         const checkpoint = published.takeCheckpoint().?;
         self.clearReceipt();
         owner.checkpoint = checkpoint;
-        return .{ .outcome = published.outcome.encoded, .checkpoint = checkpoint.bytes(), .trace = published.trace, .guest_work = published.guest_work };
+        if (owner.segment_origin) |*origin| {
+            origin.input = kosmos.RuntimeCapsule.reference(checkpoint.bytes());
+            origin.initial = false;
+        }
+        return .{ .outcome = published.outcome.encoded, .checkpoint = checkpoint.bytes(), .trace = published.trace, .guest_work = published.guest_work, .segment = segment };
     }
     pub fn close(self: *Driver) !void {
         const owner = self.storage();
@@ -250,6 +299,14 @@ test "driver retains one publication across output lifetime and failed drive the
         var frame = std.heap.ArenaAllocator.init(a);
         defer frame.deinit();
         const published = try driver.drive(frame.allocator(), .none, 256);
+        const segment = published.segment.?;
+        try std.testing.expectEqualDeep(kosmos.RuntimeCapsule.reference(&.{ 1, 42 }), segment.input);
+        try std.testing.expectEqualDeep(kosmos.RuntimeCapsule.reference(&image), segment.image);
+        try std.testing.expectEqual(driver.storage().program.storage().prepared.runtime.identity, segment.runtime);
+        try std.testing.expect(segment.initial);
+        try std.testing.expectEqual(@as(u64, 256), segment.quantum);
+        const encoded_control = try @import("protean_contracts").encodeOwned(data.invocation.Control, frame.allocator(), .none);
+        try std.testing.expectEqual(kosmos.RuntimeCapsule.reference(encoded_control).digest, segment.control);
         var outcome = try data.invocation.decode(data.invocation.Outcome, a, published.outcome);
         defer outcome.deinit();
         try std.testing.expect(outcome.value == .yielded);
@@ -260,9 +317,17 @@ test "driver retains one publication across output lifetime and failed drive the
     const receipt = driver.storage().checkpoint.?;
     try std.testing.expectEqualSlices(u8, checkpoint, receipt.bytes());
     var no_output = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    const origin = driver.storage().segment_origin.?;
     try std.testing.expectError(error.OutOfMemory, driver.drive(no_output.allocator(), .resume_yield, 256));
+    try std.testing.expectEqualDeep(origin, driver.storage().segment_origin.?);
     try std.testing.expectEqual(receipt, driver.storage().checkpoint.?);
     try std.testing.expectEqualSlices(u8, checkpoint, receipt.bytes());
+    const continued = try driver.drive(a, .none, 0);
+    defer a.free(continued.outcome);
+    try std.testing.expectEqualDeep(kosmos.RuntimeCapsule.reference(checkpoint), continued.segment.?.input);
+    try std.testing.expect(!continued.segment.?.initial);
+    try std.testing.expectEqual(@as(u64, 0), continued.segment.?.quantum);
+    try std.testing.expectEqualDeep(kosmos.RuntimeCapsule.reference(continued.checkpoint), driver.storage().segment_origin.?.input);
     const before = statistics.state_projections;
     failing.fail_index = failing.alloc_index;
     failing.resize_fail_index = failing.resize_index;
@@ -273,6 +338,11 @@ test "driver retains one publication across output lifetime and failed drive the
     defer restored.destroy() catch unreachable;
     const complete = try restored.drive(a, .resume_yield, 256);
     defer a.free(complete.outcome);
+    try std.testing.expectEqualDeep(kosmos.RuntimeCapsule.reference(checkpoint), complete.segment.?.input);
+    try std.testing.expect(!complete.segment.?.initial);
+    const encoded_control = try @import("protean_contracts").encodeOwned(data.invocation.Control, a, .resume_yield);
+    defer a.free(encoded_control);
+    try std.testing.expectEqual(kosmos.RuntimeCapsule.reference(encoded_control).digest, complete.segment.?.control);
     var outcome = try data.invocation.decode(data.invocation.Outcome, a, complete.outcome);
     defer outcome.deinit();
     try std.testing.expectEqualSlices(u8, &.{ 1, 42 }, outcome.value.completed);

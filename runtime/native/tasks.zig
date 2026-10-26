@@ -21,6 +21,30 @@ const wc = contracts.workspace;
 const construction = @import("program_construction.zig");
 const archive_api = @import("archive.zig");
 
+const GuestSegmentProofs = struct {
+    mutex: std.atomic.Mutex = .unlocked,
+    keys: [1024]?state.Digest = @splat(null),
+
+    fn contains(self: *@This(), key: state.Digest) bool {
+        if (!self.mutex.tryLock()) return false;
+        defer self.mutex.unlock();
+        const existing = self.keys[index(key)] orelse return false;
+        return std.meta.eql(existing, key);
+    }
+
+    fn retain(self: *@This(), key: state.Digest) void {
+        if (!self.mutex.tryLock()) return;
+        defer self.mutex.unlock();
+        self.keys[index(key)] = key;
+    }
+
+    fn index(key: state.Digest) usize {
+        return std.mem.readInt(u16, key[0..2], .little) % 1024;
+    }
+};
+
+var guest_segment_proofs: GuestSegmentProofs = .{};
+
 /// Terminal execution and settled cleanup are distinct Kosmos observations.
 pub fn cleanupComplete(outcome: data.invocation.Outcome) bool {
     return switch (outcome) {
@@ -9854,33 +9878,21 @@ pub fn Service(comptime Types: type) type {
             defer program.deinit();
             var packaged = try self.program.retainRuntime();
             defer packaged.deinit();
-            const segment_context = try contracts.encodeOwned(struct {
-                program: state.Reference,
-                runtime: state.Digest,
-                initial: bool,
-                control: contracts.Bytes(null),
-                quantum: u64,
-                guest_work: u64,
-                outcome: state.Reference,
-            }, a, .{
-                .program = program.value.artifact,
+            const input_reference = if (prior) |before| before.checkpoint.? else work.input;
+            const segment_fact = try guestSegmentFact(.{
+                .input = .{ .digest = input_reference.digest, .bytes = input_reference.bytes },
+                .image = .{
+                    .digest = program.value.description.image.digest,
+                    .bytes = program.value.description.image.bytes,
+                },
                 .runtime = if (work.runtime) |runtime| runtime.digest else packaged.identity,
                 .initial = prior == null,
-                .control = .{ .bytes = encoded_control },
+                .control = storage.digest(encoded_control),
                 .quantum = quantum,
-                .guest_work = item.guest_work,
-                .outcome = work.outcome,
-            });
-            const segment_fact: CompilerFact = .{
-                .kind = .guest_segment,
-                .input = if (prior) |before| before.checkpoint.? else work.input,
-                .output = work.checkpoint,
-                .context = storage.digest(segment_context),
-            };
+            }, work);
             var prepared = try self.inspectionRuntime(self.allocator, work);
             defer prepared.deinit();
-            const fact_bytes = try contracts.encodeOwned(CompilerFact, a, segment_fact);
-            const fact_key = storage.digest(fact_bytes);
+            const fact_key = try guestSegmentKey(segment_fact);
             if (try self.validatedGuestSegment(fact_key, segment_fact, work.outcome)) return;
             var execution = if (initial_checkpoint) |checkpoint|
                 try kosmos.Session.restore(self.allocator, &prepared, checkpoint)
@@ -9898,10 +9910,37 @@ pub fn Service(comptime Types: type) type {
                 finished.checkpoint.?.len != expected_checkpoint.bytes or
                 !std.meta.eql(storage.digest(outcome), work.outcome.digest) or outcome.len != work.outcome.bytes)
                 return error.InvalidArchive;
-            const store_value = self.store();
-            if (store_value.guest_segments.count() == 1024)
-                store_value.guest_segments.clearRetainingCapacity();
-            try store_value.guest_segments.put(store_value.allocator, fact_key, {});
+            guest_segment_proofs.retain(fact_key);
+        }
+
+        fn guestSegmentFact(
+            segment: evaluator.Driver.Segment,
+            work: workspace.Work,
+        ) !CompilerFact {
+            var hash = std.crypto.hash.sha2.Sha256.init(.{});
+            var writer: data.wire.Writer = .{ .hasher = &hash };
+            try data.record.write(struct {
+                execution: evaluator.Driver.Segment,
+                guest_work: u64,
+                outcome: state.Reference,
+            }, .{
+                .execution = segment,
+                .guest_work = work.guest_work,
+                .outcome = work.outcome,
+            }, &writer);
+            return .{
+                .kind = .guest_segment,
+                .input = .{ .digest = segment.input.digest, .bytes = segment.input.bytes },
+                .output = work.checkpoint,
+                .context = hash.finalResult(),
+            };
+        }
+
+        fn guestSegmentKey(fact: CompilerFact) !state.Digest {
+            var hash = std.crypto.hash.sha2.Sha256.init(.{});
+            var writer: data.wire.Writer = .{ .hasher = &hash };
+            try data.record.write(CompilerFact, fact, &writer);
+            return hash.finalResult();
         }
 
         fn validatedGuestSegment(
@@ -9910,7 +9949,7 @@ pub fn Service(comptime Types: type) type {
             fact: CompilerFact,
             outcome: state.Reference,
         ) !bool {
-            if (!self.store().guest_segments.contains(key)) return false;
+            if (!guest_segment_proofs.contains(key)) return false;
             try self.store().objectRange(fact.input, 0, &.{});
             try self.store().objectRange(fact.output, 0, &.{});
             try self.store().objectRange(outcome, 0, &.{});
@@ -15083,6 +15122,8 @@ pub fn Service(comptime Types: type) type {
             // No unbound external request is dispatched. A run policy grants
             // continued computation, never the authority to invent an answer.
             value.schedule = publicationSchedule(workspace.ControlObservation.from(.{ .work = value.*, .occurrence = null }));
+            if (publication.segment) |segment|
+                guest_segment_proofs.retain(try guestSegmentKey(try guestSegmentFact(segment, value.*)));
         }
 
         fn workspaceResident(self: *Self, a: std.mem.Allocator, value: workspace.Work) !*evaluator.Driver {

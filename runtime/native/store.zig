@@ -90,7 +90,6 @@ pub const Store = struct {
     sealed_generation: ?u64 = null,
     projecting: bool = false,
     context_cache: @import("adaptive_context.zig").Cache = .{},
-    guest_segments: std.AutoHashMapUnmanaged(Digest, void) = .empty,
     retention_epoch: ?u64 = null,
     retention_image: ?Digest = null,
 
@@ -140,7 +139,6 @@ pub const Store = struct {
     /// Invalidating custody never grants validation authority for the new epoch.
     pub fn invalidateIntegrity(self: *Store) void {
         self.context_cache.deinit(self.allocator);
-        self.guest_segments.clearRetainingCapacity();
         self.retention_epoch = null;
         self.retention_image = null;
         self.sealed_generation = null;
@@ -195,7 +193,6 @@ pub const Store = struct {
 
     pub fn deinit(self: *Store) void {
         self.context_cache.deinit(self.allocator);
-        self.guest_segments.clearAndFree(self.allocator);
     }
 
     /// Run a pure projection under one read snapshot, releasing it before the
