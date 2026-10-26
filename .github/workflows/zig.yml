@@ -353,6 +353,7 @@ jobs:
         if: startsWith(matrix.lane, 'native') || startsWith(matrix.lane, 'runtime') || matrix.lane == 'downstream'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          name: ${{ matrix.lane }}-identity.json
           path: ${{ runner.temp }}/${{ matrix.lane }}-identity.json
           archive: false
           overwrite: true
@@ -376,6 +377,7 @@ jobs:
         if: matrix.lane == 'native'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          name: protean-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}.tar.gz
           path: ${{ runner.temp }}/protean-*.tar.gz
           archive: false
           overwrite: true
