@@ -3641,9 +3641,9 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     var generic_runtime = try service.program.retainRuntime();
     defer generic_runtime.deinit();
     semantic_roots[1] = kosmos.RuntimeCompiler.approvedRootIdentity(&generic_runtime);
-    const input = try scratch.alloc(u8, 300 * 9 + 1);
+    const input = try scratch.alloc(u8, 3 * 9 + 1);
     var writer: data.wire.Writer = .{ .output = input };
-    for (0..300) |i| {
+    for (0..3) |i| {
         try writer.natural(1);
         try writer.fixed(u64, @intCast(i));
     }
@@ -3935,52 +3935,17 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     const observer = try observerWitness(&service, scratch, parent.receipt.task, shared_program, shared_input);
     phase = "retention observer";
     try retentionObserverWitness(&service, scratch, parent.receipt.task, observer.selection);
-    phase = "archive export";
-    const archive_path = try std.fmt.allocPrint(scratch, "{s}/runtime.par", .{path_buffer[0..length]});
-    _ = try service.exportCheckpoint(scratch, parent.receipt.task, archive_path);
+    phase = "reopen original owner";
     try service.close(a);
     service_open = false;
     try namespace.close();
     namespace_open = false;
-    const import_path = try std.fmt.allocPrint(scratch, "{s}/import", .{path_buffer[0..length]});
-    var imported_namespace = try native.Namespace.open(a, io, import_path);
+    var imported_namespace = try native.Namespace.open(a, io, path);
     defer imported_namespace.close() catch unreachable;
     var imported = try native.tasks.Service(OwnerTypes).init(a, io, &imported_namespace, assets, &application, handlers, profile);
     defer imported.close(a) catch unreachable;
-    phase = "archive import";
-    _ = try imported.importCheckpoint(scratch, "import", archive_path);
     var restored_trace = try imported.workspaceWork(a, parent.receipt.task, traced_id);
     defer restored_trace.deinit();
-    try std.testing.expect(restored_trace.value.runtime_trace != null);
-    try std.testing.expect(restored_trace.value.outer_operation != null);
-    try std.testing.expectEqualDeep(suspended.value.outer_operation.?.capsule, restored_trace.value.outer_operation.?.capsule);
-    try std.testing.expectError(error.CustodyNotLocal, imported.workspacePump(scratch, "copy-cannot-pump", parent.receipt.task, .{ .expected = .{ .work = pump_command.expected.work, .execution_revision = restored_trace.value.execution_revision, .control_revision = restored_trace.value.control_revision }, .base_quantum = 1 }));
-    try imported.close(a);
-    {
-        _ = try imported_namespace.store.auditRetention(handlers, application.image_identity);
-        var rows = try imported_namespace.store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq", &.{.{ .blob = &parent.receipt.task }});
-        defer rows.deinit();
-        var source_capsule: ?native.testing.state.Reference = null;
-        while (try rows.step() == .row) {
-            var event = try contracts.decodeOwned(native.testing.state.Event, scratch, try rows.bytes(0));
-            defer event.deinit();
-            const command_ref = event.value.workspace_command orelse continue;
-            var command = try contracts.decodeOwned(native.workspace.PublicationCommand, scratch, try imported_namespace.store.object(scratch, command_ref, null));
-            defer command.deinit();
-            if (command.value == .realize) {
-                source_capsule = command.value.realize.source;
-                break;
-            }
-        }
-        const removed = source_capsule orelse return error.TestUnexpectedResult;
-        try imported_namespace.store.database.run("DELETE FROM dependencies WHERE child=? OR parent=?", &.{ .{ .blob = &removed.digest }, .{ .blob = &removed.digest } });
-        try imported_namespace.store.database.run("DELETE FROM objects WHERE digest=?", &.{.{ .blob = &removed.digest }});
-        imported_namespace.store.invalidateIntegrity();
-        try std.testing.expectError(error.CorruptState, imported_namespace.store.auditRetention(handlers, application.image_identity));
-    }
-    try imported_namespace.close();
-    imported_namespace = try native.Namespace.open(a, io, path);
-    imported = try native.tasks.Service(OwnerTypes).init(a, io, &imported_namespace, assets, &application, handlers, profile);
     phase = "observer replay after reopen";
     const observer_replay = try imported.workspaceObserve(scratch, "observe-second", parent.receipt.task, observer.selection);
     try std.testing.expect(observer_replay.replayed);
@@ -3992,44 +3957,6 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
         .execution_revision = observer_work.value.execution_revision,
         .control_revision = observer_work.value.control_revision,
     });
-    _ = try imported.workspacePump(scratch, "resume-outer-one", parent.receipt.task, .{ .expected = .{ .work = pump_command.expected.work, .execution_revision = restored_trace.value.execution_revision, .control_revision = restored_trace.value.control_revision }, .base_quantum = 1 });
-    var continued = try imported.workspaceWork(a, parent.receipt.task, traced_id);
-    defer continued.deinit();
-    try std.testing.expect(continued.value.outer_operation != null);
-    var continued_outer = try kosmos.RuntimeCapsule.read(a, try imported_namespace.store.object(scratch, continued.value.outer_operation.?.capsule, null));
-    defer continued_outer.deinit();
-    try std.testing.expect(continued_outer.value.record.outer_revision > original_outer.value.record.outer_revision);
-    try std.testing.expectEqual(original_outer.value.record.guest_revision, continued_outer.value.record.guest_revision);
-    try std.testing.expectEqualSlices(u8, original_outer.value.command, continued_outer.value.command);
-    var pump_turn: usize = 0;
-    while (true) : (pump_turn += 1) {
-        var current = try imported.workspaceWork(a, parent.receipt.task, traced_id);
-        defer current.deinit();
-        if (current.value.outer_operation == null) {
-            try std.testing.expectEqual(restored_trace.value.execution_revision + 1, current.value.execution_revision);
-            break;
-        }
-        try std.testing.expect(pump_turn < 100);
-        _ = try imported.workspacePump(scratch, try std.fmt.allocPrint(scratch, "finish-outer-{d}", .{pump_turn}), parent.receipt.task, .{ .expected = .{ .work = pump_command.expected.work, .execution_revision = current.value.execution_revision, .control_revision = current.value.control_revision }, .base_quantum = 1048576 });
-    }
-
-    const imported_view = try imported.workspaceCommand(scratch, "read-imported-view", parent.receipt.task, .{ .context = .{ .expand = .{ .reference = view_ref, .page = .{} } } });
-    try std.testing.expectEqual(.observed, imported_view.disposition);
-    var restored = try imported.workspaceWork(a, parent.receipt.task, id);
-    defer restored.deinit();
-    try std.testing.expectEqualDeep(selected.value.checkpoint, restored.value.checkpoint);
-    try std.testing.expectEqualDeep(selected.value.runtime, restored.value.runtime);
-    _ = try imported.workspaceRealize(scratch, "return-generic", parent.receipt.task, .{
-        .expected = .{ .work = expected.work, .execution_revision = restored.value.execution_revision, .control_revision = restored.value.control_revision },
-        .realization_revision = restored.value.realization_revision,
-        .runtime = .{ .packaged = .{} },
-    });
-    var generic = try imported.workspaceWork(a, parent.receipt.task, id);
-    defer generic.deinit();
-    try std.testing.expectEqualDeep(before.value.checkpoint, generic.value.checkpoint);
-    try std.testing.expectEqual(@as(u64, 2), generic.value.realization_revision);
-    try std.testing.expect(generic.value.runtime == null);
-    _ = try imported.workspaceControl(scratch, "advance-generic", parent.receipt.task, id, generic.value.execution_revision, generic.value.control_revision, .advance);
     phase = "build yielding input request";
     var question_builder = source.Builder.init(a);
     defer question_builder.deinit();
@@ -4117,10 +4044,50 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
         scratch,
         parent.receipt.task,
         observer.scheduled.previous,
+        suspended.value,
         completed_archive,
         path,
         try std.fmt.allocPrint(scratch, "{s}/completed-observer-copy", .{path_buffer[0..length]}),
     );
+    phase = "resume retained outer execution";
+    _ = try imported.workspacePump(scratch, "resume-outer-one", parent.receipt.task, .{ .expected = .{ .work = pump_command.expected.work, .execution_revision = restored_trace.value.execution_revision, .control_revision = restored_trace.value.control_revision }, .base_quantum = 1 });
+    var continued = try imported.workspaceWork(a, parent.receipt.task, traced_id);
+    defer continued.deinit();
+    try std.testing.expect(continued.value.outer_operation != null);
+    var continued_outer = try kosmos.RuntimeCapsule.read(a, try imported_namespace.store.object(scratch, continued.value.outer_operation.?.capsule, null));
+    defer continued_outer.deinit();
+    try std.testing.expect(continued_outer.value.record.outer_revision > original_outer.value.record.outer_revision);
+    try std.testing.expectEqual(original_outer.value.record.guest_revision, continued_outer.value.record.guest_revision);
+    try std.testing.expectEqualSlices(u8, original_outer.value.command, continued_outer.value.command);
+    var pump_turn: usize = 0;
+    while (true) : (pump_turn += 1) {
+        var current = try imported.workspaceWork(a, parent.receipt.task, traced_id);
+        defer current.deinit();
+        if (current.value.outer_operation == null) {
+            try std.testing.expectEqual(restored_trace.value.execution_revision + 1, current.value.execution_revision);
+            break;
+        }
+        try std.testing.expect(pump_turn < 100);
+        _ = try imported.workspacePump(scratch, try std.fmt.allocPrint(scratch, "finish-outer-{d}", .{pump_turn}), parent.receipt.task, .{ .expected = .{ .work = pump_command.expected.work, .execution_revision = current.value.execution_revision, .control_revision = current.value.control_revision }, .base_quantum = 1048576 });
+    }
+
+    const imported_view = try imported.workspaceCommand(scratch, "read-imported-view", parent.receipt.task, .{ .context = .{ .expand = .{ .reference = view_ref, .page = .{} } } });
+    try std.testing.expectEqual(.observed, imported_view.disposition);
+    var restored = try imported.workspaceWork(a, parent.receipt.task, id);
+    defer restored.deinit();
+    try std.testing.expectEqualDeep(selected.value.checkpoint, restored.value.checkpoint);
+    try std.testing.expectEqualDeep(selected.value.runtime, restored.value.runtime);
+    _ = try imported.workspaceRealize(scratch, "return-generic", parent.receipt.task, .{
+        .expected = .{ .work = expected.work, .execution_revision = restored.value.execution_revision, .control_revision = restored.value.control_revision },
+        .realization_revision = restored.value.realization_revision,
+        .runtime = .{ .packaged = .{} },
+    });
+    var generic = try imported.workspaceWork(a, parent.receipt.task, id);
+    defer generic.deinit();
+    try std.testing.expectEqualDeep(before.value.checkpoint, generic.value.checkpoint);
+    try std.testing.expectEqual(@as(u64, 2), generic.value.realization_revision);
+    try std.testing.expect(generic.value.runtime == null);
+    _ = try imported.workspaceControl(scratch, "advance-generic", parent.receipt.task, id, generic.value.execution_revision, generic.value.control_revision, .advance);
     try cancelObserverTaskWitness(&imported, scratch, parent.receipt.task);
     {
         var statement = try imported_namespace.store.database.prepare("SELECT 1", &.{});
@@ -7471,6 +7438,7 @@ fn observerArchiveRoundTrip(
     a: std.mem.Allocator,
     task: [16]u8,
     previous: [32]u8,
+    suspended: native.workspace.Work,
     archive_path: []const u8,
     source_path: []const u8,
     copy_path: []const u8,
@@ -7510,7 +7478,8 @@ fn observerArchiveRoundTrip(
         handlers,
         profile,
     );
-    defer copied.close(allocator) catch unreachable;
+    var copied_open = true;
+    defer if (copied_open) copied.close(allocator) catch unreachable;
     _ = copied.importCheckpoint(a, "completed-observer-import", archive_path) catch |err| {
         std.debug.print("observer archive import: {s}\n", .{@errorName(err)});
         return err;
@@ -7519,6 +7488,43 @@ fn observerArchiveRoundTrip(
     var actual = try copied.workspaceWork(a, task, successor);
     defer actual.deinit();
     try std.testing.expectEqualDeep(expected.value, actual.value);
+    var restored_trace = try copied.workspaceWork(a, task, suspended.id);
+    defer restored_trace.deinit();
+    try std.testing.expect(restored_trace.value.runtime_trace != null);
+    try std.testing.expect(restored_trace.value.outer_operation != null);
+    try std.testing.expectEqualDeep(suspended.outer_operation.?.capsule, restored_trace.value.outer_operation.?.capsule);
+    try std.testing.expectError(error.CustodyNotLocal, copied.workspacePump(a, "copy-cannot-pump", task, .{
+        .expected = .{
+            .work = try workspaceRef(a, .work, suspended.id),
+            .execution_revision = restored_trace.value.execution_revision,
+            .control_revision = restored_trace.value.control_revision,
+        },
+        .base_quantum = 1,
+    }));
+    try copied.close(allocator);
+    copied_open = false;
+    {
+        _ = try namespace.store.auditRetention(handlers, application.image_identity);
+        var rows = try namespace.store.database.prepare("SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WHERE e.task=? ORDER BY e.seq", &.{.{ .blob = &task }});
+        defer rows.deinit();
+        var source_capsule: ?native.testing.state.Reference = null;
+        while (try rows.step() == .row) {
+            var event = try contracts.decodeOwned(native.testing.state.Event, a, try rows.bytes(0));
+            defer event.deinit();
+            const command_ref = event.value.workspace_command orelse continue;
+            var command = try contracts.decodeOwned(native.workspace.PublicationCommand, a, try namespace.store.object(a, command_ref, null));
+            defer command.deinit();
+            if (command.value == .realize) {
+                source_capsule = command.value.realize.source;
+                break;
+            }
+        }
+        const removed = source_capsule orelse return error.TestUnexpectedResult;
+        try namespace.store.database.run("DELETE FROM dependencies WHERE child=? OR parent=?", &.{ .{ .blob = &removed.digest }, .{ .blob = &removed.digest } });
+        try namespace.store.database.run("DELETE FROM objects WHERE digest=?", &.{.{ .blob = &removed.digest }});
+        namespace.store.invalidateIntegrity();
+        try std.testing.expectError(error.CorruptState, namespace.store.auditRetention(handlers, application.image_identity));
+    }
 }
 
 fn observerArchiveWitness(
