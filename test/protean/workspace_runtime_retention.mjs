@@ -16,8 +16,9 @@ const baseline = resolve(process.argv[2]), successor = resolve(process.argv[3]);
 const digest = async path => createHash('sha256').update(await readFile(path)).digest('hex');
 let client, provider;
 let diagnostics = '';
-async function launch(binary, state) {
-  client = new ProteanClient(binary, ['--state-dir', state, ...provider.args]);
+async function launch(binary, state, taskId = null) {
+  const frozen = taskId === null ? [] : ['--profile-task', taskId];
+  client = new ProteanClient(binary, ['--state-dir', state, ...provider.args, ...frozen]);
   diagnostics = '';
   client.child.stderr.on('data', bytes => { diagnostics = (diagnostics + bytes).slice(-8192); });
   try { await client.initialize(); }
@@ -114,7 +115,8 @@ try {
   assert.equal(newDescription.application.application_version, '8.0.0');
   assert.equal(provider.requests.length, 1);
   await client.close(); client = null;
-  await launch(updated.previous, state);
+  const reopenedDescription = await launch(updated.previous, state, accepted.task_id);
+  assert.equal(reopenedDescription.profile.resource_identity, description.profile.resource_identity);
   const restored = await client.call('task.status', {task_id: accepted.task_id});
   assert.deepEqual(restored.question, waiting.question);
   assert.equal(restored.profile_digest, waiting.profile_digest);
