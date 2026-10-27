@@ -196,25 +196,53 @@ The package version is now 8.0.0. Maintained raw generator/cleanup fixtures use
 Horos's `source.library` boundary; ordinary generator clients stay typed.
 The downstream build compiles removal/retention expectations against the actual
 exported Protean module, and installation inspects retired paths in that package.
-These new checks have not executed on the final candidate.
+These new checks executed in the Linux qualification below; native macOS
+execution remains incomplete under the local cutoff.
 
 The retained model-custody fixture previously had no active build-root import.
 It now runs through the existing native owner root, including the typed paired
 model-call witness, request-time offers, later-offer rejection and protected
 model-site negatives. Its presence in the source inventory alone was not
-execution evidence. Final native execution of these cases remains outstanding.
+execution evidence. All 46 native owner cases passed on Linux in the run below.
 
 The dependency lock now selects published draft candidates Horos
-`61f2b4f63bbf96039a332be9a5d610c46422daa1` and Kosmos
-`970fd0c4d80517070d80bff3518de145ec66c155`. Their actual GitHub archive members,
+`f4db3fa1aaac582eea312f4ee80a82e47234982b` and Kosmos
+`4e13a7c7ea1b320ca3f55f14075a67411e8ca5ee`. Their actual GitHub archive members,
 Git blob identities, complete normalized source inventories, Horos package
 profiles and API-file digests are bound in the lock. The Kosmos evaluator bundle
 is 275,293 bytes and differs from the prerequisite only in the embedded Horos
 package identifier. Artifact authentication is not execution qualification.
 
+Native Linux qualification at Protean
+`d4c1cef78755794a24ee70ff36276c73277ee43a` passed all eleven lanes and the
+terminal identity/budget gate in
+[run 40558021578](https://github.com/tkersey/protean/actions/runs/40558021578):
+570 seconds from the original trigger, first attempt. That run selected Horos
+`61f2b4f63bbf96039a332be9a5d610c46422daa1` and Kosmos
+`970fd0c4d80517070d80bff3518de145ec66c155`. Native, placement and
+independently built downstream identities agreed. Package absence expectations,
+changed-input rejection and the retained recursive restoration witness executed.
+
+Compared with prerequisite run 40513895462, the packaged Linux executable is
+unchanged in size at 17,701,016 bytes, while its digest changes with the build
+identity. The 162,202-byte program and 873,620-byte application asset are
+byte-identical to that prerequisite. Compressed product transport grows from
+6,390,739 to 6,390,780 bytes. These are artifact observations, not a runtime or
+compile-speed claim; complete clean/incremental, allocation and checkpoint cost
+observations remain outstanding.
+
 The user retained the existing shared local-verification cutoff, 2026-10-27
 17:30 UTC, and authorized coordinated draft publication without extending it.
-Final exported-package absence checks, native product and downstream execution,
-the required matrix/cost observations, and serial review convergence remain
-incomplete. Earlier passing checks do not qualify the subsequent namespace,
-version, downstream-test or dependency changes.
+Final native macOS execution, the complete requirement-matrix/cost observations,
+and serial review convergence remain incomplete. Any successor dependency tuple
+requires its own applicable qualification; this Linux result applies only to
+the exact recorded candidate and bindings.
+
+The callable admission root now includes the previously unwired positive
+comparison: shared schemas conservatively reject ambiguous callable origins,
+while distinct nominal callable origins admit the safe speculative callback.
+Execution of this added test remains pending on the successor candidate.
+Historical installation/continuation is a separate `retained-runtime` CI diagnostic
+using authenticated product archives and the existing
+`workspace_runtime_retention.mjs` witness. The similarly named workspace test
+lane does not establish this old-executable observation.

@@ -10,7 +10,19 @@ on:
         description: Run one existing lane for diagnosis; only all qualifies the complete product
         type: choice
         default: all
-        options: [all, authoring, owners, downstream]
+        options: [all, authoring, owners, downstream, retained-runtime]
+      baseline_artifact:
+        description: Retained-runtime diagnostic baseline product artifact ID
+        type: string
+      baseline_sha256:
+        description: SHA-256 of the baseline product archive
+        type: string
+      candidate_artifact:
+        description: Retained-runtime diagnostic candidate product artifact ID
+        type: string
+      candidate_sha256:
+        description: SHA-256 of the candidate product archive
+        type: string
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -19,6 +31,7 @@ permissions:
   actions: read
 jobs:
   qualify:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic_lane != 'retained-runtime' }}
     name: Qualification / ${{ matrix.lane }} / linux-x86_64
     strategy:
       fail-fast: false
@@ -381,3 +394,41 @@ jobs:
           elapsed=$(( $(date +%s) - $(date -d "$started" +%s) ))
           echo "Complete workflow from original trigger through terminal checks: ${elapsed}s (maximum 600s)" | tee -a "$GITHUB_STEP_SUMMARY"
           test "$elapsed" -le 600
+
+  retention:
+    name: Historical executable retention diagnostic
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'retained-runtime' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '26.9.0'
+      - name: Authenticate retained executables and continue the original task
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_ARTIFACT: ${{ inputs.baseline_artifact }}
+          BASELINE_SHA256: ${{ inputs.baseline_sha256 }}
+          CANDIDATE_ARTIFACT: ${{ inputs.candidate_artifact }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+        run: |
+          acquire() {
+            local label="$1" artifact="$2" digest="$3"
+            [[ "$artifact" =~ ^[0-9]+$ ]]
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+            mkdir -p "$RUNNER_TEMP/$label"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact/zip" > "$RUNNER_TEMP/$label.tar.gz"
+            echo "$digest  $RUNNER_TEMP/$label.tar.gz" | sha256sum --check --strict
+            tar -xzf "$RUNNER_TEMP/$label.tar.gz" -C "$RUNNER_TEMP/$label" executables/protean
+            test -f "$RUNNER_TEMP/$label/executables/protean"
+            test ! -L "$RUNNER_TEMP/$label/executables/protean"
+            sha256sum "$RUNNER_TEMP/$label/executables/protean"
+          }
+          acquire baseline "$BASELINE_ARTIFACT" "$BASELINE_SHA256"
+          acquire candidate "$CANDIDATE_ARTIFACT" "$CANDIDATE_SHA256"
+          node test/protean/workspace_runtime_retention.mjs \
+            "$RUNNER_TEMP/baseline/executables/protean" \
+            "$RUNNER_TEMP/candidate/executables/protean"

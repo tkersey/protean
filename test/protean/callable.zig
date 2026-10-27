@@ -84,6 +84,24 @@ test "static-code identity does not assert effect safety or bless schema reuse" 
     }
 }
 
+test "nominal callable origins separate safe speculation from unrelated effects" {
+    for ([_]Representation{ .interned, .static_code }) |representation| {
+        const allocator = std.testing.allocator;
+        var builder = B.init(allocator);
+        defer builder.deinit();
+        var registry = admission.Registry.init(allocator);
+        defer registry.deinit();
+        const module = try build(&builder, &registry, representation, 2);
+        var compiled = try bnd.program.compile(allocator, module);
+        defer compiled.deinit();
+        if (representation == .interned) {
+            try std.testing.expectError(error.SpeculativeEffect, admission.verify(allocator, module, &registry));
+        } else {
+            try admission.verify(allocator, module, &registry);
+        }
+    }
+}
+
 test "1 8 and 64 callable installations share schema and executable body" {
     for ([_]usize{ 1, 8, 64 }) |count| {
         var b = B.init(std.testing.allocator);
