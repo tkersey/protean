@@ -183,8 +183,13 @@ same source identity. Corrected assertions compare actual operation IDs.
 The pruning and declaration candidates emit the same 162,202-byte adaptive BPI3
 image, SHA-256
 `742e751d20c91057ffe7bf2da3960d86d3bc86dfde50a660f3d9bbc01d03a3d2`.
-This comparison does not establish arbitrary checkpoint compatibility, the
-unmodified baseline's image identity, or final coordinated qualification.
+The qualified prerequisite's `native-identity.json` artifact from
+[run 40513895462](https://github.com/tkersey/protean/actions/runs/40513895462),
+head `1e8a9fd9324c3cd492aabd1c08f46eeaf8148d6c`, records the same program
+digest on native Linux x86-64 musl with the selected Horos/Kosmos prerequisite
+pins. This establishes image identity for those intermediate pruning/declaration
+candidates against that baseline. It does not establish arbitrary checkpoint
+compatibility or final qualification against the new Horos 8/Kosmos tuple.
 
 The package version is now 8.0.0. Maintained raw generator/cleanup fixtures use
 Horos's `source.library` boundary; ordinary generator clients stay typed.
