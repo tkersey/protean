@@ -1,143 +1,211 @@
 //! Compiled participants over suspended task-valued hyperfunction endpoints.
-const horos_authoring = @import("horos").authoring;
 const std = @import("std");
 const protean = @import("protean");
 const horos = @import("horos");
 const source = horos.source;
+const a = horos.authoring;
 const hyper = horos.library.hyper;
+const generator = horos.library.generator;
 const data = horos.data;
+const native = data.schema.native;
 const fixture = @import("participant.zig");
 const P = fixture.P;
 const Input = fixture.Input;
 const State = struct { input: Input, successor: bool };
-const Id = source.Id;
+const Empty = native.Fields(&.{}, &.{});
+const Integer = a.Shape(u64);
+const Task = a.Internal(.{ .callable = a.Signature(Empty, Integer) });
+const Sample = a.Function(a.Signature(native.Fields(&.{"input"}, &.{a.Shape(Input)}), Integer));
+const Endpoint = hyper.Hyper(Task, Task);
+const Maker = a.Function(a.Signature(native.Fields(&.{"state"}, &.{a.Shape(State)}), Endpoint));
+const Model = a.Operation(a.OperationSignature(
+    a.Shape(P.AdaptiveRequest),
+    a.Shape(P.AdaptiveResult),
+    Empty,
+));
+const Read = a.Operation(a.OperationSignature(Integer, Integer, Empty));
 const Types = struct {
-    input: Id,
-    state: Id,
-    integer: Id,
-    task: Id,
-    pair: hyper.Pair,
-    model: Id,
-    read: Id,
-    sample: Id,
+    input: *const a.Schema(a.Shape(Input)),
+    state: *const a.Schema(a.Shape(State)),
+    integer: *const a.Schema(Integer),
+    task: *const a.Schema(Task),
+    pair: *const hyper.Pair(Task, Task),
+    model: *const Model,
+    read: *const Read,
+    sample: *const Sample,
 };
 
-fn types(b: *source.Builder) !Types {
-    const cache = try b.specialization(Types, "fixture.recursive-participant/v1", .{});
-    if (cache.cached) |value| return value;
-    const input = try protean.contracts.schema(Input, b);
-    const state = try protean.contracts.schema(State, b);
-    const integer = try b.scalar(u64);
-    const model = try P.declare(b);
-    const read = try b.effect(.{ .identity = "fixture.recursive.reference-bytes", .payload = integer, .result = integer });
-    const task = try b.reserveSchema();
-    const pair = try hyper.pairWith(b, task, task, &.{ state, integer });
-    try b.defineSchema(task, .{ .internal = .{ .computation = .{
-        .parameters = &.{},
-        .result = integer,
-        .effects = &.{ model, read },
-        .capture_bound = &.{ state, pair.peer_forward, pair.peer_backward },
-    } } });
-    const sample = try b.declare(&.{input}, integer, &.{model}, &.{});
-    return cache.finish(b, .{ .input = input, .state = state, .integer = integer, .task = task, .pair = pair, .model = model, .read = read, .sample = sample });
-}
-
-fn add(b: *source.Builder, t: Types, left: Id, right: Id) !Id {
-    return b.value(.{ .schema = t.integer, .expression = .{ .primitive = .{
-        .opcode = .integer_add,
-        .operands = &.{ left, right },
-        .failures = &.{.{ .kind = .arithmetic_overflow, .value = try b.failureLiteral(try b.constant(void, {})) }},
-    } } });
-}
-
-fn step(b: *source.Builder, q: hyper.Query, consumer: bool, repeat: bool) !Id {
-    const t = try types(b);
-    const task = try b.declare(&.{}, t.integer, &.{ t.model, t.read }, &.{});
-    const need = try hyper.demand.family(b, "fixture.recursive.need", t.state, t.integer);
-    const interpreted = try hyper.demand.interpret(b, q, need, t.integer, .{
-        .captures = &.{ t.state, t.integer, t.pair.peer_forward, t.pair.peer_backward },
-        .residual = .{ .effects = &.{ t.model, t.read } },
+fn types(c: *a.Context) !Types {
+    const input = try c.schema(Input);
+    const state = try c.schema(State);
+    const integer = try c.schema(u64);
+    const model = try a.interop.externalOperation(
+        c,
+        try P.declare(a.interop.builder(c)),
+        try c.schema(P.AdaptiveRequest),
+        try c.schema(P.AdaptiveResult),
+    );
+    const read = try c.external("fixture.recursive.reference-bytes", integer, integer);
+    const task = try c.declareSchema(.callable, Task);
+    const state_delay = try hyper.delayed(c, state, .{ .captures = .{state} });
+    const pair = try hyper.pair(c, task.schema(), task.schema(), .{
+        .captures = .{ state, integer, state_delay },
     });
-    const inside = try b.declare(&.{need.capability}, t.integer, &.{ t.model, t.read, need.effect }, &.{});
-    const capability = try b.reference(b.parameter(inside, 0));
-    const contribution = try b.variable(t.integer);
-    const input = try b.primitive(t.input, .field, &.{q.state}, 0);
-    const next = try b.primitive(t.state, .product, &.{ input, try b.constant(bool, true) }, 0);
-    var after = try b.pure(try add(b, t, try b.reference(contribution), try b.constant(u64, if (consumer) 13 else 10)));
-    if (!consumer) {
-        const sampled = try b.variable(t.integer);
-        const summed = try add(b, t, try b.reference(contribution), try b.reference(sampled));
-        after = try b.bind(sampled, try b.term(.{ .call = .{
-            .function = t.sample,
-            .arguments = &.{input},
-        } }), try b.pure(try add(b, t, summed, try b.constant(u64, 10))));
-    }
-    if (repeat) after = try repeatContribution(b, need, capability, t, next, try b.reference(contribution));
-    const nested = try b.bind(contribution, try hyper.demand.request(b, need, capability, next), after);
-    const body = if (consumer) try b.term(.{ .conditional = .{
-        .condition = try b.primitive(try b.scalar(bool), .field, &.{q.state}, 1),
-        .when_true = try b.term(.{ .perform = .{
-            .effect = t.read,
-            .payload = try b.constant(u64, 0),
-        } }),
-        .when_false = nested,
-    } }) else nested;
-    try b.define(inside, body);
-    try b.define(task, try hyper.demand.handle(b, interpreted, q.peer, try b.lambda(inside, interpreted.body)));
-    const description = try b.declare(&.{}, t.task, &.{}, &.{});
-    try b.define(description, try b.pure(try b.lambda(task, t.task)));
-    return b.pure(try b.lambda(description, q.types.answer_forward));
+    try c.defineCallable(task, .{}, integer, .{ model, read }, .{
+        .use = .reusable,
+        .captures = .{ state, pair.peerForward(), pair.peerBackward() },
+    });
+    return .{
+        .input = input,
+        .state = state,
+        .integer = integer,
+        .task = task.schema(),
+        .pair = pair,
+        .model = model,
+        .read = read,
+        .sample = try c.function("sample", .{ .input = input }, integer, .{model}),
+    };
 }
-const Producer = struct {
-    pub fn emit(b: *source.Builder, q: hyper.Query) !Id {
-        return step(b, q, false, false);
+
+fn add(
+    body: anytype,
+    left: *const a.Value(Integer),
+    right: *const a.Value(Integer),
+) a.Error!*const a.Value(Integer) {
+    const c = try body.context();
+    return body.checkedAdd(left, right, try c.literalFailure(void, {}));
+}
+
+const Step = struct {
+    types: Types,
+    consumer: bool,
+    repeat: bool,
+
+    pub fn emit(
+        self: @This(),
+        body: anytype,
+        query: anytype,
+    ) a.Error!*const a.Computation(hyper.Delayed(Task)) {
+        const c = try body.context();
+        const t = self.types;
+        const task = try c.functionFor("recursive task", t.task);
+        const task_body = try body.closureBody(task);
+        const need = try hyper.demand.family(c, "fixture.recursive.need", t.state, t.integer);
+        const interpreted = try hyper.demand.interpret(task_body, query, need, t.integer, .{
+            .captures = .{ t.state, t.integer, t.pair.peerForward(), t.pair.peerBackward() },
+            .residual = .{ t.model, t.read },
+        });
+        const inside = try c.functionFor("recursive work", interpreted.body());
+        const work = try task_body.closureBody(inside);
+        const capability = try work.parameter("capability");
+        const result = if (self.consumer) blk: {
+            const direct = try work.branch();
+            const nested = try work.branch();
+            break :blk try work.conditional(
+                try work.field(query.state(), "successor"),
+                try direct.ret(try direct.perform(t.read, try direct.constant(u64, 0))),
+                try nested.ret(try self.contribution(nested, query, need, capability)),
+            );
+        } else try self.contribution(work, query, need, capability);
+        try c.define(inside, try work.ret(result));
+        try c.define(task, try task_body.ret(try hyper.demand.handle(
+            task_body,
+            interpreted,
+            try task_body.lambda(inside, interpreted.body()),
+        )));
+        const description = try c.functionFor("task description", query.types().answerForward());
+        const description_body = try body.closureBody(description);
+        try c.define(description, try description_body.ret(
+            try description_body.lambda(task, t.task),
+        ));
+        return body.ret(try body.lambda(description, query.types().answerForward()));
     }
-};
-const Consumer = struct {
-    pub fn emit(b: *source.Builder, q: hyper.Query) !Id {
-        return step(b, q, true, false);
-    }
-};
-const Alternative = struct {
-    pub fn emit(b: *source.Builder, q: hyper.Query) !Id {
-        return step(b, q, true, true);
+
+    fn contribution(
+        self: @This(),
+        body: anytype,
+        query: anytype,
+        need: anytype,
+        capability: anytype,
+    ) a.Error!*const a.Value(Integer) {
+        const input = try body.field(query.state(), "input");
+        const next = try body.product(self.types.state, .{
+            .input = input,
+            .successor = try body.constant(bool, true),
+        });
+        const first = try hyper.demand.request(body, need, capability, next);
+        if (self.repeat) return repeatContribution(body, need, capability, next, first);
+        const contribution_value = if (self.consumer) first else try add(
+            body,
+            first,
+            try body.call(self.types.sample, .{
+                .input = try body.field(query.state(), "input"),
+            }),
+        );
+        return add(body, contribution_value, try body.constant(u64, if (self.consumer) 13 else 10));
     }
 };
 
-fn repeatContribution(b: *source.Builder, need: hyper.demand.Family, capability: Id, t: Types, next: Id, first: Id) !Id {
-    const second = try b.variable(t.integer);
-    const combined = try add(b, t, first, try b.reference(second));
-    const answer = try b.pure(try add(b, t, combined, try b.constant(u64, 13)));
-    return b.bind(second, try hyper.demand.request(b, need, capability, next), answer);
+fn repeatContribution(
+    body: anytype,
+    need: anytype,
+    capability: anytype,
+    next: anytype,
+    first: anytype,
+) a.Error!*const a.Value(Integer) {
+    const second = try hyper.demand.request(body, need, capability, next);
+    return add(body, try add(body, first, second), try body.constant(u64, 13));
 }
 
 fn object(allocator: std.mem.Allocator, consumer: bool) ![]u8 {
     return objectChecked(allocator, consumer, false, false);
 }
-fn objectChecked(allocator: std.mem.Allocator, consumer: bool, false_capture: bool, alternative: bool) ![]u8 {
+
+fn objectChecked(
+    allocator: std.mem.Allocator,
+    consumer: bool,
+    false_capture: bool,
+    alternative: bool,
+) ![]u8 {
     var b = source.Builder.init(allocator);
     defer b.deinit();
-    const t = try types(&b);
+    const c = try a.Context.init(&b);
+    const t = try types(c);
     if (false_capture) {
-        const owned = try b.resource(t.integer);
-        b.schemas.items[@intCast(t.task)].internal.computation.capture_bound =
-            try b.allocator().dupe(Id, &.{owned});
+        const owned = try b.resource(try a.interop.schemaId(c, t.integer));
+        const task_id = try a.interop.schemaId(c, t.task);
+        b.schemas.items[@intCast(task_id)].internal.computation.capture_bound =
+            try b.allocator().dupe(source.Id, &.{owned});
     }
-    const definition = if (alternative)
-        try hyper.ana(&b, hyper.swap(t.pair), t.state, Alternative)
-    else if (consumer)
-        try hyper.ana(&b, hyper.swap(t.pair), t.state, Consumer)
-    else
-        try hyper.ana(&b, t.pair, t.state, Producer);
-    var compiled = try source.component.compile(allocator, b.module(definition.function, try b.scalar(void)), .{
-        .imports = &.{
-            .{ .name = "model", .reference = .{ .kind = .effect, .id = t.model } },
-            .{ .name = "read", .reference = .{ .kind = .effect, .id = t.read } },
-            .{ .name = "sample", .reference = .{ .kind = .function, .id = t.sample } },
-        },
-        .exports = &.{.{ .name = "create", .reference = .{ .kind = .function, .id = definition.function } }},
-        .borrows = &.{.{ .function = t.sample }},
+    const pair = if (consumer or alternative) t.pair.swap() else t.pair;
+    const entry = try c.function("create", .{ .state = t.state }, pair.forward(), .{});
+    const body = try c.body(entry);
+    const definition = try hyper.ana(body, pair, t.state, Step{
+        .types = t,
+        .consumer = consumer or alternative,
+        .repeat = alternative,
     });
+    const initial = try body.parameter("state");
+    try c.define(entry, try body.ret(try hyper.start(body, definition, initial)));
+    const entry_id = try a.interop.functionId(c, entry);
+    const sample_id = try a.interop.functionId(c, t.sample);
+    const interface: source.component.Interface = .{
+        .imports = &.{
+            .{ .name = "model", .reference = .{
+                .kind = .effect,
+                .id = try a.interop.operationId(c, t.model),
+            } },
+            .{ .name = "read", .reference = .{
+                .kind = .effect,
+                .id = try a.interop.operationId(c, t.read),
+            } },
+            .{ .name = "sample", .reference = .{ .kind = .function, .id = sample_id } },
+        },
+        .exports = &.{.{ .name = "create", .reference = .{ .kind = .function, .id = entry_id } }},
+        .borrows = &.{.{ .function = sample_id }},
+    };
+    const module = try a.interop.componentModule(c, entry, try c.schema(void), interface);
+    var compiled = try source.component.compile(allocator, module, interface);
     defer compiled.deinit();
     const bytes = try allocator.alloc(u8, try data.component.encodedLength(compiled.object));
     errdefer allocator.free(bytes);
@@ -145,24 +213,32 @@ fn objectChecked(allocator: std.mem.Allocator, consumer: bool, false_capture: bo
     return bytes;
 }
 
-fn defineSample(c: protean.Context, t: Types) !void {
-    const b = c.builder;
-    const interpreted = try horos_authoring.interop.functionId(c.author, try protean.responders.defineModel(P, c, try c.literal(void, {}), false));
-    const result = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(P.Interpretation)));
-    const accepted = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(P.AnswerType)));
-    const rejected = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(P.InterpretationFailure)));
-    const contribution = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(struct { value: u64 })));
-    const answer = try b.term(.{ .match_sum = .{ .value = try b.reference(accepted), .cases = &.{.{ .variable = contribution, .body = try b.pure(try b.primitive(t.integer, .field, &.{try b.reference(contribution)}, 0)) }} } });
-    const dispatch = try b.term(.{ .match_sum = .{ .value = try b.reference(result), .cases = &.{
-        .{ .variable = accepted, .body = answer },
-        .{ .variable = rejected, .body = try b.term(.{ .fail = try b.constant(void, {}) }) },
-    } } });
-    const input = try b.reference(b.parameter(t.sample, 0));
-    const call = try b.term(.{ .call = .{ .function = interpreted, .arguments = &.{
-        try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema(P.AdaptiveRequest)), .field, &.{input}, 0),
-        try b.primitive(try horos_authoring.interop.schemaId(c.author, try c.schema([1]bool)), .field, &.{input}, 1),
-    } } });
-    try b.define(t.sample, try b.bind(result, call, dispatch));
+fn defineSample(context: protean.Context, t: Types) !void {
+    const c = context.author;
+    const interpreted = try protean.responders.defineModel(
+        P,
+        context,
+        try context.literal(void, {}),
+        false,
+    );
+    const body = try c.body(t.sample);
+    const input = try body.parameter("input");
+    const result = try body.call(interpreted, .{
+        .request = try body.field(input, "request"),
+        .offered = try body.field(input, "offered"),
+    });
+    const accepted = try body.caseOf(result, "accepted");
+    const rejected = try body.caseOf(result, "rejected");
+    const answer_body = accepted.body();
+    const contribution = try answer_body.caseOf(accepted.payload(), "contribute");
+    const value = try contribution.body().field(contribution.payload(), "value");
+    const answer = try answer_body.match(accepted.payload(), .{
+        .contribute = try contribution.ret(value),
+    });
+    try c.define(t.sample, try body.ret(try body.match(result, .{
+        .accepted = try accepted.ret(answer),
+        .rejected = try rejected.fail(t.integer, try rejected.body().constant(void, {})),
+    })));
 }
 
 const Application = struct {
@@ -171,50 +247,104 @@ const Application = struct {
     var omit_reference = false;
     var assessment = false;
     var completion = false;
-    pub fn emit(c: protean.Context) !source.Module {
-        const b = c.builder;
-        const t = try types(b);
-        try c.registry.classify(t.model, .model);
-        try c.registry.classify(t.read, .read);
-        try defineSample(c, t);
+    pub fn emit(context: protean.Context) !source.Module {
+        const c = context.author;
+        const t = try types(c);
+        try context.registry.classify(try a.interop.operationId(c, t.model), .model);
+        try context.registry.classify(try a.interop.operationId(c, t.read), .read);
+        try defineSample(context, t);
         var bindings = t;
-        if (completion) bindings.sample = try completionHelper(c, t);
-        const producer = try install(c, bindings, "producer", producer_bytes, t.pair.forward);
-        const consumer = try install(c, bindings, "consumer", consumer_bytes, t.pair.backward);
-        if (assessment) try c.registry.speculate(producer, &.{ t.model, t.read });
-        const entry = try b.declare(&.{t.input}, t.integer, &.{ t.model, t.read }, &.{});
-        const initial = try b.primitive(t.state, .product, &.{
-            try b.reference(b.parameter(entry, 0)), try b.constant(bool, false),
-        }, 0);
-        const p = try b.variable(t.pair.forward);
-        const peer = try b.declare(&.{}, t.pair.forward, &.{}, &.{});
-        try b.define(peer, try b.pure(try b.reference(p)));
-        const participant = try b.variable(t.pair.backward);
-        const delayed_task = try b.variable(t.pair.answer_backward);
-        const task = try b.variable(t.task);
-        const invoked = try hyper.invoke(b, try b.reference(participant), try b.lambda(peer, t.pair.peer_forward));
-        const run = try b.bind(delayed_task, invoked, try b.bind(task, try hyper.force(b, try b.reference(delayed_task)), try hyper.force(b, try b.reference(task))));
-        const created = try b.bind(participant, try b.term(.{ .call = .{
-            .function = consumer,
-            .arguments = &.{initial},
-        } }), try withIdle(b, t, run));
-        try b.define(entry, try b.bind(p, try b.term(.{ .call = .{
-            .function = producer,
-            .arguments = &.{initial},
-        } }), created));
-        return b.module(entry, try b.scalar(void));
+        if (completion) bindings.sample = try completionHelper(context, t);
+        const producer = try install(
+            context,
+            bindings,
+            "producer",
+            producer_bytes,
+            t.pair.forward(),
+        );
+        const consumer = try install(
+            context,
+            bindings,
+            "consumer",
+            consumer_bytes,
+            t.pair.backward(),
+        );
+        if (assessment) try context.registry.speculate(try a.interop.functionId(c, producer), &.{
+            try a.interop.operationId(c, t.model), try a.interop.operationId(c, t.read),
+        });
+        const entry = try c.function(
+            "entry",
+            .{ .input = t.input },
+            t.integer,
+            .{ t.model, t.read },
+        );
+        const body = try c.body(entry);
+        const initial = try body.product(t.state, .{
+            .input = try body.parameter("input"),
+            .successor = try body.constant(bool, false),
+        });
+        const p = try body.call(producer, .{ .state = initial });
+        const participant = try body.call(consumer, .{ .state = initial });
+        const peer = try hyper.deferValue(body, t.pair.peerForward(), p);
+        try c.define(entry, try body.ret(try withIdle(body, t, participant, peer)));
+        return a.interop.componentModule(c, entry, try c.schema(void), .{
+            .exports = &.{},
+            .imports = &.{
+                .{ .name = "producer", .reference = .{
+                    .kind = .function,
+                    .id = try a.interop.functionId(c, producer),
+                } },
+                .{ .name = "consumer", .reference = .{
+                    .kind = .function,
+                    .id = try a.interop.functionId(c, consumer),
+                } },
+                .{ .name = "model", .reference = .{
+                    .kind = .effect,
+                    .id = try a.interop.operationId(c, t.model),
+                } },
+                .{ .name = "read", .reference = .{
+                    .kind = .effect,
+                    .id = try a.interop.operationId(c, t.read),
+                } },
+            },
+            .borrows = &.{
+                .{ .function = try a.interop.functionId(c, producer) },
+                .{ .function = try a.interop.functionId(c, consumer) },
+            },
+        });
     }
 };
-fn install(c: protean.Context, t: Types, name: []const u8, bytes: []const u8, result: Id) !Id {
-    return protean.participant.declare(c, .{
+
+fn install(
+    context: protean.Context,
+    t: Types,
+    name: []const u8,
+    bytes: []const u8,
+    result: *const a.Schema(Endpoint),
+) !*const Maker {
+    const c = context.author;
+    const model = try a.interop.operationId(c, t.model);
+    const read = try a.interop.operationId(c, t.read);
+    const function = try protean.participant.declare(context, .{
         .instance = name,
         .object = bytes,
         .entry = "create",
-        .parameters = &.{t.state},
-        .result = result,
-        .effects = if (Application.omit_reference) &.{.{ .symbol = "model", .effect = t.model }} else &.{ .{ .symbol = "model", .effect = t.model }, .{ .symbol = "read", .effect = t.read } },
-        .functions = &.{.{ .symbol = "sample", .function = t.sample }},
+        .parameters = &.{try a.interop.schemaId(c, t.state)},
+        .result = try a.interop.schemaId(c, result),
+        .effects = if (Application.omit_reference) &.{
+            .{ .symbol = "model", .effect = model },
+        } else &.{
+            .{ .symbol = "model", .effect = model },
+            .{ .symbol = "read", .effect = read },
+        },
+        .functions = &.{.{ .symbol = "sample", .function = try a.interop.functionId(c, t.sample) }},
     });
+    return a.interop.importFunction(c, function, try c.callable(
+        .{ .state = t.state },
+        result,
+        .{},
+        .{ .use = .reusable },
+    ));
 }
 const System = protean.system(.{
     .InitialArgs = Input,
@@ -223,68 +353,77 @@ const System = protean.system(.{
     .application = Application,
 });
 
-fn discardIdle(b: *source.Builder, g: horos.library.generator.Generator, value: Id) !Id {
-    const payload = try b.variable(g.element);
-    const package = try b.variable(g.package);
-    const failure = try b.term(.{ .fail = try b.constant(void, {}) });
-    const disposed = try horos.library.generator.close(b, g, try b.reference(package));
-    const done = try b.bind(try b.variable(try b.scalar(void)), disposed, failure);
-    return b.term(.{ .unpack_product = .{ .value = value, .variables = &.{ payload, package }, .body = done } });
+fn discardIdle(body: anytype, value: anytype) a.Error!void {
+    const parts = try body.destructure(value);
+    _ = try body.disposePackage(try parts.get("future"));
 }
 
-/// Reuse the foundation's owned package mechanism. Its idle continuation remains
-/// independently live while the reciprocal task and model responder are parked.
-fn withIdle(b: *source.Builder, t: Types, work: Id) !Id {
-    const unit = try b.scalar(void);
-    const g = try horos.library.generator.defineExchange(b, "fixture.recursive.idle", unit, t.integer, unit, &.{ unit, t.integer }, &.{}, &.{}, .{ .effects = &.{t.read} });
-    const body = try b.declare(&.{g.capability}, unit, &.{ t.read, g.effect }, &.{});
-    const offered = try b.term(.{ .perform = .{ .effect = g.effect, .capability = try b.reference(b.parameter(body, 0)), .payload = try b.constant(u64, 7) } });
-    const observed = try b.term(.{ .perform = .{ .effect = t.read, .payload = try b.constant(u64, 1) } });
-    const finished = try b.pure(try b.constant(void, {}));
-    try b.define(body, try b.bind(try b.variable(unit), offered, try b.bind(try b.variable(t.integer), observed, finished)));
-    const signature = try b.schema(.{ .internal = .{ .computation = .{
-        .parameters = &.{g.capability},
-        .result = unit,
-        .effects = &.{ t.read, g.effect },
-    } } });
-    const answer = try b.variable(g.answer);
-    const yielded = try b.variable(g.yielded);
-    const payload = try b.variable(t.integer);
-    const package = try b.variable(g.package);
-    const result = try b.variable(t.integer);
-    const next = try b.variable(g.answer);
-    const unexpected = try b.variable(g.yielded);
-    const finish = try b.term(.{ .match_sum = .{ .value = try b.reference(next), .cases = &.{
-        .{ .variable = try b.variable(unit), .body = try b.pure(try b.reference(result)) },
-        .{ .variable = unexpected, .body = try discardIdle(b, g, try b.reference(unexpected)) },
-    } } });
-    const resumed = try b.bind(next, try horos.library.generator.next(b, g, try b.reference(package)), finish);
-    const execute = try b.bind(result, work, resumed);
-    const unpack = try b.term(.{ .unpack_product = .{ .value = try b.reference(yielded), .variables = &.{ payload, package }, .body = execute } });
-    const dispatch = try b.term(.{ .match_sum = .{ .value = try b.reference(answer), .cases = &.{
-        .{ .variable = try b.variable(unit), .body = try b.term(.{ .fail = try b.constant(void, {}) }) },
-        .{ .variable = yielded, .body = unpack },
-    } } });
-    return b.bind(answer, try b.term(.{ .handle = .{
-        .handler = g.handler,
-        .body = try b.lambda(body, signature),
-    } }), dispatch);
+fn withIdle(
+    body: anytype,
+    t: Types,
+    participant: anytype,
+    peer: anytype,
+) a.Error!*const a.Value(Integer) {
+    const c = try body.context();
+    const unit = try c.schema(void);
+    const g = try generator.create(c, "fixture.recursive.idle", unit, t.integer, unit, .{
+        .captures = .{ .continuation = .{ unit, t.integer } },
+        .residual = .{t.read},
+    });
+    const signature = try c.handledSchema(g.handler());
+    const producer = try c.functionFor("idle producer", signature);
+    const nested = try body.closureBody(producer);
+    const capability = try nested.parameter("capability");
+    _ = try nested.performLocal(g.effect(), capability, try nested.constant(u64, 7));
+    _ = try nested.perform(t.read, try nested.constant(u64, 1));
+    try c.define(producer, try nested.ret(try nested.constant(void, {})));
+    const answer = try body.handleWith(g.handler(), try body.lambda(producer, signature), .{});
+    const done = try body.caseOf(answer, "done");
+    const yielded = try body.caseOf(answer, "yielded");
+    const running = yielded.body();
+    const parts = try running.destructure(yielded.payload());
+    const delayed_task = try hyper.invoke(running, participant, peer);
+    const task = try hyper.force(running, delayed_task);
+    const result = try running.apply(task, .{});
+    const next = try running.resumePackage(try parts.get("future"), try running.constant(void, {}));
+    const finished = try running.caseOf(next, "done");
+    const unexpected = try running.caseOf(next, "yielded");
+    try discardIdle(unexpected.body(), unexpected.payload());
+    const final = try running.match(next, .{
+        .done = try finished.ret(result),
+        .yielded = try unexpected.fail(t.integer, try unexpected.body().constant(void, {})),
+    });
+    return body.match(answer, .{
+        .done = try done.fail(t.integer, try done.body().constant(void, {})),
+        .yielded = try yielded.ret(final),
+    });
 }
 
-fn completionHelper(c: protean.Context, t: Types) !Id {
-    const b = c.builder;
-    const write = try horos_authoring.interop.operationId(c.author, try c.external("fixture.recursive.target-write", try horos_authoring.interop.schema(c.author, t.input), try horos_authoring.interop.schema(c.author, t.integer), .write));
-    const function = try b.declare(&.{t.input}, t.integer, &.{write}, &.{});
-    const operation = try b.term(.{ .perform = .{ .effect = write, .payload = try b.reference(b.parameter(function, 0)) } });
-    // Model the real trusted completion site; ordinary admission permits it.
-    // A speculative import must still reject its actual write authority.
-    try c.registry.protectSite(function, operation, write);
-    try b.define(function, operation);
+fn completionHelper(context: protean.Context, t: Types) !*const Sample {
+    const c = context.author;
+    const write = try context.external(
+        "fixture.recursive.target-write",
+        t.input,
+        t.integer,
+        .write,
+    );
+    const function = try c.function("completion", .{ .input = t.input }, t.integer, .{write});
+    const body = try c.body(function);
+    const operation = try a.interop.performSite(body, write, try body.parameter("input"));
+    try context.registry.protectSite(
+        try a.interop.functionId(c, function),
+        operation.term,
+        try a.interop.operationId(c, write),
+    );
+    try c.define(function, try body.ret(operation.value));
     return function;
 }
 
 test "recursive participant rejects an exclusive resource hidden in a reusable task" {
-    try std.testing.expectError(error.InvalidOwnership, objectChecked(std.testing.allocator, false, true, false));
+    try std.testing.expectError(
+        error.InvalidOwnership,
+        objectChecked(std.testing.allocator, false, true, false),
+    );
 }
 
 test "recursive participant normal admission rejects missing reference binding" {
@@ -315,4 +454,219 @@ test "recursive participant assessment examines imported completion authority" {
     Application.completion = true;
     defer Application.completion = false;
     try std.testing.expectError(error.SpeculativeEffect, protean.compile(allocator, System));
+}
+
+test "recursive participant compiles repeated typed demand" {
+    const allocator = std.testing.allocator;
+    const p = try object(allocator, false);
+    defer allocator.free(p);
+    const c = try objectChecked(allocator, true, false, true);
+    defer allocator.free(c);
+    Application.producer_bytes = p;
+    Application.consumer_bytes = c;
+    var compiled = try protean.compile(allocator, System);
+    defer compiled.deinit();
+    var external_effects: usize = 0;
+    for (compiled.program.effects) |effect| {
+        if (effect.external) external_effects += 1;
+    }
+    try std.testing.expectEqual(2, external_effects);
+}
+
+const ExecutionRequest = enum { first_read, first_model, second_read, second_model, idle };
+
+fn executionInput() Input {
+    return .{ .offered = .{true}, .request = .{
+        .invocation = .{
+            .protocol = .{ .bytes = protean.model_invocation.protocol_identity },
+            .model = .{ .bytes = "recursive-model" },
+            .parameters = .{ .max_output_tokens = 128, .temperature = null, .reasoning = null },
+            .messages = .{ .items = &.{.{
+                .role = .user,
+                .content = .{ .bytes = "Supply the requested contribution." },
+            }} },
+            .tools = P.allDeclarations(),
+            .selection = .{ .minimum_calls = 1, .maximum_calls = 1, .parallel_calls = false },
+            .response_policy = .{
+                .store = false,
+                .stream = false,
+                .background = false,
+                .truncation = .disabled,
+            },
+            .normalization_limits = P.normalizationLimits(),
+            .maximum_provider_response_bytes = 4096,
+        },
+        .policy = @splat(9),
+        .selection = .{
+            .profile_id = .{ .bytes = "recursive" },
+            .profile_digest = @splat(7),
+            .effective_effort = .low,
+            .control_revision = 0,
+        },
+        .plan = .{
+            .epoch = 0,
+            .reason = .initial,
+            .watermark = 0,
+            .eviction_generation = 0,
+            .prior = null,
+            .catalog = .{ .digest = @splat(5), .bytes = 1 },
+            .skills = .{ .items = &.{} },
+        },
+        .materialized = .{true},
+        .offered = .{true},
+        .results = .{ .items = &.{} },
+    } };
+}
+
+fn executionReply(allocator: std.mem.Allocator, expected: ExecutionRequest) ![]u8 {
+    if (expected != .first_model and expected != .second_model) {
+        return protean.contracts.encodeOwned(u64, allocator, switch (expected) {
+            .first_read => 3,
+            .second_read => 5,
+            .idle => 999,
+            else => unreachable,
+        });
+    }
+    const item: P.OutputItem = .{ .function_call = .{
+        .call_id = .{ .bytes = if (expected == .first_model) "first" else "second" },
+        .name = .{ .bytes = "contribute" },
+        .arguments_json = .{ .bytes = if (expected == .first_model)
+            "{\"value\":7}"
+        else
+            "{\"value\":11}" },
+        .tool_ordinal_claim = 0,
+        .decoded_action = .{ .decoded = .{ .contribute = .{
+            .value = if (expected == .first_model) 7 else 11,
+        } } },
+    } };
+    return protean.contracts.encodeOwned(P.AdaptiveResult, allocator, .{
+        .result = .{ .output = .{
+            .items = .{ .items = &.{item} },
+            .normalized_output_digest = @splat(0),
+        } },
+        .replay = null,
+        .replay_status = .complete,
+        .usage = null,
+    });
+}
+
+fn checkExecutionRequest(
+    allocator: std.mem.Allocator,
+    expected: ExecutionRequest,
+    request: data.invocation.Request,
+) !void {
+    const model = expected == .first_model or expected == .second_model;
+    try std.testing.expectEqualStrings(
+        if (model)
+            protean.model_invocation.semantic_identity
+        else
+            "fixture.recursive.reference-bytes",
+        request.binding.semantic_identity,
+    );
+    const payload = if (model)
+        try protean.contracts.encodeOwned(P.AdaptiveRequest, allocator, executionInput().request)
+    else
+        try protean.contracts.encodeOwned(u64, allocator, if (expected == .idle) 1 else 0);
+    defer allocator.free(payload);
+    try std.testing.expectEqualSlices(u8, payload, request.binding.payload);
+}
+
+fn restoreExecution(
+    comptime kosmos: type,
+    allocator: std.mem.Allocator,
+    prepared: *const kosmos.Prepared,
+    session: *?kosmos.Session,
+) ![32]u8 {
+    var original = try session.*.?.pendingRequest(allocator);
+    defer original.deinit();
+    const checkpoint = try session.*.?.checkpoint(allocator);
+    defer allocator.free(checkpoint);
+    session.*.?.deinit();
+    session.* = null;
+    session.* = try kosmos.Session.restore(allocator, prepared, checkpoint);
+    var restored = try session.*.?.pendingRequest(allocator);
+    defer restored.deinit();
+    try std.testing.expectEqualDeep(original.request, restored.request);
+    try std.testing.expectEqualSlices(u8, checkpoint, restored.state);
+    return restored.request.request_identity;
+}
+
+fn runExecution(
+    comptime kosmos: type,
+    allocator: std.mem.Allocator,
+    prepared: *const kosmos.Prepared,
+    repeated: bool,
+    restore: bool,
+) !u64 {
+    const arguments = try protean.contracts.encodeOwned(Input, allocator, executionInput());
+    defer allocator.free(arguments);
+    var session: ?kosmos.Session = try kosmos.Session.start(allocator, prepared, arguments);
+    defer if (session) |*live| live.deinit();
+    const requests: []const ExecutionRequest = if (repeated)
+        &.{ .first_read, .first_model, .second_read, .second_model, .idle }
+    else
+        &.{ .first_read, .first_model, .idle };
+    var answered: usize = 0;
+    for (0..128) |_| switch (try session.?.run(65536)) {
+        .progressed => {},
+        .requested => {
+            try std.testing.expect(answered < requests.len);
+            var request = try session.?.pendingRequest(allocator);
+            defer request.deinit();
+            try checkExecutionRequest(allocator, requests[answered], request.request);
+            const identity = if (restore)
+                try restoreExecution(kosmos, allocator, prepared, &session)
+            else
+                request.request.request_identity;
+            const reply = try executionReply(allocator, requests[answered]);
+            defer allocator.free(reply);
+            const response = try data.invocation.encodeOwned(data.invocation.Result, allocator, .{
+                .request_identity = identity,
+                .value = reply,
+            });
+            defer allocator.free(response);
+            try session.?.answer(response);
+            answered += 1;
+        },
+        .completed => |value| {
+            try std.testing.expectEqual(requests.len, answered);
+            var result = try protean.contracts.decodeOwned(
+                u64,
+                allocator,
+                try session.?.bytes(&value),
+            );
+            defer result.deinit();
+            return result.value;
+        },
+        else => return error.UnexpectedRecursiveOutcome,
+    };
+    return error.RecursiveExecutionBudgetExceeded;
+}
+
+pub fn nativeExecution(comptime kosmos: type) !void {
+    const allocator = std.testing.allocator;
+    const producer = try object(allocator, false);
+    defer allocator.free(producer);
+    Application.producer_bytes = producer;
+    for ([_]bool{ false, true }) |repeated| {
+        const consumer = try objectChecked(allocator, true, false, repeated);
+        defer allocator.free(consumer);
+        Application.consumer_bytes = consumer;
+        var compiled = try protean.compile(allocator, System);
+        defer compiled.deinit();
+        const image = try allocator.alloc(
+            u8,
+            try data.program_image.encodedLength(compiled.program),
+        );
+        defer allocator.free(image);
+        _ = try compiled.encode(allocator, image);
+        var prepared = try kosmos.Prepared.init(allocator, image);
+        defer prepared.deinit();
+        const uninterrupted = try runExecution(kosmos, allocator, &prepared, repeated, false);
+        try std.testing.expectEqual(@as(u64, if (repeated) 59 else 33), uninterrupted);
+        try std.testing.expectEqual(
+            uninterrupted,
+            try runExecution(kosmos, allocator, &prepared, repeated, true),
+        );
+    }
 }

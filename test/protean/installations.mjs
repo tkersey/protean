@@ -2,7 +2,7 @@
 // acquisition/build/install command runs behind a native executable allowlist.
 import assert from 'node:assert/strict';
 import {execFileSync, spawnSync} from 'node:child_process';
-import {copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {basename, dirname, join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {pathToFileURL} from 'node:url';
@@ -22,7 +22,7 @@ const library = realpathSync(JSON.parse(description.match(/^\s*\.lib_dir = (".*"
 assert.equal(execFileSync(zig, ['version'], {encoding: 'utf8'}).trim(), '0.17.0');
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'Protean downstream ü ')));
 const cache = resolve(process.env.ZIG_GLOBAL_CACHE_DIR ?? join(scratch, 'global-cache'));
-const local = process.platform === 'linux' ? join(cache, 'downstream-local') : join(scratch, 'local-cache');
+const local = join(cache, 'downstream-local');
 const inputs = join(scratch, 'inputs');
 const sandboxPath = value => process.platform === 'linux' ? value.replaceAll(scratch, '/tmp/Protean downstream ü') : value;
 mkdirSync(cache, {recursive: true}); mkdirSync(local, {recursive: true}); mkdirSync(inputs);
@@ -94,16 +94,17 @@ try {
   assert.match(packageHash, /^protean-7\.0\.0-[A-Za-z0-9_-]+$/);
   const packageDir = join(scratch, 'package'); mkdirSync(packageDir);
   run('/usr/bin/tar', ['-xzf', join(cache, 'p', `${packageHash}.tar.gz`), '-C', packageDir]);
-  const source = join(packageDir, packageHash);
+  const source = join(packageDir, 'source');
+  renameSync(join(packageDir, packageHash), source);
   assert(existsSync(join(source, 'build.zig')));
   // Resolve the native qualifier's full module graph from the published bytes.
   // Loading its fixture helpers performs no provider or native execution.
   await import(pathToFileURL(join(source, 'test/protean/adaptive_native_peer.mjs')).href);
   for (const retired of ['runtime/model.mjs', 'runtime/mobility', 'examples/native-minimal', 'examples/repository-agent', 'tools/agent4/setup.mjs'])
     assert(!existsSync(join(source, retired)), `retired package member: ${retired}`);
-  const consumer = join(scratch, 'consumer'); mkdirSync(consumer);
+  const consumer = scratch;
   copyFileSync(join(root, 'test/consumers/adaptive/build.zig'), join(consumer, 'build.zig'));
-  const zon = readFileSync(join(root, 'test/consumers/adaptive/build.zig.zon'), 'utf8').replace('.path = "../../.."', `.path = "../package/${packageHash}"`);
+  const zon = readFileSync(join(root, 'test/consumers/adaptive/build.zig.zon'), 'utf8').replace('.path = "../../.."', '.path = "package/source"');
   writeFileSync(join(consumer, 'build.zig.zon'), zon);
   const prefixDir = join(scratch, 'installed');
   const buildArgs = ['build', '-Doptimize=safe', `-Dkosmos-source=${join(inputs, 'kosmos')}`, `-Dsqlite-source=${join(inputs, 'sqlite')}`, '--prefix', prefixDir, '--prefix-exe-dir', 'executables', '--summary', 'all'];

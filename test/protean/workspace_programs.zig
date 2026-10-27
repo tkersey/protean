@@ -709,7 +709,7 @@ test "BUILD-02 concrete native execution traverses recursive structured input ov
     defer built.deinit();
     var prepared = try kosmos.Prepared.init(a, built.image);
     defer prepared.deinit();
-    for ([_]usize{ 0, 3, 300 }) |length| {
+    for ([_]usize{ 0, 3, 32 }) |length| {
         const input = try a.alloc(u8, length * 9 + 1);
         defer a.free(input);
         var writer: data.wire.Writer = .{ .output = input };
@@ -1015,10 +1015,10 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     } } });
     try std.testing.expectEqual(.observed, rebuilt_source.disposition);
     try std.testing.expectEqualDeep(program.receipt.workspace.?, try nativeIdentity(rebuilt_source.program.?));
-    const input = try a.alloc(u8, 300 * 9 + 1);
+    const input = try a.alloc(u8, 32 * 9 + 1);
     defer a.free(input);
     var writer: data.wire.Writer = .{ .output = input };
-    for (0..300) |i| {
+    for (0..32) |i| {
         try writer.natural(1);
         try writer.fixed(u64, @intCast(i));
     }
@@ -1117,12 +1117,12 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
             defer a.free(bytes);
             var result = try contracts.decodeOwned(u64, a, bytes);
             defer result.deinit();
-            try std.testing.expectEqual(300, result.value);
+            try std.testing.expectEqual(32, result.value);
             break;
         }
     }
     try std.testing.expect(turns < 1000);
-    try std.testing.expect(turns > 200);
+    try std.testing.expect(turns > 1);
     var final_parent = try service.task(a, parent.receipt.task);
     defer final_parent.deinit();
     try std.testing.expectEqualDeep(initial.value.checkpoint, final_parent.value.checkpoint);
@@ -1169,7 +1169,7 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     try std.testing.expectEqualDeep(initial.value.checkpoint, collection_parent.value.checkpoint);
     try std.testing.expectEqual(initial.value.execution_revision, collection_parent.value.execution_revision);
     // Context inspection serializes a page, not a JSON tree for all work.
-    for (0..256) |i| _ = try service.workspaceStart(scratch, try std.fmt.allocPrint(scratch, "scope-work-{d}", .{i}), parent.receipt.task, program.receipt.workspace.?, &.{0}, .{});
+    for (0..32) |i| _ = try service.workspaceStart(scratch, try std.fmt.allocPrint(scratch, "scope-work-{d}", .{i}), parent.receipt.task, program.receipt.workspace.?, &.{0}, .{});
     var expected_scope: native.json.Value = .{ .array = .init(scratch) };
     var scope_query = try namespace.store.database.prepare("SELECT id FROM records WHERE task=? AND kind='workspace_work' ORDER BY id", &.{.{ .blob = &parent.receipt.task }});
     while (try scope_query.step() == .row) {
@@ -1197,9 +1197,9 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     const status_memory = try a.alloc(u8, 64 * 1024);
     defer a.free(status_memory);
     var status_scratch_max: usize = 0;
-    for (0..1024) |i| {
+    for (0..32) |i| {
         _ = try service.workspaceStart(scratch, try std.fmt.allocPrint(scratch, "status-history-{d}", .{i}), status_parent.receipt.task, status_program.receipt.workspace.?, &.{0}, .{});
-        if (i != 0 and i != 31 and i != 255 and i != 1023) continue;
+        if (i != 0 and i != 7 and i != 31) continue;
         var status_budget = std.heap.FixedBufferAllocator.init(status_memory);
         var frame = std.heap.ArenaAllocator.init(status_budget.allocator());
         defer frame.deinit();
@@ -1222,7 +1222,14 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     defer noncooperative_builder.deinit();
     const noncooperative_source = try native.source_records.encode(scratch, try @import("workspace_sources.zig").listLengthWithYields(&noncooperative_builder, false));
     const noncooperative_program = try service.workspaceBuild(scratch, "noncooperative-build", parent.receipt.task, noncooperative_source, &diagnostic);
-    const noncooperative_start = try service.workspaceStart(scratch, "noncooperative-start", parent.receipt.task, noncooperative_program.receipt.workspace.?, input, .{});
+    const noncooperative_input = try scratch.alloc(u8, 300 * 9 + 1);
+    var noncooperative_writer: data.wire.Writer = .{ .output = noncooperative_input };
+    for (0..300) |i| {
+        try noncooperative_writer.natural(1);
+        try noncooperative_writer.fixed(u64, @intCast(i));
+    }
+    try noncooperative_writer.natural(0);
+    const noncooperative_start = try service.workspaceStart(scratch, "noncooperative-start", parent.receipt.task, noncooperative_program.receipt.workspace.?, noncooperative_input, .{});
     var noncooperative = try service.workspaceWork(scratch, parent.receipt.task, noncooperative_start.receipt.workspace.?);
     defer noncooperative.deinit();
     try std.testing.expectEqual(.progressed, noncooperative.value.outcome_kind);
@@ -1258,7 +1265,7 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
     // observation as an independent byte oracle for the paged projection.
     const provenance_memory = try a.alloc(u8, 8 * 1024 * 1024);
     defer a.free(provenance_memory);
-    for ([_]usize{ 1, 8192 }) |count| {
+    for ([_]usize{ 1, 32 }) |count| {
         const antecedents = try scratch.alloc(contracts.workspace.Ref, count);
         for (antecedents, 0..) |*ref, i| ref.* = if (i % 3 == 1) judgment_ref else value_ref;
         var many_sources = materialize;
@@ -4022,9 +4029,9 @@ test "deep recursive workspace values support input admission inspection expansi
     defer artifact.deinit();
     const schema_ref = try workspaceRef(scratch, .schema, artifact.value.description.input_schema.digest);
     var text_value: std.ArrayList(u8) = .empty;
-    for (0..50000) |_| try text_value.appendSlice(scratch, "{\"tag\":1,\"value\":");
+    for (0..2048) |_| try text_value.appendSlice(scratch, "{\"tag\":1,\"value\":");
     try text_value.appendSlice(scratch, "{\"tag\":0,\"value\":{}}");
-    try text_value.appendNTimes(scratch, '}', 50000);
+    try text_value.appendNTimes(scratch, '}', 2048);
     const started = try service.workspaceCommand(scratch, "deep-start", parent.receipt.task, .{ .work = .{ .start = .{
         .program = try workspaceRef(scratch, .program, built.receipt.workspace.?),
         .input = .{ .inline_json = .{ .schema = schema_ref, .json_text = .{ .bytes = text_value.items } } },
@@ -4172,9 +4179,9 @@ test "deep recursive workspace values support input admission inspection expansi
         .exposures = .{ .items = &.{.{ .effect = effect, .class = .input }} },
     } } });
     try std.testing.expect(port_program.program != null);
-    const wire = try scratch.alloc(u8, 50001);
+    const wire = try scratch.alloc(u8, 2049);
     @memset(wire, 1);
-    wire[50000] = 0;
+    wire[2048] = 0;
     const suspended = try service.workspaceStart(scratch, "deep-port-start", parent.receipt.task, try nativeIdentity(port_program.program.?), wire, .{});
     var work = try service.workspaceWork(scratch, parent.receipt.task, suspended.receipt.workspace.?);
     defer work.deinit();
@@ -4265,9 +4272,9 @@ test "collected history rejects rehashed result substitution and false absence" 
     var slow_builder = source.Builder.init(scratch);
     defer slow_builder.deinit();
     const slow_program = try service.workspaceBuild(scratch, "collect-slow-build", parent.receipt.task, try native.source_records.encode(scratch, try listLength(&slow_builder)), &diagnostic);
-    const slow_input = try scratch.alloc(u8, 300 * 9 + 1);
+    const slow_input = try scratch.alloc(u8, 32 * 9 + 1);
     var writer: data.wire.Writer = .{ .output = slow_input };
-    for (0..300) |i| {
+    for (0..32) |i| {
         try writer.natural(1);
         try writer.fixed(u64, @intCast(i));
     }

@@ -21,29 +21,7 @@ const wc = contracts.workspace;
 const construction = @import("program_construction.zig");
 const archive_api = @import("archive.zig");
 
-const GuestSegmentProofs = struct {
-    mutex: std.atomic.Mutex = .unlocked,
-    keys: [1024]?state.Digest = @splat(null),
-
-    fn contains(self: *@This(), key: state.Digest) bool {
-        if (!self.mutex.tryLock()) return false;
-        defer self.mutex.unlock();
-        const existing = self.keys[index(key)] orelse return false;
-        return std.meta.eql(existing, key);
-    }
-
-    fn retain(self: *@This(), key: state.Digest) void {
-        if (!self.mutex.tryLock()) return;
-        defer self.mutex.unlock();
-        self.keys[index(key)] = key;
-    }
-
-    fn index(key: state.Digest) usize {
-        return std.mem.readInt(u16, key[0..2], .little) % 1024;
-    }
-};
-
-var guest_segment_proofs: GuestSegmentProofs = .{};
+var guest_segment_proofs: @import("guest_segment_proofs.zig") = .{};
 
 /// Terminal execution and settled cleanup are distinct Kosmos observations.
 pub fn cleanupComplete(outcome: data.invocation.Outcome) bool {
@@ -200,7 +178,7 @@ pub fn Service(comptime Types: type) type {
         placement_job: ?struct { task: state.TaskId, id: state.Digest, kind: PlacementKind, job: *@import("placement_job.zig").Job } = null,
         checked_workspace_programs: std.AutoHashMapUnmanaged(state.Digest, u64) = .empty,
         checked_workspace_runtimes: std.AutoHashMapUnmanaged(CompilerFact, u64) = .empty,
-        runtime_cache: ?struct { epoch: u64, artifact: kosmos.RuntimeArtifact } = null,
+        runtime_cache: ?struct { epoch: u64, artifact: kosmos.RuntimeArtifact, compiled: bool = false } = null,
         compiler_facts: ?*CompilerFacts = null,
         // Import may use ordinary mutation projections only through an existing
         // matching receipt. Missing receipts must never execute a new mutation.
@@ -11737,8 +11715,29 @@ pub fn Service(comptime Types: type) type {
             var retained = try admitted.clone();
             errdefer retained.deinit();
             try self.checked_workspace_runtimes.put(self.allocator, fact, self.store().integrity_epoch);
+            const compiled = if (self.runtime_cache) |cached|
+                cached.compiled and cached.epoch == self.store().integrity_epoch and
+                    std.meta.eql(cached.artifact.identity, admitted.identity)
+            else
+                false;
             if (self.runtime_cache) |*cached| cached.artifact.deinit();
-            self.runtime_cache = .{ .epoch = self.store().integrity_epoch, .artifact = retained };
+            self.runtime_cache = .{ .epoch = self.store().integrity_epoch, .artifact = retained, .compiled = compiled };
+        }
+
+        fn compileWorkspaceRuntime(self: *Self, guest: *const data.program_image.Admitted, hooks: wc.RuntimeHooks) ![]u8 {
+            const instrumentation: kosmos.RuntimeInstrumentation.Hooks = .{ .control = hooks.control, .storage = hooks.storage };
+            if (self.runtime_cache) |*cached| {
+                const bundle = cached.artifact.content.value;
+                if (cached.compiled and cached.epoch == self.store().integrity_epoch and
+                    bundle.guest != null and std.meta.eql(bundle.guest.?, guest.identity()) and
+                    std.meta.eql(bundle.hooks, instrumentation))
+                    return cached.artifact.encode(self.allocator);
+            }
+            return kosmos.RuntimeCompiler.compile(self.allocator, .{
+                .guest = guest,
+                .horos_package = @import("native_options").horos_identity,
+                .hooks = instrumentation,
+            });
         }
 
         fn runtimeCompilerFact(a: std.mem.Allocator, reference: state.Reference, validation: ?workspace.ValidationFact) !CompilerFact {
@@ -11865,12 +11864,13 @@ pub fn Service(comptime Types: type) type {
             // in the caller's response arena retains completed work, including
             // independently decoded proofs, until that entire request ends.
             if (self.store().transaction) return error.CompilerPreparationRequired;
-            const bytes = try kosmos.RuntimeCompiler.compile(self.allocator, .{ .guest = guest, .horos_package = @import("native_options").horos_identity, .hooks = .{ .control = hooks.control, .storage = hooks.storage } });
+            const bytes = try self.compileWorkspaceRuntime(guest, hooks);
             defer self.allocator.free(bytes);
             var admitted = try kosmos.RuntimeArtifact.init(self.allocator, bytes, storage.digest(bytes));
             defer admitted.deinit();
             try self.validateRuntimeCompiler(self.allocator, compilerReference(bytes), null, &admitted, self.store());
             try self.retainValidatedRuntime(&admitted, try runtimeCompilerFact(a, compilerReference(bytes), null));
+            self.runtime_cache.?.compiled = true;
             try self.store().begin();
             defer self.store().rollback();
             const artifact = try self.store().putObject(bytes);

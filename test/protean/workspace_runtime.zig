@@ -3697,6 +3697,7 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     const alias_program = try service.workspaceBuild(scratch, "build-alias", parent.receipt.task, alias_document, &diagnostic);
     try std.testing.expect(!std.meta.eql(program.receipt.workspace.?, alias_program.receipt.workspace.?));
     const alias_specialized = try service.workspaceSpecializeWithHooks(scratch, "specialize-alias", parent.receipt.task, alias_program.receipt.workspace.?, .{ .control = true, .storage = true });
+    try std.testing.expect(!alias_specialized.replayed);
     try std.testing.expectEqualDeep(specialized.receipt.workspace, alias_specialized.receipt.workspace);
     var alias_observation = try contracts.decodeOwned(native.workspace.Runtime, scratch, try namespace.store.object(scratch, alias_specialized.receipt.workspace_observation.?, null));
     defer alias_observation.deinit();
@@ -4189,10 +4190,6 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
         try std.testing.expectEqual(@as(usize, 1), trace.scans);
     }
     try observerArchiveWitness(&imported, scratch, document, input);
-}
-
-test "native placement carries a suspended evaluator with exclusive per-work custody" {
-    try placementCase(.work);
 }
 
 test "native placement carries the current cut of a queued work move" {

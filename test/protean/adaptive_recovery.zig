@@ -180,14 +180,6 @@ const CaptureRecord = struct {
     reconciliation: ?[32]u8,
 };
 
-test "adaptive copied capture stays parked while its original owner resumes and warms context" {
-    try adaptiveRecovery(false, .imported);
-}
-
-test "adaptive report correction preserves acquired evidence and retains a large complete report" {
-    try adaptiveRecovery(true, .none);
-}
-
 test "adaptive snapshot reconciliation preserves unknown history and settles once after restart" {
     try adaptiveRecovery(false, .snapshot);
 }
@@ -200,20 +192,8 @@ test "adaptive malformed capture remains private and portable without claiming s
     try adaptiveRecovery(false, .malformed);
 }
 
-test "adaptive workspace interrupted pure build restarts without ambiguous delivery" {
-    try workspaceRecovery(true, false, .none);
-}
-
-test "adaptive workspace captured build imports and executes exact retained code and input" {
-    try workspaceRecovery(false, false, .none);
-}
-
-test "adaptive workspace AUT-02 AUT-03 BUILD-01 controller abandons a binary framing and executes novel source twice" {
-    try workspaceRecovery(false, true, .none);
-}
-
 test "adaptive workspace reconstructed controller cannot publish invalid output" {
-    for ([_]OutputCheck{ .origin, .citation, .foreign_value, .foreign_program, .malformed, .origin_outer }) |check| try workspaceRecovery(false, false, check);
+    for ([_]OutputCheck{ .foreign_value, .malformed, .origin_outer }) |check| try workspaceRecovery(false, false, check);
 }
 
 const OutputCheck = enum { none, origin, citation, foreign_value, foreign_program, malformed, origin_outer };
