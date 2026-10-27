@@ -206,8 +206,8 @@ model-site negatives. Its presence in the source inventory alone was not
 execution evidence. All 46 native owner cases passed on Linux in the run below.
 
 The dependency lock now selects published draft candidates Horos
-`f4db3fa1aaac582eea312f4ee80a82e47234982b` and Kosmos
-`4e13a7c7ea1b320ca3f55f14075a67411e8ca5ee`. Their actual GitHub archive members,
+`535f95697ff88054df0dd8dd539df9008983ef32` and Kosmos
+`2e517666bd177e6996dbee8a7bc8e0cbf53bdc7a`. Their actual GitHub archive members,
 Git blob identities, complete normalized source inventories, Horos package
 profiles and API-file digests are bound in the lock. The Kosmos evaluator bundle
 is 275,293 bytes and differs from the prerequisite only in the embedded Horos
@@ -241,8 +241,19 @@ the exact recorded candidate and bindings.
 The callable admission root now includes the previously unwired positive
 comparison: shared schemas conservatively reject ambiguous callable origins,
 while distinct nominal callable origins admit the safe speculative callback.
-Execution of this added test remains pending on the successor candidate.
+This comparison passed in native Linux run 40561033933 at
+`ca0fa3eeade11ec06910acf8b3d0e31970d2c8d9`; final tuple qualification is pending.
 Historical installation/continuation is a separate `retained-runtime` CI diagnostic
 using authenticated product archives and the existing
 `workspace_runtime_retention.mjs` witness. The similarly named workspace test
 lane does not establish this old-executable observation.
+
+Horos native Linux run 40567783958 qualifies the selected package without the
+LLVM test override. The package consumer now inherits the exported baseline
+CPU target, avoiding a diagnosed native x86-64 AVX stack-alignment defect while
+preserving Debug mode and all assertions. Kosmos rebuilt its artifact with this
+package identity. Current Kosmos and Protean native qualification remains pending.
+The historical-retention diagnostic preserves both executables, the original
+continuation, separate namespaces and each 60-second wait. Status polling now
+uses 250 ms instead of 10 ms, and a timeout captures bounded progress, recent
+events, result and stderr before cleanup; it does not extend the semantic wait.

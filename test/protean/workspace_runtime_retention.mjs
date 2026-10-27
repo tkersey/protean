@@ -12,21 +12,36 @@ const root = await realpath(await mkdtemp(join(tmpdir(), 'protean-retained-runti
 const baseline = resolve(process.argv[2]), successor = resolve(process.argv[3]);
 const digest = async path => createHash('sha256').update(await readFile(path)).digest('hex');
 let client;
+let diagnostics = '';
 async function launch(binary, state) {
   client = new ProteanClient(binary, ['--offline', '--state-dir', state]);
-  let diagnostics = '';
-  client.child.stderr.on('data', bytes => { diagnostics += bytes; });
+  diagnostics = '';
+  client.child.stderr.on('data', bytes => { diagnostics = (diagnostics + bytes).slice(-8192); });
   try { await client.initialize(); }
   catch (error) { throw new Error(`${binary}: ${diagnostics}`, {cause: error}); }
   return client.call('describe');
 }
-async function until(read, predicate) {
+async function until(read, predicate, taskId) {
   const deadline = Date.now() + 60000;
+  const progress = [];
   for (;;) {
     const value = await read();
     if (predicate(value)) return value;
-    if (Date.now() > deadline) throw new Error(`Timed out: ${JSON.stringify(value)}`);
-    await new Promise(resolve => setTimeout(resolve, 10));
+    const observed = JSON.stringify({revision: value.revision, high_water_seq: value.high_water_seq, ready: value.ready});
+    if (progress.at(-1) !== observed) {
+      progress.push(observed);
+      if (progress.length > 8) progress.shift();
+    }
+    if (Date.now() > deadline) {
+      const observations = await Promise.allSettled([
+        client.call('task.events', {task_id: taskId, after_seq: Math.max(0, (value.high_water_seq ?? 16) - 16)}, 5000),
+        client.call('task.result', {task_id: taskId}, 5000),
+      ]);
+      const details = observations.map(item => item.status === 'fulfilled' ? item.value : {error: String(item.reason)});
+      console.error(JSON.stringify({progress, observations: details, stderr: diagnostics}).slice(-32768));
+      throw new Error(`Timed out: ${JSON.stringify(value)}`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 250));
   }
 }
 try {
@@ -35,7 +50,7 @@ try {
   const oldHash = await digest(initial.current);
   const description = await launch(join(prefix, 'bin', 'protean'), state);
   const accepted = await client.call('task.submit', {client_operation_id: 'baseline-before-update', application_id: 'adaptive-agent', profile_id: description.profile.id, input: {schema_id: 'adaptive-agent.input.v2', value: {task: 'Inspect the repository and ask for the desired review focus.'}}});
-  const waiting = await until(() => client.call('task.status', {task_id: accepted.task_id}), value => value.question != null);
+  const waiting = await until(() => client.call('task.status', {task_id: accepted.task_id}), value => value.question != null, accepted.task_id);
   await client.close(); client = null;
   const updated = await install(successor, prefix);
   assert.equal(updated.previous, initial.current);
@@ -49,7 +64,7 @@ try {
   assert.deepEqual(restored.question, waiting.question);
   await client.call('task.resume', {client_operation_id: 'original-resume', task_id: accepted.task_id, expected_revision: restored.revision});
   await client.call('task.respond', {client_operation_id: 'original-answer', task_id: accepted.task_id, question_id: waiting.question.question_id, question_revision: waiting.question.question_revision, request_digest: waiting.question.request_digest, answer: {schema_id: waiting.question.answer_schema_id, value: {message: 'Focus on observable behavior.'}}});
-  const result = await until(() => client.call('task.result', {task_id: accepted.task_id}), value => value.ready);
+  const result = await until(() => client.call('task.result', {task_id: accepted.task_id}), value => value.ready, accepted.task_id);
   assert.equal(result.outcome.value.result.tag, 'report');
   console.log(JSON.stringify({old_task_continued: true, baseline_sha256: oldHash, successor_sha256: await digest(updated.current), original_question_preserved: true, separate_namespaces: true}));
 } finally {
