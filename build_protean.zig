@@ -216,21 +216,26 @@ pub fn build(b: *std.Build) void {
     lint.dependOn(&format_check.step);
     lint.dependOn(&b.addSystemCommand(&.{ "sh", "tools/check_zig_paths.sh" }).step);
     check.dependOn(lint);
-    _ = g.testModule(check, g.module("test/authoring_tests.zig"));
-    _ = g.testModule(check, g.module("src/test_root.zig"));
     const workspace_values = b.step("check-workspace-values", "Check runtime-schema workspace value projection");
     const source_records = b.step("check-source-records", "Check the model-facing Horos source-record transport");
     const program_construction = b.step("check-program-construction", "Check untrusted general source construction");
-    _ = g.testModule(program_construction, g.module("runtime/native/program_construction.zig"));
     workspace_values.dependOn(program_construction);
     source_records.dependOn(program_construction);
     check.dependOn(program_construction);
     const admitted = g.module("test/protean/admission.zig");
     admitted.addImport("admission", g.helper("admission"));
-    _ = g.testModule(check, admitted);
     const dialogue = g.module("test/protean/dialogue_probe.zig");
     dialogue.addImport("interaction", g.helper("interaction"));
-    _ = g.testModule(check, dialogue);
+    const authoring_tests = [_]*std.Build.Step.Compile{
+        g.testModule(check, g.module("test/authoring_tests.zig")),
+        g.testModule(check, g.module("src/test_root.zig")),
+        g.testModule(program_construction, g.module("runtime/native/program_construction.zig")),
+        g.testModule(check, admitted),
+        g.testModule(check, dialogue),
+    };
+    if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) {
+        for (authoring_tests) |tests| tests.use_llvm = false;
+    }
     inline for (.{
         .{ "model_runtime_callback", "Protean model declaration has unknown field 'execute'" },
         .{ "model_unsupported_codec", "Protean model codec is unsupported for 'value': []const u8" },

@@ -10,7 +10,7 @@ on:
         description: Run one existing lane for diagnosis; only all qualifies the complete product
         type: choice
         default: all
-        options: [all, owners, downstream]
+        options: [all, authoring, owners, downstream]
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'downstream' && '[{"lane":"downstream"}]' || '[{"lane":"authoring"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control"},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"correspondence"},{"lane":"native","compiled_profile":"product"},{"lane":"native-placement","product_consumer":true},{"lane":"downstream"}]') }}
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'authoring' && '[{"lane":"authoring"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'downstream' && '[{"lane":"downstream"}]' || '[{"lane":"authoring"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control"},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"correspondence"},{"lane":"native","compiled_profile":"product"},{"lane":"native-placement","product_consumer":true},{"lane":"downstream"}]') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:

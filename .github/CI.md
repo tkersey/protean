@@ -11,9 +11,9 @@ retry does not satisfy this requirement.
 Pull requests and main pushes run the same inventory on native Linux x86-64 with
 exact Zig 0.17.0 and safe optimization. Complete manual dispatches provide
 supplemental evidence; they do not replace the original automatic PR run.
-Selective `owners` and `downstream` dispatches are diagnostic and cannot pass
-the terminal qualification gate. Matrix fail-fast remains disabled so every
-selected lane can return evidence.
+Selective `authoring`, `owners` and `downstream` dispatches are diagnostic and
+cannot pass the terminal qualification gate. Matrix fail-fast remains disabled
+so every selected lane can return evidence.
 
 ## Required inventory
 
@@ -122,6 +122,12 @@ owner/workspace checks. Explicit diagnostic targets retain their own coverage
 and do not automatically become required again.
 
 ## Compilation, caching and artifacts
+
+The five authoring test roots use Zig's native x86-64 backend on Linux, retaining
+safe optimization and every selected test. macOS keeps its existing backend;
+the production native executable keeps LLVM. This reduces repeated LLVM test
+compilation but no longer exercises those authoring test bodies through LLVM on
+Linux. Compile-time rejection and independent execution checks remain selected.
 
 Exact compiled-artifact keys bind compiler identity, target, recipe and source
 inputs. Restored manifests verify output bytes and executable modes. Every
