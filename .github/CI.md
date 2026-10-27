@@ -82,10 +82,10 @@ verification scope, not supported product inputs or production semantics.
 
 ## Local feedback
 
-Local verification retains its separate **300-second shared wall-clock
-deadline**, including setup, compilation and retries. Terminate commands and
+Local macOS verification uses a **600-second shared wall-clock deadline per
+repository**, including setup, compilation and retries. Terminate commands and
 descendants at that deadline and report unfinished verification as incomplete.
-The CI scope reduction does not reset or increase an existing local allowance.
+This local allowance is separate from the original-trigger CI budget.
 
 The supported product platforms remain macOS arm64 and Linux x86-64 musl.
 Native macOS verification supplements the required Linux workflow; emulation or
