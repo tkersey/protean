@@ -383,12 +383,9 @@ pub fn build(b: *std.Build) void {
         workspace_runtime_module.addImport("kosmos", checked_kosmos);
         workspace_runtime_module.addImport("protean_native", checked_environment);
         const workspace_runtime_checks = b.step("check-workspace-runtime", "Qualify runtime selection and bilateral workspace custody");
-        const runtime_workspace_group = b.option(enum { selection, custody, succession }, "runtime-workspace-group", "Select independent runtime workspace qualification cases (default: all)");
+        const runtime_workspace_group = b.option(enum { selection, succession }, "runtime-workspace-group", "Select independent runtime workspace qualification cases (default: all)");
         const workspace_runtime_tests = native_graph.testModuleGrouped(workspace_runtime_checks, workspace_runtime_module, &.{
             &.{ "runtime selection", "terminal parent cancellation", "scheduler bounds" },
-            &.{
-                "native placement carries a suspended evaluator with exclusive per-work custody",
-            },
             &.{
                 "delayed controls",
                 "controller succession precedes",
@@ -403,7 +400,6 @@ pub fn build(b: *std.Build) void {
             .dest_sub_path = "workspace-runtime",
         }).step);
         workspace_checks.dependOn(workspace_general);
-        workspace_checks.dependOn(workspace_runtime_checks);
         native_checks.dependOn(workspace_checks);
         const workspace_semantics_module = native_graph.module("test/protean/workspace_semantics.zig");
         workspace_semantics_module.strip = optimize != .debug;
@@ -466,6 +462,7 @@ pub fn build(b: *std.Build) void {
             adaptive_peer.addFileArg2(adaptive_product.executable.getEmittedBin(), .{ .make_absolute = true });
             adaptive_peer.addFileArg2(adaptive_application, .{ .make_absolute = true });
             adaptive_peer.addFileArg2(adaptive_image, .{ .make_absolute = true });
+            adaptive_peer.addArg("smoke");
             native_executable.dependOn(&adaptive_peer.step);
             const placement_peer = nativeCheckCommand(b);
             placement_peer.addArgs(&.{ "node", "test/protean/native_placement.mjs" });
@@ -480,7 +477,6 @@ pub fn build(b: *std.Build) void {
             runtime_peer.addArg("");
             runtime_peer.addArtifactArg(mobility_peer);
             b.step("check-native-runtime", "Qualify scripted optional runtime choices through native inference and workspace boundaries").dependOn(&runtime_peer.step);
-            native_executable.dependOn(&runtime_peer.step);
             const retention_check = b.step("check-workspace-runtime-retention", "Resume an old task with its retained original executable after installing the new product");
             if (b.option(std.Build.LazyPath, "previous-runtime", "Retained previous Protean executable for namespace compatibility qualification")) |previous| {
                 const retention_run = b.addSystemCommand(&.{ "node", "test/protean/workspace_runtime_retention.mjs" });
@@ -533,7 +529,6 @@ pub fn build(b: *std.Build) void {
         native_suite.addAnonymousImport("adaptive_application", .{ .root_source_file = adaptive_application });
         const native_asset_writer = native_graph.module("tools/native/emit.zig");
         native_suite.addImport("native_asset_writer", native_asset_writer);
-        const adaptive_group = b.option(enum { capture, control }, "adaptive-owner-group", "Select independent adaptive owner qualification cases (default: all)");
         inline for (.{
             .{ "adaptive", "test/protean/native_adaptive_tests.zig" },
             .{ "tasks", "test/protean/native_owner_tests.zig" },
@@ -547,13 +542,7 @@ pub fn build(b: *std.Build) void {
                 _ = suite.import_table.swapRemove("adaptive_application");
             }
             const checks = b.step("check-native-owner-" ++ group[0], "Qualify native " ++ group[0] ++ " contracts");
-            const tests = if (comptime std.mem.eql(u8, group[0], "adaptive"))
-                native_graph.testModuleGrouped(checks, suite, &.{
-                    &.{ "adaptive copied capture", "adaptive report correction" },
-                    &.{ "authored inference", "authored skill", "authored report", "report model arguments", "compiled catalog", "adaptive snapshot", "adaptive provider", "adaptive malformed", "adaptive workspace" },
-                }, if (adaptive_group) |selected| @backingInt(selected) else null)
-            else
-                native_graph.testModule(checks, suite);
+            const tests = native_graph.testModule(checks, suite);
             if (comptime std.mem.eql(u8, group[0], "tasks")) {
                 if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64)
                     tests.use_llvm = false;

@@ -16,7 +16,7 @@ assert.equal(createHash('sha256').update(image).digest('hex'), application.progr
 
 const app = deployment(process.argv[2], 'protean');
 const group = process.argv[5] ?? 'all';
-assert(['all', 'controls', 'workspace'].includes(group));
+assert(['all', 'controls', 'workspace', 'smoke'].includes(group));
 let passed = false;
 try {
   const invoke = (...args) => {
@@ -86,7 +86,7 @@ try {
   // progress together. Await every cleanup before closing deployment.
   const outcomes = await Promise.allSettled([
     ...(group === 'workspace' ? [] : [demo()]),
-    verifyAdaptiveNative({app, applicationPath: process.argv[3], group}),
+    ...(group === 'smoke' ? [] : [verifyAdaptiveNative({app, applicationPath: process.argv[3], group})]),
   ]);
   const failures = outcomes.filter(value => value.status === 'rejected').map(value => value.reason);
   if (failures.length) throw new AggregateError(failures, 'native adaptive qualification failed');

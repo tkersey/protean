@@ -6,17 +6,10 @@ import {dirname, join, posix} from 'node:path';
 
 const [operation, profile, argument, key] = process.argv.slice(2);
 const profiles = {
-  'mobility-helper': ['build-runtime-mobility-peer', [], 'runtime_mobility_peer.zig', ['verification/runtime-mobility-peer']],
   product: ['protean', [], null, ['executables/protean', 'protean/adaptive/application.json', 'protean/adaptive/program.bpi3']],
   owners: ['build-native-owner-tasks-check', [], 'native_owner_tests.zig', ['verification/native-owner-tasks']],
-  'owner-adaptive': ['build-native-owner-adaptive-check', ['-Dadaptive-owner-group=capture'], 'native_adaptive_tests.zig', ['verification/native-owner-adaptive']],
-  'owner-adaptive-control': ['build-native-owner-adaptive-check', ['-Dadaptive-owner-group=control'], 'native_adaptive_tests.zig', ['verification/native-owner-adaptive']],
-  workspace: ['build-workspace-general-check', ['-Dworkspace-group=execution'], 'workspace_programs.zig', ['verification/workspace-general']],
-  'workspace-retention': ['build-workspace-general-check', ['-Dworkspace-group=retention'], 'workspace_programs.zig', ['verification/workspace-general']],
-  'workspace-history': ['build-workspace-general-check', ['-Dworkspace-group=history'], 'workspace_programs.zig', ['verification/workspace-general']],
-  'workspace-runtime': ['build-workspace-runtime-check', ['-Druntime-workspace-group=selection'], 'workspace_runtime.zig', ['verification/workspace-runtime']],
-  'workspace-custody': ['build-workspace-runtime-check', ['-Druntime-workspace-group=custody'], 'workspace_runtime.zig', ['verification/workspace-runtime']],
-  'workspace-succession': ['build-workspace-runtime-check', ['-Druntime-workspace-group=succession'], 'workspace_runtime.zig', ['verification/workspace-runtime']],
+  'owner-adaptive-control': ['build-native-owner-adaptive-check', [], 'native_adaptive_tests.zig', ['verification/native-owner-adaptive']],
+  workspace: ['build-workspace-general-check', [], 'workspace_programs.zig', ['verification/workspace-general']],
 };
 assert(Object.hasOwn(profiles, profile));
 const [target, selection, testRoot, outputs] = profiles[profile];

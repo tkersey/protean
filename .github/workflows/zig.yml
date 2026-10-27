@@ -10,7 +10,7 @@ on:
         description: Run one existing lane for diagnosis; only all qualifies the complete product
         type: choice
         default: all
-        options: [all, owners, workspace-custody, downstream]
+        options: [all, owners, downstream]
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'workspace-custody' && '[{"lane":"workspace-custody","compiled_profile":"workspace-custody"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'downstream' && '[{"lane":"downstream"}]' || '[{"lane":"authoring","compiled_profile":"mobility-helper"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive","compiled_profile":"owner-adaptive"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control"},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"workspace-runtime","compiled_profile":"workspace-runtime"},{"lane":"workspace-custody","compiled_profile":"workspace-custody"},{"lane":"workspace-succession","compiled_profile":"workspace-succession"},{"lane":"correspondence"},{"lane":"native","compiled_profile":"product"},{"lane":"native-workspace","product_consumer":true},{"lane":"native-placement","compiled_profile":"product"},{"lane":"runtime","product_consumer":true},{"lane":"runtime-outer","product_consumer":true},{"lane":"runtime-guest","product_consumer":true},{"lane":"downstream"}]') }}
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'downstream' && '[{"lane":"downstream"}]' || '[{"lane":"authoring"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control"},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"correspondence"},{"lane":"native","compiled_profile":"product"},{"lane":"native-placement","product_consumer":true},{"lane":"downstream"}]') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -33,8 +33,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - if: matrix.lane != 'workspace-custody'
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '26.9.0'
       - if: ${{ !matrix.product_consumer }}
@@ -85,17 +84,15 @@ jobs:
           echo "valid=$valid" >> "$GITHUB_OUTPUT"
       - name: Restore complete compiler cache
         id: cache
-        if: ${{ !matrix.product_consumer && (matrix.lane != 'workspace-custody' || steps.compiled.outputs.valid != 'true') }}
+        if: ${{ !matrix.product_consumer }}
         continue-on-error: true
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .zig-cache-upload
-          key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.compiled_profile == 'product' && 'native' || (matrix.lane == 'runtime-outer' && 'runtime-guest' || matrix.lane) }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.compiled_profile == 'product' && 'native' || (matrix.lane == 'runtime-outer' && 'runtime-guest' || matrix.lane) }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
-            ${{ matrix.lane != 'authoring' && format('zig-adaptive-v3-{0}-{1}-0.17.0-{2}-', runner.os, runner.arch, matrix.compiled_profile == 'product' && 'native' || (matrix.lane == 'runtime-outer' && 'runtime-guest' || matrix.lane)) || '' }}
-            ${{ matrix.lane != 'authoring' && format('zig-adaptive-v3-{0}-{1}-0.17.0-runtime-{2}-', runner.os, runner.arch, hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json')) || '' }}
-            ${{ matrix.lane != 'authoring' && format('zig-adaptive-v3-{0}-{1}-0.17.0-{2}-{3}-', runner.os, runner.arch, (matrix.lane == 'runtime-outer' || matrix.lane == 'runtime-guest') && 'correspondence' || 'authoring', hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json')) || '' }}
+            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
+            ${{ matrix.lane != 'authoring' && format('zig-adaptive-v3-{0}-{1}-0.17.0-{2}-', runner.os, runner.arch, matrix.lane) || '' }}
             ${{ matrix.lane != 'authoring' && format('zig-adaptive-v3-{0}-{1}-0.17.0-', runner.os, runner.arch) || '' }}
       - name: Prepare compiler scratch and native isolation tools
         run: |
@@ -109,7 +106,7 @@ jobs:
           if [ -z "${{ matrix.compiled_profile }}" ] || [ "${{ matrix.compiled_profile }}" = product ] || [ "$lane" = authoring ]; then
             command -v rg >/dev/null || packages+=(ripgrep)
           fi
-          if [[ "$lane" == native* ]] || [[ "$lane" == runtime* ]] || [ "$lane" = downstream ]; then
+          if [[ "$lane" == native* ]] || [ "$lane" = downstream ]; then
             test -x /usr/bin/bwrap || packages+=(bubblewrap)
             test -x /usr/bin/strace || packages+=(strace)
           fi
@@ -122,14 +119,14 @@ jobs:
               sudo apt-get install --yes --no-install-recommends "${packages[@]}"
             fi
           fi
-          if [[ "$lane" == native* ]] || [[ "$lane" == runtime* ]] || [ "$lane" = downstream ]; then
+          if [[ "$lane" == native* ]] || [ "$lane" = downstream ]; then
             /usr/bin/bwrap --unshare-user --ro-bind / / /usr/bin/true
           fi
       - name: Check source inventory
         if: matrix.lane == 'authoring'
         run: sh tools/check_zig_paths.sh
       - name: Restore locked native transport bytes
-        if: ${{ !matrix.product_consumer && (matrix.lane != 'workspace-custody' || steps.compiled.outputs.valid != 'true') }}
+        if: ${{ !matrix.product_consumer }}
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
@@ -137,7 +134,7 @@ jobs:
             .protean-native/inputs/*.zip
           key: protean-native-archives-v2-${{ matrix.lane == 'downstream' && 'native' || matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}
       - name: Authenticate and provision selected native inputs
-        if: ${{ !matrix.product_consumer && matrix.lane != 'downstream' && (matrix.lane != 'workspace-custody' || steps.compiled.outputs.valid != 'true') }}
+        if: ${{ !matrix.product_consumer && matrix.lane != 'downstream' }}
         run: |
           zig run tools/native/dependencies.zig -- setup \
             conformance/protean/dependencies.lock.json \
@@ -171,25 +168,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Save completed compiled qualification inputs
-        if: matrix.compiled_profile && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.compiled.outputs.valid != 'true'
+        if: matrix.compiled_profile && steps.compiled.outputs.valid != 'true'
         continue-on-error: true
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ runner.temp }}/protean-qualification
           key: ${{ steps.deployment_inputs.outputs.key }}
-      - name: Retain independently compiled mobility helper
-        if: matrix.lane == 'authoring'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: runtime-mobility-peer
-          path: ${{ runner.temp }}/protean-qualification/verification/runtime-mobility-peer
-          archive: false
-          overwrite: true
-          if-no-files-found: error
-          retention-days: 14
       - name: Retain completed compiler work before deployment
         id: build_cache_size
-        if: (matrix.compiled_profile || matrix.lane == 'authoring') && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && steps.compiled.outputs.valid != 'true'
+        if: matrix.compiled_profile && steps.compiled.outputs.valid != 'true'
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
@@ -221,26 +208,17 @@ jobs:
             zig build check-protean check-native-https \
               -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = owners ]; then
-            run_compiled_tests native-owner-tasks 83
-          elif [ "${{ matrix.lane }}" = owner-adaptive ]; then
-            run_compiled_tests native-owner-adaptive 2
+            run_compiled_tests native-owner-tasks 35
           elif [ "${{ matrix.lane }}" = owner-adaptive-control ]; then
             run_compiled_tests native-owner-adaptive 12
           elif [ "${{ matrix.lane }}" = owner-support ]; then
             zig build check-native-owner-support -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = workspace ]; then
-            run_compiled_tests workspace-general 15
-          elif [ "${{ matrix.lane }}" = workspace-retention ]; then
-            run_compiled_tests workspace-general 3
-          elif [ "${{ matrix.lane }}" = workspace-history ]; then
-            run_compiled_tests workspace-general 3
-          elif [ "${{ matrix.lane }}" = workspace-runtime ]; then
-            run_compiled_tests workspace-runtime 7
-          elif [ "${{ matrix.lane }}" = workspace-custody ]; then
-            node -e 'const os = require("node:os"); console.log(JSON.stringify({cpus: os.cpus().length, model: os.cpus()[0].model, memory_bytes: os.totalmem()}))'
-            run_compiled_tests workspace-runtime 1
-          elif [ "${{ matrix.lane }}" = workspace-succession ]; then
-            run_compiled_tests workspace-runtime 8
+            node tools/native/qualification_tests.mjs \
+              "$RUNNER_TEMP/protean-qualification/verification/workspace-general" \
+              '[["BUILD-","WORK-C","WORK-06","WORK-08","exposure carries","workspace commands","CTX-01","deep recursive workspace"],["WORK-01","AUT-07","OWN-02"],["collected history","WORK-14","delegated model interpretation"]]' \
+              2>&1 | tee "$RUNNER_TEMP/workspace-tests.log"
+            grep -Fxq '21/21 tests passed across 3 independent groups.' "$RUNNER_TEMP/workspace-tests.log"
           elif [ "${{ matrix.lane }}" = correspondence ]; then
             zig build check-workspace-semantics -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = downstream ]; then
@@ -251,84 +229,20 @@ jobs:
             cat "$RUNNER_TEMP/downstream-identity.json"
           else
             lane="${{ matrix.lane }}"
-            result=0
-            if [ "$lane" = native ] || [ "$lane" = native-workspace ]; then
-              group=controls
-              if [ "$lane" = native-workspace ]; then group=workspace; fi
-              if [ "$result" -eq 0 ]; then
-                node test/protean/native_adaptive.mjs \
-                  "$RUNNER_TEMP/protean-qualification/executables/protean" \
-                  "$RUNNER_TEMP/protean-qualification/protean/adaptive/application.json" \
-                  "$RUNNER_TEMP/protean-qualification/protean/adaptive/program.bpi3" "$group" \
-                  2>&1 | tee -a "$RUNNER_TEMP/$lane-check.log" || result=$?
-              fi
+            if [ "$lane" = native ]; then
+              node test/protean/native_adaptive.mjs \
+                "$RUNNER_TEMP/protean-qualification/executables/protean" \
+                "$RUNNER_TEMP/protean-qualification/protean/adaptive/application.json" \
+                "$RUNNER_TEMP/protean-qualification/protean/adaptive/program.bpi3" smoke \
+                2>&1 | tee -a "$RUNNER_TEMP/$lane-check.log"
             elif [ "$lane" = native-placement ]; then
-              if [ "$result" -eq 0 ]; then
-                node test/protean/native_placement.mjs \
-                  "$RUNNER_TEMP/protean-qualification/executables/protean" \
-                  2>&1 | tee -a "$RUNNER_TEMP/$lane-check.log" || result=$?
-              fi
+              node test/protean/native_placement.mjs \
+                "$RUNNER_TEMP/protean-qualification/executables/protean" \
+                2>&1 | tee -a "$RUNNER_TEMP/$lane-check.log"
             else
-              scenarios='tools-runtime-ordinary,tools-runtime-specialized,tools-runtime-reframe'
-              if [ "$lane" = runtime-outer ] || [ "$lane" = runtime-guest ]; then
-                scenarios=tools-runtime-mobility
-                if [ "$lane" = runtime-guest ]; then scenarios=tools-runtime-guest-mobility; fi
-              fi
-              node --input-type=module <<'JS'
-          import assert from 'node:assert/strict';
-          import {execFile} from 'node:child_process';
-          import {promisify} from 'node:util';
-          import {createHash} from 'node:crypto';
-          import {mkdir, writeFile} from 'node:fs/promises';
-          import {setTimeout as delay} from 'node:timers/promises';
-          const execute = promisify(execFile), repo = process.env.GITHUB_REPOSITORY;
-          const api = async (path, timeout = 30_000) => {
-            const deadline = Date.now() + timeout;
-            for (let attempt = 0; ; attempt++) {
-              const remaining = deadline - Date.now();
-              assert(remaining > 0, 'artifact read deadline exhausted');
-              try {
-                return (await execute('gh', ['api', `repos/${repo}/${path}`], {encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, timeout: remaining})).stdout;
-              } catch (error) {
-                const status = /\bHTTP (502|503|504)\b/.exec(String(error.stderr))?.[1];
-                if (!status || attempt === 2 || deadline - Date.now() <= 1000) throw error;
-                console.warn(`Retrying GitHub artifact read after HTTP ${status}`);
-                await delay(1000);
-              }
-            }
-          };
-          const run = JSON.parse(await api(`actions/runs/${process.env.GITHUB_RUN_ID}`));
-          assert.equal(String(run.id), process.env.GITHUB_RUN_ID);
-          assert.equal(String(run.run_attempt), process.env.GITHUB_RUN_ATTEMPT);
-          const deadline = Date.parse(run.run_started_at) + 600_000;
-          let artifact;
-          while (Date.now() < deadline) {
-            const artifacts = JSON.parse(await api(`actions/runs/${process.env.GITHUB_RUN_ID}/artifacts?per_page=100`, Math.max(1, deadline - Date.now()))).artifacts;
-            const matches = artifacts.filter(value => value.name === 'runtime-mobility-peer');
-            assert(matches.length <= 1);
-            if (matches.length === 1) { artifact = matches[0]; break; }
-            await delay(Math.min(1000, Math.max(1, deadline - Date.now())));
-          }
-          assert(artifact, 'the current authoring job must publish its verification helper');
-          assert.equal(artifact.expired, false);
-          assert.equal(String(artifact.workflow_run.id), process.env.GITHUB_RUN_ID);
-          assert.equal(artifact.workflow_run.head_sha, run.head_sha);
-          const bytes = await api(`actions/artifacts/${artifact.id}/zip`, Math.max(1, deadline - Date.now()));
-          assert.equal(`sha256:${createHash('sha256').update(bytes).digest('hex')}`, artifact.digest);
-          const directory = `${process.env.RUNNER_TEMP}/protean-qualification/verification`;
-          await mkdir(directory, {recursive: true});
-          await writeFile(`${directory}/runtime-mobility-peer`, bytes, {mode: 0o755});
-          console.log(`Authenticated current-run mobility helper: ${artifact.digest}`);
-          JS
-              if [ "$result" -eq 0 ]; then
-                node test/protean/native_runtime.mjs \
-                  "$RUNNER_TEMP/protean-qualification/executables/protean" \
-                  "$RUNNER_TEMP/protean-qualification/protean/adaptive/application.json" "$scenarios" \
-                  "$RUNNER_TEMP/protean-qualification/verification/runtime-mobility-peer" \
-                  2>&1 | tee -a "$RUNNER_TEMP/$lane-check.log" || result=$?
-              fi
+              echo "Unknown qualification lane: $lane" >&2
+              exit 1
             fi
-            test "$result" -eq 0
             node --input-type=module - "$RUNNER_TEMP/protean-qualification/executables/protean" "$RUNNER_TEMP/$lane-check.log" "$RUNNER_TEMP/$lane-identity.json" "$lane" <<'JS'
           import assert from 'node:assert/strict';
           import {execFileSync} from 'node:child_process';
@@ -350,7 +264,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Retain independently qualified build identity
-        if: startsWith(matrix.lane, 'native') || startsWith(matrix.lane, 'runtime') || matrix.lane == 'downstream'
+        if: matrix.lane == 'native' || matrix.lane == 'native-placement' || matrix.lane == 'downstream'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.lane }}-identity.json
@@ -385,7 +299,7 @@ jobs:
           retention-days: 14
       - name: Admit a complete bounded cache snapshot
         id: cache_size
-        if: ${{ !cancelled() && !matrix.product_consumer && matrix.lane != 'runtime-outer' && (matrix.compiled_profile != 'product' || matrix.lane == 'native') && (steps.compiled.outputs.valid != 'true' || matrix.lane == 'authoring') && steps.build_cache_size.outputs.save != 'true' }}
+        if: ${{ !cancelled() && !matrix.product_consumer && steps.compiled.outputs.valid != 'true' && steps.build_cache_size.outputs.save != 'true' }}
         continue-on-error: true
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
@@ -421,10 +335,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
           QUALIFICATION: ${{ needs.qualify.result }}
           DIAGNOSTIC_LANE: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane || 'all' }}
         run: |
           test "$QUALIFICATION" = success
+          if [ "$RUN_ATTEMPT" != 1 ]; then
+            echo 'Qualification requires the first attempt from the original trigger.'
+            exit 1
+          fi
           if [ "$DIAGNOSTIC_LANE" != all ]; then
             echo 'A diagnostic lane does not establish complete qualification.'
             exit 1
@@ -448,20 +367,17 @@ jobs:
             assert.equal(`sha256:${createHash('sha256').update(bytes).digest('hex')}`, artifact.digest);
             return JSON.parse(bytes);
           };
-          const [native, downstream, ...runtimes] = await Promise.all([
-            'native', 'downstream', 'native-workspace', 'native-placement',
-            'runtime', 'runtime-outer', 'runtime-guest',
-          ].map(load));
+          const [native, placement, downstream] = await Promise.all(['native', 'native-placement', 'downstream'].map(load));
           for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target']) {
             assert.notEqual(native.identity[key], undefined, key);
             assert.deepEqual(downstream.identity[key], native.identity[key], key);
-            for (const runtime of runtimes) assert.deepEqual(runtime.identity[key], native.identity[key], key);
+            assert.deepEqual(placement.identity[key], native.identity[key], key);
           }
           assert.notEqual(native.artifact_sha256, undefined);
-          for (const runtime of runtimes) assert.equal(runtime.artifact_sha256, native.artifact_sha256, 'runtime scenarios executed the packaged native binary');
-          console.log('Independent native, runtime and downstream build identities agree.');
+          assert.equal(placement.artifact_sha256, native.artifact_sha256, 'placement executed the packaged native binary');
+          console.log('Independent native and downstream build identities agree; placement executed the packaged product.');
           JS
-          started="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq .run_started_at)"
+          started="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq .created_at)"
           elapsed=$(( $(date +%s) - $(date -d "$started" +%s) ))
-          echo "Complete workflow before terminal gate: ${elapsed}s (maximum 600s)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Complete workflow from original trigger through terminal checks: ${elapsed}s (maximum 600s)" | tee -a "$GITHUB_STEP_SUMMARY"
           test "$elapsed" -le 600

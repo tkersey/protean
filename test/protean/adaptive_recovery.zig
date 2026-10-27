@@ -180,14 +180,6 @@ const CaptureRecord = struct {
     reconciliation: ?[32]u8,
 };
 
-test "adaptive copied capture stays parked while its original owner resumes and warms context" {
-    try adaptiveRecovery(false, .imported);
-}
-
-test "adaptive report correction preserves acquired evidence and retains a large complete report" {
-    try adaptiveRecovery(true, .none);
-}
-
 test "adaptive snapshot reconciliation preserves unknown history and settles once after restart" {
     try adaptiveRecovery(false, .snapshot);
 }

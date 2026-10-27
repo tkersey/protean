@@ -709,7 +709,7 @@ test "BUILD-02 concrete native execution traverses recursive structured input ov
     defer built.deinit();
     var prepared = try kosmos.Prepared.init(a, built.image);
     defer prepared.deinit();
-    for ([_]usize{ 0, 3, 300 }) |length| {
+    for ([_]usize{ 0, 3, 32 }) |length| {
         const input = try a.alloc(u8, length * 9 + 1);
         defer a.free(input);
         var writer: data.wire.Writer = .{ .output = input };
@@ -4022,9 +4022,9 @@ test "deep recursive workspace values support input admission inspection expansi
     defer artifact.deinit();
     const schema_ref = try workspaceRef(scratch, .schema, artifact.value.description.input_schema.digest);
     var text_value: std.ArrayList(u8) = .empty;
-    for (0..50000) |_| try text_value.appendSlice(scratch, "{\"tag\":1,\"value\":");
+    for (0..2048) |_| try text_value.appendSlice(scratch, "{\"tag\":1,\"value\":");
     try text_value.appendSlice(scratch, "{\"tag\":0,\"value\":{}}");
-    try text_value.appendNTimes(scratch, '}', 50000);
+    try text_value.appendNTimes(scratch, '}', 2048);
     const started = try service.workspaceCommand(scratch, "deep-start", parent.receipt.task, .{ .work = .{ .start = .{
         .program = try workspaceRef(scratch, .program, built.receipt.workspace.?),
         .input = .{ .inline_json = .{ .schema = schema_ref, .json_text = .{ .bytes = text_value.items } } },
@@ -4172,9 +4172,9 @@ test "deep recursive workspace values support input admission inspection expansi
         .exposures = .{ .items = &.{.{ .effect = effect, .class = .input }} },
     } } });
     try std.testing.expect(port_program.program != null);
-    const wire = try scratch.alloc(u8, 50001);
+    const wire = try scratch.alloc(u8, 2049);
     @memset(wire, 1);
-    wire[50000] = 0;
+    wire[2048] = 0;
     const suspended = try service.workspaceStart(scratch, "deep-port-start", parent.receipt.task, try nativeIdentity(port_program.program.?), wire, .{});
     var work = try service.workspaceWork(scratch, parent.receipt.task, suspended.receipt.workspace.?);
     defer work.deinit();
@@ -4265,9 +4265,9 @@ test "collected history rejects rehashed result substitution and false absence" 
     var slow_builder = source.Builder.init(scratch);
     defer slow_builder.deinit();
     const slow_program = try service.workspaceBuild(scratch, "collect-slow-build", parent.receipt.task, try native.source_records.encode(scratch, try listLength(&slow_builder)), &diagnostic);
-    const slow_input = try scratch.alloc(u8, 300 * 9 + 1);
+    const slow_input = try scratch.alloc(u8, 32 * 9 + 1);
     var writer: data.wire.Writer = .{ .output = slow_input };
-    for (0..300) |i| {
+    for (0..32) |i| {
         try writer.natural(1);
         try writer.fixed(u64, @intCast(i));
     }

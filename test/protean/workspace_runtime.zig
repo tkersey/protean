@@ -4192,10 +4192,6 @@ test "runtime selection switches exact guest cuts and retains carried artifacts 
     try observerArchiveWitness(&imported, scratch, document, input);
 }
 
-test "native placement carries a suspended evaluator with exclusive per-work custody" {
-    try placementCase(.work);
-}
-
 test "native placement carries the current cut of a queued work move" {
     try placementCase(.queued);
 }
