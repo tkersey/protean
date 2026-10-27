@@ -16,6 +16,18 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: '26.9.0'
+      - name: Prepare native isolation tools
+        run: |
+          set -euo pipefail
+          packages=()
+          test -x /usr/bin/bwrap || packages+=(bubblewrap)
+          test -x /usr/bin/strace || packages+=(strace)
+          if [ "${#packages[@]}" -gt 0 ]; then
+            if ! sudo apt-get install --yes --no-install-recommends "${packages[@]}"; then
+              sudo apt-get update
+              sudo apt-get install --yes --no-install-recommends "${packages[@]}"
+            fi
+          fi
       - name: Authenticate final native product
         env:
           GH_TOKEN: ${{ github.token }}
