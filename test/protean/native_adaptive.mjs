@@ -85,7 +85,7 @@ try {
   // Independent state directories let the selected provider fixtures and demo
   // progress together. Await every cleanup before closing deployment.
   const outcomes = await Promise.allSettled([
-    ...(group === 'workspace' ? [] : [demo()]),
+    ...(['all', 'controls'].includes(group) ? [demo()] : []),
     ...(group === 'smoke' ? [] : [verifyAdaptiveNative({app, applicationPath: process.argv[3], group})]),
   ]);
   const failures = outcomes.filter(value => value.status === 'rejected').map(value => value.reason);

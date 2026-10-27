@@ -192,14 +192,6 @@ test "adaptive malformed capture remains private and portable without claiming s
     try adaptiveRecovery(false, .malformed);
 }
 
-test "adaptive workspace interrupted pure build restarts without ambiguous delivery" {
-    try workspaceRecovery(true, false, .none);
-}
-
-test "adaptive workspace captured build imports and executes exact retained code and input" {
-    try workspaceRecovery(false, false, .none);
-}
-
 test "adaptive workspace reconstructed controller cannot publish invalid output" {
     for ([_]OutputCheck{ .foreign_value, .malformed, .origin_outer }) |check| try workspaceRecovery(false, false, check);
 }

@@ -21,13 +21,13 @@ selected lane can return evidence.
 | --- | --- |
 | `authoring` | Source inventory, `check-protean` and `check-native-https`: authoring, model/value contracts, construction, compile-time rejection, helper integrity, adaptive asset emission, formatting, wire checks and the independent HTTPS endpoint. |
 | `owners` | All 35 retained native task/response owner tests, including their participant imports. |
-| `owner-adaptive-control` | All 11 retained adaptive owner tests. |
+| `owner-adaptive-control` | All nine retained adaptive owner tests. |
 | `owner-support` | Native unit/context and process-crash recovery checks. |
 | `workspace` | The 15 workspace execution and construction tests. |
 | `workspace-retention` | The three retained-work, wait and delegated-answer tests. |
 | `workspace-history` | The three history, cancellation-read and allocation-failure tests. |
 | `correspondence` | Independent source-oracle agreement, capsule restoration and duplicate-custody rejection. |
-| `native` | Build and package the adaptive product; verify its manifest, protocol/state rejection and offline authored-control demo through the isolated native deployment. |
+| `native` | Build and package the adaptive product; verify its manifest and protocol/state rejection through the isolated native deployment. |
 | `native-placement` | Execute the same current-run packaged binary through authenticated transfer, reopen, refusal and duplicate-acceptance checks. |
 | `downstream` | Independently acquire, authenticate, package, build, install and execute the public `addNativeSystem` consumer; reject altered Horos and Kosmos inputs. |
 
@@ -50,9 +50,8 @@ The required workflow retires the packaged workspace-report and scripted runtime
 scenarios, including controller adoption, outer/guest migration, specialization
 reuse and runtime-view reframing. The native smoke no longer runs the extended
 controlled-provider, captured-record/archive, held-inbox or signal-cancellation
-suite. Independent HTTPS, native owner recovery, the offline authored demo and
-simple packaged placement remain required, but do not establish all of those
-removed end-to-end observations.
+suite. Independent HTTPS, native owner recovery and simple packaged placement
+remain required, but do not establish all of those removed end-to-end observations.
 
 The owner suite no longer imports the separate 48-case contract collection.
 Two expensive adaptive capture/recovery tests, the adaptive reframing test and
@@ -67,6 +66,20 @@ that complete controller observation. The invalid reconstructed-output test
 retains foreign-value ownership, malformed-reference and acquired outer-handoff
 cases. It retires separate uncited-claim, foreign-program and ordinary-origin
 variants; the remaining origin case also exercises a pending acquired handoff.
+
+The required native smoke also retires the complete offline authored demo: its
+14 model calls, five work calls and eight ordered control receipts no longer form
+a blocking packaged-execution witness. Explicit extended diagnostics still include
+that scenario. Direct inference/skill control tests, isolated placement and the
+independently installed consumer's execution/cancellation remain required; they
+do not reproduce the complete demo.
+
+Two further adaptive workspace tests are deleted: known-not-sent compiler restart
+and successful redispatch, and captured compiler checkpoint import followed by
+local resumption, exact source/image retention and execution of retained input.
+The invalid-output recovery test retains all three selected rejection cases.
+The surviving construction and custody tests do not replace those successful
+end-to-end recovery sequences.
 
 Workspace execution, retention and history still run once each across 21 tests.
 CI compiles the three existing filtered groups separately; the full unfiltered
