@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: 4e4d03014df32f368165b8fa444d022553e3ad5b
+          ref: 99d583a0654266a668238b1192322c8cb3534eab
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: '26.9.0'
@@ -33,12 +33,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api repos/tkersey/protean/actions/artifacts/12764889829/zip > "$RUNNER_TEMP/product.tar.gz"
-          echo "f60d8f57d2e36438556c1050126fc8f13c5c537799c8809488a24a52abe526f4  $RUNNER_TEMP/product.tar.gz" | sha256sum --check --strict
+          gh api repos/tkersey/protean/actions/artifacts/12768612450/zip > "$RUNNER_TEMP/product.tar.gz"
+          echo "11b48dd71dcbc1abcc1d4cfb3d1da4b485c9daefaa81e86ff9c2db32298fd200  $RUNNER_TEMP/product.tar.gz" | sha256sum --check --strict
           mkdir "$RUNNER_TEMP/product"
           tar -xzf "$RUNNER_TEMP/product.tar.gz" -C "$RUNNER_TEMP/product" executables/protean protean/adaptive/application.json protean/adaptive/program.bpi3 qualification-product.json
           cd "$RUNNER_TEMP/product"
-          echo '46eadc5ae38be0e62e9b3132e62a3f71bb3070ce7afec91e43dc87a3c115677c  executables/protean' | sha256sum --check --strict
+          echo 'ed67980cfadcbba03c231bfa85b5d1020197842a667007946c9b53d05155cddc  executables/protean' | sha256sum --check --strict
           echo '18518788fd394f5bd27f1dc55711ec9536bf1e85c6e306c66002d86a31e10ce8  protean/adaptive/application.json' | sha256sum --check --strict
           echo '742e751d20c91057ffe7bf2da3960d86d3bc86dfde50a660f3d9bbc01d03a3d2  protean/adaptive/program.bpi3' | sha256sum --check --strict
           cat qualification-product.json
