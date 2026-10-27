@@ -192,6 +192,12 @@ The downstream build compiles removal/retention expectations against the actual
 exported Protean module, and installation inspects retired paths in that package.
 These new checks have not executed on the final candidate.
 
+The retained model-custody fixture previously had no active build-root import.
+It now runs through the existing native owner root, including the typed paired
+model-call witness, request-time offers, later-offer rejection and protected
+model-site negatives. Its presence in the source inventory alone was not
+execution evidence. Final native execution of these cases remains outstanding.
+
 The user retained the existing shared local-verification cutoff, 2026-10-27
 17:30 UTC. Final Horos/Kosmos pins and authenticated artifacts, exported-package
 absence checks, native product and downstream execution, final required

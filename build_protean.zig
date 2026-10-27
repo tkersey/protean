@@ -212,7 +212,7 @@ pub fn build(b: *std.Build) void {
     const aggregate = b.step("check-protean", "Check authoring and pure contracts without Kosmos");
     const lint = b.step("lint", "Check formatting and the Zig source inventory");
     const format_check = b.addRunFile(.zig_exe);
-    format_check.addArgs(&.{ "fmt", "--check", "build.zig", "build_protean.zig", "build_native.zig", "src", "runtime/native", "tools/native", "examples/adaptive", "test/protean", "test/protean/https_probe.zig", "test/consumers/adaptive/build.zig", "test/authoring_tests.zig" });
+    format_check.addArgs(&.{ "fmt", "--check", "build.zig", "build_protean.zig", "build_native.zig", "src", "runtime/native", "tools/native", "examples/adaptive", "test/protean", "test/protean/https_probe.zig", "test/consumers/adaptive", "test/authoring_tests.zig" });
     lint.dependOn(&format_check.step);
     lint.dependOn(&b.addSystemCommand(&.{ "sh", "tools/check_zig_paths.sh" }).step);
     check.dependOn(lint);
