@@ -1,4 +1,4 @@
-# Protean 4 trust boundaries
+# Protean trust boundaries
 
 Protean protects the declared public authoring path and its untrusted runtime inputs.
 It is not a sandbox for hostile native emitters that forge Builder data or its
@@ -16,17 +16,11 @@ the image separately checks candidate names, ordinals, variants, request-time of
 and policy. Raw JSON and normalized digests are audit provenance, not proof that a
 malicious adapter reported truth. The required path makes no paid model calls.
 
-Approval binds the retained operation, arguments, evidence and interaction occurrence.
-A private grant is consumed before commitment and cannot escape or enter multi-shot
-control. Simulation data cannot mint the corresponding live-read proof. Approval
-amendment invalidates the prior decision. Current tool preconditions still require
-atomic enforcement by the environment.
-
-The document fixture environment permits only allocated workspace paths, rejects
-unsupported links/path escapes, and serializes cooperating writers while checking
-the actual base and atomically replacing the document. It is not a general shell
-or a distributed transaction service. Independent nonconforming writers/handlers
-remain outside its contract. Unknown write delivery remains uncertain.
+Protected admission continues to reject unauthorized commitment, private calls,
+resource escape and unsafe speculation, including hand-authored source. Resource
+minting authority and single consumption remain checked by Horos. Removing the
+generic approval and live-observation constructors does not authorize equivalent
+raw programs. Tool metadata alone cannot grant commitment authority.
 
 An image and PST3 may contain sensitive application data. Portability is not encryption.
 Secrets belong to environmental handlers and never to examples or release artifacts.

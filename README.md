@@ -2,7 +2,7 @@
 
 Formerly Agent; see the [rename notes](docs/rename.md).
 
-Protean builds agents as typed, resumable programs. Its supported application is
+Protean builds adaptive agents as typed, resumable programs. Its supported application is
 **Protean**: a native executable that investigates a read-only snapshot,
 selects among approved models and reasoning settings, loads approved skills,
 asks questions, and optionally constructs, retains, inspects and moves computations.
@@ -48,10 +48,10 @@ installed agent needs no compiler, JS/WASM runtime, or adjacent source tree.
 
 Protean remains a library. `protean.system`, `Context`, and `compile` construct
 ordinary Horos programs. Checked model responders retain request-time offers;
-adaptive controls, inboxes, prompts, skills, compiled tools, and the generic
-interaction/approval constructions remain available to downstream authors.
+adaptive controls, inboxes, prompts, skills, compiled tools, interaction contracts,
+and checked participant composition remain available to downstream authors.
 Model calls, choices, and continuations belong to the program.
-See the [Horos 4 authoring migration](docs/authoring-migration.md) for typed
+See the [authoring migration](docs/authoring-migration.md) for typed
 Context construction, native shapes and explicit source-record boundaries.
 
 The public `addNativeSystem` build function accepts caller-owned definition,

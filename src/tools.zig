@@ -73,25 +73,3 @@ pub fn perform(c: authoring.Context, tool: Descriptor, payload: Id) !Id {
         } }),
     };
 }
-
-/// Live and hypothetical observations have different in-image tags. A model
-/// proposal is distinct again; none can become a live observation by text labels.
-pub fn Observation(comptime Value: type) type {
-    return union(enum) { external: Value, simulation: Value, proposal: Value };
-}
-
-/// Every delivery status is explicit. An uncertain operation is never a request
-/// to restore an approval grant or retry a possibly completed environmental write.
-pub fn CommitResult(
-    comptime Success: type,
-    comptime Conflict: type,
-    comptime Failure: type,
-    comptime Uncertain: type,
-) type {
-    return union(enum) {
-        success: Success,
-        conflict: Conflict,
-        failure: Failure,
-        uncertain: Uncertain,
-    };
-}

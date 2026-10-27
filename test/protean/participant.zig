@@ -28,7 +28,7 @@ fn producer(allocator: std.mem.Allocator, direct: bool) ![]u8 {
     const request = try protean.contracts.schema(P.AdaptiveRequest, &b);
     const offered = try protean.contracts.schema([1]bool, &b);
     const result = try protean.contracts.schema(P.Interpretation, &b);
-    const effect = try P.declare(&b);
+    const effect = try P.source.declare(&b);
     const helper = try b.declare(&.{ request, offered }, result, &.{effect}, &.{});
     const entry = try b.declare(&.{ request, offered }, result, &.{effect}, &.{});
     const call = try b.term(.{ .call = .{ .function = helper, .arguments = &.{
@@ -73,7 +73,7 @@ const Application = struct {
         const offered = try horos_authoring.interop.schemaId(c.author, try c.schema([1]bool));
         const result = try horos_authoring.interop.schemaId(c.author, try c.schema(P.Interpretation));
         const helper = try horos_authoring.interop.functionId(c.author, try protean.responders.defineModel(P, c, try c.literal(void, {}), false));
-        const model = try P.declare(b);
+        const model = try horos_authoring.interop.operationId(c.author, try P.declare(c));
         const bound = if (completion) try completionHelper(c, request, offered, result) else if (wrong_result)
             try wrongHelper(c, request, offered)
         else

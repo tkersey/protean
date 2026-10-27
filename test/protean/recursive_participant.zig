@@ -35,16 +35,10 @@ const Types = struct {
     sample: *const Sample,
 };
 
-fn types(c: *a.Context) !Types {
+fn types(c: *a.Context, model: *const Model) !Types {
     const input = try c.schema(Input);
     const state = try c.schema(State);
     const integer = try c.schema(u64);
-    const model = try a.interop.externalOperation(
-        c,
-        try P.declare(a.interop.builder(c)),
-        try c.schema(P.AdaptiveRequest),
-        try c.schema(P.AdaptiveResult),
-    );
     const read = try c.external("fixture.recursive.reference-bytes", integer, integer);
     const task = try c.declareSchema(.callable, Task);
     const state_delay = try hyper.delayed(c, state, .{ .captures = .{state} });
@@ -170,7 +164,13 @@ fn objectChecked(
     var b = source.Builder.init(allocator);
     defer b.deinit();
     const c = try a.Context.init(&b);
-    const t = try types(c);
+    const model = try a.interop.externalOperation(
+        c,
+        try P.source.declare(a.interop.builder(c)),
+        try c.schema(P.AdaptiveRequest),
+        try c.schema(P.AdaptiveResult),
+    );
+    const t = try types(c, model);
     if (false_capture) {
         const owned = try b.resource(try a.interop.schemaId(c, t.integer));
         const task_id = try a.interop.schemaId(c, t.task);
@@ -249,8 +249,7 @@ const Application = struct {
     var completion = false;
     pub fn emit(context: protean.Context) !source.Module {
         const c = context.author;
-        const t = try types(c);
-        try context.registry.classify(try a.interop.operationId(c, t.model), .model);
+        const t = try types(c, try P.declare(context));
         try context.registry.classify(try a.interop.operationId(c, t.read), .read);
         try defineSample(context, t);
         var bindings = t;

@@ -676,3 +676,41 @@ test "delayed shallow package resumed under hidden-effect multi successor" {
     // Rejection must be Protean's role check, after independent Horos compile.
     try std.testing.expectError(error.SpeculativeEffect, admission.verify(a, module, &registry));
 }
+
+test "protected resources admit one consumption and reject raw minting or duplication" {
+    const Mode = enum { valid, forged, reused };
+    for ([_]Mode{ .valid, .forged, .reused }) |mode| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        const resource = try f.b.resource(f.unit);
+        const mint = try f.b.declare(&.{}, resource, &.{}, &.{});
+        const consume = try f.b.declare(&.{resource}, f.unit, &.{}, &.{});
+        try f.registry.protectResource(resource);
+        try f.registry.privateFunction(mint);
+        try f.registry.privateFunction(consume);
+        try f.b.resourceAuthority(resource, &.{mint}, &.{consume});
+        const minted = try f.b.primitive(resource, .resource_pack, &.{try f.b.constant(void, {})}, 0);
+        try f.b.define(mint, try f.b.pure(minted));
+        try f.b.define(consume, try f.b.pure(try f.b.primitive(f.unit, .resource_unpack, &.{try f.b.reference(f.b.parameter(consume, 0))}, 0)));
+        const proof = try f.b.variable(resource);
+        const acquired = if (mode == .forged) try f.b.pure(minted) else blk: {
+            const call = try f.b.term(.{ .call = .{ .function = mint, .arguments = &.{} } });
+            try f.registry.allowPrivateCall(f.entry, call, mint);
+            break :blk call;
+        };
+        const first = try f.b.term(.{ .call = .{ .function = consume, .arguments = &.{try f.b.reference(proof)} } });
+        try f.registry.allowPrivateCall(f.entry, first, consume);
+        const result = if (mode == .reused) blk: {
+            const second = try f.b.term(.{ .call = .{ .function = consume, .arguments = &.{try f.b.reference(proof)} } });
+            try f.registry.allowPrivateCall(f.entry, second, consume);
+            break :blk try f.b.bind(try f.b.variable(f.unit), first, second);
+        } else first;
+        try f.b.define(f.entry, try f.b.bind(proof, acquired, result));
+        try f.check();
+        switch (mode) {
+            .valid => try f.horosCompile(),
+            .forged => try std.testing.expectError(error.InvalidOwnership, f.horosCompile()),
+            .reused => try std.testing.expectError(error.UnavailableSlot, f.horosCompile()),
+        }
+    }
+}
