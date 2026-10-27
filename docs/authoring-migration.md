@@ -205,65 +205,66 @@ model-call witness, request-time offers, later-offer rejection and protected
 model-site negatives. Its presence in the source inventory alone was not
 execution evidence. All 46 native owner cases passed on Linux in the run below.
 
-The dependency lock now selects published draft candidates Horos
-`535f95697ff88054df0dd8dd539df9008983ef32` and Kosmos
-`2e517666bd177e6996dbee8a7bc8e0cbf53bdc7a`. Their actual GitHub archive members,
-Git blob identities, complete normalized source inventories, Horos package
-profiles and API-file digests are bound in the lock. The Kosmos evaluator bundle
-is 275,293 bytes and differs from the prerequisite only in the embedded Horos
-package identifier. Artifact authentication is not execution qualification.
+The exact selected Horos and Kosmos commits, archive transports, normalized source
+inventories, Horos package profiles and API-file digests are recorded in the
+[dependency lock](../conformance/protean/dependencies.lock.json). The Kosmos
+evaluator bundle remains 275,293 bytes and differs from the prerequisite only
+in its embedded Horos package identifier. Artifact authentication does not replace
+execution qualification.
+
+The current candidate revision, dependency tuple, artifact identities, complete
+requirement mapping and command outcomes are maintained in
+[Protean #61](https://github.com/tkersey/protean/pull/61), coordinated with
+[Horos #179](https://github.com/tkersey/horos/pull/179) and
+[Kosmos #76](https://github.com/tkersey/kosmos/pull/76). Those records distinguish
+current qualification from the immutable observations below.
 
 Native Linux qualification at Protean
-`d4c1cef78755794a24ee70ff36276c73277ee43a` passed all eleven lanes and the
+`99d583a0654266a668238b1192322c8cb3534eab` passed all eleven lanes and the
 terminal identity/budget gate in
-[run 40558021578](https://github.com/tkersey/protean/actions/runs/40558021578):
-570 seconds from the original trigger, first attempt. That run selected Horos
-`61f2b4f63bbf96039a332be9a5d610c46422daa1` and Kosmos
-`970fd0c4d80517070d80bff3518de145ec66c155`. Native, placement and
-independently built downstream identities agreed. Package absence expectations,
-changed-input rejection and the retained recursive restoration witness executed.
+[run 40578373860](https://github.com/tkersey/protean/actions/runs/40578373860):
+525 seconds from the original trigger, first attempt. That run selected Horos
+`013d783dd45a7994f1c888f66f98a7003c173a79` and Kosmos
+`00b568ac29178ba71d01a95db7c90a739ec6fecc`. Native, placement and independently
+built downstream identities agreed. Package absence expectations, changed-input
+rejection and the retained recursive restoration witness executed. Linux used
+Zig 0.17.0's native backend.
 
-Compared with prerequisite run 40513895462, the packaged Linux executable is
-unchanged in size at 17,701,016 bytes, while its digest changes with the build
-identity. The 162,202-byte program and 873,620-byte application asset are
-byte-identical to that prerequisite. Compressed product transport grows from
-6,390,739 to 6,390,780 bytes. These are artifact observations, not a runtime or
-compile-speed claim; complete clean/incremental, allocation and checkpoint cost
-observations remain outstanding.
+The callable admission root includes the previously unwired positive comparison:
+shared schemas conservatively reject ambiguous callable origins, while distinct
+nominal callable origins admit the safe speculative callback. Model-custody and
+protected-site tests execute through the retained owner roots.
 
-The user retained the existing shared local-verification cutoff, 2026-10-27
-17:30 UTC, and authorized coordinated draft publication without extending it.
-Final native macOS execution, the complete requirement-matrix/cost observations,
-and serial review convergence remain incomplete. Any successor dependency tuple
-requires its own applicable qualification; this Linux result applies only to
-the exact recorded candidate and bindings.
+The authenticated Linux product from that run also passed
+[historical installation/continuation](https://github.com/tkersey/protean/actions/runs/40579548030/job/122454925233)
+and [full adaptive controls](https://github.com/tkersey/protean/actions/runs/40579544770/job/122454912139).
+The controls witness executes the complete fourteen-call offline prefix, eight
+ordered control receipts, tool-authorization cases and protocol/signal
+cancellation. Its deployment receipt records 37 traced executions in private
+user/mount/PID namespaces without a live provider.
 
-The callable admission root now includes the previously unwired positive
-comparison: shared schemas conservatively reject ambiguous callable origins,
-while distinct nominal callable origins admit the safe speculative callback.
-This comparison passed in native Linux run 40561033933 at
-`ca0fa3eeade11ec06910acf8b3d0e31970d2c8d9`; final tuple qualification is pending.
-Historical installation/continuation is a separate `retained-runtime` CI diagnostic
-using authenticated product archives and the existing
-`workspace_runtime_retention.mjs` witness. The similarly named workspace test
-lane does not establish this old-executable observation.
+Historical retention is a separate `retained-runtime` diagnostic using
+authenticated product archives and `workspace_runtime_retention.mjs`. It retains
+the original executable, frozen question/profile, captured source and task
+namespace while installing the successor into a separate namespace. The existing
+controlled loopback HTTPS provider asks first, then reads source evidence and
+reports after the original question is reopened and answered. The witness checks
+provider call identities and count even after the original snapshot file changes.
+Both 60-second waits and the ten-minute lane limit remain unchanged. The full
+controls witness separately qualifies the complete offline prefix; the similarly
+named workspace lane alone does not establish either observation.
 
-Horos native Linux run 40567783958 qualifies the selected package without the
-LLVM test override. The package consumer now inherits the exported baseline
-CPU target, avoiding a diagnosed native x86-64 AVX stack-alignment defect while
-preserving Debug mode and all assertions. Kosmos rebuilt its artifact with this
-package identity. Current Kosmos and Protean native qualification remains pending.
-The historical-retention diagnostic preserves both executables, the original
-continuation, separate namespaces and each 60-second wait. Status polling now
-uses 250 ms instead of 10 ms, and a timeout captures bounded progress, recent
-events, result and stderr before cleanup; it does not extend the semantic wait.
+Compared with prerequisite run 40513895462, that product's executable is unchanged
+in size at 17,701,016 bytes, while its digest changes with its build identity. The
+162,202-byte program and 873,620-byte application asset are byte-identical to the
+prerequisite. Compressed transport is 6,390,723 versus 6,390,739 bytes. Horos #179
+records representative clean/incremental compilation, authoring allocations,
+graph counts and image sizes; Kosmos #76 records interpreter-work and checkpoint
+allocation comparisons. These observations do not establish whole-product speed
+improvements or arbitrary checkpoint compatibility.
 
-The old offline fixture reached its question only after twelve preceding model
-interactions and did not finish that prefix in the 60-second wait. The retention
-witness now uses the baseline's existing controlled loopback HTTPS provider mode:
-ask first, then read source evidence and report after reopening and answering the
-original question. No executable is rebuilt for this fixture change. The test
-checks exact provider call identities and count, preserved question/profile,
-unchanged old executable, new namespace, and source frozen before installation
-even after the original snapshot file changes. Both waits and the CI lane budget
-remain unchanged; this replacement does not qualify the full offline scenario.
+The user retained the shared local-verification cutoff, 2026-10-27 17:30 UTC,
+and authorized coordinated draft publication without extending it. Final native
+macOS execution and serial review convergence remain incomplete. Each successor
+candidate requires its own applicable qualification; the Linux observations above
+apply only to their recorded candidate, bindings and authenticated executable.
