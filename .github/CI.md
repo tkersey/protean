@@ -20,7 +20,7 @@ so every selected lane can return evidence.
 | Lane | Checks |
 | --- | --- |
 | `authoring` | Source inventory, `check-protean` and `check-native-https`: authoring, model/value contracts, construction, compile-time rejection, helper integrity, adaptive asset emission, formatting, wire checks and the independent HTTPS endpoint. |
-| `owners` | All 35 retained native task/response owner tests, including their participant imports. |
+| `owners` | All 46 retained native task/response/model-custody owner tests, including their participant imports. |
 | `owner-adaptive-control` | All nine retained adaptive owner tests. |
 | `owner-support` | Native unit/context and process-crash recovery checks. |
 | `workspace` | The 15 workspace execution and construction tests. |
