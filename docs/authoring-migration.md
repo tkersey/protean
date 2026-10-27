@@ -162,7 +162,7 @@ The native task/runtime owners, adaptive resources, `addNativeSystem`, and
 test imports are pruned together. No protocol family or saved-task identity check
 changes as a consequence of these source removals.
 
-## Consolidation work in progress
+## Consolidation qualification
 
 `Profile.declare(context)` and the protected responder share the existing source
 declaration cache. The returned typed operation retains its request/reply shapes;
@@ -196,8 +196,8 @@ The package version is now 8.0.0. Maintained raw generator/cleanup fixtures use
 Horos's `source.library` boundary; ordinary generator clients stay typed.
 The downstream build compiles removal/retention expectations against the actual
 exported Protean module, and installation inspects retired paths in that package.
-These new checks executed in the Linux qualification below; native macOS
-execution remains incomplete under the local cutoff.
+These new checks executed in the Linux qualification below. The coordinated PR
+records their current native macOS qualification separately.
 
 The retained model-custody fixture previously had no active build-root import.
 It now runs through the existing native owner root, including the typed paired
@@ -263,8 +263,7 @@ graph counts and image sizes; Kosmos #76 records interpreter-work and checkpoint
 allocation comparisons. These observations do not establish whole-product speed
 improvements or arbitrary checkpoint compatibility.
 
-The user retained the shared local-verification cutoff, 2026-10-27 17:30 UTC,
-and authorized coordinated draft publication without extending it. Final native
-macOS execution and serial review convergence remain incomplete. Each successor
-candidate requires its own applicable qualification; the Linux observations above
-apply only to their recorded candidate, bindings and authenticated executable.
+Each successor candidate requires its own applicable qualification. The Linux
+observations above apply only to their recorded candidate, bindings and
+authenticated executable. The coordinated PR records current supported-platform
+qualification and serial review outcomes.
