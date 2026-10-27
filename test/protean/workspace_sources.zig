@@ -86,7 +86,7 @@ pub fn yieldingCancellation(b: *source.Builder) !source.Module {
 fn disposal(b: *source.Builder, request: bool) !source.Module {
     const unit = try b.scalar(void);
     const u = try b.scalar(u64);
-    const info = try @import("horos").library.cleanup.exitInfo(b, unit);
+    const info = try @import("horos").source.library.cleanup.exitInfo(b, unit);
     const observed = try b.effect(.{ .identity = "example/disposal", .payload = info, .result = unit, .external = false });
     const body = try b.declare(&.{}, u, &.{}, &.{});
     try b.define(body, try b.term(.{ .yield_then = try b.pure(try b.constant(u64, 42)) }));
@@ -147,7 +147,7 @@ pub fn semanticGuest(b: *source.Builder) !source.Module {
     const question_effect = b.functions.items[@intCast(question.entry)].effects[0];
     const alternative_effects = b.functions.items[@intCast(branches.entry)].effects;
     const effects = [_]source.Id{ question_effect, alternative_effects[0], alternative_effects[1] };
-    const info = try @import("horos").library.cleanup.exitInfo(b, unit);
+    const info = try @import("horos").source.library.cleanup.exitInfo(b, unit);
     const body = try b.declare(&.{}, boolean, &.{question_effect}, &.{});
     const answer = try b.variable(boolean);
     try b.define(body, try b.bind(answer, try b.term(.{ .call = .{
@@ -476,7 +476,7 @@ pub const Reconstruction = struct {
             try b.define(body, try b.term(.{ .match_sum = .{ .value = value, .cases = &.{ .{ .variable = original, .body = try e.call(loop, &.{initial}) }, .{ .variable = resumed, .body = try e.call(loop, &.{try b.reference(resumed)}) } } } }));
         }
         if (!cleanup) return b.module(body, unit);
-        const info = try @import("horos").library.cleanup.exitInfo(b, unit);
+        const info = try @import("horos").source.library.cleanup.exitInfo(b, unit);
         const dispose = try b.effect(.{ .identity = "controller/1/snapshot", .payload = try e.schema(u64), .result = unit, .external = false });
         const cleanup_effects = if (workspace_command != null) try b.allocator().dupe(@TypeOf(dispose), &.{ workspace_effect.?, dispose }) else &.{dispose};
         const unwind = try b.declare(&.{info}, unit, cleanup_effects, &.{});

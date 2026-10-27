@@ -84,7 +84,7 @@ and image bindings.
 
 ## Adaptive-only public surface
 
-This is a breaking source cleanup. The generic ReAct factory is removed without
+Protean 8.0.0 is a breaking source cleanup. The generic ReAct factory is removed without
 a replacement factory, alias, or relocated package. The adaptive application
 continues to author its own loop. No retained adaptive root used the deleted
 conversation, decision, observation, scope, set, approval, deliberation,
@@ -144,6 +144,8 @@ they do not claim that all final-candidate checks have already passed.
 | `test/protean/model_custody.zig` | Distinct offers and continuation after two model calls | retain internal | Named typed fields, products and calls | two scoped model calls retain separate offered sets and post answer continuation |
 | `test/protean/admission.zig` | Direct protected-boundary witnesses | retain internal | Add valid single-use, forged-mint and double-consumption cases | protected resources admit one consumption and reject raw minting or duplication |
 | `test/protean/compiled_tool.zig` | Tool declaration integrity | retain internal | Move metadata/no-commit witness from approval fixture | tool metadata and dispatch share one declaration without granting commit |
+| `test/protean/dialogue_probe.zig` and raw cleanup fixtures | Deliberate source construction and ownership/admission negatives | retain internal | `horos.source.library.generator` and `horos.source.library.cleanup` | native owner/workspace tests |
+| `test/consumers/adaptive/package_surface.zig` | Exported-package adaptive API and removal contract | retain internal | Compile against the extracted package during downstream installation | installations.mjs |
 
 The retired approval tests also exercised placement, revalidation, authority,
 amendment and scoped policy behavior. Observation tests exercised live/simulated
@@ -184,9 +186,16 @@ image, SHA-256
 This comparison does not establish arbitrary checkpoint compatibility, the
 unmodified baseline's image identity, or final coordinated qualification.
 
+The package version is now 8.0.0. Maintained raw generator/cleanup fixtures use
+Horos's `source.library` boundary; ordinary generator clients stay typed.
+The downstream build compiles removal/retention expectations against the actual
+exported Protean module, and installation inspects retired paths in that package.
+These new checks have not executed on the final candidate.
+
 The user retained the existing shared local-verification cutoff, 2026-10-27
-17:30 UTC. Final Horos/Kosmos pins and authenticated artifacts, the breaking
-package-version update, exported-package absence checks, native product and
-downstream execution, final required matrix/cost observations, and serial
-review convergence remain incomplete. Existing source locks still select the
-qualified Horos 7/Kosmos 9.1 prerequisite, not the consolidation candidate.
+17:30 UTC. Final Horos/Kosmos pins and authenticated artifacts, exported-package
+absence checks, native product and downstream execution, final required
+matrix/cost observations, and serial review convergence remain incomplete.
+Existing source locks still select the qualified Horos 7/Kosmos 9.1 prerequisite,
+not the consolidation candidate. Earlier passing checks do not qualify the
+subsequent namespace, version or downstream-test changes.

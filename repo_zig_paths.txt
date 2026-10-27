@@ -92,6 +92,7 @@ src/tools.zig
 src/workspace_contracts.zig
 test/authoring_tests.zig
 test/consumers/adaptive/build.zig
+test/consumers/adaptive/package_surface.zig
 test/protean/adaptive_controls.zig
 test/protean/adaptive_recovery.zig
 test/protean/adaptive_reports.zig

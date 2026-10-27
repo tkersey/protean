@@ -39,7 +39,7 @@ pub fn build(b: *source.Builder) !source.Module {
     const boolean = try b.scalar(bool);
     const input = try b.schema(.{ .product = &.{ u, u } });
     const command = try b.schema(.{ .sum = &.{ u, unit } });
-    const exit_info = try @import("horos").library.cleanup.exitInfo(b, unit);
+    const exit_info = try @import("horos").source.library.cleanup.exitInfo(b, unit);
     const prefix = try b.effect(.{ .identity = "mobility/prefix", .payload = u, .result = unit, .external = false });
     const select = try b.effect(.{ .identity = "mobility/alternative", .payload = u, .result = command, .external = false });
     const cleanup_effect = try b.effect(.{ .identity = "mobility/cleanup", .payload = exit_info, .result = unit, .external = false });

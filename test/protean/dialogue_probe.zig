@@ -1,7 +1,7 @@
 //! A consumer owns all control. Protean only constructs ordinary dialogue terms.
 const std = @import("std");
 const horos = @import("horos");
-const dialogue = horos.library.generator;
+const dialogue = horos.source.library.generator;
 const interaction = @import("interaction");
 const bsrc = horos.source;
 const Builder = bsrc.Builder;
@@ -259,7 +259,7 @@ fn disposal(b: *Builder) !bsrc.Module {
     const read = try b.primitive(integer, .cell_get, &.{try b.reference(cell)}, 0);
     const answer = try b.variable(integer);
     try b.define(body, try b.bind(answer, try dialogue.offer(b, d, try b.reference(b.parameter(start_fn, 0)), read), try b.pure(try b.reference(answer))));
-    const exit = try horos.library.cleanup.exitInfo(b, unit);
+    const exit = try horos.source.library.cleanup.exitInfo(b, unit);
     const cleanup = try b.declare(&.{exit}, unit, &.{release}, &.{region});
     try b.define(cleanup, try b.term(.{ .perform = .{ .effect = release, .payload = read } }));
     const body_type = try b.schema(.{ .internal = .{ .computation = .{
