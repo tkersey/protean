@@ -257,3 +257,13 @@ The historical-retention diagnostic preserves both executables, the original
 continuation, separate namespaces and each 60-second wait. Status polling now
 uses 250 ms instead of 10 ms, and a timeout captures bounded progress, recent
 events, result and stderr before cleanup; it does not extend the semantic wait.
+
+The old offline fixture reached its question only after twelve preceding model
+interactions and did not finish that prefix in the 60-second wait. The retention
+witness now uses the baseline's existing controlled loopback HTTPS provider mode:
+ask first, then read source evidence and report after reopening and answering the
+original question. No executable is rebuilt for this fixture change. The test
+checks exact provider call identities and count, preserved question/profile,
+unchanged old executable, new namespace, and source frozen before installation
+even after the original snapshot file changes. Both waits and the CI lane budget
+remain unchanged; this replacement does not qualify the full offline scenario.
