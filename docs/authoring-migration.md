@@ -60,9 +60,10 @@ and API identities are in `conformance/protean/dependencies.lock.json` and the
 Horos package binding in `build.zig.zon`. Qualification uses those exact bindings;
 uncommitted local-module development checks do not qualify a dependency tuple.
 
-## Typed recursive participants with Horos 7
+## Typed recursive participants
 
-Protean 7.0.0 selects Horos 7's canonical `library.hyper` interface. The recursive
+Protean 8 retains the canonical `library.hyper` interface introduced with the
+qualified Protean 7/Horos 7 tuple. The recursive
 participant fixture promises its effectful task schema before constructing the
 reciprocal pair, then completes the task with its actual peer captures. Its
 retained `ana` emitter uses typed state, named fields and typed Need operations;
@@ -203,10 +204,17 @@ model-call witness, request-time offers, later-offer rejection and protected
 model-site negatives. Its presence in the source inventory alone was not
 execution evidence. Final native execution of these cases remains outstanding.
 
+The dependency lock now selects published draft candidates Horos
+`61f2b4f63bbf96039a332be9a5d610c46422daa1` and Kosmos
+`970fd0c4d80517070d80bff3518de145ec66c155`. Their actual GitHub archive members,
+Git blob identities, complete normalized source inventories, Horos package
+profiles and API-file digests are bound in the lock. The Kosmos evaluator bundle
+is 275,293 bytes and differs from the prerequisite only in the embedded Horos
+package identifier. Artifact authentication is not execution qualification.
+
 The user retained the existing shared local-verification cutoff, 2026-10-27
-17:30 UTC. Final Horos/Kosmos pins and authenticated artifacts, exported-package
-absence checks, native product and downstream execution, final required
-matrix/cost observations, and serial review convergence remain incomplete.
-Existing source locks still select the qualified Horos 7/Kosmos 9.1 prerequisite,
-not the consolidation candidate. Earlier passing checks do not qualify the
-subsequent namespace, version or downstream-test changes.
+17:30 UTC, and authorized coordinated draft publication without extending it.
+Final exported-package absence checks, native product and downstream execution,
+the required matrix/cost observations, and serial review convergence remain
+incomplete. Earlier passing checks do not qualify the subsequent namespace,
+version, downstream-test or dependency changes.
