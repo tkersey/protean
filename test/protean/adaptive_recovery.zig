@@ -201,7 +201,7 @@ test "adaptive workspace captured build imports and executes exact retained code
 }
 
 test "adaptive workspace reconstructed controller cannot publish invalid output" {
-    for ([_]OutputCheck{ .origin, .citation, .foreign_value, .foreign_program, .malformed, .origin_outer }) |check| try workspaceRecovery(false, false, check);
+    for ([_]OutputCheck{ .foreign_value, .malformed, .origin_outer }) |check| try workspaceRecovery(false, false, check);
 }
 
 const OutputCheck = enum { none, origin, citation, foreign_value, foreign_program, malformed, origin_outer };

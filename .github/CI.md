@@ -63,13 +63,21 @@ qualification workflow. The removed reframing test uniquely exercised an
 authored controller retaining its full action offers while abandoning a
 boolean-demanding child, broadening evidence and executing novel GCD source
 twice. Remaining direct construction and child-control checks do not reproduce
-that complete controller observation.
+that complete controller observation. The invalid reconstructed-output test
+retains foreign-value ownership, malformed-reference and acquired outer-handoff
+cases. It retires separate uncited-claim, foreign-program and ordinary-origin
+variants; the remaining origin case also exercises a pending acquired handoff.
 
 Workspace execution, retention and history still run once each across 21 tests.
 CI compiles the three existing filtered groups separately; the full unfiltered
 root is retained for local grouped execution. Selected list fixtures are reduced
 from 300 to 32 entries and the deep recursive fixture from 50,000 to 2,048 steps. This retains the smaller-scale
-semantic checks while retiring the former scale coverage. These changes alter
+semantic checks while retiring the former scale coverage. The retained-work
+fixture uses 32 cooperative list entries, 32 scope works, 32 status-history
+works and 32 provenance antecedents instead of 300, 256, 1,024 and 8,192.
+It retains noncooperative work beyond the initial quantum, replay, cancellation,
+profile replacement, paging and input-history checks, but no longer exercises
+those large-history memory and repeated scheduling workloads. These changes alter
 verification scope, not supported product inputs or production semantics.
 
 ## Local feedback
