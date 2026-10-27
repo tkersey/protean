@@ -5,7 +5,7 @@ seconds of its original automatic trigger**. The budget includes runner queueing
 setup, acquisition, compilation, every selected test, packaging, artifact and
 cache transfers, and the final identity comparison. The terminal `native` gate
 measures from the run's `created_at`, rejects `run_attempt != 1`, and requires all
-nine qualification lanes to succeed. A failed warmup followed by a successful
+eleven qualification lanes to succeed. A failed warmup followed by a successful
 retry does not satisfy this requirement.
 
 Pull requests and main pushes run the same inventory on native Linux x86-64 with
@@ -21,9 +21,11 @@ selected lane can return evidence.
 | --- | --- |
 | `authoring` | Source inventory, `check-protean` and `check-native-https`: authoring, model/value contracts, construction, compile-time rejection, helper integrity, adaptive asset emission, formatting, wire checks and the independent HTTPS endpoint. |
 | `owners` | All 35 retained native task/response owner tests, including their participant imports. |
-| `owner-adaptive-control` | All 12 retained adaptive owner tests. |
+| `owner-adaptive-control` | All 11 retained adaptive owner tests. |
 | `owner-support` | Native unit/context and process-crash recovery checks. |
-| `workspace` | All 21 workspace-program tests from one compiled executable, run in three independent execution, retention and history groups. |
+| `workspace` | The 15 workspace execution and construction tests. |
+| `workspace-retention` | The three retained-work, wait and delegated-answer tests. |
+| `workspace-history` | The three history, cancellation-read and allocation-failure tests. |
 | `correspondence` | Independent source-oracle agreement, capsule restoration and duplicate-custody rejection. |
 | `native` | Build and package the adaptive product; verify its manifest, protocol/state rejection and offline authored-control demo through the isolated native deployment. |
 | `native-placement` | Execute the same current-run packaged binary through authenticated transfer, reopen, refusal and duplicate-acceptance checks. |
@@ -53,15 +55,20 @@ simple packaged placement remain required, but do not establish all of those
 removed end-to-end observations.
 
 The owner suite no longer imports the separate 48-case contract collection.
-Two expensive adaptive capture/recovery tests and the largest generated-evaluator
-custody test are deleted. The remaining 15 runtime-workspace tests and explicit
-scripted-runtime targets are optional diagnostics, outside the default native
+Two expensive adaptive capture/recovery tests, the adaptive reframing test and
+the largest generated-evaluator custody test are deleted. The remaining 15
+runtime-workspace tests and explicit scripted-runtime targets are optional diagnostics, outside the default native
 aggregate and required CI. They are not deferred requirements or a substitute
-qualification workflow.
+qualification workflow. The removed reframing test uniquely exercised an
+authored controller retaining its full action offers while abandoning a
+boolean-demanding child, broadening evidence and executing novel GCD source
+twice. Remaining direct construction and child-control checks do not reproduce
+that complete controller observation.
 
-Workspace execution, retention and history still run once each within the same
-21-test root, using the existing concurrent group runner. The large list fixture is reduced from 300 to 32 entries and the
-deep recursive fixture from 50,000 to 2,048 steps. This retains the smaller-scale
+Workspace execution, retention and history still run once each across 21 tests.
+CI compiles the three existing filtered groups separately; the full unfiltered
+root is retained for local grouped execution. Selected list fixtures are reduced
+from 300 to 32 entries and the deep recursive fixture from 50,000 to 2,048 steps. This retains the smaller-scale
 semantic checks while retiring the former scale coverage. These changes alter
 verification scope, not supported product inputs or production semantics.
 

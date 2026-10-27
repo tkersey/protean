@@ -9,7 +9,9 @@ const profiles = {
   product: ['protean', [], null, ['executables/protean', 'protean/adaptive/application.json', 'protean/adaptive/program.bpi3']],
   owners: ['build-native-owner-tasks-check', [], 'native_owner_tests.zig', ['verification/native-owner-tasks']],
   'owner-adaptive-control': ['build-native-owner-adaptive-check', [], 'native_adaptive_tests.zig', ['verification/native-owner-adaptive']],
-  workspace: ['build-workspace-general-check', [], 'workspace_programs.zig', ['verification/workspace-general']],
+  workspace: ['build-workspace-general-check', ['-Dworkspace-group=execution'], 'workspace_programs.zig', ['verification/workspace-general']],
+  'workspace-retention': ['build-workspace-general-check', ['-Dworkspace-group=retention'], 'workspace_programs.zig', ['verification/workspace-general']],
+  'workspace-history': ['build-workspace-general-check', ['-Dworkspace-group=history'], 'workspace_programs.zig', ['verification/workspace-general']],
 };
 assert(Object.hasOwn(profiles, profile));
 const [target, selection, testRoot, outputs] = profiles[profile];

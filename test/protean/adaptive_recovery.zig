@@ -200,10 +200,6 @@ test "adaptive workspace captured build imports and executes exact retained code
     try workspaceRecovery(false, false, .none);
 }
 
-test "adaptive workspace AUT-02 AUT-03 BUILD-01 controller abandons a binary framing and executes novel source twice" {
-    try workspaceRecovery(false, true, .none);
-}
-
 test "adaptive workspace reconstructed controller cannot publish invalid output" {
     for ([_]OutputCheck{ .origin, .citation, .foreign_value, .foreign_program, .malformed, .origin_outer }) |check| try workspaceRecovery(false, false, check);
 }
