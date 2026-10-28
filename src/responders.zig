@@ -57,7 +57,7 @@ pub fn defineModel(comptime P: type, c: authoring.Context, failure: anytype, com
     const observed_id = try typed.interop.functionId(t, observed);
     const instance = try b.specialization(Id, "agent.model.candidate-projection/v3", .{ @intFromPtr(t), observed_id });
     const result = try c.schema(if (batch) P.BatchInterpretation else P.Interpretation);
-    const effect = try typed.interop.operation(t, b.functions.items[@intCast(observed_id)].effects[0]);
+    const effect = try P.declare(c);
     const signature = try t.callable(.{ .request = try c.schema(P.AdaptiveRequest), .offered = try c.schema([P.declaration_count]bool) }, result, .{effect}, .{ .use = .reusable });
     if (instance.cached) |cached| return typed.interop.refineFunction(t, try typed.interop.declaredFunction(t, cached), signature);
     const handle = try t.functionFor("model candidate", signature);
@@ -77,11 +77,7 @@ pub fn defineControllerModelObserved(comptime P: type, comptime Carry: type, c: 
 fn defineObserved(comptime P: type, c: authoring.Context, failure: anytype, comptime batch: bool, comptime Carry: ?type) !*const ObservedFunction(P, batch, Carry) {
     const b = c.builder;
     const t = c.author;
-    const operation = if (Carry) |C| try controllerModelOperation(P, C, c) else blk: {
-        const effect = try P.declare(b);
-        try c.registry.classify(effect, .model);
-        break :blk try typed.interop.externalOperation(t, effect, try c.schema(P.AdaptiveRequest), try c.schema(P.AdaptiveResult));
-    };
+    const operation = if (Carry) |C| try controllerModelOperation(P, C, c) else try P.declare(c);
     const effect = try typed.interop.operationId(t, operation);
     const fault = try typed.interop.literalFailure(t, failure);
     const instance = try b.specialization(Id, "agent.model.observed-responder/v6", .{ @intFromPtr(t), @typeName(P), effect, try typed.interop.failureLiteralId(t, fault), batch });
@@ -95,36 +91,6 @@ fn defineObserved(comptime P: type, c: authoring.Context, failure: anytype, comp
     try t.define(handle, try g.emitBody(operation, interpreter));
     _ = try instance.finish(b, function);
     return handle;
-}
-
-/// Return an ordinary call term. Bind the candidate result before interpreting
-/// it further or presenting it to the separate protected commitment path.
-pub fn invokeModel(
-    comptime P: type,
-    c: authoring.Context,
-    failure: Id,
-    comptime batch: bool,
-    request: Id,
-    offered: Id,
-) !Id {
-    return c.builder.term(.{ .call = .{
-        .function = try typed.interop.functionId(c.author, try defineModel(P, c, try @import("authoring_imports.zig").literal(c.author, failure), batch)),
-        .arguments = &.{ request, offered },
-    } });
-}
-
-pub fn invokeModelObserved(
-    comptime P: type,
-    c: authoring.Context,
-    failure: Id,
-    comptime batch: bool,
-    request: Id,
-    offered: Id,
-) !Id {
-    return c.builder.term(.{ .call = .{
-        .function = try typed.interop.functionId(c.author, try defineModelObserved(P, c, try @import("authoring_imports.zig").literal(c.author, failure), batch)),
-        .arguments = &.{ request, offered },
-    } });
 }
 
 fn Generator(comptime P: type, comptime batch: bool, comptime Carry: ?type, comptime Fault: type, comptime Failure: type) type {

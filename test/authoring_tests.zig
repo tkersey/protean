@@ -5,5 +5,4 @@ test {
     _ = @import("protean/participant.zig");
     _ = @import("protean/composed_owners.zig");
     _ = @import("protean/recursive_participant.zig");
-    _ = @import("protean/selection.zig");
 }

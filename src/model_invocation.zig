@@ -4,6 +4,8 @@ const std = @import("std");
 const contracts = @import("protean_contracts");
 const codecs = @import("model_codec.zig");
 const models = @import("model.zig");
+const horos = @import("horos");
+const a = horos.authoring;
 
 pub const semantic_identity = "agent.model.invoke.v11";
 pub const adaptive_context_semantic_identity = "agent.model.context.responses.adaptive.v7";
@@ -523,14 +525,31 @@ pub fn Profile(
             };
         }
 
-        pub fn declare(builder: anytype) !u64 {
-            const payload = try contracts.schema(AdaptiveRequest, builder);
-            const result = try contracts.schema(AdaptiveResult, builder);
-            const slot = try builder.specialization(u64, semantic_identity, .{ payload, result });
-            if (slot.cached) |cached| return cached;
-            const effect = try builder.effect(.{ .identity = semantic_identity, .payload = payload, .result = result });
-            return slot.finish(builder, effect);
+        pub const Operation = a.Operation(a.OperationSignature(
+            a.Shape(AdaptiveRequest),
+            a.Shape(AdaptiveResult),
+            horos.data.schema.native.Fields(&.{}, &.{}),
+        ));
+        pub fn declare(context: @import("authoring.zig").Context) !*const Operation {
+            const effect = try source.declare(context.builder);
+            try context.registry.classify(effect, .model);
+            return a.interop.externalOperation(
+                context.author,
+                effect,
+                try context.schema(AdaptiveRequest),
+                try context.schema(AdaptiveResult),
+            );
         }
+        pub const source = struct {
+            pub fn declare(builder: anytype) !u64 {
+                const payload = try contracts.schema(AdaptiveRequest, builder);
+                const result = try contracts.schema(AdaptiveResult, builder);
+                const slot = try builder.specialization(u64, semantic_identity, .{ payload, result });
+                if (slot.cached) |cached| return cached;
+                const effect = try builder.effect(.{ .identity = semantic_identity, .payload = payload, .result = result });
+                return slot.finish(builder, effect);
+            }
+        };
 
         /// Checks the single-answer policy, normalized call association, concrete
         /// variant and request-time offered set. Returns candidate data only.

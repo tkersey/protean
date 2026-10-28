@@ -3,50 +3,50 @@
   "status": "development-integration",
   "boundary": {
     "repository": "tkersey/horos",
-    "commit": "13cef77f2f0ab8db3bc95362ad9bc7ebfed8b07a",
-    "gitTree": "ac31c28cbc51564a60a5e83ee6ea127c24e9dc5d",
-    "version": "7.0.0",
+    "commit": "013d783dd45a7994f1c888f66f98a7003c173a79",
+    "gitTree": "52d778971f141e9e778ffb46691ce4e8b24c9583",
+    "version": "8.0.0",
     "source": {
-      "inventorySha256": "157caabe70d8ea62c8fb0f4a2ab229f679999d8f2e795f64e24c256be746dfcf",
-      "entries": 452,
-      "bytes": 10235289
+      "inventorySha256": "85a69c4fd246ab37c4644c5c0cb38f7d0577ad957bce1526af985fb4b5d3e9b6",
+      "entries": 454,
+      "bytes": 10271435
     },
     "archive": {
-      "url": "https://github.com/tkersey/horos/archive/13cef77f2f0ab8db3bc95362ad9bc7ebfed8b07a.tar.gz",
-      "sha256": "3f3cbca8d3525d15463a22d7a938f1ac2bb17d9090f39006f00f733db9bd494a",
-      "bytes": 1855512,
+      "url": "https://github.com/tkersey/horos/archive/013d783dd45a7994f1c888f66f98a7003c173a79.tar.gz",
+      "sha256": "bfe17194dc49a95b435a8df80b520094f561096d12c6a86a138a631d379e4abc",
+      "bytes": 1862450,
       "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
     "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree.",
     "package": {
-      "zigHash": "horos-7.0.0-flclaJp5VACo90Ose04kg77D0f_5F0RwEhgqpMNXqT1T",
+      "zigHash": "horos-8.0.0-flclaFkFVQBKG0Iqo_c4I6U8mhZqTO358ywkjB63B6Sg",
       "defaultProfile": "zig-managed",
       "profiles": {
         "zig-managed": {
-          "inventorySha256": "750e3c25bf6538e1884a62b237ebfde6e3903883cb5ac1629b43dccfaefe2b98",
-          "entries": 429,
-          "bytes": 5536154
+          "inventorySha256": "8ee1ea461b83798075bf2bfdc2bee2c9c14b88f9b77a1b53aa76f9653cebd97c",
+          "entries": 431,
+          "bytes": 5571929
         },
         "archive-extracted": {
-          "inventorySha256": "794b1bc4db2aac538d322f91afbbe53773e1d654d48bf39a44edcfe04f16c07b",
-          "entries": 429,
-          "bytes": 5536154
+          "inventorySha256": "81304f08c97fc4145f79a7f6c197e7e004e116c52c52839980c707989ad9e67a",
+          "entries": 431,
+          "bytes": 5571929
         }
       },
       "archive": {
-        "sha256": "cfecc37f46fb36b77a2012fa239672b3d39ebcff7ad7981ce25202b484fad44d",
-        "bytes": 1059053
+        "sha256": "4af27e9bd81cfe70ce8050565bfa6dadb453057d537356074ff46ae6920b7517",
+        "bytes": 1065768
       }
     },
     "api": {
       "authoring": "src/root.zig",
       "data": "src/data/root.zig",
       "source": "src/source.zig",
-      "profile": "Horos 7 canonical typed hyperfunctions, finite source relations, private product layout transport and pure slices; unchanged BMO1/BPI3/PST3 and invocation grammars",
+      "profile": "Horos 8 canonical typed library policies and source-only raw construction, typed hyperfunctions, finite source relations and pure slices; unchanged BMO1/BPI3/PST3 and invocation grammars",
       "files": [
         {
           "path": "src/root.zig",
-          "sha256": "1bb7ea9900749c52f51c693b9a3e1a5db123c6ecdddee81c0975af961272544b"
+          "sha256": "755e24919fabaceea83956e4fb23ce608214a010539a33a8da9aab6d09276b66"
         },
         {
           "path": "src/data/root.zig",
@@ -54,7 +54,7 @@
         },
         {
           "path": "src/source.zig",
-          "sha256": "fbe4b8de77a5df440e0eaa2e4410c8aabbce27dffb83a6cb0e7cf115562c23c8"
+          "sha256": "a31612321ddf1b1d09d83bfaf9dc11eb3f4c52e2b820cecbcf122d2c3553be8f"
         },
         {
           "path": "docs/bpi3-wire.md",
@@ -82,7 +82,7 @@
         },
         {
           "path": "src/authoring.zig",
-          "sha256": "137a851b23bc64528804ed4f3e35cd7a78deed756fd24cc143c10bce20d51ef4"
+          "sha256": "157e6608862af7bed22c378d75c876a523f16f7fd9ec21bfcd314e5aed960956"
         },
         {
           "path": "src/data/native_shape.zig",
@@ -91,24 +91,56 @@
         {
           "path": "src/authoring/runtime.zig",
           "sha256": "8d38d8077c5aa804577c3cf677a68d68bccf4a42a1bdd07a2a7e2418bc8a2730"
+        },
+        {
+          "path": "src/library/generator.zig",
+          "sha256": "e41cc6f4efc067cabde6d6243fcfcdb93c089b0da4372ab21961a657c9ee6e20"
+        },
+        {
+          "path": "src/source/library/generator.zig",
+          "sha256": "018221a8b8be80d5ebdfe3cf947b8ca2f28934b3fb9711fa95c51208051aefe7"
+        },
+        {
+          "path": "src/source/library/cleanup.zig",
+          "sha256": "b51504c10788f71a24d2700cd01d3eb46634e35ca687574a9eca7634626c2719"
+        },
+        {
+          "path": "src/library/state.zig",
+          "sha256": "f3b7d869ed8993f1b905118762bf16303174b97283231dcdd2dd841824a3ec5b"
+        },
+        {
+          "path": "src/library/reader.zig",
+          "sha256": "30652684b5cf776ebbd363d31ed9bd23f78842c605ac701e989336007daf964e"
+        },
+        {
+          "path": "src/library/writer.zig",
+          "sha256": "e2f76a79933bc36eb4ff5ac4d648a66fa159123df3b636a938d4fc8970caf0ec"
+        },
+        {
+          "path": "src/library/raise.zig",
+          "sha256": "e9d32e03dddf502f095e32176a4ef9f038268ec3ad06564f5cb1f7a8b144c35e"
+        },
+        {
+          "path": "src/library/scheduler.zig",
+          "sha256": "e88bace79e1ad64e1fcaf36c47a322a370e530e6e716442907d5ba6bc3078a57"
         }
       ]
     }
   },
   "world": {
     "repository": "tkersey/kosmos",
-    "commit": "5d2e5e14d5349479cd50bf7d6f939f30175e0246",
-    "gitTree": "2aecd1c9d01381a4047ffd51e6eb85bc120a2189",
+    "commit": "bf788fef4dc7c660bf20d7f59b6752fbc4347479",
+    "gitTree": "bcee2e60be1a2af5a9067fb544caf24b95fbb976",
     "version": "9.1.0",
     "source": {
-      "inventorySha256": "43d937c880d5be6f33a9d47344e400366521d423f48a55c1cda4a0ea932b8bbd",
+      "inventorySha256": "d7429775e96c00bf310f816fd7c715c009e3da62699489579dee227dddb2755d",
       "entries": 215,
-      "bytes": 3395013
+      "bytes": 3399903
     },
     "archive": {
-      "url": "https://github.com/tkersey/kosmos/archive/5d2e5e14d5349479cd50bf7d6f939f30175e0246.tar.gz",
-      "sha256": "28b7d1a9840ca7fde71cea17ab49215723eb8f61924a99bca431bb94c557e1e2",
-      "bytes": 764636,
+      "url": "https://github.com/tkersey/kosmos/archive/bf788fef4dc7c660bf20d7f59b6752fbc4347479.tar.gz",
+      "sha256": "e052eddf297471e958e1d38c9ce9ae3865d81980a0f40d7b64d94fc38058722e",
+      "bytes": 766415,
       "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
     "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree."
@@ -125,15 +157,16 @@
     "compatiblePublishedReleaseObserved": false,
     "releases": [],
     "pullRequests": [
-      "https://github.com/tkersey/horos/pull/178",
-      "https://github.com/tkersey/kosmos/pull/75"
+      "https://github.com/tkersey/horos/pull/179",
+      "https://github.com/tkersey/kosmos/pull/76"
     ]
   },
   "limitations": [
-    "Development Horos 7.0.0 and Kosmos 9.1.0 commits are published in draft PRs; complete archive transports and source trees are authenticated. Version fields do not claim published releases.",
+    "Development Horos 8.0.0 and Kosmos 9.1.0 commits are published in coordinated draft PRs; complete archive transports and source trees are authenticated. Version fields do not claim published releases.",
+    "Final Protean native macOS qualification remains incomplete under the retained local deadline. Native Linux qualification and serial reviews are outstanding.",
     "Controlled-provider qualification does not establish live-provider availability or model quality; existing saved tasks retain their original executable and image bindings."
   ],
   "notes": [
-    "Exact published development source tuple for canonical typed hyperfunctions and existing semantic workspace construction. Native dependency setup independently verifies transport, package and extracted source identities; qualification belongs to the checks for these exact candidates."
+    "Exact published development source tuple for adaptive-only Protean and canonical typed library consolidation. Native dependency setup must independently verify these transport, package and extracted source identities; artifact authentication alone is not final qualification."
   ]
 }

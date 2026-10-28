@@ -29,6 +29,40 @@ const Fixture = invocation.Profile(FixtureAnswer, .{
     .{ .name = "decline", .description = "Decline the question." },
 }, limits);
 
+test "typed model declaration and protected responder share one operation" {
+    var builder = horos.source.Builder.init(std.testing.allocator);
+    defer builder.deinit();
+    var registry = @import("admission.zig").Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    const context = try @import("authoring.zig").Context.init(&builder, &registry);
+    const operation = try Fixture.declare(context);
+    const effect = try horos.authoring.interop.operationId(context.author, operation);
+    const response = try @import("responders.zig").defineModelObserved(
+        Fixture,
+        context,
+        try context.literal(void, {}),
+        false,
+    );
+    const function = try horos.authoring.interop.functionId(context.author, response);
+    try std.testing.expectEqualSlices(horos.source.Id, &.{effect}, builder.functions.items[function].effects);
+    try std.testing.expectEqual(effect, try horos.authoring.interop.operationId(context.author, try Fixture.declare(context)));
+    try std.testing.expectEqual(effect, try Fixture.source.declare(&builder));
+    const entry = try context.author.function(
+        "unprotected model call",
+        .{ .request = try context.schema(Fixture.AdaptiveRequest) },
+        try context.schema(Fixture.AdaptiveResult),
+        .{operation},
+    );
+    const body = try context.author.body(entry);
+    try context.author.define(entry, try body.ret(try body.perform(operation, try body.parameter("request"))));
+    const module = try context.author.module(entry, try context.schema(void));
+    try std.testing.expectError(error.ProtectedEffectBypass, @import("admission.zig").verify(
+        std.testing.allocator,
+        module,
+        &registry,
+    ));
+}
+
 test "model declarations preserve logical tags and derive strict schemas/codecs" {
     const declarations = Fixture.allDeclarations().items;
     try std.testing.expectEqual(2, declarations.len);
@@ -69,8 +103,12 @@ test "model effect is ordinary and a typed question requires no executable tool"
     const Question = invocation.Question(i64, "answer", "Answer the integer question.", limits);
     var builder = horos.source.Builder.init(std.testing.allocator);
     defer builder.deinit();
-    const first = try Question.declare(&builder);
-    try std.testing.expectEqual(first, try Question.declare(&builder));
+    var registry = @import("admission.zig").Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    const context = try @import("authoring.zig").Context.init(&builder, &registry);
+    const operation = try Question.declare(context);
+    const first = try horos.authoring.interop.operationId(context.author, operation);
+    try std.testing.expectEqual(first, try horos.authoring.interop.operationId(context.author, try Question.declare(context)));
     try std.testing.expectEqualStrings(invocation.semantic_identity, builder.effects.items[@intCast(first)].identity);
     const request = try contracts.schema(Question.AdaptiveRequest, &builder);
     const result = try contracts.schema(Question.AdaptiveResult, &builder);
@@ -110,9 +148,13 @@ test "v11 is the sole model effect and retains current context bindings" {
     try std.testing.expectEqualDeep(reference, decoded.value.replay.?);
     var builder = horos.source.Builder.init(std.testing.allocator);
     defer builder.deinit();
-    const effect = try Fixture.declare(&builder);
+    var registry = @import("admission.zig").Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    const context = try @import("authoring.zig").Context.init(&builder, &registry);
+    const operation = try Fixture.declare(context);
+    const effect = try horos.authoring.interop.operationId(context.author, operation);
     try std.testing.expectEqualStrings("agent.model.invoke.v11", builder.effects.items[@intCast(effect)].identity);
-    try std.testing.expectEqual(effect, try Fixture.declare(&builder));
+    try std.testing.expectEqual(effect, try horos.authoring.interop.operationId(context.author, try Fixture.declare(context)));
     try std.testing.expectEqual(@as(usize, 1), builder.effects.items.len);
     try std.testing.expectEqual(try contracts.schema(Fixture.AdaptiveRequest, &builder), builder.effects.items[@intCast(effect)].payload);
     try std.testing.expectEqual(try contracts.schema(Fixture.AdaptiveResult, &builder), builder.effects.items[@intCast(effect)].result);

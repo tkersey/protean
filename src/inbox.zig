@@ -28,11 +28,5 @@ pub fn Profile(comptime Message: type) type {
             try c.registry.classify(effect, .read);
             return a.interop.externalOperation(c.author, effect, try c.schema(void), try c.schema(Reply));
         }
-        pub fn poll(c: authoring.Context) !Id {
-            return c.builder.term(.{ .perform = .{
-                .effect = try a.interop.operationId(c.author, try declare(c)),
-                .payload = try c.builder.constant(void, {}),
-            } });
-        }
     };
 }

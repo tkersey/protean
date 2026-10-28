@@ -94,7 +94,7 @@ const Application = struct {
             .inspect = try context.external(t.inspect_identity, try context.schema(t.WorkRequest), try context.schema(t.WorkReply), .read),
             .workspace = try context.external(t.workspace_identity, try context.schema(t.WorkspaceRequest), try context.schema(@import("protean_contracts").workspace.Reply), .read),
             .inbox = try Inbox.declare(context),
-            .model = if (controller) try protean.responders.controllerModelOperation(P, t.ControllerCarry, context) else try a.interop.externalOperation(c, try P.declare(context.builder), try context.schema(P.AdaptiveRequest), try context.schema(P.AdaptiveResult)),
+            .model = if (controller) try protean.responders.controllerModelOperation(P, t.ControllerCarry, context) else try P.declare(context),
         };
         const loop = try c.function("adaptive repository investigation", .{ .bindings = try e.context.schema(t.PolicyView), .state = try e.context.schema(t.State) }, try e.context.schema(t.Output), .{ ops.prepare, ops.work, ops.ask, ops.inspect, ops.workspace, ops.inbox, ops.model });
         const program: Program(controller) = .{

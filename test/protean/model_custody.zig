@@ -105,8 +105,7 @@ test "protected Protean source rejects raw model emission with forged request-ti
     var registry = protean.admission.Registry.init(b.allocator());
     defer registry.deinit();
     const context = try protean.Context.init(&b, &registry);
-    const effect = try P.declare(&b);
-    try registry.classify(effect, .model);
+    const effect = try horos.authoring.interop.operationId(context.author, try P.declare(context));
     const entry = try b.declare(&.{try contracts.schema(P.AdaptiveRequest, &b)}, try contracts.schema(P.Interpretation, &b), &.{effect}, &.{});
     const normalized = try b.variable(try contracts.schema(P.AdaptiveResult, &b));
     const request = try b.reference(b.parameter(entry, 0));
@@ -134,7 +133,7 @@ test "reserved model identity cannot evade custody by omitted or read classifica
         defer b.deinit();
         var registry = protean.admission.Registry.init(b.allocator());
         defer registry.deinit();
-        const effect = try P.declare(&b);
+        const effect = try P.source.declare(&b);
         if (role) |classification| try registry.classify(effect, classification);
         const entry = try b.declare(&.{try contracts.schema(P.AdaptiveRequest, &b)}, try contracts.schema(P.AdaptiveResult, &b), &.{effect}, &.{});
         try b.define(entry, try b.term(.{ .perform = .{
@@ -477,38 +476,19 @@ test "batch responder retains ordered candidates and enforces captured call poli
 }
 
 fn pairModule(c: protean.Context) !source.Module {
-    const b = c.builder;
-    const effect = try P.declare(b);
-    const entry = try b.declare(
-        &.{try contracts.schema(PairInput, c.builder)},
-        try contracts.schema(PairResult, c.builder),
-        &.{effect},
-        &.{},
-    );
-    const args = try b.reference(b.parameter(entry, 0));
-    const first = try b.primitive(try contracts.schema(Input, c.builder), .field, &.{args}, 0);
-    const second = try b.primitive(try contracts.schema(Input, c.builder), .field, &.{args}, 1);
-    const first_answer = try b.variable(try contracts.schema(P.Interpretation, c.builder));
-    const second_answer = try b.variable(try contracts.schema(P.Interpretation, c.builder));
-    const answers = try b.primitive(try contracts.schema(PairResult, c.builder), .product, &.{
-        try b.reference(first_answer), try b.reference(second_answer),
-    }, 0);
-    const first_call = try pairCall(c, first);
-    const second_call = try pairCall(c, second);
-    const finish_pair = try b.bind(second_answer, second_call, try b.pure(answers));
-    try b.define(entry, try b.bind(first_answer, first_call, finish_pair));
-    return b.module(entry, try b.scalar(void));
-}
-
-fn pairCall(c: protean.Context, value: source.Id) !source.Id {
-    return protean.responders.invokeModel(
-        P,
-        c,
-        try c.builder.constant(void, {}),
-        false,
-        try c.builder.primitive(try contracts.schema(P.AdaptiveRequest, c.builder), .field, &.{value}, 0),
-        try c.builder.primitive(try contracts.schema([2]bool, c.builder), .field, &.{value}, 1),
-    );
+    const t = c.author;
+    const effect = try P.declare(c);
+    const responder = try protean.responders.defineModel(P, c, try c.literal(void, {}), false);
+    const entry = try t.function("paired model calls", .{ .input = try c.schema(PairInput) }, try c.schema(PairResult), .{effect});
+    const body = try t.body(entry);
+    const input = try body.parameter("input");
+    const first = try body.field(input, "first");
+    const second = try body.field(input, "second");
+    const first_answer = try body.call(responder, .{ .request = try body.field(first, "request"), .offered = try body.field(first, "offered") });
+    const second_answer = try body.call(responder, .{ .request = try body.field(second, "request"), .offered = try body.field(second, "offered") });
+    const answers = try body.product(try c.schema(PairResult), .{ .first = first_answer, .second = second_answer });
+    try t.define(entry, try body.ret(answers));
+    return t.module(entry, try c.schema(void));
 }
 
 test "two scoped model calls retain separate offered sets and post answer continuation" {
@@ -751,7 +731,7 @@ test "adaptive model identity cannot bypass the protected responder" {
         defer b.deinit();
         var registry = protean.admission.Registry.init(b.allocator());
         defer registry.deinit();
-        const effect = try P.declare(&b);
+        const effect = try P.source.declare(&b);
         if (role) |classification| try registry.classify(effect, classification);
         const entry = try b.declare(&.{try contracts.schema(P.AdaptiveRequest, &b)}, try contracts.schema(P.AdaptiveResult, &b), &.{effect}, &.{});
         try b.define(entry, try b.term(.{ .perform = .{ .effect = effect, .payload = try b.reference(b.parameter(entry, 0)) } }));

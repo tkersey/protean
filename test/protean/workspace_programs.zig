@@ -4594,7 +4594,7 @@ const WorkspaceCleanupApplication = struct {
         const effect = try author.operationId(c.author, try c.external("workspace-context", try c.schema(ContextTypes.Input), try c.schema(ContextTypes.Output), .read));
         const b = c.builder;
         const unit = try b.scalar(void);
-        const info = try horos.library.cleanup.exitInfo(b, unit);
+        const info = try horos.source.library.cleanup.exitInfo(b, unit);
         const body = try b.declare(&.{}, output, &.{}, &.{});
         try b.define(body, try b.term(.{ .yield_then = try b.pure(try b.literal(.{ .schema = output, .bytes = try contracts.encodeOwned(ContextTypes.Output, b.allocator(), .{ .disposition = .observed, .observation_json = .{ .bytes = "{}" } }) })) }));
         const cleanup = try b.declare(&.{info}, unit, &.{effect}, &.{});

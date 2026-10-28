@@ -50,7 +50,7 @@ const Application = struct {
         const message = try b.variable(try horos_authoring.interop.schemaId(c.author, try c.schema(Inbox.Reply)));
         const padding = try horos_authoring.interop.valueId(c.author, try c.literal(T.Padding, .{ .bytes = &@as([64 * 1024]u8, @splat('x')) }));
         const result = try b.primitive(output, .product, &.{ try b.reference(answer), try b.reference(message), padding }, 0);
-        try b.define(entry, try b.bind(incremented, try b.term(.{ .perform = .{ .effect = leaf, .payload = try b.reference(b.parameter(entry, 0)) } }), try b.bind(answer, try b.term(.{ .perform = .{ .effect = question, .payload = try b.reference(incremented) } }), try b.bind(message, try Inbox.poll(c), try b.term(.{ .yield_then = try b.pure(result) })))));
+        try b.define(entry, try b.bind(incremented, try b.term(.{ .perform = .{ .effect = leaf, .payload = try b.reference(b.parameter(entry, 0)) } }), try b.bind(answer, try b.term(.{ .perform = .{ .effect = question, .payload = try b.reference(incremented) } }), try b.bind(message, try b.term(.{ .perform = .{ .effect = inbox, .payload = try b.constant(void, {}) } }), try b.term(.{ .yield_then = try b.pure(result) })))));
         return b.module(entry, try horos_authoring.interop.schemaId(c.author, try c.schema(void)));
     }
 };
@@ -1378,7 +1378,7 @@ const CleanupApplication = struct {
         const body = try b.declare(&.{}, unit, &.{}, &.{});
         // Stop inside protect before selecting failure versus cancellation.
         try b.define(body, try b.term(.{ .yield_then = try b.term(.{ .fail = try b.constant(void, {}) }) }));
-        const exit_info = try horos.library.cleanup.exitInfo(b, unit);
+        const exit_info = try horos.source.library.cleanup.exitInfo(b, unit);
         const cleanup = try b.declare(&.{exit_info}, unit, &.{}, &.{});
         try b.define(cleanup, try b.term(.{ .yield_then = try b.term(.{ .conditional = .{
             .condition = try b.reference(b.parameter(entry, 0)),
@@ -1404,7 +1404,7 @@ test "applied cancellation awaits cleanup input without recreating runnable work
             const entry = try b.declare(&.{number}, number, &.{question}, &.{});
             const body = try b.declare(&.{}, number, &.{question}, &.{});
             try b.define(body, try b.term(.{ .perform = .{ .effect = question, .payload = try b.constant(u32, 1) } }));
-            const exit_info = try horos.library.cleanup.exitInfo(b, unit);
+            const exit_info = try horos.source.library.cleanup.exitInfo(b, unit);
             const cleanup = try b.declare(&.{exit_info}, unit, &.{question}, &.{});
             const answer = try b.variable(number);
             try b.define(cleanup, try b.bind(answer, try b.term(.{ .perform = .{ .effect = question, .payload = try b.constant(u32, 2) } }), try b.pure(try b.constant(void, {}))));
@@ -1853,7 +1853,7 @@ pub const FairApplication = struct {
             try b.term(.{ .yield_then = try b.term(.{ .call = .{ .function = entry, .arguments = &.{input} } }) }),
             try b.term(.{ .perform = .{ .effect = leaf, .payload = input } }),
             try b.term(.{ .perform = .{ .effect = question, .payload = input } }),
-            try b.bind(ignored, try Inbox.poll(c), try b.pure(input)),
+            try b.bind(ignored, try b.term(.{ .perform = .{ .effect = inbox, .payload = try b.constant(void, {}) } }), try b.pure(input)),
         };
         for (paths, 0..) |path, selector| body = try b.term(.{ .conditional = .{
             .condition = try b.primitive(boolean, .equal, &.{ input, try b.constant(u32, @intCast(selector)) }, 0),

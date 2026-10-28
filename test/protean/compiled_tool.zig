@@ -269,3 +269,33 @@ test "compiled tool final link preserves valid profiles and rejects stale identi
     profile.record.image_identity[0] ^= 1;
     try std.testing.expectError(error.InvalidOptimizationProfile, protean.compileObserved(a, System, .{ .horos_options = .{ .profile = .{ .record = profile.record } } }));
 }
+
+test "tool metadata and dispatch share one declaration without granting commit" {
+    var b = source.Builder.init(std.testing.allocator);
+    defer b.deinit();
+    var registry = protean.admission.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    const c = try protean.Context.init(&b, &registry);
+    const integer = try b.scalar(u64);
+    const read = try horos_authoring.interop.operationId(c.author, try c.external("test.document.read", try horos_authoring.interop.schema(c.author, integer), try horos_authoring.interop.schema(c.author, integer), .read));
+    const descriptor: protean.tools.Descriptor = .{
+        .identity = "test.document.read",
+        .payload = integer,
+        .result = integer,
+        .implementation = .{ .external = read },
+        .role = .read,
+        .model_offered = false,
+    };
+    try protean.tools.validate(c, &.{descriptor});
+    _ = try protean.tools.perform(c, descriptor, try b.constant(u64, 0));
+    try std.testing.expectError(error.DuplicateToolDeclaration, protean.tools.validate(c, &.{ descriptor, descriptor }));
+    var altered = descriptor;
+    altered.identity = "other.document.read";
+    try std.testing.expectError(error.InvalidToolDeclaration, protean.tools.validate(c, &.{altered}));
+    const commit = try horos_authoring.interop.operationId(c.author, try c.external("test.document.commit", try horos_authoring.interop.schema(c.author, integer), try horos_authoring.interop.schema(c.author, integer), .commit));
+    altered = descriptor;
+    altered.identity = "test.document.commit";
+    altered.implementation = .{ .external = commit };
+    altered.role = .commit;
+    try std.testing.expectError(error.ProtectedToolRequiresCheckedOwner, protean.tools.perform(c, altered, try b.constant(u64, 0)));
+}

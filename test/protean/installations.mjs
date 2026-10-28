@@ -91,7 +91,7 @@ try {
     const target = join(exportRoot, file); mkdirSync(dirname(target), {recursive: true}); copyFileSync(join(root, file), target);
   }
   const packageHash = run(zig, ['fetch', exportRoot]);
-  assert.match(packageHash, /^protean-7\.0\.0-[A-Za-z0-9_-]+$/);
+  assert.match(packageHash, /^protean-8\.0\.0-[A-Za-z0-9_-]+$/);
   const packageDir = join(scratch, 'package'); mkdirSync(packageDir);
   run('/usr/bin/tar', ['-xzf', join(cache, 'p', `${packageHash}.tar.gz`), '-C', packageDir]);
   const source = join(packageDir, 'source');
@@ -100,10 +100,14 @@ try {
   // Resolve the native qualifier's full module graph from the published bytes.
   // Loading its fixture helpers performs no provider or native execution.
   await import(pathToFileURL(join(source, 'test/protean/adaptive_native_peer.mjs')).href);
-  for (const retired of ['runtime/model.mjs', 'runtime/mobility', 'examples/native-minimal', 'examples/repository-agent', 'tools/agent4/setup.mjs'])
+  for (const retired of ['runtime/model.mjs', 'runtime/mobility', 'examples/native-minimal', 'examples/repository-agent', 'tools/agent4/setup.mjs',
+    'src/react.zig', 'src/conversation.zig', 'src/decision.zig', 'src/observation.zig',
+    'src/scopes.zig', 'src/sets.zig', 'src/approval.zig', 'src/deliberation.zig',
+    'src/clarification.zig', 'src/value_equality.zig', 'src/authoring_imports.zig'])
     assert(!existsSync(join(source, retired)), `retired package member: ${retired}`);
   const consumer = scratch;
   copyFileSync(join(root, 'test/consumers/adaptive/build.zig'), join(consumer, 'build.zig'));
+  copyFileSync(join(root, 'test/consumers/adaptive/package_surface.zig'), join(consumer, 'package_surface.zig'));
   const zon = readFileSync(join(root, 'test/consumers/adaptive/build.zig.zon'), 'utf8').replace('.path = "../../.."', '.path = "package/source"');
   writeFileSync(join(consumer, 'build.zig.zon'), zon);
   const prefixDir = join(scratch, 'installed');

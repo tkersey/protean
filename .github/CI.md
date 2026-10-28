@@ -11,8 +11,11 @@ retry does not satisfy this requirement.
 Pull requests and main pushes run the same inventory on native Linux x86-64 with
 exact Zig 0.17.0 and safe optimization. Complete manual dispatches provide
 supplemental evidence; they do not replace the original automatic PR run.
-Selective `authoring`, `owners` and `downstream` dispatches are diagnostic and
-cannot pass the terminal qualification gate. Matrix fail-fast remains disabled
+Selective `authoring`, `owners`, `downstream` and `retained-runtime` dispatches
+are diagnostic and cannot pass the terminal qualification gate. The retained-runtime
+diagnostic authenticates explicitly selected baseline/candidate product archives
+and runs the existing old-task installation/continuation witness on native Linux;
+it neither rebuilds those executables nor substitutes for full qualification. Matrix fail-fast remains disabled
 so every selected lane can return evidence.
 
 ## Required inventory
@@ -20,7 +23,7 @@ so every selected lane can return evidence.
 | Lane | Checks |
 | --- | --- |
 | `authoring` | Source inventory, `check-protean` and `check-native-https`: authoring, model/value contracts, construction, compile-time rejection, helper integrity, adaptive asset emission, formatting, wire checks and the independent HTTPS endpoint. |
-| `owners` | All 35 retained native task/response owner tests, including their participant imports. |
+| `owners` | All 46 retained native task/response/model-custody owner tests, including their participant imports. |
 | `owner-adaptive-control` | All nine retained adaptive owner tests. |
 | `owner-support` | Native unit/context and process-crash recovery checks. |
 | `workspace` | The 15 workspace execution and construction tests. |
