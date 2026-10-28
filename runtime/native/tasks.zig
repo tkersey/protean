@@ -240,6 +240,42 @@ pub fn Service(comptime Types: type) type {
             return result;
         }
 
+        fn renderConsumer(
+            self: *Self,
+            a: std.mem.Allocator,
+            bytes: []const u8,
+            derived: bool,
+            site: @import("horos").source.consumer.Site,
+            page: wc.Page,
+        ) !json.Value {
+            const Key = struct {
+                contract: contracts.Utf8,
+                source: state.Reference,
+                derived: bool,
+                site: @import("horos").source.consumer.Site,
+                page: wc.Page,
+            };
+            const key_bytes = try contracts.encodeOwned(Key, a, .{
+                .contract = .{ .bytes = "protean-consumer-inspection/1" },
+                .source = compilerReference(bytes),
+                .derived = derived,
+                .site = site,
+                .page = page,
+            });
+            defer a.free(key_bytes);
+            const key = storage.digest(key_bytes);
+            if (self.compiler_facts) |facts| if (facts.sources.get(key)) |cached|
+                return std.json.parseFromSliceLeaky(json.Value, a, cached, .{ .allocate = .alloc_always, .parse_numbers = false });
+            if (self.store().transaction) return error.CompilerPreparationRequired;
+            const result = try construction.inspectConsumer(a, bytes, derived, site, page);
+            if (self.compiler_facts) |facts| {
+                const rendered = try json.canonical(facts.allocator, result);
+                errdefer facts.allocator.free(rendered);
+                try facts.sources.put(facts.allocator, key, rendered);
+            }
+            return result;
+        }
+
         fn renderSemanticValue(self: *Self, a: std.mem.Allocator, runtime: *const kosmos.RuntimeArtifact, module: wc.SemanticModule, references: bool) !construction.SemanticValue {
             const key = try semanticRenderingKey(a, runtime, .{ .value = .{ .module = module, .references = references } });
             if (self.compiler_facts) |facts| if (facts.values.get(key)) |value| {
@@ -368,8 +404,24 @@ pub fn Service(comptime Types: type) type {
                 var authorized = try contracts.decodeOwned(workspace.Authorized, a, authorized_bytes);
                 defer authorized.deinit();
                 const command = authorized.value.command;
-                if (command != .program or command.program != .inspect or command.program.inspect.target != .semantic_source) continue;
-                try self.prepareSemanticRead(a, manifest, source, parent.value, command.program.inspect.target.semantic_source, command.program.inspect.page, saved.value.evidence.read);
+                if (command != .program or command.program != .inspect) continue;
+                const inspected = command.program.inspect;
+                if (inspected.target == .semantic_source) {
+                    try self.prepareSemanticRead(a, manifest, source, parent.value, inspected.target.semantic_source, inspected.page, saved.value.evidence.read);
+                } else if (inspected.target == .consumer) {
+                    const selected = inspected.target.consumer;
+                    const key = try workspace.custodyId(a, parent.value.id, try wp.identity(selected.program, .program));
+                    const ref = archive_api.record(manifest, .workspace_program, key) orelse return error.InvalidArchive;
+                    var program = try contracts.decodeOwned(workspace.Program, a, try source.object(a, ref, null));
+                    defer program.deinit();
+                    const artifact = program.value.description;
+                    if (artifact.source_kind != .source_records and artifact.source_kind != .source_derivation)
+                        return error.UnsupportedSource;
+                    _ = try self.renderConsumer(a, try source.object(a, artifact.source, null), artifact.source_kind == .source_derivation, .{
+                        .function = selected.function,
+                        .binding = selected.binding,
+                    }, inspected.page);
+                }
             }
         }
 
@@ -3998,7 +4050,9 @@ pub fn Service(comptime Types: type) type {
             var converter = try self.workspaceProgram(a, parent.id, converter_id);
             defer converter.deinit();
             const conversion = converter.value.description;
-            if (conversion.controller != null or conversion.ports.items.len != 0 or (conversion.source_kind != .source_records and conversion.source_kind != .component_recipe)) return error.ImpureControllerConversion;
+            if (conversion.controller != null or conversion.ports.items.len != 0 or
+                (conversion.source_kind != .source_records and conversion.source_kind != .component_recipe and
+                    conversion.source_kind != .source_derivation)) return error.ImpureControllerConversion;
             const carry_schema = try self.store().object(a, interaction.carry_schema, null);
             defer a.free(carry_schema);
             const expected_input = try @import("controller_construction.zig").conversionSchema(a, carry_schema);
@@ -6991,6 +7045,7 @@ pub fn Service(comptime Types: type) type {
                         const description = switch (request.section) {
                             .semantic_candidates => try self.workspaceSemanticContract(a, basis),
                             .source_records => try @import("source_records.zig").describe(a),
+                            .source_derivations => try @import("source_records.zig").describeRecord(@import("source_records.zig").DerivationDocument, a),
                             .values => try a.dupe(u8, "Runtime values use JSON arrays for products and sequences, {\"tag\":ordinal,\"value\":payload} for sums, {} for unit, booleans, exact decimal strings for 64-bit integers, UTF-8 strings for text, and base64url strings for bytes. Supply the actual program input schema reference. Program source uses the separately described Horos record transport."),
                             .bindings => try a.dupe(u8, "Pure source records require no environmental adapter. No effect request grants authority. Workspace observations and input ports do not restrict the controller's next action."),
                             .runtimes => try a.dupe(u8, "The packaged generic Horos evaluator is the default. program.specialize derives a checked realization for an admitted program. work.start may select its task-owned runtime reference; work.realize switches at a guest cut without changing guest execution revision. work.request_cut publishes a guest or outer checkpoint. Runtime artifacts never grant environmental authority; active or unknown delivery blocks a switch."),
@@ -7045,7 +7100,7 @@ pub fn Service(comptime Types: type) type {
                     .build => |request| {
                         const text = switch (request.source) {
                             .json_text => |inline_text| try a.dupe(u8, inline_text.bytes),
-                            .reference => |ref| try self.workspaceSource(a, task_id, ref),
+                            .reference => |ref| try self.workspaceBuildSource(a, task_id, ref, request.source_kind),
                         };
                         defer a.free(text);
                         var diagnostic: construction.Diagnostic = .{};
@@ -7057,11 +7112,21 @@ pub fn Service(comptime Types: type) type {
                             try json.put(a, &failure, "function", try values.toJson(@TypeOf(diagnostic.source.function), a, diagnostic.source.function));
                             try json.put(a, &failure, "term", try values.toJson(@TypeOf(diagnostic.source.term), a, diagnostic.source.term));
                             try json.put(a, &failure, "value", try values.toJson(@TypeOf(diagnostic.source.value), a, diagnostic.source.value));
+                            if (diagnostic.source.continuation orelse diagnostic.source.target.continuation) |detail|
+                                try json.put(a, &failure, "continuation_contract", try values.toJson(build_job.ContinuationDiagnostic, a, .{
+                                    .domain = if (diagnostic.source.continuation != null) .source else .target,
+                                    .detail = detail,
+                                    .block = diagnostic.source.target.block,
+                                    .schema = diagnostic.source.target.schema,
+                                }));
                             return .{ .observation = failure };
                         };
                         return .{ .admitted = admitted };
                     },
                     .inspect => |request| {
+                        if (request.target == .consumer) {
+                            return .{ .observation = try self.workspaceConsumer(a, task_id, request.target.consumer, request.page) };
+                        }
                         if (request.target == .semantic_source) {
                             return .{ .observation = try self.workspaceSemanticSource(
                                 a,
@@ -7777,6 +7842,26 @@ pub fn Service(comptime Types: type) type {
             };
         }
 
+        fn workspaceConsumer(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            selected: @FieldType(wc.InspectionTarget, "consumer"),
+            page: wc.Page,
+        ) !json.Value {
+            var program = try self.workspaceProgram(a, task_id, try wp.identity(selected.program, .program));
+            defer program.deinit();
+            const artifact = program.value.description;
+            if (artifact.source_kind != .source_records and artifact.source_kind != .source_derivation)
+                return error.UnsupportedSource;
+            const bytes = try self.store().object(a, artifact.source, null);
+            defer a.free(bytes);
+            return self.renderConsumer(a, bytes, artifact.source_kind == .source_derivation, .{
+                .function = selected.function,
+                .binding = selected.binding,
+            }, page);
+        }
+
         fn workspaceProgramObservation(self: *Self, a: std.mem.Allocator, id: state.Digest, artifact: workspace.ProgramArtifact) !json.Value {
             var result = json.object();
             try json.put(a, &result, "program", try values.toJson(wc.Ref, a, try wp.reference(a, .program, id)));
@@ -8164,30 +8249,44 @@ pub fn Service(comptime Types: type) type {
         const WorkspaceSource = union(enum) { text: []u8, value: WorkspaceValueReference };
 
         fn workspaceSource(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, ref: wc.Ref) ![]u8 {
+            return self.workspaceBuildSource(a, task_id, ref, .source_records);
+        }
+
+        fn workspaceBuildSource(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, ref: wc.Ref, kind: wc.SourceKind) ![]u8 {
             if (ref.kind == .value) {
                 const source = try self.workspaceValueReference(a, task_id, ref);
                 const records = @import("source_records.zig");
-                const schema = try values.schemaBytes(records.Document, a);
-                defer a.free(schema);
-                if (!std.meta.eql(source.schema, state.Reference{
-                    .digest = storage.digest(schema),
-                    .bytes = schema.len,
-                })) return error.SchemaMismatch;
-                const bytes = try self.store().object(a, source.value, null);
-                defer a.free(bytes);
-                var document = try contracts.decodeOwned(records.Document, a, bytes);
-                defer document.deinit();
-                if (document.value.version != 1) return error.UnsupportedVersion;
-                return records.encode(a, document.value.module);
+                return switch (kind) {
+                    .source_records => self.workspaceSourceValue(records.Document, a, source),
+                    .source_derivation => self.workspaceSourceValue(records.DerivationDocument, a, source),
+                    .component_recipe => error.SchemaMismatch,
+                };
             }
             return switch (try self.resolveWorkspaceSource(a, task_id, ref)) {
                 .text => |text| text,
-                .value => |source| self.workspaceSource(
+                .value => |source| self.workspaceBuildSource(
                     a,
                     task_id,
                     try wp.reference(a, .value, source.artifact.digest),
+                    kind,
                 ),
             };
+        }
+
+        fn workspaceSourceValue(self: *Self, comptime Document: type, a: std.mem.Allocator, source: WorkspaceValueReference) ![]u8 {
+            const records = @import("source_records.zig");
+            const schema = try values.schemaBytes(Document, a);
+            defer a.free(schema);
+            if (!std.meta.eql(source.schema, state.Reference{
+                .digest = storage.digest(schema),
+                .bytes = schema.len,
+            })) return error.SchemaMismatch;
+            const bytes = try self.store().object(a, source.value, null);
+            defer a.free(bytes);
+            var document = try contracts.decodeOwned(Document, a, bytes);
+            defer document.deinit();
+            if (document.value.version != 1) return error.UnsupportedVersion;
+            return records.encodeRecord(Document, a, document.value);
         }
 
         fn workspaceSourcePage(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, ref: wc.Ref, requested: wc.Page) !json.Value {
@@ -9435,7 +9534,7 @@ pub fn Service(comptime Types: type) type {
                     var program = try self.workspaceProgram(a, parent.id, admission.work);
                     defer program.deinit();
                     const artifact = program.value.description;
-                    if (artifact.source_kind != .source_records and artifact.source_kind != .component_recipe) return error.InvalidArchive;
+                    if (artifact.source_kind != .source_records and artifact.source_kind != .component_recipe and artifact.source_kind != .source_derivation) return error.InvalidArchive;
                     break :blk try operation(workspace.BuildRequest, a, .{ .task = parent.id, .source = .{ .bytes = try self.store().object(a, artifact.source, null) }, .source_kind = @fromBackingInt(@intCast(@backingInt(artifact.source_kind))), .catalog = artifact.catalog, .exposures = artifact.exposures, .role = if (artifact.controller != null) .controller else .computation });
                 },
                 .context => |context| blk: {
@@ -10871,7 +10970,7 @@ pub fn Service(comptime Types: type) type {
             const build = authorized.command.program.build;
             const source = switch (build.source) {
                 .json_text => |text| try a.dupe(u8, text.bytes),
-                .reference => |ref| try self.workspaceSource(a, parent.id, ref),
+                .reference => |ref| try self.workspaceBuildSource(a, parent.id, ref, build.source_kind),
             };
             defer a.free(source);
             var catalog: ?[]u8 = null;
@@ -11264,7 +11363,7 @@ pub fn Service(comptime Types: type) type {
                     }
                     return observed;
                 },
-                .compiled => return error.InvalidCandidate,
+                .compiled, .rejected_contract => return error.InvalidCandidate,
             }
         }
 
@@ -11386,7 +11485,7 @@ pub fn Service(comptime Types: type) type {
                         result.runtime = runtime.record.value.artifact;
                     }
                 },
-                .compiled => return error.InvalidArchive,
+                .compiled, .rejected_contract => return error.InvalidArchive,
             }
             return result;
         }
@@ -11468,7 +11567,7 @@ pub fn Service(comptime Types: type) type {
                         try a.dupe(u8, validation.code.bytes),
                     ));
                 },
-                .compiled => return error.InvalidCandidate,
+                .compiled, .rejected_contract => return error.InvalidCandidate,
             }
             if (observed.runtime) |ref| {
                 try json.put(a, &result, "runtime", try values.toJson(
@@ -11486,14 +11585,16 @@ pub fn Service(comptime Types: type) type {
         }
         fn workspaceBuildReply(self: *Self, a: std.mem.Allocator, program: ?state.Reference, output: build_job.Output) !wc.Reply {
             var observation = json.object();
-            if (output == .rejected) {
-                try json.put(a, &observation, "compiler_nanoseconds", try json.number(a, output.rejected.compiler_nanoseconds));
-                const failure = output.rejected;
+            if (output.rejection()) |failure| {
+                try json.put(a, &observation, "compiler_nanoseconds", try json.number(a, failure.compiler_nanoseconds));
                 try json.put(a, &observation, "error", json.string(try a.dupe(u8, failure.code.bytes)));
                 try json.put(a, &observation, "phase", json.string(try a.dupe(u8, failure.phase.bytes)));
                 try json.put(a, &observation, "function", try values.toJson(?u64, a, failure.function));
                 try json.put(a, &observation, "term", try values.toJson(?u64, a, failure.term));
                 try json.put(a, &observation, "value", try values.toJson(?u64, a, failure.value));
+                if (output == .rejected_contract) {
+                    try json.put(a, &observation, "continuation_contract", try values.toJson(build_job.ContinuationDiagnostic, a, output.rejected_contract.continuation));
+                }
                 return .{ .disposition = .rejected, .observation_json = .{ .bytes = try json.canonical(a, observation) } };
             }
             const saved = program orelse return error.CorruptState;
@@ -11568,7 +11669,7 @@ pub fn Service(comptime Types: type) type {
                     candidate.deinit();
                 },
                 .rejected => {},
-                .compiled => return error.InvalidCandidate,
+                .compiled, .rejected_contract => return error.InvalidCandidate,
             }
             var parent = initial;
             parent.revision = try std.math.add(u64, parent.revision, 1);
@@ -12829,6 +12930,7 @@ pub fn Service(comptime Types: type) type {
             if (!std.meta.eql(saved.artifact, compilerReference(artifact_bytes))) return error.InvalidArchive;
             const contract = if (artifact.controller != null) contracts.controller.identity else switch (artifact.source_kind) {
                 .source_records => @import("source_records.zig").identity,
+                .source_derivation => @import("source_records.zig").derivation_identity,
                 .component_recipe => construction.component_identity,
                 .instrument_model, .instrument_snapshot => instrument.identity,
             };
@@ -13604,6 +13706,10 @@ pub fn Service(comptime Types: type) type {
                 if (catalog != null) return error.InvalidConstruction;
                 return construction.buildExposed(a, source, exposures, null, diagnostic);
             }
+            if (kind == .source_derivation) {
+                if (catalog != null) return error.InvalidConstruction;
+                return construction.buildDerived(a, source, exposures, null, diagnostic);
+            }
             if (exposures.len != 0) return error.InvalidExposure;
             diagnostic.phase = .authority;
             const ref = catalog orelse return error.UnavailableCatalog;
@@ -13650,6 +13756,7 @@ pub fn Service(comptime Types: type) type {
                 .source_kind = source_kind,
                 .construction_contract = try name(if (built.controller != null) contracts.controller.identity else switch (source_kind) {
                     .source_records => @import("source_records.zig").identity,
+                    .source_derivation => @import("source_records.zig").derivation_identity,
                     .component_recipe => construction.component_identity,
                     .instrument_model, .instrument_snapshot => instrument.identity,
                 }),

@@ -661,6 +661,519 @@ test "exposure carries capabilities through closed handler returns clauses and s
 
 const compile = support.compile;
 
+fn consumerProgram(b: *source.Builder) !source.Module {
+    const original = try source.examples.consumerComposition(b);
+    const function = b.functions.items[@intCast(original.entry)];
+    const fields = try b.allocator().alloc(Id, function.parameters.len);
+    for (function.parameters, fields) |parameter, *field|
+        field.* = b.variables.items[@intCast(parameter)];
+    const input = try b.schema(.{ .product = fields });
+    const entry = try b.declare(&.{input}, function.result, &.{}, &.{});
+    const value = try b.reference(b.parameter(entry, 0));
+    const arguments = try b.allocator().alloc(Id, fields.len);
+    for (fields, arguments, 0..) |schema, *argument, index|
+        argument.* = try b.primitive(schema, .field, &.{value}, index);
+    try b.define(entry, try b.term(.{ .call = .{
+        .function = original.entry,
+        .arguments = arguments,
+    } }));
+    return b.module(entry, original.failure);
+}
+
+fn consumerSite(a: std.mem.Allocator, module: source.Module) !source.consumer.Site {
+    for (module.functions, 0..) |function, id| {
+        const body = function.body orelse continue;
+        if (module.terms[@intCast(body)] != .bind) continue;
+        const site: source.consumer.Site = .{ .function = id, .binding = body };
+        var inspection = try source.consumer.inspect(a, module, site, .{});
+        defer inspection.deinit();
+        if (inspection.outcome == .boundary and inspection.outcome.boundary.blocker == null)
+            return site;
+    }
+    return error.MissingConsumerBoundary;
+}
+
+fn generatedConsumer(
+    a: std.mem.Allocator,
+    module: source.Module,
+    site: source.consumer.Site,
+) !contracts.Decoded(kosmos.RuntimeCompiler.RecordProposal) {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    var built = try compile(a, &b, try kosmos.RuntimeTransformation.consumer(&b));
+    defer built.deinit();
+    var prepared = try kosmos.Prepared.init(a, built.image);
+    defer prepared.deinit();
+    const input = try contracts.encodeOwned(kosmos.RuntimeTransformation.ConsumerInput, a, .{
+        .module = module,
+        .site = site,
+    });
+    defer a.free(input);
+    var session = try kosmos.Session.start(a, &prepared, input);
+    defer session.deinit();
+    for (0..64) |_| switch (try session.run(1024)) {
+        .progressed => {},
+        .completed => |value| return contracts.decodeOwned(
+            kosmos.RuntimeCompiler.RecordProposal,
+            a,
+            try session.bytes(&value),
+        ),
+        else => return error.UnexpectedConsumerConstruction,
+    };
+    return error.ConsumerConstructionLimit;
+}
+
+fn consumerBuild(text: []const u8, derived: bool) contracts.workspace.Command {
+    return .{ .program = .{ .build = .{
+        .source = .{ .json_text = .{ .bytes = text } },
+        .source_kind = if (derived) .source_derivation else .source_records,
+        .exposures = .{ .items = &.{} },
+    } } };
+}
+
+fn inspectConsumerProgram(
+    a: std.mem.Allocator,
+    service: anytype,
+    task: native.testing.state.TaskId,
+    program: contracts.workspace.Ref,
+    module: source.Module,
+    operation: []const u8,
+) !void {
+    const site = try consumerSite(a, module);
+    const inspected = try service.workspaceCommand(a, operation, task, .{ .program = .{
+        .inspect = .{
+            .target = .{ .consumer = .{
+                .program = program,
+                .function = site.function,
+                .binding = site.binding,
+            } },
+            .page = .{},
+        },
+    } });
+    try std.testing.expectEqual(.observed, inspected.disposition);
+    var rendered = try native.json.parse(a, inspected.observation_json.bytes, .{});
+    defer rendered.deinit();
+    const Description = struct {
+        version: u32,
+        subject: [32]u8,
+        outcome: @FieldType(source.consumer.Inspection, "outcome"),
+    };
+    var decoded = try native.source_records.decodeRecord(
+        Description,
+        a,
+        rendered.value.object.get("text").?.string,
+    );
+    defer decoded.deinit();
+    try std.testing.expectEqual(try source.relation.identity(module), decoded.value.subject);
+    const boundary = decoded.value.outcome.boundary;
+    try std.testing.expect(boundary.blocker == null);
+    try std.testing.expectEqual(boundary.producer_result, boundary.consumer_input);
+    try std.testing.expect(boundary.producer_result != boundary.answer);
+}
+
+fn runConsumerProgram(
+    a: std.mem.Allocator,
+    service: anytype,
+    task: native.testing.state.TaskId,
+    program: contracts.workspace.Ref,
+    label: []const u8,
+) !void {
+    for ([_]bool{ false, true }) |first| {
+        const input = try contracts.encodeOwned(struct { u64, u64, u64, bool }, a, .{ 7, 3, 5, first });
+        defer a.free(input);
+        const operation = try std.fmt.allocPrint(a, "{s}-{any}", .{ label, first });
+        defer a.free(operation);
+        const started = try service.workspaceStart(a, operation, task, try nativeIdentity(program), input, .{});
+        for (0..32) |turn| {
+            var work = try service.workspaceWork(a, task, started.receipt.workspace.?);
+            defer work.deinit();
+            if (work.value.terminal()) {
+                try std.testing.expectEqual(.completed, work.value.outcome_kind);
+                const result = try service.namespace.store.object(a, work.value.result.?, null);
+                defer a.free(result);
+                try std.testing.expectEqualSlices(u8, &.{@intFromBool(first)}, result);
+                break;
+            }
+            const advance = try std.fmt.allocPrint(a, "{s}-{d}", .{ operation, turn });
+            defer a.free(advance);
+            _ = try service.workspaceControl(a, advance, task, work.value.id, work.value.execution_revision, work.value.control_revision, .advance);
+        } else return error.ConsumerExecutionLimit;
+    }
+}
+
+fn rejectConsumerProgram(
+    a: std.mem.Allocator,
+    service: anytype,
+    task: native.testing.state.TaskId,
+    document: native.source_records.DerivationDocument,
+) !void {
+    var forged = document;
+    forged.candidate = try source.own(source.Module, a, document.candidate);
+    var changed = false;
+    for (@constCast(forged.candidate.values)) |*value| {
+        if (value.expression != .primitive or value.expression.primitive.opcode != .less) continue;
+        value.expression.primitive.opcode = .equal;
+        changed = true;
+        break;
+    }
+    try std.testing.expect(changed);
+    const steps = try a.dupe(source.relation.RecordStep, document.steps);
+    steps[steps.len - 1].successor = forged.candidate;
+    forged.steps = steps;
+    var work: u64 = 1_000_000;
+    try source.admitWithWork(a, forged.candidate, &work);
+    const text = try native.source_records.encodeRecord(
+        native.source_records.DerivationDocument,
+        a,
+        forged,
+    );
+    defer a.free(text);
+    const rejected = try service.workspaceCommand(a, "consumer-hostile", task, consumerBuild(text, true));
+    try std.testing.expectEqual(.rejected, rejected.disposition);
+    try std.testing.expect(rejected.program == null);
+    var failure = try native.json.parse(a, rejected.observation_json.bytes, .{});
+    defer failure.deinit();
+    try std.testing.expectEqualStrings("InvalidRelation", failure.value.object.get("error").?.string);
+    try std.testing.expectEqualStrings("relation", failure.value.object.get("phase").?.string);
+}
+
+fn retainConsumerSchemas(
+    a: std.mem.Allocator,
+    service: anytype,
+    task: native.testing.state.TaskId,
+) !void {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const author = try horos.authoring.Context.init(&b);
+    const input = try horos.authoring.interop.schemaId(
+        author,
+        try author.schema(native.source_records.DerivationDocument),
+    );
+    const failure = try horos.authoring.interop.schemaId(
+        author,
+        try author.schema(native.source_records.Document),
+    );
+    const entry = try b.declare(&.{input}, input, &.{}, &.{});
+    try b.define(entry, try b.pure(try b.reference(b.parameter(entry, 0))));
+    const text = try native.source_records.encode(a, b.module(entry, failure));
+    defer a.free(text);
+    const built = try service.workspaceCommand(a, "consumer-schemas", task, consumerBuild(text, false));
+    try std.testing.expectEqual(.observed, built.disposition);
+}
+
+fn buildTypedConsumer(
+    a: std.mem.Allocator,
+    service: anytype,
+    task: native.testing.state.TaskId,
+    document: native.source_records.DerivationDocument,
+    expected: contracts.workspace.Ref,
+) !void {
+    try retainConsumerSchemas(a, service, task);
+    const retained = try reconstructionValue(
+        @TypeOf(document),
+        service,
+        a,
+        task,
+        "consumer-typed-document",
+        document,
+    );
+    var command = consumerBuild("", true);
+    command.program.build.source = .{ .reference = retained };
+    const built = try service.workspaceCommand(a, "consumer-typed-build", task, command);
+    try std.testing.expectEqual(.observed, built.disposition);
+    try std.testing.expectEqualDeep(expected, built.program.?);
+    const ordinary = try reconstructionValue(
+        native.source_records.Document,
+        service,
+        a,
+        task,
+        "consumer-ordinary-document",
+        .{ .version = 1, .module = document.original },
+    );
+    const scalar = try reconstructionValue(bool, service, a, task, "consumer-scalar", true);
+    for ([_]contracts.workspace.Ref{ ordinary, scalar }, 0..) |wrong, index| {
+        command.program.build.source = .{ .reference = wrong };
+        const operation = try std.fmt.allocPrint(a, "consumer-wrong-schema-{d}", .{index});
+        defer a.free(operation);
+        const rejected = try service.workspaceCommand(a, operation, task, command);
+        try std.testing.expectEqual(.rejected, rejected.disposition);
+        try std.testing.expect(rejected.program == null);
+        var observation = try native.json.parse(a, rejected.observation_json.bytes, .{});
+        defer observation.deinit();
+        try std.testing.expectEqualStrings(
+            "SchemaMismatch",
+            observation.value.object.get("error").?.string,
+        );
+    }
+}
+
+const ConsumerFailureAllocator = struct {
+    backing: std.mem.Allocator,
+    diagnostic: ?*native.program_construction.Diagnostic = null,
+    phase: @FieldType(native.program_construction.Diagnostic, "phase") = .transport,
+    cancellation: ?*std.atomic.Value(bool) = null,
+    namespace: ?*native.Namespace = null,
+    triggered: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const selected = if (self.namespace) |namespace|
+            namespace.store.transaction
+        else
+            self.diagnostic.?.phase == self.phase;
+        if (selected) {
+            self.triggered = true;
+            if (self.cancellation) |flag| flag.store(true, .release) else return null;
+        }
+        return self.backing.rawAlloc(len, alignment, ra);
+    }
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+    fn free(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(bytes, alignment, ra);
+    }
+};
+
+fn failConsumerConstruction(text: []const u8, expected_image: []const u8) !void {
+    const construction = native.program_construction;
+    const a = std.testing.allocator;
+    var diagnostic: construction.Diagnostic = .{};
+    for ([_]@FieldType(construction.Diagnostic, "phase"){
+        .transport, .relation, .interface,
+    }) |phase| for ([_]bool{ false, true }) |cancel| {
+        var counted = std.testing.FailingAllocator.init(a, .{});
+        var cancellation = std.atomic.Value(bool).init(false);
+        var fault: ConsumerFailureAllocator = .{
+            .backing = counted.allocator(),
+            .diagnostic = &diagnostic,
+            .phase = phase,
+            .cancellation = if (cancel) &cancellation else null,
+        };
+        const expected = if (cancel) error.Canceled else error.OutOfMemory;
+        try std.testing.expectError(expected, construction.buildDerived(
+            fault.allocator(),
+            text,
+            &.{},
+            &cancellation,
+            &diagnostic,
+        ));
+        try std.testing.expect(fault.triggered);
+        try std.testing.expectEqual(expected, diagnostic.code.?);
+        try std.testing.expectEqual(counted.allocated_bytes, counted.freed_bytes);
+    };
+    var recovered = try construction.buildDerived(a, text, &.{}, null, &diagnostic);
+    defer recovered.deinit();
+    try std.testing.expectEqual(.complete, diagnostic.phase);
+    try std.testing.expect(diagnostic.code == null);
+    try std.testing.expectEqualSlices(u8, expected_image, recovered.image);
+}
+
+fn consumerPublicationCounts(service: anytype) ![3]i64 {
+    var query = try service.namespace.store.database.prepare(
+        "SELECT (SELECT count(*) FROM objects)," ++
+            "(SELECT count(*) FROM records),(SELECT count(*) FROM operations)",
+        &.{},
+    );
+    defer query.deinit();
+    try std.testing.expectEqual(.row, try query.step());
+    return .{ try query.integer(0), try query.integer(1), try query.integer(2) };
+}
+
+fn failConsumerPublication(
+    a: std.mem.Allocator,
+    service: anytype,
+    task: native.testing.state.TaskId,
+    command: contracts.workspace.Command,
+) !void {
+    const head = service.namespace.store.head;
+    const counts = try consumerPublicationCounts(service);
+    var parent = try service.task(a, task);
+    defer parent.deinit();
+    var fault: ConsumerFailureAllocator = .{
+        .backing = a,
+        .namespace = service.namespace,
+    };
+    try std.testing.expectError(error.OutOfMemory, service.workspaceCommand(
+        fault.allocator(),
+        "consumer-derived",
+        task,
+        command,
+    ));
+    try std.testing.expect(fault.triggered);
+    try std.testing.expect(!service.namespace.store.transaction);
+    try std.testing.expect(!service.namespace.store.fenced);
+    try std.testing.expectEqualDeep(head, service.namespace.store.head);
+    try std.testing.expectEqualDeep(counts, try consumerPublicationCounts(service));
+    var preserved = try service.task(a, task);
+    defer preserved.deinit();
+    try std.testing.expectEqualDeep(parent.value, preserved.value);
+}
+
+fn replayConsumerPublication(
+    a: std.mem.Allocator,
+    service: anytype,
+    task: native.testing.state.TaskId,
+    command: contracts.workspace.Command,
+    expected: contracts.workspace.Ref,
+) !void {
+    var guarded: AfterCommitAllocator = .{
+        .backing = a,
+        .namespace = service.namespace,
+        .generation = service.namespace.store.head.generation,
+    };
+    try std.testing.expectError(error.OutOfMemory, service.workspaceCommand(
+        guarded.allocator(),
+        "consumer-publication",
+        task,
+        command,
+    ));
+    try std.testing.expect(guarded.rejected != 0);
+    try std.testing.expectEqual(guarded.generation + 1, service.namespace.store.head.generation);
+    try std.testing.expect(!service.namespace.store.fenced);
+    const head = service.namespace.store.head;
+    const counts = try consumerPublicationCounts(service);
+    const replay = try service.workspaceCommand(a, "consumer-publication", task, command);
+    try std.testing.expectEqual(.observed, replay.disposition);
+    try std.testing.expectEqualDeep(expected, replay.program.?);
+    var observation = try native.json.parse(a, replay.observation_json.bytes, .{});
+    defer observation.deinit();
+    try std.testing.expect(observation.value.object.get("replayed").?.bool);
+    try std.testing.expectEqualDeep(head, service.namespace.store.head);
+    try std.testing.expectEqualDeep(counts, try consumerPublicationCounts(service));
+}
+
+fn exerciseConsumerPrograms(
+    a: std.mem.Allocator,
+    service: anytype,
+    task: native.testing.state.TaskId,
+) !void {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const module = try consumerProgram(&b);
+    const source_text = try native.source_records.encode(a, module);
+    defer a.free(source_text);
+    const original = try service.workspaceCommand(a, "consumer-original", task, consumerBuild(source_text, false));
+    try std.testing.expectEqual(.observed, original.disposition);
+    try inspectConsumerProgram(a, service, task, original.program.?, module, "consumer-inspect");
+    var generated = try generatedConsumer(a, module, try consumerSite(a, module));
+    defer generated.deinit();
+    try std.testing.expectEqual(@as(usize, 2), generated.value.steps.len);
+    const document: native.source_records.DerivationDocument = .{
+        .version = 1,
+        .predecessor = try source.relation.identity(module),
+        .original = module,
+        .candidate = generated.value.selected,
+        .steps = generated.value.steps,
+    };
+    const text = try native.source_records.encodeRecord(@TypeOf(document), a, document);
+    defer a.free(text);
+    const command = consumerBuild(text, true);
+    try failConsumerPublication(a, service, task, command);
+    const built = try service.workspaceCommand(a, "consumer-derived", task, command);
+    try std.testing.expectEqual(.observed, built.disposition);
+    try std.testing.expect(!std.meta.eql(original.program, built.program));
+    try inspectConsumerProgram(a, service, task, built.program.?, document.candidate, "consumer-derived-inspect");
+    var prior = try service.workspaceProgram(a, task, try nativeIdentity(original.program.?));
+    defer prior.deinit();
+    var accepted = try service.workspaceProgram(a, task, try nativeIdentity(built.program.?));
+    defer accepted.deinit();
+    try std.testing.expectEqual(.source_derivation, accepted.value.description.source_kind);
+    const image = try service.namespace.store.object(a, accepted.value.description.image, null);
+    defer a.free(image);
+    try failConsumerConstruction(text, image);
+    try replayConsumerPublication(a, service, task, command, built.program.?);
+    try buildTypedConsumer(a, service, task, document, built.program.?);
+    try rejectConsumerProgram(a, service, task, document);
+    var unchanged = try service.workspaceProgram(a, task, try nativeIdentity(original.program.?));
+    defer unchanged.deinit();
+    var preserved = try service.workspaceProgram(a, task, try nativeIdentity(built.program.?));
+    defer preserved.deinit();
+    try std.testing.expectEqualDeep(prior.value, unchanged.value);
+    try std.testing.expectEqualDeep(accepted.value, preserved.value);
+    const replay = try service.workspaceCommand(a, "consumer-derived", task, command);
+    try std.testing.expectEqualDeep(built.program, replay.program);
+    var observation = try native.json.parse(a, replay.observation_json.bytes, .{});
+    defer observation.deinit();
+    try std.testing.expect(observation.value.object.get("replayed").?.bool);
+    try runConsumerProgram(a, service, task, original.program.?, "consumer-before");
+    try runConsumerProgram(a, service, task, built.program.?, "consumer-after");
+    try service.validateWorkspace(a, task);
+}
+
+test "BUILD-CONSUMER generated finite composition publishes a new program and rejects false proof" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var root_builder = source.Builder.init(a);
+    defer root_builder.deinit();
+    var root = try compile(a, &root_builder, try gcd(&root_builder));
+    defer root.deinit();
+    const admitted = try data.program_image.Admitted.decode(a, root.image);
+    defer admitted.deinit();
+    var application: native.discovery.Application = .{
+        .arena = .init(a),
+        .metadata = .null,
+        .manifest = .null,
+        .manifest_id = "consumer-unit",
+        .image_identity = admitted.identity(),
+    };
+    defer application.deinit();
+    const assets: native.discovery.Assets = .{
+        .image = root.image,
+        .application = "consumer-unit",
+        .manifest = "{}",
+    };
+    var handlers = try native.Registry.init(a, &.{});
+    defer handlers.deinit();
+    const profile: native.tasks.Profile = .{
+        .id = "offline",
+        .runtime_identity = @splat(42),
+        .bytes = "consumer-test",
+        .authority = .{ .grants = &.{}, .principal = "test", .tenant = "test" },
+    };
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var path_buffer: [4096]u8 = undefined;
+    const length = try temp.dir.realPath(io, &path_buffer);
+    const path = try std.fmt.allocPrint(a, "{s}/state", .{path_buffer[0..length]});
+    defer a.free(path);
+    var namespace = try native.Namespace.open(a, io, path);
+    defer namespace.close() catch unreachable;
+    var service = try native.tasks.Service(OwnerTypes).init(
+        a,
+        io,
+        &namespace,
+        assets,
+        &application,
+        handlers,
+        profile,
+    );
+    defer service.close(a) catch unreachable;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const task = (try service.submit(scratch, "consumer-parent", .{ 25, 5 })).receipt.task;
+    var before = try service.task(a, task);
+    defer before.deinit();
+    try exerciseConsumerPrograms(scratch, &service, task);
+    var after = try service.task(a, task);
+    defer after.deinit();
+    try std.testing.expectEqualDeep(before.value.checkpoint, after.value.checkpoint);
+    try std.testing.expectEqual(before.value.execution_revision, after.value.execution_revision);
+}
+
 fn execute(a: std.mem.Allocator, prepared: *kosmos.Prepared, input: []const u8, expected: u64) !u64 {
     var session = try kosmos.Session.start(a, prepared, input);
     defer session.deinit();

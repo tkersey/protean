@@ -4261,11 +4261,15 @@ fn placementObserver(
     const built = try service.workspaceBuild(a, "placement-observer-program", task, text, &diagnostic);
     const observed = try service.workspaceObserve(a, if (scheduled) "placement-observer-scheduled" else "placement-observer-explicit", task, .{
         .program = try workspaceRef(a, .program, built.receipt.workspace.?),
-        .source = .{ .expected = .{
-            .work = try workspaceRef(a, .work, source_id),
-            .execution_revision = source_work.value.execution_revision,
-            .control_revision = source_work.value.control_revision,
-        }, .realization_revision = source_work.value.realization_revision, .nodes = .{ .all = .{} } },
+        .source = .{
+            .expected = .{
+                .work = try workspaceRef(a, .work, source_id),
+                .execution_revision = source_work.value.execution_revision,
+                .control_revision = source_work.value.control_revision,
+            },
+            .realization_revision = source_work.value.realization_revision,
+            .nodes = .{ .all = .{} },
+        },
         .accumulator = try observerAccumulator(service, a, task, program),
         .policy = .{ .delivery = .lossless, .granularity = .one_guest_step, .continuation = if (scheduled) .owner_scheduled else .explicit_only },
     });
@@ -6249,6 +6253,7 @@ test "runtime selection current observer ownership bounds retained fold reads" {
     try observerCurrentOwnershipWitness(&service, scratch, parent.receipt.task, program, input, selection);
     try service.park(scratch);
     try outerObserverWitness(&service, scratch, parent.receipt.task, program, input, selection.accumulator);
+    try logicalObserverWitness(&service, scratch, parent.receipt.task);
 }
 
 fn observerCurrentOwnershipWitness(service: anytype, a: std.mem.Allocator, task: [16]u8, program: [32]u8, input: []const u8, original: contracts.workspace.Observe) !void {
@@ -8082,4 +8087,339 @@ fn currentObserverBatchWitness(service: anytype, a: std.mem.Allocator, task: [16
             label, kind, items.len, parent.value.event_high, trace.scans, trace.rows,
         });
     }
+}
+
+const LogicalFrame = struct { domain: u64, key: u64, metadata: u64 };
+const LogicalObservation = struct {
+    frames: []const LogicalFrame,
+    emitted: union(enum) {
+        omitted: void,
+        answer: union(enum) { absent: void, present: u64 },
+    },
+};
+
+fn logicalObserverSource(b: *source.Builder, fails: bool) !source.Module {
+    const query = try source.examples.logicalQuery(b);
+    const function = b.functions.items[@intCast(query.entry)];
+    const frames = b.variables.items[@intCast(function.parameters[0])];
+    const view = try contracts.schema(kosmos.RuntimeViews.GuestView, b);
+    const envelope = try contracts.schema(native.workspace.ObserverEnvelope, b);
+    const selected_schema = try b.schema(.{ .product = &.{ envelope, view } });
+    const input = try b.schema(.{ .product = &.{ selected_schema, frames } });
+    const output = try contracts.schema(LogicalObservation, b);
+    const emitted = b.schemas.items[@intCast(output)].product[1];
+    const entry = try b.declare(&.{input}, output, &.{}, &.{});
+    const argument = try b.reference(b.parameter(entry, 0));
+    const selected = try b.primitive(selected_schema, .field, &.{argument}, 0);
+    const cut = try b.primitive(view, .field, &.{selected}, 1);
+    const complete = try b.primitive(try b.scalar(bool), .field, &.{cut}, 1);
+    const snapshot = try b.primitive(frames, .field, &.{argument}, 1);
+    const result = try b.variable(function.result);
+    const found = try b.primitive(emitted, .variant, &.{try b.reference(result)}, 1);
+    const observed = try b.primitive(output, .product, &.{ snapshot, found }, 0);
+    const checked = try b.bind(result, try b.term(.{ .call = .{
+        .function = query.entry,
+        .arguments = &.{ snapshot, try b.constant(u64, 1), try b.constant(u64, 7) },
+    } }), try b.pure(observed));
+    const omitted = try b.primitive(emitted, .variant, &.{try b.constant(void, {})}, 0);
+    const partial = try b.pure(try b.primitive(output, .product, &.{ snapshot, omitted }, 0));
+    const body = if (fails)
+        try b.term(.{ .fail = try b.constant(void, {}) })
+    else
+        try b.term(.{ .conditional = .{
+            .condition = complete,
+            .when_true = checked,
+            .when_false = partial,
+        } });
+    try b.define(entry, try b.term(.{ .yield_then = body }));
+    return b.module(entry, query.failure);
+}
+
+fn logicalObserverWitness(service: anytype, a: std.mem.Allocator, task: [16]u8) !void {
+    const id = try logicalContextWork(service, a, task);
+    var source_work = try service.workspaceWork(a, task, id);
+    defer source_work.deinit();
+    try std.testing.expect(source_work.value.current_port != null);
+    const bytes = try service.namespace.store.object(a, source_work.value.current_port.?, null);
+    defer a.free(bytes);
+    var port = try contracts.decodeOwned(native.workspace.Port, a, bytes);
+    defer port.deinit();
+    var selection: contracts.workspace.Observe = .{
+        .program = try workspaceRef(
+            a,
+            .program,
+            try logicalObserverProgram(service, a, task, false),
+        ),
+        .source = .{
+            .expected = .{
+                .work = try workspaceRef(a, .work, id),
+                .execution_revision = source_work.value.execution_revision,
+                .control_revision = source_work.value.control_revision,
+            },
+            .realization_revision = source_work.value.realization_revision,
+            .nodes = .{ .all = .{} },
+        },
+        .accumulator = undefined,
+        .policy = .{ .delivery = .sampled, .continuation = .owner_scheduled },
+    };
+    selection.accumulator = try logicalSnapshotValue(
+        service,
+        a,
+        task,
+        selection.source,
+        port.value,
+    );
+    const occurrence = (try service.namespace.store.recordBytes(
+        a,
+        "occurrence",
+        source_work.value.current_occurrence.?,
+        task,
+    )).?;
+    defer a.free(occurrence);
+    selection.source.nodes = .{ .selected = .{ .items = &.{} } };
+    try logicalObserverFold(service, a, task, "logical-partial", selection, false);
+    selection.source.nodes = .{ .all = .{} };
+    try logicalObserverFold(service, a, task, "logical-complete", selection, true);
+    try logicalObserverPark(service, a, task, selection, source_work.value, occurrence);
+    selection.program = try workspaceRef(
+        a,
+        .program,
+        try logicalObserverProgram(service, a, task, true),
+    );
+    const failed = try service.workspaceObserve(a, "logical-failed", task, selection);
+    try logicalObserverFailure(service, a, task, failed.receipt.workspace.?);
+    try logicalSourceUnchanged(service, a, source_work.value, occurrence);
+    try logicalObserverStop(service, a, task, failed.receipt.workspace.?, "logical-failed-stop");
+    _ = try service.workspaceInteract(a, "logical-cleanup-answer", task, .{
+        .expected = selection.source.expected,
+        .port = try workspaceRef(a, .port, port.value.id),
+        .generation = port.value.generation,
+        .command = .{ .resume_value = .{ .inline_json = .{
+            .schema = try workspaceRef(a, .schema, port.value.interface.argument.digest),
+            .json_text = .{ .bytes = "{}" },
+        } } },
+    });
+}
+
+fn logicalContextWork(service: anytype, a: std.mem.Allocator, task: [16]u8) ![32]u8 {
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const module = try source.examples.logicalContext(&builder);
+    const cleanup: Id = for (builder.effects.items, 0..) |*effect, index| {
+        if (!std.mem.eql(u8, effect.identity, "logical-context/cleanup")) continue;
+        effect.external = false;
+        break @intCast(index);
+    } else return error.MissingLogicalCleanup;
+    const document = try native.source_records.encode(
+        a,
+        builder.module(module.entry, module.failure),
+    );
+    defer a.free(document);
+    const built = try service.workspaceCommand(a, "logical-context-build", task, .{
+        .program = .{ .build = .{
+            .source = .{ .json_text = .{ .bytes = document } },
+            .source_kind = .source_records,
+            .exposures = .{ .items = &.{.{ .effect = cleanup, .class = .input }} },
+        } },
+    });
+    try std.testing.expectEqual(.observed, built.disposition);
+    const input = try contracts.encodeOwned(u64, a, 37);
+    defer a.free(input);
+    const started = try service.workspaceStart(
+        a,
+        "logical-context-start",
+        task,
+        try nativeIdentity(built.program.?),
+        input,
+        .{},
+    );
+    const id = started.receipt.workspace.?;
+    for (0..32) |index| {
+        var current = try service.workspaceWork(a, task, id);
+        defer current.deinit();
+        if (current.value.current_port != null) return id;
+        const operation = try std.fmt.allocPrint(a, "logical-context-advance-{d}", .{index});
+        defer a.free(operation);
+        try advanceObservedSource(service, a, current.value, operation);
+    }
+    return error.MissingLogicalContextPort;
+}
+
+fn logicalSnapshotValue(
+    service: anytype,
+    a: std.mem.Allocator,
+    task: [16]u8,
+    selection: contracts.workspace.GuestViewSelection,
+    port: native.workspace.Port,
+) !contracts.workspace.Ref {
+    const disclosed = try service.workspaceCommand(a, "logical-context-view", task, .{
+        .context = .{ .materialize = .{
+            .input = .{ .guest_view = selection },
+            .sources = .{ .items = &.{} },
+        } },
+    });
+    try std.testing.expectEqual(.observed, disclosed.disposition);
+    const expanded = try service.workspaceCommand(a, "logical-context-payload", task, .{
+        .context = .{ .expand = .{
+            .reference = try workspaceRef(a, .port, port.id),
+            .page = .{},
+        } },
+    });
+    var projection = try native.json.parse(a, expanded.observation_json.bytes, .{});
+    defer projection.deinit();
+    try std.testing.expect(projection.value.object.get("complete").?.bool);
+    const payload = try service.namespace.store.object(a, port.payload, null);
+    defer a.free(payload);
+    var frames = try contracts.decodeOwned([]const LogicalFrame, a, payload);
+    defer frames.deinit();
+    try std.testing.expectEqual(@as(usize, 2), frames.value.len);
+    try std.testing.expectEqual(@as(u64, 37), frames.value[0].metadata);
+    try std.testing.expectEqual(@as(u64, 20), frames.value[1].metadata);
+    const retained = try service.workspaceCommand(a, "logical-context-snapshot", task, .{
+        .context = .{ .materialize = .{
+            .input = .{ .value = .{ .inline_json = .{
+                .schema = try workspaceRef(a, .schema, port.interface.payload.digest),
+                .json_text = .{ .bytes = projection.value.object.get("text").?.string },
+            } } },
+            .sources = .{ .items = &.{disclosed.evidence.?} },
+        } },
+    });
+    try std.testing.expectEqual(.observed, retained.disposition);
+    return retained.evidence.?;
+}
+
+fn logicalObserverProgram(
+    service: anytype,
+    a: std.mem.Allocator,
+    task: [16]u8,
+    fails: bool,
+) ![32]u8 {
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const document = try native.source_records.encode(
+        a,
+        try logicalObserverSource(&builder, fails),
+    );
+    defer a.free(document);
+    var diagnostic: native.program_construction.Diagnostic = .{};
+    const built = try service.workspaceBuild(
+        a,
+        if (fails) "logical-observer-failing-program" else "logical-observer-program",
+        task,
+        document,
+        &diagnostic,
+    );
+    return built.receipt.workspace.?;
+}
+
+fn logicalObserverFold(
+    service: anytype,
+    a: std.mem.Allocator,
+    task: [16]u8,
+    operation: []const u8,
+    selection: contracts.workspace.Observe,
+    complete: bool,
+) !void {
+    const started = try service.workspaceObserve(a, operation, task, selection);
+    const id = started.receipt.workspace.?;
+    try observerCompleted(service, a, task, id);
+    var work = try service.workspaceWork(a, task, id);
+    defer work.deinit();
+    const bytes = try service.namespace.store.object(a, work.value.result.?, null);
+    defer a.free(bytes);
+    var result = try contracts.decodeOwned(LogicalObservation, a, bytes);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 2), result.value.frames.len);
+    if (complete) {
+        try std.testing.expect(result.value.emitted == .answer);
+        try std.testing.expect(result.value.emitted.answer == .present);
+        try std.testing.expectEqual(@as(u64, 20), result.value.emitted.answer.present);
+    } else try std.testing.expect(result.value.emitted == .omitted);
+    const stop = try std.fmt.allocPrint(a, "{s}-stop", .{operation});
+    defer a.free(stop);
+    try logicalObserverStop(service, a, task, id, stop);
+}
+
+fn logicalObserverPark(
+    service: anytype,
+    a: std.mem.Allocator,
+    task: [16]u8,
+    selection: contracts.workspace.Observe,
+    source_work: native.workspace.Work,
+    occurrence: []const u8,
+) !void {
+    const started = try service.workspaceObserve(a, "logical-observer-park", task, selection);
+    const id = started.receipt.workspace.?;
+    var before = try service.workspaceWork(a, task, id);
+    defer before.deinit();
+    _ = try service.workspaceControl(
+        a,
+        "logical-observer-park-control",
+        task,
+        id,
+        before.value.execution_revision,
+        before.value.control_revision,
+        .park,
+    );
+    for (0..4) |_| _ = try service.pump(a);
+    var parked = try service.workspaceWork(a, task, id);
+    defer parked.deinit();
+    try std.testing.expectEqual(.parked, parked.value.schedule);
+    try std.testing.expect(!parked.value.terminal());
+    try logicalSourceUnchanged(service, a, source_work, occurrence);
+    try logicalObserverStop(service, a, task, id, "logical-observer-park-stop");
+}
+
+fn logicalObserverFailure(service: anytype, a: std.mem.Allocator, task: [16]u8, id: [32]u8) !void {
+    for (0..64) |index| {
+        var work = try service.workspaceWork(a, task, id);
+        defer work.deinit();
+        if (work.value.terminal()) {
+            try std.testing.expectEqual(.failed, work.value.outcome_kind);
+            try std.testing.expectEqual(null, work.value.observer.?.consumed_revision);
+            return;
+        }
+        const operation = try std.fmt.allocPrint(a, "logical-observer-failure-pump-{d}", .{index});
+        defer a.free(operation);
+        try advanceObservedSource(service, a, work.value, operation);
+    }
+    return error.LogicalObserverDidNotFail;
+}
+
+fn logicalObserverStop(
+    service: anytype,
+    a: std.mem.Allocator,
+    task: [16]u8,
+    id: [32]u8,
+    operation: []const u8,
+) !void {
+    var work = try service.workspaceWork(a, task, id);
+    defer work.deinit();
+    _ = try service.workspaceStopObserving(a, operation, task, .{
+        .work = try workspaceRef(a, .work, id),
+        .execution_revision = work.value.execution_revision,
+        .control_revision = work.value.control_revision,
+    });
+}
+
+fn logicalSourceUnchanged(
+    service: anytype,
+    a: std.mem.Allocator,
+    source_work: native.workspace.Work,
+    occurrence: []const u8,
+) !void {
+    var unchanged = try service.workspaceWork(a, source_work.task, source_work.id);
+    defer unchanged.deinit();
+    try std.testing.expectEqualDeep(source_work.checkpoint, unchanged.value.checkpoint);
+    try std.testing.expectEqualDeep(source_work.current_port, unchanged.value.current_port);
+    try std.testing.expectEqual(source_work.execution_revision, unchanged.value.execution_revision);
+    try std.testing.expectEqual(source_work.control_revision, unchanged.value.control_revision);
+    const pending = (try service.namespace.store.recordBytes(
+        a,
+        "occurrence",
+        source_work.current_occurrence.?,
+        source_work.task,
+    )).?;
+    defer a.free(pending);
+    try std.testing.expectEqualSlices(u8, occurrence, pending);
 }

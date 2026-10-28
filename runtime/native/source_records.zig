@@ -8,6 +8,14 @@ const values = @import("values.zig");
 
 pub const identity = "protean-horos-source-records/1";
 pub const Document = struct { version: u32, module: horos.source.Module };
+pub const derivation_identity = "protean-horos-source-derivation/1";
+pub const DerivationDocument = struct {
+    version: u32,
+    predecessor: [32]u8,
+    original: horos.source.Module,
+    candidate: horos.source.Module,
+    steps: []const horos.source.relation.RecordStep,
+};
 pub const IndexedDocument = struct {
     version: u32,
     module: horos.source.Module,
@@ -38,6 +46,7 @@ pub fn decodeRecord(
     a: std.mem.Allocator,
     bytes: []const u8,
 ) !contracts.Decoded(T) {
+    @setEvalBranchQuota(100_000);
     var arena = std.heap.ArenaAllocator.init(a);
     errdefer arena.deinit();
     const scratch = arena.allocator();

@@ -38,6 +38,44 @@ capture and publishes the program, schema/source/image closure and operation
 receipt in one transaction. Same-image recompilation establishes exact image
 identity; behavioral comparison never substitutes foreign request digests.
 
+### Checked consumer construction
+
+`program.inspect` with a `consumer` target selects an owned program, function
+and binding term. It returns a paged Horos consumer inspection bound to the
+exact source identity, including input and answer schemas, actual argument
+bindings, retained variables, other producer uses and eligibility blockers.
+Inspection cannot grant a transformation proof. Source and target diagnostic
+IDs belong to their respective programs.
+
+`program.build` accepts `source_kind: "source_derivation"` through its existing
+worker and publication transaction. `program.describe` with
+`source_derivations` exposes the complete record schema. The version-one
+`protean-horos-source-derivation/1` document contains `predecessor`, `original`,
+`candidate` and finite `steps` in addition to `version`. The constructor
+preflights both modules, checks the predecessor digest, and asks Horos's source
+relation to validate the actual candidate and every step. Ordinary authority,
+lowering and interface admission then apply. Failure publishes no program.
+Input may be JSON text, a stored source, or a retained value with the exact
+derivation-document schema. Equal-looking JSON with another typed schema rejects.
+
+For example, inspect the bound call in `source.examples.consumerComposition`,
+run Kosmos's authored `RuntimeTransformation.consumer` on that source and site,
+then place its candidate and record steps in the derivation document. Submit it
+through `program.build`, inspect any rejection, and run the admitted program on
+the desired inputs. A well-typed result-changing candidate rejects at the
+relation phase. A known continuation mismatch can additionally report
+`continuation_contract`, including source/target domain and contract dimension.
+The ordinary rejection variant and its encoding are retained when no detail is
+available. Existing published programs and replay receipts survive failed builds.
+
+The result is a new guest image, not a realization switch for the ancestor.
+It cannot inherit an ancestor checkpoint through this constructor. Fixed-guest
+derivation and recovery continue through their existing separate owners.
+Logical-context inspection uses an explicitly disclosed immutable frame value
+and a separately scheduled query, as described below. These capabilities do not
+establish that a model finds useful candidates or saves tokens; no live-model
+evaluation is included.
+
 ## Retention, effects and context
 
 The existing Service queue schedules roots, child work, controller preparation and retired-controller cleanup under one task. A work record binds the
@@ -185,6 +223,27 @@ with its original control and guest allowance, comparing the resulting checkpoin
 and outcome. This execution does not dispatch external effects. Publications
 retain their immutable work observations through collection and transfer.
 
+Logical annotations can be ordinary immutable `{domain, key, metadata}` values
+inside generated programs. Horos's logical-context examples use Reader/local,
+explicit snapshots and independent branch values. `logicalQuery` selects the
+newest matching domain/key in a supplied frame sequence; it does not inspect a
+physical stack or confer permissions from a label.
+
+An observer can retain an explicitly disclosed context snapshot as its typed
+accumulator and query it through that ordinary source function. The integration
+witness expands the actual pending cleanup port's snapshot, materializes it with
+the selected guest-view provenance, and runs the query through `work.observe`.
+A partial selected view emits an explicit omission result. Graph completeness
+alone does not disclose application values, and an empty projection does not
+establish that the guest has no annotations. Results describe the supplied
+snapshot and selected publication, not unrecorded scopes or complete history.
+
+The observer receives immutable data and keeps its own work identity. Its result,
+failure or park cannot answer the source's pending port: request identity,
+checkpoint, revisions and occurrence settlement remain with the existing source
+owner. Reading a snapshot does not resume the protected computation or discharge
+its cleanup obligation.
+
 Interpretations are ordinary built programs and retained work. They can consume
 initial inputs, authorized snapshots or semantic slices, implement alternative
 reply sequences, and retain an unfinished alternative through ordinary state and
@@ -254,7 +313,7 @@ cancellation cleanup.
 
 ## Reconstructing the active controller
 
-Application 8 uses `protean-workspace/4` and native state writer 20. The packaged
+Application 8 uses `protean-workspace/5` and native state writer 20. The packaged
 seed is an ordinary controller artifact built through the same source constructor
 as later candidates. `program.describe` with `current_controller` pages the
 actual binding, epoch, program, source, interfaces and residual references.
@@ -575,10 +634,10 @@ families and suite-specific comparison arms, records actual costs, and leaves
 quality adjudication explicit. No live model efficacy or token-saving percentage
 is claimed.
 
-Application 8.0.0 uses `protean-workspace/4`, context v7, output v5 and native
+Application 8.0.0 uses `protean-workspace/5`, context v7, output v5 and native
 state format 20. Older namespaces require their compatible executable. The
 [dependency lock](../conformance/protean/dependencies.lock.json) binds the local
-Horos 6.1.0 and Kosmos 9.1.0 source archives and their published commits. The
+Horos 8.0.0 and Kosmos 9.1.0 source archives and their exact commits. The
 [implementation report](semantic-construction-report.md) points to current tuple
 qualification, including remote archive transport. `describe-build` records
 the exact compiler, image, package and executable hashes for each platform.

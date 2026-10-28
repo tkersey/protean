@@ -47,22 +47,46 @@ pub const Compiled = struct {
     controller: ?c.controller.Descriptor = null,
     compiler_nanoseconds: u64 = 0,
 };
+pub const Rejection = struct {
+    code: c.Utf8,
+    phase: c.Utf8,
+    function: ?u64,
+    term: ?u64,
+    value: ?u64,
+    compiler_nanoseconds: u64 = 0,
+};
+pub const ContinuationDiagnostic = struct {
+    domain: enum { source, target },
+    detail: data.admission.ContinuationDiagnostic,
+    block: ?u64,
+    schema: ?u64,
+};
 pub const Output = union(enum) {
     compiled: Compiled,
-    rejected: struct {
-        code: c.Utf8,
-        phase: c.Utf8,
-        function: ?u64,
-        term: ?u64,
-        value: ?u64,
-        compiler_nanoseconds: u64 = 0,
-    },
+    rejected: Rejection,
     derived: struct { artifact: c.Bytes(null), compiler_nanoseconds: u64 = 0 },
     validation: struct {
         outcome: c.workspace.ValidationOutcome,
         code: c.Utf8,
         compiler_nanoseconds: u64 = 0,
     },
+    rejected_contract: struct {
+        rejection: Rejection,
+        continuation: ContinuationDiagnostic,
+        compiler_nanoseconds: u64 = 0,
+    },
+
+    pub fn rejection(self: Output) ?Rejection {
+        return switch (self) {
+            .rejected => |failure| failure,
+            .rejected_contract => |failure| blk: {
+                var result = failure.rejection;
+                result.compiler_nanoseconds = failure.compiler_nanoseconds;
+                break :blk result;
+            },
+            else => null,
+        };
+    }
 };
 
 pub fn run(ctx: registry.Context, bytes: []const u8) ![]u8 {
@@ -81,14 +105,27 @@ fn runProgram(ctx: registry.Context, input: ProgramInput) ![]u8 {
     const started = std.Io.Clock.awake.now(ctx.io);
     var built = compile(ctx, input, &diagnostic) catch |err| {
         if (err == error.Canceled or err == error.OutOfMemory) return err;
-        return c.encodeOwned(Output, ctx.allocator, .{ .rejected = .{
+        var rejection: Rejection = .{
             .code = .{ .bytes = @errorName(err) },
             .phase = .{ .bytes = @tagName(diagnostic.phase) },
             .function = diagnostic.source.function,
             .term = diagnostic.source.term,
             .value = diagnostic.source.value,
-            .compiler_nanoseconds = elapsed(ctx.io, started),
-        } });
+        };
+        const duration = elapsed(ctx.io, started);
+        if (diagnostic.source.continuation orelse diagnostic.source.target.continuation) |detail|
+            return c.encodeOwned(Output, ctx.allocator, .{ .rejected_contract = .{
+                .rejection = rejection,
+                .continuation = .{
+                    .domain = if (diagnostic.source.continuation != null) .source else .target,
+                    .detail = detail,
+                    .block = diagnostic.source.target.block,
+                    .schema = diagnostic.source.target.schema,
+                },
+                .compiler_nanoseconds = duration,
+            } });
+        rejection.compiler_nanoseconds = duration;
+        return c.encodeOwned(Output, ctx.allocator, .{ .rejected = rejection });
     };
     defer built.deinit();
     try ctx.checkCancellation();
@@ -117,6 +154,10 @@ fn compile(
     if (input.kind == .source_records) {
         if (input.catalog != null) return error.InvalidConstruction;
         return construction.buildExposed(ctx.allocator, input.source.bytes, input.exposures.items, ctx.cancellation, diagnostic);
+    }
+    if (input.kind == .source_derivation) {
+        if (input.catalog != null) return error.InvalidConstruction;
+        return construction.buildDerived(ctx.allocator, input.source.bytes, input.exposures.items, ctx.cancellation, diagnostic);
     }
     diagnostic.phase = .authority;
     if (input.exposures.items.len != 0) return error.InvalidExposure;
@@ -237,4 +278,52 @@ test "semantic derivation interruption does not become a compiler rejection" {
         .subject = .{ .controller = .{ .cut = .{ .epoch = 0, .execution_revision = 0 } } },
         .basis = .immutable,
     }));
+}
+
+test "construction worker preserves continuation details and prior rejection encoding" {
+    const a = std.testing.allocator;
+    const source = @import("horos").source;
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const module = try source.examples.logicalBranching(&builder);
+    const token = for (builder.schemas.items, 0..) |schema, index| {
+        if (schema == .internal and schema.internal == .resumption) break index;
+    } else return error.MissingResumption;
+    builder.schemas.items[token].internal.resumption.use = .reusable;
+    const text = try @import("source_records.zig").encode(a, module);
+    defer a.free(text);
+    const authority: registry.Authority = .{ .grants = &.{}, .principal = "test", .tenant = "test" };
+    const bytes = try runProgram(.{
+        .allocator = a,
+        .io = std.testing.io,
+        .authority = &authority,
+        .task_id = "test",
+        .profile = "test",
+        .environment = null,
+    }, .{
+        .source = .{ .bytes = text },
+        .kind = .source_records,
+        .catalog = null,
+        .exposures = .{ .items = &.{} },
+    });
+    defer a.free(bytes);
+    var output = try c.decodeOwned(Output, a, bytes);
+    defer output.deinit();
+    try std.testing.expect(output.value == .rejected_contract);
+    try std.testing.expectEqual(.use, output.value.rejected_contract.continuation.detail.dimension);
+    try std.testing.expectEqual(.target, output.value.rejected_contract.continuation.domain);
+    try std.testing.expectEqual(token, output.value.rejected_contract.continuation.schema.?);
+    try std.testing.expectEqualStrings("InvalidEffect", output.value.rejection().?.code.bytes);
+    const Previous = union(enum) {
+        compiled: Compiled,
+        rejected: Rejection,
+        derived: @FieldType(Output, "derived"),
+        validation: @FieldType(Output, "validation"),
+    };
+    const rejection = output.value.rejection().?;
+    const previous = try c.encodeOwned(Previous, a, .{ .rejected = rejection });
+    defer a.free(previous);
+    const current = try c.encodeOwned(Output, a, .{ .rejected = rejection });
+    defer a.free(current);
+    try std.testing.expectEqualSlices(u8, previous, current);
 }
