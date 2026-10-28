@@ -3361,11 +3361,20 @@ fn prefixPublication(a: std.mem.Allocator, index: usize) !native.testing.state.W
 }
 
 fn expectPublicationPrefix(
+    a: std.mem.Allocator,
     prefix: *native.testing.workspace_observers.PublicationPrefix,
     publications: []const native.testing.state.WorkPublication,
     scanned: *usize,
     indexed: *usize,
 ) !void {
+    var predecessors: std.StringHashMapUnmanaged(void) = .empty;
+    defer predecessors.deinit(a);
+    for (publications) |item| {
+        scanned.* += 1;
+        const observer = item.observer orelse continue;
+        const previous = observer.selection.previous orelse continue;
+        try predecessors.put(a, previous.id.bytes, {});
+    }
     for (0..4) |source_index| {
         const source_id = prefixIdentity(10000 + source_index);
         var lossless: usize = 0;
@@ -3376,13 +3385,7 @@ fn expectPublicationPrefix(
             const observer = item.observer orelse continue;
             if (observer.stopped or !std.meta.eql(observer.source_work, source_id)) continue;
             const text = std.fmt.bytesToHex(item.work, .lower);
-            const successor = for (publications) |other| {
-                scanned.* += 1;
-                const following = other.observer orelse continue;
-                const previous = following.selection.previous orelse continue;
-                if (std.mem.eql(u8, previous.id.bytes, &text)) break true;
-            } else false;
-            if (successor) continue;
+            if (predecessors.contains(&text)) continue;
             if (observer.selection.policy.granularity == .one_guest_step) quantum = 1;
             if (observer.selection.source.level == .outer_execution) outer = true;
             if (observer.selection.policy.delivery == .lossless) {
@@ -3547,10 +3550,10 @@ test "runtime selection publication prefixes preserve active observers without h
         for (publications, 0..) |*item, i| {
             item.* = try prefixPublication(scratch, i);
             try prefix.put(item.*, i * 2);
-            try expectPublicationPrefix(&prefix, publications[0 .. i + 1], &scanned, &indexed);
+            try expectPublicationPrefix(a, &prefix, publications[0 .. i + 1], &scanned, &indexed);
             item.observer.?.consumed_revision = item.observer.?.source_revision;
             try prefix.put(item.*, i * 2 + 1);
-            try expectPublicationPrefix(&prefix, publications[0 .. i + 1], &scanned, &indexed);
+            try expectPublicationPrefix(a, &prefix, publications[0 .. i + 1], &scanned, &indexed);
         }
         for (publications[count - 3 ..], 0..) |*item, i| {
             item.observer.?.stopped = true;
@@ -3564,7 +3567,7 @@ test "runtime selection publication prefixes preserve active observers without h
                 try std.testing.expectEqual(@as(u32, 0), prefix.lossless(id).?.count());
             }
         }
-        try expectPublicationPrefix(&prefix, publications, &scanned, &indexed);
+        try expectPublicationPrefix(a, &prefix, publications, &scanned, &indexed);
         try std.testing.expect(indexed <= count * 4);
         try std.testing.expect(scanned > count * count);
         std.debug.print("publication prefixes: folds={d} reference_visits={d} active_visits={d}\n", .{ count, scanned, indexed });
@@ -3582,7 +3585,7 @@ test "runtime selection publication prefixes preserve active observers without h
             item.observer.?.selection.policy.delivery = .lossless;
             try parallel.put(item.*, i);
         }
-        try expectPublicationPrefix(&parallel, independent, &scanned, &indexed);
+        try expectPublicationPrefix(a, &parallel, independent, &scanned, &indexed);
         for (independent[0 .. count - 1], 0..) |*item, i| {
             item.observer.?.stopped = true;
             try parallel.put(item.*, count + i);
@@ -3595,7 +3598,7 @@ test "runtime selection publication prefixes preserve active observers without h
             }
         }
         try std.testing.expectEqual(count, indexed);
-        try expectPublicationPrefix(&parallel, independent, &scanned, &indexed);
+        try expectPublicationPrefix(a, &parallel, independent, &scanned, &indexed);
         std.debug.print("publication prefixes: parallel_peak={d} remaining=1 queried_visits={d}\n", .{ count, indexed - 1 });
     }
 }
