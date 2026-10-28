@@ -285,39 +285,37 @@ test "construction worker preserves continuation details and prior rejection enc
     const source = @import("horos").source;
     var builder = source.Builder.init(a);
     defer builder.deinit();
-    const module = try source.examples.logicalBranching(&builder);
-    const token = for (builder.schemas.items, 0..) |schema, index| {
-        if (schema == .internal and schema.internal == .resumption and
-            schema.internal.resumption.use == .multi) break index;
-    } else return error.MissingResumption;
-    builder.schemas.items[token].internal.resumption.use = .reusable;
+    const original = try source.examples.logicalBranching(&builder);
+    const valid_bytes = try constructionTestOutput(a, original);
+    defer a.free(valid_bytes);
+    var valid_output = try c.decodeOwned(Output, a, valid_bytes);
+    defer valid_output.deinit();
+    try std.testing.expectEqual(.compiled, std.meta.activeTag(valid_output.value));
+    var module = original;
+    const schemas = try a.dupe(data.program.Schema, original.schemas);
+    defer a.free(schemas);
+    module.schemas = schemas;
+    const token = token: {
+        for (module.handlers) |handler| for (handler.clauses) |clause| {
+            if (schemas[@intCast(clause.resumption)].internal.resumption.use == .multi)
+                break :token clause.resumption;
+        };
+        return error.MissingResumption;
+    };
+    schemas[@intCast(token)].internal.resumption.use = .reusable;
+    try std.testing.expectEqual(.multi, original.schemas[@intCast(token)].internal.resumption.use);
     const admitted_schemas = try data.admission.schemas(a, module.schemas);
     defer a.free(admitted_schemas.minimum);
     defer a.free(admitted_schemas.exportable);
-    const text = try @import("source_records.zig").encode(a, module);
-    defer a.free(text);
-    const authority: registry.Authority = .{ .grants = &.{}, .principal = "test", .tenant = "test" };
-    const bytes = try runProgram(.{
-        .allocator = a,
-        .io = std.testing.io,
-        .authority = &authority,
-        .task_id = "test",
-        .profile = "test",
-        .environment = null,
-    }, .{
-        .source = .{ .bytes = text },
-        .kind = .source_records,
-        .catalog = null,
-        .exposures = .{ .items = &.{} },
-    });
+    const bytes = try constructionTestOutput(a, module);
     defer a.free(bytes);
     var output = try c.decodeOwned(Output, a, bytes);
     defer output.deinit();
-    try std.testing.expect(output.value == .rejected_contract);
+    try std.testing.expectEqual(.rejected_contract, std.meta.activeTag(output.value));
+    try std.testing.expectEqualStrings("InvalidEffect", output.value.rejection().?.code.bytes);
     try std.testing.expectEqual(.use, output.value.rejected_contract.continuation.detail.dimension);
     try std.testing.expectEqual(.target, output.value.rejected_contract.continuation.domain);
     try std.testing.expectEqual(token, output.value.rejected_contract.continuation.schema.?);
-    try std.testing.expectEqualStrings("InvalidEffect", output.value.rejection().?.code.bytes);
     const Previous = union(enum) {
         compiled: Compiled,
         rejected: Rejection,
@@ -330,4 +328,23 @@ test "construction worker preserves continuation details and prior rejection enc
     const current = try c.encodeOwned(Output, a, .{ .rejected = rejection });
     defer a.free(current);
     try std.testing.expectEqualSlices(u8, previous, current);
+}
+
+fn constructionTestOutput(a: std.mem.Allocator, module: @import("horos").source.Module) ![]u8 {
+    const text = try @import("source_records.zig").encode(a, module);
+    defer a.free(text);
+    const authority: registry.Authority = .{ .grants = &.{}, .principal = "test", .tenant = "test" };
+    return runProgram(.{
+        .allocator = a,
+        .io = std.testing.io,
+        .authority = &authority,
+        .task_id = "test",
+        .profile = "test",
+        .environment = null,
+    }, .{
+        .source = .{ .bytes = text },
+        .kind = .source_records,
+        .catalog = null,
+        .exposures = .{ .items = &.{} },
+    });
 }
