@@ -287,9 +287,13 @@ test "construction worker preserves continuation details and prior rejection enc
     defer builder.deinit();
     const module = try source.examples.logicalBranching(&builder);
     const token = for (builder.schemas.items, 0..) |schema, index| {
-        if (schema == .internal and schema.internal == .resumption) break index;
+        if (schema == .internal and schema.internal == .resumption and
+            schema.internal.resumption.use == .multi) break index;
     } else return error.MissingResumption;
     builder.schemas.items[token].internal.resumption.use = .reusable;
+    const admitted_schemas = try data.admission.schemas(a, module.schemas);
+    defer a.free(admitted_schemas.minimum);
+    defer a.free(admitted_schemas.exportable);
     const text = try @import("source_records.zig").encode(a, module);
     defer a.free(text);
     const authority: registry.Authority = .{ .grants = &.{}, .principal = "test", .tenant = "test" };
