@@ -92,7 +92,7 @@ inline fn argument(comptime T: type, a: std.mem.Allocator, value: json.Value) Ar
     };
 }
 
-inline fn argumentOptional(
+fn argumentOptional(
     comptime T: type,
     a: std.mem.Allocator,
     value: json.Value,
@@ -114,7 +114,7 @@ inline fn argumentOptional(
     );
 }
 
-inline fn argumentInteger(comptime T: type, value: json.Value) ArgumentError!T {
+fn argumentInteger(comptime T: type, value: json.Value) ArgumentError!T {
     if (value != .number_string) return error.WrongType;
     // The shared model contract first classifies an exact i64/u64
     // JSON integer, then applies the field's narrower range. A
@@ -135,7 +135,7 @@ inline fn argumentInteger(comptime T: type, value: json.Value) ArgumentError!T {
     return std.math.cast(T, number) orelse error.IntegerRange;
 }
 
-inline fn argumentStruct(
+fn argumentStruct(
     comptime T: type,
     a: std.mem.Allocator,
     value: json.Value,
@@ -160,7 +160,7 @@ inline fn argumentStruct(
     return result;
 }
 
-inline fn argumentUnion(comptime T: type, a: std.mem.Allocator, value: json.Value) ArgumentError!T {
+fn argumentUnion(comptime T: type, a: std.mem.Allocator, value: json.Value) ArgumentError!T {
     const info = @typeInfo(T).@"union";
 
     if (value != .object) return error.WrongType;

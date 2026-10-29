@@ -16325,31 +16325,36 @@ fn reconstructionRegistry(a: std.mem.Allocator, scenario: ReconstructionCase) !n
     return handlers;
 }
 
-fn reconstructionContract(scratch: std.mem.Allocator) !contracts.controller.Contract {
+fn reconstructionContract(
+    scratch: std.mem.Allocator,
+    imports: *[3]contracts.controller.Signature,
+) !contracts.controller.Contract {
     const reply_schema = try native.program_construction.controller.replySchema(
         scratch,
         try native.values.schemaBytes(Reconstruction.Response, scratch),
     );
-    const contract: contracts.controller.Contract = .{
-        .result = .{ .bytes = try native.values.schemaBytes(Reconstruction.Output, scratch) },
-        .failure = .{ .bytes = try native.values.schemaBytes(void, scratch) },
-        .imports = .{ .items = &.{
-            .{ .import = .deliberate, .payload = .{
-                .bytes = try native.values.schemaBytes(Reconstruction.Proposal, scratch),
-            }, .result = .{ .bytes = reply_schema }, .native_result = .{
-                .bytes = try native.values.schemaBytes(Reconstruction.Response, scratch),
-            } },
-            .{ .import = .snapshot, .payload = .{
-                .bytes = try native.values.schemaBytes(u64, scratch),
-            }, .result = .{ .bytes = try native.values.schemaBytes(void, scratch) } },
-            .{ .import = .workspace, .payload = .{
-                .bytes = try native.values.schemaBytes(contracts.workspace.Command, scratch),
-            }, .result = .{
-                .bytes = try native.values.schemaBytes(contracts.workspace.Reply, scratch),
-            } },
+    const result = try native.values.schemaBytes(Reconstruction.Output, scratch);
+    const failure = try native.values.schemaBytes(void, scratch);
+    imports.* = .{
+        .{ .import = .deliberate, .payload = .{
+            .bytes = try native.values.schemaBytes(Reconstruction.Proposal, scratch),
+        }, .result = .{ .bytes = reply_schema }, .native_result = .{
+            .bytes = try native.values.schemaBytes(Reconstruction.Response, scratch),
+        } },
+        .{ .import = .snapshot, .payload = .{
+            .bytes = try native.values.schemaBytes(u64, scratch),
+        }, .result = .{ .bytes = try native.values.schemaBytes(void, scratch) } },
+        .{ .import = .workspace, .payload = .{
+            .bytes = try native.values.schemaBytes(contracts.workspace.Command, scratch),
+        }, .result = .{
+            .bytes = try native.values.schemaBytes(contracts.workspace.Reply, scratch),
         } },
     };
-    return contract;
+    return .{
+        .result = .{ .bytes = result },
+        .failure = .{ .bytes = failure },
+        .imports = .{ .items = imports },
+    };
 }
 
 fn reconstructionBuild(
@@ -18193,7 +18198,8 @@ fn reconstructionHistoryReopen(fixture: anytype) !void {
 fn reconstructionRegistryOwner(environment: anytype) !void {
     var handlers = try reconstructionRegistry(environment.a.*, environment.scenario.*);
     defer handlers.deinit();
-    const contract = try reconstructionContract(environment.scratch.*);
+    var imports: [3]contracts.controller.Signature = undefined;
+    const contract = try reconstructionContract(environment.scratch.*, &imports);
     try reconstructionSourceOwner(.{
         .handlers = &handlers,
         .contract = &contract,
