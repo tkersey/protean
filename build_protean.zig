@@ -832,6 +832,7 @@ const BuildGraph = struct {
             },
             if (workspace_group) |group| @backingInt(group) else null,
         );
+        if (linuxX86(s.b.graph.host)) workspace_general_tests.use_llvm = false;
         s.b.step("build-workspace-general-check", "Build the retained workspace test executable")
             .dependOn(&s.b.addInstallArtifact(workspace_general_tests, .{
             .dest_dir = .{ .override = .{ .custom = "verification" } },
