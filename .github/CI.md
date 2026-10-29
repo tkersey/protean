@@ -94,7 +94,10 @@ end-to-end recovery sequences.
 
 Workspace execution, retention and history still run once each across 22 tests.
 CI compiles the three existing filtered groups separately; the full unfiltered
-root is retained for local grouped execution. Selected list fixtures are reduced
+root is retained for local grouped execution. The 16 execution tests run in three
+independent processes using the existing qualification runner, which rejects
+omissions, overlaps, skips, failures and leaks. Local execution uses those same
+partitions alongside retention and history. Selected list fixtures are reduced
 from 300 to 32 entries and the deep recursive fixture from 50,000 to 2,048 steps. This retains the smaller-scale
 semantic checks while retiring the former scale coverage. The retained-work
 fixture uses 32 cooperative list entries, 32 scope works, 32 status-history

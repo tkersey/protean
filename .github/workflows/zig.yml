@@ -250,7 +250,12 @@ jobs:
           elif [ "${{ matrix.lane }}" = owner-support ]; then
             zig build check-native-owner-support -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = workspace ]; then
-            run_compiled_tests workspace-general 16
+            log="$RUNNER_TEMP/workspace-general-tests.log"
+            /usr/bin/time -v node tools/native/qualification_tests.mjs \
+              "$RUNNER_TEMP/protean-qualification/verification/workspace-general" \
+              '[["CTX-01"],["WORK-C07"],["BUILD-","WORK-C03","WORK-06","WORK-08","exposure carries","workspace commands","deep recursive workspace"]]' \
+              2>&1 | tee "$log"
+            grep -Fxq '16/16 tests passed across 3 independent groups.' "$log"
           elif [ "${{ matrix.lane }}" = workspace-retention ]; then
             run_compiled_tests workspace-general 3
           elif [ "${{ matrix.lane }}" = workspace-history ]; then

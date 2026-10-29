@@ -1,4 +1,19 @@
 const std = @import("std");
+const workspace_execution_groups = [_][]const []const u8{
+    &.{"CTX-01"},
+    &.{"WORK-C07"},
+    &.{
+        "BUILD-",
+        "WORK-C03",
+        "WORK-06",
+        "WORK-08",
+        "exposure carries",
+        "workspace commands",
+        "deep recursive workspace",
+    },
+    &.{ "WORK-01", "AUT-07", "OWN-02" },
+    &.{ "collected history", "WORK-14", "delegated model interpretation" },
+};
 const Graph = struct {
     b: *std.Build,
     optimize: std.lang.Optimize,
@@ -67,6 +82,15 @@ const Graph = struct {
     ) *std.Build.Step.Compile {
         if (selected) |index| return g.testModuleFiltered(step, module_value, groups[index]);
         const tests = g.compileTests(module_value, &.{});
+        g.runGrouped(step, tests, groups);
+        return tests;
+    }
+    fn runGrouped(
+        g: Graph,
+        step: *std.Build.Step,
+        tests: *std.Build.Step.Compile,
+        groups: []const []const []const u8,
+    ) void {
         const run = nodeCommand(g.b);
         run.addArg("node");
         run.addFileArg2(g.b.path("tools/native/qualification_tests.mjs"), .{});
@@ -77,7 +101,6 @@ const Graph = struct {
         run.has_side_effects = true;
         run.expectExitCode(0);
         step.dependOn(&run.step);
-        return tests;
     }
     fn emitter(
         g: Graph,
@@ -813,25 +836,30 @@ const BuildGraph = struct {
             "workspace-group",
             "Select independent workspace qualification cases (default: all)",
         );
-        const workspace_general_tests = s.native_graph.testModuleGrouped(
-            s.workspace_general,
-            workspace_programs,
+        const compilation_groups = [_][]const []const u8{
             &.{
-                &.{
-                    "BUILD-",
-                    "WORK-C",
-                    "WORK-06",
-                    "WORK-08",
-                    "exposure carries",
-                    "workspace commands",
-                    "CTX-01",
-                    "deep recursive workspace",
-                },
-                &.{ "WORK-01", "AUT-07", "OWN-02" },
-                &.{ "collected history", "WORK-14", "delegated model interpretation" },
+                "BUILD-",
+                "WORK-C",
+                "WORK-06",
+                "WORK-08",
+                "exposure carries",
+                "workspace commands",
+                "CTX-01",
+                "deep recursive workspace",
             },
-            if (workspace_group) |group| @backingInt(group) else null,
+            &.{ "WORK-01", "AUT-07", "OWN-02" },
+            &.{ "collected history", "WORK-14", "delegated model interpretation" },
+        };
+        const workspace_general_tests = s.native_graph.compileTests(
+            workspace_programs,
+            if (workspace_group) |group| compilation_groups[@backingInt(group)] else &.{},
         );
+        const groups = if (workspace_group) |group| switch (group) {
+            .execution => workspace_execution_groups[0..3],
+            .retention => workspace_execution_groups[3..4],
+            .history => workspace_execution_groups[4..5],
+        } else &workspace_execution_groups;
+        s.native_graph.runGrouped(s.workspace_general, workspace_general_tests, groups);
         if (linuxX86(s.b.graph.host)) workspace_general_tests.use_llvm = false;
         s.b.step("build-workspace-general-check", "Build the retained workspace test executable")
             .dependOn(&s.b.addInstallArtifact(workspace_general_tests, .{
