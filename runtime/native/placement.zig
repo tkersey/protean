@@ -17,7 +17,11 @@ pub const Configuration = struct {
     transport_directory: ?[]const u8 = null,
     staging_limits: ?StagingLimits = null,
 };
-pub const Channel = struct { argv: []const []const u8, remote_name: []const u8, timeout_ms: u32 = 30000 };
+pub const Channel = struct {
+    argv: []const []const u8,
+    remote_name: []const u8,
+    timeout_ms: u32 = 30000,
+};
 pub const Peer = struct {
     name: []const u8,
     site: Site,
@@ -101,7 +105,10 @@ pub const Control = struct {
     custody_epoch: u64,
     operation: state.Name,
     command: contracts.workspace.Work,
-    expansion: ?struct { reference: contracts.workspace.Ref, page: contracts.workspace.Page } = null,
+    expansion: ?struct {
+        reference: contracts.workspace.Ref,
+        page: contracts.workspace.Page,
+    } = null,
     /// The controller's durable cancellation event revision. It orders repeated
     /// cleanup requests without comparing clocks across namespaces.
     cleanup_request: ?u64 = null,
@@ -150,8 +157,22 @@ pub const Action = struct {
     reply: contracts.workspace.Reply,
 };
 pub const ActionRecord = struct { id: Digest, task: state.TaskId, action: Signed(Action) };
-pub const Succession = struct { id: Digest, task: state.TaskId, offer: Signed(Offer), decision: Signed(Decision) };
-pub const Behavior = struct { operation: Digest, task: state.TaskId, owner: Site, previous_epoch: u64, epoch: u64, predecessor: Digest, successor: Digest, event_cut: u64 };
+pub const Succession = struct {
+    id: Digest,
+    task: state.TaskId,
+    offer: Signed(Offer),
+    decision: Signed(Decision),
+};
+pub const Behavior = struct {
+    operation: Digest,
+    task: state.TaskId,
+    owner: Site,
+    previous_epoch: u64,
+    epoch: u64,
+    predecessor: Digest,
+    successor: Digest,
+    event_cut: u64,
+};
 pub const BehaviorRecord = struct { id: Digest, task: state.TaskId, decision: Signed(Behavior) };
 pub const ControllerTransition = union(enum) {
     move: Succession,
@@ -169,13 +190,19 @@ pub const ControlResolution = union(enum) { report: Signed(Report), next: Succes
 
 /// A route extends the original signed command without changing its identity.
 /// Every edge is an accepted bilateral transfer of that exact work subject.
-pub fn routeNext(a: std.mem.Allocator, subject: Subject, current: Executor, next: Succession) !Executor {
+pub fn routeNext(
+    a: std.mem.Allocator,
+    subject: Subject,
+    current: Executor,
+    next: Succession,
+) !Executor {
     const intent = next.offer.value.intent;
     try verify(Offer, a, next.offer, current.site);
     try matchDecision(a, next.offer.value, next.decision);
     if (!std.meta.eql(subject, intent.subject) or subject.work == null or
         !std.meta.eql(next.task, subject.task) or !std.meta.eql(next.id, intent.transfer) or
-        intent.epoch != current.epoch or next.decision.value.verdict != .accepted) return error.InvalidRemoteCommand;
+        intent.epoch != current.epoch or
+        next.decision.value.verdict != .accepted) return error.InvalidRemoteCommand;
     return .{ .site = next.decision.value.destination, .epoch = next.decision.value.epoch };
 }
 pub fn routeHead(a: std.mem.Allocator, control: Control, route: []const Succession) !Executor {
@@ -183,14 +210,28 @@ pub fn routeHead(a: std.mem.Allocator, control: Control, route: []const Successi
     for (route) |next| current = try routeNext(a, control.subject, current, next);
     return current;
 }
-pub fn matchReport(a: std.mem.Allocator, control: Control, route: []const Succession, report: Signed(Report)) !void {
+pub fn matchReport(
+    a: std.mem.Allocator,
+    control: Control,
+    route: []const Succession,
+    report: Signed(Report),
+) !void {
     var current: Executor = .{ .site = control.executor, .epoch = control.custody_epoch };
-    var matches = std.meta.eql(current.site, report.value.executor) and current.epoch == report.value.custody_epoch;
+    var matches = std.meta.eql(
+        current.site,
+        report.value.executor,
+    ) and current.epoch == report.value.custody_epoch;
     for (route) |next| {
         current = try routeNext(a, control.subject, current, next);
-        matches = matches or (std.meta.eql(current.site, report.value.executor) and current.epoch == report.value.custody_epoch);
+        matches = matches or (std.meta.eql(
+            current.site,
+            report.value.executor,
+        ) and current.epoch == report.value.custody_epoch);
     }
-    if (!matches or !std.meta.eql(report.value.control, try digest(Control, a, control))) return error.InvalidRemoteCommand;
+    if (!matches or !std.meta.eql(
+        report.value.control,
+        try digest(Control, a, control),
+    )) return error.InvalidRemoteCommand;
     try verify(Report, a, report, report.value.executor);
 }
 /// Source-local retained export. It is never part of another transfer's
@@ -226,18 +267,41 @@ pub const Request = union(enum) {
     freeze: struct { subject: Subject, peer: state.Name, expected: Cut, transfer: Digest },
     move: struct { subject: Subject, peer: state.Name, expected: Cut, transfer: Digest },
     offer: struct { subject: Subject, peer: state.Name, path: contracts.Utf8 },
-    accept: struct { operation: state.Name, peer: state.Name, offer: Signed(Offer), path: contracts.Utf8 },
-    stage: struct { peer: state.Name, offer: Signed(Offer), offset: u64, bytes: contracts.Bytes(32768) },
+    accept: struct {
+        operation: state.Name,
+        peer: state.Name,
+        offer: Signed(Offer),
+        path: contracts.Utf8,
+    },
+    stage: struct {
+        peer: state.Name,
+        offer: Signed(Offer),
+        offset: u64,
+        bytes: contracts.Bytes(32768),
+    },
     accept_staged: struct { operation: state.Name, peer: state.Name, offer: Signed(Offer) },
     refuse: struct { peer: state.Name, offer: Signed(Offer), reason: Refusal },
     decision: struct { subject: Subject, decision: Signed(Decision) },
     abort_unsent: struct { subject: Subject, transfer: Digest },
     withdraw: struct { task: state.TaskId, transfer: Digest },
-    control: struct { operation: state.Name, task: state.TaskId, command: contracts.workspace.Work },
+    control: struct {
+        operation: state.Name,
+        task: state.TaskId,
+        command: contracts.workspace.Work,
+    },
     execute_control: struct { peer: state.Name, control: Signed(Control) },
-    resolve_control: struct { peer: state.Name, control: Signed(Control), route: contracts.Vector(Succession, null) },
+    resolve_control: struct {
+        peer: state.Name,
+        control: Signed(Control),
+        route: contracts.Vector(Succession, null),
+    },
     report: struct { task: state.TaskId, control: Digest, report: Signed(Report) },
-    follow_controller: struct { source: state.Name, destination: state.Name, offer: Signed(Offer), decision: Signed(Decision) },
+    follow_controller: struct {
+        source: state.Name,
+        destination: state.Name,
+        offer: Signed(Offer),
+        decision: Signed(Decision),
+    },
     follow_controller_proof: struct { offer: Signed(Offer), decision: Signed(Decision) },
     follow_controller_behavior: Signed(Behavior),
 };
@@ -245,12 +309,27 @@ pub fn Signed(comptime T: type) type {
     return struct { value: T, signature: [64]u8 };
 }
 fn domain(comptime T: type) []const u8 {
-    return if (T == Offer) "protean-placement/1/offer\x00" else if (T == Decision) "protean-placement/1/decision\x00" else if (T == Control) "protean-placement/1/control\x00" else if (T == Report) "protean-placement/1/report\x00" else if (T == Hello) "protean-placement/1/hello\x00" else if (T == Action) "protean-placement/1/action\x00" else if (T == Behavior) "protean-placement/1/behavior\x00" else @compileError("not a signed placement message");
+    if (T == Offer) return "protean-placement/1/offer\x00";
+    if (T == Decision) return "protean-placement/1/decision\x00";
+    if (T == Control) return "protean-placement/1/control\x00";
+    if (T == Report) return "protean-placement/1/report\x00";
+    if (T == Hello) return "protean-placement/1/hello\x00";
+    if (T == Action) return "protean-placement/1/action\x00";
+    if (T == Behavior) return "protean-placement/1/behavior\x00";
+    @compileError("not a signed placement message");
 }
 fn signerOf(comptime T: type, value: T) Site {
-    return if (T == Offer) value.intent.source else if (T == Decision) value.destination else if (T == Control) value.controller else if (T == Hello) value.site else if (T == Action or T == Behavior) value.owner else value.executor;
+    if (T == Offer) return value.intent.source;
+    if (T == Decision) return value.destination;
+    if (T == Control) return value.controller;
+    if (T == Hello) return value.site;
+    if (T == Action or T == Behavior) return value.owner;
+    return value.executor;
 }
-pub fn operationId(site: Site, task: state.TaskId, operation_name: []const u8, kind: enum { action, move }) Digest {
+pub fn operationId(site: Site, task: state.TaskId, operation_name: []const u8, kind: enum {
+    action,
+    move,
+}) Digest {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update("protean-placement/1/operation\x00");
     hash.update(@tagName(kind));
@@ -271,13 +350,19 @@ pub fn digest(comptime T: type, a: std.mem.Allocator, value: T) !Digest {
 pub fn sign(comptime T: type, a: std.mem.Allocator, key: Ed25519.KeyPair, value: T) !Signed(T) {
     const signer = signerOf(T, value);
     if (!std.meta.eql(signer.key, key.public_key.toBytes())) return error.KeyOwnerMismatch;
-    return .{ .value = value, .signature = (try key.sign(&try digest(T, a, value), null)).toBytes() };
+    return .{
+        .value = value,
+        .signature = (try key.sign(&try digest(T, a, value), null)).toBytes(),
+    };
 }
 pub fn verify(comptime T: type, a: std.mem.Allocator, signed: Signed(T), expected: Site) !void {
     const signer = signerOf(T, signed.value);
     if (!std.meta.eql(signer, expected)) return error.KeyOwnerMismatch;
     const public = try Ed25519.PublicKey.fromBytes(expected.key);
-    try Ed25519.Signature.fromBytes(signed.signature).verifyStrict(&try digest(T, a, signed.value), public);
+    try Ed25519.Signature.fromBytes(signed.signature).verifyStrict(
+        &try digest(T, a, signed.value),
+        public,
+    );
 }
 pub fn subjectId(subject: Subject) Digest {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
@@ -303,7 +388,15 @@ pub fn commandWork(command: contracts.workspace.Work) !contracts.workspace.Ref {
     return switch (command) {
         .inspect => |value| value.work,
         .advance, .park, .stop_observing => |value| value.work,
-        inline .pump, .delegate, .interact, .cancel, .realize, .request_cut, .guard, .unguard => |value| value.expected.work,
+        inline .pump,
+        .delegate,
+        .interact,
+        .cancel,
+        .realize,
+        .request_cut,
+        .guard,
+        .unguard,
+        => |value| value.expected.work,
         .start, .observe, .wait, .collect, .realize_controller => error.InvalidRemoteCommand,
     };
 }
@@ -319,7 +412,13 @@ pub const Custody = struct {
     decision: ?Signed(Decision) = null,
 
     pub fn initial(subject: Subject, site: Site) Custody {
-        return .{ .id = subjectId(subject), .task = subject.task, .work = subject.work, .owner = site, .phase = .local };
+        return .{
+            .id = subjectId(subject),
+            .task = subject.task,
+            .work = subject.work,
+            .owner = site,
+            .phase = .local,
+        };
     }
     pub fn requireLocal(self: Custody, site: Site) !void {
         if (self.phase != .local or !std.meta.eql(self.owner, site)) return error.CustodyNotLocal;
@@ -329,7 +428,10 @@ pub const Custody = struct {
     pub fn freeze(self: Custody, site: Site, intent: Intent) !Custody {
         try self.requireLocal(site);
         if (!std.meta.eql(intent.source, site) or std.meta.eql(intent.destination, site) or
-            !std.meta.eql(intent.subject, Subject{ .task = self.task, .work = self.work }) or intent.epoch != self.epoch or
+            !std.meta.eql(intent.subject, Subject{
+                .task = self.task,
+                .work = self.work,
+            }) or intent.epoch != self.epoch or
             self.epoch == std.math.maxInt(u64)) return error.InvalidTransfer;
         var result = self;
         result.phase = .frozen;
@@ -339,7 +441,10 @@ pub const Custody = struct {
         return result;
     }
     pub fn offered(self: Custody, a: std.mem.Allocator, signed: Signed(Offer)) !Custody {
-        if (self.phase != .frozen or self.intent == null or !std.meta.eql(self.intent.?, signed.value.intent)) return error.InvalidTransfer;
+        if (self.phase != .frozen or self.intent == null or !std.meta.eql(
+            self.intent.?,
+            signed.value.intent,
+        )) return error.InvalidTransfer;
         try verify(Offer, a, signed, self.owner);
         if (self.offer) |prior| if (!std.meta.eql(prior, signed)) return error.OperationConflict;
         var result = self;
@@ -371,20 +476,39 @@ pub fn matchDecision(a: std.mem.Allocator, offer: Offer, signed: Signed(Decision
     try verify(Decision, a, signed, offer.intent.destination);
     const value = signed.value;
     if (offer.intent.epoch == std.math.maxInt(u64) or value.epoch != offer.intent.epoch + 1 or
-        !std.meta.eql(value.transfer, offer.intent.transfer) or !std.meta.eql(value.source, offer.intent.source) or
-        !std.meta.eql(value.offer_digest, try digest(Offer, a, offer))) return error.InvalidTransfer;
+        !std.meta.eql(value.transfer, offer.intent.transfer) or
+        !std.meta.eql(value.source, offer.intent.source) or
+        !std.meta.eql(
+            value.offer_digest,
+            try digest(Offer, a, offer),
+        )) return error.InvalidTransfer;
 }
 /// This candidate is not executable until the enclosing native transaction
 /// commits both its independently validated objects and this exact decision.
-pub fn accept(a: std.mem.Allocator, site: Site, imported: Custody, offer: Signed(Offer), decision: Signed(Decision)) !Custody {
+pub fn accept(
+    a: std.mem.Allocator,
+    site: Site,
+    imported: Custody,
+    offer: Signed(Offer),
+    decision: Signed(Decision),
+) !Custody {
     try verify(Offer, a, offer, offer.value.intent.source);
     try matchDecision(a, offer.value, decision);
-    if (!std.meta.eql(site, offer.value.intent.destination) or decision.value.verdict != .accepted or
+    if (!std.meta.eql(
+        site,
+        offer.value.intent.destination,
+    ) or decision.value.verdict != .accepted or
         imported.phase != .frozen or imported.intent == null or
         !std.meta.eql(imported.intent.?, offer.value.intent) or
-        !std.meta.eql(imported.owner, offer.value.intent.source) or imported.epoch != offer.value.intent.epoch or
+        !std.meta.eql(
+            imported.owner,
+            offer.value.intent.source,
+        ) or imported.epoch != offer.value.intent.epoch or
         !std.meta.eql(imported.id, subjectId(offer.value.intent.subject)) or
-        !std.meta.eql(imported.task, offer.value.intent.subject.task) or !std.meta.eql(imported.work, offer.value.intent.subject.work)) return error.InvalidTransfer;
+        !std.meta.eql(imported.task, offer.value.intent.subject.task) or !std.meta.eql(
+        imported.work,
+        offer.value.intent.subject.work,
+    )) return error.InvalidTransfer;
     var result = imported;
     result.phase = .local;
     result.owner = site;
@@ -394,21 +518,31 @@ pub fn accept(a: std.mem.Allocator, site: Site, imported: Custody, offer: Signed
     return result;
 }
 
-test "bilateral placement freezes across lost acceptance and binds namespace, cut and disposition" {
-    const a = std.testing.allocator;
+fn expectParkSettled() !void {
     for ([_]bool{ false, true }) |cancelled| {
         for ([_]bool{ false, true }) |parked| {
             for ([_]bool{ false, true }) |settled| {
-                const observed: WorkState = .{ .observed_at = 1, .execution_revision = 1, .control_revision = 1, .outcome = .requested, .cleanup_complete = false, .cancellation = if (cancelled) .{ .bytes = "stop" } else null, .explicitly_parked = parked, .park_complete = settled };
-                try std.testing.expectEqual(!cancelled and parked and settled, observed.parkSettled());
+                const observed: WorkState = .{
+                    .observed_at = 1,
+                    .execution_revision = 1,
+                    .control_revision = 1,
+                    .outcome = .requested,
+                    .cleanup_complete = false,
+                    .cancellation = if (cancelled) .{ .bytes = "stop" } else null,
+                    .explicitly_parked = parked,
+                    .park_complete = settled,
+                };
+                try std.testing.expectEqual(
+                    !cancelled and parked and settled,
+                    observed.parkSettled(),
+                );
             }
         }
     }
-    const source_key = try Ed25519.KeyPair.generateDeterministic(@splat(1));
-    const destination_key = try Ed25519.KeyPair.generateDeterministic(@splat(2));
-    const source: Site = .{ .key = source_key.public_key.toBytes(), .namespace = @splat(3) };
-    const destination: Site = .{ .key = destination_key.public_key.toBytes(), .namespace = @splat(4) };
-    const intent: Intent = .{
+}
+
+fn placementIntent(source: Site, destination: Site) Intent {
+    return .{
         .transfer = @splat(5),
         .subject = .{ .task = @splat(6), .work = @splat(7) },
         .source = source,
@@ -416,17 +550,50 @@ test "bilateral placement freezes across lost acceptance and binds namespace, cu
         .source_native = @splat(21),
         .destination_native = @splat(22),
         .epoch = 0,
-        .cut = .{ .execution = 8, .control = 9, .realization = 2, .checkpoint = .{ .digest = @splat(10), .bytes = 11 } },
-        .compatibility = .{ .base = @splat(12), .admission = @splat(13), .bridge = @splat(14), .semantics = @splat(15), .private_state = @splat(16) },
+        .cut = .{ .execution = 8, .control = 9, .realization = 2, .checkpoint = .{
+            .digest = @splat(10),
+            .bytes = 11,
+        } },
+        .compatibility = .{
+            .base = @splat(12),
+            .admission = @splat(13),
+            .bridge = @splat(14),
+            .semantics = @splat(15),
+            .private_state = @splat(16),
+        },
         .resources = @splat(17),
         .disclosure = @splat(18),
     };
+}
+
+test "bilateral placement freezes across lost acceptance and binds namespace, cut and disposition" {
+    const a = std.testing.allocator;
+    try expectParkSettled();
+    const source_key = try Ed25519.KeyPair.generateDeterministic(@splat(1));
+    const destination_key = try Ed25519.KeyPair.generateDeterministic(@splat(2));
+    const source: Site = .{ .key = source_key.public_key.toBytes(), .namespace = @splat(3) };
+    const destination: Site = .{
+        .key = destination_key.public_key.toBytes(),
+        .namespace = @splat(4),
+    };
+    const intent = placementIntent(source, destination);
     const initial = Custody.initial(intent.subject, source);
     const frozen = try initial.freeze(source, intent);
-    const offer = try sign(Offer, a, source_key, .{ .intent = intent, .archive_digest = @splat(19), .archive_bytes = 20 });
+    const offer = try sign(Offer, a, source_key, .{
+        .intent = intent,
+        .archive_digest = @splat(19),
+        .archive_bytes = 20,
+    });
     const offered_value = try frozen.offered(a, offer);
     try std.testing.expectError(error.CustodyNotLocal, offered_value.requireLocal(source));
-    const decision = try sign(Decision, a, destination_key, .{ .transfer = intent.transfer, .offer_digest = try digest(Offer, a, offer.value), .source = source, .destination = destination, .epoch = 1, .verdict = .accepted });
+    const decision = try sign(Decision, a, destination_key, .{
+        .transfer = intent.transfer,
+        .offer_digest = try digest(Offer, a, offer.value),
+        .source = source,
+        .destination = destination,
+        .epoch = 1,
+        .verdict = .accepted,
+    });
     const accepted = try accept(a, destination, frozen, offer, decision);
     try accepted.requireLocal(destination);
     // Destination acceptance does not release a source whose reply was lost.
@@ -436,10 +603,16 @@ test "bilateral placement freezes across lost acceptance and binds namespace, cu
     try std.testing.expectEqualDeep(departed, try departed.decided(a, decision));
     var another_namespace = destination;
     another_namespace.namespace[0] ^= 1;
-    try std.testing.expectError(error.InvalidTransfer, accept(a, another_namespace, frozen, offer, decision));
+    try std.testing.expectError(
+        error.InvalidTransfer,
+        accept(a, another_namespace, frozen, offer, decision),
+    );
     var changed_offer = offer;
     changed_offer.value.intent.cut.execution += 1;
-    try std.testing.expectError(error.SignatureVerificationFailed, verify(Offer, a, changed_offer, source));
+    try std.testing.expectError(
+        error.SignatureVerificationFailed,
+        verify(Offer, a, changed_offer, source),
+    );
     var refusal_value = decision.value;
     refusal_value.verdict = .{ .refused = .capacity };
     const refusal = try sign(Decision, a, destination_key, refusal_value);
@@ -449,5 +622,8 @@ test "bilateral placement freezes across lost acceptance and binds namespace, cu
     try std.testing.expectError(error.OperationConflict, returned.decided(a, decision));
     var stale = decision.value;
     stale.epoch += 1;
-    try std.testing.expectError(error.InvalidTransfer, matchDecision(a, offer.value, try sign(Decision, a, destination_key, stale)));
+    try std.testing.expectError(
+        error.InvalidTransfer,
+        matchDecision(a, offer.value, try sign(Decision, a, destination_key, stale)),
+    );
 }

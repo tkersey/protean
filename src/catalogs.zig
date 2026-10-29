@@ -111,7 +111,17 @@ pub const SourceIssue = enum {
 pub fn sourceIssue(comptime spec: anytype) ?SourceIssue {
     if (@typeInfo(@TypeOf(spec)) != .@"struct") return .InvalidSystemSource;
     inline for (@typeInfo(@TypeOf(spec)).@"struct".field_names) |entry_field_name| {
-        const names = .{ "InitialArgs", "Result", "Failure", "application", "models", "prompts", "skills", "tools", "interactions" };
+        const names = .{
+            "InitialArgs",
+            "Result",
+            "Failure",
+            "application",
+            "models",
+            "prompts",
+            "skills",
+            "tools",
+            "interactions",
+        };
         var known = false;
         inline for (names) |name| known = known or std.mem.eql(u8, name, entry_field_name);
         if (!known) return .UnknownSystemField;
@@ -159,7 +169,11 @@ fn entryIssue(comptime kind: []const u8, comptime Entry: anytype) ?SourceIssue {
     if (comptime std.mem.eql(u8, kind, "models")) {
         if (!models.isAdmitted(Entry)) return .UnsupportedModelDescriptor;
         if (!text(Entry.name) or !text(Entry.model_id)) return .InvalidDescriptorText;
-        if (!std.mem.eql(u8, Entry.protocol.semantic_identity, @import("protocol/openai_responses_v2.zig").semantic_identity))
+        if (!std.mem.eql(
+            u8,
+            Entry.protocol.semantic_identity,
+            @import("protocol/openai_responses_v2.zig").semantic_identity,
+        ))
             return .UnsupportedModelProtocol;
     } else if (comptime std.mem.eql(u8, kind, "prompts")) {
         if (!prompts.isAdmitted(Entry)) return .UnsupportedPromptDescriptor;
@@ -207,7 +221,13 @@ fn text(value: []const u8) bool {
 pub fn install(context: anytype, comptime spec: anytype) !Catalogs {
     var result: Catalogs = .{};
     if (@hasField(@TypeOf(spec), "models")) result.models = try installModels(context, spec.models);
-    if (@hasField(@TypeOf(spec), "prompts")) result.prompts = try installPrompts(context, spec.prompts);
+    if (@hasField(
+        @TypeOf(spec),
+        "prompts",
+    )) result.prompts = try installPrompts(
+        context,
+        spec.prompts,
+    );
     var updated = context;
     updated.catalogs = result;
     if (@hasField(@TypeOf(spec), "tools")) result.tools = try installTools(updated, spec.tools);
@@ -224,7 +244,12 @@ fn literal(c: anytype, comptime T: type, value: T) !Id {
 }
 
 fn projectField(c: anytype, comptime T: type, value: Id, ordinal: Id) !Id {
-    return c.builder.primitive(try horos.authoring.interop.schemaId(c.author, try c.schema(T)), .field, &.{value}, ordinal);
+    return c.builder.primitive(
+        try horos.authoring.interop.schemaId(c.author, try c.schema(T)),
+        .field,
+        &.{value},
+        ordinal,
+    );
 }
 
 fn installModels(c: anytype, comptime entries: anytype) ![]const Model {
@@ -262,7 +287,10 @@ fn modelParameters(comptime ModelType: type) Parameters {
             null,
         .reasoning = if (has and @hasField(@TypeOf(p), "reasoning")) .{
             .effort = if (@hasField(@TypeOf(p.reasoning), "effort")) p.reasoning.effort else null,
-            .summary = if (@hasField(@TypeOf(p.reasoning), "summary")) p.reasoning.summary else null,
+            .summary = if (@hasField(
+                @TypeOf(p.reasoning),
+                "summary",
+            )) p.reasoning.summary else null,
         } else null,
     };
 }
@@ -305,7 +333,10 @@ fn installTools(c: anytype, comptime entries: anytype) ![]const tool_library.Des
     return result;
 }
 
-fn installInteractions(c: anytype, comptime entries: anytype) ![]const interaction_library.Definition {
+fn installInteractions(
+    c: anytype,
+    comptime entries: anytype,
+) ![]const interaction_library.Definition {
     const result = try c.builder.allocator().alloc(interaction_library.Definition, entries.len);
     inline for (entries, 0..) |Entry, index| result[index] = try Entry.declare(c);
     for (result, 0..) |entry, index| {

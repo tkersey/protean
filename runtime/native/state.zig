@@ -17,16 +17,40 @@ pub fn visitReferences(comptime T: type, value: T, collector: anytype) anyerror!
 }
 /// Application codecs supply their exact nominal reference type. Matching
 /// field names alone never makes an unrelated application value a reference.
-pub fn visitReferencesAs(comptime T: type, comptime Ref: type, value: T, collector: anytype) anyerror!void {
+pub inline fn visitReferencesAs(
+    comptime T: type,
+    comptime Ref: type,
+    value: T,
+    collector: anytype,
+) anyerror!void {
+    @setEvalBranchQuota(100_000);
     if (T == Ref) return collector.add(.{ .digest = value.digest, .bytes = value.bytes });
     if (T == occurrence.Acquired) try collector.reply(value);
     if (T == @import("workspace_state.zig").Observer.Incomplete)
         try collector.observerSource(value.source);
     switch (@typeInfo(T)) {
-        .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| try visitReferencesAs(Field, Ref, @field(value, name), collector),
-        .optional => |info| if (value) |child| try visitReferencesAs(info.child, Ref, child, collector),
+        .@"struct" => |info| {
+            inline for (info.field_names, info.field_types) |name, Field| {
+                try visitReferencesAs(Field, Ref, @field(value, name), collector);
+            }
+        },
+        .optional => |info| if (value) |child| try visitReferencesAs(
+            info.child,
+            Ref,
+            child,
+            collector,
+        ),
         .@"union" => |info| inline for (info.field_names, info.field_types) |name, Field| {
-            if (std.mem.eql(u8, @tagName(value), name)) try visitReferencesAs(Field, Ref, @field(value, name), collector);
+            if (std.mem.eql(
+                u8,
+                @tagName(value),
+                name,
+            )) try visitReferencesAs(
+                Field,
+                Ref,
+                @field(value, name),
+                collector,
+            );
         },
         .pointer => |info| if (info.size == .slice and info.child != u8) {
             for (value) |child| try visitReferencesAs(info.child, Ref, child, collector);
@@ -38,7 +62,12 @@ pub fn visitReferencesAs(comptime T: type, comptime Ref: type, value: T, collect
     }
 }
 
-pub fn visitObserverSource(a: std.mem.Allocator, store: anytype, ref: Reference, collector: anytype) anyerror!void {
+pub fn visitObserverSource(
+    a: std.mem.Allocator,
+    store: anytype,
+    ref: Reference,
+    collector: anytype,
+) anyerror!void {
     const bytes = try store.object(a, ref, null);
     defer a.free(bytes);
     const T = @import("workspace_state.zig").WorkObservation;
@@ -48,10 +77,63 @@ pub fn visitObserverSource(a: std.mem.Allocator, store: anytype, ref: Reference,
 }
 pub const Outcome = enum { progressed, yielded, requested, completed, failed, cancelled };
 pub const Schedule = enum { queued, active, parked };
-pub const Status = enum { queued, running, waiting_input, parked, cancelling, blocked, unknown, completed, failed, cancelled };
+pub const Status = enum {
+    queued,
+    running,
+    waiting_input,
+    parked,
+    cancelling,
+    blocked,
+    unknown,
+    completed,
+    failed,
+    cancelled,
+};
 /// Portable task records. Source-local retention records are not archive kinds.
-pub const RecordKind = enum { occurrence, question, message, artifact, capture, attempt, origin, reconciliation, workspace_program, workspace_work, workspace_value, workspace_view, workspace_port, workspace_port_reply, execution_route, workspace_wait, workspace_delegation, workspace_reply, workspace_runtime, placement_custody, placement_control, placement_action, placement_move, placement_succession, root_operation, controller_binding, controller_interaction, controller_succession, controller_residual, placement_behavior, workspace_trial, workspace_candidate };
-pub const Blocker = enum { missing_capability, denied, capacity, missing_artifact, incompatible_profile, unavailable_environment, waiting_workspace, observation_blocked };
+pub const RecordKind = enum {
+    occurrence,
+    question,
+    message,
+    artifact,
+    capture,
+    attempt,
+    origin,
+    reconciliation,
+    workspace_program,
+    workspace_work,
+    workspace_value,
+    workspace_view,
+    workspace_port,
+    workspace_port_reply,
+    execution_route,
+    workspace_wait,
+    workspace_delegation,
+    workspace_reply,
+    workspace_runtime,
+    placement_custody,
+    placement_control,
+    placement_action,
+    placement_move,
+    placement_succession,
+    root_operation,
+    controller_binding,
+    controller_interaction,
+    controller_succession,
+    controller_residual,
+    placement_behavior,
+    workspace_trial,
+    workspace_candidate,
+};
+pub const Blocker = enum {
+    missing_capability,
+    denied,
+    capacity,
+    missing_artifact,
+    incompatible_profile,
+    unavailable_environment,
+    waiting_workspace,
+    observation_blocked,
+};
 
 /// Physical controller progress is independent of the last published guest cut.
 /// This row is replaced on suspension and cleared atomically with the next cut.
@@ -109,7 +191,10 @@ pub const ControllerSuccession = struct {
     successor: ?Digest = null,
     converter: ?Digest = null,
     conversion_input: ?Reference = null,
-    view_works: contracts.Vector(@import("workspace_state.zig").WorkObservation, null) = .{ .items = &.{} },
+    view_works: contracts.Vector(
+        @import("workspace_state.zig").WorkObservation,
+        null,
+    ) = .{ .items = &.{} },
     conversion_work: ?Digest = null,
     converted: ?Reference = null,
     boot: ?struct { checkpoint: Reference, outcome: Reference } = null,
@@ -118,7 +203,11 @@ pub const ControllerSuccession = struct {
     activation_event: ?u64 = null,
     activated_epoch: ?u64 = null,
     residual: ?Digest = null,
-    operator_admission: ?struct { revision: u64, event: u64, occurrence: @import("occurrence.zig").Occurrence } = null,
+    operator_admission: ?struct {
+        revision: u64,
+        event: u64,
+        occurrence: @import("occurrence.zig").Occurrence,
+    } = null,
 };
 pub const ControllerAdoptionRequest = struct {
     method: Method = .adopt,
@@ -165,13 +254,17 @@ pub const ControllerResidualObservation = struct {
 
     pub fn from(value: ControllerResidual) ControllerResidualObservation {
         var result: ControllerResidualObservation = undefined;
-        inline for (@typeInfo(ControllerResidualObservation).@"struct".field_names) |field| @field(result, field) = @field(value, field);
+        inline for (@typeInfo(
+            ControllerResidualObservation,
+        ).@"struct".field_names) |field| @field(result, field) = @field(value, field);
         return result;
     }
 
     pub fn retained(value: ControllerResidualObservation) ControllerResidual {
         var result: ControllerResidual = undefined;
-        inline for (@typeInfo(ControllerResidualObservation).@"struct".field_names) |field| @field(result, field) = @field(value, field);
+        inline for (@typeInfo(
+            ControllerResidualObservation,
+        ).@"struct".field_names) |field| @field(result, field) = @field(value, field);
         result.outer_operation = null;
         return result;
     }
@@ -235,8 +328,26 @@ pub const Task = struct {
     }
 };
 
-pub const Method = enum { submit, message, respond, cancel, @"resume", import_checkpoint, reconcile, workspace, adopt };
-pub const Disposition = enum { accepted, queued, answer_acquired, cancellation_requested, resumed, imported, reconciled };
+pub const Method = enum {
+    submit,
+    message,
+    respond,
+    cancel,
+    @"resume",
+    import_checkpoint,
+    reconcile,
+    workspace,
+    adopt,
+};
+pub const Disposition = enum {
+    accepted,
+    queued,
+    answer_acquired,
+    cancellation_requested,
+    resumed,
+    imported,
+    reconciled,
+};
 pub const Receipt = struct {
     id: Digest,
     client_operation_id: Name,
@@ -287,20 +398,50 @@ pub fn questionPromptReference(a: std.mem.Allocator, question: Question) !json.V
     const digest = try a.dupe(u8, &std.fmt.bytesToHex(question.prompt.digest, .lower));
     try json.put(a, &ref, "artifact_id", json.string(digest));
     try json.put(a, &ref, "sha256", json.string(digest));
-    try json.put(a, &ref, "bytes", json.string(try std.fmt.allocPrint(a, "{d}", .{question.prompt.bytes})));
+    try json.put(
+        a,
+        &ref,
+        "bytes",
+        json.string(try std.fmt.allocPrint(a, "{d}", .{question.prompt.bytes})),
+    );
     try json.put(a, &ref, "media_type", json.string("application/json"));
     try json.put(a, &ref, "schema_id", json.string("agent-native-question-prompt.v1"));
     try json.put(a, &ref, "retention", json.string("state-namespace"));
-    try json.put(a, &ref, "question_id", json.string(try a.dupe(u8, &std.fmt.bytesToHex(question.id, .lower))));
+    try json.put(
+        a,
+        &ref,
+        "question_id",
+        json.string(try a.dupe(u8, &std.fmt.bytesToHex(question.id, .lower))),
+    );
     return ref;
 }
 
 pub fn questionData(a: std.mem.Allocator, question: Question, prompt: []const u8) !json.Value {
     var result = json.object();
-    try json.put(a, &result, "question_id", json.string(try a.dupe(u8, &std.fmt.bytesToHex(question.id, .lower))));
-    try json.put(a, &result, "question_revision", json.string(try std.fmt.allocPrint(a, "{d}", .{question.revision})));
-    try json.put(a, &result, "request_digest", json.string(try a.dupe(u8, &std.fmt.bytesToHex(question.request_digest, .lower))));
-    try json.put(a, &result, "answer_schema_id", json.string(try a.dupe(u8, question.answer_schema_id.bytes)));
+    try json.put(
+        a,
+        &result,
+        "question_id",
+        json.string(try a.dupe(u8, &std.fmt.bytesToHex(question.id, .lower))),
+    );
+    try json.put(
+        a,
+        &result,
+        "question_revision",
+        json.string(try std.fmt.allocPrint(a, "{d}", .{question.revision})),
+    );
+    try json.put(
+        a,
+        &result,
+        "request_digest",
+        json.string(try a.dupe(u8, &std.fmt.bytesToHex(question.request_digest, .lower))),
+    );
+    try json.put(
+        a,
+        &result,
+        "answer_schema_id",
+        json.string(try a.dupe(u8, question.answer_schema_id.bytes)),
+    );
     // Prompt bytes come from the owner's canonical JSON presentation. Do not
     // materialize a second large value just to choose a bounded public view.
     if (prompt.len <= json.payload_limits.bytes) {
@@ -318,10 +459,24 @@ pub fn questionData(a: std.mem.Allocator, question: Question, prompt: []const u8
     return result;
 }
 
-pub fn messageData(a: std.mem.Allocator, message: Message, disposition: MessageDisposition) !json.Value {
+pub fn messageData(
+    a: std.mem.Allocator,
+    message: Message,
+    disposition: MessageDisposition,
+) !json.Value {
     var result = json.object();
-    try json.put(a, &result, "message_id", json.string(try a.dupe(u8, &std.fmt.bytesToHex(message.id, .lower))));
-    try json.put(a, &result, "ordinal", json.string(try std.fmt.allocPrint(a, "{d}", .{message.ordinal})));
+    try json.put(
+        a,
+        &result,
+        "message_id",
+        json.string(try a.dupe(u8, &std.fmt.bytesToHex(message.id, .lower))),
+    );
+    try json.put(
+        a,
+        &result,
+        "ordinal",
+        json.string(try std.fmt.allocPrint(a, "{d}", .{message.ordinal})),
+    );
     try json.put(a, &result, "disposition", json.string(@tagName(disposition)));
     return result;
 }
@@ -355,7 +510,10 @@ pub const ControllerReadCut = struct {
     execution_revision: u64,
 
     pub fn from(task: Task) ControllerReadCut {
-        return .{ .event_watermark = task.event_high, .execution_revision = task.execution_revision };
+        return .{
+            .event_watermark = task.event_high,
+            .execution_revision = task.execution_revision,
+        };
     }
 };
 
@@ -433,7 +591,10 @@ pub const RootHistory = struct {
         }
         if (event.root_publication) |publication| {
             if (event.revision <= self.previous_revision) return error.InvalidArchive;
-            const same_controller = std.meta.eql(publication.before.controller, publication.after.controller);
+            const same_controller = std.meta.eql(
+                publication.before.controller,
+                publication.after.controller,
+            );
             if (same_controller != (event.kind == .execution)) return error.InvalidArchive;
             if (event.kind == .execution and (event.workspace_command != null or
                 event.workspace_publications.items.len != 0 or
@@ -442,8 +603,14 @@ pub const RootHistory = struct {
                 if (event.residual_publications.items.len != 1) return error.InvalidArchive;
                 const residual = event.residual_publications.items[0].value;
                 try self.observeRevision(residual.execution_revision);
-                if (!std.meta.eql(publication.before.controller, @as(?Digest, residual.controller)) or
-                    !std.meta.eql(publication.before.checkpoint, residual.initial_checkpoint.digest))
+                if (!std.meta.eql(
+                    publication.before.controller,
+                    @as(?Digest, residual.controller),
+                ) or
+                    !std.meta.eql(
+                        publication.before.checkpoint,
+                        residual.initial_checkpoint.digest,
+                    ))
                     return error.InvalidArchive;
             }
             try self.observeCut(publication.before);
@@ -571,53 +738,51 @@ pub const Reconciliation = struct {
 
 /// Decode historical owners instead of trusting dependency rows or treating
 /// their content hashes as sufficient proof of the retained closure.
-pub fn visitReconciliationHistory(a: std.mem.Allocator, store: anytype, current: Reconciliation, collector: anytype) anyerror!void {
+pub fn visitReconciliationHistory(
+    a: std.mem.Allocator,
+    store: anytype,
+    initial: Reconciliation,
+    collector: anytype,
+) anyerror!void {
+    var retained: ?contracts.Decoded(Reconciliation) = null;
+    defer if (retained) |*decoded| decoded.deinit();
+    var next: ?Reconciliation = initial;
+    while (next) |current| {
+        const prior = try visitReconciliationNode(a, store, current, collector);
+        if (retained) |*decoded| decoded.deinit();
+        retained = prior;
+        next = if (prior) |decoded| decoded.value else null;
+    }
+}
+
+fn visitReconciliationNode(
+    a: std.mem.Allocator,
+    store: anytype,
+    current: Reconciliation,
+    collector: anytype,
+) anyerror!?contracts.Decoded(Reconciliation) {
     if (current.version != 1 or current.admission_revision == 0) return error.CorruptState;
-    const occurrence_bytes = try store.object(a, current.original_occurrence, null);
-    defer a.free(occurrence_bytes);
-    var original = try contracts.decodeOwned(occurrence.Occurrence, a, occurrence_bytes);
-    defer original.deinit();
-    if (!std.meta.eql(original.value.task, current.task) or !std.meta.eql(original.value.id, current.occurrence) or original.value.state != .unknown or !std.meta.eql(original.value.state.unknown.id, current.attempt) or !std.meta.eql(original.value.request_object, current.request)) return error.CorruptState;
-    try collector.typed(occurrence.Occurrence, current.original_occurrence, original.value);
-    const attempt_bytes = try store.object(a, current.original_attempt, null);
-    defer a.free(attempt_bytes);
-    var attempt = try contracts.decodeOwned(Attempt, a, attempt_bytes);
-    defer attempt.deinit();
-    if (!std.meta.eql(attempt.value.task, current.task) or !std.meta.eql(attempt.value.id, current.attempt) or !std.meta.eql(attempt.value.occurrence, current.occurrence) or !std.meta.eql(attempt.value.request, current.request) or !std.meta.eql(attempt.value.prepared, current.prepared) or !std.meta.eql(attempt.value.profile, current.profile) or !std.mem.eql(u8, attempt.value.capability.bytes, current.capability.bytes)) return error.CorruptState;
-    try collector.typed(Attempt, current.original_attempt, attempt.value);
-    if (current.original_capture) |ref| {
-        const bytes = try store.object(a, ref, null);
-        defer a.free(bytes);
-        var captured = try contracts.decodeOwned(Capture, a, bytes);
-        defer captured.deinit();
-        if (!std.meta.eql(captured.value.task, current.task) or !std.meta.eql(captured.value.attempt, current.attempt) or !std.meta.eql(captured.value.occurrence, current.occurrence) or current.prepared == null or !std.meta.eql(captured.value.request, current.prepared.?) or captured.value.projection != null) return error.CorruptState;
-        try collector.typed(Capture, ref, captured.value);
-    }
-    if (current.selection == .rederive and current.evidence != null) return error.CorruptState;
-    switch (current.outcome) {
-        .pending => if (current.owner_epoch == null or current.provenance != .none or current.previous != null or current.evidence != null) return error.CorruptState,
-        .unresolved => if (current.provenance != .none) return error.CorruptState,
-        .capture_admitted, .reply_settled => {
-            const provenance: @FieldType(Reconciliation, "provenance") = if (current.selection == .rederive) .rederived else .authentic;
-            if (current.provenance != provenance) return error.CorruptState;
-            if (current.owner_epoch == null) return error.CorruptState;
-            if (current.outcome == .capture_admitted and current.prepared == null) return error.CorruptState;
-            if (current.selection == .lookup and (current.evidence == null or current.owner_epoch == null)) return error.CorruptState;
-        },
-        .not_sent => |proof| if (current.selection != .lookup or current.provenance != .authoritative or current.evidence == null or !std.meta.eql(proof, current.evidence.?) or current.owner_epoch == null) return error.CorruptState,
-    }
-    if (current.outcome != .pending and current.owner_epoch != null and current.previous == null) return error.CorruptState;
+    try visitReconciliationSources(a, store, current, collector);
+    try validateReconciliationOutcome(current);
     if (current.previous) |ref| {
         const bytes = try store.object(a, ref, null);
         defer a.free(bytes);
         var prior = try contracts.decodeOwned(Reconciliation, a, bytes);
-        defer prior.deinit();
+        errdefer prior.deinit();
         // The transition graph is acyclic: pending -> completed, and then
         // capture_admitted -> reply_settled. No history-depth quota is needed.
         if (prior.value.outcome == .pending) {
-            if (current.outcome == .pending or (current.outcome == .reply_settled and current.selection != .rederive)) return error.CorruptState;
+            if (current.outcome == .pending or
+                (current.outcome == .reply_settled and
+                    current.selection != .rederive))
+                return error.CorruptState;
         } else if (prior.value.outcome == .capture_admitted) {
-            if (current.outcome != .reply_settled or current.provenance != prior.value.provenance or !std.meta.eql(current.evidence, prior.value.evidence)) return error.CorruptState;
+            if (current.outcome != .reply_settled or
+                current.provenance != prior.value.provenance or
+                !std.meta.eql(
+                    current.evidence,
+                    prior.value.evidence,
+                )) return error.CorruptState;
         } else return error.CorruptState;
         var normalized = current;
         normalized.outcome = prior.value.outcome;
@@ -628,8 +793,9 @@ pub fn visitReconciliationHistory(a: std.mem.Allocator, store: anytype, current:
         defer a.free(expected);
         if (!std.mem.eql(u8, expected, bytes)) return error.CorruptState;
         try collector.typed(Reconciliation, ref, prior.value);
-        try visitReconciliationHistory(a, store, prior.value, collector);
+        return prior;
     }
+    return null;
 }
 
 pub fn controllerExecutionIdentity(id: TaskId) Digest {
@@ -643,9 +809,17 @@ pub fn controllerExecutionIdentity(id: TaskId) Digest {
 
 /// An operation receipt retains the exact observation returned at admission,
 /// including historical work checkpoints superseded by later execution.
-pub fn visitWorkspaceReceipt(a: std.mem.Allocator, store: anytype, receipt: Receipt, collector: anytype) anyerror!void {
+pub fn visitWorkspaceReceipt(
+    a: std.mem.Allocator,
+    store: anytype,
+    receipt: Receipt,
+    collector: anytype,
+) anyerror!void {
     if (receipt.method != .workspace) {
-        if (receipt.workspace != null or receipt.workspace_kind != null or receipt.workspace_observation != null) return error.CorruptState;
+        if (receipt.workspace != null or
+            receipt.workspace_kind != null or
+            receipt.workspace_observation != null)
+            return error.CorruptState;
         return;
     }
     const id = receipt.workspace orelse return error.CorruptState;
@@ -654,27 +828,21 @@ pub fn visitWorkspaceReceipt(a: std.mem.Allocator, store: anytype, receipt: Rece
     const bytes = try store.object(a, ref, null);
     defer a.free(bytes);
     const w = @import("workspace_state.zig");
-    inline for (.{ .{ .program, w.ProgramArtifact }, .{ .work, w.WorkObservation }, .{ .value, w.ValueArtifact }, .{ .view, w.ViewArtifact }, .{ .runtime, w.Runtime }, .{ .residual, ControllerResidual }, .{ .controller, w.ControllerRealization }, .{ .candidate, w.SemanticObservation } }) |entry| {
+    inline for (.{
+        .{ .program, w.ProgramArtifact },
+        .{ .work, w.WorkObservation },
+        .{ .value, w.ValueArtifact },
+        .{ .view, w.ViewArtifact },
+        .{ .runtime, w.Runtime },
+        .{ .residual, ControllerResidual },
+        .{ .controller, w.ControllerRealization },
+        .{ .candidate, w.SemanticObservation },
+    }) |entry| {
         if (kind == entry[0]) {
             const T = entry[1];
             var decoded = try contracts.decodeOwned(T, a, bytes);
             defer decoded.deinit();
-            if (T == w.WorkObservation) {
-                const work = decoded.value.work;
-                if (!std.meta.eql(work.id, id) or !std.meta.eql(work.task, receipt.task)) return error.CorruptState;
-                if (decoded.value.occurrence) |pending| {
-                    if (!std.meta.eql(work.current_occurrence, pending.id) or !std.meta.eql(pending.task, work.task) or !std.meta.eql(pending.work, work.id)) return error.CorruptState;
-                } else if (work.current_occurrence != null) return error.CorruptState;
-            } else if (T == ControllerResidual) {
-                if (!std.meta.eql(decoded.value.id, id) or !std.meta.eql(decoded.value.task, receipt.task)) return error.CorruptState;
-            } else if (T == w.Runtime) {
-                if (!std.meta.eql(decoded.value.artifact.digest, id) or !std.meta.eql(decoded.value.task, receipt.task)) return error.CorruptState;
-            } else if (T == w.ControllerRealization) {
-                if (!std.meta.eql(controllerExecutionIdentity(receipt.task), id)) return error.CorruptState;
-            } else if (T == w.SemanticObservation) {
-                const expected = if (decoded.value.candidate) |candidate| candidate.digest else ref.digest;
-                if (!std.meta.eql(expected, id)) return error.CorruptState;
-            } else if (!std.meta.eql(ref.digest, id)) return error.CorruptState;
+            try validateWorkspaceReceiptValue(T, decoded.value, id, receipt, ref);
             try collector.typed(T, ref, decoded.value);
             return;
         }
@@ -682,7 +850,13 @@ pub fn visitWorkspaceReceipt(a: std.mem.Allocator, store: anytype, receipt: Rece
     return error.CorruptState;
 }
 
-pub fn visitWorkspaceEvent(a: std.mem.Allocator, store: anytype, event_ref: Reference, event: Event, collector: anytype) anyerror!void {
+pub fn visitWorkspaceEvent(
+    a: std.mem.Allocator,
+    store: anytype,
+    event_ref: Reference,
+    event: Event,
+    collector: anytype,
+) anyerror!void {
     for (event.workspace_publications.items) |publication| {
         const ref = try store.objectReference(publication.observation, null);
         const bytes = try store.object(a, ref, null);
@@ -745,4 +919,149 @@ test "task metadata retains resource and input identities past former capacities
     defer decoded.deinit();
     try std.testing.expectEqualDeep(task.resources, decoded.value.resources);
     try std.testing.expectEqualDeep(task.messages, decoded.value.messages);
+}
+
+fn visitReconciliationSources(
+    a: std.mem.Allocator,
+    store: anytype,
+    current: Reconciliation,
+    collector: anytype,
+) !void {
+    const occurrence_bytes = try store.object(a, current.original_occurrence, null);
+    defer a.free(occurrence_bytes);
+    var original = try contracts.decodeOwned(occurrence.Occurrence, a, occurrence_bytes);
+    defer original.deinit();
+    if (!std.meta.eql(original.value.task, current.task) or !std.meta.eql(
+        original.value.id,
+        current.occurrence,
+    ) or original.value.state != .unknown or !std.meta.eql(
+        original.value.state.unknown.id,
+        current.attempt,
+    ) or !std.meta.eql(
+        original.value.request_object,
+        current.request,
+    )) return error.CorruptState;
+    try collector.typed(occurrence.Occurrence, current.original_occurrence, original.value);
+    const attempt_bytes = try store.object(a, current.original_attempt, null);
+    defer a.free(attempt_bytes);
+    var attempt = try contracts.decodeOwned(Attempt, a, attempt_bytes);
+    defer attempt.deinit();
+    if (!std.meta.eql(attempt.value.task, current.task) or
+        !std.meta.eql(attempt.value.id, current.attempt) or
+        !std.meta.eql(attempt.value.occurrence, current.occurrence) or
+        !std.meta.eql(attempt.value.request, current.request) or
+        !std.meta.eql(attempt.value.prepared, current.prepared) or
+        !std.meta.eql(attempt.value.profile, current.profile) or
+        !std.mem.eql(
+            u8,
+            attempt.value.capability.bytes,
+            current.capability.bytes,
+        )) return error.CorruptState;
+    try collector.typed(Attempt, current.original_attempt, attempt.value);
+    try visitReconciliationCapture(a, store, current, collector);
+}
+
+fn validateReconciliationOutcome(current: Reconciliation) !void {
+    if (current.selection == .rederive and current.evidence != null) return error.CorruptState;
+    switch (current.outcome) {
+        .pending => if (current.owner_epoch == null or
+            current.provenance != .none or
+            current.previous != null or
+            current.evidence != null)
+            return error.CorruptState,
+        .unresolved => if (current.provenance != .none) return error.CorruptState,
+        .capture_admitted, .reply_settled => {
+            const provenance: @FieldType(
+                Reconciliation,
+                "provenance",
+            ) = if (current.selection == .rederive) .rederived else .authentic;
+            if (current.provenance != provenance) return error.CorruptState;
+            if (current.owner_epoch == null) return error.CorruptState;
+            if (current.outcome == .capture_admitted and
+                current.prepared == null)
+                return error.CorruptState;
+            if (current.selection == .lookup and
+                (current.evidence == null or
+                    current.owner_epoch == null))
+                return error.CorruptState;
+        },
+        .not_sent => |proof| if (current.selection != .lookup or
+            current.provenance != .authoritative or
+            current.evidence == null or
+            !std.meta.eql(
+                proof,
+                current.evidence.?,
+            ) or current.owner_epoch == null) return error.CorruptState,
+    }
+    if (current.outcome != .pending and
+        current.owner_epoch != null and
+        current.previous == null)
+        return error.CorruptState;
+}
+
+fn visitReconciliationCapture(
+    a: std.mem.Allocator,
+    store: anytype,
+    current: Reconciliation,
+    collector: anytype,
+) !void {
+    if (current.original_capture) |ref| {
+        const bytes = try store.object(a, ref, null);
+        defer a.free(bytes);
+        var captured = try contracts.decodeOwned(Capture, a, bytes);
+        defer captured.deinit();
+        if (!std.meta.eql(captured.value.task, current.task) or
+            !std.meta.eql(captured.value.attempt, current.attempt) or
+            !std.meta.eql(
+                captured.value.occurrence,
+                current.occurrence,
+            ) or current.prepared == null or !std.meta.eql(
+            captured.value.request,
+            current.prepared.?,
+        ) or captured.value.projection != null) return error.CorruptState;
+        try collector.typed(Capture, ref, captured.value);
+    }
+}
+
+fn validateWorkspaceReceiptValue(
+    comptime T: type,
+    value: T,
+    id: Digest,
+    receipt: Receipt,
+    ref: Reference,
+) !void {
+    const w = @import("workspace_state.zig");
+    if (T == w.WorkObservation) {
+        const work = value.work;
+        if (!std.meta.eql(work.id, id) or
+            !std.meta.eql(work.task, receipt.task))
+            return error.CorruptState;
+        if (value.occurrence) |pending| {
+            if (!std.meta.eql(work.current_occurrence, pending.id) or
+                !std.meta.eql(pending.task, work.task) or
+                !std.meta.eql(pending.work, work.id))
+                return error.CorruptState;
+        } else if (work.current_occurrence != null) return error.CorruptState;
+    } else if (T == ControllerResidual) {
+        if (!std.meta.eql(value.id, id) or !std.meta.eql(
+            value.task,
+            receipt.task,
+        )) return error.CorruptState;
+    } else if (T == w.Runtime) {
+        if (!std.meta.eql(value.artifact.digest, id) or !std.meta.eql(
+            value.task,
+            receipt.task,
+        )) return error.CorruptState;
+    } else if (T == w.ControllerRealization) {
+        if (!std.meta.eql(
+            controllerExecutionIdentity(receipt.task),
+            id,
+        )) return error.CorruptState;
+    } else if (T == w.SemanticObservation) {
+        const expected = if (value.candidate) |candidate|
+            candidate.digest
+        else
+            ref.digest;
+        if (!std.meta.eql(expected, id)) return error.CorruptState;
+    } else if (!std.meta.eql(ref.digest, id)) return error.CorruptState;
 }

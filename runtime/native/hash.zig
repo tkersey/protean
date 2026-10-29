@@ -18,7 +18,11 @@ export fn protean_native_sha256_init(storage: *abi.State) void {
     hasher(storage).* = Sha256.init(.{});
 }
 
-export fn protean_native_sha256_update(storage: *abi.State, bytes: [*]const u8, length: usize) void {
+export fn protean_native_sha256_update(
+    storage: *abi.State,
+    bytes: [*]const u8,
+    length: usize,
+) void {
     hasher(storage).update(bytes[0..length]);
 }
 

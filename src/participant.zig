@@ -74,7 +74,12 @@ pub fn declare(c: Context, spec: Specification) !Id {
     };
     // Reserve publication capacity before adding the source declaration.
     try c.registry.compiled_imports.ensureUnusedCapacity(stored, 1);
-    item.function = try c.builder.declare(spec.parameters, spec.result, spec.residual, spec.regions);
+    item.function = try c.builder.declare(
+        spec.parameters,
+        spec.result,
+        spec.residual,
+        spec.regions,
+    );
     item.borrows.function = item.function;
     c.registry.compiled_imports.appendAssumeCapacity(item);
     return item.function;
@@ -115,7 +120,12 @@ fn bindings(c: Context, spec: Specification, object: data.component.Object) !voi
     try inspect(c.builder.allocator(), object, temporary, c.registry, null);
 }
 
-fn roleOf(object: data.component.Object, item: admission.CompiledImport, registry: *const admission.Registry, effect: Id) !admission.Role {
+fn roleOf(
+    object: data.component.Object,
+    item: admission.CompiledImport,
+    registry: *const admission.Registry,
+    effect: Id,
+) !admission.Role {
     for (object.imports) |symbol| {
         if (symbol.reference.kind == .effect and symbol.reference.id == effect) {
             const local = try effectBinding(item.effects, symbol.name);
@@ -129,7 +139,13 @@ fn roleOf(object: data.component.Object, item: admission.CompiledImport, registr
 /// Inspect every object definition, including code hidden behind local handlers.
 /// Direct protected emissions/handlers are forbidden; only checked source helper
 /// imports can implement them. Assessment also checks every bound helper body.
-pub fn inspect(allocator: std.mem.Allocator, object: data.component.Object, item: admission.CompiledImport, registry: *const admission.Registry, allowed: ?[]const Id) !void {
+pub fn inspect(
+    allocator: std.mem.Allocator,
+    object: data.component.Object,
+    item: admission.CompiledImport,
+    registry: *const admission.Registry,
+    allowed: ?[]const Id,
+) !void {
     if (allowed != null) try assessmentInterfaces(allocator, object);
     for (object.program.effects, 0..) |_, id| {
         const role = try roleOf(object, item, registry, id);
@@ -182,7 +198,10 @@ fn assessmentInterfaces(allocator: std.mem.Allocator, object: data.component.Obj
     defer queue.deinit(allocator);
     var seen: std.AutoHashMapUnmanaged(Id, void) = .empty;
     defer seen.deinit(allocator);
-    for ([_][]const data.component.Symbol{ object.imports, object.exports }) |symbols| for (symbols) |symbol| {
+    for ([_][]const data.component.Symbol{
+        object.imports,
+        object.exports,
+    }) |symbols| for (symbols) |symbol| {
         switch (symbol.reference.kind) {
             .function => {
                 const f = program.functions[@intCast(symbol.reference.id)];

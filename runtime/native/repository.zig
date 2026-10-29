@@ -12,7 +12,11 @@ pub fn pathAllowed(path: []const u8) bool {
     if (path.len == 0 or !std.unicode.utf8ValidateSlice(path)) return false;
     for (path) |byte| if (byte < 0x20 or byte == 0x7f or byte == '\\') return false;
     var segments = std.mem.splitScalar(u8, path, '/');
-    while (segments.next()) |segment| if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return false;
+    while (segments.next()) |segment| if (segment.len == 0 or std.mem.eql(
+        u8,
+        segment,
+        ".",
+    ) or std.mem.eql(u8, segment, "..")) return false;
     return true;
 }
 
@@ -27,14 +31,30 @@ pub const Snapshot = struct {
     pub fn openBorrowed(a: std.mem.Allocator, bytes: []const u8) !Snapshot {
         return openWithOwnership(a, bytes, true);
     }
-    fn openWithOwnership(a: std.mem.Allocator, bytes: []const u8, comptime borrowed: bool) !Snapshot {
-        var record = if (borrowed) try contracts.decodeBorrowed(Record, a, bytes) else try contracts.decodeOwned(Record, a, bytes);
+    fn openWithOwnership(
+        a: std.mem.Allocator,
+        bytes: []const u8,
+        comptime borrowed: bool,
+    ) !Snapshot {
+        var record = if (borrowed) try contracts.decodeBorrowed(
+            Record,
+            a,
+            bytes,
+        ) else try contracts.decodeOwned(Record, a, bytes);
         errdefer record.deinit();
         if (record.value.version != 2) return error.UnsupportedSnapshot;
         var previous: ?[]const u8 = null;
         for (record.value.files.items) |file| {
-            if (!pathAllowed(file.path.bytes) or (previous != null and !std.mem.lessThan(u8, previous.?, file.path.bytes)) or
-                !std.mem.eql(u8, &storage.digest(file.contents.bytes), &file.sha256)) return error.InvalidSnapshot;
+            if (!pathAllowed(file.path.bytes) or (previous != null and !std.mem.lessThan(
+                u8,
+                previous.?,
+                file.path.bytes,
+            )) or
+                !std.mem.eql(
+                    u8,
+                    &storage.digest(file.contents.bytes),
+                    &file.sha256,
+                )) return error.InvalidSnapshot;
             previous = file.path.bytes;
         }
         return .{ .decoded = record, .identity = storage.digest(bytes) };
@@ -74,13 +94,23 @@ const Collector = struct {
     fn walk(self: *Collector, root: std.Io.Dir) !void {
         // Iterators reset their buffer pointer on next(), so moving this stack
         // is safe. Directory handles are owned until popped, including errors.
-        const Frame = struct { directory: std.Io.Dir, prefix: []const u8, iterator: std.Io.Dir.Iterator, owned: bool };
+        const Frame = struct {
+            directory: std.Io.Dir,
+            prefix: []const u8,
+            iterator: std.Io.Dir.Iterator,
+            owned: bool,
+        };
         var stack: std.ArrayList(Frame) = .empty;
         defer {
             for (stack.items) |frame| if (frame.owned) frame.directory.close(self.io);
             stack.deinit(self.allocator);
         }
-        try stack.append(self.allocator, .{ .directory = root, .prefix = "", .iterator = root.iterate(), .owned = false });
+        try stack.append(self.allocator, .{
+            .directory = root,
+            .prefix = "",
+            .iterator = root.iterate(),
+            .owned = false,
+        });
         while (stack.items.len != 0) {
             const top = &stack.items[stack.items.len - 1];
             const entry = (try top.iterator.next(self.io)) orelse {
@@ -92,43 +122,85 @@ const Collector = struct {
             const prefix = top.prefix;
             // These named administrative/build trees are outside this profile.
             // Count every excluded entry and expose it in the frozen record.
-            if (std.mem.eql(u8, entry.name, ".git") or std.mem.eql(u8, entry.name, ".zig-cache") or std.mem.eql(u8, entry.name, "zig-out") or std.mem.eql(u8, entry.name, "node_modules")) {
+            if (std.mem.eql(u8, entry.name, ".git") or
+                std.mem.eql(u8, entry.name, ".zig-cache") or
+                std.mem.eql(u8, entry.name, "zig-out") or
+                std.mem.eql(u8, entry.name, "node_modules"))
+            {
                 self.excluded = try std.math.add(u64, self.excluded, 1);
                 continue;
             }
-            const path = if (prefix.len == 0) try self.allocator.dupe(u8, entry.name) else try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, entry.name });
+            const path = if (prefix.len == 0) try self.allocator.dupe(
+                u8,
+                entry.name,
+            ) else try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, entry.name });
             if (!pathAllowed(path)) return error.InvalidSnapshotPath;
             switch (entry.kind) {
                 .directory => {
-                    const child = try directory.openDir(self.io, entry.name, .{ .iterate = true, .follow_symlinks = false });
+                    const child = try directory.openDir(self.io, entry.name, .{
+                        .iterate = true,
+                        .follow_symlinks = false,
+                    });
                     errdefer child.close(self.io);
-                    try stack.append(self.allocator, .{ .directory = child, .prefix = path, .iterator = child.iterate(), .owned = true });
+                    try stack.append(self.allocator, .{
+                        .directory = child,
+                        .prefix = path,
+                        .iterator = child.iterate(),
+                        .owned = true,
+                    });
                 },
-                .file => {
-                    const name = try self.allocator.dupeSentinel(u8, entry.name, 0);
-                    // A path can change after readdir. O_NONBLOCK prevents a
-                    // replacement FIFO from blocking before fstat rejects it.
-                    const fd = c.openat(directory.handle, name.ptr, c.O_RDONLY | c.O_NOFOLLOW | c.O_CLOEXEC | c.O_NONBLOCK | c.O_NOCTTY);
-                    if (fd < 0) return error.SnapshotIo;
-                    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
-                    defer file.close(self.io);
-                    const before = try file.stat(self.io);
-                    if (before.kind != .file) return error.UnsupportedSnapshotEntry;
-                    var buffer: [4096]u8 = undefined;
-                    var reader = file.reader(self.io, &buffer);
-                    const bytes = try self.payload_allocator.alloc(u8, std.math.cast(usize, before.size) orelse return error.SnapshotCapacity);
-                    errdefer self.payload_allocator.free(bytes);
-                    reader.interface.readSliceAll(bytes) catch |err| return if (err == error.EndOfStream) error.SnapshotChanged else err;
-                    if (reader.interface.takeByte()) |_| return error.SnapshotChanged else |err| if (err != error.EndOfStream) return err;
-                    const after = try file.stat(self.io);
-                    if (bytes.len != before.size or before.size != after.size or before.inode != after.inode or !std.meta.eql(before.mtime, after.mtime) or !std.meta.eql(before.ctime, after.ctime)) return error.SnapshotChanged;
-                    try self.files.append(self.allocator, .{ .path = .{ .bytes = path }, .sha256 = storage.digest(bytes), .contents = .{ .bytes = bytes } });
-                },
+                .file => try self.collectFile(directory, entry.name, path),
                 // In particular, never follow repository symlinks or open a
                 // FIFO/device that could block or access another resource.
                 else => return error.UnsupportedSnapshotEntry,
             }
         }
+    }
+    fn collectFile(
+        self: *Collector,
+        directory: std.Io.Dir,
+        name_bytes: []const u8,
+        path: []const u8,
+    ) !void {
+        const name = try self.allocator.dupeSentinel(u8, name_bytes, 0);
+        // A path can change after readdir. O_NONBLOCK prevents a
+        // replacement FIFO from blocking before fstat rejects it.
+        const fd = c.openat(
+            directory.handle,
+            name.ptr,
+            c.O_RDONLY | c.O_NOFOLLOW | c.O_CLOEXEC | c.O_NONBLOCK | c.O_NOCTTY,
+        );
+        if (fd < 0) return error.SnapshotIo;
+        const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+        defer file.close(self.io);
+        const before = try file.stat(self.io);
+        if (before.kind != .file) return error.UnsupportedSnapshotEntry;
+        var buffer: [4096]u8 = undefined;
+        var reader = file.reader(self.io, &buffer);
+        const bytes = try self.payload_allocator.alloc(
+            u8,
+            std.math.cast(usize, before.size) orelse return error.SnapshotCapacity,
+        );
+        errdefer self.payload_allocator.free(bytes);
+        reader.interface.readSliceAll(bytes) catch |err| return switch (err) {
+            error.EndOfStream => error.SnapshotChanged,
+            else => err,
+        };
+        if (reader.interface.takeByte()) |_| {
+            return error.SnapshotChanged;
+        } else |err| if (err != error.EndOfStream) return err;
+        const after = try file.stat(self.io);
+        if (bytes.len != before.size or
+            before.size != after.size or
+            before.inode != after.inode or
+            !std.meta.eql(before.mtime, after.mtime) or
+            !std.meta.eql(before.ctime, after.ctime))
+        {
+            return error.SnapshotChanged;
+        }
+        try self.files.append(self.allocator, .{ .path = .{
+            .bytes = path,
+        }, .sha256 = storage.digest(bytes), .contents = .{ .bytes = bytes } });
     }
 };
 
@@ -138,12 +210,24 @@ pub fn capture(a: std.mem.Allocator, io: std.Io, root: []const u8) ![]u8 {
 
 /// Keep temporary file buffers out of an output arena whose lifetime is the
 /// whole task profile. Actual allocation failure remains visible.
-pub fn captureWithScratch(a: std.mem.Allocator, scratch: std.mem.Allocator, io: std.Io, root: []const u8) ![]u8 {
+pub fn captureWithScratch(
+    a: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    io: std.Io,
+    root: []const u8,
+) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(scratch);
     defer arena.deinit();
-    const directory = try std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true, .follow_symlinks = false });
+    const directory = try std.Io.Dir.cwd().openDir(io, root, .{
+        .iterate = true,
+        .follow_symlinks = false,
+    });
     defer directory.close(io);
-    var collector: Collector = .{ .allocator = arena.allocator(), .payload_allocator = scratch, .io = io };
+    var collector: Collector = .{
+        .allocator = arena.allocator(),
+        .payload_allocator = scratch,
+        .io = io,
+    };
     defer for (collector.files.items) |file| scratch.free(file.contents.bytes);
     try collector.walk(directory);
     std.mem.sort(File, collector.files.items, {}, struct {
@@ -151,7 +235,13 @@ pub fn captureWithScratch(a: std.mem.Allocator, scratch: std.mem.Allocator, io: 
             return std.mem.lessThan(u8, left.path.bytes, right.path.bytes);
         }
     }.less);
-    const bytes = try contracts.encodeOwned(Record, a, .{ .version = 2, .excluded_entries = collector.excluded, .files = .{ .items = collector.files.items } });
+    const bytes = try contracts.encodeOwned(
+        Record,
+        a,
+        .{ .version = 2, .excluded_entries = collector.excluded, .files = .{
+            .items = collector.files.items,
+        } },
+    );
     errdefer a.free(bytes);
     return bytes;
 }
@@ -159,8 +249,18 @@ pub fn captureWithScratch(a: std.mem.Allocator, scratch: std.mem.Allocator, io: 
 test "snapshot admission binds sorted paths and exact frozen content" {
     const a = std.testing.allocator;
     const source = "fn main() void {}\n";
-    var files = [_]File{.{ .path = .{ .bytes = "src/main.zig" }, .sha256 = storage.digest(source), .contents = .{ .bytes = source } }};
-    const bytes = try contracts.encodeOwned(Record, a, .{ .version = 2, .excluded_entries = 0, .files = .{ .items = &files } });
+    var files = [_]File{
+        .{
+            .path = .{ .bytes = "src/main.zig" },
+            .sha256 = storage.digest(source),
+            .contents = .{ .bytes = source },
+        },
+    };
+    const bytes = try contracts.encodeOwned(
+        Record,
+        a,
+        .{ .version = 2, .excluded_entries = 0, .files = .{ .items = &files } },
+    );
     defer a.free(bytes);
     var snapshot = try Snapshot.open(a, bytes);
     defer snapshot.deinit();
@@ -173,12 +273,26 @@ test "snapshot admission binds sorted paths and exact frozen content" {
     try std.testing.expectEqualStrings(source, snapshot.get("src/main.zig").?.contents.bytes);
     try std.testing.expect(snapshot.get("../src/main.zig") == null);
     files[0].sha256[0] ^= 1;
-    const changed = try contracts.encodeOwned(Record, a, .{ .version = 2, .excluded_entries = 0, .files = .{ .items = &files } });
+    const changed = try contracts.encodeOwned(
+        Record,
+        a,
+        .{ .version = 2, .excluded_entries = 0, .files = .{ .items = &files } },
+    );
     defer a.free(changed);
     try std.testing.expectError(error.InvalidSnapshot, Snapshot.open(a, changed));
     try std.testing.expectError(error.InvalidSnapshot, Snapshot.openBorrowed(a, changed));
-    try std.testing.expectError(error.Truncated, Snapshot.openBorrowed(a, bytes[0 .. bytes.len - 1]));
-    for ([_][]const u8{ "/absolute", "../escape", "a/../b", "a//b", "a\\b", "./a" }) |path| try std.testing.expect(!pathAllowed(path));
+    try std.testing.expectError(
+        error.Truncated,
+        Snapshot.openBorrowed(a, bytes[0 .. bytes.len - 1]),
+    );
+    for ([_][]const u8{
+        "/absolute",
+        "../escape",
+        "a/../b",
+        "a//b",
+        "a\\b",
+        "./a",
+    }) |path| try std.testing.expect(!pathAllowed(path));
     try std.testing.expect(pathAllowed("src/雪.zig"));
 }
 
@@ -231,7 +345,11 @@ test "capture freezes bytes, reports exclusions and refuses repository symlinks"
 /// Application-owned records keep their published schema identities.
 pub fn Tools(comptime t: type) type {
     return struct {
-        pub fn list(a: std.mem.Allocator, snapshot: Snapshot, request: t.ListRequest) !t.ListObservation {
+        pub fn list(
+            a: std.mem.Allocator,
+            snapshot: Snapshot,
+            request: t.ListRequest,
+        ) !t.ListObservation {
             // These are bounded lexical selectors over admitted snapshot paths, not
             // filesystem paths. A directory prefix such as "src/" is valid; a prefix
             // that matches no admitted path simply produces an empty page.
@@ -244,26 +362,47 @@ pub fn Tools(comptime t: type) type {
                     truncated = true;
                     break;
                 }
-                try entries.append(a, .{ .path = .{ .bytes = file.path.bytes }, .bytes = file.contents.bytes.len });
+                try entries.append(a, .{
+                    .path = .{ .bytes = file.path.bytes },
+                    .bytes = file.contents.bytes.len,
+                });
             }
             const value: t.Listing = .{
                 .entries = .{ .items = entries.items },
                 .truncated = truncated,
-                .next = .{ .bytes = if (truncated) entries.items[entries.items.len - 1].path.bytes else "" },
+                .next = .{
+                    .bytes = if (truncated) entries.items[entries.items.len - 1].path.bytes else "",
+                },
             };
             return .{ .value = value, .model_text = try text(t.Listing, a, value) };
         }
 
-        pub fn read(a: std.mem.Allocator, snapshot: Snapshot, request: t.ReadRequest) !t.ReadObservation {
+        pub fn read(
+            a: std.mem.Allocator,
+            snapshot: Snapshot,
+            request: t.ReadRequest,
+        ) !t.ReadObservation {
             const value: t.ReadResult = value: {
-                if (!pathAllowed(request.path.bytes)) break :value .{ .invalid = .{ .bytes = "Invalid logical snapshot path." } };
-                const file = snapshot.get(request.path.bytes) orelse break :value .{ .missing = request.path };
-                if (request.maximum == 0 or request.maximum > 4096 or request.start > file.contents.bytes.len)
-                    break :value .{ .invalid = .{ .bytes = "Read requires maximum 1..4096 and an offset within the file." } };
+                if (!pathAllowed(request.path.bytes)) break :value .{ .invalid = .{
+                    .bytes = "Invalid logical snapshot path.",
+                } };
+                const file = snapshot.get(request.path.bytes) orelse
+                    break :value .{ .missing = request.path };
+                if (request.maximum == 0 or
+                    request.maximum > 4096 or
+                    request.start > file.contents.bytes.len)
+                    break :value .{ .invalid = .{
+                        .bytes = "Read requires maximum 1..4096 and an offset within the file.",
+                    } };
                 const start: usize = @intCast(request.start);
-                const end = start + @min(@as(usize, request.maximum), file.contents.bytes.len - start);
+                const end = start + @min(
+                    @as(usize, request.maximum),
+                    file.contents.bytes.len - start,
+                );
                 const content = file.contents.bytes[start..end];
-                if (!std.unicode.utf8ValidateSlice(content)) break :value .{ .invalid = .{ .bytes = "Selected byte window is not complete UTF-8; adjust its boundaries." } };
+                if (!std.unicode.utf8ValidateSlice(content)) break :value .{ .invalid = .{
+                    .bytes = "Selected byte window is not complete UTF-8; adjust its boundaries.",
+                } };
                 const hex = std.fmt.bytesToHex(file.sha256, .lower);
                 break :value .{ .found = .{
                     .snapshot = snapshot.identity,
@@ -279,7 +418,10 @@ pub fn Tools(comptime t: type) type {
         }
 
         fn text(comptime T: type, a: std.mem.Allocator, value: T) !t.P.ResultText {
-            const bytes = try @import("json.zig").canonical(a, try @import("values.zig").toJson(T, a, value));
+            const bytes = try @import("json.zig").canonical(
+                a,
+                try @import("values.zig").toJson(T, a, value),
+            );
             if (contracts.exceeds(bytes.len, t.P.ResultText.max_length)) return error.Capacity;
             return .{ .bytes = bytes };
         }

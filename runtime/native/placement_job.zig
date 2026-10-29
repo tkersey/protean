@@ -4,7 +4,14 @@ const std = @import("std");
 const p = @import("placement.zig");
 const transport = @import("placement_transport.zig");
 const contracts = @import("protean_contracts");
-pub const Input = union(enum) { move: struct { offer: p.Signed(p.Offer), path: contracts.Utf8 }, withdraw: p.Signed(p.Offer), control: struct { message: p.Signed(p.Control), route: contracts.Vector(p.Succession, null), lineage: contracts.Vector(p.ControllerTransition, null) } };
+pub const Input = union(enum) { move: struct {
+    offer: p.Signed(p.Offer),
+    path: contracts.Utf8,
+}, withdraw: p.Signed(p.Offer), control: struct {
+    message: p.Signed(p.Control),
+    route: contracts.Vector(p.Succession, null),
+    lineage: contracts.Vector(p.ControllerTransition, null),
+} };
 pub const Result = union(enum) { decision: p.Signed(p.Decision), report: []u8 };
 pub const Job = struct {
     allocator: std.mem.Allocator,
@@ -30,40 +37,93 @@ pub const Job = struct {
     fn exchange(self: *Job) !Result {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
-        var connection = try transport.Connection.openCancelable(arena.allocator(), self.io, self.peer, &self.cancelled);
+        var connection = try transport.Connection.openCancelable(
+            arena.allocator(),
+            self.io,
+            self.peer,
+            &self.cancelled,
+        );
         defer connection.deinit();
         var input = try contracts.decodeOwned(Input, arena.allocator(), self.owned_input);
         defer input.deinit();
         return switch (input.value) {
-            .move => |move| .{ .decision = try connection.transfer(arena.allocator(), move.offer, move.path.bytes) },
+            .move => |move| .{
+                .decision = try connection.transfer(arena.allocator(), move.offer, move.path.bytes),
+            },
             .withdraw => |offer| withdrawn: {
-                const json = try connection.request(arena.allocator(), .{ .refuse = .{ .peer = .{ .bytes = connection.channel.remote_name }, .offer = offer, .reason = .withdrawn } });
-                const decision = try @import("values.zig").fromJson(p.Signed(p.Decision), arena.allocator(), json);
+                const json = try connection.request(arena.allocator(), .{ .refuse = .{
+                    .peer = .{ .bytes = connection.channel.remote_name },
+                    .offer = offer,
+                    .reason = .withdrawn,
+                } });
+                const decision = try @import("values.zig").fromJson(
+                    p.Signed(p.Decision),
+                    arena.allocator(),
+                    json,
+                );
                 try p.matchDecision(arena.allocator(), offer.value, decision);
                 break :withdrawn .{ .decision = decision };
             },
-            .control => |selected| control_result: {
-                const control = selected.message;
-                const remote = try @import("values.zig").fromJson(?p.Custody, arena.allocator(), try connection.request(arena.allocator(), .{ .status = .{ .task = control.value.subject.task } })) orelse return error.InvalidTransfer;
-                for (selected.lineage.items) |succession| {
-                    if (succession.epoch() <= remote.epoch) continue;
-                    switch (succession) {
-                        .move => |move| _ = try connection.request(arena.allocator(), .{ .follow_controller_proof = .{ .offer = move.offer, .decision = move.decision } }),
-                        .behavior => |behavior| _ = try connection.request(arena.allocator(), .{ .follow_controller_behavior = behavior }),
-                    }
-                }
-                const head = try p.routeHead(arena.allocator(), control.value, selected.route.items);
-                if (!std.meta.eql(head.site, self.peer.site)) return error.InvalidRemoteCommand;
-                const json = try connection.request(arena.allocator(), .{ .resolve_control = .{ .peer = .{ .bytes = connection.channel.remote_name }, .control = control, .route = selected.route } });
-                const resolution = try @import("values.zig").fromJson(p.ControlResolution, arena.allocator(), json);
-                switch (resolution) {
-                    .report => |report| try p.matchReport(arena.allocator(), control.value, selected.route.items, report),
-                    .next => |next| _ = try p.routeNext(arena.allocator(), control.value.subject, head, next),
-                }
-                break :control_result .{ .report = try contracts.encodeOwned(p.ControlResolution, self.allocator, resolution) };
-            },
+            .control => |selected| try self.exchangeControl(
+                arena.allocator(),
+                &connection,
+                selected,
+            ),
         };
     }
+    fn exchangeControl(
+        self: *Job,
+        a: std.mem.Allocator,
+        connection: *transport.Connection,
+        selected: @FieldType(Input, "control"),
+    ) !Result {
+        const control = selected.message;
+        const remote = try @import("values.zig").fromJson(
+            ?p.Custody,
+            a,
+            try connection.request(a, .{ .status = .{ .task = control.value.subject.task } }),
+        ) orelse return error.InvalidTransfer;
+        for (selected.lineage.items) |succession| {
+            if (succession.epoch() <= remote.epoch) continue;
+            switch (succession) {
+                .move => |move| _ = try connection.request(
+                    a,
+                    .{ .follow_controller_proof = .{
+                        .offer = move.offer,
+                        .decision = move.decision,
+                    } },
+                ),
+                .behavior => |behavior| _ = try connection.request(a, .{
+                    .follow_controller_behavior = behavior,
+                }),
+            }
+        }
+        const head = try p.routeHead(a, control.value, selected.route.items);
+        if (!std.meta.eql(head.site, self.peer.site)) return error.InvalidRemoteCommand;
+        const json = try connection.request(a, .{ .resolve_control = .{
+            .peer = .{ .bytes = connection.channel.remote_name },
+            .control = control,
+            .route = selected.route,
+        } });
+        const resolution = try @import("values.zig").fromJson(p.ControlResolution, a, json);
+        switch (resolution) {
+            .report => |report| try p.matchReport(
+                a,
+                control.value,
+                selected.route.items,
+                report,
+            ),
+            .next => |next| _ = try p.routeNext(a, control.value.subject, head, next),
+        }
+        return .{
+            .report = try contracts.encodeOwned(
+                p.ControlResolution,
+                self.allocator,
+                resolution,
+            ),
+        };
+    }
+
     fn run(self: *Job) void {
         self.result = self.exchange();
         self.finished.store(true, .release);
@@ -90,10 +150,21 @@ test "placement transport cancellation joins without claiming a decision" {
         .disclosure_policy = @splat(0),
         .context = undefined,
         .disclose = struct {
-            fn check(_: *anyopaque, _: p.Subject, _: []const @import("state.zig").Reference) !void {}
+            fn check(
+                _: *anyopaque,
+                _: p.Subject,
+                _: []const @import("state.zig").Reference,
+            ) !void {}
         }.check,
         .channel = .{ .argv = &.{"/usr/bin/false"}, .remote_name = "source", .timeout_ms = 1000 },
     };
-    const job = try Job.start(std.testing.allocator, std.testing.io, peer, .{ .move = .{ .offer = std.mem.zeroes(p.Signed(p.Offer)), .path = .{ .bytes = "unused" } } });
+    const job = try Job.start(
+        std.testing.allocator,
+        std.testing.io,
+        peer,
+        .{ .move = .{ .offer = std.mem.zeroes(
+            p.Signed(p.Offer),
+        ), .path = .{ .bytes = "unused" } } },
+    );
     job.deinit();
 }

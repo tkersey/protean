@@ -7,7 +7,14 @@ comptime {
     }) |name| {
         if (@hasDecl(protean, name)) @compileError("retired Protean export: " ++ name);
     }
-    for (.{ "Context", "system", "compile", "participant", "responders", "adaptive_controls" }) |name| {
+    for (.{
+        "Context",
+        "system",
+        "compile",
+        "participant",
+        "responders",
+        "adaptive_controls",
+    }) |name| {
         if (!@hasDecl(protean, name)) @compileError("missing adaptive Protean export: " ++ name);
     }
 }

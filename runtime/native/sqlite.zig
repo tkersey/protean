@@ -3,7 +3,15 @@
 const std = @import("std");
 const c = @import("native_c");
 var in_use: std.atomic.Value(bool) = .init(false);
-pub const Error = error{ StorageUnavailable, CorruptState, Capacity, Constraint, AlreadyOpen, Closed, Busy } || std.mem.Allocator.Error;
+pub const Error = error{
+    StorageUnavailable,
+    CorruptState,
+    Capacity,
+    Constraint,
+    AlreadyOpen,
+    Closed,
+    Busy,
+} || std.mem.Allocator.Error;
 
 fn result(code: c_int) Error!void {
     return switch (code & 0xff) {
@@ -36,7 +44,12 @@ pub const Database = opaque {
     /// must acquire the namespace's OS lock before opening its database.
     pub fn open(a: std.mem.Allocator, path: []const u8, create: bool) Error!*Database {
         if (std.mem.indexOfScalar(u8, path, 0) != null) return error.StorageUnavailable;
-        if (in_use.cmpxchgStrong(false, true, .acquire, .monotonic) != null) return error.AlreadyOpen;
+        if (in_use.cmpxchgStrong(
+            false,
+            true,
+            .acquire,
+            .monotonic,
+        ) != null) return error.AlreadyOpen;
         errdefer in_use.store(false, .release);
         const storage = try a.create(Storage);
         errdefer a.destroy(storage);
@@ -46,7 +59,10 @@ pub const Database = opaque {
         const name = try a.dupeSentinel(u8, path, 0);
         defer a.free(name);
         var db: ?*c.sqlite3 = null;
-        const flags: c_int = c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_FULLMUTEX | (if (create) @as(c_int, c.SQLITE_OPEN_CREATE) else 0);
+        const flags: c_int = c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_FULLMUTEX | (if (create) @as(
+            c_int,
+            c.SQLITE_OPEN_CREATE,
+        ) else 0);
         const opened = c.sqlite3_open_v2(name.ptr, &db, flags, null);
         errdefer if (db) |ptr| {
             _ = c.sqlite3_close(ptr);
@@ -84,9 +100,25 @@ pub const Database = opaque {
         return @intCast(c.sqlite3_changes64(try self.handle()));
     }
 
-    pub fn openBlob(self: *Database, comptime table: [:0]const u8, comptime column: [:0]const u8, row: i64, writable: bool) Error!Blob {
+    pub fn openBlob(
+        self: *Database,
+        comptime table: [:0]const u8,
+        comptime column: [:0]const u8,
+        row: i64,
+        writable: bool,
+    ) Error!Blob {
         var blob: ?*c.sqlite3_blob = null;
-        try result(c.sqlite3_blob_open(try self.handle(), "main", table.ptr, column.ptr, row, @intFromBool(writable), &blob));
+        try result(
+            c.sqlite3_blob_open(
+                try self.handle(),
+                "main",
+                table.ptr,
+                column.ptr,
+                row,
+                @intFromBool(writable),
+                &blob,
+            ),
+        );
         return .{ .handle = blob orelse return error.StorageUnavailable };
     }
 
@@ -94,17 +126,48 @@ pub const Database = opaque {
     pub fn exec(self: *Database, comptime sql: [:0]const u8) Error!void {
         try result(c.sqlite3_exec(try self.handle(), sql.ptr, null, null, null));
     }
-    pub fn prepare(self: *Database, comptime sql: [:0]const u8, params: []const Param) Error!Statement {
+    pub fn prepare(
+        self: *Database,
+        comptime sql: [:0]const u8,
+        params: []const Param,
+    ) Error!Statement {
         var statement: ?*c.sqlite3_stmt = null;
-        try result(c.sqlite3_prepare_v3(try self.handle(), sql.ptr, @intCast(sql.len), 0, &statement, null));
+        try result(
+            c.sqlite3_prepare_v3(
+                try self.handle(),
+                sql.ptr,
+                @intCast(sql.len),
+                0,
+                &statement,
+                null,
+            ),
+        );
         const stmt = statement orelse return error.StorageUnavailable;
         errdefer _ = c.sqlite3_finalize(stmt);
-        if (c.sqlite3_bind_parameter_count(stmt) != @as(c_int, @intCast(params.len))) return error.StorageUnavailable;
+        if (c.sqlite3_bind_parameter_count(stmt) != @as(c_int, @intCast(params.len)))
+            return error.StorageUnavailable;
         for (params, 1..) |param, i| {
             const index: c_int = @intCast(i);
             try result(switch (param) {
-                .text => |bytes| c.sqlite3_bind_text64(stmt, index, if (bytes.len == 0) "" else bytes.ptr, bytes.len, c.SQLITE_STATIC, c.SQLITE_UTF8),
-                .blob => |bytes| if (bytes.len == 0) c.sqlite3_bind_zeroblob64(stmt, index, 0) else c.sqlite3_bind_blob64(stmt, index, bytes.ptr, bytes.len, c.SQLITE_STATIC),
+                .text => |bytes| c.sqlite3_bind_text64(
+                    stmt,
+                    index,
+                    if (bytes.len == 0) "" else bytes.ptr,
+                    bytes.len,
+                    c.SQLITE_STATIC,
+                    c.SQLITE_UTF8,
+                ),
+                .blob => |bytes| if (bytes.len == 0) c.sqlite3_bind_zeroblob64(
+                    stmt,
+                    index,
+                    0,
+                ) else c.sqlite3_bind_blob64(
+                    stmt,
+                    index,
+                    bytes.ptr,
+                    bytes.len,
+                    c.SQLITE_STATIC,
+                ),
                 .integer => |value| c.sqlite3_bind_int64(stmt, index, value),
                 .null => c.sqlite3_bind_null(stmt, index),
             });
@@ -132,11 +195,15 @@ pub const Blob = struct {
     }
     pub fn read(self: Blob, bytes: []u8, offset: usize) Error!void {
         if (offset > self.length() or bytes.len > self.length() - offset) return error.CorruptState;
-        if (bytes.len != 0) try result(c.sqlite3_blob_read(self.handle, bytes.ptr, @intCast(bytes.len), @intCast(offset)));
+        if (bytes.len != 0) try result(
+            c.sqlite3_blob_read(self.handle, bytes.ptr, @intCast(bytes.len), @intCast(offset)),
+        );
     }
     pub fn write(self: Blob, bytes: []const u8, offset: usize) Error!void {
         if (offset > self.length() or bytes.len > self.length() - offset) return error.CorruptState;
-        if (bytes.len != 0) try result(c.sqlite3_blob_write(self.handle, bytes.ptr, @intCast(bytes.len), @intCast(offset)));
+        if (bytes.len != 0) try result(
+            c.sqlite3_blob_write(self.handle, bytes.ptr, @intCast(bytes.len), @intCast(offset)),
+        );
     }
 };
 
@@ -160,7 +227,10 @@ pub const Statement = struct {
         }
     }
     pub fn integer(self: Statement, index: c_int) Error!i64 {
-        if (c.sqlite3_column_type(self.handle, index) != c.SQLITE_INTEGER) return error.CorruptState;
+        if (c.sqlite3_column_type(
+            self.handle,
+            index,
+        ) != c.SQLITE_INTEGER) return error.CorruptState;
         return c.sqlite3_column_int64(self.handle, index);
     }
     pub fn bytes(self: Statement, index: c_int) Error![]const u8 {

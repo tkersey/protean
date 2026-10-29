@@ -8,12 +8,17 @@ pub fn executable(io: std.Io) !Identity {
     const file = try std.process.openExecutable(io, .{});
     defer file.close(io);
     const before = try file.stat(io);
-    if (before.kind != .file or before.size == 0 or before.size > 256 * 1024 * 1024) return error.UnsupportedNativeArtifact;
+    if (before.kind != .file or
+        before.size == 0 or
+        before.size > 256 * 1024 * 1024)
+    {
+        return error.UnsupportedNativeArtifact;
+    }
     var hash: hash_abi.State = undefined;
     hash_abi.protean_native_sha256_init(&hash);
     var buffer: [64 * 1024]u8 = undefined;
     var length: u64 = 0;
-    while (true) {
+    while (length <= before.size) {
         const count = file.readStreaming(io, &.{&buffer}) catch |err| switch (err) {
             error.EndOfStream => break,
             else => return err,
@@ -24,7 +29,13 @@ pub fn executable(io: std.Io) !Identity {
         hash_abi.protean_native_sha256_update(&hash, &buffer, count);
     }
     const after = try file.stat(io);
-    if (length != before.size or before.inode != after.inode or before.size != after.size or !std.meta.eql(before.mtime, after.mtime) or !std.meta.eql(before.ctime, after.ctime)) return error.NativeArtifactChanged;
+    if (length != before.size or
+        before.inode != after.inode or
+        before.size != after.size or
+        !std.meta.eql(
+            before.mtime,
+            after.mtime,
+        ) or !std.meta.eql(before.ctime, after.ctime)) return error.NativeArtifactChanged;
     var result: Identity = .{ .sha256 = undefined, .bytes = length };
     hash_abi.protean_native_sha256_final(&hash, &result.sha256);
     return result;

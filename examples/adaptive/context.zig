@@ -25,82 +25,452 @@ fn profile(policy: P.AdaptivePolicy, id: []const u8) !A.Profile {
     for (policy.profiles.items) |entry| if (equal(id, entry.id.bytes)) return entry;
     return error.UnknownInferenceProfile;
 }
-pub fn instructions(a: std.mem.Allocator, policy: P.AdaptivePolicy, catalog: P.AdaptiveCatalog) !P.MessageText {
+pub fn instructions(
+    a: std.mem.Allocator,
+    policy: P.AdaptivePolicy,
+    catalog: P.AdaptiveCatalog,
+) !P.MessageText {
     // Metadata never includes the instruction bodies or resource filesystem paths.
-    const Profile = struct { id: contracts.Text(64), model: contracts.Text(128), efforts: @FieldType(A.Profile, "efforts") };
-    const Skill = struct { id: contracts.Text(64), version: contracts.Text(64), description: contracts.Text(256) };
+    const Profile = struct {
+        id: contracts.Text(64),
+        model: contracts.Text(128),
+        efforts: @FieldType(A.Profile, "efforts"),
+    };
+    const Skill = struct {
+        id: contracts.Text(64),
+        version: contracts.Text(64),
+        description: contracts.Text(256),
+    };
     const profiles = try a.alloc(Profile, policy.profiles.items.len);
-    for (profiles, policy.profiles.items) |*out, entry| out.* = .{ .id = entry.id, .model = entry.model, .efforts = entry.efforts };
+    for (profiles, policy.profiles.items) |*out, entry| out.* = .{
+        .id = entry.id,
+        .model = entry.model,
+        .efforts = entry.efforts,
+    };
     const skills = try a.alloc(Skill, catalog.skills.items.len);
-    for (skills, catalog.skills.items) |*out, entry| out.* = .{ .id = entry.id, .version = entry.version, .description = entry.description };
-    const Catalog = struct { profiles: contracts.Vector(Profile, null), skills: contracts.Vector(Skill, null) };
-    const metadata = try native.json.canonical(a, try native.values.toJson(Catalog, a, .{ .profiles = .{ .items = profiles }, .skills = .{ .items = skills } }));
+    for (skills, catalog.skills.items) |*out, entry| out.* = .{
+        .id = entry.id,
+        .version = entry.version,
+        .description = entry.description,
+    };
+    const Catalog = struct {
+        profiles: contracts.Vector(Profile, null),
+        skills: contracts.Vector(Skill, null),
+    };
+    const metadata = try native.json.canonical(
+        a,
+        try native.values.toJson(Catalog, a, .{ .profiles = .{
+            .items = profiles,
+        }, .skills = .{ .items = skills } }),
+    );
     const text = try std.fmt.allocPrint(a, "Approved catalog:\n{s}", .{metadata});
     return .{ .bytes = text };
 }
 
 pub fn declaration() native.Declaration {
-    return .{ .identity = t.prepare_identity, .resource_role = "context", .kind = .leaf, .background = true, .payload_schema = struct {
-        fn schema(a: std.mem.Allocator) ![]u8 {
-            return native.values.schemaBytes(t.Preparation, a);
-        }
-    }.schema, .resume_schema = struct {
-        fn schema(a: std.mem.Allocator) ![]u8 {
-            return native.values.schemaBytes(t.PreparationResult, a);
-        }
-    }.schema, .capture = .{ .prepare = prepare, .acquire = acquire, .interpret = interpret, .dependencies = dependencies } };
+    return .{
+        .identity = t.prepare_identity,
+        .resource_role = "context",
+        .kind = .leaf,
+        .background = true,
+        .payload_schema = struct {
+            fn schema(a: std.mem.Allocator) ![]u8 {
+                return native.values.schemaBytes(t.Preparation, a);
+            }
+        }.schema,
+        .resume_schema = struct {
+            fn schema(a: std.mem.Allocator) ![]u8 {
+                return native.values.schemaBytes(t.PreparationResult, a);
+            }
+        }.schema,
+        .capture = .{
+            .prepare = prepare,
+            .acquire = acquire,
+            .interpret = interpret,
+            .dependencies = dependencies,
+        },
+    };
 }
 
-fn receiptText(a: std.mem.Allocator, receipt: t.ControlReceipt, control: t.controls.State) !P.ResultText {
+fn receiptText(
+    a: std.mem.Allocator,
+    receipt: t.ControlReceipt,
+    control: t.controls.State,
+) !P.ResultText {
     var value = try native.values.toJson(t.ControlReceipt, a, receipt);
     // Model-facing revision arguments are exact JSON integers, independent of
     // the machine protocol's decimal-string u64 mapping.
-    inline for (.{ "previous_revision", "next_revision", "context_epoch", "eviction_generation" }) |name| try native.json.put(a, &value, name, try native.json.number(a, @field(receipt, name)));
-    try native.json.put(a, &value, "takes_effect", native.json.string("next inference; no provider request has been executed by this control"));
-    try native.json.put(a, &value, "skills", try native.values.toJson(@FieldType(t.controls.State, "skills"), a, control.skills));
+    inline for (.{
+        "previous_revision",
+        "next_revision",
+        "context_epoch",
+        "eviction_generation",
+    }) |name| try native.json.put(
+        a,
+        &value,
+        name,
+        try native.json.number(a, @field(receipt, name)),
+    );
+    try native.json.put(
+        a,
+        &value,
+        "takes_effect",
+        native.json.string("next inference; no provider request has been executed by this control"),
+    );
+    try native.json.put(
+        a,
+        &value,
+        "skills",
+        try native.values.toJson(@FieldType(t.controls.State, "skills"), a, control.skills),
+    );
     return .{ .bytes = try native.json.canonical(a, value) };
 }
 
-fn controlSource(ctx: native.registry.ProjectionContext, state: t.State, subject: t.ControlSubject, policy: P.AdaptivePolicy) !contracts.Decoded(P.AdaptiveContext) {
+fn controlSource(
+    ctx: native.registry.ProjectionContext,
+    state: t.State,
+    subject: t.ControlSubject,
+    policy: P.AdaptivePolicy,
+) !contracts.Decoded(P.AdaptiveContext) {
     const ref = state.replay orelse return error.InvalidContext;
     var prior = try Adapter.Context.open(ctx, ref, policy.audience.bytes);
     errdefer prior.deinit();
-    if (!try encodedEqual(ctx.allocator, t.model.AdaptiveSelection, state.control.selection, prior.value.selection) or
-        state.control.epoch != prior.value.plan.epoch or state.control.eviction_generation != prior.value.plan.eviction_generation or
-        !try encodedEqual(ctx.allocator, @FieldType(t.controls.State, "skills"), state.control.skills, prior.value.plan.skills)) return error.InvalidContext;
-    const prepared_bytes = try ctx.object(.{ .digest = prior.value.source_request.digest, .bytes = prior.value.source_request.bytes }, std.math.cast(usize, prior.value.source_request.bytes) orelse return error.Capacity);
+    if (!try encodedEqual(
+        ctx.allocator,
+        t.model.AdaptiveSelection,
+        state.control.selection,
+        prior.value.selection,
+    ) or
+        state.control.epoch != prior.value.plan.epoch or
+        state.control.eviction_generation != prior.value.plan.eviction_generation or
+        !try encodedEqual(
+            ctx.allocator,
+            @FieldType(t.controls.State, "skills"),
+            state.control.skills,
+            prior.value.plan.skills,
+        )) return error.InvalidContext;
+    try admitControlCall(ctx, state, subject, prior.value);
+    return prior;
+}
+
+fn admitControlCall(
+    ctx: native.registry.ProjectionContext,
+    state: t.State,
+    subject: t.ControlSubject,
+    prior: P.AdaptiveContext,
+) !void {
+    const prepared_bytes = try ctx.object(
+        .{ .digest = prior.source_request.digest, .bytes = prior.source_request.bytes },
+        std.math.cast(usize, prior.source_request.bytes) orelse return error.Capacity,
+    );
     var prepared = try contracts.decodeOwned(Adapter.Prepared, ctx.allocator, prepared_bytes);
     defer prepared.deinit();
-    const capture = try ctx.object(.{ .digest = prior.value.source_capture.digest, .bytes = prior.value.source_capture.bytes }, std.math.cast(usize, prior.value.source_capture.bytes) orelse return error.Capacity);
+    const capture = try ctx.object(
+        .{ .digest = prior.source_capture.digest, .bytes = prior.source_capture.bytes },
+        std.math.cast(usize, prior.source_capture.bytes) orelse return error.Capacity,
+    );
     var raw = try contracts.decodeOwned(native.responses.Raw, ctx.allocator, capture);
     defer raw.deinit();
-    const response = (try native.json.parse(ctx.allocator, raw.value.body.bytes, .{ .bytes = raw.value.body.bytes.len, .tokens = raw.value.body.bytes.len, .members = raw.value.body.bytes.len })).value;
+    const response = (try native.json.parse(ctx.allocator, raw.value.body.bytes, .{
+        .bytes = raw.value.body.bytes.len,
+        .tokens = raw.value.body.bytes.len,
+        .members = raw.value.body.bytes.len,
+    })).value;
     const output = native.json.get(response, "output") orelse return error.InvalidCapture;
-    const normalized = try native.responses.OutputNormalizer(P).normalize(ctx.allocator, prepared.value.request.invocation, output);
+    const normalized = try native.responses.OutputNormalizer(P).normalize(
+        ctx.allocator,
+        prepared.value.request.invocation,
+        output,
+    );
     if (normalized != .output) return error.InvalidCapture;
     var found = false;
-    for (normalized.output.items.items) |item| if (item == .function_call and equal(item.function_call.call_id.bytes, subject.call_id.bytes)) {
+    for (normalized.output.items.items) |item| if (item == .function_call and equal(
+        item.function_call.call_id.bytes,
+        subject.call_id.bytes,
+    )) {
         const call = item.function_call;
-        if (found or call.tool_ordinal_claim >= P.declaration_count or !prepared.value.request.offered[call.tool_ordinal_claim] or call.decoded_action != .decoded) return error.InvalidCapture;
-        const action = call.decoded_action.decoded;
-        const reason = switch (action) {
-            .inference_set => |value| value.reason,
-            .skill_set => |value| value.reason,
-            else => return error.InvalidCapture,
-        };
-        if (!equal(reason.bytes, subject.reason.bytes)) return error.InvalidCapture;
-        const expected = switch (action) {
-            .inference_set => |command| command.expected_revision,
-            .skill_set => |command| command.expected_revision,
-            else => return error.InvalidCapture,
-        };
-        if (subject.proposal.disposition != .rejected and expected != state.control.selection.control_revision) return error.InvalidCapture;
-        if (subject.proposal.disposition == .proposed and action == .inference_set and
-            (!equal(subject.proposal.state.selection.profile_id.bytes, action.inference_set.profile_id.bytes) or subject.proposal.state.selection.effective_effort != action.inference_set.effort)) return error.InvalidCapture;
+        if (found or
+            call.tool_ordinal_claim >= P.declaration_count or
+            !prepared.value.request.offered[call.tool_ordinal_claim] or
+            call.decoded_action != .decoded)
+            return error.InvalidCapture;
+        try admitControlAction(state, subject, call.decoded_action.decoded);
         found = true;
     };
     if (!found) return error.InvalidCapture;
-    return prior;
+}
+fn admitControlAction(state: t.State, subject: t.ControlSubject, action: t.Action) !void {
+    const reason = switch (action) {
+        .inference_set => |value| value.reason,
+        .skill_set => |value| value.reason,
+        else => return error.InvalidCapture,
+    };
+    if (!equal(reason.bytes, subject.reason.bytes)) return error.InvalidCapture;
+    const expected = switch (action) {
+        .inference_set => |command| command.expected_revision,
+        .skill_set => |command| command.expected_revision,
+        else => return error.InvalidCapture,
+    };
+    if (subject.proposal.disposition != .rejected and
+        expected != state.control.selection.control_revision)
+        return error.InvalidCapture;
+    if (subject.proposal.disposition == .proposed and action == .inference_set and
+        (!equal(
+            subject.proposal.state.selection.profile_id.bytes,
+            action.inference_set.profile_id.bytes,
+        ) or
+            subject.proposal.state.selection.effective_effort != action.inference_set.effort))
+        return error.InvalidCapture;
+}
+
+fn resolveResult(ctx: native.registry.ProjectionContext, item: t.PendingResult) !P.ToolResult {
+    const a = ctx.allocator;
+    const content: []const u8 = switch (item.output) {
+        .inline_text => |value| value.bytes,
+        .report_rejection => |value| try native.json.canonical(
+            a,
+            try native.values.toJson(t.ReportRejection, a, value),
+        ),
+        .workspace => |value| try workspaceResultText(a, value),
+        .work => |ref| blk: {
+            var record = try work.open(ctx, ref);
+            defer record.deinit();
+            if (!equal(
+                record.value.call_id.bytes,
+                item.call_id.bytes,
+            )) return error.InvalidWorkArtifact;
+            break :blk try a.dupe(u8, record.value.model_text.bytes);
+        },
+        .control => |ref| blk: {
+            const bytes = try ctx.object(
+                .{ .digest = ref.digest, .bytes = ref.bytes },
+                std.math.cast(usize, ref.bytes) orelse return error.Capacity,
+            );
+            var record = try contracts.decodeOwned(t.ReceiptArtifact, a, bytes);
+            defer record.deinit();
+            if (!equal(&record.value.receipt.task, &ctx.task) or !equal(
+                record.value.receipt.call_id.bytes,
+                item.call_id.bytes,
+            )) return error.InvalidContext;
+            break :blk try a.dupe(u8, record.value.model_text.bytes);
+        },
+    };
+    return .{ .call_id = item.call_id, .output = .{ .bytes = content } };
+}
+fn workspaceResultText(a: std.mem.Allocator, value: t.WorkspaceResult) ![]const u8 {
+    const bytes = value.reply.observation_json.bytes;
+    const parsed = (try native.json.parse(a, bytes, .{
+        .bytes = bytes.len,
+        .depth = bytes.len,
+        .tokens = bytes.len,
+        .members = bytes.len,
+    })).value;
+    var response = native.json.object();
+    try native.json.put(
+        a,
+        &response,
+        "disposition",
+        native.json.string(@tagName(value.reply.disposition)),
+    );
+    try native.json.put(a, &response, "observation", parsed);
+    if (value.evidence_index) |index| try native.json.put(
+        a,
+        &response,
+        "evidence_index",
+        try native.json.number(a, index),
+    );
+    return native.json.canonical(a, response);
+}
+
+const PreparedControl = struct {
+    state: t.controls.State,
+    results: @FieldType(P.AdaptiveRequest, "results"),
+    receipt: ?t.ControlReceipt = null,
+    text: ?P.ResultText = null,
+};
+fn prepareControl(
+    ctx: native.registry.ProjectionContext,
+    state: t.State,
+    subject: t.ControlSubject,
+    policy: P.AdaptivePolicy,
+) !PreparedControl {
+    const a = ctx.allocator;
+    var control = state.control;
+    var prior = try controlSource(ctx, state, subject, policy);
+    defer prior.deinit();
+    if (subject.proposal.disposition == .proposed) {
+        if (subject.proposal.rejection != .none) return error.InvalidContext;
+        if (subject.proposal.state.selection.control_revision != try std.math.add(
+            u64,
+            control.selection.control_revision,
+            1,
+        )) return error.InvalidContext;
+        control = subject.proposal.state;
+    } else if (!try encodedEqual(
+        a,
+        t.controls.State,
+        control,
+        subject.proposal.state,
+    )) return error.InvalidContext;
+    const receipt: t.ControlReceipt = .{
+        .task = ctx.task,
+        .source = prior.value.source_capture,
+        .call_id = subject.call_id,
+        .previous_revision = state.control.selection.control_revision,
+        .next_revision = control.selection.control_revision,
+        .disposition = switch (subject.proposal.disposition) {
+            .proposed => .admitted,
+            .unchanged => .unchanged,
+            .rejected => .rejected,
+        },
+        .rejection = subject.proposal.rejection,
+        .previous_profile = state.control.selection.profile_id,
+        .next_profile = control.selection.profile_id,
+        .previous_model = (try profile(
+            policy,
+            state.control.selection.profile_id.bytes,
+        )).model,
+        .next_model = (try profile(policy, control.selection.profile_id.bytes)).model,
+        .previous_effort = state.control.selection.effective_effort,
+        .next_effort = control.selection.effective_effort,
+        .context_epoch = control.epoch,
+        .eviction_generation = control.eviction_generation,
+    };
+    const text = try receiptText(a, receipt, control);
+    const items = try a.alloc(P.ToolResult, 1);
+    items[0] = .{ .call_id = subject.call_id, .output = text };
+    return .{ .state = control, .receipt = receipt, .text = text, .results = .{ .items = items } };
+}
+
+const PreparedTools = struct {
+    materialized: [P.declaration_count]bool,
+    offered: [P.declaration_count]bool,
+    declarations: []P.ToolDeclaration,
+};
+fn prepareTools(
+    a: std.mem.Allocator,
+    policy: P.AdaptivePolicy,
+    catalog: P.AdaptiveCatalog,
+    control: t.controls.State,
+    requested_tools: [P.declaration_count]bool,
+) !PreparedTools {
+    var materialized = policy.core_tools;
+    var offered = policy.core_tools;
+    for (control.skills.items) |loaded| for (catalog.skills.items) |skill| if (equal(
+        loaded.skill_id.bytes,
+        skill.id.bytes,
+    )) {
+        for (skill.tools, 0..) |enabled, ordinal| {
+            materialized[ordinal] = materialized[ordinal] or enabled;
+            offered[ordinal] = offered[ordinal] or (enabled and loaded.active);
+        }
+    };
+    for (&offered, requested_tools, policy.permitted_tools) |*allowed, requested, permitted| {
+        allowed.* = allowed.* and requested and permitted;
+    }
+    var declarations: std.ArrayList(P.ToolDeclaration) = .empty;
+    for (materialized, P.allDeclarations().items) |defined, item| {
+        if (defined) try declarations.append(a, item);
+    }
+    return .{
+        .materialized = materialized,
+        .offered = offered,
+        .declarations = declarations.items,
+    };
+}
+
+fn makeRequest(
+    ctx: native.registry.ProjectionContext,
+    input: t.Preparation,
+    prepared_control: PreparedControl,
+    selected: A.Profile,
+    policy: P.AdaptivePolicy,
+    tools: PreparedTools,
+) P.AdaptiveRequest {
+    const control = prepared_control.state;
+    const messages = input.state.messages;
+    return .{
+        .policy = digest(ctx.profile),
+        .selection = control.selection,
+        .materialized = tools.materialized,
+        .offered = tools.offered,
+        .results = prepared_control.results,
+        .plan = .{
+            .epoch = control.epoch,
+            .reason = control.epoch_reason,
+            .watermark = if (input.state.replay) |ref| ref.watermark else 0,
+            .eviction_generation = control.eviction_generation,
+            .prior = input.state.replay,
+            .catalog = policy.catalog,
+            .skills = control.skills,
+            .research = if (input.state.selected_view) |view| .{
+                .view = view,
+                .selected_at = input.state.selected_view_at,
+                .retained_calls = input.retained_calls,
+            } else null,
+        },
+        .invocation = .{
+            .protocol = .{ .bytes = t.model.protocol_identity },
+            .model = .{ .bytes = selected.model.bytes },
+            .parameters = .{
+                .max_output_tokens = selected.max_output_tokens,
+                .temperature = null,
+                .reasoning = .{ .effort = control.top_effort, .summary = null },
+            },
+            .messages = messages,
+            .tools = .{ .items = tools.declarations },
+            .selection = .{ .minimum_calls = 1, .maximum_calls = 1, .parallel_calls = false },
+            .response_policy = .{
+                .store = false,
+                .stream = false,
+                .background = false,
+                .truncation = .disabled,
+            },
+            .normalization_limits = P.normalizationLimits(),
+            .maximum_provider_response_bytes = selected.response_bytes,
+        },
+    };
+}
+
+fn preparedProduct(
+    a: std.mem.Allocator,
+    request: P.AdaptiveRequest,
+    pending: t.PendingResults,
+    control: PreparedControl,
+) !Product {
+    var receipt_object: ?contracts.Bytes(null) = null;
+    var receipt_ref: ?t.ReceiptReference = null;
+    var next_results = pending;
+    if (control.receipt) |value| {
+        const bytes = try contracts.encodeOwned(t.ReceiptArtifact, a, .{
+            .receipt = value,
+            .model_text = control.text.?,
+        });
+        receipt_object = .{ .bytes = bytes };
+        const ref = work.reference(bytes);
+        receipt_ref = .{
+            .object = ref,
+            .previous_revision = value.previous_revision,
+            .next_revision = value.next_revision,
+            .disposition = value.disposition,
+            .rejection = value.rejection,
+            .next_profile = value.next_profile,
+            .next_effort = value.next_effort,
+            .context_epoch = value.context_epoch,
+            .eviction_generation = value.eviction_generation,
+        };
+        const items = try a.alloc(t.PendingResult, 1);
+        items[0] = .{ .call_id = value.call_id, .output = .{ .control = ref } };
+        next_results = .{ .items = items };
+    }
+    return .{
+        .result = .{ .ready = .{
+            .request = request,
+            .receipt = receipt_ref,
+            .results = next_results,
+        } },
+        .receipt = receipt_object,
+    };
 }
 
 fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Product {
@@ -108,123 +478,23 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
     const policy = try A.policy(a, ctx.profile);
     var catalog = try A.catalog(ctx, policy);
     defer catalog.deinit();
-    var control = input.state.control;
-    var receipt: ?t.ControlReceipt = null;
-    var text: ?P.ResultText = null;
     const pending = input.state.results;
     const resolved = try a.alloc(P.ToolResult, pending.items.len);
     for (resolved, pending.items) |*out, item| {
-        const content: []const u8 = switch (item.output) {
-            .inline_text => |value| value.bytes,
-            .report_rejection => |value| try native.json.canonical(a, try native.values.toJson(t.ReportRejection, a, value)),
-            .workspace => |value| blk: {
-                const bytes = value.reply.observation_json.bytes;
-                const parsed = (try native.json.parse(a, bytes, .{ .bytes = bytes.len, .depth = bytes.len, .tokens = bytes.len, .members = bytes.len })).value;
-                var response = native.json.object();
-                try native.json.put(a, &response, "disposition", native.json.string(@tagName(value.reply.disposition)));
-                try native.json.put(a, &response, "observation", parsed);
-                if (value.evidence_index) |index| try native.json.put(a, &response, "evidence_index", try native.json.number(a, index));
-                break :blk try native.json.canonical(a, response);
-            },
-            .work => |ref| blk: {
-                var record = try work.open(ctx, ref);
-                defer record.deinit();
-                if (!equal(record.value.call_id.bytes, item.call_id.bytes)) return error.InvalidWorkArtifact;
-                break :blk try a.dupe(u8, record.value.model_text.bytes);
-            },
-            .control => |ref| blk: {
-                const bytes = try ctx.object(.{ .digest = ref.digest, .bytes = ref.bytes }, std.math.cast(usize, ref.bytes) orelse return error.Capacity);
-                var record = try contracts.decodeOwned(t.ReceiptArtifact, a, bytes);
-                defer record.deinit();
-                if (!equal(&record.value.receipt.task, &ctx.task) or !equal(record.value.receipt.call_id.bytes, item.call_id.bytes)) return error.InvalidContext;
-                break :blk try a.dupe(u8, record.value.model_text.bytes);
-            },
-        };
-        out.* = .{ .call_id = item.call_id, .output = .{ .bytes = content } };
+        out.* = try resolveResult(ctx, item);
     }
-    var results: @FieldType(P.AdaptiveRequest, "results") = .{ .items = resolved };
-    if (input.control) |subject| {
-        var prior = try controlSource(ctx, input.state, subject, policy);
-        defer prior.deinit();
-        if (subject.proposal.disposition == .proposed) {
-            if (subject.proposal.rejection != .none) return error.InvalidContext;
-            if (subject.proposal.state.selection.control_revision != try std.math.add(u64, control.selection.control_revision, 1)) return error.InvalidContext;
-            control = subject.proposal.state;
-        } else if (!try encodedEqual(a, t.controls.State, control, subject.proposal.state)) return error.InvalidContext;
-        receipt = .{
-            .task = ctx.task,
-            .source = prior.value.source_capture,
-            .call_id = subject.call_id,
-            .previous_revision = input.state.control.selection.control_revision,
-            .next_revision = control.selection.control_revision,
-            .disposition = switch (subject.proposal.disposition) {
-                .proposed => .admitted,
-                .unchanged => .unchanged,
-                .rejected => .rejected,
-            },
-            .rejection = subject.proposal.rejection,
-            .previous_profile = input.state.control.selection.profile_id,
-            .next_profile = control.selection.profile_id,
-            .previous_model = (try profile(policy, input.state.control.selection.profile_id.bytes)).model,
-            .next_model = (try profile(policy, control.selection.profile_id.bytes)).model,
-            .previous_effort = input.state.control.selection.effective_effort,
-            .next_effort = control.selection.effective_effort,
-            .context_epoch = control.epoch,
-            .eviction_generation = control.eviction_generation,
-        };
-        text = try receiptText(a, receipt.?, control);
-        const items = try a.alloc(P.ToolResult, 1);
-        items[0] = .{ .call_id = subject.call_id, .output = text.? };
-        results = .{ .items = items };
-    }
+    const prepared_control: PreparedControl = if (input.control) |subject|
+        try prepareControl(ctx, input.state, subject, policy)
+    else
+        .{ .state = input.state.control, .results = .{ .items = resolved } };
+    const control = prepared_control.state;
     const selected = try profile(policy, control.selection.profile_id.bytes);
-    var materialized = policy.core_tools;
-    var offered = policy.core_tools;
-    for (control.skills.items) |loaded| for (catalog.value.skills.items) |skill| if (equal(loaded.skill_id.bytes, skill.id.bytes)) {
-        for (skill.tools, 0..) |enabled, ordinal| {
-            materialized[ordinal] = materialized[ordinal] or enabled;
-            offered[ordinal] = offered[ordinal] or (enabled and loaded.active);
-        }
-    };
-    for (&offered, input.offered, policy.permitted_tools) |*allowed, requested, permitted| allowed.* = allowed.* and requested and permitted;
-    var declarations: std.ArrayList(P.ToolDeclaration) = .empty;
-    for (materialized, P.allDeclarations().items) |defined, item| if (defined) try declarations.append(a, item);
-    const messages = input.state.messages;
-    const request: P.AdaptiveRequest = .{
-        .policy = digest(ctx.profile),
-        .selection = control.selection,
-        .materialized = materialized,
-        .offered = offered,
-        .results = results,
-        .plan = .{ .epoch = control.epoch, .reason = control.epoch_reason, .watermark = if (input.state.replay) |ref| ref.watermark else 0, .eviction_generation = control.eviction_generation, .prior = input.state.replay, .catalog = policy.catalog, .skills = control.skills, .research = if (input.state.selected_view) |view| .{ .view = view, .selected_at = input.state.selected_view_at, .retained_calls = input.retained_calls } else null },
-        .invocation = .{
-            .protocol = .{ .bytes = t.model.protocol_identity },
-            .model = .{ .bytes = selected.model.bytes },
-            .parameters = .{ .max_output_tokens = selected.max_output_tokens, .temperature = null, .reasoning = .{ .effort = control.top_effort, .summary = null } },
-            .messages = messages,
-            .tools = .{ .items = declarations.items },
-            .selection = .{ .minimum_calls = 1, .maximum_calls = 1, .parallel_calls = false },
-            .response_policy = .{ .store = false, .stream = false, .background = false, .truncation = .disabled },
-            .normalization_limits = P.normalizationLimits(),
-            .maximum_provider_response_bytes = selected.response_bytes,
-        },
-    };
+    const tools = try prepareTools(a, policy, catalog.value, control, input.offered);
+    const request = makeRequest(ctx, input, prepared_control, selected, policy, tools);
     // Horos retains the computation and task facts. Continue its immutable
     // transcript; only the projection owner changes provider-visible material.
     _ = try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, request));
-    var receipt_object: ?contracts.Bytes(null) = null;
-    var receipt_ref: ?t.ReceiptReference = null;
-    var next_results = pending;
-    if (receipt) |value| {
-        const bytes = try contracts.encodeOwned(t.ReceiptArtifact, a, .{ .receipt = value, .model_text = text.? });
-        receipt_object = .{ .bytes = bytes };
-        const ref = work.reference(bytes);
-        receipt_ref = .{ .object = ref, .previous_revision = value.previous_revision, .next_revision = value.next_revision, .disposition = value.disposition, .rejection = value.rejection, .next_profile = value.next_profile, .next_effort = value.next_effort, .context_epoch = value.context_epoch, .eviction_generation = value.eviction_generation };
-        const items = try a.alloc(t.PendingResult, 1);
-        items[0] = .{ .call_id = value.call_id, .output = .{ .control = ref } };
-        next_results = .{ .items = items };
-    }
-    return .{ .result = .{ .ready = .{ .request = request, .receipt = receipt_ref, .results = next_results } }, .receipt = receipt_object };
+    return preparedProduct(a, request, pending, prepared_control);
 }
 
 fn prepare(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
@@ -232,10 +502,22 @@ fn prepare(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
     defer input.deinit();
     const product = evaluate(ctx, input.value) catch |err| switch (err) {
         error.Capacity => Product{ .result = .{ .rejected = .capacity }, .receipt = null },
-        error.UnknownSkill, error.InvalidSkill => Product{ .result = .{ .rejected = .unknown_skill }, .receipt = null },
-        error.UnknownInferenceProfile => Product{ .result = .{ .rejected = .unknown_profile }, .receipt = null },
-        error.UnsupportedEffort => Product{ .result = .{ .rejected = .unsupported_effort }, .receipt = null },
-        error.IncompatibleProfile => Product{ .result = .{ .rejected = .invalid_operation }, .receipt = null },
+        error.UnknownSkill, error.InvalidSkill => Product{
+            .result = .{ .rejected = .unknown_skill },
+            .receipt = null,
+        },
+        error.UnknownInferenceProfile => Product{
+            .result = .{ .rejected = .unknown_profile },
+            .receipt = null,
+        },
+        error.UnsupportedEffort => Product{
+            .result = .{ .rejected = .unsupported_effort },
+            .receipt = null,
+        },
+        error.IncompatibleProfile => Product{
+            .result = .{ .rejected = .invalid_operation },
+            .receipt = null,
+        },
         else => return err,
     };
     return contracts.encodeOwned(Product, ctx.allocator, product);
@@ -250,16 +532,38 @@ fn dependencies(a: std.mem.Allocator, objects: []const []const u8) ![]native.reg
     if (objects.len > 1) return error.InvalidProjection;
     var references: native.registry.ProjectionReferences = .{ .allocator = a };
     defer references.deinit();
-    if (objects.len != 0) try references.object(t.ReceiptArtifact, t.model.ArtifactReference, objects[0], null);
+    if (objects.len != 0) try references.object(
+        t.ReceiptArtifact,
+        t.model.ArtifactReference,
+        objects[0],
+        null,
+    );
     return references.finish();
 }
-fn interpret(ctx: native.registry.ProjectionContext, request: []const u8, prepared: []const u8, captured: []const u8) !native.registry.Projection {
+fn interpret(
+    ctx: native.registry.ProjectionContext,
+    request: []const u8,
+    prepared: []const u8,
+    captured: []const u8,
+) !native.registry.Projection {
     var observation = try contracts.decodeOwned(t.PreparationCapture, ctx.allocator, captured);
     defer observation.deinit();
-    if (!equal(&observation.value.prepared, &digest(prepared)) or !equal(try prepare(ctx, request), prepared)) return error.InvalidCapture;
+    if (!equal(&observation.value.prepared, &digest(prepared)) or
+        !equal(try prepare(ctx, request), prepared))
+        return error.InvalidCapture;
     var product = try contracts.decodeOwned(Product, ctx.allocator, prepared);
     defer product.deinit();
-    const objects = try ctx.allocator.alloc([]const u8, @intFromBool(product.value.receipt != null));
+    const objects = try ctx.allocator.alloc(
+        []const u8,
+        @intFromBool(product.value.receipt != null),
+    );
     if (product.value.receipt) |receipt| objects[0] = try ctx.allocator.dupe(u8, receipt.bytes);
-    return .{ .reply = try contracts.encodeOwned(t.PreparationResult, ctx.allocator, product.value.result), .objects = objects };
+    return .{
+        .reply = try contracts.encodeOwned(
+            t.PreparationResult,
+            ctx.allocator,
+            product.value.result,
+        ),
+        .objects = objects,
+    };
 }

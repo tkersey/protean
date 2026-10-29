@@ -16,7 +16,12 @@ const Fixture = struct {
         errdefer b.deinit();
         const unit = try b.scalar(void);
         const entry = try b.declare(&.{}, unit, &.{}, &.{});
-        return .{ .b = b, .registry = admission.Registry.init(allocator), .unit = unit, .entry = entry };
+        return .{
+            .b = b,
+            .registry = admission.Registry.init(allocator),
+            .unit = unit,
+            .entry = entry,
+        };
     }
 
     fn deinit(self: *Fixture) void {
@@ -115,7 +120,9 @@ test "recursive and higher-order mobility remain forbidden inside protected spec
         const next = try f.b.term(.{ .call = .{ .function = recursive, .arguments = &.{} } });
         try f.b.define(recursive, try f.b.bind(try f.b.variable(f.unit), performed, next));
         f.b.functions.items[@intCast(f.entry)].effects = &.{move};
-        const call = if (higher_order) try f.b.term(.{ .apply = .{ .computation = try f.lambda(recursive), .arguments = &.{} } }) else next;
+        const call = if (higher_order) try f.b.term(.{ .apply = .{ .computation = try f.lambda(
+            recursive,
+        ), .arguments = &.{} } }) else next;
         try f.b.define(f.entry, call);
         try f.compile();
         try f.registry.speculate(f.entry, &.{move});
@@ -309,7 +316,11 @@ test "explicit model read and simulation speculation is admitted" {
     const discarded = try f.b.variable(f.unit);
     const model_call = try f.perform(model);
     try f.registry.protectSite(f.entry, model_call, model);
-    const run = try f.b.bind(discarded, model_call, try f.b.bind(try f.b.variable(f.unit), try f.perform(read), try f.perform(simulation)));
+    const run = try f.b.bind(
+        discarded,
+        model_call,
+        try f.b.bind(try f.b.variable(f.unit), try f.perform(read), try f.perform(simulation)),
+    );
     f.b.functions.items[@intCast(f.entry)].effects = &.{ model, read, simulation };
     try f.b.define(f.entry, run);
     try f.registry.speculate(f.entry, &.{ model, read, simulation });
@@ -355,7 +366,10 @@ test "raw multi handler cannot omit speculative effect checks" {
     const body = try handledBody(&f, choice, &.{ choice, write });
     const perform = try f.perform(write);
     try f.registry.protectSite(body, perform, write);
-    try f.b.define(body, try f.b.bind(try f.b.variable(f.unit), try performHandled(&f, body, choice), perform));
+    try f.b.define(
+        body,
+        try f.b.bind(try f.b.variable(f.unit), try performHandled(&f, body, choice), perform),
+    );
     try f.b.define(f.entry, try localHandler(&f, choice, body, true));
     f.b.functions.items[@intCast(f.entry)].effects = &.{write};
     try f.horosCompile();
@@ -564,7 +578,10 @@ test "cloning a linear handler continuation checks its original body" {
     const body = try handledBody(&f, choice, &.{ choice, write });
     const perform = try f.perform(write);
     try f.registry.protectSite(body, perform, write);
-    try f.b.define(body, try f.b.bind(try f.b.variable(f.unit), try performHandled(&f, body, choice), perform));
+    try f.b.define(
+        body,
+        try f.b.bind(try f.b.variable(f.unit), try performHandled(&f, body, choice), perform),
+    );
     try f.b.define(f.entry, try localHandler(&f, choice, body, false));
     const handler = f.b.handlers.items[0];
     const resume_type = handler.clauses[0].resumption;
@@ -572,10 +589,7 @@ test "cloning a linear handler continuation checks its original body" {
     multi_shape.internal.resumption.use = .multi;
     const template_type = try f.b.schema(multi_shape);
     const clause = handler.clauses[0].function;
-    _ = try f.b.cloneResumption(
-        try f.b.reference(f.b.parameter(clause, 1)),
-        template_type,
-    );
+    _ = try f.b.cloneResumption(try f.b.reference(f.b.parameter(clause, 1)), template_type);
     try std.testing.expectError(error.SpeculativeEffect, f.check());
 }
 
@@ -637,40 +651,49 @@ test "delayed shallow package resumed under hidden-effect multi successor" {
     var registry = admission.Registry.init(a);
     defer registry.deinit();
     const unit = try b.scalar(void);
-    const e = try b.effect(.{ .identity = "probe/decision", .payload = unit, .result = unit, .external = false, .control_use = .multi });
+    const e = try b.effect(.{
+        .identity = "probe/decision",
+        .payload = unit,
+        .result = unit,
+        .external = false,
+        .control_use = .multi,
+    });
     try registry.classify(e, .internal);
-    const u = try b.effect(.{ .identity = "probe/unclassified", .payload = unit, .result = unit, .external = false });
+    const u = try b.effect(.{
+        .identity = "probe/unclassified",
+        .payload = unit,
+        .result = unit,
+        .external = false,
+    });
     const cap = try b.schema(.{ .internal = .{ .capability = e } });
     const ucap = try b.schema(.{ .internal = .{ .capability = u } });
-    const before = try b.schema(.{ .internal = .{ .resumption = .{ .effect = e, .input = unit, .answer = unit, .effects = &.{e}, .handled = &.{e}, .capture_bound = &.{ unit, cap }, .mode = .shallow, .use = .linear } } });
+    const before = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = e,
+        .input = unit,
+        .answer = unit,
+        .effects = &.{e},
+        .handled = &.{e},
+        .capture_bound = &.{ unit, cap },
+        .mode = .shallow,
+        .use = .linear,
+    } } });
     const package = try b.schema(.{ .internal = .{ .suspension_package = before } });
-    const after = try b.schema(.{ .internal = .{ .resumption = .{ .effect = e, .input = unit, .answer = unit, .effects = &.{}, .handled = &.{e}, .capture_bound = &.{ unit, cap }, .mode = .deep, .use = .multi } } });
+    const after = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = e,
+        .input = unit,
+        .answer = unit,
+        .effects = &.{},
+        .handled = &.{e},
+        .capture_bound = &.{ unit, cap },
+        .mode = .deep,
+        .use = .multi,
+    } } });
     const done = try b.declare(&.{unit}, unit, &.{}, &.{});
     try b.define(done, try b.pure(try b.reference(b.parameter(done, 0))));
-    const unexpected_return = try b.declare(&.{unit}, package, &.{}, &.{});
-    try b.define(unexpected_return, try b.term(.{ .fail = try b.constant(void, {}) }));
-    const park = try b.declare(&.{ unit, before }, package, &.{}, &.{});
-    try b.define(park, try b.pure(try b.primitive(package, .package, &.{try b.reference(b.parameter(park, 1))}, 0)));
-    const initial = try b.handler(.{ .mode = .shallow, .input = unit, .answer = package, .return_function = unexpected_return, .effects = &.{}, .clauses = &.{.{ .effect = e, .function = park, .resumption = before }} });
-    const utoken = try b.schema(.{ .internal = .{ .resumption = .{ .effect = u, .input = unit, .answer = unit, .handled = &.{u}, .mode = .deep, .use = .linear } } });
-    const uclause = try b.declare(&.{ unit, utoken }, unit, &.{}, &.{});
-    try b.define(uclause, try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(uclause, 1)), .argument = try b.constant(void, {}) } }));
-    const uh = try b.handler(.{ .mode = .deep, .input = unit, .answer = unit, .return_function = done, .clauses = &.{.{ .effect = u, .function = uclause, .resumption = utoken }} });
-    const ub = try b.declare(&.{ucap}, unit, &.{u}, &.{});
-    try b.define(ub, try b.term(.{ .perform = .{ .effect = u, .capability = try b.reference(b.parameter(ub, 0)), .payload = try b.constant(void, {}) } }));
-    const ubtype = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{ucap}, .result = unit, .effects = &.{u} } } });
-    const successor_clause = try b.declare(&.{ unit, after }, unit, &.{}, &.{});
-    const ignored = try b.variable(unit);
-    try b.define(successor_clause, try b.bind(ignored, try b.term(.{ .handle = .{ .handler = uh, .body = try b.lambda(ub, ubtype) } }), try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(successor_clause, 1)), .argument = try b.constant(void, {}) } })));
-    const successor = try b.handler(.{ .mode = .deep, .input = unit, .answer = unit, .return_function = done, .clauses = &.{.{ .effect = e, .function = successor_clause, .resumption = after }} });
-    const body = try b.declare(&.{cap}, unit, &.{e}, &.{});
-    const op = try b.term(.{ .perform = .{ .effect = e, .capability = try b.reference(b.parameter(body, 0)), .payload = try b.constant(void, {}) } });
-    try b.define(body, try b.bind(try b.variable(unit), op, op));
-    const bt = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{cap}, .result = unit, .effects = &.{e} } } });
-    const root = try b.declare(&.{}, unit, &.{}, &.{});
-    const saved = try b.variable(package);
-    try b.define(root, try b.bind(saved, try b.term(.{ .handle = .{ .handler = initial, .body = try b.lambda(body, bt) } }), try b.term(.{ .resume_with = .{ .resumption = try b.primitive(before, .unpack, &.{try b.reference(saved)}, 0), .argument = try b.constant(void, {}), .handler = successor } })));
-    const module = b.module(root, unit);
+    const initial = try shallowInitial(&b, unit, package, e, before);
+    const hidden = try hiddenEffect(&b, unit, done, u, ucap);
+    const successor = try shallowSuccessor(&b, unit, done, e, after, hidden);
+    const module = try shallowModule(&b, unit, e, cap, package, before, initial, successor);
     var compiled = try bnd.program.compile(a, module);
     defer compiled.deinit();
     // Rejection must be Protean's role check, after independent Horos compile.
@@ -689,19 +712,38 @@ test "protected resources admit one consumption and reject raw minting or duplic
         try f.registry.privateFunction(mint);
         try f.registry.privateFunction(consume);
         try f.b.resourceAuthority(resource, &.{mint}, &.{consume});
-        const minted = try f.b.primitive(resource, .resource_pack, &.{try f.b.constant(void, {})}, 0);
+        const minted = try f.b.primitive(
+            resource,
+            .resource_pack,
+            &.{try f.b.constant(void, {})},
+            0,
+        );
         try f.b.define(mint, try f.b.pure(minted));
-        try f.b.define(consume, try f.b.pure(try f.b.primitive(f.unit, .resource_unpack, &.{try f.b.reference(f.b.parameter(consume, 0))}, 0)));
+        try f.b.define(
+            consume,
+            try f.b.pure(
+                try f.b.primitive(
+                    f.unit,
+                    .resource_unpack,
+                    &.{try f.b.reference(f.b.parameter(consume, 0))},
+                    0,
+                ),
+            ),
+        );
         const proof = try f.b.variable(resource);
         const acquired = if (mode == .forged) try f.b.pure(minted) else blk: {
             const call = try f.b.term(.{ .call = .{ .function = mint, .arguments = &.{} } });
             try f.registry.allowPrivateCall(f.entry, call, mint);
             break :blk call;
         };
-        const first = try f.b.term(.{ .call = .{ .function = consume, .arguments = &.{try f.b.reference(proof)} } });
+        const first = try f.b.term(.{ .call = .{ .function = consume, .arguments = &.{
+            try f.b.reference(proof),
+        } } });
         try f.registry.allowPrivateCall(f.entry, first, consume);
         const result = if (mode == .reused) blk: {
-            const second = try f.b.term(.{ .call = .{ .function = consume, .arguments = &.{try f.b.reference(proof)} } });
+            const second = try f.b.term(.{ .call = .{ .function = consume, .arguments = &.{
+                try f.b.reference(proof),
+            } } });
             try f.registry.allowPrivateCall(f.entry, second, consume);
             break :blk try f.b.bind(try f.b.variable(f.unit), first, second);
         } else first;
@@ -713,4 +755,144 @@ test "protected resources admit one consumption and reject raw minting or duplic
             .reused => try std.testing.expectError(error.UnavailableSlot, f.horosCompile()),
         }
     }
+}
+
+fn shallowInitial(b: *B, unit: Id, package: Id, e: Id, before: Id) !Id {
+    const unexpected_return = try b.declare(&.{unit}, package, &.{}, &.{});
+    try b.define(unexpected_return, try b.term(.{ .fail = try b.constant(void, {}) }));
+    const park = try b.declare(&.{ unit, before }, package, &.{}, &.{});
+    try b.define(
+        park,
+        try b.pure(
+            try b.primitive(package, .package, &.{try b.reference(b.parameter(park, 1))}, 0),
+        ),
+    );
+    const initial = try b.handler(
+        .{
+            .mode = .shallow,
+            .input = unit,
+            .answer = package,
+            .return_function = unexpected_return,
+            .effects = &.{},
+            .clauses = &.{.{ .effect = e, .function = park, .resumption = before }},
+        },
+    );
+    return initial;
+}
+
+const HiddenEffect = struct { handler: Id, body: Id, body_type: Id };
+
+fn hiddenEffect(b: *B, unit: Id, done: Id, u: Id, ucap: Id) !HiddenEffect {
+    const utoken = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = u,
+        .input = unit,
+        .answer = unit,
+        .handled = &.{u},
+        .mode = .deep,
+        .use = .linear,
+    } } });
+    const uclause = try b.declare(&.{ unit, utoken }, unit, &.{}, &.{});
+    try b.define(
+        uclause,
+        try b.term(.{ .resume_value = .{
+            .resumption = try b.reference(b.parameter(uclause, 1)),
+            .argument = try b.constant(void, {}),
+        } }),
+    );
+    const uh = try b.handler(
+        .{ .mode = .deep, .input = unit, .answer = unit, .return_function = done, .clauses = &.{.{
+            .effect = u,
+            .function = uclause,
+            .resumption = utoken,
+        }} },
+    );
+    const ub = try b.declare(&.{ucap}, unit, &.{u}, &.{});
+    try b.define(
+        ub,
+        try b.term(.{ .perform = .{
+            .effect = u,
+            .capability = try b.reference(b.parameter(ub, 0)),
+            .payload = try b.constant(void, {}),
+        } }),
+    );
+    const ubtype = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{
+        ucap,
+    }, .result = unit, .effects = &.{u} } } });
+    return .{ .handler = uh, .body = ub, .body_type = ubtype };
+}
+
+fn shallowSuccessor(
+    b: *B,
+    unit: Id,
+    done: Id,
+    e: Id,
+    after: Id,
+    hidden: HiddenEffect,
+) !Id {
+    const successor_clause = try b.declare(&.{ unit, after }, unit, &.{}, &.{});
+    const ignored = try b.variable(unit);
+    try b.define(
+        successor_clause,
+        try b.bind(
+            ignored,
+            try b.term(
+                .{
+                    .handle = .{
+                        .handler = hidden.handler,
+                        .body = try b.lambda(hidden.body, hidden.body_type),
+                    },
+                },
+            ),
+            try b.term(.{ .resume_value = .{
+                .resumption = try b.reference(b.parameter(successor_clause, 1)),
+                .argument = try b.constant(void, {}),
+            } }),
+        ),
+    );
+    const successor = try b.handler(
+        .{ .mode = .deep, .input = unit, .answer = unit, .return_function = done, .clauses = &.{.{
+            .effect = e,
+            .function = successor_clause,
+            .resumption = after,
+        }} },
+    );
+    return successor;
+}
+
+fn shallowModule(
+    b: *B,
+    unit: Id,
+    e: Id,
+    cap: Id,
+    package: Id,
+    before: Id,
+    initial: Id,
+    successor: Id,
+) !bnd.source.Module {
+    const body = try b.declare(&.{cap}, unit, &.{e}, &.{});
+    const op = try b.term(.{ .perform = .{
+        .effect = e,
+        .capability = try b.reference(b.parameter(body, 0)),
+        .payload = try b.constant(void, {}),
+    } });
+    try b.define(body, try b.bind(try b.variable(unit), op, op));
+    const bt = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{
+        cap,
+    }, .result = unit, .effects = &.{e} } } });
+    const root = try b.declare(&.{}, unit, &.{}, &.{});
+    const saved = try b.variable(package);
+    try b.define(
+        root,
+        try b.bind(
+            saved,
+            try b.term(.{ .handle = .{ .handler = initial, .body = try b.lambda(body, bt) } }),
+            try b.term(.{ .resume_with = .{
+                .resumption = try b.primitive(before, .unpack, &.{try b.reference(saved)}, 0),
+                .argument = try b.constant(void, {}),
+                .handler = successor,
+            } }),
+        ),
+    );
+    const module = b.module(root, unit);
+    return module;
 }

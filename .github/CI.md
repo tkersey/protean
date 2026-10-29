@@ -3,9 +3,9 @@
 The required pull-request workflow must complete in **one attempt within 600
 seconds of its original automatic trigger**. The budget includes runner queueing,
 setup, acquisition, compilation, every selected test, packaging, artifact and
-cache transfers, and the final identity comparison. The terminal `native` gate
+cache transfers, TigerStyle, and the final identity comparison. The terminal `native` gate
 measures from the run's `created_at`, rejects `run_attempt != 1`, and requires all
-eleven qualification lanes to succeed. A failed warmup followed by a successful
+eleven qualification lanes and TigerStyle to succeed. A failed warmup followed by a successful
 retry does not satisfy this requirement.
 
 Pull requests and main pushes run the same inventory on native Linux x86-64 with
@@ -19,6 +19,14 @@ it neither rebuilds those executables nor substitutes for full qualification. Ma
 so every selected lane can return evidence.
 
 ## Required inventory
+
+The [TigerStyle gate](../docs/tiger-style.md) runs alongside the qualification
+matrix. It checks every tracked Zig file at the exact committed PR head, main
+push head, or manual-run head, including unchanged code. It runs the pinned
+auditor's tests and launcher integration probes. The terminal
+`native` gate requires both TigerStyle and the existing matrix, within the same
+600-second original-trigger budget. The retained-runtime diagnostic omits
+TigerStyle and still cannot pass the terminal gate.
 
 | Lane | Checks |
 | --- | --- |
@@ -108,6 +116,7 @@ Native macOS verification supplements the required Linux workflow; emulation or
 cross-compilation does not replace the native platform checks.
 
 ```sh
+bash tools/tiger-style.sh --all HEAD
 sh tools/check_zig_paths.sh
 zig run tools/native/dependencies.zig -- setup \
   conformance/protean/dependencies.lock.json \

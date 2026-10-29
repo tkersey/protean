@@ -13,4 +13,11 @@ pub const Row = struct {
 pub const Rows = c.Vector(Row, null);
 pub const Keys = c.Vector(u64, null);
 pub const Table = struct { rows: Rows, relation: Rows, selected: Keys };
-pub const Status = enum(u64) { unclassified = 0, agreement = 1, mismatch = 2, missing = 3, ambiguous = 4, group_count = 5 };
+pub const Status = enum(u64) {
+    unclassified = 0,
+    agreement = 1,
+    mismatch = 2,
+    missing = 3,
+    ambiguous = 4,
+    group_count = 5,
+};

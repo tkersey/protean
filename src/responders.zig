@@ -10,27 +10,66 @@ fn V(comptime T: type) type {
     return *const typed.Value(typed.Shape(T));
 }
 pub fn ModelFunction(comptime P: type, comptime Request: type, comptime Result: type) type {
-    return typed.Function(typed.Signature(native.Fields(&.{ "request", "offered" }, &.{ typed.Shape(Request), typed.Shape([P.declaration_count]bool) }), typed.Shape(Result)));
+    return typed.Function(
+        typed.Signature(
+            native.Fields(
+                &.{ "request", "offered" },
+                &.{ typed.Shape(Request), typed.Shape([P.declaration_count]bool) },
+            ),
+            typed.Shape(Result),
+        ),
+    );
 }
 
 pub fn ControllerRequest(comptime P: type, comptime Carry: type) type {
     return struct { request: P.AdaptiveRequest, carry: Carry };
 }
 pub fn ObservedFunction(comptime P: type, comptime batch: bool, comptime Carry: ?type) type {
-    if (Carry) |C| return typed.Function(typed.Signature(native.Fields(&.{ "request", "offered", "carry" }, &.{ typed.Shape(P.AdaptiveRequest), typed.Shape([P.declaration_count]bool), typed.Shape(C) }), typed.Shape(ModelObservation(P, batch))));
+    if (Carry) |C| return typed.Function(
+        typed.Signature(
+            native.Fields(&.{ "request", "offered", "carry" }, &.{
+                typed.Shape(P.AdaptiveRequest),
+                typed.Shape([P.declaration_count]bool),
+                typed.Shape(C),
+            }),
+            typed.Shape(ModelObservation(P, batch)),
+        ),
+    );
     return ModelFunction(P, P.AdaptiveRequest, ModelObservation(P, batch));
 }
-pub fn controllerModelOperation(comptime P: type, comptime Carry: type, c: authoring.Context) !*const typed.Operation(typed.OperationSignature(typed.Shape(ControllerRequest(P, Carry)), typed.Shape(@import("protean_contracts").controller.Reply(P.AdaptiveResult)), native.Fields(&.{}, &.{}))) {
+pub fn controllerModelOperation(
+    comptime P: type,
+    comptime Carry: type,
+    c: authoring.Context,
+) !*const typed.Operation(
+    typed.OperationSignature(
+        typed.Shape(ControllerRequest(P, Carry)),
+        typed.Shape(@import("protean_contracts").controller.Reply(P.AdaptiveResult)),
+        native.Fields(&.{}, &.{}),
+    ),
+) {
     const b = c.builder;
-    const instance = try b.specialization(Id, "protean.controller.model/v1", .{ @intFromPtr(c.author), @typeName(P), @typeName(Carry) });
+    const instance = try b.specialization(Id, "protean.controller.model/v1", .{
+        @intFromPtr(c.author),
+        @typeName(P),
+        @typeName(Carry),
+    });
     const effect = if (instance.cached) |id| id else try instance.finish(b, try b.effect(.{
         .identity = @import("protean_contracts").controller.import_prefix ++ "deliberate",
         .payload = try typed.interop.schemaId(c.author, try c.schema(ControllerRequest(P, Carry))),
-        .result = try typed.interop.schemaId(c.author, try c.schema(@import("protean_contracts").controller.Reply(P.AdaptiveResult))),
+        .result = try typed.interop.schemaId(
+            c.author,
+            try c.schema(@import("protean_contracts").controller.Reply(P.AdaptiveResult)),
+        ),
         .external = true,
     }));
     try c.registry.classify(effect, .model);
-    return typed.interop.externalOperation(c.author, effect, try c.schema(ControllerRequest(P, Carry)), try c.schema(@import("protean_contracts").controller.Reply(P.AdaptiveResult)));
+    return typed.interop.externalOperation(
+        c.author,
+        effect,
+        try c.schema(ControllerRequest(P, Carry)),
+        try c.schema(@import("protean_contracts").controller.Reply(P.AdaptiveResult)),
+    );
 }
 
 /// Normalized metadata is untrusted external evidence. Its adjacent admission
@@ -50,50 +89,121 @@ pub fn ModelObservation(comptime P: type, comptime batch: bool) type {
 /// before external I/O. Selection and the very same offered value
 /// are captured before suspension and used to admit the normalized result.
 /// `failure` is a literal of the enclosing module's failure schema.
-pub fn defineModel(comptime P: type, c: authoring.Context, failure: anytype, comptime batch: bool) !*const ModelFunction(P, P.AdaptiveRequest, if (batch) P.BatchInterpretation else P.Interpretation) {
+pub fn defineModel(
+    comptime P: type,
+    c: authoring.Context,
+    failure: anytype,
+    comptime batch: bool,
+) !*const ModelFunction(
+    P,
+    P.AdaptiveRequest,
+    if (batch) P.BatchInterpretation else P.Interpretation,
+) {
     const observed = try defineModelObserved(P, c, failure, batch);
     const t = c.author;
     const b = c.builder;
     const observed_id = try typed.interop.functionId(t, observed);
-    const instance = try b.specialization(Id, "agent.model.candidate-projection/v3", .{ @intFromPtr(t), observed_id });
+    const instance = try b.specialization(Id, "agent.model.candidate-projection/v3", .{
+        @intFromPtr(t),
+        observed_id,
+    });
     const result = try c.schema(if (batch) P.BatchInterpretation else P.Interpretation);
     const effect = try P.declare(c);
-    const signature = try t.callable(.{ .request = try c.schema(P.AdaptiveRequest), .offered = try c.schema([P.declaration_count]bool) }, result, .{effect}, .{ .use = .reusable });
-    if (instance.cached) |cached| return typed.interop.refineFunction(t, try typed.interop.declaredFunction(t, cached), signature);
+    const signature = try t.callable(.{
+        .request = try c.schema(P.AdaptiveRequest),
+        .offered = try c.schema([P.declaration_count]bool),
+    }, result, .{effect}, .{ .use = .reusable });
+    if (instance.cached) |cached| return typed.interop.refineFunction(
+        t,
+        try typed.interop.declaredFunction(t, cached),
+        signature,
+    );
     const handle = try t.functionFor("model candidate", signature);
     const body = try t.body(handle);
-    const observation = try body.call(observed, .{ .request = try body.parameter("request"), .offered = try body.parameter("offered") });
+    const observation = try body.call(observed, .{
+        .request = try body.parameter("request"),
+        .offered = try body.parameter("offered"),
+    });
     try t.define(handle, try body.ret(try body.field(observation, "interpretation")));
     _ = try instance.finish(b, try typed.interop.functionId(t, handle));
     return handle;
 }
 
-pub fn defineModelObserved(comptime P: type, c: authoring.Context, failure: anytype, comptime batch: bool) !*const ModelFunction(P, P.AdaptiveRequest, ModelObservation(P, batch)) {
+pub fn defineModelObserved(
+    comptime P: type,
+    c: authoring.Context,
+    failure: anytype,
+    comptime batch: bool,
+) !*const ModelFunction(P, P.AdaptiveRequest, ModelObservation(P, batch)) {
     return defineObserved(P, c, failure, batch, null);
 }
-pub fn defineControllerModelObserved(comptime P: type, comptime Carry: type, c: authoring.Context, failure: anytype, comptime batch: bool) !*const ObservedFunction(P, batch, Carry) {
+pub fn defineControllerModelObserved(
+    comptime P: type,
+    comptime Carry: type,
+    c: authoring.Context,
+    failure: anytype,
+    comptime batch: bool,
+) !*const ObservedFunction(P, batch, Carry) {
     return defineObserved(P, c, failure, batch, Carry);
 }
-fn defineObserved(comptime P: type, c: authoring.Context, failure: anytype, comptime batch: bool, comptime Carry: ?type) !*const ObservedFunction(P, batch, Carry) {
+fn defineObserved(
+    comptime P: type,
+    c: authoring.Context,
+    failure: anytype,
+    comptime batch: bool,
+    comptime Carry: ?type,
+) !*const ObservedFunction(P, batch, Carry) {
     const b = c.builder;
     const t = c.author;
     const operation = if (Carry) |C| try controllerModelOperation(P, C, c) else try P.declare(c);
     const effect = try typed.interop.operationId(t, operation);
     const fault = try typed.interop.literalFailure(t, failure);
-    const instance = try b.specialization(Id, "agent.model.observed-responder/v6", .{ @intFromPtr(t), @typeName(P), effect, try typed.interop.failureLiteralId(t, fault), batch });
-    const parameters = if (Carry) |C| .{ .request = try c.schema(P.AdaptiveRequest), .offered = try c.schema([P.declaration_count]bool), .carry = try c.schema(C) } else .{ .request = try c.schema(P.AdaptiveRequest), .offered = try c.schema([P.declaration_count]bool) };
-    const signature = try t.callable(parameters, try c.schema(ModelObservation(P, batch)), .{operation}, .{ .use = .reusable });
-    if (instance.cached) |cached| return typed.interop.refineFunction(t, try typed.interop.declaredFunction(t, cached), signature);
+    const instance = try b.specialization(Id, "agent.model.observed-responder/v6", .{
+        @intFromPtr(t),
+        @typeName(P),
+        effect,
+        try typed.interop.failureLiteralId(t, fault),
+        batch,
+    });
+    const parameters = if (Carry) |C| .{
+        .request = try c.schema(P.AdaptiveRequest),
+        .offered = try c.schema([P.declaration_count]bool),
+        .carry = try c.schema(C),
+    } else .{
+        .request = try c.schema(P.AdaptiveRequest),
+        .offered = try c.schema([P.declaration_count]bool),
+    };
+    const signature = try t.callable(parameters, try c.schema(
+        ModelObservation(P, batch),
+    ), .{operation}, .{ .use = .reusable });
+    if (instance.cached) |cached| return typed.interop.refineFunction(
+        t,
+        try typed.interop.declaredFunction(t, cached),
+        signature,
+    );
     const interpreter = if (batch) try P.interpretAll(c) else try P.interpreter(c);
     const handle = try t.functionFor("observed model response", signature);
     const function = try typed.interop.functionId(t, handle);
-    const g = Generator(P, batch, Carry, @TypeOf(fault), @TypeOf(failure)){ .context = c, .typed_context = t, .handle = handle, .function = function, .fault = fault, .failure = failure };
+    const g = Generator(P, batch, Carry, @TypeOf(fault), @TypeOf(failure)){
+        .context = c,
+        .typed_context = t,
+        .handle = handle,
+        .function = function,
+        .fault = fault,
+        .failure = failure,
+    };
     try t.define(handle, try g.emitBody(operation, interpreter));
     _ = try instance.finish(b, function);
     return handle;
 }
 
-fn Generator(comptime P: type, comptime batch: bool, comptime Carry: ?type, comptime Fault: type, comptime Failure: type) type {
+fn Generator(
+    comptime P: type,
+    comptime batch: bool,
+    comptime Carry: ?type,
+    comptime Fault: type,
+    comptime Failure: type,
+) type {
     return struct {
         context: authoring.Context,
         typed_context: *typed.Context,
@@ -106,9 +216,17 @@ fn Generator(comptime P: type, comptime batch: bool, comptime Carry: ?type, comp
         fn rejectWhen(g: G, body: anytype, invalid: V(bool)) !void {
             const rejected = try body.branch();
             const accepted = try body.branch();
-            _ = try body.conditional(invalid, try rejected.fail(try g.context.schema(void), g.failure), try accepted.ret(try accepted.constant(void, {})));
+            _ = try body.conditional(
+                invalid,
+                try rejected.fail(try g.context.schema(void), g.failure),
+                try accepted.ret(try accepted.constant(void, {})),
+            );
         }
-        fn emitBody(g: G, operation: anytype, interpreter: anytype) !*const typed.Computation(typed.Shape(ModelObservation(P, batch))) {
+        fn emitBody(
+            g: G,
+            operation: anytype,
+            interpreter: anytype,
+        ) !*const typed.Computation(typed.Shape(ModelObservation(P, batch))) {
             const root = try g.typed_context.body(g.handle);
             const envelope = try root.parameter("request");
             const template = try root.field(envelope, "invocation");
@@ -116,34 +234,106 @@ fn Generator(comptime P: type, comptime batch: bool, comptime Carry: ?type, comp
             const materialized = try root.field(envelope, "materialized");
             try g.checkMaterialized(root, materialized, offered);
             var tools = try g.context.literal(P.Tools, .{ .items = &.{} });
-            for (0..P.declaration_count) |index| tools = try g.filter(root, materialized, index, tools);
+            for (0..P.declaration_count) |index| tools = try g.filter(
+                root,
+                materialized,
+                index,
+                tools,
+            );
             const selection = try root.field(template, "selection");
             try g.checkTemplate(root, template, selection);
             const invocation = try g.request(root, template, tools);
-            const payload = try root.update(envelope, .{ .invocation = invocation, .offered = offered });
-            const bound = if (Carry) |C| try root.product(try g.context.schema(ControllerRequest(P, C)), .{ .request = payload, .carry = try root.parameter("carry") }) else payload;
+            const payload = try root.update(envelope, .{
+                .invocation = invocation,
+                .offered = offered,
+            });
+            const bound = if (Carry) |C| try root.product(try g.context.schema(
+                ControllerRequest(P, C),
+            ), .{ .request = payload, .carry = try root.parameter("carry") }) else payload;
             const site = try typed.interop.performSite(root, operation, bound);
-            try g.context.registry.protectSite(g.function, site.term, try typed.interop.operationId(g.typed_context, operation));
-            const observation = if (Carry != null) try root.field(site.value, "response") else site.value;
-            const diagnostic = if (Carry != null) try root.field(site.value, "diagnostic") else try g.context.literal(?@import("protean_contracts").controller.Diagnostic, null);
+            try g.context.registry.protectSite(
+                g.function,
+                site.term,
+                try typed.interop.operationId(g.typed_context, operation),
+            );
+            const observation = if (Carry != null) try root.field(
+                site.value,
+                "response",
+            ) else site.value;
+            const diagnostic = if (Carry != null) try root.field(
+                site.value,
+                "diagnostic",
+            ) else try g.context.literal(
+                ?@import("protean_contracts").controller.Diagnostic,
+                null,
+            );
+            return g.interpretObservation(
+                root,
+                interpreter,
+                observation,
+                diagnostic,
+                offered,
+                selection,
+            );
+        }
+        fn interpretObservation(
+            g: G,
+            root: anytype,
+            interpreter: anytype,
+            observation: V(P.AdaptiveResult),
+            diagnostic: V(?@import("protean_contracts").controller.Diagnostic),
+            offered: V([P.declaration_count]bool),
+            selection: V(@import("model_invocation.zig").Selection),
+        ) !*const typed.Computation(typed.Shape(ModelObservation(P, batch))) {
             const normalized = try root.field(observation, "result");
-            const interpreted = try root.call(interpreter, .{ .result = normalized, .offered = offered, .selection = selection });
+            const interpreted = try root.call(interpreter, .{
+                .result = normalized,
+                .offered = offered,
+                .selection = selection,
+            });
             const admitted = blk: {
                 const good = try root.branch();
                 const lost = try root.branch();
                 const Interpretation = if (batch) P.BatchInterpretation else P.Interpretation;
                 const status = try root.field(observation, "replay_status");
-                break :blk try root.conditional(try root.equal(try root.enumTag(status), try root.constant(u32, @backingInt(@import("model_invocation.zig").ReplayStatus.complete))), try good.ret(interpreted), try lost.ret(try g.context.literal(Interpretation, .{ .rejected = .unsupported })));
+                break :blk try root.conditional(
+                    try root.equal(
+                        try root.enumTag(status),
+                        try root.constant(
+                            u32,
+                            @backingInt(@import("model_invocation.zig").ReplayStatus.complete),
+                        ),
+                    ),
+                    try good.ret(interpreted),
+                    try lost.ret(
+                        try g.context.literal(Interpretation, .{ .rejected = .unsupported }),
+                    ),
+                );
             };
-            return root.ret(try root.product(try g.context.schema(ModelObservation(P, batch)), .{ .normalized = observation, .interpretation = admitted, .diagnostic = diagnostic }));
+            return root.ret(
+                try root.product(try g.context.schema(ModelObservation(P, batch)), .{
+                    .normalized = observation,
+                    .interpretation = admitted,
+                    .diagnostic = diagnostic,
+                }),
+            );
         }
+
         fn member(_: G, body: anytype, set: V([P.declaration_count]bool), index: usize) !V(bool) {
             const item = try body.sequenceGet(set, try body.constant(u64, index));
             const present = try body.caseOf(item, "some");
             const absent = try body.caseOf(item, "none");
-            return body.match(item, .{ .some = try present.ret(present.payload()), .none = try absent.ret(try absent.body().constant(bool, false)) });
+            return body.match(item, .{
+                .some = try present.ret(present.payload()),
+                .none = try absent.ret(try absent.body().constant(bool, false)),
+            });
         }
-        fn checkMaterialized(g: G, body: anytype, materialized: V([P.declaration_count]bool), offered: V([P.declaration_count]bool)) !void {
+        fn checkMaterialized(
+            g: G,
+            body: anytype,
+            materialized: V([P.declaration_count]bool),
+            offered: V([P.declaration_count]bool),
+        ) !void {
             for (0..P.declaration_count) |index| {
                 const defined = try g.member(body, materialized, index);
                 const callable = try g.member(body, offered, index);
@@ -160,43 +350,111 @@ fn Generator(comptime P: type, comptime batch: bool, comptime Carry: ?type, comp
             };
             var values: Values = undefined;
             const item = P.allDeclarations().items[index];
-            inline for (fields.field_names, fields.field_types) |name, T| @field(values, name) = try g.context.literal(T, @field(item, name));
+            inline for (fields.field_names, fields.field_types) |name, T| @field(
+                values,
+                name,
+            ) = try g.context.literal(T, @field(item, name));
             return body.product(try g.context.schema(P.ToolDeclaration), values);
         }
-        fn filter(g: G, body: anytype, offered: V([P.declaration_count]bool), index: usize, previous: V(P.Tools)) !V(P.Tools) {
+        fn filter(
+            g: G,
+            body: anytype,
+            offered: V([P.declaration_count]bool),
+            index: usize,
+            previous: V(P.Tools),
+        ) !V(P.Tools) {
             const present = try g.member(body, offered, index);
             const included = try body.branch();
             const excluded = try body.branch();
-            const appended = try included.append(previous, try g.declaration(included, index), .{ .capacity = g.fault });
-            return body.conditional(present, try included.ret(appended), try excluded.ret(previous));
+            const appended = try included.append(previous, try g.declaration(
+                included,
+                index,
+            ), .{ .capacity = g.fault });
+            return body.conditional(
+                present,
+                try included.ret(appended),
+                try excluded.ret(previous),
+            );
         }
-        fn checkTemplate(g: G, body: anytype, template: V(P.Request), selection: V(@import("model_invocation.zig").Selection)) !void {
+        fn checkTemplate(
+            g: G,
+            body: anytype,
+            template: V(P.Request),
+            selection: V(@import("model_invocation.zig").Selection),
+        ) !void {
             const bytes = try body.field(template, "maximum_provider_response_bytes");
             const no_bytes = try body.caseOf(bytes, "none");
             const bounded_bytes = try body.caseOf(bytes, "some");
-            try g.rejectWhen(body, try body.match(bytes, .{ .none = try no_bytes.ret(try no_bytes.body().constant(bool, false)), .some = try bounded_bytes.ret(try bounded_bytes.body().equal(bounded_bytes.payload(), try bounded_bytes.body().constant(u32, 0))) }));
-            const Limits = @FieldType(P.Request, "normalization_limits");
+            try g.rejectWhen(
+                body,
+                try body.match(bytes, .{
+                    .none = try no_bytes.ret(try no_bytes.body().constant(bool, false)),
+                    .some = try bounded_bytes.ret(
+                        try bounded_bytes.body().equal(
+                            bounded_bytes.payload(),
+                            try bounded_bytes.body().constant(u32, 0),
+                        ),
+                    ),
+                }),
+            );
             const limits = try body.field(template, "normalization_limits");
             const count = try body.field(limits, "maximum_output_items");
             const minimum = try body.field(selection, "minimum_calls");
             const maximum = try body.field(selection, "maximum_calls");
             const no_count = try body.caseOf(count, "none");
             const bounded_count = try body.caseOf(count, "some");
-            try g.rejectWhen(body, try body.match(count, .{ .none = try no_count.ret(try no_count.body().constant(bool, false)), .some = try bounded_count.ret(try bounded_count.body().less(bounded_count.payload(), maximum)) }));
+            try g.rejectWhen(
+                body,
+                try body.match(count, .{
+                    .none = try no_count.ret(try no_count.body().constant(bool, false)),
+                    .some = try bounded_count.ret(
+                        try bounded_count.body().less(bounded_count.payload(), maximum),
+                    ),
+                }),
+            );
             try g.rejectWhen(body, try body.less(maximum, minimum));
+            try g.checkReplyBounds(body, limits);
+        }
+        fn checkReplyBounds(
+            g: G,
+            body: anytype,
+            limits: V(@FieldType(P.Request, "normalization_limits")),
+        ) !void {
+            const Limits = @FieldType(P.Request, "normalization_limits");
             const bounds = P.normalizationLimits();
             // A request cannot promise a wider result than its reply schema.
-            inline for (.{ "maximum_result_text_bytes", "maximum_arguments_bytes", "maximum_name_bytes", "maximum_call_id_bytes", "maximum_output_items" }) |name| {
+            inline for (.{
+                "maximum_result_text_bytes",
+                "maximum_arguments_bytes",
+                "maximum_name_bytes",
+                "maximum_call_id_bytes",
+                "maximum_output_items",
+            }) |name| {
                 const actual = try body.field(limits, name);
                 if (@typeInfo(@FieldType(Limits, name)) != .optional) {
-                    try g.rejectWhen(body, try body.less(try body.constant(u32, @field(bounds, name)), actual));
+                    try g.rejectWhen(
+                        body,
+                        try body.less(try body.constant(u32, @field(bounds, name)), actual),
+                    );
                 } else if (@field(bounds, name)) |bound| {
                     const unbounded = try body.caseOf(actual, "none");
                     const bounded = try body.caseOf(actual, "some");
-                    try g.rejectWhen(body, try body.match(actual, .{ .none = try unbounded.ret(try unbounded.body().constant(bool, true)), .some = try bounded.ret(try bounded.body().less(try bounded.body().constant(u32, bound), bounded.payload())) }));
+                    try g.rejectWhen(
+                        body,
+                        try body.match(actual, .{
+                            .none = try unbounded.ret(try unbounded.body().constant(bool, true)),
+                            .some = try bounded.ret(
+                                try bounded.body().less(
+                                    try bounded.body().constant(u32, bound),
+                                    bounded.payload(),
+                                ),
+                            ),
+                        }),
+                    );
                 }
             }
         }
+
         fn request(_: G, body: anytype, template: V(P.Request), tools: V(P.Tools)) !V(P.Request) {
             return body.update(template, .{ .tools = tools });
         }

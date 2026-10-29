@@ -1,7 +1,11 @@
 const std = @import("std");
 
 pub fn isAdmitted(comptime Model: type) bool {
-    if (@typeInfo(Model) != .@"struct" or @typeInfo(Model).@"struct".field_names.len != 0) return false;
+    if (@typeInfo(
+        Model,
+    ) != .@"struct" or @typeInfo(
+        Model,
+    ).@"struct".field_names.len != 0) return false;
     inline for (.{ "name", "protocol", "model_id", "ParametersType", "parameters" }) |name| {
         if (!@hasDecl(Model, name)) return false;
         if (!@typeInfo(@TypeOf(&@field(Model, name))).pointer.attrs.@"const") return false;
@@ -11,7 +15,12 @@ pub fn isAdmitted(comptime Model: type) bool {
 
 // Exact private-constructor identity admits factory results, not lookalikes.
 // No public seal can be copied and no private declaration lookup is required.
-fn Descriptor(comptime name_value: anytype, comptime protocol_value: anytype, comptime identifier: anytype, comptime parameters_value: anytype) type {
+fn Descriptor(
+    comptime name_value: anytype,
+    comptime protocol_value: anytype,
+    comptime identifier: anytype,
+    comptime parameters_value: anytype,
+) type {
     return struct {
         pub const name = name_value;
         pub const protocol = protocol_value;
@@ -94,7 +103,9 @@ fn validateParameters(comptime parameters: anytype) void {
     if (@TypeOf(parameters) == void) return;
     inline for (@typeInfo(@TypeOf(parameters)).@"struct".field_names) |field_name| {
         if (!parameterFieldAdmitted(field_name)) {
-            @compileError("protean model parameters contain unsupported field '" ++ field_name ++ "'");
+            @compileError(
+                "protean model parameters contain unsupported field '" ++ field_name ++ "'",
+            );
         }
     }
     if (@hasField(@TypeOf(parameters), "max_output_tokens")) {

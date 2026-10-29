@@ -69,12 +69,26 @@ const Application = struct {
     pub fn emit(c: protean.Context) !source.Module {
         const b = c.builder;
         const unit = try b.scalar(void);
-        const request = try horos_authoring.interop.schemaId(c.author, try c.schema(P.AdaptiveRequest));
+        const request = try horos_authoring.interop.schemaId(
+            c.author,
+            try c.schema(P.AdaptiveRequest),
+        );
         const offered = try horos_authoring.interop.schemaId(c.author, try c.schema([1]bool));
-        const result = try horos_authoring.interop.schemaId(c.author, try c.schema(P.Interpretation));
-        const helper = try horos_authoring.interop.functionId(c.author, try protean.responders.defineModel(P, c, try c.literal(void, {}), false));
+        const result = try horos_authoring.interop.schemaId(
+            c.author,
+            try c.schema(P.Interpretation),
+        );
+        const helper = try horos_authoring.interop.functionId(
+            c.author,
+            try protean.responders.defineModel(P, c, try c.literal(void, {}), false),
+        );
         const model = try horos_authoring.interop.operationId(c.author, try P.declare(c));
-        const bound = if (completion) try completionHelper(c, request, offered, result) else if (wrong_result)
+        const bound = if (completion) try completionHelper(
+            c,
+            request,
+            offered,
+            result,
+        ) else if (wrong_result)
             try wrongHelper(c, request, offered)
         else
             helper;
@@ -90,7 +104,9 @@ const Application = struct {
         });
         if (mutate_object) @memset(@constCast(bytes), 0xff);
         if (assessment) try c.registry.speculate(participant, if (allow_model) &.{model} else &.{});
-        const entry = try b.declare(&.{try horos_authoring.interop.schemaId(c.author, try c.schema(Input))}, result, &.{model}, &.{});
+        const entry = try b.declare(&.{
+            try horos_authoring.interop.schemaId(c.author, try c.schema(Input)),
+        }, result, &.{model}, &.{});
         const input = try b.reference(b.parameter(entry, 0));
         try b.define(entry, try b.term(.{ .call = .{ .function = participant, .arguments = &.{
             try b.primitive(request, .field, &.{input}, 0),
@@ -107,9 +123,22 @@ fn wrongHelper(c: protean.Context, request: source.Id, offered: source.Id) !sour
     return helper;
 }
 
-fn completionHelper(c: protean.Context, request: source.Id, offered: source.Id, result: source.Id) !source.Id {
+fn completionHelper(
+    c: protean.Context,
+    request: source.Id,
+    offered: source.Id,
+    result: source.Id,
+) !source.Id {
     const b = c.builder;
-    const write = try horos_authoring.interop.operationId(c.author, try c.external("fixture/target-write", try horos_authoring.interop.schema(c.author, try b.scalar(void)), try horos_authoring.interop.schema(c.author, result), .write));
+    const write = try horos_authoring.interop.operationId(
+        c.author,
+        try c.external(
+            "fixture/target-write",
+            try horos_authoring.interop.schema(c.author, try b.scalar(void)),
+            try horos_authoring.interop.schema(c.author, result),
+            .write,
+        ),
+    );
     const helper = try b.declare(&.{ request, offered }, result, &.{write}, &.{});
     const operation = try b.term(.{ .perform = .{
         .effect = write,
@@ -131,12 +160,15 @@ const System = protean.system(.{
 test "compiled participant final link rejects an invalid optimization profile" {
     Application.bytes = try producer(a, false);
     defer a.free(Application.bytes);
-    try std.testing.expectError(error.InvalidOptimizationProfile, protean.compileObserved(a, System, .{ .horos_options = .{ .profile = .{ .record = .{
-        .version = 0,
-        .image_identity = @splat(0),
-        .block_counts = &.{},
-        .total = 0,
-    } } } }));
+    try std.testing.expectError(
+        error.InvalidOptimizationProfile,
+        protean.compileObserved(a, System, .{ .horos_options = .{ .profile = .{ .record = .{
+            .version = 0,
+            .image_identity = @splat(0),
+            .block_counts = &.{},
+            .total = 0,
+        } } } }),
+    );
 }
 
 test "compiled participant uses the actual checked model responder through normal compilation" {
@@ -146,7 +178,10 @@ test "compiled participant uses the actual checked model responder through norma
     var compiled = try protean.compile(a, System);
     defer compiled.deinit();
     try std.testing.expectEqual(1, compiled.program.effects.len);
-    try std.testing.expectEqualStrings("agent.model.invoke.v11", compiled.program.effects[0].identity);
+    try std.testing.expectEqualStrings(
+        "agent.model.invoke.v11",
+        compiled.program.effects[0].identity,
+    );
     const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
     defer a.free(image);
     _ = try compiled.encode(a, image);
@@ -203,14 +238,41 @@ test "participant admission owns the exact component bytes before caller mutatio
     var compiled = try protean.compile(a, System);
     defer compiled.deinit();
     try std.testing.expectEqual(@as(u8, 0xff), bytes[0]);
-    try std.testing.expectEqualStrings("agent.model.invoke.v11", compiled.program.effects[0].identity);
+    try std.testing.expectEqualStrings(
+        "agent.model.invoke.v11",
+        compiled.program.effects[0].identity,
+    );
 }
 
-fn incomingOwnerType(b: *source.Builder, wrapped: bool) !struct { effect: source.Id, owner: source.Id, input: source.Id } {
+fn incomingOwnerType(
+    b: *source.Builder,
+    wrapped: bool,
+) !struct {
+    effect: source.Id,
+    owner: source.Id,
+    input: source.Id,
+} {
     const unit = try b.scalar(void);
-    const effect = try b.effect(.{ .identity = "assessment/incoming-owner", .payload = unit, .result = unit, .external = false });
-    const owner = try b.schema(.{ .internal = .{ .resumption = .{ .effect = effect, .input = unit, .answer = unit, .handled = &.{effect}, .mode = .deep, .use = .linear, .obligations = true } } });
-    return .{ .effect = effect, .owner = owner, .input = if (wrapped) try b.schema(.{ .product = &.{owner} }) else owner };
+    const effect = try b.effect(.{
+        .identity = "assessment/incoming-owner",
+        .payload = unit,
+        .result = unit,
+        .external = false,
+    });
+    const owner = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = effect,
+        .input = unit,
+        .answer = unit,
+        .handled = &.{effect},
+        .mode = .deep,
+        .use = .linear,
+        .obligations = true,
+    } } });
+    return .{
+        .effect = effect,
+        .owner = owner,
+        .input = if (wrapped) try b.schema(.{ .product = &.{owner} }) else owner,
+    };
 }
 fn incomingOwner(allocator: std.mem.Allocator, wrapped: bool) ![]u8 {
     var b = source.Builder.init(allocator);
@@ -220,7 +282,14 @@ fn incomingOwner(allocator: std.mem.Allocator, wrapped: bool) ![]u8 {
     const value = try b.reference(b.parameter(entry, 0));
     const owner = try b.variable(t.owner);
     const dispose = try b.term(.{ .dispose = if (wrapped) try b.reference(owner) else value });
-    try b.define(entry, if (wrapped) try b.term(.{ .unpack_product = .{ .value = value, .variables = &.{owner}, .body = dispose } }) else dispose);
+    try b.define(
+        entry,
+        if (wrapped) try b.term(.{ .unpack_product = .{
+            .value = value,
+            .variables = &.{owner},
+            .body = dispose,
+        } }) else dispose,
+    );
     var compiled = try source.component.compile(allocator, b.module(entry, try b.scalar(void)), .{
         .imports = &.{.{ .name = "demand", .reference = .{ .kind = .effect, .id = t.effect } }},
         .exports = &.{.{ .name = "dispose", .reference = .{ .kind = .function, .id = entry } }},
@@ -240,7 +309,12 @@ const IncomingOwner = struct {
         const t = try incomingOwnerType(b, wrapped);
         try c.registry.classify(t.effect, .internal);
         const unit = try b.scalar(void);
-        const imported = try protean.participant.declare(c, .{ .instance = "incoming", .object = object, .entry = "dispose", .parameters = &.{t.input}, .result = unit, .effects = &.{.{ .symbol = "demand", .effect = t.effect }} });
+        const imported = try protean.participant.declare(
+            c,
+            .{ .instance = "incoming", .object = object, .entry = "dispose", .parameters = &.{
+                t.input,
+            }, .result = unit, .effects = &.{.{ .symbol = "demand", .effect = t.effect }} },
+        );
         if (assessment) try c.registry.speculate(imported, &.{});
         const entry = try b.declare(&.{unit}, unit, &.{}, &.{});
         try b.define(entry, try b.pure(try b.constant(void, {})));
@@ -248,7 +322,12 @@ const IncomingOwner = struct {
     }
 };
 test "compiled assessment rejects incoming cleanup owners directly and through aggregates" {
-    const OwnerSystem = protean.system(.{ .InitialArgs = void, .Result = void, .Failure = void, .application = IncomingOwner });
+    const OwnerSystem = protean.system(.{
+        .InitialArgs = void,
+        .Result = void,
+        .Failure = void,
+        .application = IncomingOwner,
+    });
     for ([_]bool{ false, true }) |wrapped| {
         const bytes = try incomingOwner(a, wrapped);
         defer a.free(bytes);
@@ -265,7 +344,14 @@ test "compiled assessment rejects incoming cleanup owners directly and through a
 fn inspectIncomingAllocation(allocator: std.mem.Allocator, object: data.component.Object) !void {
     var registry = protean.admission.Registry.init(allocator);
     defer registry.deinit();
-    const item: protean.admission.CompiledImport = .{ .function = 0, .instance = "incoming", .object = &.{}, .entry = "dispose", .effects = &.{}, .participant = true };
+    const item: protean.admission.CompiledImport = .{
+        .function = 0,
+        .instance = "incoming",
+        .object = &.{},
+        .entry = "dispose",
+        .effects = &.{},
+        .participant = true,
+    };
     protean.participant.inspect(allocator, object, item, &registry, &.{}) catch |err| {
         if (err == error.SpeculativeCapture) return;
         return err;

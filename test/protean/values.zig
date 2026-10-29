@@ -48,7 +48,11 @@ test "descriptor derivation and value bytes agree with public Horos admission" {
         0, 7,  17, 9,  2,  6, 15, 11, 3,  3, 18, 4,
     };
     try std.testing.expectEqualSlices(u8, &schema_bytes, encoded);
-    const fixture = try std.json.parseFromSlice(std.json.Value, a, @embedFile("values-vectors.json"), .{ .allocate = .alloc_always });
+    const fixture = try std.json.parseFromSlice(std.json.Value, a, @embedFile(
+        "values-vectors.json",
+    ), .{
+        .allocate = .alloc_always,
+    });
     defer fixture.deinit();
     const vector = fixture.value.object.get("envelope").?;
     const fixture_schema = vector.object.get("schemaBytes").?.array.items;
@@ -147,17 +151,41 @@ test "malformed and semantically invalid input reject without mutating bytes" {
     try std.testing.expectError(error.Truncated, contracts.decodeOwned(u64, a, &.{1}));
     try std.testing.expectError(error.NonCanonical, contracts.decodeOwned(void, a, &.{0}));
     try std.testing.expectError(error.InvalidValue, contracts.decodeOwned(?u8, a, &.{2}));
-    try std.testing.expectError(error.InvalidValue, contracts.decodeOwned(Mode, a, &.{ 8, 0, 0, 0 }));
-    try std.testing.expectError(error.InvalidUtf8, contracts.decodeOwned(contracts.Text(8), a, &.{ 2, 0xc0, 0x80 }));
-    try std.testing.expectError(error.InvalidValue, contracts.decodeOwned(contracts.Text(1), a, &.{ 2, 'a', 'b' }));
-    try std.testing.expectError(error.InvalidValue, contracts.decodeOwned(contracts.Vector(u8, 1), a, &.{ 2, 0, 0 }));
-    try std.testing.expectError(error.Truncated, contracts.decodeOwned([]const u64, a, &.{ 255, 255, 255, 255, 15 }));
+    try std.testing.expectError(
+        error.InvalidValue,
+        contracts.decodeOwned(Mode, a, &.{ 8, 0, 0, 0 }),
+    );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        contracts.decodeOwned(contracts.Text(8), a, &.{ 2, 0xc0, 0x80 }),
+    );
+    try std.testing.expectError(
+        error.InvalidValue,
+        contracts.decodeOwned(contracts.Text(1), a, &.{ 2, 'a', 'b' }),
+    );
+    try std.testing.expectError(
+        error.InvalidValue,
+        contracts.decodeOwned(contracts.Vector(u8, 1), a, &.{ 2, 0, 0 }),
+    );
+    try std.testing.expectError(
+        error.Truncated,
+        contracts.decodeOwned([]const u64, a, &.{ 255, 255, 255, 255, 15 }),
+    );
 }
 
 test "outbound values validate UTF8 and explicit bounds" {
-    try std.testing.expectError(error.InvalidValue, contracts.encodeOwned(contracts.Text(1), a, .{ .bytes = "λ" }));
-    try std.testing.expectError(error.InvalidUtf8, contracts.encodeOwned(contracts.Utf8, a, .{ .bytes = &.{0xff} }));
-    try std.testing.expectError(error.InvalidValue, contracts.encodeOwned(contracts.Vector(u8, 1), a, .{ .items = &.{ 1, 2 } }));
+    try std.testing.expectError(
+        error.InvalidValue,
+        contracts.encodeOwned(contracts.Text(1), a, .{ .bytes = "λ" }),
+    );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        contracts.encodeOwned(contracts.Utf8, a, .{ .bytes = &.{0xff} }),
+    );
+    try std.testing.expectError(
+        error.InvalidValue,
+        contracts.encodeOwned(contracts.Vector(u8, 1), a, .{ .items = &.{ 1, 2 } }),
+    );
 }
 
 test "explicit recursive descriptors are canonicalized and exclude internal values" {

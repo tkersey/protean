@@ -123,7 +123,11 @@ fn validateContract(builder: *const source.Builder, contract: Contract) Error!vo
         }
     }
     const required = [_]Id{
-        contract.channel, contract.purpose, contract.presentation, contract.outgoing, contract.input,
+        contract.channel,
+        contract.purpose,
+        contract.presentation,
+        contract.outgoing,
+        contract.input,
     };
     for (required) |schema| if (schema >= builder.schemas.items.len) {
         return error.InvalidInteractionContract;
@@ -203,13 +207,19 @@ test "exchange preserves payload order and does not widen reply variants" {
         .presentation = nothing,
         .outgoing = message,
     });
-    try std.testing.expectEqual(definition.effect, builder.terms.items[@intCast(term)].perform.effect);
+    try std.testing.expectEqual(
+        definition.effect,
+        builder.terms.items[@intCast(term)].perform.effect,
+    );
     const shape = builder.schemas.items[@intCast(definition.payload)].product;
     try std.testing.expectEqualSlices(Id, &.{ unit, unit, unit, integer }, shape);
     try std.testing.expectEqual(@as(?Id, 1), definition.close_conversation_tag);
     _ = try value(&builder, definition, message);
     _ = try closeConversation(&builder, definition, nothing);
-    try std.testing.expectError(error.InvalidInteractionContract, abortTurn(&builder, definition, nothing));
+    try std.testing.expectError(
+        error.InvalidInteractionContract,
+        abortTurn(&builder, definition, nothing),
+    );
     try std.testing.expectError(error.TypeMismatch, value(&builder, definition, nothing));
 }
 

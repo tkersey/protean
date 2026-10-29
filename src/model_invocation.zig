@@ -69,7 +69,11 @@ pub const AdaptiveContextReference = struct {
 /// reference is data, never object access authority; its actual material enters
 /// through the paired workspace result at selected_at.
 pub const RetainedCalls = contracts.Vector(contracts.Text(128), null);
-pub const ResearchSelection = struct { view: contracts.workspace.Ref, selected_at: u64, retained_calls: RetainedCalls = .{ .items = &.{} } };
+pub const ResearchSelection = struct {
+    view: contracts.workspace.Ref,
+    selected_at: u64,
+    retained_calls: RetainedCalls = .{ .items = &.{} },
+};
 /// Authored classification of paired call/results during research replacement.
 /// Human input and other operative controls must survive a selected data view.
 pub const ContextRetention = enum { research, control };
@@ -183,37 +187,11 @@ fn checkDeclarations(comptime Answer: type, comptime declarations: anytype) void
 /// The union defines answer association; declarations supply its provider names.
 /// An answer may propose an operation or answer an ordinary question. Neither
 /// kind authorizes dispatch; the enclosing protected composition owns admission.
-pub fn Profile(
-    comptime Answer: type,
-    comptime declarations: anytype,
-    comptime limits: Limits,
-) type {
-    // Only descriptor derivation runs at comptime; application control does not.
+// Only descriptor derivation runs at comptime; application control does not.
+pub fn Profile(comptime Answer: type, comptime catalog: anytype, comptime limits: Limits) type {
     @setEvalBranchQuota(100_000);
     const CodecProfile = codecs.Profile(Answer);
-    comptime checkDeclarations(Answer, declarations);
-    comptime for (@typeInfo(Limits).@"struct".field_names) |name| {
-        if (@field(limits, name) == 0)
-            @compileError("Protean model limit must be positive: " ++ name);
-    };
-    if (limits.maximum_adaptive_reply_bytes != null and limits.maximum_adaptive_reply_bytes.? < 128)
-        @compileError("adaptive reply budget must hold a capacity result and exact usage");
-    const maxima = comptime blk: {
-        var name: usize = 1;
-        var description: usize = 0;
-        var schema: usize = 2;
-        for (declarations, @typeInfo(Answer).@"union".field_types) |declaration, Variant| {
-            name = @max(name, declaration.name.len);
-            description = @max(description, declaration.description.len);
-            schema = @max(schema, codecs.json.ToolSchema(Variant).value.len);
-            if (limits.arguments_json_bytes) |maximum| {
-                const needed = codecs.json.maximumToolArgumentsByteLength(Variant) orelse
-                    @compileError("bounded arguments cannot represent an unbounded answer");
-                if (maximum < needed) @compileError("Protean model arguments_json_bytes cannot represent every admitted answer");
-            }
-        }
-        break :blk .{ .name = name, .description = description, .schema = schema };
-    };
+    const maxima = profileMaxima(Answer, catalog, limits);
     return struct {
         const Self = @This();
         pub const identity = semantic_identity;
@@ -225,16 +203,8 @@ pub fn Profile(
         pub const BatchInterpretation = @import("model_interpretation.zig").Result([]const Answer);
         pub const InterpretationFailure = @import("model_interpretation.zig").Failure;
         pub const representation = limits;
-        pub const declaration_count = declarations.len;
-        /// Compile-time application semantics, never provider-supplied metadata.
-        pub const retained_control_calls: [declarations.len]bool = blk: {
-            var result: [declarations.len]bool = @splat(false);
-            for (declarations, 0..) |declaration, i| {
-                if (@hasField(@TypeOf(declaration), "context_retention"))
-                    result[i] = @as(ContextRetention, declaration.context_retention) == .control;
-            }
-            break :blk result;
-        };
+        pub const declaration_count = catalog.len;
+        pub const retained_control_calls = retainedControls(catalog);
         pub const ArgumentCodec = CodecProfile.Codec;
         pub const DecodedAnswer = CodecProfile.Decoded;
         pub const ModelId = contracts.Text(schemaBound(limits.model_id_bytes));
@@ -247,31 +217,294 @@ pub fn Profile(
         pub const ArgumentsJson = contracts.Bytes(schemaBound(limits.arguments_json_bytes));
         pub const ResultText = contracts.Text(schemaBound(limits.result_text_bytes));
         pub const CallId = contracts.Text(schemaBound(limits.call_id_bytes));
+        pub const ReasoningConfig = RequestTypes(Self).ReasoningConfig;
+        pub const ModelParameters = RequestTypes(Self).ModelParameters;
+        pub const Message = RequestTypes(Self).Message;
+        pub const Messages = RequestTypes(Self).Messages;
+        pub const ToolDeclaration = RequestTypes(Self).ToolDeclaration;
+        pub const Tools = RequestTypes(Self).Tools;
+        pub const Request = RequestTypes(Self).Request;
+        pub const FunctionCall = ResponseTypes(Self).FunctionCall;
+        pub const OutputItem = ResponseTypes(Self).OutputItem;
+        pub const OutputItems = ResponseTypes(Self).OutputItems;
+        pub const Output = ResponseTypes(Self).Output;
+        pub const Result = ResponseTypes(Self).Result;
+        pub const ToolResult = ResponseTypes(Self).ToolResult;
+        pub const AdaptiveRequest = AdaptiveTypes(Self).AdaptiveRequest;
+        pub const AdaptivePrepared = AdaptiveTypes(Self).AdaptivePrepared;
+        pub const AdaptivePolicy = AdaptiveTypes(Self).AdaptivePolicy;
+        pub const AdaptiveSkill = AdaptiveTypes(Self).AdaptiveSkill;
+        pub const AdaptiveCatalog = AdaptiveTypes(Self).AdaptiveCatalog;
+        pub const AdaptiveContext = HistoryTypes(Self).AdaptiveContext;
+        pub const HistoryReference = HistoryTypes(Self).HistoryReference;
+        pub const ContextEvent = HistoryTypes(Self).ContextEvent;
+        pub const HistoryChunk = HistoryTypes(Self).HistoryChunk;
+        pub const ReasoningSkills = HistoryTypes(Self).ReasoningSkills;
+        pub const ContextOrigin = HistoryTypes(Self).ContextOrigin;
+        pub const AdaptiveResult = HistoryTypes(Self).AdaptiveResult;
+        pub fn allDeclarations() Tools {
+            const items = comptime blk: {
+                var result: [catalog.len]ToolDeclaration = undefined;
+                const info = @typeInfo(Answer).@"union";
+                for (
+                    catalog,
+                    info.field_names,
+                    info.field_types,
+                    0..,
+                ) |descriptor, name, Variant, index| {
+                    result[index] = .{
+                        .action_ordinal = @intCast(index),
+                        .action_tag = @intCast(@backingInt(@field(info.tag_type.?, name))),
+                        .name = .{ .bytes = descriptor.name },
+                        .description = .{ .bytes = descriptor.description },
+                        .input_schema_json = .{ .bytes = &codecs.json.ToolSchema(Variant).value },
+                        .strict = true,
+                        .argument_codec = CodecProfile.value(index),
+                    };
+                }
+                break :blk result;
+            };
+            return .{ .items = &items };
+        }
+        /// Stage immutable fields separately so equal schemas/codecs/descriptions
+        /// share canonical constants across distinct model-visible catalog.
+        pub fn declarationValue(builder: anytype, index: usize) !u64 {
+            if (index >= catalog.len) return error.InvalidDeclarationIndex;
+            const slot = try builder.specialization(u64, "agent.model.declaration/v3", .{
+                @typeName(Self), index,
+            });
+            if (slot.cached) |cached| return cached;
+            const declaration = allDeclarations().items[index];
+            const fields = @typeInfo(ToolDeclaration).@"struct";
+            var values: [fields.field_names.len]u64 = undefined;
+            inline for (
+                fields.field_names,
+                fields.field_types,
+                0..,
+            ) |name, FieldType, field_index| {
+                values[field_index] = try builder.literal(.{
+                    .schema = try contracts.schema(FieldType, builder),
+                    .bytes = try contracts.encodeOwned(
+                        FieldType,
+                        builder.allocator(),
+                        @field(declaration, name),
+                    ),
+                });
+            }
+            const product = try builder.primitive(
+                try contracts.schema(ToolDeclaration, builder),
+                .product,
+                &values,
+                0,
+            );
+            return slot.finish(builder, product);
+        }
+        /// The returned slice belongs to allocator; nested metadata is immutable.
+        pub fn declarationsValue(
+            allocator: std.mem.Allocator,
+            offered: [catalog.len]bool,
+        ) !Tools {
+            var count: usize = 0;
+            for (offered) |present| if (present) {
+                count += 1;
+            };
+            const items = try allocator.alloc(ToolDeclaration, count);
+            var next: usize = 0;
+            for (offered, allDeclarations().items) |present, declaration| if (present) {
+                items[next] = declaration;
+                next += 1;
+            };
+            return .{ .items = items };
+        }
+        pub fn parametersValue(comptime Model: type) ModelParameters {
+            comptime {
+                if (!models.isAdmitted(
+                    Model,
+                )) @compileError(
+                    "Protean model must use protean.model",
+                );
+                if (!std.mem.eql(u8, Model.protocol.semantic_identity, protocol_identity))
+                    @compileError("Protean model profile uses an unsupported provider protocol");
+                if (contracts.exceeds(Model.model_id.len, limits.model_id_bytes))
+                    @compileError("Protean model identifier exceeds model_id_bytes");
+            }
+            const parameters = Model.parameters;
+            const has = @TypeOf(parameters) != void;
+            const temperature: ?[]const u8 = if (has and @hasField(
+                @TypeOf(parameters),
+                "temperature",
+            ))
+                parameters.temperature
+            else
+                null;
+            if (temperature != null and contracts.exceeds(
+                temperature.?.len,
+                limits.temperature_bytes,
+            ))
+                @compileError("Protean model temperature exceeds temperature_bytes");
+            return .{
+                .max_output_tokens = if (has and @hasField(
+                    @TypeOf(parameters),
+                    "max_output_tokens",
+                ))
+                    parameters.max_output_tokens
+                else
+                    null,
+                .temperature = if (temperature) |value| .{ .bytes = value } else null,
+                .reasoning = if (has and @hasField(@TypeOf(parameters), "reasoning")) .{
+                    .effort = if (@hasField(@TypeOf(parameters.reasoning), "effort"))
+                        parameters.reasoning.effort
+                    else
+                        null,
+                    .summary = if (@hasField(@TypeOf(parameters.reasoning), "summary"))
+                        parameters.reasoning.summary
+                    else
+                        null,
+                } else null,
+            };
+        }
+        pub fn normalizationLimits() NormalizationLimits {
+            return .{
+                .maximum_output_items = limits.maximum_output_items,
+                .maximum_call_id_bytes = limits.call_id_bytes,
+                .maximum_name_bytes = maxima.name,
+                .maximum_arguments_bytes = limits.arguments_json_bytes,
+                .maximum_argument_name_bytes = @intCast(CodecProfile.FieldName.max_length.?),
+                .maximum_argument_fields = @intCast(CodecProfile.maximum_fields),
+                .maximum_result_text_bytes = limits.result_text_bytes,
+            };
+        }
+        /// Authoring convenience. Dynamic prompt and offer construction uses the
+        /// same public product/vector terms inside the emitted computation.
+        pub fn invocationValue(
+            allocator: std.mem.Allocator,
+            comptime Model: type,
+            messages: Messages,
+            offered: [catalog.len]bool,
+            selection: Selection,
+        ) !Request {
+            var request = try templateValue(Model, messages, selection);
+            request.tools = try declarationsValue(allocator, offered);
+            return request;
+        }
+        /// Configuration for the checked responder. Its tools are emitted from
+        /// the captured offered set, so the template contains no catalog copy.
+        pub fn templateValue(
+            comptime Model: type,
+            messages: Messages,
+            selection: Selection,
+        ) !Request {
+            if (selection.minimum_calls > selection.maximum_calls or
+                contracts.exceeds(selection.maximum_calls, limits.maximum_output_items))
+                return error.InvalidSelection;
+            return .{
+                .protocol = .{ .bytes = protocol_identity },
+                .model = .{ .bytes = Model.model_id },
+                .parameters = parametersValue(Model),
+                .messages = messages,
+                .tools = .{ .items = &.{} },
+                .selection = selection,
+                .response_policy = .{
+                    .store = false,
+                    .stream = false,
+                    .background = false,
+                    .truncation = .disabled,
+                },
+                .normalization_limits = normalizationLimits(),
+                .maximum_provider_response_bytes = limits.provider_response_bytes,
+            };
+        }
+        pub const Operation = OperationType(Self);
+        pub fn declare(context: @import("authoring.zig").Context) !*const Operation {
+            const effect = try source.declare(context.builder);
+            try context.registry.classify(effect, .model);
+            return a.interop.externalOperation(
+                context.author,
+                effect,
+                try context.schema(AdaptiveRequest),
+                try context.schema(AdaptiveResult),
+            );
+        }
+        pub const source = struct {
+            pub fn declare(builder: anytype) !u64 {
+                const payload = try contracts.schema(AdaptiveRequest, builder);
+                const result = try contracts.schema(AdaptiveResult, builder);
+                const slot = try builder.specialization(u64, semantic_identity, .{
+                    payload,
+                    result,
+                });
+                if (slot.cached) |cached| return cached;
+                const effect = try builder.effect(.{
+                    .identity = semantic_identity,
+                    .payload = payload,
+                    .result = result,
+                });
+                return slot.finish(builder, effect);
+            }
+        };
+        /// Checks the single-answer policy, normalized call association, concrete
+        /// variant and request-time offered set. Returns candidate data only.
+        pub fn interpreter(
+            context: anytype,
+        ) @TypeOf(@import("model_interpretation.zig").define(Self, context)) {
+            return @import("model_interpretation.zig").define(Self, context);
+        }
+        /// Preserves all admitted candidate calls in their original order.
+        /// Candidate count cannot exceed the bounded incoming OutputItems count.
+        pub fn interpretAll(
+            context: anytype,
+        ) @TypeOf(@import("model_interpretation.zig").defineAll(Self, context)) {
+            return @import("model_interpretation.zig").defineAll(Self, context);
+        }
+    };
+}
+
+/// A question's synthetic answer declaration has no associated executable tool.
+pub fn Question(
+    comptime Value: type,
+    comptime name: []const u8,
+    comptime description: []const u8,
+    comptime limits: Limits,
+) type {
+    const Payload = if (@typeInfo(Value) == .@"enum" or
+        (@typeInfo(Value) == .@"struct" and !codecs.json.isText(Value)))
+        Value
+    else
+        struct { value: Value };
+    const Answer = union(enum) { answer: Payload };
+    return Profile(Answer, .{.{ .name = name, .description = description }}, limits);
+}
+
+fn RequestTypes(comptime P: type) type {
+    return struct {
         pub const ReasoningConfig = struct {
             effort: ?models.ReasoningEffort,
             summary: ?models.ReasoningSummary,
         };
         pub const ModelParameters = struct {
             max_output_tokens: ?u32,
-            temperature: ?Temperature,
+            temperature: ?P.Temperature,
             reasoning: ?ReasoningConfig,
         };
-        pub const Message = struct { role: MessageRole, content: MessageText };
-        pub const Messages = contracts.Vector(Message, schemaBound(limits.maximum_messages));
+        pub const Message = struct { role: MessageRole, content: P.MessageText };
+        pub const Messages = contracts.Vector(
+            Message,
+            schemaBound(P.representation.maximum_messages),
+        );
         pub const ToolDeclaration = struct {
             action_ordinal: u32,
             action_tag: u32,
-            name: ToolName,
-            description: ToolDescription,
-            input_schema_json: ToolSchema,
+            name: P.ToolName,
+            description: P.ToolDescription,
+            input_schema_json: P.ToolSchema,
             strict: bool,
-            argument_codec: ArgumentCodec,
+            argument_codec: P.ArgumentCodec,
         };
-        pub const Tools = contracts.Vector(ToolDeclaration, declarations.len);
+        pub const Tools = contracts.Vector(ToolDeclaration, P.declaration_count);
         /// Invocation settings nested inside the sole v11 request contract.
         pub const Request = struct {
-            protocol: ProtocolIdentity,
-            model: ModelId,
+            protocol: P.ProtocolIdentity,
+            model: P.ModelId,
             parameters: ModelParameters,
             messages: Messages,
             tools: Tools,
@@ -280,19 +513,27 @@ pub fn Profile(
             normalization_limits: NormalizationLimits,
             maximum_provider_response_bytes: ?u32,
         };
+    };
+}
+
+fn ResponseTypes(comptime P: type) type {
+    return struct {
         pub const FunctionCall = struct {
-            call_id: CallId,
-            name: ToolName,
-            arguments_json: ArgumentsJson,
+            call_id: P.CallId,
+            name: P.ToolName,
+            arguments_json: P.ArgumentsJson,
             tool_ordinal_claim: u32,
-            decoded_action: DecodedAnswer,
+            decoded_action: P.DecodedAnswer,
         };
         pub const OutputItem = union(enum) {
             function_call: FunctionCall,
-            message: struct { role: MessageRole, content: ResultText },
-            reasoning: struct { summary: ResultText },
+            message: struct { role: MessageRole, content: P.ResultText },
+            reasoning: struct { summary: P.ResultText },
         };
-        pub const OutputItems = contracts.Vector(OutputItem, schemaBound(limits.maximum_output_items));
+        pub const OutputItems = contracts.Vector(
+            OutputItem,
+            schemaBound(P.representation.maximum_output_items),
+        );
         pub const Output = struct {
             items: OutputItems,
             normalized_output_digest: [32]u8,
@@ -300,47 +541,63 @@ pub fn Profile(
         /// Sum ordinals are fixed in this order. Nested enums retain explicit u32 tags.
         pub const Result = union(enum) {
             output: Output,
-            refusal: ResultText,
+            refusal: P.ResultText,
             transport_failure: TransportFailure,
             provider_failure: struct { kind: ProviderFailureKind, http_status: u16 },
             unsupported_response: UnsupportedResponse,
         };
 
-        pub const ToolResult = struct { call_id: CallId, output: ResultText };
+        pub const ToolResult = struct { call_id: P.CallId, output: P.ResultText };
+    };
+}
 
+fn AdaptiveTypes(comptime P: type) type {
+    return struct {
         /// v11 independently represents definition residency and call authority.
         /// The checked responder replaces invocation.tools from materialized,
         /// and replaces offered from its separately captured argument. All
         /// definitions still come from this compiled answer catalog.
         pub const AdaptiveRequest = struct {
-            invocation: Request,
+            invocation: P.Request,
             policy: [32]u8,
             selection: AdaptiveSelection,
             plan: AdaptivePlan,
-            materialized: [declarations.len]bool,
-            offered: [declarations.len]bool,
-            results: contracts.Vector(ToolResult, schemaBound(limits.maximum_output_items)),
+            materialized: [P.declaration_count]bool,
+            offered: [P.declaration_count]bool,
+            results: contracts.Vector(
+                P.ToolResult,
+                schemaBound(P.representation.maximum_output_items),
+            ),
         };
-        pub const AdaptivePrepared = struct { version: u32, request: AdaptiveRequest, body: contracts.Bytes(null) };
+        pub const AdaptivePrepared = struct {
+            version: u32,
+            request: AdaptiveRequest,
+            body: contracts.Bytes(null),
+        };
         pub const AdaptivePolicy = struct {
             schema: contracts.Text(128),
             endpoint: contracts.Text(2048),
             audience: contracts.Text(128),
             profiles: contracts.Vector(AdaptiveInferenceProfile, null),
             catalog: ArtifactReference,
-            core_tools: [declarations.len]bool,
-            permitted_tools: [declarations.len]bool,
+            core_tools: [P.declaration_count]bool,
+            permitted_tools: [P.declaration_count]bool,
         };
         pub const AdaptiveSkill = struct {
             id: contracts.Text(64),
             version: contracts.Text(64),
             description: contracts.Text(256),
             instructions: ArtifactReference,
-            tools: [declarations.len]bool,
+            tools: [P.declaration_count]bool,
         };
         pub const AdaptiveCatalog = struct {
             skills: contracts.Vector(AdaptiveSkill, null),
         };
+    };
+}
+
+fn HistoryTypes(comptime P: type) type {
+    return struct {
         /// Audit closure and rendered input are different sets. History contains
         /// committed events, never copies of transient suffix injections.
         /// source_request retains the exact prepared request that did contain
@@ -369,214 +626,69 @@ pub fn Profile(
             events: contracts.Vector(ContextEvent, null),
         };
         pub const ReasoningSkills = contracts.Vector(u64, null);
-        pub const ContextOrigin = struct { watermark: u64, resident_skill: ?u64 = null, reasoning_skills: ReasoningSkills = .{ .items = &.{} }, reasoning_tools: [declarations.len]bool = @splat(false) };
+        pub const ContextOrigin = struct {
+            watermark: u64,
+            resident_skill: ?u64 = null,
+            reasoning_skills: ReasoningSkills = .{ .items = &.{} },
+            reasoning_tools: [P.declaration_count]bool = @splat(false),
+        };
         pub const AdaptiveResult = struct {
-            result: Result,
+            result: P.Result,
             replay: ?AdaptiveContextReference,
             replay_status: ReplayStatus,
             usage: ?AdaptiveUsage,
         };
-
-        pub fn allDeclarations() Tools {
-            const items = comptime blk: {
-                var result: [declarations.len]ToolDeclaration = undefined;
-                const info = @typeInfo(Answer).@"union";
-                for (declarations, info.field_names, info.field_types, 0..) |descriptor, name, Variant, index| {
-                    result[index] = .{
-                        .action_ordinal = @intCast(index),
-                        .action_tag = @intCast(@backingInt(@field(info.tag_type.?, name))),
-                        .name = .{ .bytes = descriptor.name },
-                        .description = .{ .bytes = descriptor.description },
-                        .input_schema_json = .{ .bytes = &codecs.json.ToolSchema(Variant).value },
-                        .strict = true,
-                        .argument_codec = CodecProfile.value(index),
-                    };
-                }
-                break :blk result;
-            };
-            return .{ .items = &items };
-        }
-
-        /// Stage immutable fields separately so equal schemas/codecs/descriptions
-        /// share canonical constants across distinct model-visible declarations.
-        pub fn declarationValue(builder: anytype, index: usize) !u64 {
-            if (index >= declarations.len) return error.InvalidDeclarationIndex;
-            const slot = try builder.specialization(u64, "agent.model.declaration/v3", .{
-                @typeName(Self), index,
-            });
-            if (slot.cached) |cached| return cached;
-            const declaration = allDeclarations().items[index];
-            const fields = @typeInfo(ToolDeclaration).@"struct";
-            var values: [fields.field_names.len]u64 = undefined;
-            inline for (fields.field_names, fields.field_types, 0..) |name, FieldType, field_index| {
-                values[field_index] = try builder.literal(.{
-                    .schema = try contracts.schema(FieldType, builder),
-                    .bytes = try contracts.encodeOwned(FieldType, builder.allocator(), @field(declaration, name)),
-                });
-            }
-            const product = try builder.primitive(try contracts.schema(ToolDeclaration, builder), .product, &values, 0);
-            return slot.finish(builder, product);
-        }
-
-        /// The returned slice belongs to allocator; nested metadata is immutable.
-        pub fn declarationsValue(
-            allocator: std.mem.Allocator,
-            offered: [declarations.len]bool,
-        ) !Tools {
-            var count: usize = 0;
-            for (offered) |present| if (present) {
-                count += 1;
-            };
-            const items = try allocator.alloc(ToolDeclaration, count);
-            var next: usize = 0;
-            for (offered, allDeclarations().items) |present, declaration| if (present) {
-                items[next] = declaration;
-                next += 1;
-            };
-            return .{ .items = items };
-        }
-
-        pub fn parametersValue(comptime Model: type) ModelParameters {
-            comptime {
-                if (!models.isAdmitted(Model)) @compileError("Protean model must use protean.model");
-                if (!std.mem.eql(u8, Model.protocol.semantic_identity, protocol_identity))
-                    @compileError("Protean model profile uses an unsupported provider protocol");
-                if (contracts.exceeds(Model.model_id.len, limits.model_id_bytes))
-                    @compileError("Protean model identifier exceeds model_id_bytes");
-            }
-            const parameters = Model.parameters;
-            const has = @TypeOf(parameters) != void;
-            const temperature: ?[]const u8 = if (has and @hasField(@TypeOf(parameters), "temperature"))
-                parameters.temperature
-            else
-                null;
-            if (temperature != null and contracts.exceeds(temperature.?.len, limits.temperature_bytes))
-                @compileError("Protean model temperature exceeds temperature_bytes");
-            return .{
-                .max_output_tokens = if (has and @hasField(@TypeOf(parameters), "max_output_tokens"))
-                    parameters.max_output_tokens
-                else
-                    null,
-                .temperature = if (temperature) |value| .{ .bytes = value } else null,
-                .reasoning = if (has and @hasField(@TypeOf(parameters), "reasoning")) .{
-                    .effort = if (@hasField(@TypeOf(parameters.reasoning), "effort"))
-                        parameters.reasoning.effort
-                    else
-                        null,
-                    .summary = if (@hasField(@TypeOf(parameters.reasoning), "summary"))
-                        parameters.reasoning.summary
-                    else
-                        null,
-                } else null,
-            };
-        }
-
-        pub fn normalizationLimits() NormalizationLimits {
-            return .{
-                .maximum_output_items = limits.maximum_output_items,
-                .maximum_call_id_bytes = limits.call_id_bytes,
-                .maximum_name_bytes = maxima.name,
-                .maximum_arguments_bytes = limits.arguments_json_bytes,
-                .maximum_argument_name_bytes = @intCast(CodecProfile.FieldName.max_length.?),
-                .maximum_argument_fields = @intCast(CodecProfile.maximum_fields),
-                .maximum_result_text_bytes = limits.result_text_bytes,
-            };
-        }
-
-        /// Authoring convenience. Dynamic prompt and offer construction uses the
-        /// same public product/vector terms inside the emitted computation.
-        pub fn invocationValue(
-            allocator: std.mem.Allocator,
-            comptime Model: type,
-            messages: Messages,
-            offered: [declarations.len]bool,
-            selection: Selection,
-        ) !Request {
-            var request = try templateValue(Model, messages, selection);
-            request.tools = try declarationsValue(allocator, offered);
-            return request;
-        }
-
-        /// Configuration for the checked responder. Its tools are emitted from
-        /// the captured offered set, so the template contains no catalog copy.
-        pub fn templateValue(
-            comptime Model: type,
-            messages: Messages,
-            selection: Selection,
-        ) !Request {
-            if (selection.minimum_calls > selection.maximum_calls or
-                contracts.exceeds(selection.maximum_calls, limits.maximum_output_items))
-                return error.InvalidSelection;
-            return .{
-                .protocol = .{ .bytes = protocol_identity },
-                .model = .{ .bytes = Model.model_id },
-                .parameters = parametersValue(Model),
-                .messages = messages,
-                .tools = .{ .items = &.{} },
-                .selection = selection,
-                .response_policy = .{
-                    .store = false,
-                    .stream = false,
-                    .background = false,
-                    .truncation = .disabled,
-                },
-                .normalization_limits = normalizationLimits(),
-                .maximum_provider_response_bytes = limits.provider_response_bytes,
-            };
-        }
-
-        pub const Operation = a.Operation(a.OperationSignature(
-            a.Shape(AdaptiveRequest),
-            a.Shape(AdaptiveResult),
-            horos.data.schema.native.Fields(&.{}, &.{}),
-        ));
-        pub fn declare(context: @import("authoring.zig").Context) !*const Operation {
-            const effect = try source.declare(context.builder);
-            try context.registry.classify(effect, .model);
-            return a.interop.externalOperation(
-                context.author,
-                effect,
-                try context.schema(AdaptiveRequest),
-                try context.schema(AdaptiveResult),
-            );
-        }
-        pub const source = struct {
-            pub fn declare(builder: anytype) !u64 {
-                const payload = try contracts.schema(AdaptiveRequest, builder);
-                const result = try contracts.schema(AdaptiveResult, builder);
-                const slot = try builder.specialization(u64, semantic_identity, .{ payload, result });
-                if (slot.cached) |cached| return cached;
-                const effect = try builder.effect(.{ .identity = semantic_identity, .payload = payload, .result = result });
-                return slot.finish(builder, effect);
-            }
-        };
-
-        /// Checks the single-answer policy, normalized call association, concrete
-        /// variant and request-time offered set. Returns candidate data only.
-        pub fn interpreter(context: anytype) @TypeOf(@import("model_interpretation.zig").define(Self, context)) {
-            return @import("model_interpretation.zig").define(Self, context);
-        }
-
-        /// Preserves all admitted candidate calls in their original order.
-        /// Candidate count cannot exceed the bounded incoming OutputItems count.
-        pub fn interpretAll(context: anytype) @TypeOf(@import("model_interpretation.zig").defineAll(Self, context)) {
-            return @import("model_interpretation.zig").defineAll(Self, context);
-        }
     };
 }
 
-/// A question's synthetic answer declaration has no associated executable tool.
-pub fn Question(
-    comptime Value: type,
-    comptime name: []const u8,
-    comptime description: []const u8,
+const ProfileMaxima = struct { name: usize, description: usize, schema: usize };
+
+fn profileMaxima(
+    comptime Answer: type,
+    comptime declarations: anytype,
     comptime limits: Limits,
-) type {
-    const Payload = if (@typeInfo(Value) == .@"enum" or
-        (@typeInfo(Value) == .@"struct" and !codecs.json.isText(Value)))
-        Value
-    else
-        struct { value: Value };
-    const Answer = union(enum) { answer: Payload };
-    return Profile(Answer, .{.{ .name = name, .description = description }}, limits);
+) ProfileMaxima {
+    comptime checkDeclarations(Answer, declarations);
+    comptime for (@typeInfo(Limits).@"struct".field_names) |name| {
+        if (@field(limits, name) == 0)
+            @compileError("Protean model limit must be positive: " ++ name);
+    };
+    if (limits.maximum_adaptive_reply_bytes != null and limits.maximum_adaptive_reply_bytes.? < 128)
+        @compileError("adaptive reply budget must hold a capacity result and exact usage");
+    return comptime blk: {
+        var name: usize = 1;
+        var description: usize = 0;
+        var schema: usize = 2;
+        for (declarations, @typeInfo(Answer).@"union".field_types) |declaration, Variant| {
+            name = @max(name, declaration.name.len);
+            description = @max(description, declaration.description.len);
+            schema = @max(schema, codecs.json.ToolSchema(Variant).value.len);
+            if (limits.arguments_json_bytes) |maximum| {
+                const needed = codecs.json.maximumToolArgumentsByteLength(Variant) orelse
+                    @compileError("bounded arguments cannot represent an unbounded answer");
+                if (maximum < needed) @compileError(
+                    "Protean model arguments_json_bytes cannot represent every admitted answer",
+                );
+            }
+        }
+        break :blk .{ .name = name, .description = description, .schema = schema };
+    };
+}
+
+/// Compile-time application semantics, never provider-supplied metadata.
+fn retainedControls(comptime declarations: anytype) [declarations.len]bool {
+    var result: [declarations.len]bool = @splat(false);
+    for (declarations, 0..) |declaration, i| {
+        if (@hasField(@TypeOf(declaration), "context_retention"))
+            result[i] = @as(ContextRetention, declaration.context_retention) == .control;
+    }
+    return result;
+}
+
+fn OperationType(comptime P: type) type {
+    return a.Operation(a.OperationSignature(
+        a.Shape(P.AdaptiveRequest),
+        a.Shape(P.AdaptiveResult),
+        horos.data.schema.native.Fields(&.{}, &.{}),
+    ));
 }

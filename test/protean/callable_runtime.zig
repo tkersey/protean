@@ -19,7 +19,10 @@ test "static-code callable preserves actual Kosmos observations and branch work"
         defer protean_registry.deinit();
         const original = try witness.build(&raw_builder, &raw_registry, .interned, count);
         const changed = try witness.build(&protean_builder, &protean_registry, .static_code, count);
-        try std.testing.expectError(error.SpeculativeEffect, protean.admission.verify(allocator, original, &raw_registry));
+        try std.testing.expectError(
+            error.SpeculativeEffect,
+            protean.admission.verify(allocator, original, &raw_registry),
+        );
         try protean.admission.verify(allocator, changed, &protean_registry);
         var raw = try horos.program.compile(allocator, original);
         defer raw.deinit();
@@ -27,35 +30,9 @@ test "static-code callable preserves actual Kosmos observations and branch work"
         defer selected.deinit();
         var raw_stats: kosmos.Statistics = .{};
         var selected_stats: kosmos.Statistics = .{};
-        const invocation_image_0 = try allocator.alloc(u8, try horos.data.program_image.encodedLength(raw.program));
-        defer allocator.free(invocation_image_0);
-        _ = try horos.data.program_image.encode(allocator, raw.program, invocation_image_0);
-        var before = observed: {
-            const instance: horos.data.invocation.Instance = .{ .initial_args = &.{} };
-            var session = switch (instance) {
-                .initial_args => |args| try kosmos.Session.initImage(allocator, invocation_image_0, args),
-                .state => |state| try kosmos.Session.restoreImage(allocator, invocation_image_0, state),
-            };
-            defer session.deinit();
-            session.setStatistics(&raw_stats);
-            _ = try kosmos.invocation.advance(&session, .none, null);
-            break :observed try kosmos.invocation.finish(allocator, &session, true);
-        };
+        var before = try observe(allocator, raw.program, &raw_stats);
         defer before.deinit();
-        const invocation_image_1 = try allocator.alloc(u8, try horos.data.program_image.encodedLength(selected.program));
-        defer allocator.free(invocation_image_1);
-        _ = try horos.data.program_image.encode(allocator, selected.program, invocation_image_1);
-        var after = observed: {
-            const instance: horos.data.invocation.Instance = .{ .initial_args = &.{} };
-            var session = switch (instance) {
-                .initial_args => |args| try kosmos.Session.initImage(allocator, invocation_image_1, args),
-                .state => |state| try kosmos.Session.restoreImage(allocator, invocation_image_1, state),
-            };
-            defer session.deinit();
-            session.setStatistics(&selected_stats);
-            _ = try kosmos.invocation.advance(&session, .none, null);
-            break :observed try kosmos.invocation.finish(allocator, &session, true);
-        };
+        var after = try observe(allocator, selected.program, &selected_stats);
         defer after.deinit();
         try std.testing.expect(before.record == .completed);
         try std.testing.expect(after.record == .completed);
@@ -65,17 +42,45 @@ test "static-code callable preserves actual Kosmos observations and branch work"
         try std.testing.expectEqual(count * 2, selected_stats.branch_activations);
         try std.testing.expectEqual(raw_stats.transitions, selected_stats.transitions);
         try std.testing.expectEqual(raw_stats.multi_templates, selected_stats.multi_templates);
-        try std.testing.expectEqual(raw_stats.branch_activations, selected_stats.branch_activations);
-        if (prior_functions) |expected| try std.testing.expectEqual(expected, selected.program.functions.len);
-        if (prior_schemas) |expected| try std.testing.expectEqual(expected, selected.program.schemas.len);
+        try std.testing.expectEqual(
+            raw_stats.branch_activations,
+            selected_stats.branch_activations,
+        );
+        if (prior_functions) |expected| try std.testing.expectEqual(
+            expected,
+            selected.program.functions.len,
+        );
+        if (prior_schemas) |expected| try std.testing.expectEqual(
+            expected,
+            selected.program.schemas.len,
+        );
         prior_functions = selected.program.functions.len;
         prior_schemas = selected.program.schemas.len;
         std.debug.print("callable installs={d} original_bytes={d} selected_bytes={d} " ++
             "functions={d} schemas={d} transitions={d} templates={d} branches={d}\n", .{
-            count,                                                        try horos.data.program_image.encodedLength(raw.program),
-            try horos.data.program_image.encodedLength(selected.program), selected.program.functions.len,
-            selected.program.schemas.len,                                 selected_stats.transitions,
-            selected_stats.multi_templates,                               selected_stats.branch_activations,
+            count,
+            try horos.data.program_image.encodedLength(raw.program),
+            try horos.data.program_image.encodedLength(selected.program),
+            selected.program.functions.len,
+            selected.program.schemas.len,
+            selected_stats.transitions,
+            selected_stats.multi_templates,
+            selected_stats.branch_activations,
         });
     }
+}
+
+fn observe(
+    allocator: std.mem.Allocator,
+    program: anytype,
+    statistics: *kosmos.Statistics,
+) !kosmos.invocation.Outcome {
+    const image = try allocator.alloc(u8, try horos.data.program_image.encodedLength(program));
+    defer allocator.free(image);
+    _ = try horos.data.program_image.encode(allocator, program, image);
+    var session = try kosmos.Session.initImage(allocator, image, &.{});
+    defer session.deinit();
+    session.setStatistics(statistics);
+    _ = try kosmos.invocation.advance(&session, .none, null);
+    return kosmos.invocation.finish(allocator, &session, true);
 }

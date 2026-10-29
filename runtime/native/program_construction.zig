@@ -23,7 +23,15 @@ pub const PortInterface = struct {
 };
 
 pub const Diagnostic = struct {
-    phase: enum { transport, preflight, authority, compilation, interface, complete, relation } = .transport,
+    phase: enum {
+        transport,
+        preflight,
+        authority,
+        compilation,
+        interface,
+        complete,
+        relation,
+    } = .transport,
     source: horos.source.Diagnostic = .{},
     code: ?anyerror = null,
 };
@@ -50,7 +58,11 @@ pub fn buildComponent(a: std.mem.Allocator, catalog_bytes: []const u8, text: []c
     var arena = std.heap.ArenaAllocator.init(a);
     errdefer arena.deinit();
     const output = arena.allocator();
-    var catalog = try contracts.decodeOwned(contracts.tool_construction.Catalog, output, catalog_bytes);
+    var catalog = try contracts.decodeOwned(
+        contracts.tool_construction.Catalog,
+        output,
+        catalog_bytes,
+    );
     defer catalog.deinit();
     const built = try @import("tool_construction.zig").build(output, a, catalog.value, text);
     return .{ .arena = arena, .image = built.image.bytes, .interface = built.interface };
@@ -65,7 +77,12 @@ pub fn describeComponents(a: std.mem.Allocator, bytes: []const u8) ![]u8 {
     defer catalog.deinit();
     try @import("tool_construction.zig").validateCatalog(a, catalog.value);
     var description = json.object();
-    try json.put(a, &description, "recipe_schema", json.string(&contracts.json.ClientSchema(contracts.tool_construction.Recipe).value));
+    try json.put(
+        a,
+        &description,
+        "recipe_schema",
+        json.string(&contracts.json.ClientSchema(contracts.tool_construction.Recipe).value),
+    );
     var components: json.Value = .{ .array = .init(a) };
     for (catalog.value.items) |item| {
         var decoded = try data.component.decode(a, item.object.bytes);
@@ -82,7 +99,11 @@ pub fn describeComponents(a: std.mem.Allocator, bytes: []const u8) ![]u8 {
                 try json.put(a, &signature, "name", json.string(try a.dupe(u8, symbol.name)));
                 var inputs: json.Value = .{ .array = .init(a) };
                 for (function.inputs) |slot| {
-                    const descriptor = try data.schema.encodeOwned(a, program.schemas, function.layout.slots[@intCast(slot)]);
+                    const descriptor = try data.schema.encodeOwned(
+                        a,
+                        program.schemas,
+                        function.layout.slots[@intCast(slot)],
+                    );
                     defer a.free(descriptor);
                     try inputs.array.append(try wp.schema(a, descriptor));
                 }
@@ -110,7 +131,10 @@ pub fn runtimeQuery(a: std.mem.Allocator, retention: bool) ![]u8 {
     var builder = horos.source.Builder.init(a);
     defer builder.deinit();
     const queries = @import("kosmos").RuntimeViews.queries;
-    return records.encode(a, if (retention) try queries.retention(&builder) else try queries.divergence(&builder));
+    return records.encode(
+        a,
+        if (retention) try queries.retention(&builder) else try queries.divergence(&builder),
+    );
 }
 
 pub fn hypotheticalReply(a: std.mem.Allocator) ![]u8 {
@@ -186,7 +210,12 @@ fn semanticSummary(
     ));
     inline for (.{ "image", "emitter" }) |field| {
         const id = @field(bundle, field);
-        try json.put(a, &result, field, json.string(try a.dupe(u8, &std.fmt.bytesToHex(id, .lower))));
+        try json.put(
+            a,
+            &result,
+            field,
+            json.string(try a.dupe(u8, &std.fmt.bytesToHex(id, .lower))),
+        );
     }
     try json.put(a, &result, "guest_image", try values.toJson(@TypeOf(guest), a, guest));
     try json.put(a, &result, "lineage", try records.project(
@@ -207,7 +236,19 @@ fn semanticSummary(
         try helpers.array.append(item);
     }
     try json.put(a, &result, "helpers", helpers);
-    inline for (.{ "requirements", "bridge", "generic_roles", "selected_roles", "generic_pure_entries", "generic_entries", "selected_entries", "parameters", "anchors", "branch_returns", "template_entries" }) |field| {
+    inline for (.{
+        "requirements",
+        "bridge",
+        "generic_roles",
+        "selected_roles",
+        "generic_pure_entries",
+        "generic_entries",
+        "selected_entries",
+        "parameters",
+        "anchors",
+        "branch_returns",
+        "template_entries",
+    }) |field| {
         const value = @field(bundle, field);
         try json.put(a, &result, field, try records.project(@TypeOf(value), a, value));
     }
@@ -270,22 +311,43 @@ pub fn semanticModuleValue(
     }
     const schema = try @import("values.zig").schemaBytes(records.Document, a);
     errdefer a.free(schema);
-    const value = try contracts.encodeOwned(records.Document, a, .{ .version = 1, .module = module });
+    const value = try contracts.encodeOwned(records.Document, a, .{
+        .version = 1,
+        .module = module,
+    });
     return .{ .schema = schema, .value = value };
 }
 
 /// The exact canonical descriptors come from compiled code, never model claims.
-pub fn interfaceOf(a: std.mem.Allocator, program: data.activation.Program) !contracts.tool_construction.Interface {
+pub fn interfaceOf(
+    a: std.mem.Allocator,
+    program: data.activation.Program,
+) !contracts.tool_construction.Interface {
     const entry = program.functions[@intCast(program.roots.entry)];
     if (entry.inputs.len != 1) return error.InvalidInterface;
     return .{
-        .input = .{ .bytes = try data.schema.encodeOwned(a, program.schemas, entry.layout.slots[@intCast(entry.inputs[0])]) },
-        .output = .{ .bytes = try data.schema.encodeOwned(a, program.schemas, program.roots.result) },
-        .failure = .{ .bytes = try data.schema.encodeOwned(a, program.schemas, program.roots.failure) },
+        .input = .{
+            .bytes = try data.schema.encodeOwned(
+                a,
+                program.schemas,
+                entry.layout.slots[@intCast(entry.inputs[0])],
+            ),
+        },
+        .output = .{
+            .bytes = try data.schema.encodeOwned(a, program.schemas, program.roots.result),
+        },
+        .failure = .{
+            .bytes = try data.schema.encodeOwned(a, program.schemas, program.roots.failure),
+        },
     };
 }
 
-pub fn build(a: std.mem.Allocator, text: []const u8, cancellation: ?*const std.atomic.Value(bool), diagnostic: *Diagnostic) !Built {
+pub fn build(
+    a: std.mem.Allocator,
+    text: []const u8,
+    cancellation: ?*const std.atomic.Value(bool),
+    diagnostic: *Diagnostic,
+) !Built {
     return buildExposed(a, text, &.{}, cancellation, diagnostic);
 }
 
@@ -372,7 +434,13 @@ fn consumerPage(
         .outcome = inspection.outcome,
     }, page);
 }
-pub fn buildExposed(a: std.mem.Allocator, text: []const u8, exposures: []const contracts.workspace.Exposure, cancellation: ?*const std.atomic.Value(bool), diagnostic: *Diagnostic) !Built {
+pub fn buildExposed(
+    a: std.mem.Allocator,
+    text: []const u8,
+    exposures: []const contracts.workspace.Exposure,
+    cancellation: ?*const std.atomic.Value(bool),
+    diagnostic: *Diagnostic,
+) !Built {
     diagnostic.* = .{};
     return buildBody(a, text, exposures, null, cancellation, diagnostic) catch |err| {
         diagnostic.code = err;
@@ -380,7 +448,13 @@ pub fn buildExposed(a: std.mem.Allocator, text: []const u8, exposures: []const c
     };
 }
 
-pub fn buildController(a: std.mem.Allocator, text: []const u8, contract: controller.Contract, cancellation: ?*const std.atomic.Value(bool), diagnostic: *Diagnostic) !Built {
+pub fn buildController(
+    a: std.mem.Allocator,
+    text: []const u8,
+    contract: controller.Contract,
+    cancellation: ?*const std.atomic.Value(bool),
+    diagnostic: *Diagnostic,
+) !Built {
     diagnostic.* = .{};
     return buildBody(a, text, &.{}, contract, cancellation, diagnostic) catch |err| {
         diagnostic.code = err;
@@ -388,7 +462,14 @@ pub fn buildController(a: std.mem.Allocator, text: []const u8, contract: control
     };
 }
 
-fn buildBody(a: std.mem.Allocator, text: []const u8, exposures: []const contracts.workspace.Exposure, controller_contract: ?controller.Contract, cancellation: ?*const std.atomic.Value(bool), diagnostic: *Diagnostic) !Built {
+fn buildBody(
+    a: std.mem.Allocator,
+    text: []const u8,
+    exposures: []const contracts.workspace.Exposure,
+    controller_contract: ?controller.Contract,
+    cancellation: ?*const std.atomic.Value(bool),
+    diagnostic: *Diagnostic,
+) !Built {
     try canceled(cancellation);
     var document = try records.decode(a, text);
     defer document.deinit();
@@ -398,58 +479,146 @@ fn buildBody(a: std.mem.Allocator, text: []const u8, exposures: []const contract
     try rejectSemanticBridge(document.module);
     var registry = protean.admission.Registry.init(a);
     defer registry.deinit();
-    var controller_generated: ?controller.Generated = if (controller_contract) |contract| try controller.generate(a, document.module, contract) else null;
+    var controller_generated: ?controller.Generated = if (controller_contract) |contract|
+        try controller.generate(a, document.module, contract)
+    else
+        null;
     defer if (controller_generated) |*g| g.deinit();
-    if (controller_generated) |g| {
-        try g.register(&registry);
-    } else for (document.module.effects, 0..) |effect, id| {
-        // Application/private identities are not a public generated-source API.
-        // Generated internal effects carry no environmental authority.
-        if (std.mem.startsWith(u8, effect.identity, "agent.") or std.mem.startsWith(u8, effect.identity, "protean.")) return error.ForbiddenEffect;
-        if (effect.external) return error.UnboundEffect;
-        try registry.classify(id, .internal);
-    }
-    var generated: ?driver.Generated = if (exposures.len != 0) try driver.generate(a, document.module, exposures) else null;
+    try admitEffects(&registry, document.module, controller_generated);
+    var generated: ?driver.Generated = if (exposures.len != 0) try driver.generate(
+        a,
+        document.module,
+        exposures,
+    ) else null;
     defer if (generated) |*g| g.deinit();
-    const module = if (controller_generated) |g| g.module else if (generated) |g| g.module else document.module;
-    if (controller_generated == null) for (document.module.effects.len..module.effects.len) |id| try registry.classify(id, .read);
+    const module = if (controller_generated) |g|
+        g.module
+    else if (generated) |g|
+        g.module
+    else
+        document.module;
+    if (controller_generated == null) {
+        for (document.module.effects.len..module.effects.len) |id| try registry.classify(id, .read);
+    }
     if (generated) |g| try registry.speculate(g.body, g.controls);
     if (controller_generated != null or generated != null)
         try preserveConstructors(a, document.module, module);
     try protean.admission.verify(a, module, &registry);
     try canceled(cancellation);
     diagnostic.phase = .compilation;
-    var compiled = try horos.source.lowerObserved(a, module, .{ .diagnostic = &diagnostic.source, .contract = .structural });
+    var compiled = try horos.source.lowerObserved(a, module, .{
+        .diagnostic = &diagnostic.source,
+        .contract = .structural,
+    });
     defer compiled.deinit();
     try canceled(cancellation);
+    return retainBuilt(
+        a,
+        module,
+        &compiled,
+        generated,
+        controller_generated,
+        cancellation,
+        diagnostic,
+    );
+}
+
+fn retainBuilt(
+    a: std.mem.Allocator,
+    module: horos.source.Module,
+    compiled: *horos.source.Compiled,
+    generated: ?driver.Generated,
+    controller_generated: ?controller.Generated,
+    cancellation: ?*const std.atomic.Value(bool),
+    diagnostic: *Diagnostic,
+) !Built {
     var arena = std.heap.ArenaAllocator.init(a);
     errdefer arena.deinit();
     const output = arena.allocator();
     diagnostic.phase = .interface;
     const interface = try interfaceOf(output, compiled.program);
+    const ports = try buildPorts(output, module, compiled.program, generated);
+    const image = try output.alloc(u8, try data.program_image.encodedLength(compiled.program));
+    _ = try compiled.encode(a, image);
+    try canceled(cancellation);
+    diagnostic.phase = .complete;
+    const descriptor = if (controller_generated) |g| try g.describe(
+        output,
+        compiled.program,
+    ) else null;
+    return .{
+        .arena = arena,
+        .image = image,
+        .interface = interface,
+        .ports = ports,
+        .controller = descriptor,
+    };
+}
+
+fn admitEffects(
+    registry: *protean.admission.Registry,
+    module: horos.source.Module,
+    controller_generated: ?controller.Generated,
+) !void {
+    if (controller_generated) |g| {
+        try g.register(registry);
+    } else for (module.effects, 0..) |effect, id| {
+        // Application/private identities are not a public generated-source API.
+        // Generated internal effects carry no environmental authority.
+        if (std.mem.startsWith(u8, effect.identity, "agent.") or std.mem.startsWith(
+            u8,
+            effect.identity,
+            "protean.",
+        )) return error.ForbiddenEffect;
+        if (effect.external) return error.UnboundEffect;
+        try registry.classify(id, .internal);
+    }
+}
+
+fn buildPorts(
+    output: std.mem.Allocator,
+    module: horos.source.Module,
+    program: data.activation.Program,
+    generated: ?driver.Generated,
+) ![]PortInterface {
     const ports = try output.alloc(PortInterface, if (generated) |g| g.ports.len else 0);
     if (generated) |g| for (g.ports, ports) |port, *destination| {
-        const effect = for (compiled.program.effects) |effect| {
+        const effect = for (program.effects) |effect| {
             if (std.mem.eql(u8, effect.identity, port.identity)) break effect;
         } else return error.InvalidDriverInterface;
         destination.* = .{
             .identity = .{ .bytes = try output.dupe(u8, port.identity) },
             .class = port.class,
-            .argument = .{ .bytes = try data.schema.encodeOwned(output, module.schemas, port.argument) },
-            .observation = .{ .bytes = try data.schema.encodeOwned(output, module.schemas, port.observation) },
-            .payload = .{ .bytes = try data.schema.encodeOwned(output, compiled.program.schemas, effect.payload) },
-            .command = .{ .bytes = try data.schema.encodeOwned(output, compiled.program.schemas, effect.result) },
+            .argument = .{
+                .bytes = try data.schema.encodeOwned(output, module.schemas, port.argument),
+            },
+            .observation = .{
+                .bytes = try data.schema.encodeOwned(output, module.schemas, port.observation),
+            },
+            .payload = .{
+                .bytes = try data.schema.encodeOwned(
+                    output,
+                    program.schemas,
+                    effect.payload,
+                ),
+            },
+            .command = .{
+                .bytes = try data.schema.encodeOwned(
+                    output,
+                    program.schemas,
+                    effect.result,
+                ),
+            },
         };
     };
-    const image = try output.alloc(u8, try data.program_image.encodedLength(compiled.program));
-    _ = try compiled.encode(a, image);
-    try canceled(cancellation);
-    diagnostic.phase = .complete;
-    const descriptor = if (controller_generated) |g| try g.describe(output, compiled.program) else null;
-    return .{ .arena = arena, .image = image, .interface = interface, .ports = ports, .controller = descriptor };
+    return ports;
 }
 
-fn preserveConstructors(a: std.mem.Allocator, before: horos.source.Module, after: horos.source.Module) !void {
+fn preserveConstructors(
+    a: std.mem.Allocator,
+    before: horos.source.Module,
+    after: horos.source.Module,
+) !void {
     const constructors = horos.source.constructor_bindings;
     for (before.values) |value| {
         if (constructors.raw(value) == null) continue;
@@ -489,7 +658,12 @@ test "general source builds through actual checked lowering and rejects private 
     try std.testing.expectEqual(.complete, diagnostic.phase);
     var image = try data.program_image.decode(a, compiled.image);
     defer image.deinit();
-    _ = try builder.effect(.{ .identity = "agent.model.invoke.v11", .payload = module.failure, .result = module.failure, .external = false });
+    _ = try builder.effect(.{
+        .identity = "agent.model.invoke.v11",
+        .payload = module.failure,
+        .result = module.failure,
+        .external = false,
+    });
     const forged = try records.encode(a, builder.module(module.entry, module.failure));
     defer a.free(forged);
     try std.testing.expectError(error.ForbiddenEffect, build(a, forged, null, &diagnostic));
@@ -501,7 +675,11 @@ test "source ingestion rejects unused malformed declarations before lowering" {
     var builder = horos.source.Builder.init(a);
     defer builder.deinit();
     const module = try horos.source.examples.lexical(&builder);
-    _ = try builder.value(.{ .schema = 0, .expression = .{ .primitive = .{ .opcode = .field, .operands = &.{9999}, .immediate = 0 } } });
+    _ = try builder.value(.{ .schema = 0, .expression = .{ .primitive = .{
+        .opcode = .field,
+        .operands = &.{9999},
+        .immediate = 0,
+    } } });
     const text = try records.encode(a, builder.module(module.entry, module.failure));
     defer a.free(text);
     var diagnostic: Diagnostic = .{};

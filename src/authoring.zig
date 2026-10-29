@@ -45,7 +45,19 @@ pub const Context = struct {
     }
 
     /// Declare environmental I/O; protected roles still need their checked owner.
-    pub fn external(self: Context, identity: []const u8, payload: anytype, result: anytype, role: admission.Role) !*const a.Operation(a.OperationSignature(a.ShapeOf(@TypeOf(payload)), a.ShapeOf(@TypeOf(result)), native.Fields(&.{}, &.{}))) {
+    pub fn external(
+        self: Context,
+        identity: []const u8,
+        payload: anytype,
+        result: anytype,
+        role: admission.Role,
+    ) !*const a.Operation(
+        a.OperationSignature(
+            a.ShapeOf(@TypeOf(payload)),
+            a.ShapeOf(@TypeOf(result)),
+            native.Fields(&.{}, &.{}),
+        ),
+    ) {
         const operation = try self.author.external(identity, payload, result);
         try self.registry.classify(try a.interop.operationId(self.author, operation), role);
         return operation;
@@ -61,7 +73,11 @@ pub const Context = struct {
 /// The native emitter runs once while authoring. All resulting control is source data.
 pub fn system(comptime spec: anytype) type {
     comptime {
-        if (catalogs.sourceIssue(spec)) |issue| @compileError("protean.system: " ++ @tagName(issue));
+        if (catalogs.sourceIssue(
+            spec,
+        )) |issue| @compileError(
+            "protean.system: " ++ @tagName(issue),
+        );
         for (.{ "InitialArgs", "Result", "Failure", "application" }) |name| {
             if (!@hasField(@TypeOf(spec), name))
                 @compileError("protean.system requires " ++ name);

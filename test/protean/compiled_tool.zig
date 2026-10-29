@@ -20,7 +20,13 @@ fn objectNamed(hidden: bool, multi: bool, internal: bool, identity: []const u8) 
     defer b.deinit();
     const unit = try b.scalar(void);
     const integer = try b.scalar(u64);
-    const read = try b.effect(.{ .identity = identity, .payload = integer, .result = integer, .control_use = if (multi) .multi else .linear, .external = !internal });
+    const read = try b.effect(.{
+        .identity = identity,
+        .payload = integer,
+        .result = integer,
+        .control_use = if (multi) .multi else .linear,
+        .external = !internal,
+    });
     if (multi) _ = try b.schema(.{ .internal = .{ .resumption = .{
         .effect = read,
         .input = integer,
@@ -29,10 +35,21 @@ fn objectNamed(hidden: bool, multi: bool, internal: bool, identity: []const u8) 
         .mode = .deep,
         .use = .multi,
     } } });
-    if (hidden) _ = try b.effect(.{ .identity = "fixture/hidden", .payload = unit, .result = unit });
+    if (hidden) _ = try b.effect(.{
+        .identity = "fixture/hidden",
+        .payload = unit,
+        .result = unit,
+    });
     const main = try b.declare(&.{integer}, integer, &.{read}, &.{});
     const value = try b.reference(b.parameter(main, 0));
-    try b.define(main, if (internal) try b.pure(value) else try b.term(.{ .perform = .{ .effect = read, .payload = value } }));
+    try b.define(
+        main,
+        if (internal) try b.pure(
+            value,
+        ) else try b.term(
+            .{ .perform = .{ .effect = read, .payload = value } },
+        ),
+    );
     var compiled = try source.component.compile(a, b.module(main, unit), .{
         .imports = &.{.{ .name = "read", .reference = .{ .kind = .effect, .id = read } }},
         .exports = &.{.{ .name = "inspect", .reference = .{ .kind = .function, .id = main } }},
@@ -54,11 +71,35 @@ const Tool = struct {
     pub fn declare(c: protean.Context) !protean.tools.Descriptor {
         const integer = try horos_authoring.interop.schemaId(c.author, try c.schema(u64));
         const read = if (internal) blk: {
-            const effect = try c.builder.effect(.{ .identity = "fixture/compiled-read", .payload = integer, .result = integer, .external = false });
+            const effect = try c.builder.effect(.{
+                .identity = "fixture/compiled-read",
+                .payload = integer,
+                .result = integer,
+                .external = false,
+            });
             try c.registry.classify(effect, internal_role);
             break :blk effect;
-        } else try horos_authoring.interop.operationId(c.author, try c.external(if (rename) "fixture/other" else identity, try horos_authoring.interop.schema(c.author, integer), try horos_authoring.interop.schema(c.author, integer), role));
-        return protean.tools.declareCompiled(c, .{ .instance = "read-tool", .object = bytes, .entry = "inspect", .identity = "fixture/local-inspect", .payload = integer, .result = integer, .effects = &.{.{ .symbol = "read", .effect = read }}, .model_offered = true, .name = "inspect", .description = "Inspect a number using the compiled tool" });
+        } else try horos_authoring.interop.operationId(
+            c.author,
+            try c.external(
+                if (rename) "fixture/other" else identity,
+                try horos_authoring.interop.schema(c.author, integer),
+                try horos_authoring.interop.schema(c.author, integer),
+                role,
+            ),
+        );
+        return protean.tools.declareCompiled(c, .{
+            .instance = "read-tool",
+            .object = bytes,
+            .entry = "inspect",
+            .identity = "fixture/local-inspect",
+            .payload = integer,
+            .result = integer,
+            .effects = &.{.{ .symbol = "read", .effect = read }},
+            .model_offered = true,
+            .name = "inspect",
+            .description = "Inspect a number using the compiled tool",
+        });
     }
 };
 const Application = struct {
@@ -68,14 +109,28 @@ const Application = struct {
         const tool = try c.catalogs.tool("inspect");
         const b = c.builder;
         const function = tool.implementation.local;
-        const main = try b.declare(&.{tool.payload}, tool.result, b.functions.items[@intCast(function)].effects, &.{});
-        try b.define(main, try protean.tools.perform(c, tool, try b.reference(b.parameter(main, 0))));
-        if (speculate) try c.registry.speculate(function, b.functions.items[@intCast(function)].effects);
+        const main = try b.declare(&.{tool.payload}, tool.result, b.functions.items[
+            @intCast(function)
+        ].effects, &.{});
+        try b.define(
+            main,
+            try protean.tools.perform(c, tool, try b.reference(b.parameter(main, 0))),
+        );
+        if (speculate) try c.registry.speculate(
+            function,
+            b.functions.items[@intCast(function)].effects,
+        );
         if (mutate) @memset(Tool.bytes, 0xff);
         return b.module(main, try b.scalar(void));
     }
 };
-const System = protean.system(.{ .InitialArgs = u64, .Result = u64, .Failure = void, .tools = .{Tool}, .application = Application });
+const System = protean.system(.{
+    .InitialArgs = u64,
+    .Result = u64,
+    .Failure = void,
+    .tools = .{Tool},
+    .application = Application,
+});
 
 test "internal model participants cannot enter through a read-tool alias" {
     // Horos accepts this typed effectful component, but that does not grant
@@ -135,7 +190,10 @@ test "compiled local tool links owned object bytes through normal Protean compil
     var compiled = try protean.compile(a, System);
     defer compiled.deinit();
     try std.testing.expectEqual(1, compiled.program.effects.len);
-    try std.testing.expectEqualStrings("fixture/compiled-read", compiled.program.effects[0].identity);
+    try std.testing.expectEqualStrings(
+        "fixture/compiled-read",
+        compiled.program.effects[0].identity,
+    );
     const encoded = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
     defer a.free(encoded);
     _ = try compiled.encode(a, encoded);
@@ -219,11 +277,23 @@ test "compiled tool final link forwards semantic contract and deterministic limi
     defer limited.deinit();
     try std.testing.expectEqual(data.closed_compilation.Outcome.work_limit, stats.outcome);
     try std.testing.expect(coalescing.outcome != .not_run);
-    try std.testing.expectEqual(try data.program_image.identity(a, structural.program), try data.program_image.identity(a, limited.program));
-    var semantic = try protean.compileObserved(a, System, .{ .horos_options = .{ .contract = .semantic, .semantic_statistics = &stats } });
+    try std.testing.expectEqual(
+        try data.program_image.identity(a, structural.program),
+        try data.program_image.identity(a, limited.program),
+    );
+    var semantic = try protean.compileObserved(a, System, .{ .horos_options = .{
+        .contract = .semantic,
+        .semantic_statistics = &stats,
+    } });
     defer semantic.deinit();
     try std.testing.expect(stats.outcome == .applied or stats.outcome == .no_change);
-    try std.testing.expectError(error.Capacity, protean.compileObserved(a, System, .{ .horos_options = .{ .contract = .semantic, .max_image_bytes = 0 } }));
+    try std.testing.expectError(
+        error.Capacity,
+        protean.compileObserved(a, System, .{ .horos_options = .{
+            .contract = .semantic,
+            .max_image_bytes = 0,
+        } }),
+    );
 }
 
 test "compiled tool final link validates profiles before structural or work-limit returns" {
@@ -236,11 +306,14 @@ test "compiled tool final link validates profiles before structural or work-limi
         .total = 0,
     } };
     for ([_]data.closed_compilation.Contract{ .structural, .semantic }) |contract| {
-        try std.testing.expectError(error.InvalidOptimizationProfile, protean.compileObserved(a, System, .{ .horos_options = .{
-            .contract = contract,
-            .profile = invalid,
-            .semantic_work_limit = 0,
-        } }));
+        try std.testing.expectError(
+            error.InvalidOptimizationProfile,
+            protean.compileObserved(a, System, .{ .horos_options = .{
+                .contract = contract,
+                .profile = invalid,
+                .semantic_work_limit = 0,
+            } }),
+        );
     }
 }
 
@@ -249,7 +322,9 @@ test "compiled tool final link preserves valid profiles and rejects stale identi
     defer a.free(Tool.bytes);
     // P01's documented zero-work rollback exposes the admitted original record
     // to the collector; the profiled compilation still uses ordinary defaults.
-    var original = try protean.compileObserved(a, System, .{ .horos_options = .{ .coalescing = .{ .work_limit = 0 } } });
+    var original = try protean.compileObserved(a, System, .{ .horos_options = .{ .coalescing = .{
+        .work_limit = 0,
+    } } });
     defer original.deinit();
     var collector = try data.optimization_profile.Collector.init(a, original.program);
     defer collector.deinit();
@@ -263,11 +338,21 @@ test "compiled tool final link preserves valid profiles and rejects stale identi
     } });
     defer compiled.deinit();
     try std.testing.expect(stats.profile_used);
-    var ordinary = try protean.compileObserved(a, System, .{ .horos_options = .{ .contract = .semantic } });
+    var ordinary = try protean.compileObserved(a, System, .{ .horos_options = .{
+        .contract = .semantic,
+    } });
     defer ordinary.deinit();
-    try std.testing.expectEqual(try data.program_image.identity(a, ordinary.program), try data.program_image.identity(a, compiled.program));
+    try std.testing.expectEqual(
+        try data.program_image.identity(a, ordinary.program),
+        try data.program_image.identity(a, compiled.program),
+    );
     profile.record.image_identity[0] ^= 1;
-    try std.testing.expectError(error.InvalidOptimizationProfile, protean.compileObserved(a, System, .{ .horos_options = .{ .profile = .{ .record = profile.record } } }));
+    try std.testing.expectError(
+        error.InvalidOptimizationProfile,
+        protean.compileObserved(a, System, .{ .horos_options = .{ .profile = .{
+            .record = profile.record,
+        } } }),
+    );
 }
 
 test "tool metadata and dispatch share one declaration without granting commit" {
@@ -277,7 +362,15 @@ test "tool metadata and dispatch share one declaration without granting commit" 
     defer registry.deinit();
     const c = try protean.Context.init(&b, &registry);
     const integer = try b.scalar(u64);
-    const read = try horos_authoring.interop.operationId(c.author, try c.external("test.document.read", try horos_authoring.interop.schema(c.author, integer), try horos_authoring.interop.schema(c.author, integer), .read));
+    const read = try horos_authoring.interop.operationId(
+        c.author,
+        try c.external(
+            "test.document.read",
+            try horos_authoring.interop.schema(c.author, integer),
+            try horos_authoring.interop.schema(c.author, integer),
+            .read,
+        ),
+    );
     const descriptor: protean.tools.Descriptor = .{
         .identity = "test.document.read",
         .payload = integer,
@@ -288,14 +381,31 @@ test "tool metadata and dispatch share one declaration without granting commit" 
     };
     try protean.tools.validate(c, &.{descriptor});
     _ = try protean.tools.perform(c, descriptor, try b.constant(u64, 0));
-    try std.testing.expectError(error.DuplicateToolDeclaration, protean.tools.validate(c, &.{ descriptor, descriptor }));
+    try std.testing.expectError(
+        error.DuplicateToolDeclaration,
+        protean.tools.validate(c, &.{ descriptor, descriptor }),
+    );
     var altered = descriptor;
     altered.identity = "other.document.read";
-    try std.testing.expectError(error.InvalidToolDeclaration, protean.tools.validate(c, &.{altered}));
-    const commit = try horos_authoring.interop.operationId(c.author, try c.external("test.document.commit", try horos_authoring.interop.schema(c.author, integer), try horos_authoring.interop.schema(c.author, integer), .commit));
+    try std.testing.expectError(
+        error.InvalidToolDeclaration,
+        protean.tools.validate(c, &.{altered}),
+    );
+    const commit = try horos_authoring.interop.operationId(
+        c.author,
+        try c.external(
+            "test.document.commit",
+            try horos_authoring.interop.schema(c.author, integer),
+            try horos_authoring.interop.schema(c.author, integer),
+            .commit,
+        ),
+    );
     altered = descriptor;
     altered.identity = "test.document.commit";
     altered.implementation = .{ .external = commit };
     altered.role = .commit;
-    try std.testing.expectError(error.ProtectedToolRequiresCheckedOwner, protean.tools.perform(c, altered, try b.constant(u64, 0)));
+    try std.testing.expectError(
+        error.ProtectedToolRequiresCheckedOwner,
+        protean.tools.perform(c, altered, try b.constant(u64, 0)),
+    );
 }

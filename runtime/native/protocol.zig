@@ -4,7 +4,12 @@ const json = @import("json.zig");
 pub const version = "agent-host/2.1";
 /// Validate the offer list completely, then accept only the current contract.
 pub fn accepts(versions: json.Value) !bool {
-    if (versions != .array or versions.array.items.len == 0 or versions.array.items.len > 16) return error.InvalidParams;
+    if (versions != .array or
+        versions.array.items.len == 0 or
+        versions.array.items.len > 16)
+    {
+        return error.InvalidParams;
+    }
     var accepted = false;
     for (versions.array.items) |item| {
         if (item != .string or item.string.len > 128) return error.InvalidParams;
@@ -17,11 +22,19 @@ test "initialization accepts only 2.1 and validates the entire offer list" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const offers = [_][]const u8{ "[\"agent-host/2.0\"]", "[\"agent-host/2.0\",\"agent-host/2.1\"]", "[\"agent-host/2.1\"]", "[\"agent-host/9.0\"]" };
+    const offers = [_][]const u8{
+        "[\"agent-host/2.0\"]",
+        "[\"agent-host/2.0\",\"agent-host/2.1\"]",
+        "[\"agent-host/2.1\"]",
+        "[\"agent-host/9.0\"]",
+    };
     for (offers, [_]bool{ false, true, true, false }) |bytes, expected|
         try std.testing.expectEqual(expected, try accepts((try json.parse(a, bytes, .{})).value));
     for ([_][]const u8{ "[]", "null", "[\"agent-host/2.1\",17]" }) |bytes|
-        try std.testing.expectError(error.InvalidParams, accepts((try json.parse(a, bytes, .{})).value));
+        try std.testing.expectError(
+            error.InvalidParams,
+            accepts((try json.parse(a, bytes, .{})).value),
+        );
 }
 
 pub const Limits = struct {
@@ -63,7 +76,9 @@ pub const Framer = struct {
         self.length += count;
         if (newline == null) return .{ .consumed = count, .frame = null };
         self.ready = true;
-        const end = self.length - @intFromBool(self.length != 0 and self.buffer[self.length - 1] == '\r');
+        const end = self.length - @intFromBool(
+            self.length != 0 and self.buffer[self.length - 1] == '\r',
+        );
         return .{ .consumed = count + 1, .frame = self.buffer[0..end] };
     }
     pub fn incomplete(self: Framer) bool {
@@ -144,25 +159,65 @@ pub fn fields(method: Method) Fields {
         .describe => .{ .required = &.{}, .optional = &.{ "application_id", "cursor", "limit" } },
         .ping => .{ .required = &.{} },
         .placement => .{ .required = &.{"request"} },
-        .@"task.submit" => .{ .required = &.{ "client_operation_id", "application_id", "profile_id", "input" } },
+        .@"task.submit" => .{ .required = &.{
+            "client_operation_id",
+            "application_id",
+            "profile_id",
+            "input",
+        } },
         .@"task.message" => .{ .required = &.{ "client_operation_id", "task_id", "message" } },
-        .@"task.respond" => .{ .required = &.{ "client_operation_id", "task_id", "question_id", "question_revision", "request_digest", "answer" } },
+        .@"task.respond" => .{ .required = &.{
+            "client_operation_id",
+            "task_id",
+            "question_id",
+            "question_revision",
+            "request_digest",
+            "answer",
+        } },
         .@"task.status" => .{ .required = &.{"task_id"}, .optional = &.{"residual_id"} },
         .@"task.result" => .{ .required = &.{"task_id"} },
         .@"task.events" => .{ .required = &.{ "task_id", "after_seq" }, .optional = &.{"limit"} },
         .@"task.subscribe" => .{ .required = &.{ "task_id", "after_seq" } },
         .@"task.unsubscribe" => .{ .required = &.{"subscription_id"} },
-        .@"task.cancel" => .{ .required = &.{ "client_operation_id", "task_id" }, .optional = &.{"reason"} },
-        .@"task.resume" => .{ .required = &.{ "client_operation_id", "task_id", "expected_revision" } },
-        .@"task.adopt" => .{ .required = &.{ "client_operation_id", "task_id", "expected_revision", "adoption" } },
-        .@"task.reconcile" => .{ .required = &.{ "client_operation_id", "task_id", "expected_revision", "occurrence_id", "attempt_id", "recovery" } },
-        .@"artifact.read" => .{ .required = &.{ "artifact_id", "offset", "length" }, .optional = &.{ "task_id", "question_id" } },
+        .@"task.cancel" => .{ .required = &.{
+            "client_operation_id",
+            "task_id",
+        }, .optional = &.{"reason"} },
+        .@"task.resume" => .{ .required = &.{
+            "client_operation_id",
+            "task_id",
+            "expected_revision",
+        } },
+        .@"task.adopt" => .{ .required = &.{
+            "client_operation_id",
+            "task_id",
+            "expected_revision",
+            "adoption",
+        } },
+        .@"task.reconcile" => .{ .required = &.{
+            "client_operation_id",
+            "task_id",
+            "expected_revision",
+            "occurrence_id",
+            "attempt_id",
+            "recovery",
+        } },
+        .@"artifact.read" => .{ .required = &.{
+            "artifact_id",
+            "offset",
+            "length",
+        }, .optional = &.{ "task_id", "question_id" } },
         .shutdown => .{ .required = &.{"mode"} },
     };
 }
 
 pub fn closed(value: json.Value, spec: Fields) error{InvalidParams}!void {
-    if (value != .object or value.object.count() < spec.required.len or value.object.count() > spec.required.len + spec.optional.len) return error.InvalidParams;
+    if (value != .object or
+        value.object.count() < spec.required.len or
+        value.object.count() > spec.required.len + spec.optional.len)
+    {
+        return error.InvalidParams;
+    }
     for (spec.required) |key| if (!value.object.contains(key)) return error.InvalidParams;
     for (value.object.keys()) |key| {
         var known = false;
@@ -190,20 +245,44 @@ fn validId(value: json.Value, limit: usize) bool {
 }
 
 pub fn admit(value: json.Value, limits: Limits, batch: bool) Admitted {
-    closed(value, .{ .required = &.{ "jsonrpc", "method" }, .optional = &.{ "id", "params" } }) catch
+    closed(
+        value,
+        .{ .required = &.{ "jsonrpc", "method" }, .optional = &.{ "id", "params" } },
+    ) catch
         return .{ .failure = .{ .kind = .InvalidRequest } };
     const rpc = value.object.get("jsonrpc").?;
     const name = value.object.get("method").?;
-    if (rpc != .string or !std.mem.eql(u8, rpc.string, "2.0") or name != .string or name.string.len == 0 or name.string.len > limits.id_bytes)
+    if (rpc != .string or !std.mem.eql(
+        u8,
+        rpc.string,
+        "2.0",
+    ) or name != .string or name.string.len == 0 or name.string.len > limits.id_bytes)
         return .{ .failure = .{ .kind = .InvalidRequest } };
     // A structurally valid notification cannot mutate state, even when it names
     // a real method. No response is emitted and no initialization is performed.
     const id = value.object.get("id") orelse return .notification;
     if (!validId(id, limits.id_bytes)) return .{ .failure = .{ .kind = .InvalidRequest } };
-    const params = value.object.get("params") orelse return .{ .failure = .{ .id = id, .kind = .InvalidParams } };
-    const method = std.meta.stringToEnum(Method, name.string) orelse return .{ .failure = .{ .id = id, .kind = .MethodNotFound } };
-    if (batch and method == .initialize) return .{ .failure = .{ .id = id, .kind = .InvalidRequest } };
-    closed(params, fields(method)) catch return .{ .failure = .{ .id = id, .kind = .InvalidParams } };
+    const params = value.object.get(
+        "params",
+    ) orelse return .{
+        .failure = .{ .id = id, .kind = .InvalidParams },
+    };
+    const method = std.meta.stringToEnum(
+        Method,
+        name.string,
+    ) orelse return .{
+        .failure = .{ .id = id, .kind = .MethodNotFound },
+    };
+    if (batch and method == .initialize) return .{ .failure = .{
+        .id = id,
+        .kind = .InvalidRequest,
+    } };
+    closed(
+        params,
+        fields(method),
+    ) catch return .{
+        .failure = .{ .id = id, .kind = .InvalidParams },
+    };
     return .{ .call = .{ .id = id, .method = method, .params = params } };
 }
 
@@ -212,14 +291,21 @@ pub fn equalId(a: json.Value, b: json.Value) bool {
     return switch (a) {
         .null => true,
         .string => |s| std.mem.eql(u8, s, b.string),
-        .number_string => |s| (json.safeInteger(s) catch return false) == (json.safeInteger(b.number_string) catch return false),
+        .number_string => |s| (json.safeInteger(
+            s,
+        ) catch return false) == (json.safeInteger(
+            b.number_string,
+        ) catch return false),
         else => false,
     };
 }
 
 /// Preflight the complete bounded batch before any member can reach an owner.
 /// Duplicate IDs are a connection-fatal correlation ambiguity, not two calls.
-pub fn batchPreflight(values: []const json.Value, limits: Limits) error{ InvalidBatch, DuplicateId }!void {
+pub fn batchPreflight(
+    values: []const json.Value,
+    limits: Limits,
+) error{ InvalidBatch, DuplicateId }!void {
     if (values.len == 0 or values.len > limits.batch_elements) return error.InvalidBatch;
     for (values, 0..) |value, i| {
         const id = json.get(value, "id") orelse continue;
@@ -275,10 +361,19 @@ test "framer handles split utf8 coalescing crlf truncation and exact limits" {
 
 test "notifications never become calls and batch duplicate ids fail before dispatch" {
     const a = std.testing.allocator;
-    var ignored = try json.parse(a, "{\"jsonrpc\":\"2.0\",\"method\":\"task.cancel\",\"params\":{}}", .{});
+    var ignored = try json.parse(
+        a,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"task.cancel\",\"params\":{}}",
+        .{},
+    );
     defer ignored.deinit();
     try std.testing.expect(admit(ignored.value, .{}, false) == .notification);
-    var batch = try json.parse(a, "[{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"params\":{},\"id\":\"x\"},{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"params\":{},\"id\":\"x\"}]", .{});
+    var batch = try json.parse(
+        a,
+        "[{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"params\":{},\"id\":\"x\"},{\"jso" ++
+            "nrpc\":\"2.0\",\"method\":\"ping\",\"params\":{},\"id\":\"x\"}]",
+        .{},
+    );
     defer batch.deinit();
     try std.testing.expectError(error.DuplicateId, batchPreflight(batch.value.array.items, .{}));
     try std.testing.expectError(error.InvalidBatch, batchPreflight(&.{}, .{}));

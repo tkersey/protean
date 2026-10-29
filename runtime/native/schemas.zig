@@ -23,7 +23,12 @@ fn constant(a: std.mem.Allocator, value: []const u8) !json.Value {
 }
 fn reference(a: std.mem.Allocator, name: []const u8) !json.Value {
     var result = json.object();
-    try json.put(a, &result, "$ref", json.string(try std.fmt.allocPrint(a, "#/$defs/{s}", .{name})));
+    try json.put(
+        a,
+        &result,
+        "$ref",
+        json.string(try std.fmt.allocPrint(a, "#/$defs/{s}", .{name})),
+    );
     return result;
 }
 fn strings(a: std.mem.Allocator, list: []const []const u8) !json.Value {
@@ -43,7 +48,11 @@ fn enumSchema(comptime T: type, a: std.mem.Allocator) !json.Value {
     try json.put(a, &result, "enum", .{ .array = items });
     return result;
 }
-fn shape(a: std.mem.Allocator, properties: []const Property, optional: []const []const u8) !json.Value {
+fn shape(
+    a: std.mem.Allocator,
+    properties: []const Property,
+    optional: []const []const u8,
+) !json.Value {
     var fields = json.object();
     var required: std.array_list.Managed(json.Value) = .init(a);
     for (properties) |property| {
@@ -57,7 +66,12 @@ fn shape(a: std.mem.Allocator, properties: []const Property, optional: []const [
     try json.put(a, &result, "required", .{ .array = required });
     return result;
 }
-fn extend(a: std.mem.Allocator, original: json.Value, properties: []const Property, optional: []const []const u8) !json.Value {
+fn extend(
+    a: std.mem.Allocator,
+    original: json.Value,
+    properties: []const Property,
+    optional: []const []const u8,
+) !json.Value {
     var result = try json.copy(a, original);
     const fields = result.object.getPtr("properties").?;
     const required = result.object.getPtr("required").?;
@@ -102,77 +116,101 @@ fn counter(a: std.mem.Allocator, maximum: u64) !json.Value {
     const digits = try std.fmt.allocPrint(a, "{d}", .{maximum});
     var parts: std.array_list.Managed([]const u8) = .init(a);
     try parts.append("0");
-    if (digits.len > 1) try parts.append(try std.fmt.allocPrint(a, "[1-9][0-9]{{0,{d}}}", .{digits.len - 2}));
+    if (digits.len > 1) try parts.append(
+        try std.fmt.allocPrint(a, "[1-9][0-9]{{0,{d}}}", .{digits.len - 2}),
+    );
     for (digits, 0..) |digit, i| {
         const lower: u8 = if (i == 0) '1' else '0';
         if (digit <= lower) continue;
-        try parts.append(try std.fmt.allocPrint(a, "{s}[{c}-{c}][0-9]{{{d}}}", .{ digits[0..i], lower, digit - 1, digits.len - i - 1 }));
+        try parts.append(
+            try std.fmt.allocPrint(a, "{s}[{c}-{c}][0-9]{{{d}}}", .{
+                digits[0..i],
+                lower,
+                digit - 1,
+                digits.len - i - 1,
+            }),
+        );
     }
     try parts.append(digits);
     var result = try text(a, 1, digits.len);
-    try json.put(a, &result, "pattern", json.string(try std.fmt.allocPrint(a, "^({s})(?![\\s\\S])", .{try std.mem.join(a, "|", parts.items)})));
+    try json.put(
+        a,
+        &result,
+        "pattern",
+        json.string(
+            try std.fmt.allocPrint(a, "^({s})(?![\\s\\S])", .{
+                try std.mem.join(a, "|", parts.items),
+            }),
+        ),
+    );
     return result;
 }
 fn typed(a: std.mem.Allocator, application: json.Value, name: []const u8) !json.Value {
     const item = application.object.get(name).?;
-    return shape(a, &.{ .{ "schema_id", try constant(a, item.object.get("schema_id").?.string) }, .{ "value", item.object.get("json").? } }, &.{});
+    return shape(a, &.{ .{
+        "schema_id",
+        try constant(a, item.object.get("schema_id").?.string),
+    }, .{ "value", item.object.get("json").? } }, &.{});
 }
-fn parameter(a: std.mem.Allocator, method: protocol.Method, key: []const u8, application: json.Value, limits: protocol.Limits) !json.Value {
+fn parameter(
+    a: std.mem.Allocator,
+    method: protocol.Method,
+    key: []const u8,
+    application: json.Value,
+    limits: protocol.Limits,
+) !json.Value {
     if (method == .@"task.adopt" and std.mem.eql(u8, key, "adoption")) {
-        const bytes = try @import("values.zig").schemas.ClientSchema(@import("protean_contracts").workspace.Adoption).alloc(a);
+        const bytes = try @import("values.zig").schemas.ClientSchema(
+            @import("protean_contracts").workspace.Adoption,
+        ).alloc(
+            a,
+        );
         defer a.free(bytes);
         return (try json.parseAsset(a, bytes, bytes.len)).value;
     }
     if (method == .placement and std.mem.eql(u8, key, "request")) {
         // Emit this large immutable schema once during discovery construction.
         // Parsing owns its strings, so the temporary bytes can be released.
-        const bytes = try @import("values.zig").schemas.ClientSchema(@import("placement.zig").Request).alloc(a);
+        const bytes = try @import("values.zig").schemas.ClientSchema(
+            @import("placement.zig").Request,
+        ).alloc(
+            a,
+        );
         defer a.free(bytes);
         return (try json.parseAsset(a, bytes, bytes.len)).value;
     }
-    if (std.mem.eql(u8, key, "task_id") or std.mem.eql(u8, key, "subscription_id")) return reference(a, "id128");
-    if (std.mem.eql(u8, key, "question_id") or std.mem.eql(u8, key, "request_digest") or std.mem.eql(u8, key, "artifact_id") or std.mem.eql(u8, key, "occurrence_id") or std.mem.eql(u8, key, "attempt_id") or std.mem.eql(u8, key, "residual_id")) return reference(a, "digest");
-    if (std.mem.eql(u8, key, "recovery")) return shape(a, &.{.{ "mechanism", try enumSchema(state.RecoveryRequest, a) }}, &.{});
-    if (std.mem.eql(u8, key, "question_revision") or std.mem.eql(u8, key, "expected_revision") or std.mem.eql(u8, key, "after_seq") or std.mem.eql(u8, key, "offset")) return reference(a, "counter");
-    if (std.mem.eql(u8, key, "input") or std.mem.eql(u8, key, "answer") or std.mem.eql(u8, key, "message")) return typed(a, application, key);
+    if (std.mem.eql(u8, key, "task_id") or
+        std.mem.eql(u8, key, "subscription_id"))
+        return reference(a, "id128");
+    if (std.mem.eql(u8, key, "question_id") or
+        std.mem.eql(u8, key, "request_digest") or
+        std.mem.eql(u8, key, "artifact_id") or
+        std.mem.eql(u8, key, "occurrence_id") or
+        std.mem.eql(u8, key, "attempt_id") or
+        std.mem.eql(u8, key, "residual_id"))
+        return reference(a, "digest");
+    if (std.mem.eql(u8, key, "recovery"))
+        return shape(a, &.{.{ "mechanism", try enumSchema(state.RecoveryRequest, a) }}, &.{});
+    if (std.mem.eql(u8, key, "question_revision") or
+        std.mem.eql(u8, key, "expected_revision") or
+        std.mem.eql(u8, key, "after_seq") or
+        std.mem.eql(u8, key, "offset"))
+        return reference(a, "counter");
+    if (std.mem.eql(u8, key, "input") or
+        std.mem.eql(u8, key, "answer") or
+        std.mem.eql(u8, key, "message"))
+        return typed(a, application, key);
     if (std.mem.eql(u8, key, "application_id")) {
         var result = try constant(a, application.object.get("application_id").?.string);
-        if (method == .describe) try json.put(a, &result, "default", application.object.get("application_id").?);
+        if (method == .describe) try json.put(
+            a,
+            &result,
+            "default",
+            application.object.get("application_id").?,
+        );
         return result;
     }
-    // The launch admits the identifier; a static schema cannot select its
-    // configured value. Task submission still checks exact profile membership.
-    if (std.mem.eql(u8, key, "profile_id")) return text(a, 1, 128);
-    if (std.mem.eql(u8, key, "client_operation_id")) return text(a, 1, 128);
-    if (std.mem.eql(u8, key, "reason")) {
-        var result = try text(a, 0, 256);
-        try json.put(a, &result, "default", json.string("client requested cancellation"));
-        return result;
-    }
-    if (std.mem.eql(u8, key, "limit")) return number(a, if (method == .describe) 16 else limits.event_page, 16);
-    if (std.mem.eql(u8, key, "cursor")) {
-        var result = try counter(a, @typeInfo(protocol.Method).@"enum".field_names.len);
-        try json.put(a, &result, "default", json.string("0"));
-        return result;
-    }
-    if (std.mem.eql(u8, key, "length")) {
-        var result = try counter(a, limits.artifact_chunk_bytes);
-        try json.put(a, &result, "not", try constant(a, "0"));
-        return result;
-    }
-    if (std.mem.eql(u8, key, "mode")) return enumeration(a, &.{ "park", "cancel" });
-    if (std.mem.eql(u8, key, "protocol_versions")) {
-        var result = try array(a, try text(a, 0, 128), 16);
-        try json.put(a, &result, "minItems", try json.number(a, 1));
-        return result;
-    }
-    if (std.mem.eql(u8, key, "client_info")) {
-        var result = try shape(a, &.{ .{ "name", try text(a, 0, 128) }, .{ "version", try text(a, 0, 128) } }, &.{});
-        try json.put(a, &result, "default", .null);
-        try json.put(a, &result, "description", json.string("Optional diagnostics; omission records no client metadata and grants no authority."));
-        return result;
-    }
-    return error.InvalidProtocolSchema;
+    return parameterControl(a, method, key, limits);
 }
 
 // The field contract drives both public JSON Schema and durable admission.
@@ -184,23 +222,62 @@ const EventField = struct {
 };
 fn eventFields(kind: state.EventType) []const EventField {
     return switch (kind) {
-        .input_required => &.{ .{ .name = "question_id", .kind = .digest }, .{ .name = "question_revision", .kind = .counter }, .{ .name = "request_digest", .kind = .digest }, .{ .name = "answer_schema_id", .kind = .name }, .{ .name = "prompt", .kind = .prompt, .optional = true }, .{ .name = "prompt_ref", .kind = .prompt_ref, .optional = true } },
-        .message_queued, .message_consumed, .message_not_consumed => &.{ .{ .name = "message_id", .kind = .digest }, .{ .name = "ordinal", .kind = .counter }, .{ .name = "disposition", .kind = .disposition } },
-        .blocked => &.{ .{ .name = "delivery", .kind = .delivery, .optional = true }, .{ .name = "reason", .kind = .name, .optional = true } },
+        .input_required => &.{
+            .{ .name = "question_id", .kind = .digest },
+            .{ .name = "question_revision", .kind = .counter },
+            .{ .name = "request_digest", .kind = .digest },
+            .{ .name = "answer_schema_id", .kind = .name },
+            .{ .name = "prompt", .kind = .prompt, .optional = true },
+            .{ .name = "prompt_ref", .kind = .prompt_ref, .optional = true },
+        },
+        .message_queued, .message_consumed, .message_not_consumed => &.{ .{
+            .name = "message_id",
+            .kind = .digest,
+        }, .{
+            .name = "ordinal",
+            .kind = .counter,
+        }, .{
+            .name = "disposition",
+            .kind = .disposition,
+        } },
+        .blocked => &.{
+            .{ .name = "delivery", .kind = .delivery, .optional = true },
+            .{ .name = "reason", .kind = .name, .optional = true },
+        },
         .imported => &.{.{ .name = "archive_sha256", .kind = .digest }},
         .reconciled => &.{.{ .name = "reconciliation_id", .kind = .digest }},
-        .workspace_read => &.{ .{ .name = "occurrence_id", .kind = .digest }, .{ .name = "attempt_id", .kind = .digest, .optional = true } },
+        .workspace_read => &.{
+            .{ .name = "occurrence_id", .kind = .digest },
+            .{ .name = "attempt_id", .kind = .digest, .optional = true },
+        },
         .workspace, .workspace_progress => &.{.{ .name = "workspace_id", .kind = .digest }},
-        .controller => &.{ .{ .name = "operation", .kind = .digest }, .{ .name = "phase", .kind = .name }, .{ .name = "epoch", .kind = .counter } },
+        .controller => &.{
+            .{ .name = "operation", .kind = .digest },
+            .{ .name = "phase", .kind = .name },
+            .{ .name = "epoch", .kind = .counter },
+        },
         .controller_requested => &.{.{ .name = "operation", .kind = .digest }},
-        .accepted, .input_accepted, .cancellation_requested, .parked, .resumed, .delivery_unknown, .completed, .failed, .cancelled, .execution => &.{},
+        .accepted,
+        .input_accepted,
+        .cancellation_requested,
+        .parked,
+        .resumed,
+        .delivery_unknown,
+        .completed,
+        .failed,
+        .cancelled,
+        .execution,
+        => &.{},
     };
 }
 fn questionReferenceSchema(a: std.mem.Allocator) !json.Value {
     return try shape(a, &.{
-        .{ "artifact_id", try reference(a, "digest") },                       .{ "sha256", try reference(a, "digest") },
-        .{ "bytes", try reference(a, "counter") },                            .{ "media_type", try constant(a, "application/json") },
-        .{ "schema_id", try constant(a, "agent-native-question-prompt.v1") }, .{ "retention", try constant(a, "state-namespace") },
+        .{ "artifact_id", try reference(a, "digest") },
+        .{ "sha256", try reference(a, "digest") },
+        .{ "bytes", try reference(a, "counter") },
+        .{ "media_type", try constant(a, "application/json") },
+        .{ "schema_id", try constant(a, "agent-native-question-prompt.v1") },
+        .{ "retention", try constant(a, "state-namespace") },
         .{ "question_id", try reference(a, "digest") },
     }, &.{});
 }
@@ -224,7 +301,12 @@ fn eventPayload(a: std.mem.Allocator, kind: state.EventType) !json.Value {
         if (field.optional) try optional.append(a, field.name);
     }
     var result = try shape(a, fields.items, optional.items);
-    if (kind == .input_required) try json.put(a, &result, "oneOf", try literal(a, "[{\"required\":[\"prompt\"]},{\"required\":[\"prompt_ref\"]}]"));
+    if (kind == .input_required) try json.put(
+        a,
+        &result,
+        "oneOf",
+        try literal(a, "[{\"required\":[\"prompt\"]},{\"required\":[\"prompt_ref\"]}]"),
+    );
     return result;
 }
 pub fn validateEventData(a: std.mem.Allocator, kind: state.EventType, bytes: []const u8) !void {
@@ -232,7 +314,9 @@ pub fn validateEventData(a: std.mem.Allocator, kind: state.EventType, bytes: []c
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidArchive;
     const fields = eventFields(kind);
-    if (kind == .input_required and (parsed.value.object.contains("prompt") == parsed.value.object.contains("prompt_ref"))) return error.InvalidArchive;
+    if (kind == .input_required and (parsed.value.object.contains(
+        "prompt",
+    ) == parsed.value.object.contains("prompt_ref"))) return error.InvalidArchive;
     for (parsed.value.object.keys()) |key| {
         var found = false;
         for (fields) |field| if (std.mem.eql(u8, key, field.name)) {
@@ -248,21 +332,7 @@ pub fn validateEventData(a: std.mem.Allocator, kind: state.EventType, bytes: []c
         };
         switch (field.kind) {
             .prompt => {},
-            .prompt_ref => {
-                if (value != .object or value.object.count() != 7) return error.InvalidArchive;
-                inline for (.{ "artifact_id", "sha256", "question_id" }) |name| {
-                    const encoded = json.text(value.object.get(name) orelse return error.InvalidArchive) catch return error.InvalidArchive;
-                    if (encoded.len != 64) return error.InvalidArchive;
-                    var id: [32]u8 = undefined;
-                    _ = std.fmt.hexToBytes(&id, encoded) catch return error.InvalidArchive;
-                }
-                if (!std.mem.eql(u8, value.object.get("artifact_id").?.string, value.object.get("sha256").?.string) or
-                    !std.mem.eql(u8, value.object.get("question_id").?.string, (parsed.value.object.get("question_id") orelse return error.InvalidArchive).string)) return error.InvalidArchive;
-                _ = json.decimal(u64, value.object.get("bytes") orelse return error.InvalidArchive) catch return error.InvalidArchive;
-                inline for (.{ .{ "media_type", "application/json" }, .{ "schema_id", "agent-native-question-prompt.v1" }, .{ "retention", "state-namespace" } }) |pair| {
-                    if (!std.mem.eql(u8, json.text(value.object.get(pair[0]) orelse return error.InvalidArchive) catch return error.InvalidArchive, pair[1])) return error.InvalidArchive;
-                }
-            },
+            .prompt_ref => try validatePromptReference(value, parsed.value),
             .counter => {
                 _ = json.decimal(u64, value) catch return error.InvalidArchive;
             },
@@ -278,68 +348,256 @@ pub fn validateEventData(a: std.mem.Allocator, kind: state.EventType, bytes: []c
             },
             .disposition => {
                 const name = json.text(value) catch return error.InvalidArchive;
-                _ = std.meta.stringToEnum(state.MessageDisposition, name) orelse return error.InvalidArchive;
+                _ = std.meta.stringToEnum(
+                    state.MessageDisposition,
+                    name,
+                ) orelse return error.InvalidArchive;
             },
-            .delivery => if (!std.mem.eql(u8, json.text(value) catch return error.InvalidArchive, "definitely_not_sent")) return error.InvalidArchive,
+            .delivery => if (!std.mem.eql(
+                u8,
+                json.text(value) catch return error.InvalidArchive,
+                "definitely_not_sent",
+            )) return error.InvalidArchive,
         }
     }
 }
 
-pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.Limits) !json.Value {
+pub fn document(
+    a: std.mem.Allocator,
+    application: json.Value,
+    limits: protocol.Limits,
+) !json.Value {
+    var definitions = try baseDefinitions(a);
+    const ctx: SchemaContext = .{
+        .a = a,
+        .application = application,
+        .limits = limits,
+        .id = try reference(a, "id128"),
+        .digest = try reference(a, "digest"),
+        .count = try reference(a, "counter"),
+        .boolean = try reference(a, "boolean"),
+    };
+    const empty = try shape(a, &.{}, &.{});
+    const snapshot = try snapshotSchema(ctx);
+    try json.put(a, &definitions, "snapshot", snapshot);
+    const artifact = try artifactSchema(ctx);
+    const outcome_schema = try outcomeSchema(ctx, artifact);
+    const task_result = try taskResultSchema(ctx, snapshot, outcome_schema);
+    try json.put(a, &definitions, "task.result.result", task_result);
+    try addReceiptDefinitions(ctx, &definitions, snapshot);
+    const event_schema = try eventSchema(ctx);
+    try json.put(a, &definitions, "event", event_schema);
+    const event = try reference(a, "event");
+    try addRequestDefinitions(ctx, &definitions);
+    try addControlResults(ctx, &definitions, snapshot, empty);
+    try addReadResults(ctx, &definitions, event);
+    try addEventNotifications(ctx, &definitions, event);
+    try addServerNotifications(ctx, &definitions);
+    try addInitialization(ctx, &definitions);
+    try json.put(a, &definitions, "describe.result", try descriptionSchema(ctx));
+    try addErrorSchema(ctx, &definitions);
+    try addResponseSchemas(ctx, &definitions);
+    return finishDocument(a, definitions);
+}
+
+const SchemaContext = struct {
+    a: std.mem.Allocator,
+    application: json.Value,
+    limits: protocol.Limits,
+    id: json.Value,
+    digest: json.Value,
+    count: json.Value,
+    boolean: json.Value,
+};
+
+fn baseDefinitions(a: std.mem.Allocator) !json.Value {
     var definitions = json.object();
-    try json.put(a, &definitions, "id128", try literal(a, "{\"type\":\"string\",\"pattern\":\"^[0-9a-fA-F]{32}(?![\\\\s\\\\S])\"}"));
-    try json.put(a, &definitions, "digest", try literal(a, "{\"type\":\"string\",\"pattern\":\"^[0-9a-fA-F]{64}(?![\\\\s\\\\S])\"}"));
+    try json.put(
+        a,
+        &definitions,
+        "id128",
+        try literal(a, "{\"type\":\"string\",\"pattern\":\"^[0-9a-fA-F]{32}(?![\\\\s\\\\S])\"}"),
+    );
+    try json.put(
+        a,
+        &definitions,
+        "digest",
+        try literal(a, "{\"type\":\"string\",\"pattern\":\"^[0-9a-fA-F]{64}(?![\\\\s\\\\S])\"}"),
+    );
     try json.put(a, &definitions, "counter", try counter(a, std.math.maxInt(u64)));
     try json.put(a, &definitions, "boolean", try literal(a, "{\"type\":\"boolean\"}"));
-    try json.put(a, &definitions, "rpc_id", try literal(a, "{\"anyOf\":[{\"type\":\"null\"},{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"x-max-utf8-bytes\":128},{\"type\":\"integer\",\"minimum\":-9007199254740991,\"maximum\":9007199254740991}]}"));
-    const id = try reference(a, "id128");
-    const digest = try reference(a, "digest");
-    const count = try reference(a, "counter");
-    const boolean = try reference(a, "boolean");
-    const empty = try shape(a, &.{}, &.{});
+    try json.put(
+        a,
+        &definitions,
+        "rpc_id",
+        try literal(
+            a,
+            "{\"anyOf\":[{\"type\":\"null\"},{\"type\":\"string\",\"minLe" ++
+                "ngth\":1,\"maxLength\":128,\"x-max-utf8-bytes\":128},{\"type" ++
+                "\":\"integer\",\"minimum\":-9007199254740991,\"maximum\":900" ++
+                "7199254740991}]}",
+        ),
+    );
+    return definitions;
+}
+
+fn snapshotSchema(ctx: SchemaContext) !json.Value {
+    const a = ctx.a;
+    const limits = ctx.limits;
+    const id = ctx.id;
+    const digest = ctx.digest;
+    const count = ctx.count;
+    const boolean = ctx.boolean;
     // Queries can expose saved tasks from another application or version.
     // Their schema identities are data; mutation parameters below still bind
     // the currently admitted application contract.
     const question = try eventPayload(a, .input_required);
     const message = try eventPayload(a, .message_queued);
     var snapshot = try shape(a, &.{
-        .{ "task_id", id },                             .{ "application_id", try text(a, 1, 128) },                        .{ "profile_id", try text(a, 1, 128) },                    .{ "profile_digest", digest },
-        .{ "status", try enumSchema(state.Status, a) }, .{ "revision", count },                                            .{ "result_available", boolean },                          .{ "earliest_available_seq", count },
-        .{ "high_water_seq", count },                   .{ "blocker", try nullable(a, try enumSchema(state.Blocker, a)) }, .{ "cancellation", try nullable(a, try text(a, 0, 256)) }, .{ "pending_messages", try array(a, message, limits.pending_message_page) },
-        .{ "pending_message_count", count },            .{ "pending_messages_truncated", boolean },                        .{ "message_history", try constant(a, "task.events") },    .{ "question", try nullable(a, question) },
+        .{ "task_id", id },
+        .{ "application_id", try text(a, 1, 128) },
+        .{ "profile_id", try text(a, 1, 128) },
+        .{ "profile_digest", digest },
+        .{ "status", try enumSchema(state.Status, a) },
+        .{ "revision", count },
+        .{ "result_available", boolean },
+        .{ "earliest_available_seq", count },
+        .{ "high_water_seq", count },
+        .{ "blocker", try nullable(a, try enumSchema(state.Blocker, a)) },
+        .{ "cancellation", try nullable(a, try text(a, 0, 256)) },
+        .{ "pending_messages", try array(a, message, limits.pending_message_page) },
+        .{ "pending_message_count", count },
+        .{ "pending_messages_truncated", boolean },
+        .{ "message_history", try constant(a, "task.events") },
+        .{ "question", try nullable(a, question) },
     }, &.{});
-    const availability = try shape(a, &.{ .{ "occurrence_id", digest }, .{ "attempt_id", digest }, .{ "mechanisms", try array(a, try enumSchema(state.RecoveryRequest, a), null) } }, &.{});
+    const availability = try shape(
+        a,
+        &.{ .{ "occurrence_id", digest }, .{ "attempt_id", digest }, .{
+            "mechanisms",
+            try array(a, try enumSchema(state.RecoveryRequest, a), null),
+        } },
+        &.{},
+    );
     snapshot = try extend(a, snapshot, &.{.{ "recovery", try nullable(a, availability) }}, &.{});
     snapshot = try extend(a, snapshot, &.{.{ "associated_work_disposed", boolean }}, &.{});
-    snapshot = try extend(a, snapshot, &.{ .{ "controller_epoch", count }, .{ "controller_handoff", try nullable(a, digest) } }, &.{});
-    try json.put(a, &definitions, "snapshot", snapshot);
-    const artifact = try shape(a, &.{ .{ "artifact_id", digest }, .{ "sha256", digest }, .{ "bytes", count }, .{ "media_type", try constant(a, "application/json") }, .{ "schema_id", try text(a, 1, 128) }, .{ "retention", try constant(a, "state-namespace") } }, &.{});
+    snapshot = try extend(
+        a,
+        snapshot,
+        &.{ .{ "controller_epoch", count }, .{ "controller_handoff", try nullable(a, digest) } },
+        &.{},
+    );
+    return snapshot;
+}
+
+fn artifactSchema(ctx: SchemaContext) !json.Value {
+    const a = ctx.a;
+    const digest = ctx.digest;
+    const count = ctx.count;
+    const artifact = try shape(
+        a,
+        &.{
+            .{ "artifact_id", digest },
+            .{ "sha256", digest },
+            .{ "bytes", count },
+            .{ "media_type", try constant(a, "application/json") },
+            .{ "schema_id", try text(a, 1, 128) },
+            .{ "retention", try constant(a, "state-namespace") },
+        },
+        &.{},
+    );
+    return artifact;
+}
+
+fn outcomeSchema(ctx: SchemaContext, artifact: json.Value) !json.Value {
+    const a = ctx.a;
+    const boolean = ctx.boolean;
     var outcomes: std.array_list.Managed(json.Value) = .init(a);
     inline for (.{ "output", "failure" }) |name| {
         var outcome = try shape(a, &.{
-            .{ "type", try constant(a, if (comptime std.mem.eql(u8, name, "output")) "completed" else "failed") },
+            .{
+                "type",
+                try constant(
+                    a,
+                    if (comptime std.mem.eql(u8, name, "output")) "completed" else "failed",
+                ),
+            },
             .{ "schema_id", try text(a, 1, 128) },
             .{ "value", json.object() },
             .{ "value_ref", artifact },
         }, &.{ "value", "value_ref" });
-        if (comptime std.mem.eql(u8, name, "failure")) outcome = try extend(a, outcome, &.{.{ "cleanup_complete", boolean }}, &.{});
-        try json.put(a, &outcome, "oneOf", try literal(a, "[{\"required\":[\"value\"]},{\"required\":[\"value_ref\"]}]"));
+        if (comptime std.mem.eql(
+            u8,
+            name,
+            "failure",
+        )) outcome = try extend(a, outcome, &.{.{ "cleanup_complete", boolean }}, &.{});
+        try json.put(
+            a,
+            &outcome,
+            "oneOf",
+            try literal(a, "[{\"required\":[\"value\"]},{\"required\":[\"value_ref\"]}]"),
+        );
         try outcomes.append(outcome);
     }
-    try outcomes.append(try shape(a, &.{ .{ "type", try constant(a, "cancelled") }, .{ "cleanup_complete", boolean } }, &.{}));
+    try outcomes.append(
+        try shape(
+            a,
+            &.{ .{ "type", try constant(a, "cancelled") }, .{ "cleanup_complete", boolean } },
+            &.{},
+        ),
+    );
     var outcome_schema = json.object();
     try json.put(a, &outcome_schema, "oneOf", .{ .array = outcomes });
-    var task_result = try extend(a, snapshot, &.{ .{ "ready", boolean }, .{ "outcome", outcome_schema } }, &.{"outcome"});
-    var result_cases = try literal(a, "[{\"if\":{\"properties\":{\"ready\":{\"const\":true}}},\"then\":{\"required\":[\"outcome\"]},\"else\":{\"not\":{\"required\":[\"outcome\"]}}}]");
+    return outcome_schema;
+}
+
+fn taskResultSchema(
+    ctx: SchemaContext,
+    snapshot: json.Value,
+    outcome_schema: json.Value,
+) !json.Value {
+    const a = ctx.a;
+    const application = ctx.application;
+    const boolean = ctx.boolean;
+    var task_result = try extend(
+        a,
+        snapshot,
+        &.{ .{ "ready", boolean }, .{ "outcome", outcome_schema } },
+        &.{"outcome"},
+    );
+    var result_cases = try literal(
+        a,
+        "[{\"if\":{\"properties\":{\"ready\":{\"const\":true}}},\"the" ++
+            "n\":{\"required\":[\"outcome\"]},\"else\":{\"not\":{\"requir" ++
+            "ed\":[\"outcome\"]}}}]",
+    );
     inline for (.{ "output", "failure" }) |name| {
         const contract = application.object.get(name).?;
         var saved = json.object();
-        try json.put(a, &saved, "type", try constant(a, if (comptime std.mem.eql(u8, name, "output")) "completed" else "failed"));
-        try json.put(a, &saved, "schema_id", try constant(a, contract.object.get("schema_id").?.string));
+        try json.put(
+            a,
+            &saved,
+            "type",
+            try constant(
+                a,
+                if (comptime std.mem.eql(u8, name, "output")) "completed" else "failed",
+            ),
+        );
+        try json.put(
+            a,
+            &saved,
+            "schema_id",
+            try constant(a, contract.object.get("schema_id").?.string),
+        );
         var saved_outcome = json.object();
         try json.put(a, &saved_outcome, "properties", saved);
         var properties = json.object();
-        try json.put(a, &properties, "application_id", try constant(a, application.object.get("application_id").?.string));
+        try json.put(
+            a,
+            &properties,
+            "application_id",
+            try constant(a, application.object.get("application_id").?.string),
+        );
         try json.put(a, &properties, "outcome", saved_outcome);
         var condition = json.object();
         try json.put(a, &condition, "properties", properties);
@@ -357,18 +615,67 @@ pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.
         try result_cases.array.append(branch);
     }
     try json.put(a, &task_result, "allOf", result_cases);
-    try json.put(a, &definitions, "task.result.result", task_result);
-    inline for (.{ "task.submit", "task.message", "task.respond", "task.cancel", "task.resume", "task.reconcile", "task.adopt" }) |name| {
-        var admitted = try extend(a, snapshot, &.{ .{ "receipt_id", digest }, .{ "receipt_revision", count }, .{ "replayed", boolean }, .{ "disposition", try enumSchema(state.Disposition, a) } }, &.{});
-        if (comptime std.mem.eql(u8, name, "task.message")) admitted = try extend(a, admitted, &.{.{ "message_id", digest }}, &.{});
-        if (comptime std.mem.eql(u8, name, "task.respond")) admitted = try extend(a, admitted, &.{.{ "question_id", digest }}, &.{});
+    return task_result;
+}
+
+fn addReceiptDefinitions(ctx: SchemaContext, definitions: *json.Value, snapshot: json.Value) !void {
+    const a = ctx.a;
+    const digest = ctx.digest;
+    const count = ctx.count;
+    const boolean = ctx.boolean;
+    inline for (.{
+        "task.submit",
+        "task.message",
+        "task.respond",
+        "task.cancel",
+        "task.resume",
+        "task.reconcile",
+        "task.adopt",
+    }) |name| {
+        var admitted = try extend(
+            a,
+            snapshot,
+            &.{
+                .{ "receipt_id", digest },
+                .{ "receipt_revision", count },
+                .{ "replayed", boolean },
+                .{ "disposition", try enumSchema(state.Disposition, a) },
+            },
+            &.{},
+        );
+        if (comptime std.mem.eql(
+            u8,
+            name,
+            "task.message",
+        )) admitted = try extend(a, admitted, &.{.{ "message_id", digest }}, &.{});
+        if (comptime std.mem.eql(
+            u8,
+            name,
+            "task.respond",
+        )) admitted = try extend(a, admitted, &.{.{ "question_id", digest }}, &.{});
         if (comptime std.mem.eql(u8, name, "task.reconcile")) {
-            const recovery = try shape(a, &.{ .{ "reconciliation_id", digest }, .{ "occurrence_id", digest }, .{ "attempt_id", digest }, .{ "status", try enumeration(a, &.{ "unresolved", "capture_admitted", "reply_settled", "pending", "not_sent" }) }, .{ "provenance", try enumeration(a, &.{ "none", "rederived", "authentic", "authoritative" }) }, .{ "mechanism", try text(a, 1, 128) }, .{ "mechanism_version", try counter(a, std.math.maxInt(u32)) }, .{ "reason", try nullable(a, try enumeration(a, &.{ "unsupported", "unavailable", "interrupted", "inconclusive", "rejected" })) } }, &.{});
+            const recovery = try reconciliationSchema(ctx);
             admitted = try extend(a, admitted, &.{.{ "reconciliation", recovery }}, &.{});
         }
-        try json.put(a, &definitions, name ++ ".result", admitted);
+        try json.put(a, definitions, name ++ ".result", admitted);
     }
-    var event_schema = try shape(a, &.{ .{ "task_id", id }, .{ "seq", count }, .{ "revision", count }, .{ "type", try enumSchema(state.EventType, a) }, .{ "data", try literal(a, "{\"type\":\"object\"}") } }, &.{});
+}
+
+fn eventSchema(ctx: SchemaContext) !json.Value {
+    const a = ctx.a;
+    const id = ctx.id;
+    const count = ctx.count;
+    var event_schema = try shape(
+        a,
+        &.{
+            .{ "task_id", id },
+            .{ "seq", count },
+            .{ "revision", count },
+            .{ "type", try enumSchema(state.EventType, a) },
+            .{ "data", try literal(a, "{\"type\":\"object\"}") },
+        },
+        &.{},
+    );
     var event_cases: std.array_list.Managed(json.Value) = .init(a);
     inline for (@typeInfo(state.EventType).@"enum".field_names) |name| {
         const kind = @field(state.EventType, name);
@@ -387,34 +694,229 @@ pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.
         try event_cases.append(condition);
     }
     try json.put(a, &event_schema, "allOf", .{ .array = event_cases });
-    try json.put(a, &definitions, "event", event_schema);
-    const event = try reference(a, "event");
+    return event_schema;
+}
+
+fn addRequestDefinitions(ctx: SchemaContext, definitions: *json.Value) !void {
+    const a = ctx.a;
+    const application = ctx.application;
+    const limits = ctx.limits;
     inline for (@typeInfo(protocol.Method).@"enum".field_names) |name| {
         const method = @field(protocol.Method, name);
         const fields = protocol.fields(method);
         var properties: std.array_list.Managed(Property) = .init(a);
-        for (fields.required) |key| try properties.append(.{ key, try parameter(a, method, key, application, limits) });
-        for (fields.optional) |key| try properties.append(.{ key, try parameter(a, method, key, application, limits) });
+        for (fields.required) |key| try properties.append(.{
+            key,
+            try parameter(a, method, key, application, limits),
+        });
+        for (fields.optional) |key| try properties.append(.{
+            key,
+            try parameter(a, method, key, application, limits),
+        });
         var params = try shape(a, properties.items, fields.optional);
-        if (method == .@"artifact.read") try json.put(a, &params, "dependentRequired", try literal(a, "{\"question_id\":[\"task_id\"]}"));
-        try json.put(a, &definitions, name ++ ".params", params);
-        try json.put(a, &definitions, name ++ ".request", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "id", try reference(a, "rpc_id") }, .{ "method", try constant(a, name) }, .{ "params", params } }, &.{}));
+        if (method == .@"artifact.read") try json.put(
+            a,
+            &params,
+            "dependentRequired",
+            try literal(a, "{\"question_id\":[\"task_id\"]}"),
+        );
+        try json.put(a, definitions, name ++ ".params", params);
+        try json.put(
+            a,
+            definitions,
+            name ++ ".request",
+            try shape(
+                a,
+                &.{
+                    .{ "jsonrpc", try constant(a, "2.0") },
+                    .{ "id", try reference(a, "rpc_id") },
+                    .{ "method", try constant(a, name) },
+                    .{ "params", params },
+                },
+                &.{},
+            ),
+        );
     }
-    try json.put(a, &definitions, "ping.result", try shape(a, &.{.{ "server_instance_id", id }}, &.{}));
-    try json.put(a, &definitions, "task.status.result", try extend(a, snapshot, &.{.{ "residual_id", digest }}, &.{"residual_id"}));
-    try json.put(a, &definitions, "task.unsubscribe.result", empty);
-    try json.put(a, &definitions, "shutdown.result", try shape(a, &.{ .{ "mode", try enumeration(a, &.{ "park", "cancel" }) }, .{ "accepted", try literal(a, "{\"const\":true}") } }, &.{}));
-    try json.put(a, &definitions, "task.events.result", try shape(a, &.{ .{ "events", try array(a, event, limits.event_page) }, .{ "earliest_available_seq", count }, .{ "high_water_seq", count }, .{ "next_after_seq", count }, .{ "has_more", boolean } }, &.{}));
-    try json.put(a, &definitions, "task.subscribe.result", try shape(a, &.{ .{ "subscription_id", id }, .{ "after_seq", count }, .{ "earliest_available_seq", count }, .{ "high_water_seq", count } }, &.{}));
-    try json.put(a, &definitions, "artifact.read.result", try shape(a, &.{ .{ "encoding", try constant(a, "base64url") }, .{ "data", try text(a, 0, (limits.artifact_chunk_bytes * 4 + 2) / 3) }, .{ "sha256", digest }, .{ "total_bytes", count }, .{ "next_offset", count }, .{ "eof", boolean } }, &.{}));
+}
+
+fn addControlResults(
+    ctx: SchemaContext,
+    definitions: *json.Value,
+    snapshot: json.Value,
+    empty: json.Value,
+) !void {
+    const a = ctx.a;
+    const id = ctx.id;
+    const digest = ctx.digest;
+    try json.put(
+        a,
+        definitions,
+        "ping.result",
+        try shape(a, &.{.{ "server_instance_id", id }}, &.{}),
+    );
+    try json.put(
+        a,
+        definitions,
+        "task.status.result",
+        try extend(a, snapshot, &.{.{ "residual_id", digest }}, &.{"residual_id"}),
+    );
+    try json.put(a, definitions, "task.unsubscribe.result", empty);
+    try json.put(
+        a,
+        definitions,
+        "shutdown.result",
+        try shape(
+            a,
+            &.{
+                .{ "mode", try enumeration(a, &.{ "park", "cancel" }) },
+                .{ "accepted", try literal(a, "{\"const\":true}") },
+            },
+            &.{},
+        ),
+    );
+}
+
+fn addReadResults(ctx: SchemaContext, definitions: *json.Value, event: json.Value) !void {
+    const a = ctx.a;
+    const limits = ctx.limits;
+    const id = ctx.id;
+    const digest = ctx.digest;
+    const count = ctx.count;
+    const boolean = ctx.boolean;
+    try json.put(
+        a,
+        definitions,
+        "task.events.result",
+        try shape(
+            a,
+            &.{
+                .{ "events", try array(a, event, limits.event_page) },
+                .{ "earliest_available_seq", count },
+                .{ "high_water_seq", count },
+                .{ "next_after_seq", count },
+                .{ "has_more", boolean },
+            },
+            &.{},
+        ),
+    );
+    try json.put(
+        a,
+        definitions,
+        "task.subscribe.result",
+        try shape(
+            a,
+            &.{
+                .{ "subscription_id", id },
+                .{ "after_seq", count },
+                .{ "earliest_available_seq", count },
+                .{ "high_water_seq", count },
+            },
+            &.{},
+        ),
+    );
+    try json.put(
+        a,
+        definitions,
+        "artifact.read.result",
+        try shape(
+            a,
+            &.{
+                .{ "encoding", try constant(a, "base64url") },
+                .{ "data", try text(a, 0, (limits.artifact_chunk_bytes * 4 + 2) / 3) },
+                .{ "sha256", digest },
+                .{ "total_bytes", count },
+                .{ "next_offset", count },
+                .{ "eof", boolean },
+            },
+            &.{},
+        ),
+    );
+}
+
+fn addEventNotifications(ctx: SchemaContext, definitions: *json.Value, event: json.Value) !void {
+    const a = ctx.a;
+    const id = ctx.id;
+    const count = ctx.count;
     const event_params = try shape(a, &.{ .{ "subscription_id", id }, .{ "event", event } }, &.{});
-    try json.put(a, &definitions, "task.event", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "method", try constant(a, "task.event") }, .{ "params", event_params } }, &.{}));
-    const closed_params = try shape(a, &.{ .{ "subscription_id", id }, .{ "task_id", id }, .{ "reason", try constant(a, "CursorExpired") }, .{ "earliest_available_seq", count }, .{ "high_water_seq", count } }, &.{});
-    try json.put(a, &definitions, "subscription.closed", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "method", try constant(a, "subscription.closed") }, .{ "params", closed_params } }, &.{}));
-    const server_closed = try shape(a, &.{ .{ "mode", try enumeration(a, &.{ "park", "cancel" }) }, .{ "disposition", try enumeration(a, &.{ "parked", "cancelled", "incomplete" }) }, .{ "recovery_tasks", try array(a, id, limits.recovery_task_page) } }, &.{});
+    try json.put(
+        a,
+        definitions,
+        "task.event",
+        try shape(
+            a,
+            &.{
+                .{ "jsonrpc", try constant(a, "2.0") },
+                .{ "method", try constant(a, "task.event") },
+                .{ "params", event_params },
+            },
+            &.{},
+        ),
+    );
+    const closed_params = try shape(
+        a,
+        &.{
+            .{ "subscription_id", id },
+            .{ "task_id", id },
+            .{ "reason", try constant(a, "CursorExpired") },
+            .{ "earliest_available_seq", count },
+            .{ "high_water_seq", count },
+        },
+        &.{},
+    );
+    try json.put(
+        a,
+        definitions,
+        "subscription.closed",
+        try shape(
+            a,
+            &.{
+                .{ "jsonrpc", try constant(a, "2.0") },
+                .{ "method", try constant(a, "subscription.closed") },
+                .{ "params", closed_params },
+            },
+            &.{},
+        ),
+    );
+}
+
+fn addServerNotifications(ctx: SchemaContext, definitions: *json.Value) !void {
+    const a = ctx.a;
+    const limits = ctx.limits;
+    const id = ctx.id;
+    const server_closed = try shape(a, &.{ .{
+        "mode",
+        try enumeration(a, &.{ "park", "cancel" }),
+    }, .{
+        "disposition",
+        try enumeration(a, &.{ "parked", "cancelled", "incomplete" }),
+    }, .{
+        "recovery_tasks",
+        try array(a, id, limits.recovery_task_page),
+    } }, &.{});
     for ([_][]const u8{ "server.recovery", "server.closed" }) |method| {
-        try json.put(a, &definitions, method, try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "method", try constant(a, method) }, .{ "params", server_closed } }, &.{}));
+        try json.put(
+            a,
+            definitions,
+            method,
+            try shape(
+                a,
+                &.{
+                    .{ "jsonrpc", try constant(a, "2.0") },
+                    .{ "method", try constant(a, method) },
+                    .{ "params", server_closed },
+                },
+                &.{},
+            ),
+        );
     }
+}
+
+fn addInitialization(ctx: SchemaContext, definitions: *json.Value) !void {
+    const a = ctx.a;
+    const limits = ctx.limits;
+    const id = ctx.id;
+    const digest = ctx.digest;
+    const boolean = ctx.boolean;
     var limit_properties: std.array_list.Managed(Property) = .init(a);
     inline for (@typeInfo(protocol.Limits).@"struct".field_names) |name| {
         var property = json.object();
@@ -422,42 +924,412 @@ pub fn document(a: std.mem.Allocator, application: json.Value, limits: protocol.
         try limit_properties.append(.{ name, property });
     }
     const limits_schema = try shape(a, limit_properties.items, &.{});
-    const capabilities = try shape(a, &.{ .{ "task_events", boolean }, .{ "message_input", boolean }, .{ "task_execution", boolean }, .{ "task_reconciliation", boolean } }, &.{});
-    const info = try shape(a, &.{ .{ "name", try text(a, 1, 128) }, .{ "version", try text(a, 1, 128) } }, &.{});
-    try json.put(a, &definitions, "initialize.result", try shape(a, &.{ .{ "protocol_version", try constant(a, protocol.version) }, .{ "server_instance_id", id }, .{ "server_info", info }, .{ "build_manifest_id", digest }, .{ "native_artifact_sha256", digest }, .{ "limits", limits_schema }, .{ "capabilities", capabilities } }, &.{}));
-    const method_description = try shape(a, &.{ .{ "name", try enumSchema(protocol.Method, a) }, .{ "required_fields", try array(a, try text(a, 1, 128), 16) }, .{ "optional_fields", try array(a, try text(a, 1, 128), 16) }, .{ "params_schema", try text(a, 1, 128) }, .{ "result_schema", try text(a, 1, 128) } }, &.{});
-    var app_properties: std.array_list.Managed(Property) = .init(a);
-    for ([_][]const u8{ "application_id", "application_version", "client_mapping" }) |key| try app_properties.append(.{ key, try constant(a, application.object.get(key).?.string) });
-    const schema_reference = try shape(a, &.{ .{ "artifact_id", digest }, .{ "sha256", digest }, .{ "bytes", count }, .{ "media_type", try constant(a, "application/json") }, .{ "schema_id", try text(a, 1, 128) }, .{ "retention", try constant(a, "embedded") } }, &.{});
-    const app_reference = try extend(a, try shape(a, app_properties.items, &.{}), &.{.{ "metadata_ref", schema_reference }}, &.{});
-    const schema_asset = try shape(a, &.{ .{ "schema_id", try text(a, 1, 128) }, .{ "wire_sha256", digest }, .{ "wire_base64url", try text(a, 0, limits.frame_bytes) }, .{ "json", try literal(a, "{\"type\":\"object\"}") } }, &.{});
-    for ([_][]const u8{ "input", "output", "failure", "answer", "message" }) |key| try app_properties.append(.{ key, schema_asset });
-    const capability = try shape(a, &.{ .{ "identity", try text(a, 1, 128) }, .{ "resource_role", try text(a, 1, 128) }, .{ "payload_sha256", digest }, .{ "resume_sha256", digest } }, &.{});
-    try app_properties.append(.{ "capabilities", try array(a, capability, null) });
-    const launch_profile = try nullable(a, try shape(a, &.{ .{ "id", try text(a, 1, 128) }, .{ "sha256", digest }, .{ "resource_identity", digest } }, &.{}));
-    var description = try shape(a, &.{ .{ "methods", try array(a, method_description, 16) }, .{ "next_cursor", try nullable(a, count) }, .{ "application", try oneOf(a, &.{ try shape(a, app_properties.items, &.{}), app_reference }) }, .{ "execution_mode", try enumeration(a, &.{ "offline", "live" }) }, .{ "profile", launch_profile }, .{ "protocol_schema", try literal(a, "{\"type\":\"object\"}") }, .{ "protocol_schema_ref", schema_reference } }, &.{ "protocol_schema", "protocol_schema_ref" });
-    try json.put(a, &description, "oneOf", try literal(a, "[{\"required\":[\"protocol_schema\"]},{\"required\":[\"protocol_schema_ref\"]}]"));
-    try json.put(a, &definitions, "describe.result", description);
+    const capabilities = try shape(
+        a,
+        &.{
+            .{ "task_events", boolean },
+            .{ "message_input", boolean },
+            .{ "task_execution", boolean },
+            .{ "task_reconciliation", boolean },
+        },
+        &.{},
+    );
+    const info = try shape(
+        a,
+        &.{ .{ "name", try text(a, 1, 128) }, .{ "version", try text(a, 1, 128) } },
+        &.{},
+    );
+    try json.put(
+        a,
+        definitions,
+        "initialize.result",
+        try shape(
+            a,
+            &.{
+                .{ "protocol_version", try constant(a, protocol.version) },
+                .{ "server_instance_id", id },
+                .{ "server_info", info },
+                .{ "build_manifest_id", digest },
+                .{ "native_artifact_sha256", digest },
+                .{ "limits", limits_schema },
+                .{ "capabilities", capabilities },
+            },
+            &.{},
+        ),
+    );
+}
+
+fn descriptionSchema(ctx: SchemaContext) !json.Value {
+    const a = ctx.a;
+    const digest = ctx.digest;
+    const count = ctx.count;
+    const method_description = try methodDescription(a);
+    const application_schema = try applicationDescription(ctx);
+    const launch_profile = try nullable(
+        a,
+        try shape(
+            a,
+            &.{
+                .{ "id", try text(a, 1, 128) },
+                .{ "sha256", digest },
+                .{ "resource_identity", digest },
+            },
+            &.{},
+        ),
+    );
+    var description = try shape(a, &.{ .{
+        "methods",
+        try array(a, method_description, 16),
+    }, .{ "next_cursor", try nullable(a, count) }, .{
+        "application",
+        application_schema.schema,
+    }, .{
+        "execution_mode",
+        try enumeration(a, &.{ "offline", "live" }),
+    }, .{
+        "profile",
+        launch_profile,
+    }, .{
+        "protocol_schema",
+        try literal(a, "{\"type\":\"object\"}"),
+    }, .{
+        "protocol_schema_ref",
+        application_schema.reference,
+    } }, &.{
+        "protocol_schema",
+        "protocol_schema_ref",
+    });
+    try json.put(
+        a,
+        &description,
+        "oneOf",
+        try literal(
+            a,
+            "[{\"required\":[\"protocol_schema\"]},{\"required\":[\"protocol_schema_ref\"]}]",
+        ),
+    );
+    return description;
+}
+
+fn addErrorSchema(ctx: SchemaContext, definitions: *json.Value) !void {
+    const a = ctx.a;
+    const count = ctx.count;
     var errors: std.array_list.Managed(json.Value) = .init(a);
     inline for (@typeInfo(protocol.Kind).@"enum".field_names) |name| {
         const kind = @field(protocol.Kind, name);
         var code = json.object();
         try json.put(a, &code, "const", try json.number(a, kind.code()));
-        var details = try shape(a, &.{ .{ "kind", try constant(a, name) }, .{ "recovery", if (kind == .CursorExpired) try constant(a, "read_status_or_result") else try enumeration(a, &.{ "correct_request", "reconnect", "retry_same_operation_or_inspect" }) }, .{ "supported_versions", try array(a, try enumeration(a, &.{protocol.version}), 1) } }, &.{"supported_versions"});
-        if (kind == .CursorExpired) details = try extend(a, details, &.{ .{ "earliest_available_seq", count }, .{ "high_water_seq", count } }, &.{});
-        try errors.append(try shape(a, &.{ .{ "code", code }, .{ "message", try constant(a, name) }, .{ "data", details } }, &.{}));
+        var details = try shape(a, &.{ .{ "kind", try constant(a, name) }, .{
+            "recovery",
+            if (kind == .CursorExpired) try constant(
+                a,
+                "read_status_or_result",
+            ) else try enumeration(a, &.{
+                "correct_request",
+                "reconnect",
+                "retry_same_operation_or_inspect",
+            }),
+        }, .{
+            "supported_versions",
+            try array(a, try enumeration(a, &.{protocol.version}), 1),
+        } }, &.{"supported_versions"});
+        if (kind == .CursorExpired) details = try extend(a, details, &.{ .{
+            "earliest_available_seq",
+            count,
+        }, .{ "high_water_seq", count } }, &.{});
+        try errors.append(
+            try shape(
+                a,
+                &.{
+                    .{ "code", code },
+                    .{ "message", try constant(a, name) },
+                    .{ "data", details },
+                },
+                &.{},
+            ),
+        );
     }
     var fault = json.object();
     try json.put(a, &fault, "oneOf", .{ .array = errors });
-    try json.put(a, &definitions, "error", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "id", try reference(a, "rpc_id") }, .{ "error", fault } }, &.{}));
+    try json.put(
+        a,
+        definitions,
+        "error",
+        try shape(
+            a,
+            &.{
+                .{ "jsonrpc", try constant(a, "2.0") },
+                .{ "id", try reference(a, "rpc_id") },
+                .{ "error", fault },
+            },
+            &.{},
+        ),
+    );
+}
+
+fn addResponseSchemas(ctx: SchemaContext, definitions: *json.Value) !void {
+    const a = ctx.a;
     inline for (@typeInfo(protocol.Method).@"enum".field_names) |name| {
-        try json.put(a, &definitions, name ++ ".response", try shape(a, &.{ .{ "jsonrpc", try constant(a, "2.0") }, .{ "id", try reference(a, "rpc_id") }, .{ "result", try reference(a, name ++ ".result") } }, &.{}));
+        try json.put(
+            a,
+            definitions,
+            name ++ ".response",
+            try shape(
+                a,
+                &.{
+                    .{ "jsonrpc", try constant(a, "2.0") },
+                    .{ "id", try reference(a, "rpc_id") },
+                    .{ "result", try reference(a, name ++ ".result") },
+                },
+                &.{},
+            ),
+        );
     }
+}
+
+fn finishDocument(a: std.mem.Allocator, definitions: json.Value) !json.Value {
     var result = json.object();
-    try json.put(a, &result, "$schema", json.string("https://json-schema.org/draft/2020-12/schema"));
+    try json.put(
+        a,
+        &result,
+        "$schema",
+        json.string("https://json-schema.org/draft/2020-12/schema"),
+    );
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(try json.canonical(a, definitions), &hash, .{});
-    try json.put(a, &result, "$id", json.string(try std.fmt.allocPrint(a, "urn:agent:agent-host:1.0:{s}", .{std.fmt.bytesToHex(hash, .lower)})));
+    try json.put(
+        a,
+        &result,
+        "$id",
+        json.string(
+            try std.fmt.allocPrint(a, "urn:agent:agent-host:1.0:{s}", .{
+                std.fmt.bytesToHex(hash, .lower),
+            }),
+        ),
+    );
     try json.put(a, &result, "$defs", definitions);
     return result;
+}
+
+fn parameterControl(
+    a: std.mem.Allocator,
+    method: protocol.Method,
+    key: []const u8,
+    limits: protocol.Limits,
+) !json.Value {
+    // The launch admits the identifier; a static schema cannot select its
+    // configured value. Task submission still checks exact profile membership.
+    if (std.mem.eql(u8, key, "profile_id")) return text(a, 1, 128);
+    if (std.mem.eql(u8, key, "client_operation_id")) return text(a, 1, 128);
+    if (std.mem.eql(u8, key, "reason")) {
+        var result = try text(a, 0, 256);
+        try json.put(a, &result, "default", json.string("client requested cancellation"));
+        return result;
+    }
+    if (std.mem.eql(u8, key, "limit"))
+        return number(a, if (method == .describe) 16 else limits.event_page, 16);
+    if (std.mem.eql(u8, key, "cursor")) {
+        var result = try counter(a, @typeInfo(protocol.Method).@"enum".field_names.len);
+        try json.put(a, &result, "default", json.string("0"));
+        return result;
+    }
+    if (std.mem.eql(u8, key, "length")) {
+        var result = try counter(a, limits.artifact_chunk_bytes);
+        try json.put(a, &result, "not", try constant(a, "0"));
+        return result;
+    }
+    if (std.mem.eql(u8, key, "mode")) return enumeration(a, &.{ "park", "cancel" });
+    if (std.mem.eql(u8, key, "protocol_versions")) {
+        var result = try array(a, try text(a, 0, 128), 16);
+        try json.put(a, &result, "minItems", try json.number(a, 1));
+        return result;
+    }
+    if (std.mem.eql(u8, key, "client_info")) {
+        var result = try shape(
+            a,
+            &.{ .{ "name", try text(a, 0, 128) }, .{ "version", try text(a, 0, 128) } },
+            &.{},
+        );
+        try json.put(a, &result, "default", .null);
+        try json.put(
+            a,
+            &result,
+            "description",
+            json.string(
+                "Optional diagnostics; omission records no client metadata an" ++
+                    "d grants no authority.",
+            ),
+        );
+        return result;
+    }
+    return error.InvalidProtocolSchema;
+}
+
+fn validatePromptReference(value: json.Value, root: json.Value) !void {
+    if (value != .object or value.object.count() != 7) return error.InvalidArchive;
+    inline for (.{ "artifact_id", "sha256", "question_id" }) |name| {
+        const encoded = json.text(
+            value.object.get(name) orelse return error.InvalidArchive,
+        ) catch return error.InvalidArchive;
+        if (encoded.len != 64) return error.InvalidArchive;
+        var id: [32]u8 = undefined;
+        _ = std.fmt.hexToBytes(&id, encoded) catch return error.InvalidArchive;
+    }
+    if (!std.mem.eql(
+        u8,
+        value.object.get("artifact_id").?.string,
+        value.object.get("sha256").?.string,
+    ) or
+        !std.mem.eql(
+            u8,
+            value.object.get("question_id").?.string,
+            (root.object.get("question_id") orelse return error.InvalidArchive).string,
+        )) return error.InvalidArchive;
+    _ = json.decimal(
+        u64,
+        value.object.get("bytes") orelse return error.InvalidArchive,
+    ) catch return error.InvalidArchive;
+    inline for (.{
+        .{ "media_type", "application/json" },
+        .{ "schema_id", "agent-native-question-prompt.v1" },
+        .{ "retention", "state-namespace" },
+    }) |pair| {
+        if (!std.mem.eql(
+            u8,
+            json.text(
+                value.object.get(pair[0]) orelse return error.InvalidArchive,
+            ) catch return error.InvalidArchive,
+            pair[1],
+        )) return error.InvalidArchive;
+    }
+}
+
+fn reconciliationSchema(ctx: SchemaContext) !json.Value {
+    const a = ctx.a;
+    const digest = ctx.digest;
+    const recovery = try shape(
+        a,
+        &.{
+            .{ "reconciliation_id", digest },
+            .{ "occurrence_id", digest },
+            .{ "attempt_id", digest },
+            .{
+                "status",
+                try enumeration(a, &.{
+                    "unresolved",
+                    "capture_admitted",
+                    "reply_settled",
+                    "pending",
+                    "not_sent",
+                }),
+            },
+            .{
+                "provenance",
+                try enumeration(a, &.{ "none", "rederived", "authentic", "authoritative" }),
+            },
+            .{ "mechanism", try text(a, 1, 128) },
+            .{ "mechanism_version", try counter(a, std.math.maxInt(u32)) },
+            .{
+                "reason",
+                try nullable(
+                    a,
+                    try enumeration(a, &.{
+                        "unsupported",
+                        "unavailable",
+                        "interrupted",
+                        "inconclusive",
+                        "rejected",
+                    }),
+                ),
+            },
+        },
+        &.{},
+    );
+    return recovery;
+}
+
+fn methodDescription(a: std.mem.Allocator) !json.Value {
+    const method_description = try shape(a, &.{ .{
+        "name",
+        try enumSchema(protocol.Method, a),
+    }, .{
+        "required_fields",
+        try array(a, try text(a, 1, 128), 16),
+    }, .{
+        "optional_fields",
+        try array(a, try text(a, 1, 128), 16),
+    }, .{
+        "params_schema",
+        try text(a, 1, 128),
+    }, .{
+        "result_schema",
+        try text(a, 1, 128),
+    } }, &.{});
+    return method_description;
+}
+
+const ApplicationDescription = struct { schema: json.Value, reference: json.Value };
+fn applicationDescription(ctx: SchemaContext) !ApplicationDescription {
+    const a = ctx.a;
+    const application = ctx.application;
+    const digest = ctx.digest;
+    const count = ctx.count;
+    const limits = ctx.limits;
+    var app_properties: std.array_list.Managed(Property) = .init(a);
+    for ([_][]const u8{
+        "application_id",
+        "application_version",
+        "client_mapping",
+    }) |key| try app_properties.append(.{
+        key,
+        try constant(a, application.object.get(key).?.string),
+    });
+    const schema_reference = try shape(
+        a,
+        &.{
+            .{ "artifact_id", digest },
+            .{ "sha256", digest },
+            .{ "bytes", count },
+            .{ "media_type", try constant(a, "application/json") },
+            .{ "schema_id", try text(a, 1, 128) },
+            .{ "retention", try constant(a, "embedded") },
+        },
+        &.{},
+    );
+    const app_reference = try extend(a, try shape(a, app_properties.items, &.{}), &.{.{
+        "metadata_ref",
+        schema_reference,
+    }}, &.{});
+    const schema_asset = try shape(
+        a,
+        &.{
+            .{ "schema_id", try text(a, 1, 128) },
+            .{ "wire_sha256", digest },
+            .{ "wire_base64url", try text(a, 0, limits.frame_bytes) },
+            .{ "json", try literal(a, "{\"type\":\"object\"}") },
+        },
+        &.{},
+    );
+    for ([_][]const u8{
+        "input",
+        "output",
+        "failure",
+        "answer",
+        "message",
+    }) |key| try app_properties.append(.{ key, schema_asset });
+    const capability = try shape(
+        a,
+        &.{
+            .{ "identity", try text(a, 1, 128) },
+            .{ "resource_role", try text(a, 1, 128) },
+            .{ "payload_sha256", digest },
+            .{ "resume_sha256", digest },
+        },
+        &.{},
+    );
+    try app_properties.append(.{ "capabilities", try array(a, capability, null) });
+    return .{
+        .schema = try oneOf(a, &.{ try shape(a, app_properties.items, &.{}), app_reference }),
+        .reference = schema_reference,
+    };
 }

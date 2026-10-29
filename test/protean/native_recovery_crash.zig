@@ -36,7 +36,7 @@ fn emit(value: anytype) !void {
 fn stopAt(point: []const u8) !void {
     if (verifying or !std.mem.eql(u8, phase, point)) return;
     try emit(.{ .cut = phase, .witness = witness });
-    while (true) try process_io.sleep(.fromSeconds(1), .awake);
+    while (true) try process_io.sleep(.fromSeconds(1), .awake); // tiger: event-loop
 }
 fn stopReconstruction(point: []const u8, task: [16]u8, operation: [32]u8) !void {
     witness = .{ .task = task, .occurrence = operation };
@@ -52,14 +52,24 @@ fn original(ctx: native.Context, _: []const u8) !native.registry.Acquisition {
     try stopAt("original-invoked");
     return .{ .captured = try C.encodeOwned(u32, ctx.allocator, 99) };
 }
-fn lookup(ctx: native.Context, input: native.registry.RecoveryInput, _: []const u8, _: ?[]const u8) ![]u8 {
+fn lookup(
+    ctx: native.Context,
+    input: native.registry.RecoveryInput,
+    _: []const u8,
+    _: ?[]const u8,
+) ![]u8 {
     lookup_calls += 1;
     if (verifying) return error.LookupMustNotRestart;
     try emit(.{ .invoked = "lookup" });
     try stopAt("lookup-invoked");
     return fixtures.LookupFixture.receipt(ctx.allocator, input, .capture);
 }
-fn interpret(ctx: native.registry.ProjectionContext, payload: []const u8, prepared: []const u8, raw: []const u8) !native.registry.Projection {
+fn interpret(
+    ctx: native.registry.ProjectionContext,
+    payload: []const u8,
+    prepared: []const u8,
+    raw: []const u8,
+) !native.registry.Projection {
     const result = try fixtures.LookupFixture.interpret(ctx, payload, prepared, raw);
     // The projection exists, but no owner transaction has published it yet.
     try stopAt(if (witness.recovery == null) "original-interpreted" else "lookup-interpreted");
@@ -71,8 +81,19 @@ fn forbidden(_: native.Context, _: u32) !u32 {
 fn present(ctx: native.Context, input: u32) !native.json.Value {
     return native.json.number(ctx.allocator, input);
 }
-fn record(comptime T: type, a: std.mem.Allocator, namespace: *native.Namespace, comptime kind: []const u8, id: [32]u8) !C.Decoded(T) {
-    const bytes = (try namespace.store.recordBytes(a, kind, id, witness.task)) orelse return error.MissingRecord;
+fn record(
+    comptime T: type,
+    a: std.mem.Allocator,
+    namespace: *native.Namespace,
+    comptime kind: []const u8,
+    id: [32]u8,
+) !C.Decoded(T) {
+    const bytes = (try namespace.store.recordBytes(
+        a,
+        kind,
+        id,
+        witness.task,
+    )) orelse return error.MissingRecord;
     defer a.free(bytes);
     return C.decodeOwned(T, a, bytes);
 }
@@ -80,54 +101,162 @@ fn record(comptime T: type, a: std.mem.Allocator, namespace: *native.Namespace, 
 test "process-crash-controller-only" {
     const io = std.testing.io;
     process_io = io;
-    const env = std.testing.environ;
-    const mode = env.getPosix("PROTEAN_CRASH_MODE") orelse return error.InvalidArguments;
-    verifying = std.mem.eql(u8, mode, "verify");
-    if (!verifying and !std.mem.eql(u8, mode, "crash")) return error.InvalidArguments;
-    const path = env.getPosix("PROTEAN_CRASH_PATH") orelse return error.InvalidArguments;
-    phase = env.getPosix("PROTEAN_CRASH_PHASE") orelse return error.InvalidArguments;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    if (verifying) witness = (try std.json.parseFromSlice(Witness, a, env.getPosix("PROTEAN_CRASH_WITNESS") orelse return error.InvalidArguments, .{})).value;
-    if (std.mem.startsWith(u8, phase, "controller-")) {
-        try @import("workspace_programs.zig").reconstructionContinuity(.{ .path = path, .phase = phase, .verifying = verifying, .task = if (verifying) witness.task else @splat(0), .operation = if (verifying) witness.occurrence else @splat(0), .stop = stopReconstruction }, .round_trip);
-        try std.testing.expect(verifying);
-        try emit(.{ .verified = phase });
-        return;
-    }
-    var compiled = try protean.compile(std.testing.allocator, protean.system(.{ .InitialArgs = u32, .Result = u32, .Failure = void, .application = fixtures.FairApplication }));
-    defer compiled.deinit();
-    const image = try a.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
-    _ = try compiled.encode(std.testing.allocator, image);
-    const admitted = try horos.data.program_image.Admitted.decode(std.testing.allocator, image);
-    defer admitted.deinit();
-    const manifest = try fixtures.ownerManifest(a, image, admitted.identity(), "crash-owner");
-    const assets: native.discovery.Assets = .{ .image = image, .application = "crash-owner", .manifest = manifest };
-    var application: native.discovery.Application = .{ .arena = .init(std.testing.allocator), .metadata = .null, .manifest = .null, .manifest_id = "unit", .image_identity = admitted.identity() };
+    const path = try configureCrash(a);
+    if (std.mem.startsWith(u8, phase, "controller-")) return controllerCrash(path);
+    const prepared = try crashAssets(a);
+    var application: native.discovery.Application = .{
+        .arena = .init(std.testing.allocator),
+        .metadata = .null,
+        .manifest = .null,
+        .manifest_id = "unit",
+        .image_identity = prepared.identity,
+    };
     defer application.deinit();
-    application.manifest = (try native.json.parse(application.arena.allocator(), manifest, .{})).value;
-    var leaf = native.leaf(u32, u32, .{ .identity = "fair.leaf.v1", .resource_role = "local", .inference = true }, forbidden);
-    leaf.capture = .{ .prepare = prepare, .acquire = original, .interpret = interpret, .dependencies = native.registry.opaqueProjection };
-    leaf.invoke = null;
-    leaf.background = true;
-    leaf.recovery = .{ .identity = "signed-fixture-receipt.v1", .version = 1, .lookup = .{ .acquire = lookup, .verify = fixtures.LookupFixture.verify } };
-    var handlers = try native.Registry.init(std.testing.allocator, &.{ leaf, native.question(u32, u32, .{ .identity = "fair.question.v1", .resource_role = "user", .answer_schema_id = "fair.answer.v1" }, present), native.inbox.declaration(u32) });
+    application.manifest = (try native.json.parse(
+        application.arena.allocator(),
+        prepared.assets.manifest,
+        .{},
+    )).value;
+    var handlers = try crashHandlers();
     defer handlers.deinit();
     var grants: [3]native.registry.Grant = undefined;
-    const profile: native.tasks.Profile = .{ .id = "crash", .runtime_identity = @splat(42), .bytes = "frozen-profile", .authority = .{ .grants = &grants, .principal = "test", .tenant = "test", .inference = true } };
-    for (&grants, handlers.entries) |*grant, entry| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = try profile.resourceIdentity(a, application.image_identity) };
+    const profile = try crashProfile(a, &grants, handlers, application.image_identity);
     var namespace = try native.Namespace.open(std.testing.allocator, io, path);
-    defer namespace.close() catch unreachable;
-    var service = try Service.init(std.testing.allocator, io, &namespace, assets, &application, handlers, profile);
-    // Crash branches never run these defers. A test error remains a failed run.
-    defer service.close(a) catch unreachable;
+    defer @import("native_test_support.zig").cleanup("namespace close", namespace.close());
+    var service = try Service.init(
+        std.testing.allocator,
+        io,
+        &namespace,
+        prepared.assets,
+        &application,
+        handlers,
+        profile,
+    );
+    defer @import("native_test_support.zig").cleanup("service close", service.close(a));
     if (verifying) {
         try verify(a, &service, &namespace);
         _ = try namespace.store.auditRetention(handlers, application.image_identity);
         try emit(.{ .verified = phase });
         return;
     }
+    const work = try dispatchCrash(a, &service);
+    return executeCrash(a, io, &service, work, profile);
+}
+
+fn configureCrash(a: std.mem.Allocator) ![]const u8 {
+    const env = std.testing.environ;
+    const mode = env.getPosix("PROTEAN_CRASH_MODE") orelse return error.InvalidArguments;
+    verifying = std.mem.eql(u8, mode, "verify");
+    if (!verifying and !std.mem.eql(u8, mode, "crash")) return error.InvalidArguments;
+    phase = env.getPosix("PROTEAN_CRASH_PHASE") orelse return error.InvalidArguments;
+    if (verifying) {
+        const bytes = env.getPosix("PROTEAN_CRASH_WITNESS") orelse return error.InvalidArguments;
+        witness = (try std.json.parseFromSlice(Witness, a, bytes, .{})).value;
+    }
+    return env.getPosix("PROTEAN_CRASH_PATH") orelse error.InvalidArguments;
+}
+
+fn controllerCrash(path: []const u8) !void {
+    try @import("workspace_programs.zig").reconstructionContinuity(.{
+        .path = path,
+        .phase = phase,
+        .verifying = verifying,
+        .task = if (verifying) witness.task else @splat(0),
+        .operation = if (verifying) witness.occurrence else @splat(0),
+        .stop = stopReconstruction,
+    }, .round_trip);
+    try std.testing.expect(verifying);
+    try emit(.{ .verified = phase });
+}
+
+fn crashAssets(a: std.mem.Allocator) !struct {
+    assets: native.discovery.Assets,
+    identity: [32]u8,
+} {
+    var compiled = try protean.compile(
+        std.testing.allocator,
+        protean.system(.{
+            .InitialArgs = u32,
+            .Result = u32,
+            .Failure = void,
+            .application = fixtures.FairApplication,
+        }),
+    );
+    defer compiled.deinit();
+    const image = try a.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
+    _ = try compiled.encode(std.testing.allocator, image);
+    const admitted = try horos.data.program_image.Admitted.decode(std.testing.allocator, image);
+    defer admitted.deinit();
+    const manifest = try fixtures.ownerManifest(a, image, admitted.identity(), "crash-owner");
+    const assets: native.discovery.Assets = .{
+        .image = image,
+        .application = "crash-owner",
+        .manifest = manifest,
+    };
+    return .{ .assets = assets, .identity = admitted.identity() };
+}
+
+fn crashHandlers() !native.Registry {
+    var leaf = native.leaf(
+        u32,
+        u32,
+        .{ .identity = "fair.leaf.v1", .resource_role = "local", .inference = true },
+        forbidden,
+    );
+    leaf.capture = .{
+        .prepare = prepare,
+        .acquire = original,
+        .interpret = interpret,
+        .dependencies = native.registry.opaqueProjection,
+    };
+    leaf.invoke = null;
+    leaf.background = true;
+    leaf.recovery = .{ .identity = "signed-fixture-receipt.v1", .version = 1, .lookup = .{
+        .acquire = lookup,
+        .verify = fixtures.LookupFixture.verify,
+    } };
+    return native.Registry.init(std.testing.allocator, &.{
+        leaf,
+        native.question(
+            u32,
+            u32,
+            .{
+                .identity = "fair.question.v1",
+                .resource_role = "user",
+                .answer_schema_id = "fair.answer.v1",
+            },
+            present,
+        ),
+        native.inbox.declaration(u32),
+    });
+}
+
+fn crashProfile(
+    a: std.mem.Allocator,
+    grants: *[3]native.registry.Grant,
+    handlers: native.Registry,
+    image_identity: [32]u8,
+) !native.tasks.Profile {
+    const profile: native.tasks.Profile = .{ .id = "crash", .runtime_identity = @splat(
+        42,
+    ), .bytes = "frozen-profile", .authority = .{
+        .grants = grants,
+        .principal = "test",
+        .tenant = "test",
+        .inference = true,
+    } };
+    for (grants, handlers.entries) |*grant, entry| grant.* = .{
+        .identity = entry.declaration.identity,
+        .resource_role = entry.declaration.resource_role,
+        .resource_identity = try profile.resourceIdentity(a, image_identity),
+    };
+    return profile;
+}
+
+fn dispatchCrash(a: std.mem.Allocator, service: *Service) !native.tasks.Work {
     const submitted = try service.submit(a, "original", 1);
     for (0..20) |_| {
         _ = try service.pump(a);
@@ -149,12 +278,30 @@ test "process-crash-controller-only" {
         var unknown = try service.task(a, witness.task);
         defer unknown.deinit();
         witness.revision = unknown.value.revision;
-        const recovery = try service.reconcile(a, "recover", witness.task, witness.revision, witness.occurrence, witness.attempt, .lookup);
+        const recovery = try service.reconcile(
+            a,
+            "recover",
+            witness.task,
+            witness.revision,
+            witness.occurrence,
+            witness.attempt,
+            .lookup,
+        );
         witness.recovery = recovery.receipt.reconciliation.?;
         try stopAt("lookup-admitted");
         work = (try service.pump(a)).work;
         try stopAt("lookup-dispatched");
     } else try stopAt("original-dispatched");
+    return work;
+}
+
+fn executeCrash(
+    a: std.mem.Allocator,
+    io: std.Io,
+    service: *Service,
+    work: native.tasks.Work,
+    profile: native.tasks.Profile,
+) !void {
     const worker = try native.testing.Worker.init(a, io);
     try worker.start(work, profile.authority, null);
     const deadline = std.Io.Clock.awake.now(io).toMilliseconds() + 5000;
@@ -182,38 +329,46 @@ fn verify(a: std.mem.Allocator, service: *Service, namespace: *native.Namespace)
     var occurrence = try record(Occurrence, a, namespace, "occurrence", witness.occurrence);
     defer occurrence.deinit();
     const ready = std.mem.endsWith(u8, phase, "-ready");
-    const captured = std.mem.endsWith(u8, phase, "-captured") or std.mem.endsWith(u8, phase, "-interpreted");
+    const captured = std.mem.endsWith(
+        u8,
+        phase,
+        "-captured",
+    ) or std.mem.endsWith(
+        u8,
+        phase,
+        "-interpreted",
+    );
     const settled = std.mem.endsWith(u8, phase, "-settled");
     const completed = std.mem.endsWith(u8, phase, "-completed");
     const unknown = !ready and !captured and !settled and !completed;
-    const expected: std.meta.Tag(@TypeOf(occurrence.value.state)) = if (ready) .ready else if (captured) .captured else if (settled) .settled_reply else if (completed) .admitted else .unknown;
+    const expected: std.meta.Tag(
+        @TypeOf(occurrence.value.state),
+    ) = if (ready)
+        .ready
+    else if (captured)
+        .captured
+    else if (settled)
+        .settled_reply
+    else if (completed)
+        .admitted
+    else
+        .unknown;
     try std.testing.expectEqual(expected, std.meta.activeTag(occurrence.value.state));
     try std.testing.expectEqual(@as(u64, if (ready) 0 else 1), task.value.inference_attempts);
     try std.testing.expectEqual(witness.request_bytes, task.value.inference_request_bytes);
-    try std.testing.expectEqual(@as(u64, if (settled or completed) 7 else 0), task.value.inference_output_tokens);
+    try std.testing.expectEqual(
+        @as(u64, if (settled or completed) 7 else 0),
+        task.value.inference_output_tokens,
+    );
     try std.testing.expect((try service.submit(a, "original", 1)).replayed);
-    if (captured or settled or completed) {
-        var raw = try record(State.Capture, a, namespace, "capture", witness.attempt);
-        defer raw.deinit();
-        try std.testing.expect(raw.value.disposition == .complete);
-        try std.testing.expectEqual(settled or completed, raw.value.projection != null);
-        const bytes = try namespace.store.object(a, raw.value.response.?, null);
-        try std.testing.expectEqualSlices(u8, try C.encodeOwned(u32, a, 99), bytes);
-        try std.testing.expectError(error.ArtifactUnavailable, service.projectedArtifact(a, witness.task, raw.value.response.?.digest));
-    }
-    if (witness.recovery) |id| {
-        var recovery = try service.reconciliation(a, witness.task, id);
-        defer recovery.deinit();
-        if (unknown) {
-            try std.testing.expect(recovery.value.outcome == .unresolved and recovery.value.outcome.unresolved == .interrupted);
-        } else if (captured) {
-            try std.testing.expect(recovery.value.outcome == .capture_admitted);
-        } else try std.testing.expect(recovery.value.outcome == .reply_settled);
-        try std.testing.expect((try service.reconcile(a, "recover", witness.task, witness.revision, witness.occurrence, witness.attempt, .lookup)).replayed);
-        try std.testing.expectError(error.ArtifactUnavailable, service.projectedArtifact(a, witness.task, recovery.value.original_occurrence.digest));
-    }
+    try verifyCapture(a, service, namespace, captured, settled, completed);
+    try verifyRecovery(a, service, captured, unknown);
+
     if (unknown) {
-        try std.testing.expectError(error.UnsettledOccurrence, service.resumeTask(a, "resume", witness.task, task.value.revision));
+        try std.testing.expectError(
+            error.UnsettledOccurrence,
+            service.resumeTask(a, "resume", witness.task, task.value.revision),
+        );
     } else if (captured or settled) {
         _ = try service.resumeTask(a, "resume", witness.task, task.value.revision);
         for (0..6) |_| try std.testing.expect(try service.pump(a) != .work);
@@ -231,4 +386,56 @@ fn verify(a: std.mem.Allocator, service: *Service, namespace: *native.Namespace)
     try std.testing.expectEqual(0, original_calls);
     try std.testing.expectEqual(0, lookup_calls);
     try std.testing.expect(try service.pump(a) == .idle);
+}
+
+fn verifyCapture(
+    a: std.mem.Allocator,
+    service: *Service,
+    namespace: *native.Namespace,
+    captured: bool,
+    settled: bool,
+    completed: bool,
+) !void {
+    if (captured or settled or completed) {
+        var raw = try record(State.Capture, a, namespace, "capture", witness.attempt);
+        defer raw.deinit();
+        try std.testing.expect(raw.value.disposition == .complete);
+        try std.testing.expectEqual(settled or completed, raw.value.projection != null);
+        const bytes = try namespace.store.object(a, raw.value.response.?, null);
+        try std.testing.expectEqualSlices(u8, try C.encodeOwned(u32, a, 99), bytes);
+        try std.testing.expectError(
+            error.ArtifactUnavailable,
+            service.projectedArtifact(a, witness.task, raw.value.response.?.digest),
+        );
+    }
+}
+
+fn verifyRecovery(a: std.mem.Allocator, service: *Service, captured: bool, unknown: bool) !void {
+    if (witness.recovery) |id| {
+        var recovery = try service.reconciliation(a, witness.task, id);
+        defer recovery.deinit();
+        if (unknown) {
+            try std.testing.expect(
+                recovery.value.outcome == .unresolved and
+                    recovery.value.outcome.unresolved == .interrupted,
+            );
+        } else if (captured) {
+            try std.testing.expect(recovery.value.outcome == .capture_admitted);
+        } else try std.testing.expect(recovery.value.outcome == .reply_settled);
+        try std.testing.expect(
+            (try service.reconcile(
+                a,
+                "recover",
+                witness.task,
+                witness.revision,
+                witness.occurrence,
+                witness.attempt,
+                .lookup,
+            )).replayed,
+        );
+        try std.testing.expectError(
+            error.ArtifactUnavailable,
+            service.projectedArtifact(a, witness.task, recovery.value.original_occurrence.digest),
+        );
+    }
 }

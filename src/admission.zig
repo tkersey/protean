@@ -7,7 +7,17 @@ const p = horos.data.program;
 const Id = p.Id;
 const constructors = source.constructor_bindings;
 
-pub const Role = enum { internal, model, interaction, read, simulation, approval, commit, write, mobility };
+pub const Role = enum {
+    internal,
+    model,
+    interaction,
+    read,
+    simulation,
+    approval,
+    commit,
+    write,
+    mobility,
+};
 pub const Error = std.mem.Allocator.Error || error{
     InvalidSource,
     EffectRoleMismatch,
@@ -64,11 +74,18 @@ pub const Registry = struct {
             if (present != role) return error.EffectRoleMismatch;
             return;
         }
-        try self.classifications.append(self.arena.allocator(), .{ .effect = effect, .role = role });
+        try self.classifications.append(self.arena.allocator(), .{
+            .effect = effect,
+            .role = role,
+        });
     }
 
     pub fn protectSite(self: *Registry, owner: Id, term: Id, effect: Id) Error!void {
-        try self.sites.append(self.arena.allocator(), .{ .owner = owner, .node = term, .target = effect });
+        try self.sites.append(self.arena.allocator(), .{
+            .owner = owner,
+            .node = term,
+            .target = effect,
+        });
     }
 
     pub fn privateFunction(self: *Registry, function: Id) Error!void {
@@ -132,7 +149,11 @@ const Node = struct { kind: Kind, id: Id, owner: Id = 0 };
 /// Work and storage are bounded by source nodes and edges, per owner function
 /// and speculation entry. Explicit worklists terminate on recursive functions,
 /// recursive schemas, and malformed cyclic term/value graphs.
-pub fn verify(allocator: std.mem.Allocator, module: source.Module, registry: *const Registry) Error!void {
+pub fn verify(
+    allocator: std.mem.Allocator,
+    module: source.Module,
+    registry: *const Registry,
+) Error!void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -158,7 +179,12 @@ const Origins = struct {
         for (module.values) |value| {
             if (constructors.raw(value) == null) continue;
             var work: u64 = std.math.maxInt(u64);
-            return .{ .bindings = constructors.admit(a, a, module, &work) catch |err| return switch (err) {
+            return .{ .bindings = constructors.admit(
+                a,
+                a,
+                module,
+                &work,
+            ) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 else => error.UnprovenComputationOrigin,
             } };
@@ -174,7 +200,12 @@ const Origins = struct {
     }
 };
 
-fn checkMultiOrigins(a: std.mem.Allocator, m: source.Module, r: *const Registry, origins: Origins) Error!void {
+fn checkMultiOrigins(
+    a: std.mem.Allocator,
+    m: source.Module,
+    r: *const Registry,
+    origins: Origins,
+) Error!void {
     // The actual module determines all multi origins. Registry omission never
     // exempts a raw handle, clone, or multi computation from role checks.
     for (m.terms) |term| switch (term) {
@@ -218,7 +249,13 @@ fn checkMultiOrigins(a: std.mem.Allocator, m: source.Module, r: *const Registry,
     }
 }
 
-fn checkResumptionOrigins(a: std.mem.Allocator, m: source.Module, r: *const Registry, origins: Origins, id: Id) Error!void {
+fn checkResumptionOrigins(
+    a: std.mem.Allocator,
+    m: source.Module,
+    r: *const Registry,
+    origins: Origins,
+    id: Id,
+) Error!void {
     if (id >= m.schemas.len) return error.InvalidSource;
     const shape = m.schemas[@intCast(id)];
     if (shape != .internal or shape.internal != .resumption) return error.InvalidSource;
@@ -287,8 +324,12 @@ fn checkMultiBody(
 
 fn checkCatalogs(module: source.Module, registry: *const Registry) Error!void {
     for (registry.compiled_imports.items, 0..) |item, index| {
-        if (item.function >= module.functions.len or module.functions[@intCast(item.function)].body != null or registry.isPrivate(item.function)) return error.InvalidSource;
-        for (registry.compiled_imports.items[0..index]) |prior| if (prior.function == item.function) return error.InvalidSource;
+        if (item.function >= module.functions.len or module.functions[
+            @intCast(item.function)
+        ].body != null or registry.isPrivate(item.function)) return error.InvalidSource;
+        for (registry.compiled_imports.items[0..index]) |prior| {
+            if (prior.function == item.function) return error.InvalidSource;
+        }
     }
     if (module.entry >= module.functions.len or module.failure >= module.schemas.len)
         return error.InvalidSource;
@@ -348,8 +389,20 @@ const Walker = struct {
     queue: std.ArrayList(Node) = .empty,
     seen: std.AutoHashMapUnmanaged(Node, void) = .empty,
 
-    fn init(a: std.mem.Allocator, m: source.Module, r: *const Registry, origins: Origins, s: ?[]const Id) Walker {
-        return .{ .allocator = a, .module = m, .registry = r, .speculative = s, .origins = origins };
+    fn init(
+        a: std.mem.Allocator,
+        m: source.Module,
+        r: *const Registry,
+        origins: Origins,
+        s: ?[]const Id,
+    ) Walker {
+        return .{
+            .allocator = a,
+            .module = m,
+            .registry = r,
+            .speculative = s,
+            .origins = origins,
+        };
     }
 
     fn push(self: *Walker, kind: Kind, id: Id, owner: Id) Error!void {
@@ -452,9 +505,21 @@ const Walker = struct {
     }
 
     fn participant(self: *Walker, item: CompiledImport) Error!void {
-        var decoded = @import("horos").data.component.decode(self.allocator, item.object) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidSource;
+        var decoded = @import("horos").data.component.decode(
+            self.allocator,
+            item.object,
+        ) catch |err| return if (err == error.OutOfMemory)
+            error.OutOfMemory
+        else
+            error.InvalidSource;
         defer decoded.deinit();
-        @import("participant.zig").inspect(self.allocator, decoded.object, item, self.registry, self.speculative) catch |err| return switch (err) {
+        @import("participant.zig").inspect(
+            self.allocator,
+            decoded.object,
+            item,
+            self.registry,
+            self.speculative,
+        ) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.SpeculativeEffect => error.SpeculativeEffect,
             error.SpeculativeCapture => error.SpeculativeCapture,
@@ -574,7 +639,9 @@ const Walker = struct {
             },
             .primitive => |op| {
                 if (op.opcode == .computation) {
-                    const callee = self.origins.function(v) orelse return error.UnprovenComputationOrigin;
+                    const callee = self.origins.function(
+                        v,
+                    ) orelse return error.UnprovenComputationOrigin;
                     if (self.speculative == null and self.registry.isPrivate(callee) and
                         !hasSite(self.registry.private_lambdas.items, owner, id, callee))
                         return error.PrivateFunctionBypass;
@@ -712,7 +779,12 @@ fn portable(a: std.mem.Allocator, m: source.Module, root: Id) Error!void {
     return inspectShape(a, m, root, null);
 }
 
-fn noProtectedResource(a: std.mem.Allocator, m: source.Module, r: *const Registry, root: Id) Error!void {
+fn noProtectedResource(
+    a: std.mem.Allocator,
+    m: source.Module,
+    r: *const Registry,
+    root: Id,
+) Error!void {
     return inspectShape(a, m, root, r);
 }
 
