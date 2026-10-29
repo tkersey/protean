@@ -1,7 +1,9 @@
 # TigerStyle for Protean
 
 This contract applies to all tracked Zig code, including tests,
-examples and build tools. It adapts the
+examples and build tools. Its upstream reference is
+[TigerBeetle TigerStyle at `ba8d4b3`](https://github.com/tigerbeetle/tigerbeetle/blob/ba8d4b347cbb29057fd52243d2909b7a830f9336/docs/TIGER_STYLE.md).
+It adapts the
 [skills-zig TigerStyle contract](https://github.com/tkersey/skills-zig/blob/ac19a3fabd0b32fae3f6bf1becf5368c724e96f3/docs/engineering/TIGER_STYLE.md)
 to Protean's authoring library and native agent host. Safety, performance and
 developer experience are the priorities, in that order.
