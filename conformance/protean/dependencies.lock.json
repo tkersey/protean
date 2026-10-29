@@ -3,39 +3,39 @@
   "status": "development-integration",
   "boundary": {
     "repository": "tkersey/horos",
-    "commit": "013d783dd45a7994f1c888f66f98a7003c173a79",
-    "gitTree": "52d778971f141e9e778ffb46691ce4e8b24c9583",
+    "commit": "7d34f2c72e818665be4d519fde4f2cef9c986048",
+    "gitTree": "f0836a935ffac4225399ce7fcc5ed1e1965165de",
     "version": "8.0.0",
     "source": {
-      "inventorySha256": "85a69c4fd246ab37c4644c5c0cb38f7d0577ad957bce1526af985fb4b5d3e9b6",
-      "entries": 454,
-      "bytes": 10271435
+      "inventorySha256": "5d5261ae29662b19c0b57aea3c1de5f8a0b8002da4d685d2dafcad1a542f758e",
+      "entries": 455,
+      "bytes": 10347252
     },
     "archive": {
-      "url": "https://github.com/tkersey/horos/archive/013d783dd45a7994f1c888f66f98a7003c173a79.tar.gz",
-      "sha256": "bfe17194dc49a95b435a8df80b520094f561096d12c6a86a138a631d379e4abc",
-      "bytes": 1862450,
+      "url": "https://github.com/tkersey/horos/archive/7d34f2c72e818665be4d519fde4f2cef9c986048.tar.gz",
+      "sha256": "a5059ab0b8143852b409bb8d95f2a7275dc82b57a9d4d6b83a20a0b85a5cb8f6",
+      "bytes": 1877822,
       "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
-    "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree.",
+    "authentication": "Complete public archive paths, Git blob identities and executable modes authenticated against the recorded Git tree.",
     "package": {
-      "zigHash": "horos-8.0.0-flclaFkFVQBKG0Iqo_c4I6U8mhZqTO358ywkjB63B6Sg",
+      "zigHash": "horos-8.0.0-flclaIItVgCRBCbUEysErcsQyVqsukGf2Q8X2is_wRuU",
       "defaultProfile": "zig-managed",
       "profiles": {
         "zig-managed": {
-          "inventorySha256": "8ee1ea461b83798075bf2bfdc2bee2c9c14b88f9b77a1b53aa76f9653cebd97c",
-          "entries": 431,
-          "bytes": 5571929
+          "inventorySha256": "d78347a1c485a61bd35b29dd89ed9767ca4a132d7cc214d265225fbe5fc69c91",
+          "entries": 432,
+          "bytes": 5647746
         },
         "archive-extracted": {
-          "inventorySha256": "81304f08c97fc4145f79a7f6c197e7e004e116c52c52839980c707989ad9e67a",
-          "entries": 431,
-          "bytes": 5571929
+          "inventorySha256": "6991eb3323ff8104d31d768799f168f71340ee055bd4fea206cf78e1581a4426",
+          "entries": 432,
+          "bytes": 5647746
         }
       },
       "archive": {
-        "sha256": "4af27e9bd81cfe70ce8050565bfa6dadb453057d537356074ff46ae6920b7517",
-        "bytes": 1065768
+        "sha256": "476ee894282971e7a54bba06cdb59da8a755d1f42ec23eeb68ed1057bda801eb",
+        "bytes": 1079833
       }
     },
     "api": {
@@ -54,7 +54,7 @@
         },
         {
           "path": "src/source.zig",
-          "sha256": "a31612321ddf1b1d09d83bfaf9dc11eb3f4c52e2b820cecbcf122d2c3553be8f"
+          "sha256": "17d9078a66fc3284c109448f703405f6d7fea3b7e0f1edc450323db69d58396a"
         },
         {
           "path": "docs/bpi3-wire.md",
@@ -78,7 +78,7 @@
         },
         {
           "path": "src/source/diagnostic.zig",
-          "sha256": "0ec3d8b038018a41a5185636ab1a936b404a58ef55c1bad3b7d67b50596e93c4"
+          "sha256": "dd57d383fe36bb71c9db2902d48cb62e28cf875e3b372d726b007a1633245761"
         },
         {
           "path": "src/authoring.zig",
@@ -129,21 +129,21 @@
   },
   "world": {
     "repository": "tkersey/kosmos",
-    "commit": "bf788fef4dc7c660bf20d7f59b6752fbc4347479",
-    "gitTree": "bcee2e60be1a2af5a9067fb544caf24b95fbb976",
+    "commit": "e3ac443b97c31bda4ebe42b7cafb99e4ce721906",
+    "gitTree": "f43ba132c9f0abee9bafc5c980469c4098dd220d",
     "version": "9.1.0",
     "source": {
-      "inventorySha256": "d7429775e96c00bf310f816fd7c715c009e3da62699489579dee227dddb2755d",
-      "entries": 215,
-      "bytes": 3399903
+      "inventorySha256": "37bc4c9097f0d46ef01701f16aa21dbcbb970ee49eb62d742cfceaa51a67c46b",
+      "entries": 216,
+      "bytes": 3539168
     },
     "archive": {
-      "url": "https://github.com/tkersey/kosmos/archive/bf788fef4dc7c660bf20d7f59b6752fbc4347479.tar.gz",
-      "sha256": "e052eddf297471e958e1d38c9ce9ae3865d81980a0f40d7b64d94fc38058722e",
-      "bytes": 766415,
+      "url": "https://github.com/tkersey/kosmos/archive/e3ac443b97c31bda4ebe42b7cafb99e4ce721906.tar.gz",
+      "sha256": "c4974f5d3d2c3a85cf5228de7d81d1f91091ffc60b6b53b0acdd41f652c8aec9",
+      "bytes": 792451,
       "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
-    "authentication": "Downloaded public GitHub commit archive; complete path, mode and blob identity comparison against the exact Git tree."
+    "authentication": "Complete public archive paths, Git blob identities and executable modes authenticated against the recorded Git tree."
   },
   "toolchain": {
     "zig": {
@@ -157,16 +157,15 @@
     "compatiblePublishedReleaseObserved": false,
     "releases": [],
     "pullRequests": [
-      "https://github.com/tkersey/horos/pull/179",
-      "https://github.com/tkersey/kosmos/pull/76"
+      "https://github.com/tkersey/horos/pull/180",
+      "https://github.com/tkersey/kosmos/pull/78"
     ]
   },
   "limitations": [
-    "Development Horos 8.0.0 and Kosmos 9.1.0 commits are published in coordinated draft PRs; complete archive transports and source trees are authenticated. Version fields do not claim published releases.",
-    "Final Protean native macOS qualification remains incomplete under the retained local deadline. Native Linux qualification and serial reviews are outstanding.",
+    "Exact public development commits; no release or installed-runtime transition is claimed.",
     "Controlled-provider qualification does not establish live-provider availability or model quality; existing saved tasks retain their original executable and image bindings."
   ],
   "notes": [
-    "Exact published development source tuple for adaptive-only Protean and canonical typed library consolidation. Native dependency setup must independently verify these transport, package and extracted source identities; artifact authentication alone is not final qualification."
+    "Consumer-aware construction and logical execution context integration using independently authenticated public source archives."
   ]
 }

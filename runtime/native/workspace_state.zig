@@ -65,7 +65,7 @@ pub const RunPolicy = contracts.workspace.Policy;
 pub const ProgramArtifact = struct {
     version: u32 = 2,
     source: state.Reference,
-    source_kind: enum { source_records, component_recipe, instrument_model, instrument_snapshot },
+    source_kind: enum { source_records, component_recipe, instrument_model, instrument_snapshot, source_derivation },
     construction_contract: state.Name,
     authoring_identity: state.Digest,
     image: state.Reference,

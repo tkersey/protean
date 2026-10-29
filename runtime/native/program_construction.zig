@@ -23,7 +23,7 @@ pub const PortInterface = struct {
 };
 
 pub const Diagnostic = struct {
-    phase: enum { transport, preflight, authority, compilation, interface, complete } = .transport,
+    phase: enum { transport, preflight, authority, compilation, interface, complete, relation } = .transport,
     source: horos.source.Diagnostic = .{},
     code: ?anyerror = null,
 };
@@ -287,6 +287,90 @@ pub fn interfaceOf(a: std.mem.Allocator, program: data.activation.Program) !cont
 
 pub fn build(a: std.mem.Allocator, text: []const u8, cancellation: ?*const std.atomic.Value(bool), diagnostic: *Diagnostic) !Built {
     return buildExposed(a, text, &.{}, cancellation, diagnostic);
+}
+
+pub fn buildDerived(
+    a: std.mem.Allocator,
+    text: []const u8,
+    exposures: []const contracts.workspace.Exposure,
+    cancellation: ?*const std.atomic.Value(bool),
+    diagnostic: *Diagnostic,
+) !Built {
+    diagnostic.* = .{};
+    return derivedBody(a, text, exposures, cancellation, diagnostic) catch |err| {
+        diagnostic.code = err;
+        return err;
+    };
+}
+
+fn derivedBody(
+    a: std.mem.Allocator,
+    text: []const u8,
+    exposures: []const contracts.workspace.Exposure,
+    cancellation: ?*const std.atomic.Value(bool),
+    diagnostic: *Diagnostic,
+) !Built {
+    try canceled(cancellation);
+    var document = try records.decodeRecord(records.DerivationDocument, a, text);
+    defer document.deinit();
+    const value = document.value;
+    if (value.version != 1) return error.UnsupportedVersion;
+    diagnostic.phase = .preflight;
+    try preflight.validate(a, value.original, &diagnostic.source);
+    try preflight.validate(a, value.candidate, &diagnostic.source);
+    diagnostic.phase = .relation;
+    if (!std.meta.eql(value.predecessor, try horos.source.relation.identity(value.original)))
+        return error.InvalidRelation;
+    const scratch = document.arena.allocator();
+    const steps = try scratch.alloc(horos.source.relation.Step, value.steps.len);
+    var remaining_bytes: usize = std.math.maxInt(usize);
+    for (value.steps, steps) |record, *step| {
+        try canceled(cancellation);
+        step.* = try horos.source.relation.decodeRecordStep(scratch, record, &remaining_bytes);
+    }
+    try horos.source.relation.validate(a, value.original, value.candidate, steps, .{});
+    try canceled(cancellation);
+    const candidate = try records.encode(a, value.candidate);
+    defer a.free(candidate);
+    return buildBody(a, candidate, exposures, null, cancellation, diagnostic);
+}
+
+pub fn inspectConsumer(
+    a: std.mem.Allocator,
+    text: []const u8,
+    derived: bool,
+    site: horos.source.consumer.Site,
+    page: contracts.workspace.Page,
+) !@import("json.zig").Value {
+    if (derived) {
+        var document = try records.decodeRecord(records.DerivationDocument, a, text);
+        defer document.deinit();
+        if (document.value.version != 1) return error.UnsupportedVersion;
+        return consumerPage(a, document.value.candidate, site, page);
+    }
+    var document = try records.decode(a, text);
+    defer document.deinit();
+    return consumerPage(a, document.module, site, page);
+}
+
+fn consumerPage(
+    a: std.mem.Allocator,
+    module: horos.source.Module,
+    site: horos.source.consumer.Site,
+    page: contracts.workspace.Page,
+) !@import("json.zig").Value {
+    var inspection = try horos.source.consumer.inspect(a, module, site, .{});
+    defer inspection.deinit();
+    const Description = struct {
+        version: u32,
+        subject: [32]u8,
+        outcome: @FieldType(horos.source.consumer.Inspection, "outcome"),
+    };
+    return records.pageRecord(Description, a, .{
+        .version = 1,
+        .subject = inspection.subject,
+        .outcome = inspection.outcome,
+    }, page);
 }
 pub fn buildExposed(a: std.mem.Allocator, text: []const u8, exposures: []const contracts.workspace.Exposure, cancellation: ?*const std.atomic.Value(bool), diagnostic: *Diagnostic) !Built {
     diagnostic.* = .{};

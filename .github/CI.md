@@ -26,7 +26,7 @@ so every selected lane can return evidence.
 | `owners` | All 46 retained native task/response/model-custody owner tests, including their participant imports. |
 | `owner-adaptive-control` | All nine retained adaptive owner tests. |
 | `owner-support` | Native unit/context and process-crash recovery checks. |
-| `workspace` | The 15 workspace execution and construction tests. |
+| `workspace` | The 16 workspace execution and construction tests. |
 | `workspace-retention` | The three retained-work, wait and delegated-answer tests. |
 | `workspace-history` | The three history, cancellation-read and allocation-failure tests. |
 | `correspondence` | Independent source-oracle agreement, capsule restoration and duplicate-custody rejection. |
@@ -84,7 +84,7 @@ The invalid-output recovery test retains all three selected rejection cases.
 The surviving construction and custody tests do not replace those successful
 end-to-end recovery sequences.
 
-Workspace execution, retention and history still run once each across 21 tests.
+Workspace execution, retention and history still run once each across 22 tests.
 CI compiles the three existing filtered groups separately; the full unfiltered
 root is retained for local grouped execution. Selected list fixtures are reduced
 from 300 to 32 entries and the deep recursive fixture from 50,000 to 2,048 steps. This retains the smaller-scale

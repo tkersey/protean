@@ -1,7 +1,7 @@
 //! Model actions select ordinary Horos programs and native workspace operations.
 //! Text fields carry canonical runtime-schema JSON; they are never native code.
 const c = @import("contracts.zig");
-pub const identity = "protean-workspace/4";
+pub const identity = "protean-workspace/5";
 pub const Ref = struct {
     kind: enum { program, work, port, value, schema, source, provenance, view, runtime, residual, candidate, controller },
     id: c.Text(64),
@@ -12,7 +12,7 @@ pub const ValueInput = union(enum) {
     inline_json: struct { schema: Ref, json_text: c.Utf8 },
 };
 pub const SourceInput = union(enum) { json_text: c.Utf8, reference: Ref };
-pub const SourceKind = enum { source_records, component_recipe };
+pub const SourceKind = enum(u8) { source_records, component_recipe, source_derivation = 4 };
 pub const ProgramRole = enum { computation, controller };
 pub const NodeScope = union(enum) { all: struct {}, selected: c.Vector(u64, null) };
 pub const ValueScope = union(enum) {
@@ -78,6 +78,7 @@ pub const SemanticModule = union(enum) {
 pub const InspectionTarget = union(enum) {
     program: Ref,
     semantic_source: struct { subject: SemanticTarget, section: SemanticSection },
+    consumer: struct { program: Ref, function: u64, binding: u64 },
 };
 pub const Exposure = struct { effect: u64, class: enum { observation, input, alternative } };
 pub const Interpretation = union(enum) {
@@ -94,7 +95,7 @@ pub const Adoption = struct {
     reason: c.Text(256),
 };
 pub const Program = union(enum) {
-    describe: struct { section: enum { source_records, values, components, examples, bindings, runtimes, retention_query, divergence_query, hypothetical_reply, controller_contract, current_controller, semantic_candidates }, page: Page },
+    describe: struct { section: enum { source_records, values, components, examples, bindings, runtimes, retention_query, divergence_query, hypothetical_reply, controller_contract, current_controller, semantic_candidates, source_derivations }, page: Page },
     build: struct { source: SourceInput, source_kind: SourceKind, exposures: c.Vector(Exposure, null), role: ProgramRole = .computation },
     inspect: struct { target: InspectionTarget, page: Page },
     specialize: struct { program: Ref, hooks: RuntimeHooks = .{} },
