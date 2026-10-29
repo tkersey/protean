@@ -156,27 +156,45 @@ inline fn write(comptime T: type, value: T, output: *wire.Writer) Error!void {
         .@"enum" => {
             try output.fixed(u32, @intCast(@backingInt(value)));
         },
-        .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType|
-            try write(FieldType, @field(value, field_name), output),
-        .@"union" => |info| {
-            inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, index| {
-                if (std.meta.activeTag(value) == @field(info.tag_type.?, field_name)) {
-                    try output.natural(index);
-                    try write(FieldType, @field(value, field_name), output);
-                    return;
-                }
-            }
-        },
-        .optional => |info| {
-            try output.natural(if (value == null) 0 else 1);
-            if (value) |present| try write(info.child, present, output);
-        },
-        .array => |info| for (value) |element| try write(info.child, element, output),
+        .@"struct" => try writeProduct(T, value, output),
+        .@"union" => try writeSum(T, value, output),
+        .optional => try writeOptional(T, value, output),
+        .array => try writeArray(T, value, output),
         .pointer => |info| {
             try writeSlice(info.child, value, output);
         },
         else => @compileError("Unsupported Protean portable value type: " ++ @typeName(T)),
     }
+}
+
+fn writeProduct(comptime T: type, value: T, output: *wire.Writer) Error!void {
+    @setEvalBranchQuota(100_000);
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |field_name, FieldType|
+        try write(FieldType, @field(value, field_name), output);
+}
+
+fn writeSum(comptime T: type, value: T, output: *wire.Writer) Error!void {
+    @setEvalBranchQuota(100_000);
+    const info = @typeInfo(T).@"union";
+    inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, index| {
+        if (std.meta.activeTag(value) == @field(info.tag_type.?, field_name)) {
+            try output.natural(index);
+            try write(FieldType, @field(value, field_name), output);
+            return;
+        }
+    }
+}
+
+fn writeOptional(comptime T: type, value: T, output: *wire.Writer) Error!void {
+    const info = @typeInfo(T).optional;
+    try output.natural(if (value == null) 0 else 1);
+    if (value) |present| try write(info.child, present, output);
+}
+
+fn writeArray(comptime T: type, value: T, output: *wire.Writer) Error!void {
+    const info = @typeInfo(T).array;
+    for (value) |element| try write(info.child, element, output);
 }
 
 fn writeSlice(comptime T: type, values: []const T, output: *wire.Writer) Error!void {
@@ -236,43 +254,74 @@ inline fn read(
             break :blk input.fixed(T);
         },
         .@"enum" => readEnum(T, input),
-        .@"struct" => |info| blk: {
-            var result: T = undefined;
-            inline for (info.field_names, info.field_types) |field_name, FieldType|
-                @field(result, field_name) = try read(FieldType, allocator, input, borrow_bytes);
-            break :blk result;
-        },
-        .@"union" => |info| blk: {
-            const tag = try input.natural();
-            inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, index| {
-                if (tag == index) break :blk @unionInit(
-                    T,
-                    field_name,
-                    try read(FieldType, allocator, input, borrow_bytes),
-                );
-            }
-            break :blk error.InvalidValue;
-        },
-        .optional => |info| switch (try input.natural()) {
-            0 => null,
-            1 => try read(info.child, allocator, input, borrow_bytes),
-            else => error.InvalidValue,
-        },
-        .array => |info| blk: {
-            var result: T = undefined;
-            for (&result) |*element| element.* = try read(
-                info.child,
-                allocator,
-                input,
-                borrow_bytes,
-            );
-            break :blk result;
-        },
+        .@"struct" => readProduct(T, allocator, input, borrow_bytes),
+        .@"union" => readSum(T, allocator, input, borrow_bytes),
+        .optional => readOptional(T, allocator, input, borrow_bytes),
+        .array => readArray(T, allocator, input, borrow_bytes),
         .pointer => |info| blk: {
             break :blk readElements(info.child, allocator, input, try input.count(), borrow_bytes);
         },
         else => @compileError("Unsupported Protean portable value type: " ++ @typeName(T)),
     };
+}
+
+fn readProduct(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    input: *wire.Reader,
+    comptime borrow_bytes: bool,
+) Error!T {
+    @setEvalBranchQuota(100_000);
+    const info = @typeInfo(T).@"struct";
+    var result: T = undefined;
+    inline for (info.field_names, info.field_types) |field_name, FieldType|
+        @field(result, field_name) = try read(FieldType, allocator, input, borrow_bytes);
+    return result;
+}
+
+fn readSum(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    input: *wire.Reader,
+    comptime borrow_bytes: bool,
+) Error!T {
+    @setEvalBranchQuota(100_000);
+    const info = @typeInfo(T).@"union";
+    const tag = try input.natural();
+    inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, index| {
+        if (tag == index) return @unionInit(
+            T,
+            field_name,
+            try read(FieldType, allocator, input, borrow_bytes),
+        );
+    }
+    return error.InvalidValue;
+}
+
+fn readOptional(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    input: *wire.Reader,
+    comptime borrow_bytes: bool,
+) Error!T {
+    const info = @typeInfo(T).optional;
+    return switch (try input.natural()) {
+        0 => null,
+        1 => try read(info.child, allocator, input, borrow_bytes),
+        else => error.InvalidValue,
+    };
+}
+
+fn readArray(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    input: *wire.Reader,
+    comptime borrow_bytes: bool,
+) Error!T {
+    const info = @typeInfo(T).array;
+    var result: T = undefined;
+    for (&result) |*element| element.* = try read(info.child, allocator, input, borrow_bytes);
+    return result;
 }
 
 fn readElements(

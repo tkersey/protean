@@ -101,6 +101,7 @@ fn writeUnsigned(writer: anytype, comptime value: anytype) void {
 }
 
 inline fn writeSchema(comptime T: type, writer: anytype) void {
+    @setEvalBranchQuota(100_000);
     _ = comptime native.info(T);
     if (comptime isText(T)) {
         if (T.max_length == null) {
@@ -268,6 +269,7 @@ fn DecimalRange(comptime maximum: u64) type {
 }
 
 inline fn writeClientSchema(comptime T: type, writer: anytype) void {
+    @setEvalBranchQuota(1_000_000);
     _ = comptime native.info(T);
     if (comptime isText(T)) {
         if (T.max_length == null) {
@@ -391,7 +393,7 @@ pub fn maximumToolArgumentsByteLength(comptime T: type) ?usize {
         maximumValueBytes(T);
 }
 
-inline fn writeOptionalSchema(comptime T: type, writer: anytype) void {
+fn writeOptionalSchema(comptime T: type, writer: anytype) void {
     const info = @typeInfo(T).optional;
     writer.raw("{\"anyOf\":[{\"type\":\"null\"},");
     if (comptime taggedOptional(T)) {
@@ -406,7 +408,7 @@ inline fn writeOptionalSchema(comptime T: type, writer: anytype) void {
     writer.raw("]}");
 }
 
-inline fn writeProductSchema(comptime T: type, writer: anytype) void {
+fn writeProductSchema(comptime T: type, writer: anytype) void {
     const info = @typeInfo(T).@"struct";
     if (info.is_tuple) {
         @compileError("protean JSON tuple schemas are not implemented yet");
@@ -426,7 +428,7 @@ inline fn writeProductSchema(comptime T: type, writer: anytype) void {
     writer.raw("],\"additionalProperties\":false}");
 }
 
-inline fn writeSumSchema(comptime T: type, writer: anytype) void {
+fn writeSumSchema(comptime T: type, writer: anytype) void {
     const info = @typeInfo(T).@"union";
     if (info.tag_type == null) @compileError("model JSON union must be tagged");
     writer.raw("{\"anyOf\":[");
@@ -443,7 +445,7 @@ inline fn writeSumSchema(comptime T: type, writer: anytype) void {
     writer.raw("]}");
 }
 
-inline fn writeClientIntegerSchema(comptime T: type, writer: anytype) void {
+fn writeClientIntegerSchema(comptime T: type, writer: anytype) void {
     const info = @typeInfo(T).int;
     if (info.bits <= 32) return writeSchema(T, writer);
     if (info.bits != 64) @compileError("unsupported client integer width");
@@ -463,7 +465,7 @@ inline fn writeClientIntegerSchema(comptime T: type, writer: anytype) void {
     writer.raw("\"}");
 }
 
-inline fn writeClientOptionalSchema(comptime T: type, writer: anytype) void {
+fn writeClientOptionalSchema(comptime T: type, writer: anytype) void {
     const info = @typeInfo(T).optional;
     writer.raw("{\"anyOf\":[{\"type\":\"null\"},");
     if (comptime taggedOptional(T)) writer.raw(
@@ -476,7 +478,7 @@ inline fn writeClientOptionalSchema(comptime T: type, writer: anytype) void {
     writer.raw("]}");
 }
 
-inline fn writeClientProductSchema(comptime T: type, writer: anytype) void {
+fn writeClientProductSchema(comptime T: type, writer: anytype) void {
     const info = @typeInfo(T).@"struct";
     if (info.is_tuple) @compileError("client tuples need an explicit named mapping");
     writer.raw("{\"type\":\"object\",\"properties\":{");
@@ -494,7 +496,7 @@ inline fn writeClientProductSchema(comptime T: type, writer: anytype) void {
     writer.raw("],\"additionalProperties\":false}");
 }
 
-inline fn writeClientSumSchema(comptime T: type, writer: anytype) void {
+fn writeClientSumSchema(comptime T: type, writer: anytype) void {
     const info = @typeInfo(T).@"union";
     if (info.tag_type == null) @compileError("client union must be tagged");
     writer.raw("{\"oneOf\":[");
