@@ -772,8 +772,8 @@ const ConfigurationAdmission = struct {
             ),
         ) orelse return error.InvalidConfiguration;
         var selected: ?t.model.AdaptiveInferenceProfile = null;
-        for (s.policy.profiles.items) |candidate| if (std.mem.eql(u8, candidate.id.bytes, initial_id)) {
-            selected = candidate;
+        for (s.policy.profiles.items) |entry| if (std.mem.eql(u8, entry.id.bytes, initial_id)) {
+            selected = entry;
         };
         s.initial = selected orelse return error.UnknownInferenceProfile;
         var supported = false;

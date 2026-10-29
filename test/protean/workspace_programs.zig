@@ -5234,7 +5234,7 @@ fn snapshotContextReadRuntime(fixture: anytype) !void {
         .source_ref = fixture.source_ref,
         .read_source = &read_source,
         .read_commands = read_commands,
-        .description_roots = description_roots,
+        .description_roots = &description_roots,
         .description_archives = &description_archives,
     });
 }
@@ -5255,7 +5255,7 @@ fn snapshotContextReadCommand(fixture: anytype, read_command: anytype, read_case
     if (policy_description) {
         fixture.service.*.profile.semantic_construction = if (read_case % 2 == 0)
             .{
-                .roots = &fixture.description_roots,
+                .roots = fixture.description_roots,
                 .checkers = &.{"recorded-checker"},
                 .guard = true,
             }
@@ -5313,7 +5313,7 @@ fn snapshotContextReadPolicy(
         fixture.service.*.profile.semantic_construction = if (read_case % 2 == 0)
             null
         else
-            .{ .roots = &fixture.description_roots, .checkers = &.{"new-checker"} };
+            .{ .roots = fixture.description_roots, .checkers = &.{"new-checker"} };
         const fresh = try fixture.service.*.workspaceCommand(
             fixture.scratch,
             "current-semantic-description",
@@ -17951,7 +17951,7 @@ fn reconstructionRecord(
     comptime T: type,
     fixture: anytype,
     allocator: std.mem.Allocator,
-    kind: []const u8,
+    comptime kind: []const u8,
     id: [32]u8,
 ) !T {
     const bytes = (try fixture.namespace.store.recordBytes(allocator, kind, id, fixture.task)).?;
@@ -19426,7 +19426,7 @@ fn reconstructionPrograms(
     scratch: std.mem.Allocator,
     scenario: ReconstructionCase,
     operator_failure: bool,
-    task: [32]u8,
+    task: [16]u8,
     programs: *[3]contracts.workspace.Ref,
     indexed_source: *[]const u8,
 ) !void {
@@ -19480,7 +19480,7 @@ fn reconstructionRejectInitialBinding(
     process: anytype,
     scenario: ReconstructionCase,
     namespace_owner: anytype,
-    task: [32]u8,
+    task: [16]u8,
     programs: anytype,
     initial_binding: anytype,
     a_ref: contracts.workspace.Ref,
@@ -19532,7 +19532,7 @@ fn reconstructionStartChild(
     service: anytype,
     a: std.mem.Allocator,
     scratch: std.mem.Allocator,
-    task: [32]u8,
+    task: [16]u8,
 ) ![32]u8 {
     var child_builder = source.Builder.init(a);
     defer child_builder.deinit();

@@ -8856,7 +8856,7 @@ fn placementAdvanceController(comptime scenario: anytype, borrow: anytype) !void
 }
 
 fn placementPrepareControllerTransfer(comptime scenario: anytype, borrow: anytype) !void {
-    const state_placementCompatibility = &borrow.services.sender.*.placementCompatibility;
+    const sender = borrow.services.sender;
 
     borrow.setup.phase.* = "prepare observer for controller transfer";
     const observed_source = try borrow.services.sender.*.workspaceStart(
@@ -8887,7 +8887,7 @@ fn placementPrepareControllerTransfer(comptime scenario: anytype, borrow: anytyp
         borrow.namespaces.scratch.*,
         borrow.report.controller_subject.*,
     );
-    borrow.peers.source_peers.*[1].compatibility = try state_placementCompatibility.*(
+    borrow.peers.source_peers.*[1].compatibility = try sender.placementCompatibility(
         borrow.namespaces.scratch.*,
         borrow.report.controller_subject.*,
     );
