@@ -237,9 +237,12 @@ removing a hold, the repository owner must post this fresh, unedited exact comme
 ```
 
 
-A completed candidate stays frozen while its base remains current. After the base
-advances, its authenticated closed epoch permits a fresh candidate and fresh
-qualification/review. If a branch update succeeded before the PR description
+A generated proposal is reviewed against its immutable original Git parent, even
+if main advances before review begins. Trusted current control must descend from
+that base; original preparation, impact, and pending review inputs remain bound to
+the original subject. A completed candidate stays frozen while its base remains
+current. After the base advances, its authenticated closed epoch permits a fresh
+candidate and fresh qualification/review. If a branch update succeeded before the PR description
 update, the writer authenticates the described predecessor and actual successor
 independently, then finishes only the missing metadata update. Further base
 movement does not authorize another source transition during that recovery.

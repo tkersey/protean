@@ -38,7 +38,7 @@ async function pulls(reader) {
   throw new Error('pull request pagination capacity exceeded');
 }
 
-async function previousForHead(reader, head, tree, command, controlCommit) {
+async function previousForHead(reader, head, tree, command, subjectBase) {
   const artifacts = await workflowPages(reader, 'actions/artifacts', 'artifacts');
   const bases = new Set();
   for (const artifact of artifacts) {
@@ -51,11 +51,15 @@ async function previousForHead(reader, head, tree, command, controlCommit) {
   const previous = [];
   for (const base of bases) {
     const value = await readReviewResult({repository: reader.repository, base, head, tree}, command);
-    previous.push({base, value});
+    if (value.status !== 'absent') previous.push({base, value});
   }
   const open = previous.filter(item => item.value.status !== 'complete');
   assert.ok(open.length <= 1, 'multiple unclosed owner subjects; recover original epochs before continuing');
-  return open[0] ?? previous.find(item => item.base === controlCommit) ?? null;
+  const selected = open[0] ?? previous.find(item => item.base === subjectBase);
+  if (selected) return selected;
+  if (bases.has(subjectBase)) return null;
+  const value = await readReviewResult({repository: reader.repository, base: subjectBase, head, tree}, command);
+  return value.status === 'absent' ? null : {base: subjectBase, value};
 }
 
 export async function observeProteanReview({controlCommit, requestedPull = null}, command = githubCommand,
@@ -84,12 +88,22 @@ export async function observeProteanReview({controlCommit, requestedPull = null}
       const commit = await reader.api(`git/commits/${head}`);
       assert.equal(commit.sha, head); const tree = commit.tree.sha;
       assert.match(tree, /^[0-9a-f]{40}$/);
-      const prior = await previousReader(reader, head, tree, command, controlCommit);
+      let subjectBase = controlCommit;
+      if (pull.head.ref === proposalBranch) {
+        assert.equal(commit.parents?.length, 1, 'generated proposal must have one immutable Git parent');
+        subjectBase = commit.parents[0].sha;
+        assert.match(subjectBase, /^[0-9a-f]{40}$/);
+      }
+      if (subjectBase !== controlCommit) assert.ok(await reader.forward(subjectBase, controlCommit),
+        'current review control predates or diverges from original candidate base');
+      const prior = await previousReader(reader, head, tree, command, subjectBase);
       if (prior && ['blocked', 'running'].includes(prior.value.status)) {
         observations.push({number: pull.number, status: prior.value.status, reason: prior.value.reason ?? prior.value.envelope?.reason});
         continue;
       }
-      const base = prior?.value.status === 'pending' ? prior.base : controlCommit;
+      const base = prior?.value.status === 'pending' ? prior.base : subjectBase;
+      if (base !== subjectBase && base !== controlCommit) assert.ok(await reader.forward(base, controlCommit),
+        'current review control predates or diverges from pending owner subject');
       const impact = impactInput(pull.body, base, head);
       if (prior?.base === base) {
         requireCurrentImpact(prior.value.envelope.context.impact, pull.body, base, head);
