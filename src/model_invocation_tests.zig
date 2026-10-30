@@ -44,8 +44,15 @@ test "typed model declaration and protected responder share one operation" {
         false,
     );
     const function = try horos.authoring.interop.functionId(context.author, response);
-    try std.testing.expectEqualSlices(horos.source.Id, &.{effect}, builder.functions.items[function].effects);
-    try std.testing.expectEqual(effect, try horos.authoring.interop.operationId(context.author, try Fixture.declare(context)));
+    try std.testing.expectEqualSlices(
+        horos.source.Id,
+        &.{effect},
+        builder.functions.items[function].effects,
+    );
+    try std.testing.expectEqual(
+        effect,
+        try horos.authoring.interop.operationId(context.author, try Fixture.declare(context)),
+    );
     try std.testing.expectEqual(effect, try Fixture.source.declare(&builder));
     const entry = try context.author.function(
         "unprotected model call",
@@ -54,7 +61,10 @@ test "typed model declaration and protected responder share one operation" {
         .{operation},
     );
     const body = try context.author.body(entry);
-    try context.author.define(entry, try body.ret(try body.perform(operation, try body.parameter("request"))));
+    try context.author.define(
+        entry,
+        try body.ret(try body.perform(operation, try body.parameter("request"))),
+    );
     const module = try context.author.module(entry, try context.schema(void));
     try std.testing.expectError(error.ProtectedEffectBypass, @import("admission.zig").verify(
         std.testing.allocator,
@@ -72,10 +82,24 @@ test "model declarations preserve logical tags and derive strict schemas/codecs"
     const fields = declarations[0].argument_codec.items;
     try std.testing.expectEqual(5, fields.len);
     try std.testing.expectEqual(16, fields[0].maximum_bytes);
-    try std.testing.expect(std.mem.indexOf(u8, declarations[0].input_schema_json.bytes, "\"maxLength\":16") != null);
+    try std.testing.expect(
+        std.mem.indexOf(u8, declarations[0].input_schema_json.bytes, "\"maxLength\":16") != null,
+    );
     try std.testing.expectEqualSlices(u32, &.{ 9, 3 }, fields[4].enum_tags.items);
-    try std.testing.expect(std.mem.indexOf(u8, declarations[0].input_schema_json.bytes, "18446744073709551615") != null);
-    try std.testing.expect(std.mem.indexOf(u8, declarations[0].input_schema_json.bytes, "\"additionalProperties\":false") != null);
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            declarations[0].input_schema_json.bytes,
+            "18446744073709551615",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            declarations[0].input_schema_json.bytes,
+            "\"additionalProperties\":false",
+        ) != null,
+    );
 }
 
 test "normalized Answer uses sum ordinal while enum payload keeps explicit tags" {
@@ -108,8 +132,14 @@ test "model effect is ordinary and a typed question requires no executable tool"
     const context = try @import("authoring.zig").Context.init(&builder, &registry);
     const operation = try Question.declare(context);
     const first = try horos.authoring.interop.operationId(context.author, operation);
-    try std.testing.expectEqual(first, try horos.authoring.interop.operationId(context.author, try Question.declare(context)));
-    try std.testing.expectEqualStrings(invocation.semantic_identity, builder.effects.items[@intCast(first)].identity);
+    try std.testing.expectEqual(
+        first,
+        try horos.authoring.interop.operationId(context.author, try Question.declare(context)),
+    );
+    try std.testing.expectEqualStrings(
+        invocation.semantic_identity,
+        builder.effects.items[@intCast(first)].identity,
+    );
     const request = try contracts.schema(Question.AdaptiveRequest, &builder);
     const result = try contracts.schema(Question.AdaptiveResult, &builder);
     try std.testing.expectEqual(request, builder.effects.items[@intCast(first)].payload);
@@ -140,7 +170,11 @@ test "v11 is the sole model effect and retains current context bindings" {
         .replay_status = .complete,
         .usage = null,
     };
-    const encoded = try contracts.encodeOwned(Fixture.AdaptiveResult, std.testing.allocator, result);
+    const encoded = try contracts.encodeOwned(
+        Fixture.AdaptiveResult,
+        std.testing.allocator,
+        result,
+    );
     defer std.testing.allocator.free(encoded);
     try std.testing.expect(encoded.len < 256);
     var decoded = try contracts.decodeOwned(Fixture.AdaptiveResult, std.testing.allocator, encoded);
@@ -153,16 +187,33 @@ test "v11 is the sole model effect and retains current context bindings" {
     const context = try @import("authoring.zig").Context.init(&builder, &registry);
     const operation = try Fixture.declare(context);
     const effect = try horos.authoring.interop.operationId(context.author, operation);
-    try std.testing.expectEqualStrings("agent.model.invoke.v11", builder.effects.items[@intCast(effect)].identity);
-    try std.testing.expectEqual(effect, try horos.authoring.interop.operationId(context.author, try Fixture.declare(context)));
+    try std.testing.expectEqualStrings(
+        "agent.model.invoke.v11",
+        builder.effects.items[@intCast(effect)].identity,
+    );
+    try std.testing.expectEqual(
+        effect,
+        try horos.authoring.interop.operationId(context.author, try Fixture.declare(context)),
+    );
     try std.testing.expectEqual(@as(usize, 1), builder.effects.items.len);
-    try std.testing.expectEqual(try contracts.schema(Fixture.AdaptiveRequest, &builder), builder.effects.items[@intCast(effect)].payload);
-    try std.testing.expectEqual(try contracts.schema(Fixture.AdaptiveResult, &builder), builder.effects.items[@intCast(effect)].result);
+    try std.testing.expectEqual(
+        try contracts.schema(Fixture.AdaptiveRequest, &builder),
+        builder.effects.items[@intCast(effect)].payload,
+    );
+    try std.testing.expectEqual(
+        try contracts.schema(Fixture.AdaptiveResult, &builder),
+        builder.effects.items[@intCast(effect)].result,
+    );
 }
 
 test "nested tool codecs describe bounded vectors without changing flat field codecs" {
     const Nested = invocation.Profile(union(enum) {
-        propose: struct { rows: contracts.Vector(struct { label: contracts.Text(8), mode: enum(u32) { first = 7, second = 19 } }, 2) },
+        propose: struct {
+            rows: contracts.Vector(
+                struct { label: contracts.Text(8), mode: enum(u32) { first = 7, second = 19 } },
+                2,
+            ),
+        },
     }, .{.{ .name = "propose", .description = "Propose rows." }}, limits);
     const tool = Nested.allDeclarations().items[0];
     try std.testing.expectEqual(@as(usize, 4), tool.argument_codec.items.len);
@@ -171,19 +222,35 @@ test "nested tool codecs describe bounded vectors without changing flat field co
     try std.testing.expectEqual(@as(u32, 1), tool.argument_codec.items[0].children);
     try std.testing.expectEqual(.product, tool.argument_codec.items[1].field.kind);
     try std.testing.expectEqual(@as(u32, 2), tool.argument_codec.items[1].children);
-    try std.testing.expectEqualSlices(u32, &.{ 7, 19 }, tool.argument_codec.items[3].field.enum_tags.items);
+    try std.testing.expectEqualSlices(
+        u32,
+        &.{ 7, 19 },
+        tool.argument_codec.items[3].field.enum_tags.items,
+    );
     try std.testing.expectEqual(@as(u32, 1), Nested.normalizationLimits().maximum_argument_fields);
-    try std.testing.expect(std.mem.indexOf(u8, tool.input_schema_json.bytes, "\"maxItems\":2") != null);
+    try std.testing.expect(
+        std.mem.indexOf(u8, tool.input_schema_json.bytes, "\"maxItems\":2") != null,
+    );
     // Existing flat consumers still receive their six-field metadata records.
-    try std.testing.expectEqual(@as(usize, 6), @typeInfo(Fixture.ArgumentCodec.Child).@"struct".field_names.len);
+    try std.testing.expectEqual(
+        @as(usize, 6),
+        @typeInfo(Fixture.ArgumentCodec.Child).@"struct".field_names.len,
+    );
 }
 
 test "bounded tool arguments support nested union payloads" {
     const Nested = invocation.Profile(union(enum) {
         choose: struct { option: union(enum) { left: bool, right: u8 } },
-    }, .{.{ .name = "choose", .description = "Choose a value." }}, .{ .arguments_json_bytes = 256 });
+    }, .{
+        .{ .name = "choose", .description = "Choose a value." },
+    }, .{
+        .arguments_json_bytes = 256,
+    });
     const tool = Nested.allDeclarations().items[0];
-    try std.testing.expectEqual(@as(?u32, 256), Nested.normalizationLimits().maximum_arguments_bytes);
+    try std.testing.expectEqual(
+        @as(?u32, 256),
+        Nested.normalizationLimits().maximum_arguments_bytes,
+    );
     try std.testing.expect(std.mem.indexOf(u8, tool.input_schema_json.bytes, "\"anyOf\"") != null);
 }
 
@@ -197,7 +264,9 @@ test "optional model inputs retain nullable schemas and nested codec structure" 
     try std.testing.expectEqual(@as(u32, 1), tool.argument_codec.items[0].children);
     try std.testing.expectEqual(.product, tool.argument_codec.items[1].field.kind);
     try std.testing.expectEqual(.unsigned_integer, tool.argument_codec.items[2].field.kind);
-    try std.testing.expect(std.mem.indexOf(u8, tool.input_schema_json.bytes, "\"type\":\"null\"") != null);
+    try std.testing.expect(
+        std.mem.indexOf(u8, tool.input_schema_json.bytes, "\"type\":\"null\"") != null,
+    );
 }
 
 test "guest snapshot disclosure remains an explicit model boolean" {

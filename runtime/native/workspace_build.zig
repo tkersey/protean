@@ -139,7 +139,10 @@ fn runProgram(ctx: registry.Context, input: ProgramInput) ![]u8 {
 }
 
 fn elapsed(io: std.Io, started: std.Io.Timestamp) u64 {
-    return std.math.cast(u64, @max(0, std.Io.Clock.awake.now(io).nanoseconds - started.nanoseconds)) orelse std.math.maxInt(u64);
+    return std.math.cast(
+        u64,
+        @max(0, std.Io.Clock.awake.now(io).nanoseconds - started.nanoseconds),
+    ) orelse std.math.maxInt(u64);
 }
 
 fn compile(
@@ -148,16 +151,37 @@ fn compile(
     diagnostic: *construction.Diagnostic,
 ) !construction.Built {
     if (input.controller) |contract| {
-        if (input.kind != .source_records or input.catalog != null or input.exposures.items.len != 0) return error.InvalidConstruction;
-        return construction.buildController(ctx.allocator, input.source.bytes, contract, ctx.cancellation, diagnostic);
+        if (input.kind != .source_records or
+            input.catalog != null or
+            input.exposures.items.len != 0)
+            return error.InvalidConstruction;
+        return construction.buildController(
+            ctx.allocator,
+            input.source.bytes,
+            contract,
+            ctx.cancellation,
+            diagnostic,
+        );
     }
     if (input.kind == .source_records) {
         if (input.catalog != null) return error.InvalidConstruction;
-        return construction.buildExposed(ctx.allocator, input.source.bytes, input.exposures.items, ctx.cancellation, diagnostic);
+        return construction.buildExposed(
+            ctx.allocator,
+            input.source.bytes,
+            input.exposures.items,
+            ctx.cancellation,
+            diagnostic,
+        );
     }
     if (input.kind == .source_derivation) {
         if (input.catalog != null) return error.InvalidConstruction;
-        return construction.buildDerived(ctx.allocator, input.source.bytes, input.exposures.items, ctx.cancellation, diagnostic);
+        return construction.buildDerived(
+            ctx.allocator,
+            input.source.bytes,
+            input.exposures.items,
+            ctx.cancellation,
+            diagnostic,
+        );
     }
     diagnostic.phase = .authority;
     if (input.exposures.items.len != 0) return error.InvalidExposure;
@@ -206,9 +230,13 @@ fn derive(ctx: registry.Context, input: DeriveInput) ![]u8 {
     );
     defer proposal.deinit();
     if (proposal.value.version != 1) return error.UnsupportedVersion;
-    const bytes = try kosmos.RuntimeCompiler.deriveRecord(a, &ancestor, guest, proposal.value.proposal, .{
-        .horos_package = @import("native_options").horos_identity,
-    });
+    const bytes = try kosmos.RuntimeCompiler.deriveRecord(
+        a,
+        &ancestor,
+        guest,
+        proposal.value.proposal,
+        .{ .horos_package = @import("native_options").horos_identity },
+    );
     errdefer a.free(bytes);
     try ctx.checkCancellation();
     return bytes;
@@ -221,7 +249,10 @@ fn runValidate(ctx: registry.Context, input: ValidateInput) ![]u8 {
             error.OutOfMemory => .{ .resource_exhausted, @errorName(err) },
             error.Canceled => .{ .interrupted, @errorName(err) },
             error.UnsupportedRelation => .{ .unsupported_relation, @errorName(err) },
-            error.Capacity, error.RelationLimit, error.WorkLimit, error.SpecializationLimit => .{ .resource_exhausted, @errorName(err) },
+            error.Capacity, error.RelationLimit, error.WorkLimit, error.SpecializationLimit => .{
+                .resource_exhausted,
+                @errorName(err),
+            },
             error.ArtifactUnavailable => .{ .unavailable_dependency, @errorName(err) },
             else => .{ .rejected, @errorName(err) },
         };
@@ -258,7 +289,11 @@ fn validate(ctx: registry.Context, input: ValidateInput) !void {
 
 test "semantic derivation interruption does not become a compiler rejection" {
     var cancelled = std.atomic.Value(bool).init(true);
-    const authority: registry.Authority = .{ .grants = &.{}, .principal = "test", .tenant = "test" };
+    const authority: registry.Authority = .{
+        .grants = &.{},
+        .principal = "test",
+        .tenant = "test",
+    };
     try std.testing.expectError(error.Canceled, runDerive(.{
         .allocator = std.testing.allocator,
         .io = std.testing.io,
@@ -333,7 +368,11 @@ test "construction worker preserves continuation details and prior rejection enc
 fn constructionTestOutput(a: std.mem.Allocator, module: @import("horos").source.Module) ![]u8 {
     const text = try @import("source_records.zig").encode(a, module);
     defer a.free(text);
-    const authority: registry.Authority = .{ .grants = &.{}, .principal = "test", .tenant = "test" };
+    const authority: registry.Authority = .{
+        .grants = &.{},
+        .principal = "test",
+        .tenant = "test",
+    };
     return runProgram(.{
         .allocator = a,
         .io = std.testing.io,

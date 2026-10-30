@@ -6,8 +6,14 @@ const json = @import("json.zig");
 const state = @import("state.zig");
 const w = c.workspace;
 
-pub fn reference(a: std.mem.Allocator, kind: @FieldType(w.Ref, "kind"), digest: state.Digest) !w.Ref {
-    return .{ .kind = kind, .id = .{ .bytes = try a.dupe(u8, &std.fmt.bytesToHex(digest, .lower)) } };
+pub fn reference(
+    a: std.mem.Allocator,
+    kind: @FieldType(w.Ref, "kind"),
+    digest: state.Digest,
+) !w.Ref {
+    return .{ .kind = kind, .id = .{
+        .bytes = try a.dupe(u8, &std.fmt.bytesToHex(digest, .lower)),
+    } };
 }
 pub fn identity(ref: w.Ref, kind: @FieldType(w.Ref, "kind")) !state.Digest {
     if (ref.kind != kind or ref.id.bytes.len != 64) return error.InvalidReference;
@@ -16,9 +22,17 @@ pub fn identity(ref: w.Ref, kind: @FieldType(w.Ref, "kind")) !state.Digest {
     return result;
 }
 pub fn page(a: std.mem.Allocator, bytes: []const u8, requested: w.Page) !json.Value {
-    if (requested.maximum == 0 or requested.maximum > 48 * 1024 or requested.offset > bytes.len) return error.InvalidRange;
+    if (requested.maximum == 0 or
+        requested.maximum > 48 * 1024 or
+        requested.offset > bytes.len)
+        return error.InvalidRange;
     const start: usize = @intCast(requested.offset);
-    return window(a, bytes[start..][0..@min(bytes.len - start, requested.maximum + 1)], requested, bytes.len);
+    return window(
+        a,
+        bytes[start..][0..@min(bytes.len - start, requested.maximum + 1)],
+        requested,
+        bytes.len,
+    );
 }
 
 /// Fold serialized fragments into one byte range. Concatenation preserves
@@ -54,8 +68,14 @@ pub const Range = struct {
 /// A projected window includes one lookahead byte when it is not at EOF.
 /// This preserves UTF-8 boundaries without materializing the complete value.
 pub fn window(a: std.mem.Allocator, bytes: []const u8, requested: w.Page, total: u64) !json.Value {
-    if (requested.maximum == 0 or requested.maximum > 48 * 1024 or requested.offset > total) return error.InvalidRange;
-    if (bytes.len != @min(total - requested.offset, requested.maximum + 1)) return error.InvalidRange;
+    if (requested.maximum == 0 or
+        requested.maximum > 48 * 1024 or
+        requested.offset > total)
+        return error.InvalidRange;
+    if (bytes.len != @min(
+        total - requested.offset,
+        requested.maximum + 1,
+    )) return error.InvalidRange;
     var length = @min(bytes.len, requested.maximum);
     if (bytes.len != 0 and bytes[0] & 0xc0 == 0x80) return error.InvalidRange;
     while (length < bytes.len and bytes[length] & 0xc0 == 0x80) length -= 1;
@@ -94,7 +114,10 @@ test "range folding agrees with complete paging across every fragment boundary" 
                     try std.testing.expectError(err, range.finish(scratch));
                     continue;
                 };
-                try std.testing.expectEqualStrings(try json.canonical(scratch, expected), try json.canonical(scratch, try range.finish(scratch)));
+                try std.testing.expectEqualStrings(
+                    try json.canonical(scratch, expected),
+                    try json.canonical(scratch, try range.finish(scratch)),
+                );
             }
         }
     }

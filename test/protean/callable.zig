@@ -8,7 +8,12 @@ const B = bnd.source.Builder;
 
 pub const Representation = enum { interned, static_code, unsafe_reuse, unsafe_code };
 
-pub fn build(b: *B, registry: *admission.Registry, representation: Representation, count: usize) !bnd.source.Module {
+pub fn build(
+    b: *B,
+    registry: *admission.Registry,
+    representation: Representation,
+    count: usize,
+) !bnd.source.Module {
     const unit = try b.scalar(void);
     const signature: bnd.data.program.ComputationType = .{ .parameters = &.{}, .result = unit };
     const safe = try b.declare(&.{}, unit, &.{}, &.{});
@@ -18,20 +23,7 @@ pub fn build(b: *B, registry: *admission.Registry, representation: Representatio
         .schema = try b.schema(.{ .internal = .{ .computation = signature } }),
     } else try callable.define(b, safe, signature);
 
-    // This local effect is legal outside speculation, but not admitted inside.
-    const u = try b.effect(.{ .identity = "probe/outside-only", .payload = unit, .result = unit, .external = false });
-    const cap = try b.schema(.{ .internal = .{ .capability = u } });
-    const token = try b.schema(.{ .internal = .{ .resumption = .{ .effect = u, .input = unit, .answer = unit, .handled = &.{u}, .mode = .deep, .use = .linear } } });
-    const returns = try b.declare(&.{unit}, unit, &.{}, &.{});
-    try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
-    const clause = try b.declare(&.{ unit, token }, unit, &.{}, &.{});
-    try b.define(clause, try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(clause, 1)), .argument = try b.constant(void, {}) } }));
-    const local = try b.handler(.{ .mode = .deep, .input = unit, .answer = unit, .return_function = returns, .clauses = &.{.{ .effect = u, .function = clause, .resumption = token }} });
-    const local_body = try b.declare(&.{cap}, unit, &.{u}, &.{});
-    try b.define(local_body, try b.term(.{ .perform = .{ .effect = u, .capability = try b.reference(b.parameter(local_body, 0)), .payload = try b.constant(void, {}) } }));
-    const local_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{cap}, .result = unit, .effects = &.{u} } } });
-    const outside = try b.declare(&.{}, unit, &.{}, &.{});
-    try b.define(outside, try b.term(.{ .handle = .{ .handler = local, .body = try b.lambda(local_body, local_type) } }));
+    const outside = try outsideEffect(b, unit);
     const outside_code: callable.Definition = switch (representation) {
         .interned, .unsafe_reuse => .{ .function = outside, .schema = safe_code.schema },
         .static_code, .unsafe_code => try callable.define(b, outside, signature),
@@ -42,32 +34,132 @@ pub fn build(b: *B, registry: *admission.Registry, representation: Representatio
     };
     const callback = supplied.schema;
 
-    // One reusable higher-order helper receives the safe callback as a VALUE.
-    const typed = bnd.authoring;
-    const author = try typed.Context.init(b);
-    const family = try bnd.library.choice.family(author, "probe/choice");
-    const choice = .{ .effect = try typed.interop.operationId(author, family.effect()), .capability = try typed.interop.schemaId(author, family.capability()) };
-    try registry.classify(choice.effect, .internal);
-    const interpreted = try bnd.library.choice.all(author, family, try author.schema(void), .{ .captures = .{ .continuation = .{ try author.schema(void), try typed.interop.schema(author, callback), family.capability() } }, .residual = &.{} });
-    const all = .{ .handler = try typed.interop.handlerId(author, interpreted.handler), .answer = try typed.interop.schemaId(author, interpreted.answer) };
-    const body = try b.declare(&.{ choice.capability, callback }, unit, &.{choice.effect}, &.{});
-    const decision = try b.variable(try b.scalar(bool));
-    try b.define(body, try b.bind(decision, try b.term(.{ .perform = .{ .effect = choice.effect, .capability = try b.reference(b.parameter(body, 0)), .payload = try b.constant(void, {}) } }), try b.term(.{ .apply = .{ .computation = try b.reference(b.parameter(body, 1)), .arguments = &.{} } })));
-    const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{ choice.capability, callback }, .result = unit, .effects = &.{choice.effect} } } });
+    const speculative = try speculativeBody(b, registry, unit, callback);
     const root = try b.declare(&.{}, unit, &.{}, &.{});
     // The unrelated callback runs only AFTER all speculative work returns.
-    var tail = try b.term(.{ .apply = .{ .computation = try callable.value(b, outside_code), .arguments = &.{} } });
+    var tail = try b.term(.{ .apply = .{ .computation = try callable.value(
+        b,
+        outside_code,
+    ), .arguments = &.{} } });
     for (0..count) |_| {
-        const result = try b.variable(all.answer);
+        const result = try b.variable(speculative.answer);
         const evaluate = try b.term(.{ .handle = .{
-            .handler = all.handler,
-            .body = try b.lambda(body, body_type),
+            .handler = speculative.handler,
+            .body = try b.lambda(speculative.body, speculative.body_type),
             .arguments = &.{try callable.value(b, supplied)},
         } });
         tail = try b.bind(result, evaluate, tail);
     }
     try b.define(root, tail);
     return b.module(root, unit);
+}
+
+fn outsideEffect(b: *B, unit: Id) !Id {
+    // This local effect is legal outside speculation, but not admitted inside.
+    const u = try b.effect(.{
+        .identity = "probe/outside-only",
+        .payload = unit,
+        .result = unit,
+        .external = false,
+    });
+    const cap = try b.schema(.{ .internal = .{ .capability = u } });
+    const token = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = u,
+        .input = unit,
+        .answer = unit,
+        .handled = &.{u},
+        .mode = .deep,
+        .use = .linear,
+    } } });
+    const returns = try b.declare(&.{unit}, unit, &.{}, &.{});
+    try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
+    const clause = try b.declare(&.{ unit, token }, unit, &.{}, &.{});
+    try b.define(
+        clause,
+        try b.term(.{ .resume_value = .{
+            .resumption = try b.reference(b.parameter(clause, 1)),
+            .argument = try b.constant(void, {}),
+        } }),
+    );
+    const local = try b.handler(
+        .{
+            .mode = .deep,
+            .input = unit,
+            .answer = unit,
+            .return_function = returns,
+            .clauses = &.{.{ .effect = u, .function = clause, .resumption = token }},
+        },
+    );
+    const local_body = try b.declare(&.{cap}, unit, &.{u}, &.{});
+    try b.define(
+        local_body,
+        try b.term(.{ .perform = .{
+            .effect = u,
+            .capability = try b.reference(b.parameter(local_body, 0)),
+            .payload = try b.constant(void, {}),
+        } }),
+    );
+    const local_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{
+        cap,
+    }, .result = unit, .effects = &.{u} } } });
+    const outside = try b.declare(&.{}, unit, &.{}, &.{});
+    try b.define(
+        outside,
+        try b.term(.{ .handle = .{
+            .handler = local,
+            .body = try b.lambda(local_body, local_type),
+        } }),
+    );
+    return outside;
+}
+
+fn speculativeBody(
+    b: *B,
+    registry: *admission.Registry,
+    unit: Id,
+    callback: Id,
+) !struct { handler: Id, answer: Id, body: Id, body_type: Id } {
+    // One reusable higher-order helper receives the safe callback as a VALUE.
+    const typed = bnd.authoring;
+    const author = try typed.Context.init(b);
+    const family = try bnd.library.choice.family(author, "probe/choice");
+    const choice = .{
+        .effect = try typed.interop.operationId(author, family.effect()),
+        .capability = try typed.interop.schemaId(author, family.capability()),
+    };
+    try registry.classify(choice.effect, .internal);
+    const interpreted = try bnd.library.choice.all(author, family, try author.schema(
+        void,
+    ), .{ .captures = .{ .continuation = .{
+        try author.schema(void),
+        try typed.interop.schema(author, callback),
+        family.capability(),
+    } }, .residual = &.{} });
+    const all = .{
+        .handler = try typed.interop.handlerId(author, interpreted.handler),
+        .answer = try typed.interop.schemaId(author, interpreted.answer),
+    };
+    const body = try b.declare(&.{ choice.capability, callback }, unit, &.{choice.effect}, &.{});
+    const decision = try b.variable(try b.scalar(bool));
+    try b.define(
+        body,
+        try b.bind(
+            decision,
+            try b.term(.{ .perform = .{
+                .effect = choice.effect,
+                .capability = try b.reference(b.parameter(body, 0)),
+                .payload = try b.constant(void, {}),
+            } }),
+            try b.term(.{ .apply = .{ .computation = try b.reference(
+                b.parameter(body, 1),
+            ), .arguments = &.{} } }),
+        ),
+    );
+    const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{
+        choice.capability,
+        callback,
+    }, .result = unit, .effects = &.{choice.effect} } } });
+    return .{ .handler = all.handler, .answer = all.answer, .body = body, .body_type = body_type };
 }
 
 test "static-code identity does not assert effect safety or bless schema reuse" {
@@ -80,7 +172,10 @@ test "static-code identity does not assert effect safety or bless schema reuse" 
         const module = try build(&b, &registry, representation, 1);
         var compiled = try bnd.program.compile(a, module);
         defer compiled.deinit();
-        try std.testing.expectError(error.SpeculativeEffect, admission.verify(a, module, &registry));
+        try std.testing.expectError(
+            error.SpeculativeEffect,
+            admission.verify(a, module, &registry),
+        );
     }
 }
 
@@ -95,7 +190,10 @@ test "nominal callable origins separate safe speculation from unrelated effects"
         var compiled = try bnd.program.compile(allocator, module);
         defer compiled.deinit();
         if (representation == .interned) {
-            try std.testing.expectError(error.SpeculativeEffect, admission.verify(allocator, module, &registry));
+            try std.testing.expectError(
+                error.SpeculativeEffect,
+                admission.verify(allocator, module, &registry),
+            );
         } else {
             try admission.verify(allocator, module, &registry);
         }

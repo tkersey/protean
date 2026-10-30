@@ -30,6 +30,29 @@ permissions:
   contents: read
   actions: read
 jobs:
+  tiger-style:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic_lane != 'retained-runtime' }}
+    name: TigerStyle
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.0'
+          mirror: https://zigmirror.com
+          use-cache: false
+          use-tool-cache: true
+      - name: Enforce TigerStyle on all tracked Zig source
+        env:
+          TIGER_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: bash tools/tiger-style.sh --all "$TIGER_HEAD"
+      - name: Verify TigerStyle selection and failure behavior
+        run: bash tools/test-tiger-style.sh
   qualify:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic_lane != 'retained-runtime' }}
     name: Qualification / ${{ matrix.lane }} / linux-x86_64
@@ -227,7 +250,12 @@ jobs:
           elif [ "${{ matrix.lane }}" = owner-support ]; then
             zig build check-native-owner-support -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = workspace ]; then
-            run_compiled_tests workspace-general 16
+            log="$RUNNER_TEMP/workspace-general-tests.log"
+            /usr/bin/time -v node tools/native/qualification_tests.mjs \
+              "$RUNNER_TEMP/protean-qualification/verification/workspace-general" \
+              '[["CTX-01"],["WORK-C07"],["BUILD-","WORK-C03","WORK-06","WORK-08","exposure carries","workspace commands","deep recursive workspace"]]' \
+              2>&1 | tee "$log"
+            grep -Fxq '16/16 tests passed across 3 independent groups.' "$log"
           elif [ "${{ matrix.lane }}" = workspace-retention ]; then
             run_compiled_tests workspace-general 3
           elif [ "${{ matrix.lane }}" = workspace-history ]; then
@@ -338,7 +366,7 @@ jobs:
           key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
   native:
     name: native
-    needs: [qualify]
+    needs: [qualify, tiger-style]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -350,9 +378,11 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           QUALIFICATION: ${{ needs.qualify.result }}
+          TIGER_STYLE: ${{ needs.tiger-style.result }}
           DIAGNOSTIC_LANE: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane || 'all' }}
         run: |
           test "$QUALIFICATION" = success
+          test "$TIGER_STYLE" = success
           if [ "$RUN_ATTEMPT" != 1 ]; then
             echo 'Qualification requires the first attempt from the original trigger.'
             exit 1

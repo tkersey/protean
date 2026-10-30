@@ -26,5 +26,7 @@ comptime {
     if (!@hasDecl(horos, "source") or !@hasDecl(horos, "data") or
         !@hasDecl(horos, "program") or !@hasDecl(horos.program, "compileObserved") or
         !@hasField(horos.source.Compiled, "flow"))
-        @compileError("Protean requires the coordinated Horos stable-activation compiler and data API");
+        @compileError(
+            "Protean requires the coordinated Horos stable-activation compiler and data API",
+        );
 }

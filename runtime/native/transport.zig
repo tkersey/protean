@@ -28,11 +28,21 @@ pub const Id = union(enum) {
         return switch (a) {
             .null => true,
             .number => |value| value == b.number,
-            .text => |text| text.len == b.text.len and std.mem.eql(u8, text.bytes[0..text.len], b.text.bytes[0..b.text.len]),
+            .text => |text| text.len == b.text.len and std.mem.eql(
+                u8,
+                text.bytes[0..text.len],
+                b.text.bytes[0..b.text.len],
+            ),
         };
     }
 };
-const Frame = struct { bytes: []u8, offset: usize = 0, ids: [16]Id = undefined, count: usize = 0, private: bool };
+const Frame = struct {
+    bytes: []u8,
+    offset: usize = 0,
+    ids: [16]Id = undefined,
+    count: usize = 0,
+    private: bool,
+};
 
 pub const Transport = struct {
     allocator: std.mem.Allocator,
@@ -63,7 +73,14 @@ pub const Transport = struct {
         if (c.fcntl(0, c.F_SETFL, input_flags | c.O_NONBLOCK) < 0) return error.IoUnavailable;
         errdefer _ = c.fcntl(0, c.F_SETFL, input_flags);
         if (c.fcntl(1, c.F_SETFL, output_flags | c.O_NONBLOCK) < 0) return error.IoUnavailable;
-        return .{ .allocator = a, .io = io, .limits = limits, .stdin_flags = input_flags, .stdout_flags = output_flags, .framing = .{ .buffer = buffer } };
+        return .{
+            .allocator = a,
+            .io = io,
+            .limits = limits,
+            .stdin_flags = input_flags,
+            .stdout_flags = output_flags,
+            .framing = .{ .buffer = buffer },
+        };
     }
     pub fn deinit(self: *Transport) void {
         for (&self.queue) |*slot| if (slot.*) |frame| {
@@ -80,13 +97,15 @@ pub const Transport = struct {
     }
     pub fn deadlines(self: *Transport) !void {
         const time = self.now();
-        if (self.frame_started) |start| if (time - start >= self.limits.incomplete_frame_ms) return error.FrameTimeout;
-        if (self.output_progress) |start| if (time - start >= self.limits.output_stall_ms) return error.OutputStall;
+        if (self.frame_started) |start| if (time - start >= self.limits.incomplete_frame_ms)
+            return error.FrameTimeout;
+        if (self.output_progress) |start| if (time - start >= self.limits.output_stall_ms)
+            return error.OutputStall;
     }
     pub fn next(self: *Transport) !?[]const u8 {
         if (self.pending) |bytes| return bytes;
         if (self.eof) return null;
-        while (true) {
+        while (true) { // tiger: event-loop
             if (self.input_start == self.input_end) {
                 const count = c.read(0, &self.input, self.input.len);
                 if (count < 0) switch (std.c.errno(count)) {
@@ -118,19 +137,31 @@ pub const Transport = struct {
     /// A complete frame has at most one frame-sized response, including batches.
     /// Keep one frame's space available for control/error publication.
     pub fn canAdmit(self: Transport) bool {
-        return self.outstanding < self.limits.in_flight_calls and self.count < self.queue.len and self.queued_bytes + self.limits.frame_bytes <= self.limits.outbound_bytes;
+        return self.outstanding < self.limits.in_flight_calls and
+            self.count < self.queue.len and
+            self.queued_bytes + self.limits.frame_bytes <= self.limits.outbound_bytes;
     }
     pub fn preflight(self: Transport, ids: []const Id) !void {
-        if (ids.len > self.limits.in_flight_calls or self.outstanding + ids.len > self.limits.in_flight_calls or !self.canAdmit()) return error.Overloaded;
+        if (ids.len > self.limits.in_flight_calls or
+            self.outstanding + ids.len > self.limits.in_flight_calls or
+            !self.canAdmit())
+            return error.Overloaded;
         for (ids, 0..) |id, i| {
             for (ids[0..i]) |prior| if (Id.equal(id, prior)) return error.DuplicateId;
             for (self.queue) |slot| if (slot) |frame| {
-                for (frame.ids[0..frame.count]) |prior| if (Id.equal(id, prior)) return error.DuplicateId;
+                for (frame.ids[0..frame.count]) |prior| if (Id.equal(
+                    id,
+                    prior,
+                )) return error.DuplicateId;
             };
         }
     }
     pub fn enqueue(self: *Transport, bytes: []const u8, ids: []const Id, private: bool) !void {
-        if (bytes.len + 1 > self.limits.frame_bytes or ids.len > 16 or self.count == self.queue.len or self.queued_bytes + bytes.len + 1 > self.limits.outbound_bytes) return error.Overloaded;
+        if (bytes.len + 1 > self.limits.frame_bytes or
+            ids.len > 16 or
+            self.count == self.queue.len or
+            self.queued_bytes + bytes.len + 1 > self.limits.outbound_bytes)
+            return error.Overloaded;
         const owned = try self.allocator.alloc(u8, bytes.len + 1);
         @memcpy(owned[0..bytes.len], bytes);
         owned[bytes.len] = '\n';
@@ -177,10 +208,15 @@ pub const Transport = struct {
             var output = c.struct_pollfd{ .fd = 1, .events = c.POLLOUT, .revents = 0 };
             const ready = c.poll(&output, 1, 0);
             if (ready < 0 and std.c.errno(ready) != .INTR) return error.IoUnavailable;
-            if (output.revents & (c.POLLERR | c.POLLHUP | c.POLLNVAL) != 0) return error.OutputClosed;
+            if (output.revents & (c.POLLERR | c.POLLHUP | c.POLLNVAL) != 0)
+                return error.OutputClosed;
         }
         var fds = [_]c.struct_pollfd{
-            .{ .fd = if (read and !self.eof and self.pending == null) 0 else -1, .events = c.POLLIN, .revents = 0 },
+            .{
+                .fd = if (read and !self.eof and self.pending == null) 0 else -1,
+                .events = c.POLLIN,
+                .revents = 0,
+            },
             // Closure is a connection event even without a pending write.
             // Request write readiness only for queued output, avoiding idle spin.
             .{ .fd = 1, .events = if (self.count != 0) c.POLLOUT else 0, .revents = 0 },
@@ -198,7 +234,12 @@ test "idle output waits without spinning and detects closed pipe and socket read
     defer _ = c.dup2(saved, 1);
     for ([_]bool{ false, true }) |socket| {
         var fds: [2]c_int = undefined;
-        const opened = if (socket) c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &fds) else c.pipe(&fds);
+        const opened = if (socket) c.socketpair(
+            c.AF_UNIX,
+            c.SOCK_STREAM,
+            0,
+            &fds,
+        ) else c.pipe(&fds);
         try std.testing.expectEqual(0, opened);
         var reader_open = true;
         defer {
@@ -248,7 +289,7 @@ test "write opportunity after owner work distinguishes queued output from a stal
     try std.testing.expectEqualStrings("ok\n", &received);
 
     const fill: [4096]u8 = @splat(0);
-    while (true) {
+    while (true) { // tiger: event-loop
         const written = c.write(1, &fill, fill.len);
         if (written < 0) {
             if (std.c.errno(written) == .INTR) continue;
@@ -258,7 +299,7 @@ test "write opportunity after owner work distinguishes queued output from a stal
         try std.testing.expect(written > 0);
     }
     // A failed PIPE_BUF-sized write may leave room for a smaller frame.
-    while (true) {
+    while (true) { // tiger: event-loop
         const written = c.write(1, &fill, 1);
         if (written < 0) {
             if (std.c.errno(written) == .INTR) continue;

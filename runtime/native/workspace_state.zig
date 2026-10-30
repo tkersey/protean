@@ -65,7 +65,13 @@ pub const RunPolicy = contracts.workspace.Policy;
 pub const ProgramArtifact = struct {
     version: u32 = 2,
     source: state.Reference,
-    source_kind: enum { source_records, component_recipe, instrument_model, instrument_snapshot, source_derivation },
+    source_kind: enum {
+        source_records,
+        component_recipe,
+        instrument_model,
+        instrument_snapshot,
+        source_derivation,
+    },
     construction_contract: state.Name,
     authoring_identity: state.Digest,
     image: state.Reference,
@@ -191,10 +197,25 @@ pub const Guard = struct {
     reference_nanoseconds: u64 = 0,
     candidate_nanoseconds: u64 = 0,
     reference_operation: ?OuterOperation = null,
-    candidate_segment: ?struct { checkpoint: state.Reference, observation: state.Reference, guest_work: u64 } = null,
+    candidate_segment: ?struct {
+        checkpoint: state.Reference,
+        observation: state.Reference,
+        guest_work: u64,
+    } = null,
 };
 
-pub const Trial = struct { id: state.Digest, task: state.TaskId, selection: contracts.workspace.Trial, view: state.Reference, view_works: contracts.Vector(WorkObservation, null), policy: state.Reference, responses: contracts.Vector(struct { identity: contracts.Utf8, payload: state.Reference, response: state.Reference }, null) };
+pub const Trial = struct {
+    id: state.Digest,
+    task: state.TaskId,
+    selection: contracts.workspace.Trial,
+    view: state.Reference,
+    view_works: contracts.Vector(WorkObservation, null),
+    policy: state.Reference,
+    responses: contracts.Vector(
+        struct { identity: contracts.Utf8, payload: state.Reference, response: state.Reference },
+        null,
+    ),
+};
 
 pub const Observer = struct {
     pub const Incomplete = struct {
@@ -313,11 +334,38 @@ pub const ControlObservation = struct {
 
     pub fn from(observed: WorkObservation) ControlObservation {
         const work = observed.work;
-        return .{ .policy = work.policy, .schedule = work.schedule, .blocker = work.blocker, .cancellation = work.cancellation, .cancellation_applied = work.cancellation_applied, .outcome = work.outcome_kind, .instrument = work.delegation != null, .trial = work.trial != null, .port = work.current_port != null, .delivery = if (observed.occurrence) |pending| std.meta.activeTag(pending.state) else null };
+        return .{
+            .policy = work.policy,
+            .schedule = work.schedule,
+            .blocker = work.blocker,
+            .cancellation = work.cancellation,
+            .cancellation_applied = work.cancellation_applied,
+            .outcome = work.outcome_kind,
+            .instrument = work.delegation != null,
+            .trial = work.trial != null,
+            .port = work.current_port != null,
+            .delivery = if (observed.occurrence) |pending| std.meta.activeTag(
+                pending.state,
+            ) else null,
+        };
     }
 };
 
-pub const StartRequest = struct { method: state.Method = .workspace, kind: Operation = .start, task: state.TaskId, program: state.Digest, input: contracts.Bytes(null), policy: RunPolicy, origin: ?state.Reference, runtime: ?state.Reference = null, trial: contracts.workspace.Trial = .{ .none = .{} } };
+pub const StartRequest = struct {
+    method: state.Method = .workspace,
+    kind: Operation = .start,
+    task: state.TaskId,
+    program: state.Digest,
+    input: contracts.Bytes(
+        null,
+    ),
+    policy: RunPolicy,
+    origin: ?state.Reference,
+    runtime: ?state.Reference = null,
+    trial: contracts.workspace.Trial = .{
+        .none = .{},
+    },
+};
 pub const ObserveRequest = struct {
     method: state.Method = .workspace,
     kind: Operation = .observe,
@@ -330,10 +378,35 @@ pub const StopObservingRequest = struct {
     task: state.TaskId,
     expected: contracts.workspace.Expected,
 };
-pub const SpecializeRequest = struct { method: state.Method = .workspace, kind: Operation = .specialize, task: state.TaskId, program: state.Digest, hooks: contracts.workspace.RuntimeHooks = .{} };
-pub const RealizeRequest = struct { method: state.Method = .workspace, kind: Operation = .realize, task: state.TaskId, work: state.Digest, execution: u64, control: u64, realization: u64, runtime: ?state.Reference };
-pub const CutRequest = struct { method: state.Method = .workspace, kind: Operation = .request_cut, task: state.TaskId, command: @FieldType(contracts.workspace.Work, "request_cut") };
-pub const PumpRequest = struct { method: state.Method = .workspace, kind: Operation = .pump, task: state.TaskId, command: @FieldType(contracts.workspace.Work, "pump") };
+pub const SpecializeRequest = struct {
+    method: state.Method = .workspace,
+    kind: Operation = .specialize,
+    task: state.TaskId,
+    program: state.Digest,
+    hooks: contracts.workspace.RuntimeHooks = .{},
+};
+pub const RealizeRequest = struct {
+    method: state.Method = .workspace,
+    kind: Operation = .realize,
+    task: state.TaskId,
+    work: state.Digest,
+    execution: u64,
+    control: u64,
+    realization: u64,
+    runtime: ?state.Reference,
+};
+pub const CutRequest = struct {
+    method: state.Method = .workspace,
+    kind: Operation = .request_cut,
+    task: state.TaskId,
+    command: @FieldType(contracts.workspace.Work, "request_cut"),
+};
+pub const PumpRequest = struct {
+    method: state.Method = .workspace,
+    kind: Operation = .pump,
+    task: state.TaskId,
+    command: @FieldType(contracts.workspace.Work, "pump"),
+};
 pub const GuardRequest = struct {
     method: state.Method = .workspace,
     task: state.TaskId,
@@ -342,12 +415,48 @@ pub const GuardRequest = struct {
         unguard: @FieldType(contracts.workspace.Work, "unguard"),
     },
 };
-pub const ResidualControlRequest = struct { method: state.Method = .workspace, task: state.TaskId, residual: state.Digest, execution: u64, control: u64, command: Command };
-pub const ControlRequest = struct { method: state.Method = .workspace, kind: Operation = .control, task: state.TaskId, work: state.Digest, execution: u64, control: u64, command: Command };
-pub const InteractionRequest = struct { kind: Operation = .interact, task: state.TaskId, interaction: @FieldType(contracts.workspace.Work, "interact") };
-pub const DelegationRequest = struct { task: state.TaskId, command: @FieldType(contracts.workspace.Work, "delegate") };
-pub const BuildRequest = struct { method: state.Method = .workspace, kind: Operation = .build, task: state.TaskId, source: contracts.Bytes(null), source_kind: contracts.workspace.SourceKind, catalog: ?state.Reference, exposures: contracts.Vector(contracts.workspace.Exposure, null), role: contracts.workspace.ProgramRole = .computation };
-pub const ContextRequest = struct { task: state.TaskId, command: contracts.workspace.Context, snapshot: ?state.Reference, input: ?state.Reference };
+pub const ResidualControlRequest = struct {
+    method: state.Method = .workspace,
+    task: state.TaskId,
+    residual: state.Digest,
+    execution: u64,
+    control: u64,
+    command: Command,
+};
+pub const ControlRequest = struct {
+    method: state.Method = .workspace,
+    kind: Operation = .control,
+    task: state.TaskId,
+    work: state.Digest,
+    execution: u64,
+    control: u64,
+    command: Command,
+};
+pub const InteractionRequest = struct {
+    kind: Operation = .interact,
+    task: state.TaskId,
+    interaction: @FieldType(contracts.workspace.Work, "interact"),
+};
+pub const DelegationRequest = struct {
+    task: state.TaskId,
+    command: @FieldType(contracts.workspace.Work, "delegate"),
+};
+pub const BuildRequest = struct {
+    method: state.Method = .workspace,
+    kind: Operation = .build,
+    task: state.TaskId,
+    source: contracts.Bytes(null),
+    source_kind: contracts.workspace.SourceKind,
+    catalog: ?state.Reference,
+    exposures: contracts.Vector(contracts.workspace.Exposure, null),
+    role: contracts.workspace.ProgramRole = .computation,
+};
+pub const ContextRequest = struct {
+    task: state.TaskId,
+    command: contracts.workspace.Context,
+    snapshot: ?state.Reference,
+    input: ?state.Reference,
+};
 
 /// The existing receipt binds these inputs by request digest. Start input bytes
 /// and identity already have immutable work custody, so do not copy them here.
@@ -378,13 +487,33 @@ pub const PublicationCommand = union(enum) {
         input: state.Reference,
         output: state.Reference,
     },
-    realize: struct { execution: u64, control: u64, realization: u64, runtime: ?state.Reference, source: state.Reference, target: state.Reference, dependencies: contracts.Vector(state.Reference, null) },
+    realize: struct {
+        execution: u64,
+        control: u64,
+        realization: u64,
+        runtime: ?state.Reference,
+        source: state.Reference,
+        target: state.Reference,
+        dependencies: contracts.Vector(state.Reference, null),
+    },
     request_cut: @FieldType(contracts.workspace.Work, "request_cut"),
     guard: @FieldType(contracts.workspace.Work, "guard"),
     unguard: @FieldType(contracts.workspace.Work, "unguard"),
     pump: @FieldType(contracts.workspace.Work, "pump"),
-    context: struct { command: contracts.workspace.Context, snapshot: ?state.Reference, input: ?state.Reference },
-    start: struct { observer: ?Observer = null, policy: RunPolicy, origin: bool, runtime: ?state.Reference = null, trial: contracts.workspace.Trial = .{ .none = .{} } },
+    context: struct {
+        command: contracts.workspace.Context,
+        snapshot: ?state.Reference,
+        input: ?state.Reference,
+    },
+    start: struct {
+        observer: ?Observer = null,
+        policy: RunPolicy,
+        origin: bool,
+        runtime: ?state.Reference = null,
+        trial: contracts.workspace.Trial = .{
+            .none = .{},
+        },
+    },
     control: struct { execution: u64, control: u64, command: Command },
     interact: @FieldType(contracts.workspace.Work, "interact"),
     delegate: @FieldType(contracts.workspace.Work, "delegate"),

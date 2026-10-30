@@ -100,7 +100,8 @@ fn writeUnsigned(writer: anytype, comptime value: anytype) void {
     writer.raw(std.fmt.comptimePrint("{d}", .{value}));
 }
 
-fn writeSchema(comptime T: type, writer: anytype) void {
+inline fn writeSchema(comptime T: type, writer: anytype) void {
+    @setEvalBranchQuota(100_000);
     _ = comptime native.info(T);
     if (comptime isText(T)) {
         if (T.max_length == null) {
@@ -126,7 +127,9 @@ fn writeSchema(comptime T: type, writer: anytype) void {
         return;
     }
     switch (@typeInfo(T)) {
-        .void => writer.raw("{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"),
+        .void => writer.raw(
+            "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+        ),
         .bool => writer.raw("{\"type\":\"boolean\"}"),
         .int => {
             writer.raw("{\"type\":\"integer\",\"minimum\":");
@@ -135,17 +138,7 @@ fn writeSchema(comptime T: type, writer: anytype) void {
             writer.raw(std.fmt.comptimePrint("{d}", .{std.math.maxInt(T)}));
             writer.byte('}');
         },
-        .optional => |info| {
-            writer.raw("{\"anyOf\":[{\"type\":\"null\"},");
-            if (comptime taggedOptional(T)) {
-                writer.raw("{\"type\":\"object\",\"properties\":{\"tag\":{\"const\":\"some\"},\"value\":");
-            }
-            writeSchema(info.child, writer);
-            if (comptime taggedOptional(T)) {
-                writer.raw("},\"required\":[\"tag\",\"value\"],\"additionalProperties\":false}");
-            }
-            writer.raw("]}");
-        },
+        .optional => writeOptionalSchema(T, writer),
         .@"enum" => |info| {
             writer.raw("{\"type\":\"string\",\"enum\":[");
             inline for (info.field_names, 0..) |field_name, index| {
@@ -154,37 +147,8 @@ fn writeSchema(comptime T: type, writer: anytype) void {
             }
             writer.raw("]}");
         },
-        .@"struct" => |info| {
-            if (info.is_tuple) {
-                @compileError("protean JSON tuple schemas are not implemented yet");
-            }
-            writer.raw("{\"type\":\"object\",\"properties\":{");
-            inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, index| {
-                if (index != 0) writer.byte(',');
-                writeString(writer, field_name);
-                writer.byte(':');
-                writeSchema(FieldType, writer);
-            }
-            writer.raw("},\"required\":[");
-            inline for (info.field_names, 0..) |field_name, index| {
-                if (index != 0) writer.byte(',');
-                writeString(writer, field_name);
-            }
-            writer.raw("],\"additionalProperties\":false}");
-        },
-        .@"union" => |info| {
-            if (info.tag_type == null) @compileError("model JSON union must be tagged");
-            writer.raw("{\"anyOf\":[");
-            inline for (info.field_names, info.field_types, 0..) |name, Child, index| {
-                if (index != 0) writer.byte(',');
-                writer.raw("{\"type\":\"object\",\"properties\":{\"tag\":{\"type\":\"string\",\"enum\":[");
-                writeString(writer, name);
-                writer.raw("]},\"value\":");
-                writeSchema(Child, writer);
-                writer.raw("},\"required\":[\"tag\",\"value\"],\"additionalProperties\":false}");
-            }
-            writer.raw("]}");
-        },
+        .@"struct" => writeProductSchema(T, writer),
+        .@"union" => writeSumSchema(T, writer),
         else => @compileError("protean JSON schema does not support " ++ @typeName(T)),
     }
 }
@@ -249,6 +213,7 @@ pub fn ClientSchema(comptime T: type) type {
         };
         /// Owned bytes from the same mapping, emitted at runtime for large schemas.
         pub fn alloc(allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+            @setEvalBranchQuota(1_000_000);
             const bytes = try allocator.alloc(u8, length);
             var writer = SliceWriter{ .bytes = bytes };
             writeClientSchema(T, &writer);
@@ -303,7 +268,8 @@ fn DecimalRange(comptime maximum: u64) type {
     };
 }
 
-fn writeClientSchema(comptime T: type, writer: anytype) void {
+inline fn writeClientSchema(comptime T: type, writer: anytype) void {
+    @setEvalBranchQuota(1_000_000);
     _ = comptime native.info(T);
     if (comptime isText(T)) {
         if (T.max_length == null) {
@@ -328,7 +294,10 @@ fn writeClientSchema(comptime T: type, writer: anytype) void {
             }
             // Complete groups, then only canonical zero-padded terminal bits.
             // Strict end assertion also rejects a final newline.
-            writer.raw(",\"pattern\":\"^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-][AQgw]|[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048])?(?![\\\\s\\\\S])\"");
+            writer.raw(
+                ",\"pattern\":\"^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-][AQgw]|" ++
+                    "[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048])?(?![\\\\s\\\\S])\"",
+            );
             writer.byte('}');
             return;
         }
@@ -346,31 +315,8 @@ fn writeClientSchema(comptime T: type, writer: anytype) void {
     }
     switch (@typeInfo(T)) {
         .void, .bool, .@"enum" => writeSchema(T, writer),
-        .int => |info| {
-            if (info.bits <= 32) return writeSchema(T, writer);
-            if (info.bits != 64) @compileError("unsupported client integer width");
-            writer.raw("{\"type\":\"string\",\"pattern\":\"");
-            writer.raw("^(0|");
-            writer.raw(&DecimalRange(std.math.maxInt(T)).value);
-            if (info.signedness == .signed) {
-                writer.raw("|-(");
-                writer.raw(&DecimalRange(@as(u64, std.math.maxInt(T)) + 1).value);
-                writer.byte(')');
-            }
-            writer.raw(")(?![\\\\s\\\\S])");
-            writer.raw("\",\"x-integer-minimum\":\"");
-            writer.raw(std.fmt.comptimePrint("{d}", .{std.math.minInt(T)}));
-            writer.raw("\",\"x-integer-maximum\":\"");
-            writer.raw(std.fmt.comptimePrint("{d}", .{std.math.maxInt(T)}));
-            writer.raw("\"}");
-        },
-        .optional => |info| {
-            writer.raw("{\"anyOf\":[{\"type\":\"null\"},");
-            if (comptime taggedOptional(T)) writer.raw("{\"type\":\"object\",\"properties\":{\"tag\":{\"const\":\"some\"},\"value\":");
-            writeClientSchema(info.child, writer);
-            if (comptime taggedOptional(T)) writer.raw("},\"required\":[\"tag\",\"value\"],\"additionalProperties\":false}");
-            writer.raw("]}");
-        },
+        .int => writeClientIntegerSchema(T, writer),
+        .optional => writeClientOptionalSchema(T, writer),
         .array => |info| {
             writer.raw("{\"type\":\"array\",\"minItems\":");
             writeUnsigned(writer, info.len);
@@ -380,40 +326,15 @@ fn writeClientSchema(comptime T: type, writer: anytype) void {
             writeClientSchema(info.child, writer);
             writer.byte('}');
         },
-        .@"struct" => |info| {
-            if (info.is_tuple) @compileError("client tuples need an explicit named mapping");
-            writer.raw("{\"type\":\"object\",\"properties\":{");
-            inline for (info.field_names, info.field_types, 0..) |name, FieldType, i| {
-                if (i != 0) writer.byte(',');
-                writeString(writer, name);
-                writer.byte(':');
-                writeClientSchema(FieldType, writer);
-            }
-            writer.raw("},\"required\":[");
-            inline for (info.field_names, 0..) |name, i| {
-                if (i != 0) writer.byte(',');
-                writeString(writer, name);
-            }
-            writer.raw("],\"additionalProperties\":false}");
-        },
-        .@"union" => |info| {
-            if (info.tag_type == null) @compileError("client union must be tagged");
-            writer.raw("{\"oneOf\":[");
-            inline for (info.field_names, info.field_types, 0..) |name, FieldType, i| {
-                if (i != 0) writer.byte(',');
-                writer.raw("{\"type\":\"object\",\"properties\":{\"tag\":{\"const\":");
-                writeString(writer, name);
-                writer.raw("},\"value\":");
-                writeClientSchema(FieldType, writer);
-                writer.raw("},\"required\":[\"tag\",\"value\"],\"additionalProperties\":false}");
-            }
-            writer.raw("]}");
-        },
-        else => @compileError("client values require a bounded ordinary contract: " ++ @typeName(T)),
+        .@"struct" => writeClientProductSchema(T, writer),
+        .@"union" => writeClientSumSchema(T, writer),
+        else => @compileError(
+            "client values require a bounded ordinary contract: " ++ @typeName(T),
+        ),
     }
 }
 
-fn maximumValueBytes(comptime T: type) ?usize {
+inline fn maximumValueBytes(comptime T: type) ?usize {
     _ = comptime native.info(T);
     if (comptime isText(T)) {
         const maximum = T.max_length orelse return null;
@@ -461,9 +382,7 @@ fn maximumValueBytes(comptime T: type) ?usize {
             }
             break :blk maximum;
         },
-        else => @compileError(
-            "protean JSON value bound does not support " ++ @typeName(T),
-        ),
+        else => @compileError("protean JSON value bound does not support " ++ @typeName(T)),
     };
 }
 
@@ -472,4 +391,122 @@ pub fn maximumToolArgumentsByteLength(comptime T: type) ?usize {
         10 + (maximumValueBytes(T) orelse return null)
     else
         maximumValueBytes(T);
+}
+
+fn writeOptionalSchema(comptime T: type, writer: anytype) void {
+    const info = @typeInfo(T).optional;
+    writer.raw("{\"anyOf\":[{\"type\":\"null\"},");
+    if (comptime taggedOptional(T)) {
+        writer.raw(
+            "{\"type\":\"object\",\"properties\":{\"tag\":{\"const\":\"some\"},\"value\":",
+        );
+    }
+    writeSchema(info.child, writer);
+    if (comptime taggedOptional(T)) {
+        writer.raw("},\"required\":[\"tag\",\"value\"],\"additionalProperties\":false}");
+    }
+    writer.raw("]}");
+}
+
+fn writeProductSchema(comptime T: type, writer: anytype) void {
+    const info = @typeInfo(T).@"struct";
+    if (info.is_tuple) {
+        @compileError("protean JSON tuple schemas are not implemented yet");
+    }
+    writer.raw("{\"type\":\"object\",\"properties\":{");
+    inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, index| {
+        if (index != 0) writer.byte(',');
+        writeString(writer, field_name);
+        writer.byte(':');
+        writeSchema(FieldType, writer);
+    }
+    writer.raw("},\"required\":[");
+    inline for (info.field_names, 0..) |field_name, index| {
+        if (index != 0) writer.byte(',');
+        writeString(writer, field_name);
+    }
+    writer.raw("],\"additionalProperties\":false}");
+}
+
+fn writeSumSchema(comptime T: type, writer: anytype) void {
+    const info = @typeInfo(T).@"union";
+    if (info.tag_type == null) @compileError("model JSON union must be tagged");
+    writer.raw("{\"anyOf\":[");
+    inline for (info.field_names, info.field_types, 0..) |name, Child, index| {
+        if (index != 0) writer.byte(',');
+        writer.raw(
+            "{\"type\":\"object\",\"properties\":{\"tag\":{\"type\":\"string\",\"enum\":[",
+        );
+        writeString(writer, name);
+        writer.raw("]},\"value\":");
+        writeSchema(Child, writer);
+        writer.raw("},\"required\":[\"tag\",\"value\"],\"additionalProperties\":false}");
+    }
+    writer.raw("]}");
+}
+
+fn writeClientIntegerSchema(comptime T: type, writer: anytype) void {
+    const info = @typeInfo(T).int;
+    if (info.bits <= 32) return writeSchema(T, writer);
+    if (info.bits != 64) @compileError("unsupported client integer width");
+    writer.raw("{\"type\":\"string\",\"pattern\":\"");
+    writer.raw("^(0|");
+    writer.raw(&DecimalRange(std.math.maxInt(T)).value);
+    if (info.signedness == .signed) {
+        writer.raw("|-(");
+        writer.raw(&DecimalRange(@as(u64, std.math.maxInt(T)) + 1).value);
+        writer.byte(')');
+    }
+    writer.raw(")(?![\\\\s\\\\S])");
+    writer.raw("\",\"x-integer-minimum\":\"");
+    writer.raw(std.fmt.comptimePrint("{d}", .{std.math.minInt(T)}));
+    writer.raw("\",\"x-integer-maximum\":\"");
+    writer.raw(std.fmt.comptimePrint("{d}", .{std.math.maxInt(T)}));
+    writer.raw("\"}");
+}
+
+fn writeClientOptionalSchema(comptime T: type, writer: anytype) void {
+    const info = @typeInfo(T).optional;
+    writer.raw("{\"anyOf\":[{\"type\":\"null\"},");
+    if (comptime taggedOptional(T)) writer.raw(
+        "{\"type\":\"object\",\"properties\":{\"tag\":{\"const\":\"some\"},\"value\":",
+    );
+    writeClientSchema(info.child, writer);
+    if (comptime taggedOptional(T)) writer.raw(
+        "},\"required\":[\"tag\",\"value\"],\"additionalProperties\":false}",
+    );
+    writer.raw("]}");
+}
+
+fn writeClientProductSchema(comptime T: type, writer: anytype) void {
+    const info = @typeInfo(T).@"struct";
+    if (info.is_tuple) @compileError("client tuples need an explicit named mapping");
+    writer.raw("{\"type\":\"object\",\"properties\":{");
+    inline for (info.field_names, info.field_types, 0..) |name, FieldType, i| {
+        if (i != 0) writer.byte(',');
+        writeString(writer, name);
+        writer.byte(':');
+        writeClientSchema(FieldType, writer);
+    }
+    writer.raw("},\"required\":[");
+    inline for (info.field_names, 0..) |name, i| {
+        if (i != 0) writer.byte(',');
+        writeString(writer, name);
+    }
+    writer.raw("],\"additionalProperties\":false}");
+}
+
+fn writeClientSumSchema(comptime T: type, writer: anytype) void {
+    const info = @typeInfo(T).@"union";
+    if (info.tag_type == null) @compileError("client union must be tagged");
+    writer.raw("{\"oneOf\":[");
+    inline for (info.field_names, info.field_types, 0..) |name, FieldType, i| {
+        if (i != 0) writer.byte(',');
+        writer.raw("{\"type\":\"object\",\"properties\":{\"tag\":{\"const\":");
+        writeString(writer, name);
+        writer.raw("},\"value\":");
+        writeClientSchema(FieldType, writer);
+        writer.raw("},\"required\":[\"tag\",\"value\"],\"additionalProperties\":false}");
+    }
+    writer.raw("]}");
 }

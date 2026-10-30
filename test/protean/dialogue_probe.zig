@@ -37,14 +37,36 @@ pub fn build(b: *Builder, mode: Mode) !bsrc.Module {
         .payload = integer,
         .result = integer,
     });
-    const d = try dialogue.defineExchange(b, "agent.probe.dialogue.typed.v1", integer, integer, integer, &.{integer}, &.{}, &.{}, .{ .effects = &.{} });
+    const d = try dialogue.defineExchange(
+        b,
+        "agent.probe.dialogue.typed.v1",
+        integer,
+        integer,
+        integer,
+        &.{integer},
+        &.{},
+        &.{},
+        .{ .effects = &.{} },
+    );
     const body = try b.declare(&.{d.capability}, integer, &.{d.effect}, &.{});
     const first = try b.variable(integer);
     const second = try b.variable(integer);
     const cap = try b.reference(b.parameter(body, 0));
-    const offered = try arithmetic(b, .integer_add, try b.constant(u64, 10), try b.reference(first));
+    const offered = try arithmetic(
+        b,
+        .integer_add,
+        try b.constant(u64, 10),
+        try b.reference(first),
+    );
     const result = try arithmetic(b, .integer_add, offered, try b.reference(second));
-    try b.define(body, try b.bind(first, try dialogue.offer(b, d, cap, try b.constant(u64, 10)), try b.bind(second, try dialogue.offer(b, d, cap, offered), try b.pure(result))));
+    try b.define(
+        body,
+        try b.bind(
+            first,
+            try dialogue.offer(b, d, cap, try b.constant(u64, 10)),
+            try b.bind(second, try dialogue.offer(b, d, cap, offered), try b.pure(result)),
+        ),
+    );
     const body_type = try b.schema(.{ .internal = .{ .computation = .{
         .parameters = &.{d.capability},
         .result = integer,
@@ -86,7 +108,18 @@ fn portableExchange(b: *Builder, mode: Mode) !bsrc.Module {
         .outgoing = try b.reference(b.parameter(entry, 0)),
     });
     // The second occurrence exercises deep rendering after resume as well.
-    try b.define(entry, try b.bind(response, request, try b.bind(try b.variable(contract.reply), request, try b.pure(try b.constant(void, {})))));
+    try b.define(
+        entry,
+        try b.bind(
+            response,
+            request,
+            try b.bind(
+                try b.variable(contract.reply),
+                request,
+                try b.pure(try b.constant(void, {})),
+            ),
+        ),
+    );
     return b.module(entry, unit);
 }
 
@@ -116,7 +149,12 @@ fn typedExchange(b: *Builder) !bsrc.Module {
     const checked = try b.term(.{ .match_sum = .{
         .value = try b.reference(response),
         .cases = &.{
-            .{ .variable = input, .body = try b.pure(try arithmetic(b, .integer_add, try b.reference(input), try b.constant(u64, 1))) },
+            .{
+                .variable = input,
+                .body = try b.pure(
+                    try arithmetic(b, .integer_add, try b.reference(input), try b.constant(u64, 1)),
+                ),
+            },
             .{ .variable = close, .body = try b.pure(try b.constant(u64, 0)) },
         },
     } });
@@ -139,7 +177,10 @@ fn arithmetic(b: *Builder, opcode: horos.data.program.Opcode, a: Id, c: Id) !Id 
     return b.value(.{ .schema = try b.scalar(u64), .expression = .{ .primitive = .{
         .opcode = opcode,
         .operands = &.{ a, c },
-        .failures = &.{.{ .kind = .arithmetic_overflow, .value = try b.failureLiteral(try b.constant(void, {})) }},
+        .failures = &.{.{
+            .kind = .arithmetic_overflow,
+            .value = try b.failureLiteral(try b.constant(void, {})),
+        }},
     } } });
 }
 
@@ -181,7 +222,12 @@ fn awaitingStep(
     const awaiting = try b.variable(d.yielded);
     const outgoing = try b.variable(d.element);
     const future = try b.variable(d.package);
-    var advance = try consumeAnswer(b, d, try dialogue.exchange(b, d, try b.reference(future), input), next);
+    var advance = try consumeAnswer(
+        b,
+        d,
+        try dialogue.exchange(b, d, try b.reference(future), input),
+        next,
+    );
     if (duplicate) {
         const discarded = try b.variable(try b.scalar(void));
         advance = try b.bind(discarded, try dialogue.close(b, d, try b.reference(future)), advance);
@@ -213,7 +259,12 @@ fn delayedStep(
     const outgoing = try b.variable(d.element);
     const future = try b.variable(d.package);
     const response = try b.variable(d.input);
-    var resumed = try consumeAnswer(b, d, try dialogue.exchange(b, d, try b.reference(future), try b.reference(response)), next);
+    var resumed = try consumeAnswer(
+        b,
+        d,
+        try dialogue.exchange(b, d, try b.reference(future), try b.reference(response)),
+        next,
+    );
     if (duplicate) {
         const ignored = try b.variable(try b.scalar(void));
         resumed = try b.bind(ignored, try dialogue.close(b, d, try b.reference(future)), resumed);
@@ -250,56 +301,29 @@ fn disposal(b: *Builder) !bsrc.Module {
         .payload = integer,
         .result = unit,
     });
-    const d = try dialogue.defineExchange(b, "agent.probe.dialogue.owned.v1", integer, integer, integer, &.{ unit, integer, cell_type }, &.{region}, &.{}, .{ .effects = &.{release} });
+    const d = try dialogue.defineExchange(
+        b,
+        "agent.probe.dialogue.owned.v1",
+        integer,
+        integer,
+        integer,
+        &.{ unit, integer, cell_type },
+        &.{region},
+        &.{},
+        .{ .effects = &.{release} },
+    );
     const entry = try b.declare(&.{}, integer, &.{release}, &.{});
-    const start_fn = try b.declare(&.{d.capability}, integer, &.{ release, d.effect }, &.{});
-    const inside = try b.declare(&.{region_type}, integer, &.{ release, d.effect }, &.{region});
-    const body = try b.declare(&.{}, integer, &.{d.effect}, &.{region});
-    const cell = try b.variable(cell_type);
-    const read = try b.primitive(integer, .cell_get, &.{try b.reference(cell)}, 0);
-    const answer = try b.variable(integer);
-    try b.define(body, try b.bind(answer, try dialogue.offer(b, d, try b.reference(b.parameter(start_fn, 0)), read), try b.pure(try b.reference(answer))));
-    const exit = try horos.source.library.cleanup.exitInfo(b, unit);
-    const cleanup = try b.declare(&.{exit}, unit, &.{release}, &.{region});
-    try b.define(cleanup, try b.term(.{ .perform = .{ .effect = release, .payload = read } }));
-    const body_type = try b.schema(.{ .internal = .{ .computation = .{
-        .parameters = &.{},
-        .result = integer,
-        .effects = &.{d.effect},
-        .capture_bound = &.{ d.capability, cell_type },
-        .regions = &.{region},
-    } } });
-    const cleanup_type = try b.schema(.{ .internal = .{ .computation = .{
-        .parameters = &.{exit},
-        .result = unit,
-        .effects = &.{release},
-        .capture_bound = &.{cell_type},
-        .regions = &.{region},
-    } } });
-    const protected = try b.term(.{ .protect = .{
-        .body = try b.lambda(body, body_type),
-        .cleanup = try b.lambda(cleanup, cleanup_type),
-    } });
-    const created = try b.primitive(cell_type, .cell_new, &.{ try b.reference(b.parameter(inside, 0)), try b.constant(u64, 42) }, 0);
-    try b.define(inside, try b.bind(cell, try b.pure(created), protected));
-    const inside_type = try b.schema(.{ .internal = .{ .computation = .{
-        .parameters = &.{region_type},
-        .result = integer,
-        .effects = &.{ release, d.effect },
-        .capture_bound = &.{d.capability},
-        .regions = &.{region},
-    } } });
-    try b.define(start_fn, try b.term(.{ .with_region = .{
-        .region = region,
-        .body = try b.lambda(inside, inside_type),
-    } }));
-    const start_type = try b.schema(.{ .internal = .{ .computation = .{
-        .parameters = &.{d.capability},
-        .result = integer,
-        .effects = &.{ release, d.effect },
-    } } });
+    const start = try disposalStart(b, d, unit, integer, region, region_type, cell_type, release);
     const next = try disposeStep(b, d);
-    try b.define(entry, try consumeAnswer(b, d, try dialogue.start(b, d, try b.lambda(start_fn, start_type), &.{}), next));
+    try b.define(
+        entry,
+        try consumeAnswer(
+            b,
+            d,
+            try dialogue.start(b, d, start, &.{}),
+            next,
+        ),
+    );
     return b.module(entry, unit);
 }
 
@@ -310,7 +334,11 @@ fn disposeStep(b: *Builder, d: dialogue.Generator) !Continuation {
     const outgoing = try b.variable(d.element);
     const future = try b.variable(d.package);
     const ignored = try b.variable(try b.scalar(void));
-    const closed = try b.bind(ignored, try dialogue.close(b, d, try b.reference(future)), try b.pure(try b.reference(outgoing)));
+    const closed = try b.bind(
+        ignored,
+        try dialogue.close(b, d, try b.reference(future)),
+        try b.pure(try b.reference(outgoing)),
+    );
     const unpack = try b.term(.{ .unpack_product = .{
         .value = try b.reference(awaiting),
         .variables = &.{ outgoing, future },
@@ -334,14 +362,31 @@ fn borrowedEscape(b: *Builder) !bsrc.Module {
         .element = integer,
         .region = region,
     } } });
-    const d = try dialogue.defineExchange(b, "agent.probe.dialogue.borrow.v1", integer, integer, integer, &.{ integer, cell_type }, &.{}, &.{region}, .{ .effects = &.{} });
+    const d = try dialogue.defineExchange(
+        b,
+        "agent.probe.dialogue.borrow.v1",
+        integer,
+        integer,
+        integer,
+        &.{ integer, cell_type },
+        &.{},
+        &.{region},
+        .{ .effects = &.{} },
+    );
     const entry = try b.declare(&.{}, integer, &.{}, &.{});
     const inside = try b.declare(&.{region_type}, d.answer, &.{}, &.{region});
     const body = try b.declare(&.{d.capability}, integer, &.{d.effect}, &.{region});
     const cell = try b.variable(cell_type);
     const ignored = try b.variable(integer);
     const read = try b.primitive(integer, .cell_get, &.{try b.reference(cell)}, 0);
-    try b.define(body, try b.bind(ignored, try dialogue.offer(b, d, try b.reference(b.parameter(body, 0)), read), try b.pure(read)));
+    try b.define(
+        body,
+        try b.bind(
+            ignored,
+            try dialogue.offer(b, d, try b.reference(b.parameter(body, 0)), read),
+            try b.pure(read),
+        ),
+    );
     const body_type = try b.schema(.{ .internal = .{ .computation = .{
         .parameters = &.{d.capability},
         .result = integer,
@@ -349,8 +394,20 @@ fn borrowedEscape(b: *Builder) !bsrc.Module {
         .capture_bound = &.{cell_type},
         .regions = &.{region},
     } } });
-    const created = try b.primitive(cell_type, .cell_new, &.{ try b.reference(b.parameter(inside, 0)), try b.constant(u64, 42) }, 0);
-    try b.define(inside, try b.bind(cell, try b.pure(created), try dialogue.start(b, d, try b.lambda(body, body_type), &.{})));
+    const created = try b.primitive(
+        cell_type,
+        .cell_new,
+        &.{ try b.reference(b.parameter(inside, 0)), try b.constant(u64, 42) },
+        0,
+    );
+    try b.define(
+        inside,
+        try b.bind(
+            cell,
+            try b.pure(created),
+            try dialogue.start(b, d, try b.lambda(body, body_type), &.{}),
+        ),
+    );
     const inside_type = try b.schema(.{ .internal = .{ .computation = .{
         .parameters = &.{region_type},
         .result = d.answer,
@@ -368,11 +425,111 @@ fn borrowedEscape(b: *Builder) !bsrc.Module {
 test "consumed dialogue future cannot be resumed" {
     var b = Builder.init(std.testing.allocator);
     defer b.deinit();
-    try std.testing.expectError(error.UnavailableSlot, horos.program.compile(std.testing.allocator, try build(&b, .double_use)));
+    try std.testing.expectError(
+        error.UnavailableSlot,
+        horos.program.compile(std.testing.allocator, try build(&b, .double_use)),
+    );
 }
 
 test "borrowed dialogue future cannot escape creator region" {
     var b = Builder.init(std.testing.allocator);
     defer b.deinit();
-    try std.testing.expectError(error.InvalidOwnership, horos.program.compile(std.testing.allocator, try build(&b, .borrowed_escape)));
+    try std.testing.expectError(
+        error.InvalidOwnership,
+        horos.program.compile(std.testing.allocator, try build(&b, .borrowed_escape)),
+    );
+}
+
+fn disposalStart(
+    b: *Builder,
+    d: dialogue.Generator,
+    unit: Id,
+    integer: Id,
+    region: Id,
+    region_type: Id,
+    cell_type: Id,
+    release: Id,
+) !Id {
+    const start_fn = try b.declare(&.{d.capability}, integer, &.{ release, d.effect }, &.{});
+    const inside = try b.declare(&.{region_type}, integer, &.{ release, d.effect }, &.{region});
+    const protection = try disposalProtection(
+        b,
+        d,
+        unit,
+        integer,
+        region,
+        cell_type,
+        release,
+        start_fn,
+    );
+    const created = try b.primitive(
+        cell_type,
+        .cell_new,
+        &.{ try b.reference(b.parameter(inside, 0)), try b.constant(u64, 42) },
+        0,
+    );
+    try b.define(inside, try b.bind(protection.cell, try b.pure(created), protection.term));
+    const inside_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{region_type},
+        .result = integer,
+        .effects = &.{ release, d.effect },
+        .capture_bound = &.{d.capability},
+        .regions = &.{region},
+    } } });
+    try b.define(start_fn, try b.term(.{ .with_region = .{
+        .region = region,
+        .body = try b.lambda(inside, inside_type),
+    } }));
+    const start_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{d.capability},
+        .result = integer,
+        .effects = &.{ release, d.effect },
+    } } });
+    return b.lambda(start_fn, start_type);
+}
+
+fn disposalProtection(
+    b: *Builder,
+    d: dialogue.Generator,
+    unit: Id,
+    integer: Id,
+    region: Id,
+    cell_type: Id,
+    release: Id,
+    start_fn: Id,
+) !struct { cell: Id, term: Id } {
+    const body = try b.declare(&.{}, integer, &.{d.effect}, &.{region});
+    const cell = try b.variable(cell_type);
+    const read = try b.primitive(integer, .cell_get, &.{try b.reference(cell)}, 0);
+    const answer = try b.variable(integer);
+    try b.define(
+        body,
+        try b.bind(
+            answer,
+            try dialogue.offer(b, d, try b.reference(b.parameter(start_fn, 0)), read),
+            try b.pure(try b.reference(answer)),
+        ),
+    );
+    const exit = try horos.source.library.cleanup.exitInfo(b, unit);
+    const cleanup = try b.declare(&.{exit}, unit, &.{release}, &.{region});
+    try b.define(cleanup, try b.term(.{ .perform = .{ .effect = release, .payload = read } }));
+    const body_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{},
+        .result = integer,
+        .effects = &.{d.effect},
+        .capture_bound = &.{ d.capability, cell_type },
+        .regions = &.{region},
+    } } });
+    const cleanup_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{exit},
+        .result = unit,
+        .effects = &.{release},
+        .capture_bound = &.{cell_type},
+        .regions = &.{region},
+    } } });
+    const protected = try b.term(.{ .protect = .{
+        .body = try b.lambda(body, body_type),
+        .cleanup = try b.lambda(cleanup, cleanup_type),
+    } });
+    return .{ .cell = cell, .term = protected };
 }

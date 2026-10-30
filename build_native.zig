@@ -2,7 +2,14 @@
 const std = @import("std");
 /// One packaging constant supplies both the namespace reader and manifest.
 pub const state_format: u32 = 20;
-pub const sqlite_flags: []const []const u8 = &.{ "-std=c99", "-DSQLITE_THREADSAFE=1", "-DSQLITE_OMIT_LOAD_EXTENSION=1", "-DSQLITE_DQS=0", "-DSQLITE_DEFAULT_MEMSTATUS=1", "-DSQLITE_DEFAULT_FOREIGN_KEYS=1" };
+pub const sqlite_flags: []const []const u8 = &.{
+    "-std=c99",
+    "-DSQLITE_THREADSAFE=1",
+    "-DSQLITE_OMIT_LOAD_EXTENSION=1",
+    "-DSQLITE_DQS=0",
+    "-DSQLITE_DEFAULT_MEMSTATUS=1",
+    "-DSQLITE_DEFAULT_FOREIGN_KEYS=1",
+};
 
 pub fn sqliteFlags(optimize: std.lang.Optimize) []const []const u8 {
     // Reduce optimization work on the amalgamation while retaining safe mode's
@@ -69,7 +76,8 @@ pub const Modules = struct {
 pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product {
     const target = modules.native.resolved_target orelse @panic("native target is required");
     const supported = (target.result.os.tag == .macos and target.result.cpu.arch == .aarch64) or
-        (target.result.os.tag == .linux and target.result.cpu.arch == .x86_64 and target.result.abi == .musl);
+        (target.result.os.tag == .linux and
+            target.result.cpu.arch == .x86_64 and target.result.abi == .musl);
     if (!supported) @panic("native product supports aarch64-macos and x86_64-linux-musl");
     const optimize = modules.native.optimize orelse .safe;
     const assets = switch (options.application) {
@@ -81,7 +89,10 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
         .root_source_file = assets.types,
         .target = target,
         .optimize = optimize,
-        .imports = &.{ .{ .name = "protean_contracts", .module = modules.native_contracts }, .{ .name = "protean", .module = modules.native_protean } },
+        .imports = &.{ .{
+            .name = "protean_contracts",
+            .module = modules.native_contracts,
+        }, .{ .name = "protean", .module = modules.native_protean } },
     });
     const environment = b.createModule(.{
         .root_source_file = options.environment,
@@ -94,29 +105,7 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
             .{ .name = "horos_data", .module = modules.native_data },
         },
     });
-    const manifest = b.addRunArtifact(modules.host_tool);
-    manifest.addArg("manifest");
-    manifest.has_side_effects = true;
-    manifest.addFileArg2(assets.image, .{});
-    manifest.addFileArg2(assets.application, .{});
-    manifest.addFileArg2(modules.root.path(b, "conformance/protean/dependencies.lock.json"), .{});
-    manifest.addFileArg2(modules.root.path(b, "LICENSE"), .{});
-    const kosmos = modules.native.import_table.get("kosmos") orelse @panic("missing admitted Kosmos module");
-    manifest.addFileArg2(kosmos.root_source_file.?.dirname().dirname().path(b, "LICENSE"), .{});
-    manifest.addFileArg2(modules.native_data.root_source_file.?.dirname().dirname().dirname().path(b, "LICENSE"), .{});
-    manifest.addDirectoryArg2(modules.sqlite_source, .{ .make_absolute = true });
-    manifest.addArg("system");
-    manifest.addArg(std.json.Stringify.valueAlloc(b.allocator, sqliteFlags(optimize), .{}) catch @panic("out of memory"));
-    manifest.addArg("filesystem");
-    manifest.addArg(b.fmt("agent-native-state/{d}", .{state_format}));
-    manifest.addArgs(&.{ target.result.zigTriple(b.allocator) catch @panic("out of memory"), @tagName(optimize) });
-    // Always-run steps do not hash file arguments into their output directory
-    // in Zig 0.17. Distinguish the named products even on the same target so
-    // concurrent manifest writers cannot overwrite one another's output.
-    const manifest_file = manifest.addOutputFileArg2(b.fmt("{s}-manifest.json", .{options.name}), .{});
-    manifest.addFileArg2(modules.root.path(b, "conformance/protean/native-dependencies.lock.json"), .{});
-    manifest.addFileArg2(.zig_exe, .{ .make_absolute = true });
-    manifest.addDirectoryArg2(.zig_lib, .{ .make_absolute = true });
+    const manifest_file = createManifest(b, modules, options.name, assets, target, optimize);
 
     const root = b.createModule(.{
         .root_source_file = modules.root.path(b, "runtime/native/entry.zig"),
@@ -136,10 +125,73 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
     const executable = b.addExecutable(.{
         .name = options.name,
         .root_module = root,
-        .use_llvm = if (target.result.os.tag == .linux and target.result.cpu.arch == .x86_64) true else null,
+        .use_llvm = if (linuxX86(target)) true else null,
     });
     const install = b.addInstallArtifact(executable, .{});
-    return .{ .executable = executable, .install = install, .assets = assets, .manifest = manifest_file };
+    return .{
+        .executable = executable,
+        .install = install,
+        .assets = assets,
+        .manifest = manifest_file,
+    };
+}
+
+fn createManifest(
+    b: *std.Build,
+    modules: Modules,
+    name: []const u8,
+    assets: Assets,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) std.Build.LazyPath {
+    const manifest = b.addRunArtifact(modules.host_tool);
+    manifest.addArg("manifest");
+    manifest.has_side_effects = true;
+    manifest.addFileArg2(assets.image, .{});
+    manifest.addFileArg2(assets.application, .{});
+    manifest.addFileArg2(modules.root.path(b, "conformance/protean/dependencies.lock.json"), .{});
+    manifest.addFileArg2(modules.root.path(b, "LICENSE"), .{});
+    const kosmos = modules.native.import_table.get(
+        "kosmos",
+    ) orelse @panic(
+        "missing admitted Kosmos module",
+    );
+    manifest.addFileArg2(kosmos.root_source_file.?.dirname().dirname().path(b, "LICENSE"), .{});
+    manifest.addFileArg2(modules.native_data.root_source_file.?.dirname().dirname().dirname().path(
+        b,
+        "LICENSE",
+    ), .{});
+    manifest.addDirectoryArg2(modules.sqlite_source, .{ .make_absolute = true });
+    manifest.addArg("system");
+    manifest.addArg(
+        std.json.Stringify.valueAlloc(
+            b.allocator,
+            sqliteFlags(optimize),
+            .{},
+        ) catch @panic(
+            "out of memory",
+        ),
+    );
+    manifest.addArg("filesystem");
+    manifest.addArg(b.fmt("agent-native-state/{d}", .{state_format}));
+    manifest.addArgs(&.{
+        target.result.zigTriple(b.allocator) catch @panic("out of memory"),
+        @tagName(optimize),
+    });
+    // Always-run steps do not hash file arguments into their output directory
+    // in Zig 0.17. Distinguish the named products even on the same target so
+    // concurrent manifest writers cannot overwrite one another's output.
+    const manifest_file = manifest.addOutputFileArg2(b.fmt("{s}-manifest.json", .{
+        name,
+    }), .{});
+    manifest.addFileArg2(modules.root.path(
+        b,
+        "conformance/protean/native-dependencies.lock.json",
+    ), .{});
+    manifest.addFileArg2(.zig_exe, .{ .make_absolute = true });
+    manifest.addDirectoryArg2(.zig_lib, .{ .make_absolute = true });
+
+    return manifest_file;
 }
 
 fn generate(b: *std.Build, modules: Modules, source: Source) Assets {
@@ -148,7 +200,10 @@ fn generate(b: *std.Build, modules: Modules, source: Source) Assets {
         .root_source_file = source.types,
         .target = b.graph.host,
         .optimize = optimize,
-        .imports = &.{ .{ .name = "protean_contracts", .module = modules.contracts }, .{ .name = "protean", .module = modules.protean } },
+        .imports = &.{
+            .{ .name = "protean_contracts", .module = modules.contracts },
+            .{ .name = "protean", .module = modules.protean },
+        },
     });
     const definition = b.createModule(.{
         .root_source_file = source.definition,
@@ -175,7 +230,7 @@ fn generate(b: *std.Build, modules: Modules, source: Source) Assets {
     });
     const emitter = b.addExecutable(.{
         .name = "protean-native-assets",
-        .use_llvm = if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) false else null,
+        .use_llvm = if (linuxX86(b.graph.host)) false else null,
         .root_module = b.createModule(.{
             .root_source_file = modules.root.path(b, "tools/native/emit.zig"),
             .target = b.graph.host,
@@ -195,4 +250,8 @@ fn generate(b: *std.Build, modules: Modules, source: Source) Assets {
         .application = run.addOutputFileArg2("application.json", .{}),
         .types = source.types,
     };
+}
+
+fn linuxX86(target: std.Build.ResolvedTarget) bool {
+    return target.result.os.tag == .linux and target.result.cpu.arch == .x86_64;
 }

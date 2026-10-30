@@ -74,7 +74,11 @@ pub const PublicationPrefix = struct {
     const Set = std.AutoHashMapUnmanaged(state.Digest, void);
     const Active = std.AutoArrayHashMapUnmanaged(state.Digest, void);
     const Position = struct { publication: state.WorkPublication, seq: u64 };
-    const Source = struct { lossless: Active = .empty, outer: Set = .empty, single_step: Set = .empty };
+    const Source = struct {
+        lossless: Active = .empty,
+        outer: Set = .empty,
+        single_step: Set = .empty,
+    };
 
     latest: std.AutoHashMap(state.Digest, Position),
     successors: Set = .empty,
@@ -134,20 +138,38 @@ pub const PublicationPrefix = struct {
         try self.latest.put(item.work, .{ .publication = item, .seq = seq });
     }
 
-    pub fn outerCursorAt(self: *const PublicationPrefix, id: state.Digest, watermark: u64) @import("workspace_state.zig").OuterCursor {
+    pub fn outerCursorAt(
+        self: *const PublicationPrefix,
+        id: state.Digest,
+        watermark: u64,
+    ) @import("workspace_state.zig").OuterCursor {
         return self.outer_history.at(id, watermark);
     }
 
-    pub fn outerCursor(self: *const PublicationPrefix, id: state.Digest, watermark: u64, current: ?state.Reference) !@import("workspace_state.zig").OuterCursor {
+    pub fn outerCursor(
+        self: *const PublicationPrefix,
+        id: state.Digest,
+        watermark: u64,
+        current: ?state.Reference,
+    ) !@import("workspace_state.zig").OuterCursor {
         return self.outer_history.withCurrent(id, watermark, current);
     }
 
     pub fn validateOuterCursor(self: *const PublicationPrefix, item: state.WorkPublication) !void {
-        const expected = self.outerCursor(item.work, std.math.maxInt(u64), item.outer_operation orelse item.runtime_capsule) catch return error.InvalidArchive;
+        const expected = self.outerCursor(
+            item.work,
+            std.math.maxInt(u64),
+            item.outer_operation orelse item.runtime_capsule,
+        ) catch return error.InvalidArchive;
         if (!std.meta.eql(expected, item.outer_cursor)) return error.InvalidArchive;
     }
 
-    pub fn outerRevision(self: *const PublicationPrefix, id: state.Digest, watermark: u64, current: ?state.Reference) !u64 {
+    pub fn outerRevision(
+        self: *const PublicationPrefix,
+        id: state.Digest,
+        watermark: u64,
+        current: ?state.Reference,
+    ) !u64 {
         return (try self.outerCursor(id, watermark, current)).revision;
     }
 

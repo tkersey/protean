@@ -3,9 +3,9 @@
 The required pull-request workflow must complete in **one attempt within 600
 seconds of its original automatic trigger**. The budget includes runner queueing,
 setup, acquisition, compilation, every selected test, packaging, artifact and
-cache transfers, and the final identity comparison. The terminal `native` gate
+cache transfers, TigerStyle, and the final identity comparison. The terminal `native` gate
 measures from the run's `created_at`, rejects `run_attempt != 1`, and requires all
-eleven qualification lanes to succeed. A failed warmup followed by a successful
+eleven qualification lanes and TigerStyle to succeed. A failed warmup followed by a successful
 retry does not satisfy this requirement.
 
 Pull requests and main pushes run the same inventory on native Linux x86-64 with
@@ -19,6 +19,14 @@ it neither rebuilds those executables nor substitutes for full qualification. Ma
 so every selected lane can return evidence.
 
 ## Required inventory
+
+The [TigerStyle gate](../docs/tiger-style.md) runs alongside the qualification
+matrix. It checks every tracked Zig file at the exact committed PR head, main
+push head, or manual-run head, including unchanged code. It runs the pinned
+auditor's tests and launcher integration probes. The terminal
+`native` gate requires both TigerStyle and the existing matrix, within the same
+600-second original-trigger budget. The retained-runtime diagnostic omits
+TigerStyle and still cannot pass the terminal gate.
 
 | Lane | Checks |
 | --- | --- |
@@ -86,7 +94,10 @@ end-to-end recovery sequences.
 
 Workspace execution, retention and history still run once each across 22 tests.
 CI compiles the three existing filtered groups separately; the full unfiltered
-root is retained for local grouped execution. Selected list fixtures are reduced
+root is retained for local grouped execution. The 16 execution tests run in three
+independent processes using the existing qualification runner, which rejects
+omissions, overlaps, skips, failures and leaks. Local execution uses those same
+partitions alongside retention and history. Selected list fixtures are reduced
 from 300 to 32 entries and the deep recursive fixture from 50,000 to 2,048 steps. This retains the smaller-scale
 semantic checks while retiring the former scale coverage. The retained-work
 fixture uses 32 cooperative list entries, 32 scope works, 32 status-history
@@ -108,6 +119,7 @@ Native macOS verification supplements the required Linux workflow; emulation or
 cross-compilation does not replace the native platform checks.
 
 ```sh
+bash tools/tiger-style.sh --all HEAD
 sh tools/check_zig_paths.sh
 zig run tools/native/dependencies.zig -- setup \
   conformance/protean/dependencies.lock.json \
@@ -126,11 +138,12 @@ and do not automatically become required again.
 
 ## Compilation, caching and artifacts
 
-The five authoring test roots use Zig's native x86-64 backend on Linux, retaining
-safe optimization and every selected test. macOS keeps its existing backend;
+The five authoring test roots, both native owner test roots, and all three general
+workspace groups use Zig's native x86-64 backend on Linux, retaining safe
+optimization and every selected test. macOS keeps its existing backend;
 the production native executable keeps LLVM. This reduces repeated LLVM test
-compilation but no longer exercises those authoring test bodies through LLVM on
-Linux. Compile-time rejection and independent execution checks remain selected.
+compilation but does not exercise those test bodies through LLVM on Linux.
+Compile-time rejection and independent execution checks remain selected.
 
 Exact compiled-artifact keys bind compiler identity, target, recipe and source
 inputs. Restored manifests verify output bytes and executable modes. Every

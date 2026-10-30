@@ -22,7 +22,12 @@ fn hexadecimal(a: std.mem.Allocator, bytes: anytype) !json.Value {
 fn counter(a: std.mem.Allocator, value: u64) !json.Value {
     return json.string(try std.fmt.allocPrint(a, "{d}", .{value}));
 }
-fn reference(a: std.mem.Allocator, id: [32]u8, ref: state.Reference, schema_id: []const u8) !json.Value {
+fn reference(
+    a: std.mem.Allocator,
+    id: [32]u8,
+    ref: state.Reference,
+    schema_id: []const u8,
+) !json.Value {
     var artifact = json.object();
     try json.put(a, &artifact, "artifact_id", try hexadecimal(a, id));
     try json.put(a, &artifact, "sha256", try hexadecimal(a, ref.digest));
@@ -42,7 +47,11 @@ fn operationId(value: json.Value) ![]const u8 {
 }
 fn typed(comptime T: type, a: std.mem.Allocator, object: json.Value, schema_id: []const u8) !T {
     try protocol.closed(object, .{ .required = &.{ "schema_id", "value" } });
-    if (!std.mem.eql(u8, try json.text(try field(object, "schema_id")), schema_id)) return error.InvalidParams;
+    if (!std.mem.eql(
+        u8,
+        try json.text(try field(object, "schema_id")),
+        schema_id,
+    )) return error.InvalidParams;
     const value = try field(object, "value");
     try inlineValue(a, value);
     return values.fromJson(T, a, value);
@@ -68,75 +77,204 @@ pub fn Client(comptime Types: type) type {
             return self.subjectSnapshot(a, id, null);
         }
 
-        fn subjectSnapshot(self: *Self, a: std.mem.Allocator, id: state.TaskId, residual: ?state.Digest) !json.Value {
+        fn subjectSnapshot(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            residual: ?state.Digest,
+        ) !json.Value {
             var decoded = try self.service.task(a, id);
             defer decoded.deinit();
             const task = decoded.value;
+            var result = try self.snapshotMetadata(a, id, task);
+            try self.snapshotMessages(a, id, task, &result);
+            try self.snapshotRecovery(a, id, residual, &result);
+            return result;
+        }
+        fn snapshotMetadata(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            task: state.Task,
+        ) !json.Value {
             var result = json.object();
             try json.put(a, &result, "task_id", try hexadecimal(a, id));
-            try json.put(a, &result, "application_id", json.string(try a.dupe(u8, task.application_id.bytes)));
-            try json.put(a, &result, "profile_id", json.string(try a.dupe(u8, task.profile_id.bytes)));
+            try json.put(
+                a,
+                &result,
+                "application_id",
+                json.string(try a.dupe(u8, task.application_id.bytes)),
+            );
+            try json.put(
+                a,
+                &result,
+                "profile_id",
+                json.string(try a.dupe(u8, task.profile_id.bytes)),
+            );
             try json.put(a, &result, "profile_digest", try hexadecimal(a, task.profile.digest));
-            try json.put(a, &result, "status", json.string(@tagName(try self.service.status(a, task))));
+            try json.put(
+                a,
+                &result,
+                "status",
+                json.string(@tagName(try self.service.status(a, task))),
+            );
             try json.put(a, &result, "revision", try counter(a, task.revision));
             try json.put(a, &result, "controller_epoch", try counter(a, task.controller_epoch));
-            try json.put(a, &result, "controller_handoff", if (task.controller_interaction) |handoff| try hexadecimal(a, handoff) else .null);
+            try json.put(
+                a,
+                &result,
+                "controller_handoff",
+                if (task.controller_interaction) |handoff| try hexadecimal(a, handoff) else .null,
+            );
             try json.put(a, &result, "result_available", .{ .bool = task.terminal() });
-            try json.put(a, &result, "associated_work_disposed", .{ .bool = try self.service.associatedWorkDisposed(a, id) });
+            try json.put(a, &result, "associated_work_disposed", .{
+                .bool = try self.service.associatedWorkDisposed(a, id),
+            });
             try json.put(a, &result, "earliest_available_seq", try counter(a, task.event_floor));
             try json.put(a, &result, "high_water_seq", try counter(a, task.event_high));
-            try json.put(a, &result, "blocker", if (task.blocker) |blocker| json.string(@tagName(blocker)) else .null);
-            try json.put(a, &result, "cancellation", if (task.cancellation) |reason| json.string(try a.dupe(u8, reason.bytes)) else .null);
+            try json.put(
+                a,
+                &result,
+                "blocker",
+                if (task.blocker) |blocker| json.string(@tagName(blocker)) else .null,
+            );
+            try json.put(
+                a,
+                &result,
+                "cancellation",
+                if (task.cancellation) |reason| json.string(
+                    try a.dupe(u8, reason.bytes),
+                ) else .null,
+            );
+            return result;
+        }
+        fn snapshotMessages(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            task: state.Task,
+            result: *json.Value,
+        ) !void {
             var messages: std.array_list.Managed(json.Value) = .init(a);
-            try json.put(a, &result, "pending_messages", .{ .array = messages });
-            try json.put(a, &result, "pending_message_count", try counter(a, task.messages.items.len));
-            try json.put(a, &result, "pending_messages_truncated", .{ .bool = false });
-            try json.put(a, &result, "message_history", json.string("task.events"));
-            if (try self.service.pendingQuestion(a, id)) |pending| {
-                var question = pending;
-                defer question.deinit();
-                const bytes = try self.service.namespace.store.object(a, question.value.prompt, null);
-                defer a.free(bytes);
-                try json.put(a, &result, "question", try self.projectQuestion(a, id, try state.questionData(a, question.value, bytes)));
-            } else try json.put(a, &result, "question", .null);
-            for (task.messages.items[0..@min(task.messages.items.len, (protocol.Limits{}).pending_message_page)]) |message_id| {
-                const bytes = (try self.service.namespace.store.recordBytes(a, "message", message_id, id)) orelse return error.CorruptState;
+            try json.put(a, result, "pending_messages", .{ .array = messages });
+            try json.put(
+                a,
+                result,
+                "pending_message_count",
+                try counter(a, task.messages.items.len),
+            );
+            try json.put(a, result, "pending_messages_truncated", .{ .bool = false });
+            try json.put(a, result, "message_history", json.string("task.events"));
+            try self.snapshotQuestion(a, id, result);
+            for (task.messages.items[0..@min(
+                task.messages.items.len,
+                (protocol.Limits{}).pending_message_page,
+            )]) |message_id| {
+                const bytes = (try self.service.namespace.store.recordBytes(
+                    a,
+                    "message",
+                    message_id,
+                    id,
+                )) orelse return error.CorruptState;
                 defer a.free(bytes);
                 var saved = try contracts.decodeOwned(state.Message, a, bytes);
                 defer saved.deinit();
                 try messages.append(try state.messageData(a, saved.value, saved.value.disposition));
-                try json.put(a, &result, "pending_messages", .{ .array = messages });
-                if (!try json.fits(a, result, json.projection_limits)) {
+                try json.put(a, result, "pending_messages", .{ .array = messages });
+                if (!try json.fits(a, result.*, json.projection_limits)) {
                     messages.items.len -= 1;
                     break;
                 }
             }
-            try json.put(a, &result, "pending_messages", .{ .array = messages });
-            try json.put(a, &result, "pending_messages_truncated", .{ .bool = messages.items.len != task.messages.items.len });
+            try json.put(a, result, "pending_messages", .{ .array = messages });
+            try json.put(a, result, "pending_messages_truncated", .{
+                .bool = messages.items.len != task.messages.items.len,
+            });
+        }
+        fn snapshotQuestion(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            result: *json.Value,
+        ) !void {
+            if (try self.service.pendingQuestion(a, id)) |pending| {
+                var question = pending;
+                defer question.deinit();
+                const bytes = try self.service.namespace.store.object(
+                    a,
+                    question.value.prompt,
+                    null,
+                );
+                defer a.free(bytes);
+                try json.put(
+                    a,
+                    result,
+                    "question",
+                    try self.projectQuestion(
+                        a,
+                        id,
+                        try state.questionData(a, question.value, bytes),
+                    ),
+                );
+            } else try json.put(a, result, "question", .null);
+        }
+        fn snapshotRecovery(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            residual: ?state.Digest,
+            result: *json.Value,
+        ) !void {
             var recovery: json.Value = .null;
-            if (residual) |selected| try json.put(a, &result, "residual_id", try hexadecimal(a, selected));
+            if (residual) |selected| try json.put(
+                a,
+                result,
+                "residual_id",
+                try hexadecimal(a, selected),
+            );
             if (try self.service.subjectRecoveryAvailability(a, id, residual)) |available| {
                 recovery = json.object();
-                try json.put(a, &recovery, "occurrence_id", try hexadecimal(a, available.occurrence));
+                try json.put(
+                    a,
+                    &recovery,
+                    "occurrence_id",
+                    try hexadecimal(a, available.occurrence),
+                );
                 try json.put(a, &recovery, "attempt_id", try hexadecimal(a, available.attempt));
                 var mechanisms: std.array_list.Managed(json.Value) = .init(a);
-                for (available.mechanisms) |mechanism| try mechanisms.append(json.string(@tagName(mechanism)));
+                for (available.mechanisms) |mechanism| try mechanisms.append(
+                    json.string(@tagName(mechanism)),
+                );
                 try json.put(a, &recovery, "mechanisms", .{ .array = mechanisms });
             }
-            try json.put(a, &result, "recovery", recovery);
-            return result;
+            try json.put(a, result, "recovery", recovery);
         }
 
-        fn projectQuestion(self: *Self, a: std.mem.Allocator, task_id: state.TaskId, value: json.Value) !json.Value {
+        fn projectQuestion(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            value: json.Value,
+        ) !json.Value {
             if (json.get(value, "prompt_ref") != null) return value;
             const prompt = json.get(value, "prompt") orelse return error.CorruptState;
             if (try json.fits(a, prompt, json.payload_limits)) return value;
             const id = try identifier(32, try field(value, "question_id"));
-            const bytes = (try self.service.namespace.store.recordBytes(a, "question", id, task_id)) orelse return error.CorruptState;
+            const bytes = (try self.service.namespace.store.recordBytes(
+                a,
+                "question",
+                id,
+                task_id,
+            )) orelse return error.CorruptState;
             defer a.free(bytes);
             var question = try contracts.decodeOwned(state.Question, a, bytes);
             defer question.deinit();
-            var ref = try reference(a, question.value.prompt.digest, question.value.prompt, "agent-native-question-prompt.v1");
+            var ref = try reference(
+                a,
+                question.value.prompt.digest,
+                question.value.prompt,
+                "agent-native-question-prompt.v1",
+            );
             try json.put(a, &ref, "question_id", try hexadecimal(a, id));
             var result = value;
             _ = result.object.swapRemove("prompt");
@@ -149,9 +287,24 @@ pub fn Client(comptime Types: type) type {
             try json.put(a, &result, "receipt_id", try hexadecimal(a, admitted.receipt.id));
             try json.put(a, &result, "receipt_revision", try counter(a, admitted.receipt.revision));
             try json.put(a, &result, "replayed", .{ .bool = admitted.replayed });
-            try json.put(a, &result, "disposition", json.string(@tagName(admitted.receipt.disposition)));
-            if (admitted.receipt.message) |id| try json.put(a, &result, "message_id", try hexadecimal(a, id));
-            if (admitted.receipt.question) |id| try json.put(a, &result, "question_id", try hexadecimal(a, id));
+            try json.put(
+                a,
+                &result,
+                "disposition",
+                json.string(@tagName(admitted.receipt.disposition)),
+            );
+            if (admitted.receipt.message) |id| try json.put(
+                a,
+                &result,
+                "message_id",
+                try hexadecimal(a, id),
+            );
+            if (admitted.receipt.question) |id| try json.put(
+                a,
+                &result,
+                "question_id",
+                try hexadecimal(a, id),
+            );
             if (admitted.receipt.reconciliation) |id| {
                 var decoded = try self.service.reconciliation(a, admitted.receipt.task, id);
                 defer decoded.deinit();
@@ -162,15 +315,38 @@ pub fn Client(comptime Types: type) type {
                 try json.put(a, &recovery, "attempt_id", try hexadecimal(a, saved.attempt));
                 try json.put(a, &recovery, "status", json.string(@tagName(saved.outcome)));
                 try json.put(a, &recovery, "provenance", json.string(@tagName(saved.provenance)));
-                try json.put(a, &recovery, "mechanism", json.string(try a.dupe(u8, saved.mechanism.bytes)));
-                try json.put(a, &recovery, "mechanism_version", try counter(a, saved.mechanism_version));
-                try json.put(a, &recovery, "reason", if (saved.outcome == .unresolved) json.string(@tagName(saved.outcome.unresolved)) else .null);
+                try json.put(
+                    a,
+                    &recovery,
+                    "mechanism",
+                    json.string(try a.dupe(u8, saved.mechanism.bytes)),
+                );
+                try json.put(
+                    a,
+                    &recovery,
+                    "mechanism_version",
+                    try counter(a, saved.mechanism_version),
+                );
+                try json.put(
+                    a,
+                    &recovery,
+                    "reason",
+                    if (saved.outcome == .unresolved) json.string(
+                        @tagName(saved.outcome.unresolved),
+                    ) else .null,
+                );
                 try json.put(a, &result, "reconciliation", recovery);
             }
             return result;
         }
 
-        pub fn events(self: *Self, a: std.mem.Allocator, id: state.TaskId, after: u64, limit: u32) !json.Value {
+        pub fn events(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            after: u64,
+            limit: u32,
+        ) !json.Value {
             var decoded = try self.service.task(a, id);
             defer decoded.deinit();
             const task = decoded.value;
@@ -191,14 +367,12 @@ pub fn Client(comptime Types: type) type {
                 var saved = try contracts.decodeOwned(state.Event, a, bytes);
                 defer saved.deinit();
                 const event = saved.value;
-                if (event.seq != next + 1 or !std.mem.eql(u8, &event.task, &id)) return error.CorruptState;
-                var item = json.object();
-                try json.put(a, &item, "task_id", try hexadecimal(a, id));
-                try json.put(a, &item, "seq", try counter(a, event.seq));
-                try json.put(a, &item, "revision", try counter(a, event.revision));
-                try json.put(a, &item, "type", json.string(@tagName(event.kind)));
-                const data_value = (try json.parse(a, event.data.bytes, .{ .bytes = 48 * 1024, .depth = 33 })).value;
-                try json.put(a, &item, "data", if (event.kind == .input_required) try self.projectQuestion(a, id, data_value) else data_value);
+                if (event.seq != next + 1 or !std.mem.eql(
+                    u8,
+                    &event.task,
+                    &id,
+                )) return error.CorruptState;
+                const item = try self.projectEvent(a, id, event);
                 const encoded = try json.canonical(a, item);
                 defer a.free(encoded);
                 if (encoded.len + 1 > (protocol.Limits{}).inline_bytes - encoded_bytes) {
@@ -209,7 +383,11 @@ pub fn Client(comptime Types: type) type {
                 try items.append(item);
                 // The page adds one object and a fixed small cursor envelope;
                 // reserve those tokens before accepting the next complete event.
-                if (!try json.fits(a, .{ .array = items }, .{ .bytes = json.projection_limits.bytes - 1024, .depth = json.projection_limits.depth - 1, .tokens = json.projection_limits.tokens - 32 })) {
+                if (!try json.fits(a, .{ .array = items }, .{
+                    .bytes = json.projection_limits.bytes - 1024,
+                    .depth = json.projection_limits.depth - 1,
+                    .tokens = json.projection_limits.tokens - 32,
+                })) {
                     _ = items.pop();
                     if (items.items.len == 0) return error.CorruptState;
                     break;
@@ -223,6 +401,34 @@ pub fn Client(comptime Types: type) type {
             try json.put(a, &result, "next_after_seq", try counter(a, next));
             try json.put(a, &result, "has_more", .{ .bool = next < task.event_high });
             return result;
+        }
+
+        fn projectEvent(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            event: state.Event,
+        ) !json.Value {
+            var item = json.object();
+            try json.put(a, &item, "task_id", try hexadecimal(a, id));
+            try json.put(a, &item, "seq", try counter(a, event.seq));
+            try json.put(a, &item, "revision", try counter(a, event.revision));
+            try json.put(a, &item, "type", json.string(@tagName(event.kind)));
+            const data_value = (try json.parse(a, event.data.bytes, .{
+                .bytes = 48 * 1024,
+                .depth = 33,
+            })).value;
+            try json.put(
+                a,
+                &item,
+                "data",
+                if (event.kind == .input_required) try self.projectQuestion(
+                    a,
+                    id,
+                    data_value,
+                ) else data_value,
+            );
+            return item;
         }
 
         fn taskResult(self: *Self, a: std.mem.Allocator, id: state.TaskId) !json.Value {
@@ -239,7 +445,12 @@ pub fn Client(comptime Types: type) type {
                 // Keep integrity/missing-object checks without materializing a
                 // large wire result just to return its existing public reference.
                 try self.service.namespace.store.objectRange(result, 0, &.{});
-                try json.put(a, &outcome, "schema_id", json.string(try a.dupe(u8, task.output_schema_id.bytes)));
+                try json.put(
+                    a,
+                    &outcome,
+                    "schema_id",
+                    json.string(try a.dupe(u8, task.output_schema_id.bytes)),
+                );
                 try self.resultValue(a, &outcome, task);
             } else {
                 const bytes = try self.service.namespace.store.object(a, result, null);
@@ -248,12 +459,21 @@ pub fn Client(comptime Types: type) type {
                 defer saved.deinit();
                 switch (saved.value) {
                     .failed => {
-                        try json.put(a, &outcome, "schema_id", json.string(try a.dupe(u8, task.failure_schema_id.bytes)));
+                        try json.put(
+                            a,
+                            &outcome,
+                            "schema_id",
+                            json.string(try a.dupe(u8, task.failure_schema_id.bytes)),
+                        );
                         try self.resultValue(a, &outcome, task);
-                        try json.put(a, &outcome, "cleanup_complete", .{ .bool = tasks.cleanupComplete(saved.value) });
+                        try json.put(a, &outcome, "cleanup_complete", .{
+                            .bool = tasks.cleanupComplete(saved.value),
+                        });
                     },
                     .cancelled => {
-                        try json.put(a, &outcome, "cleanup_complete", .{ .bool = tasks.cleanupComplete(saved.value) });
+                        try json.put(a, &outcome, "cleanup_complete", .{
+                            .bool = tasks.cleanupComplete(saved.value),
+                        });
                     },
                     else => return error.CorruptState,
                 }
@@ -261,7 +481,12 @@ pub fn Client(comptime Types: type) type {
             try json.put(a, &output, "outcome", outcome);
             return output;
         }
-        fn resultValue(self: *Self, a: std.mem.Allocator, output: *json.Value, task: state.Task) !void {
+        fn resultValue(
+            self: *Self,
+            a: std.mem.Allocator,
+            output: *json.Value,
+            task: state.Task,
+        ) !void {
             const ref = task.client_result orelse return error.CorruptState;
             if (task.result_artifact == null and ref.bytes <= json.payload_limits.bytes) {
                 const bytes = try self.service.namespace.store.object(a, ref, 60 * 1024);
@@ -272,10 +497,30 @@ pub fn Client(comptime Types: type) type {
                     return;
                 }
             }
-            try json.put(a, output, "value_ref", try reference(a, task.result_artifact orelse ref.digest, ref, if (task.outcome_kind == .completed) task.output_schema_id.bytes else task.failure_schema_id.bytes));
+            try json.put(
+                a,
+                output,
+                "value_ref",
+                try reference(
+                    a,
+                    task.result_artifact orelse ref.digest,
+                    ref,
+                    if (task.outcome_kind == .completed)
+                        task.output_schema_id.bytes
+                    else
+                        task.failure_schema_id.bytes,
+                ),
+            );
         }
 
-        pub fn cursorRange(self: *Self, a: std.mem.Allocator, params: json.Value) !struct { first: u64, last: u64 } {
+        pub fn cursorRange(
+            self: *Self,
+            a: std.mem.Allocator,
+            params: json.Value,
+        ) !struct {
+            first: u64,
+            last: u64,
+        } {
             var task = try self.service.task(a, try identifier(16, try field(params, "task_id")));
             defer task.deinit();
             return .{ .first = task.value.event_floor, .last = task.value.event_high };
@@ -288,37 +533,98 @@ pub fn Client(comptime Types: type) type {
             const length = request.length;
             const task_value = json.get(params, "task_id") orelse {
                 if (json.get(params, "question_id") != null) return error.InvalidParams;
-                return discovery.artifactChunk(a, try self.service.schemaArtifact(id), offset, length);
+                return discovery.artifactChunk(
+                    a,
+                    try self.service.schemaArtifact(id),
+                    offset,
+                    length,
+                );
             };
             const task_id = try identifier(16, task_value);
             var task = try self.service.task(a, task_id);
             defer task.deinit();
             if (json.get(params, "question_id")) |question_value| {
-                const question_id = try identifier(32, question_value);
-                const bytes = (try self.service.namespace.store.recordBytes(a, "question", question_id, task_id)) orelse return error.ArtifactUnavailable;
-                defer a.free(bytes);
-                var question = try contracts.decodeOwned(state.Question, a, bytes);
-                defer question.deinit();
-                if (!std.mem.eql(u8, &question.value.task, &task_id) or !std.mem.eql(u8, &question.value.id, &question_id)) return error.CorruptState;
-                if (!std.mem.eql(u8, &question.value.prompt.digest, &id)) return error.ArtifactUnavailable;
-                return self.objectChunk(a, question.value.prompt, offset, length);
+                return self.questionArtifact(a, task_id, question_value, request);
             }
-            if (task.value.client_result == null or !std.mem.eql(u8, &(task.value.result_artifact orelse task.value.client_result.?.digest), &id))
-                return self.objectChunk(a, try self.service.projectedArtifact(a, task_id, id), offset, length);
+            if (task.value.client_result == null or !std.mem.eql(
+                u8,
+                &(task.value.result_artifact orelse task.value.client_result.?.digest),
+                &id,
+            ))
+                return self.objectChunk(
+                    a,
+                    try self.service.projectedArtifact(a, task_id, id),
+                    offset,
+                    length,
+                );
             const public_result = task.value.client_result.?;
             const published = task.value.result_artifact orelse public_result.digest;
             if (!std.mem.eql(u8, &published, &id)) return error.ArtifactUnavailable;
-            if (task.value.result_artifact == null) return self.objectChunk(a, public_result, offset, length);
-            const encoded = (try self.service.namespace.store.recordBytes(a, "artifact", id, task_id)) orelse return error.ArtifactUnavailable;
+            if (task.value.result_artifact == null) return self.objectChunk(
+                a,
+                public_result,
+                offset,
+                length,
+            );
+            const encoded = (try self.service.namespace.store.recordBytes(
+                a,
+                "artifact",
+                id,
+                task_id,
+            )) orelse return error.ArtifactUnavailable;
             defer a.free(encoded);
             var saved = try contracts.decodeOwned(state.Artifact, a, encoded);
             defer saved.deinit();
             const artifact = saved.value;
-            if (artifact.task == null or !std.mem.eql(u8, &artifact.task.?, &task_id) or !std.mem.eql(u8, &artifact.id, &id)) return error.CorruptState;
+            if (artifact.task == null or !std.mem.eql(
+                u8,
+                &artifact.task.?,
+                &task_id,
+            ) or !std.mem.eql(u8, &artifact.id, &id)) return error.CorruptState;
             return self.objectChunk(a, artifact.value, offset, length);
         }
 
-        fn objectChunk(self: *Self, a: std.mem.Allocator, ref: state.Reference, offset: u64, length: u32) !json.Value {
+        fn questionArtifact(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            question_value: json.Value,
+            request: discovery.ArtifactRequest,
+        ) !json.Value {
+            const id = request.id;
+            const offset = request.offset;
+            const length = request.length;
+
+            const question_id = try identifier(32, question_value);
+            const bytes = (try self.service.namespace.store.recordBytes(
+                a,
+                "question",
+                question_id,
+                task_id,
+            )) orelse return error.ArtifactUnavailable;
+            defer a.free(bytes);
+            var question = try contracts.decodeOwned(state.Question, a, bytes);
+            defer question.deinit();
+            if (!std.mem.eql(u8, &question.value.task, &task_id) or !std.mem.eql(
+                u8,
+                &question.value.id,
+                &question_id,
+            )) return error.CorruptState;
+            if (!std.mem.eql(
+                u8,
+                &question.value.prompt.digest,
+                &id,
+            )) return error.ArtifactUnavailable;
+            return self.objectChunk(a, question.value.prompt, offset, length);
+        }
+
+        fn objectChunk(
+            self: *Self,
+            a: std.mem.Allocator,
+            ref: state.Reference,
+            offset: u64,
+            length: u32,
+        ) !json.Value {
             if (offset > ref.bytes) return error.InvalidParams;
             const bytes = try a.alloc(u8, @intCast(@min(length, ref.bytes - offset)));
             defer a.free(bytes);
@@ -335,11 +641,26 @@ pub fn Client(comptime Types: type) type {
                     var task = try self.service.task(a, subscription.task);
                     defer task.deinit();
                     var params = json.object();
-                    try json.put(a, &params, "subscription_id", try hexadecimal(a, subscription.id));
+                    try json.put(
+                        a,
+                        &params,
+                        "subscription_id",
+                        try hexadecimal(a, subscription.id),
+                    );
                     try json.put(a, &params, "task_id", try hexadecimal(a, subscription.task));
                     try json.put(a, &params, "reason", json.string("CursorExpired"));
-                    try json.put(a, &params, "earliest_available_seq", try counter(a, task.value.event_floor));
-                    try json.put(a, &params, "high_water_seq", try counter(a, task.value.event_high));
+                    try json.put(
+                        a,
+                        &params,
+                        "earliest_available_seq",
+                        try counter(a, task.value.event_floor),
+                    );
+                    try json.put(
+                        a,
+                        &params,
+                        "high_water_seq",
+                        try counter(a, task.value.event_high),
+                    );
                     slot.* = null;
                     return try protocol.notification(a, "subscription.closed", params);
                 };
@@ -354,7 +675,12 @@ pub fn Client(comptime Types: type) type {
             return null;
         }
 
-        pub fn call(self: *Self, a: std.mem.Allocator, method: protocol.Method, params: json.Value) !json.Value {
+        pub fn call(
+            self: *Self,
+            a: std.mem.Allocator,
+            method: protocol.Method,
+            params: json.Value,
+        ) !json.Value {
             // A batch retains responses, not full object/decoder scratch from
             // earlier members. The service owns the reclaimable host budget;
             // backing this arena with the response arena would retain it again.
@@ -363,68 +689,251 @@ pub fn Client(comptime Types: type) type {
             return json.copy(a, try self.dispatch(scratch.allocator(), method, params));
         }
 
-        fn dispatch(self: *Self, a: std.mem.Allocator, method: protocol.Method, params: json.Value) !json.Value {
+        fn dispatchPlacement(self: *Self, a: std.mem.Allocator, params: json.Value) !json.Value {
+            return self.service.placementRequest(
+                a,
+                try values.fromJson(
+                    @import("placement.zig").Request,
+                    a,
+                    try field(params, "request"),
+                ),
+            );
+        }
+
+        fn dispatchTaskSubmit(self: *Self, a: std.mem.Allocator, params: json.Value) !json.Value {
+            if (!std.mem.eql(
+                u8,
+                try json.text(try field(params, "application_id")),
+                Types.application_id,
+            ) or !std.mem.eql(
+                u8,
+                try json.text(try field(params, "profile_id")),
+                self.service.profile.id,
+            )) return error.NotFound;
+            return self.admission(
+                a,
+                try self.service.submit(
+                    a,
+                    try operationId(params),
+                    try typed(
+                        Types.Input,
+                        a,
+                        try field(params, "input"),
+                        Types.input_schema_id,
+                    ),
+                ),
+            );
+        }
+
+        fn dispatchTaskMessage(self: *Self, a: std.mem.Allocator, params: json.Value) !json.Value {
+            return self.admission(
+                a,
+                try self.service.message(
+                    a,
+                    try operationId(params),
+                    try identifier(16, try field(params, "task_id")),
+                    try typed(
+                        Types.Message,
+                        a,
+                        try field(params, "message"),
+                        Types.message_schema_id,
+                    ),
+                ),
+            );
+        }
+
+        fn dispatchTaskRespond(self: *Self, a: std.mem.Allocator, params: json.Value) !json.Value {
+            const answer = try field(params, "answer");
+            try protocol.closed(answer, .{ .required = &.{ "schema_id", "value" } });
+            try inlineValue(a, try field(answer, "value"));
+            return self.admission(
+                a,
+                try self.service.respond(
+                    a,
+                    try operationId(params),
+                    try identifier(16, try field(params, "task_id")),
+                    try identifier(32, try field(params, "question_id")),
+                    try json.decimal(u64, try field(params, "question_revision")),
+                    try identifier(32, try field(params, "request_digest")),
+                    try json.text(try field(answer, "schema_id")),
+                    try field(answer, "value"),
+                ),
+            );
+        }
+
+        fn dispatchTaskCancel(self: *Self, a: std.mem.Allocator, params: json.Value) !json.Value {
+            return self.admission(
+                a,
+                try self.service.requestCancel(
+                    a,
+                    try operationId(params),
+                    try identifier(16, try field(params, "task_id")),
+                    if (json.get(params, "reason")) |reason| try json.text(
+                        reason,
+                    ) else "client requested cancellation",
+                ),
+            );
+        }
+
+        fn dispatchTaskResume(self: *Self, a: std.mem.Allocator, params: json.Value) !json.Value {
+            return self.admission(
+                a,
+                try self.service.resumeTask(
+                    a,
+                    try operationId(params),
+                    try identifier(16, try field(params, "task_id")),
+                    try json.decimal(u64, try field(params, "expected_revision")),
+                ),
+            );
+        }
+
+        fn dispatchTaskAdopt(self: *Self, a: std.mem.Allocator, params: json.Value) !json.Value {
+            return self.admission(
+                a,
+                try self.service.adoptController(
+                    a,
+                    try operationId(params),
+                    try identifier(16, try field(params, "task_id")),
+                    try json.decimal(u64, try field(params, "expected_revision")),
+                    try values.fromJson(
+                        contracts.workspace.Adoption,
+                        a,
+                        try field(params, "adoption"),
+                    ),
+                ),
+            );
+        }
+
+        fn dispatchTaskReconcile(
+            self: *Self,
+            a: std.mem.Allocator,
+            params: json.Value,
+        ) !json.Value {
+            try protocol.closed(params, protocol.fields(.@"task.reconcile"));
+            const recovery = try field(params, "recovery");
+            try protocol.closed(recovery, .{ .required = &.{"mechanism"} });
+            const mechanism = std.meta.stringToEnum(
+                state.RecoveryRequest,
+                try json.text(try field(recovery, "mechanism")),
+            ) orelse return error.InvalidParams;
+            return self.admission(
+                a,
+                try self.service.reconcile(
+                    a,
+                    try operationId(params),
+                    try identifier(16, try field(params, "task_id")),
+                    try json.decimal(u64, try field(params, "expected_revision")),
+                    try identifier(32, try field(params, "occurrence_id")),
+                    try identifier(32, try field(params, "attempt_id")),
+                    mechanism,
+                ),
+            );
+        }
+
+        fn dispatchTaskStatus(self: *Self, a: std.mem.Allocator, params: json.Value) !json.Value {
+            return self.subjectSnapshot(
+                a,
+                try identifier(16, try field(params, "task_id")),
+                if (json.get(params, "residual_id")) |id| try identifier(32, id) else null,
+            );
+        }
+
+        fn dispatchTaskResult(self: *Self, a: std.mem.Allocator, params: json.Value) !json.Value {
+            return self.taskResult(
+                a,
+                try identifier(16, try field(params, "task_id")),
+            );
+        }
+
+        fn dispatchTaskEvents(self: *Self, a: std.mem.Allocator, params: json.Value) !json.Value {
+            const limit = if (json.get(
+                params,
+                "limit",
+            )) |limit| try json.numberInteger(
+                u32,
+                if (limit == .number_string) limit.number_string else return error.InvalidParams,
+            ) else @as(u32, 16);
+            if (limit == 0 or limit > 128) return error.InvalidParams;
+            return self.events(
+                a,
+                try identifier(16, try field(params, "task_id")),
+                try json.decimal(u64, try field(params, "after_seq")),
+                if (self.batch) 1 else limit,
+            );
+        }
+
+        fn dispatchArtifactRead(self: *Self, a: std.mem.Allocator, params: json.Value) !json.Value {
+            return self.artifactRead(a, params);
+        }
+
+        fn dispatchTaskSubscribe(
+            self: *Self,
+            a: std.mem.Allocator,
+            params: json.Value,
+        ) !json.Value {
+            const task_id = try identifier(16, try field(params, "task_id"));
+            const after = try json.decimal(u64, try field(params, "after_seq"));
+            var result_value = try self.events(a, task_id, after, 1);
+            _ = result_value.object.swapRemove("events");
+            _ = result_value.object.swapRemove("next_after_seq");
+            _ = result_value.object.swapRemove("has_more");
+            try json.put(a, &result_value, "after_seq", try counter(a, after));
+            for (&self.subscriptions) |*slot| if (slot.* == null) {
+                var id: [16]u8 = undefined;
+                if (self.subscription_counter == 0) try self.service.io.randomSecure(
+                    &self.subscription_nonce,
+                );
+                self.subscription_counter = try std.math.add(
+                    u64,
+                    self.subscription_counter,
+                    1,
+                );
+                @memcpy(id[0..8], &self.subscription_nonce);
+                std.mem.writeInt(u64, id[8..16], self.subscription_counter, .big);
+                slot.* = .{ .id = id, .task = task_id, .after = after };
+                try json.put(a, &result_value, "subscription_id", try hexadecimal(a, id));
+                return result_value;
+            };
+            return error.Capacity;
+        }
+
+        fn dispatchTaskUnsubscribe(
+            self: *Self,
+            _: std.mem.Allocator,
+            params: json.Value,
+        ) !json.Value {
+            const id = try identifier(16, try field(params, "subscription_id"));
+            for (&self.subscriptions) |*slot| if (slot.*) |subscription| {
+                if (std.mem.eql(u8, &subscription.id, &id)) {
+                    slot.* = null;
+                    return json.object();
+                }
+            };
+            return error.NotFound;
+        }
+
+        fn dispatch(
+            self: *Self,
+            a: std.mem.Allocator,
+            method: protocol.Method,
+            params: json.Value,
+        ) !json.Value {
             switch (method) {
-                .placement => return self.service.placementRequest(a, try values.fromJson(@import("placement.zig").Request, a, try field(params, "request"))),
-                .@"task.submit" => {
-                    if (!std.mem.eql(u8, try json.text(try field(params, "application_id")), Types.application_id) or !std.mem.eql(u8, try json.text(try field(params, "profile_id")), self.service.profile.id)) return error.NotFound;
-                    return self.admission(a, try self.service.submit(a, try operationId(params), try typed(Types.Input, a, try field(params, "input"), Types.input_schema_id)));
-                },
-                .@"task.message" => return self.admission(a, try self.service.message(a, try operationId(params), try identifier(16, try field(params, "task_id")), try typed(Types.Message, a, try field(params, "message"), Types.message_schema_id))),
-                .@"task.respond" => {
-                    const answer = try field(params, "answer");
-                    try protocol.closed(answer, .{ .required = &.{ "schema_id", "value" } });
-                    try inlineValue(a, try field(answer, "value"));
-                    return self.admission(a, try self.service.respond(a, try operationId(params), try identifier(16, try field(params, "task_id")), try identifier(32, try field(params, "question_id")), try json.decimal(u64, try field(params, "question_revision")), try identifier(32, try field(params, "request_digest")), try json.text(try field(answer, "schema_id")), try field(answer, "value")));
-                },
-                .@"task.cancel" => return self.admission(a, try self.service.requestCancel(a, try operationId(params), try identifier(16, try field(params, "task_id")), if (json.get(params, "reason")) |reason| try json.text(reason) else "client requested cancellation")),
-                .@"task.resume" => return self.admission(a, try self.service.resumeTask(a, try operationId(params), try identifier(16, try field(params, "task_id")), try json.decimal(u64, try field(params, "expected_revision")))),
-                .@"task.adopt" => return self.admission(a, try self.service.adoptController(a, try operationId(params), try identifier(16, try field(params, "task_id")), try json.decimal(u64, try field(params, "expected_revision")), try values.fromJson(contracts.workspace.Adoption, a, try field(params, "adoption")))),
-                .@"task.reconcile" => {
-                    try protocol.closed(params, protocol.fields(method));
-                    const recovery = try field(params, "recovery");
-                    try protocol.closed(recovery, .{ .required = &.{"mechanism"} });
-                    const mechanism = std.meta.stringToEnum(state.RecoveryRequest, try json.text(try field(recovery, "mechanism"))) orelse return error.InvalidParams;
-                    return self.admission(a, try self.service.reconcile(a, try operationId(params), try identifier(16, try field(params, "task_id")), try json.decimal(u64, try field(params, "expected_revision")), try identifier(32, try field(params, "occurrence_id")), try identifier(32, try field(params, "attempt_id")), mechanism));
-                },
-                .@"task.status" => return self.subjectSnapshot(a, try identifier(16, try field(params, "task_id")), if (json.get(params, "residual_id")) |id| try identifier(32, id) else null),
-                .@"task.result" => return self.taskResult(a, try identifier(16, try field(params, "task_id"))),
-                .@"task.events" => {
-                    const limit = if (json.get(params, "limit")) |limit| try json.numberInteger(u32, if (limit == .number_string) limit.number_string else return error.InvalidParams) else @as(u32, 16);
-                    if (limit == 0 or limit > 128) return error.InvalidParams;
-                    return self.events(a, try identifier(16, try field(params, "task_id")), try json.decimal(u64, try field(params, "after_seq")), if (self.batch) 1 else limit);
-                },
-                .@"artifact.read" => return self.artifactRead(a, params),
-                .@"task.subscribe" => {
-                    const task_id = try identifier(16, try field(params, "task_id"));
-                    const after = try json.decimal(u64, try field(params, "after_seq"));
-                    var result_value = try self.events(a, task_id, after, 1);
-                    _ = result_value.object.swapRemove("events");
-                    _ = result_value.object.swapRemove("next_after_seq");
-                    _ = result_value.object.swapRemove("has_more");
-                    try json.put(a, &result_value, "after_seq", try counter(a, after));
-                    for (&self.subscriptions) |*slot| if (slot.* == null) {
-                        var id: [16]u8 = undefined;
-                        if (self.subscription_counter == 0) try self.service.io.randomSecure(&self.subscription_nonce);
-                        self.subscription_counter = try std.math.add(u64, self.subscription_counter, 1);
-                        @memcpy(id[0..8], &self.subscription_nonce);
-                        std.mem.writeInt(u64, id[8..16], self.subscription_counter, .big);
-                        slot.* = .{ .id = id, .task = task_id, .after = after };
-                        try json.put(a, &result_value, "subscription_id", try hexadecimal(a, id));
-                        return result_value;
-                    };
-                    return error.Capacity;
-                },
-                .@"task.unsubscribe" => {
-                    const id = try identifier(16, try field(params, "subscription_id"));
-                    for (&self.subscriptions) |*slot| if (slot.*) |subscription| {
-                        if (std.mem.eql(u8, &subscription.id, &id)) {
-                            slot.* = null;
-                            return json.object();
-                        }
-                    };
-                    return error.NotFound;
-                },
+                .placement => return self.dispatchPlacement(a, params),
+                .@"task.submit" => return self.dispatchTaskSubmit(a, params),
+                .@"task.message" => return self.dispatchTaskMessage(a, params),
+                .@"task.respond" => return self.dispatchTaskRespond(a, params),
+                .@"task.cancel" => return self.dispatchTaskCancel(a, params),
+                .@"task.resume" => return self.dispatchTaskResume(a, params),
+                .@"task.adopt" => return self.dispatchTaskAdopt(a, params),
+                .@"task.reconcile" => return self.dispatchTaskReconcile(a, params),
+                .@"task.status" => return self.dispatchTaskStatus(a, params),
+                .@"task.result" => return self.dispatchTaskResult(a, params),
+                .@"task.events" => return self.dispatchTaskEvents(a, params),
+                .@"artifact.read" => return self.dispatchArtifactRead(a, params),
+                .@"task.subscribe" => return self.dispatchTaskSubscribe(a, params),
+                .@"task.unsubscribe" => return self.dispatchTaskUnsubscribe(a, params),
+
                 else => return error.UnsupportedCapability,
             }
         }

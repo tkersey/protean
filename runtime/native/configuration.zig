@@ -78,23 +78,48 @@ test "semantic policy admits only explicit exact roots and checkers" {
     try parsed.value.object.getPtr("roots").?.array.append(duplicate);
     try std.testing.expectError(error.InvalidConfiguration, semanticPolicy(a, parsed.value));
     _ = parsed.value.object.getPtr("roots").?.array.pop();
-    try parsed.value.object.getPtr("checkers").?.array.append(json.string("operator-selected-checker"));
+    try parsed.value.object.getPtr("checkers").?.array.append(
+        json.string("operator-selected-checker"),
+    );
     try std.testing.expectError(error.InvalidConfiguration, semanticPolicy(a, parsed.value));
 }
 
 /// Explicit files only. Refuse symlinks and nonregular entries; secret
 /// inputs additionally require the current user's private file permissions.
-pub fn readFile(a: std.mem.Allocator, io: std.Io, path: []const u8, maximum: ?usize, secret: bool) ![]u8 {
-    if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidConfiguration;
+pub fn readFile(
+    a: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    maximum: ?usize,
+    secret: bool,
+) ![]u8 {
+    if (path.len == 0 or std.mem.indexOfScalar(
+        u8,
+        path,
+        0,
+    ) != null) return error.InvalidConfiguration;
     const name = try a.dupeSentinel(u8, path, 0);
     defer a.free(name);
-    const fd = c.open(name.ptr, c.O_RDONLY | c.O_NOFOLLOW | c.O_CLOEXEC | c.O_NONBLOCK | c.O_NOCTTY);
+    const fd = c.open(
+        name.ptr,
+        c.O_RDONLY | c.O_NOFOLLOW | c.O_CLOEXEC | c.O_NONBLOCK | c.O_NOCTTY,
+    );
     if (fd < 0) return error.ConfigurationUnavailable;
     const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
     defer file.close(io);
     var info: c.struct_protean_native_stat = undefined;
-    if (c.protean_native_fstat(fd, &info) != 0 or info.st_mode & c.S_IFMT != c.S_IFREG or info.st_size < 0) return error.InvalidConfiguration;
-    if (secret and (info.st_uid != c.geteuid() or info.st_mode & 0o077 != 0)) return error.UnsafeCredentialFile;
+    if (c.protean_native_fstat(
+        fd,
+        &info,
+    ) != 0 or
+        info.st_mode & c.S_IFMT != c.S_IFREG or
+        info.st_size < 0) return error.InvalidConfiguration;
+    if (secret and
+        (info.st_uid != c.geteuid() or
+            info.st_mode & 0o077 != 0))
+    {
+        return error.UnsafeCredentialFile;
+    }
     if (maximum != null and @as(u64, @intCast(info.st_size)) > maximum.?) return error.Capacity;
     var buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &buffer);

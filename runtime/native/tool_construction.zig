@@ -29,18 +29,44 @@ fn digest(bytes: []const u8) [32]u8 {
 }
 
 /// Catalog bytes come from the frozen resource closure, never model arguments.
-pub fn construct(output: std.mem.Allocator, scratch: std.mem.Allocator, task: [16]u8, profile: []const u8, catalog_bytes: []const u8, proposal: []const u8) !Program {
+pub fn construct(
+    output: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    task: [16]u8,
+    profile: []const u8,
+    catalog_bytes: []const u8,
+    proposal: []const u8,
+) !Program {
     var catalog = try contracts.decodeOwned(Catalog, scratch, catalog_bytes);
     defer catalog.deinit();
     const recipe = try output.dupe(u8, proposal);
     errdefer output.free(recipe);
-    return .{ .task = task, .policy = digest(profile), .catalog = digest(catalog_bytes), .recipe = .{ .bytes = recipe }, .built = try build(output, scratch, catalog.value, proposal) };
+    return .{
+        .task = task,
+        .policy = digest(profile),
+        .catalog = digest(catalog_bytes),
+        .recipe = .{ .bytes = recipe },
+        .built = try build(output, scratch, catalog.value, proposal),
+    };
 }
 
 /// Re-admit the derivation and compare it to the exact retained program. Linking
 /// is validation here: execution still receives the originally referenced bytes.
-pub fn execute(output: std.mem.Allocator, scratch: std.mem.Allocator, cancellation: ?*const std.atomic.Value(bool), task: [16]u8, profile: []const u8, catalog_bytes: []const u8, program: Program, input: Input) ![]u8 {
-    if (program.version != 2 or !same(&program.task, &task) or !same(&program.policy, &digest(profile)) or !same(&program.catalog, &digest(catalog_bytes))) return error.UnauthorizedProgram;
+pub fn execute(
+    output: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    cancellation: ?*const std.atomic.Value(bool),
+    task: [16]u8,
+    profile: []const u8,
+    catalog_bytes: []const u8,
+    program: Program,
+    input: Input,
+) ![]u8 {
+    if (program.version != 2 or
+        !same(&program.task, &task) or
+        !same(&program.policy, &digest(profile)) or
+        !same(&program.catalog, &digest(catalog_bytes)))
+        return error.UnauthorizedProgram;
     if (cancellation) |flag| if (flag.load(.acquire)) return error.Canceled;
     var arena = std.heap.ArenaAllocator.init(scratch);
     defer arena.deinit();
@@ -51,7 +77,10 @@ pub fn execute(output: std.mem.Allocator, scratch: std.mem.Allocator, cancellati
     if (!same(derived.image.bytes, program.built.image.bytes) or
         !same(derived.interface.input.bytes, program.built.interface.input.bytes) or
         !same(derived.interface.output.bytes, program.built.interface.output.bytes) or
-        !same(derived.interface.failure.bytes, program.built.interface.failure.bytes)) return error.InvalidDerivation;
+        !same(
+            derived.interface.failure.bytes,
+            program.built.interface.failure.bytes,
+        )) return error.InvalidDerivation;
     return run(output, scratch, cancellation, program.built, input.schema.bytes, input.value.bytes);
 }
 
@@ -60,10 +89,14 @@ pub fn validateCatalog(a: std.mem.Allocator, catalog: Catalog) !void {
     if (catalog.items.len == 0) return error.InvalidCatalog;
     for (catalog.items, 0..) |item, i| {
         if (item.id.bytes.len == 0) return error.InvalidCatalog;
-        for (catalog.items[0..i]) |prior| if (same(prior.id.bytes, item.id.bytes)) return error.InvalidCatalog;
+        for (catalog.items[0..i]) |prior| if (same(
+            prior.id.bytes,
+            item.id.bytes,
+        )) return error.InvalidCatalog;
         var decoded = try data.component.decode(a, item.object.bytes);
         defer decoded.deinit();
-        for (decoded.object.program.effects) |effect| if (effect.external) return error.ForbiddenEffect;
+        for (decoded.object.program.effects) |effect| if (effect.external)
+            return error.ForbiddenEffect;
     }
 }
 
@@ -133,12 +166,26 @@ pub fn interfaceOf(a: std.mem.Allocator, program: data.activation.Program) !Inte
     errdefer a.free(output_bytes);
     const failure_bytes = try data.schema.encodeOwned(a, program.schemas, program.roots.failure);
     errdefer a.free(failure_bytes);
-    return .{ .input = .{ .bytes = input_bytes }, .output = .{ .bytes = output_bytes }, .failure = .{ .bytes = failure_bytes } };
+    return .{
+        .input = .{ .bytes = input_bytes },
+        .output = .{ .bytes = output_bytes },
+        .failure = .{ .bytes = failure_bytes },
+    };
 }
 
-pub fn build(output: std.mem.Allocator, scratch: std.mem.Allocator, catalog: Catalog, proposal: []const u8) !Built {
+pub fn build(
+    output: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    catalog: Catalog,
+    proposal: []const u8,
+) !Built {
     // Recipe structure has fixed grammar depth; breadth follows actual input.
-    var parsed = try json.parse(scratch, proposal, .{ .bytes = proposal.len, .depth = 6, .tokens = proposal.len, .members = proposal.len });
+    var parsed = try json.parse(scratch, proposal, .{
+        .bytes = proposal.len,
+        .depth = 6,
+        .tokens = proposal.len,
+        .members = proposal.len,
+    });
     defer parsed.deinit();
     var arena = std.heap.ArenaAllocator.init(scratch);
     defer arena.deinit();
@@ -154,14 +201,26 @@ pub fn build(output: std.mem.Allocator, scratch: std.mem.Allocator, catalog: Cat
             object = candidate.object.bytes;
             break;
         };
-        instance.* = .{ .key = item.key.bytes, .object = object orelse return error.UnknownComponent };
+        instance.* = .{
+            .key = item.key.bytes,
+            .object = object orelse return error.UnknownComponent,
+        };
     }
     const bindings = try a.alloc(data.linker.Binding, recipe.bindings.items.len);
     for (recipe.bindings.items, bindings) |item, *binding| binding.* = .{
-        .required = .{ .instance = item.required.instance.bytes, .symbol = item.required.symbol.bytes },
-        .supplied = .{ .instance = item.supplied.instance.bytes, .symbol = item.supplied.symbol.bytes },
+        .required = .{
+            .instance = item.required.instance.bytes,
+            .symbol = item.required.symbol.bytes,
+        },
+        .supplied = .{
+            .instance = item.supplied.instance.bytes,
+            .symbol = item.supplied.symbol.bytes,
+        },
     };
-    var linked = try data.linker.linkWithCompilation(scratch, instances, bindings, .{ .instance = recipe.entry.instance.bytes, .symbol = recipe.entry.symbol.bytes }, .{});
+    var linked = try data.linker.linkWithCompilation(scratch, instances, bindings, .{
+        .instance = recipe.entry.instance.bytes,
+        .symbol = recipe.entry.symbol.bytes,
+    }, .{});
     defer linked.deinit();
     const interface = try interfaceOf(a, linked.program);
     const length = try data.program_image.encodedLength(linked.program);
@@ -184,7 +243,14 @@ pub fn build(output: std.mem.Allocator, scratch: std.mem.Allocator, catalog: Cat
 /// A fresh pure Session is entirely owned by this occurrence. Its public
 /// deinitializer releases interrupted work; no resident or checkpoint escapes.
 /// Quanta bound cancellation latency, not the lifetime of a valid computation.
-pub fn run(output: std.mem.Allocator, parent: std.mem.Allocator, cancellation: ?*const std.atomic.Value(bool), built: Built, input_schema: []const u8, input: []const u8) ![]u8 {
+pub fn run(
+    output: std.mem.Allocator,
+    parent: std.mem.Allocator,
+    cancellation: ?*const std.atomic.Value(bool),
+    built: Built,
+    input_schema: []const u8,
+    input: []const u8,
+) ![]u8 {
     if (cancellation) |flag| if (flag.load(.acquire)) return error.Canceled;
     const a = parent;
     var prepared = try kosmos.Prepared.init(a, built.image.bytes);
@@ -194,8 +260,14 @@ pub fn run(output: std.mem.Allocator, parent: std.mem.Allocator, cancellation: ?
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const actual = try interfaceOf(arena.allocator(), session.program);
-    if (!same(actual.input.bytes, input_schema) or !same(actual.input.bytes, built.interface.input.bytes) or !same(actual.output.bytes, built.interface.output.bytes) or !same(actual.failure.bytes, built.interface.failure.bytes)) return error.IncompatibleInterface;
-    while (true) {
+    if (!same(actual.input.bytes, input_schema) or
+        !same(actual.input.bytes, built.interface.input.bytes) or
+        !same(actual.output.bytes, built.interface.output.bytes) or
+        !same(
+            actual.failure.bytes,
+            built.interface.failure.bytes,
+        )) return error.IncompatibleInterface;
+    while (true) { // tiger: event-loop
         if (cancellation) |flag| if (flag.load(.acquire)) return error.Canceled;
         const progress = try session.run(256);
         if (cancellation) |flag| if (flag.load(.acquire)) return error.Canceled;

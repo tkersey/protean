@@ -72,6 +72,7 @@ pub fn descriptorOwned(
 }
 
 pub fn encodeOwned(comptime T: type, allocator: std.mem.Allocator, value: T) Error![]u8 {
+    @setEvalBranchQuota(100_000);
     var measure: wire.Writer = .{};
     try write(T, value, &measure);
     const bytes = try allocator.alloc(u8, measure.position);
@@ -104,11 +105,21 @@ pub fn decodeOwned(
 
 /// Uses the same value admission as decodeOwned, borrowing only byte/text
 /// payloads. The immutable input must outlive the decoded value and its views.
-pub fn decodeBorrowed(comptime T: type, allocator: std.mem.Allocator, bytes: []const u8) Error!Decoded(T) {
+pub fn decodeBorrowed(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+) Error!Decoded(T) {
     return decode(T, allocator, bytes, true);
 }
 
-fn decode(comptime T: type, allocator: std.mem.Allocator, bytes: []const u8, comptime borrow_bytes: bool) Error!Decoded(T) {
+fn decode(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    comptime borrow_bytes: bool,
+) Error!Decoded(T) {
+    @setEvalBranchQuota(100_000);
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     var input: wire.Reader = .{ .input = bytes };
@@ -123,11 +134,14 @@ fn checkBlob(comptime T: type, bytes: []const u8) Error!void {
         return error.InvalidUtf8;
 }
 
-fn write(comptime T: type, value: T, output: *wire.Writer) Error!void {
+inline fn write(comptime T: type, value: T, output: *wire.Writer) Error!void {
     _ = comptime native.info(T);
     if (comptime native.wrapped(T)) {
         if (T.protean_value_kind == .vector) {
-            if (@as(?u64, T.max_length)) |maximum| if (value.items.len > maximum) return error.InvalidValue;
+            if (@as(
+                ?u64,
+                T.max_length,
+            )) |maximum| if (value.items.len > maximum) return error.InvalidValue;
             return writeSlice(T.Child, value.items, output);
         }
         try checkBlob(T, value.bytes);
@@ -142,27 +156,45 @@ fn write(comptime T: type, value: T, output: *wire.Writer) Error!void {
         .@"enum" => {
             try output.fixed(u32, @intCast(@backingInt(value)));
         },
-        .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType|
-            try write(FieldType, @field(value, field_name), output),
-        .@"union" => |info| {
-            inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, index| {
-                if (std.meta.activeTag(value) == @field(info.tag_type.?, field_name)) {
-                    try output.natural(index);
-                    try write(FieldType, @field(value, field_name), output);
-                    return;
-                }
-            }
-        },
-        .optional => |info| {
-            try output.natural(if (value == null) 0 else 1);
-            if (value) |present| try write(info.child, present, output);
-        },
-        .array => |info| for (value) |element| try write(info.child, element, output),
+        .@"struct" => try writeProduct(T, value, output),
+        .@"union" => try writeSum(T, value, output),
+        .optional => try writeOptional(T, value, output),
+        .array => try writeArray(T, value, output),
         .pointer => |info| {
             try writeSlice(info.child, value, output);
         },
         else => @compileError("Unsupported Protean portable value type: " ++ @typeName(T)),
     }
+}
+
+fn writeProduct(comptime T: type, value: T, output: *wire.Writer) Error!void {
+    @setEvalBranchQuota(100_000);
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |field_name, FieldType|
+        try write(FieldType, @field(value, field_name), output);
+}
+
+fn writeSum(comptime T: type, value: T, output: *wire.Writer) Error!void {
+    @setEvalBranchQuota(100_000);
+    const info = @typeInfo(T).@"union";
+    inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, index| {
+        if (std.meta.activeTag(value) == @field(info.tag_type.?, field_name)) {
+            try output.natural(index);
+            try write(FieldType, @field(value, field_name), output);
+            return;
+        }
+    }
+}
+
+fn writeOptional(comptime T: type, value: T, output: *wire.Writer) Error!void {
+    const info = @typeInfo(T).optional;
+    try output.natural(if (value == null) 0 else 1);
+    if (value) |present| try write(info.child, present, output);
+}
+
+fn writeArray(comptime T: type, value: T, output: *wire.Writer) Error!void {
+    const info = @typeInfo(T).array;
+    for (value) |element| try write(info.child, element, output);
 }
 
 fn writeSlice(comptime T: type, values: []const T, output: *wire.Writer) Error!void {
@@ -176,7 +208,7 @@ fn writeSlice(comptime T: type, values: []const T, output: *wire.Writer) Error!v
 fn minimumSize(comptime T: type) usize {
     return minimumContract(native.info(T));
 }
-fn minimumContract(comptime shape: native.Info) usize {
+inline fn minimumContract(comptime shape: native.Info) usize {
     return switch (shape) {
         .unit => 0,
         .boolean => 1,
@@ -184,7 +216,9 @@ fn minimumContract(comptime shape: native.Info) usize {
         .enumeration => 4,
         .product => |Fields| blk: {
             var size: usize = 0;
-            inline for (@typeInfo(Fields).@"struct".field_types) |Child| size += minimumContract(Child.contract);
+            inline for (@typeInfo(
+                Fields,
+            ).@"struct".field_types) |Child| size += minimumContract(Child.contract);
             break :blk size;
         },
         .array => |array| array.length * minimumContract(array.element.contract),
@@ -192,7 +226,12 @@ fn minimumContract(comptime shape: native.Info) usize {
     };
 }
 
-fn read(comptime T: type, allocator: std.mem.Allocator, input: *wire.Reader, comptime borrow_bytes: bool) Error!T {
+inline fn read(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    input: *wire.Reader,
+    comptime borrow_bytes: bool,
+) Error!T {
     _ = comptime native.info(T);
     if (comptime native.wrapped(T)) {
         if (T.protean_value_kind == .vector) {
@@ -214,41 +253,75 @@ fn read(comptime T: type, allocator: std.mem.Allocator, input: *wire.Reader, com
         .int => blk: {
             break :blk input.fixed(T);
         },
-        .@"enum" => blk: {
-            const tag = try input.fixed(u32);
-            inline for (@typeInfo(T).@"enum".field_names, @typeInfo(T).@"enum".field_values) |field_name, field_value| {
-                if (tag == field_value) break :blk @field(T, field_name);
-            }
-            break :blk error.InvalidValue;
-        },
-        .@"struct" => |info| blk: {
-            var result: T = undefined;
-            inline for (info.field_names, info.field_types) |field_name, FieldType|
-                @field(result, field_name) = try read(FieldType, allocator, input, borrow_bytes);
-            break :blk result;
-        },
-        .@"union" => |info| blk: {
-            const tag = try input.natural();
-            inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, index| {
-                if (tag == index) break :blk @unionInit(T, field_name, try read(FieldType, allocator, input, borrow_bytes));
-            }
-            break :blk error.InvalidValue;
-        },
-        .optional => |info| switch (try input.natural()) {
-            0 => null,
-            1 => try read(info.child, allocator, input, borrow_bytes),
-            else => error.InvalidValue,
-        },
-        .array => |info| blk: {
-            var result: T = undefined;
-            for (&result) |*element| element.* = try read(info.child, allocator, input, borrow_bytes);
-            break :blk result;
-        },
+        .@"enum" => readEnum(T, input),
+        .@"struct" => readProduct(T, allocator, input, borrow_bytes),
+        .@"union" => readSum(T, allocator, input, borrow_bytes),
+        .optional => readOptional(T, allocator, input, borrow_bytes),
+        .array => readArray(T, allocator, input, borrow_bytes),
         .pointer => |info| blk: {
             break :blk readElements(info.child, allocator, input, try input.count(), borrow_bytes);
         },
         else => @compileError("Unsupported Protean portable value type: " ++ @typeName(T)),
     };
+}
+
+fn readProduct(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    input: *wire.Reader,
+    comptime borrow_bytes: bool,
+) Error!T {
+    @setEvalBranchQuota(100_000);
+    const info = @typeInfo(T).@"struct";
+    var result: T = undefined;
+    inline for (info.field_names, info.field_types) |field_name, FieldType|
+        @field(result, field_name) = try read(FieldType, allocator, input, borrow_bytes);
+    return result;
+}
+
+fn readSum(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    input: *wire.Reader,
+    comptime borrow_bytes: bool,
+) Error!T {
+    @setEvalBranchQuota(100_000);
+    const info = @typeInfo(T).@"union";
+    const tag = try input.natural();
+    inline for (info.field_names, info.field_types, 0..) |field_name, FieldType, index| {
+        if (tag == index) return @unionInit(
+            T,
+            field_name,
+            try read(FieldType, allocator, input, borrow_bytes),
+        );
+    }
+    return error.InvalidValue;
+}
+
+fn readOptional(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    input: *wire.Reader,
+    comptime borrow_bytes: bool,
+) Error!T {
+    const info = @typeInfo(T).optional;
+    return switch (try input.natural()) {
+        0 => null,
+        1 => try read(info.child, allocator, input, borrow_bytes),
+        else => error.InvalidValue,
+    };
+}
+
+fn readArray(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    input: *wire.Reader,
+    comptime borrow_bytes: bool,
+) Error!T {
+    const info = @typeInfo(T).array;
+    var result: T = undefined;
+    for (&result) |*element| element.* = try read(info.child, allocator, input, borrow_bytes);
+    return result;
 }
 
 fn readElements(
@@ -266,4 +339,14 @@ fn readElements(
     if (comptime minimum == 0) return result;
     for (result) |*element| element.* = try read(T, allocator, input, borrow_bytes);
     return result;
+}
+
+fn readEnum(comptime T: type, input: *wire.Reader) Error!T {
+    const tag = try input.fixed(u32);
+    inline for (@typeInfo(T).@"enum".field_names, @typeInfo(
+        T,
+    ).@"enum".field_values) |field_name, field_value| {
+        if (tag == field_value) return @field(T, field_name);
+    }
+    return error.InvalidValue;
 }

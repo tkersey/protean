@@ -2,6 +2,9 @@
 
 Formerly Agent; see the [rename notes](docs/rename.md).
 
+All tracked Zig code follows [TigerStyle](docs/tiger-style.md), enforced in CI
+alongside the existing qualification checks.
+
 Protean builds adaptive agents as typed, resumable programs. Its supported application is
 **Protean**: a native executable that investigates a read-only snapshot,
 selects among approved models and reasoning settings, loads approved skills,

@@ -9,11 +9,22 @@ const c = @import("native_c");
 fn regular(fd: c_int) !c.struct_protean_native_stat {
     var stat: c.struct_protean_native_stat = undefined;
     if (c.protean_native_fstat(fd, &stat) != 0) return error.StorageUnavailable;
-    if (stat.st_mode & c.S_IFMT != c.S_IFREG or stat.st_mode & 0o077 != 0 or stat.st_uid != c.geteuid() or stat.st_nlink != 1) return error.UnsafeStatePath;
+    if (stat.st_mode & c.S_IFMT != c.S_IFREG or
+        stat.st_mode & 0o077 != 0 or
+        stat.st_uid != c.geteuid() or
+        stat.st_nlink != 1)
+    {
+        return error.UnsafeStatePath;
+    }
     return stat;
 }
 fn openFile(dir: c_int, name: [:0]const u8, flags: c_int) !c_int {
-    const fd = c.openat(dir, name.ptr, flags | c.O_NONBLOCK | c.O_NOFOLLOW | c.O_CLOEXEC, @as(c_uint, 0o600));
+    const fd = c.openat(
+        dir,
+        name.ptr,
+        flags | c.O_NONBLOCK | c.O_NOFOLLOW | c.O_CLOEXEC,
+        @as(c_uint, 0o600),
+    );
     if (fd < 0) return switch (std.c.errno(fd)) {
         .NOENT => error.FileNotFound,
         .EXIST => error.AlreadyExists,
@@ -40,7 +51,14 @@ fn inspectDirectory(a: std.mem.Allocator, io: std.Io, fd: c_int, validate_files:
     var has_lock = false;
     while (try iterator.next(io)) |entry| {
         var known = false;
-        for ([_][]const u8{ "owner.lock", "identity", "state.sqlite", "state.sqlite-journal", "seal", "seal.next" }) |name| known = known or std.mem.eql(u8, name, entry.name);
+        for ([_][]const u8{
+            "owner.lock",
+            "identity",
+            "state.sqlite",
+            "state.sqlite-journal",
+            "seal",
+            "seal.next",
+        }) |name| known = known or std.mem.eql(u8, name, entry.name);
         if (!known) return error.UnsafeStatePath;
         count += 1;
         has_lock = has_lock or std.mem.eql(u8, entry.name, "owner.lock");
@@ -105,7 +123,12 @@ fn trustedAncestry(start: c_int) !void {
 
 /// Descriptor-based path admission shared by state namespaces and archives.
 /// The caller owns the returned descriptor. Only namespaces create a final dir.
-pub fn openDirectory(a: std.mem.Allocator, path: []const u8, create_final: bool, private_final: bool) !c_int {
+pub fn openDirectory(
+    a: std.mem.Allocator,
+    path: []const u8,
+    create_final: bool,
+    private_final: bool,
+) !c_int {
     if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.UnsafeStatePath;
     // Walk every component without following symlinks. Only the selected
     // final directory may be created; no ambient parent tree is modified.
@@ -122,10 +145,18 @@ pub fn openDirectory(a: std.mem.Allocator, path: []const u8, create_final: bool,
         if (!std.mem.eql(u8, part, ".")) {
             const name = try a.dupeSentinel(u8, part, 0);
             defer a.free(name);
-            var child = c.openat(dir, name.ptr, c.O_RDONLY | c.O_DIRECTORY | c.O_NOFOLLOW | c.O_CLOEXEC);
+            var child = c.openat(
+                dir,
+                name.ptr,
+                c.O_RDONLY | c.O_DIRECTORY | c.O_NOFOLLOW | c.O_CLOEXEC,
+            );
             if (child < 0 and create_final and next == null and std.c.errno(child) == .NOENT) {
                 if (c.mkdirat(dir, name.ptr, 0o700) != 0) return error.StorageUnavailable;
-                child = c.openat(dir, name.ptr, c.O_RDONLY | c.O_DIRECTORY | c.O_NOFOLLOW | c.O_CLOEXEC);
+                child = c.openat(
+                    dir,
+                    name.ptr,
+                    c.O_RDONLY | c.O_DIRECTORY | c.O_NOFOLLOW | c.O_CLOEXEC,
+                );
             }
             if (child < 0) return error.UnsafeStatePath;
             _ = c.close(dir);
@@ -160,12 +191,62 @@ pub const Namespace = struct {
         if (c.flock(lock, c.LOCK_EX | c.LOCK_NB) != 0) return error.Busy;
         _ = try inspectDirectory(a, io, dir, true);
 
+        const admitted_identity = try acquireIdentity(io, dir, stat);
+        const identity = admitted_identity.identity;
+        const fresh = admitted_identity.fresh;
+        const database_file = try openFile(
+            dir,
+            "state.sqlite",
+            c.O_RDWR | (if (fresh) @as(c_int, c.O_CREAT | c.O_EXCL) else 0),
+        );
+        defer _ = c.close(database_file);
+        // SQLite inherits the precreated private database's mode for journals.
+        // Check any existing recovery journal before SQLite opens it.
+        if (openFile(dir, "state.sqlite-journal", c.O_RDONLY)) |journal_fd| {
+            _ = c.close(journal_fd);
+        } else |err| if (err != error.FileNotFound) return err;
+        const name = try std.fmt.allocPrint(a, "{s}/state.sqlite", .{path});
+        defer a.free(name);
+        const database = try sqlite.Database.open(a, name, false);
+        errdefer {
+            database.close() catch |err| {
+                std.log.err("namespace database cleanup failed: {s}", .{@errorName(err)});
+            };
+            database.destroy() catch |err| {
+                std.log.err("namespace database destruction failed: {s}", .{@errorName(err)});
+            };
+        }
+        var self: Namespace = .{
+            .allocator = a,
+            .directory = dir,
+            .lock = lock,
+            .database = database,
+            .store = try journal.Store.init(a, database, fresh, identity),
+            .identity = identity,
+        };
+        try self.restoreSeal(fresh);
+        try self.store.confirmSealed(self.store.head);
+        return self;
+    }
+
+    const Identity = struct { identity: [32]u8, fresh: bool };
+
+    fn acquireIdentity(io: std.Io, dir: c_int, stat: c.struct_protean_native_stat) !Identity {
         var fresh = false;
         const identity_file = openFile(dir, "identity", c.O_RDONLY) catch |err| switch (err) {
             error.FileNotFound => blk: {
                 // Never initialize over an existing database or seal.
-                for ([_][:0]const u8{ "state.sqlite", "seal", "seal.next", "state.sqlite-journal" }) |name| {
-                    const existing = openFile(dir, name, c.O_RDONLY) catch |failure| switch (failure) {
+                for ([_][:0]const u8{
+                    "state.sqlite",
+                    "seal",
+                    "seal.next",
+                    "state.sqlite-journal",
+                }) |name| {
+                    const existing = openFile(
+                        dir,
+                        name,
+                        c.O_RDONLY,
+                    ) catch |failure| switch (failure) {
                         error.FileNotFound => continue,
                         else => return failure,
                     };
@@ -191,28 +272,20 @@ pub const Namespace = struct {
             if (!std.mem.eql(u8, identity_bytes[0..8], "AGNNS001") or
                 std.mem.readInt(u64, identity_bytes[40..48], .little) != stat.st_dev or
                 std.mem.readInt(u64, identity_bytes[48..56], .little) != stat.st_ino or
-                std.mem.readInt(u64, identity_bytes[56..64], .little) != stat.st_uid) return error.ForeignNamespace;
+                std.mem.readInt(
+                    u64,
+                    identity_bytes[56..64],
+                    .little,
+                ) != stat.st_uid) return error.ForeignNamespace;
         }
-        const identity = identity_bytes[8..40].*;
-        const database_file = try openFile(dir, "state.sqlite", c.O_RDWR | (if (fresh) @as(c_int, c.O_CREAT | c.O_EXCL) else 0));
-        defer _ = c.close(database_file);
-        // SQLite inherits the precreated private database's mode for journals.
-        // Check any existing recovery journal before SQLite opens it.
-        if (openFile(dir, "state.sqlite-journal", c.O_RDONLY)) |journal_fd| {
-            _ = c.close(journal_fd);
-        } else |err| if (err != error.FileNotFound) return err;
-        const name = try std.fmt.allocPrint(a, "{s}/state.sqlite", .{path});
-        defer a.free(name);
-        const database = try sqlite.Database.open(a, name, false);
-        errdefer {
-            database.close() catch {};
-            database.destroy() catch {};
-        }
-        var self: Namespace = .{ .allocator = a, .directory = dir, .lock = lock, .database = database, .store = try journal.Store.init(a, database, fresh, identity), .identity = identity };
+        return .{ .identity = identity_bytes[8..40].*, .fresh = fresh };
+    }
+
+    fn restoreSeal(self: *Namespace, fresh: bool) !void {
         if (fresh) {
             try self.seal();
         } else {
-            const seal_fd = try openFile(dir, "seal", c.O_RDONLY);
+            const seal_fd = try openFile(self.directory, "seal", c.O_RDONLY);
             defer _ = c.close(seal_fd);
             var bytes: [80]u8 = undefined;
             try readExact(seal_fd, &bytes);
@@ -220,14 +293,22 @@ pub const Namespace = struct {
             const generation = std.mem.readInt(u64, bytes[8..16], .little);
             const current = self.store.head;
             if (generation == current.generation) {
-                if (!std.mem.eql(u8, bytes[16..48], &current.parent) or !std.mem.eql(u8, bytes[48..80], &current.digest)) return error.CorruptState;
-            } else if (generation < std.math.maxInt(u64) and generation + 1 == current.generation and std.mem.eql(u8, bytes[48..80], &current.parent)) {
+                if (!std.mem.eql(u8, bytes[16..48], &current.parent) or !std.mem.eql(
+                    u8,
+                    bytes[48..80],
+                    &current.digest,
+                )) return error.CorruptState;
+            } else if (generation < std.math.maxInt(
+                u64,
+            ) and generation + 1 == current.generation and std.mem.eql(
+                u8,
+                bytes[48..80],
+                &current.parent,
+            )) {
                 // Process died after SQLite commit, before seal publication.
                 try self.seal();
             } else return error.RollbackDetected;
         }
-        try self.store.confirmSealed(self.store.head);
-        return self;
     }
 
     fn seal(self: *Namespace) !void {
@@ -246,7 +327,11 @@ pub const Namespace = struct {
         @memcpy(bytes[16..48], &self.store.head.parent);
         @memcpy(bytes[48..80], &self.store.head.digest);
         try writeExact(fd, &bytes);
-        if (c.renameat(self.directory, "seal.next", self.directory, "seal") != 0 or c.fsync(self.directory) != 0) return error.StorageUnavailable;
+        if (c.renameat(self.directory, "seal.next", self.directory, "seal") != 0 or
+            c.fsync(self.directory) != 0)
+        {
+            return error.StorageUnavailable;
+        }
     }
     pub fn commit(self: *Namespace, transition: []const u8) !void {
         _ = try self.store.commit(transition);
@@ -276,7 +361,9 @@ test "namespace excludes a second owner and recovers the SQLite commit to seal g
     defer a.free(path);
     var first = try Namespace.open(a, io, path);
     var live = true;
-    defer if (live) first.close() catch unreachable;
+    defer if (live) first.close() catch |err| {
+        std.debug.panic("test namespace cleanup failed: {s}", .{@errorName(err)});
+    };
     try std.testing.expectError(error.Busy, Namespace.open(a, io, path));
     try first.store.begin();
     const ref = try first.store.putObject("acquired before disconnect");
@@ -290,7 +377,9 @@ test "namespace excludes a second owner and recovers the SQLite commit to seal g
     try first.close();
     live = false;
     var recovered = try Namespace.open(a, io, path);
-    defer recovered.close() catch unreachable;
+    defer recovered.close() catch |err| {
+        std.debug.panic("test namespace cleanup failed: {s}", .{@errorName(err)});
+    };
     try std.testing.expectEqual(1, recovered.store.head.generation);
     const bytes = try recovered.store.object(a, ref, 1024);
     defer a.free(bytes);
@@ -312,13 +401,17 @@ test "namespace refuses a database older than its published seal" {
     defer a.free(path);
     var owner = try Namespace.open(a, io, path);
     var live = true;
-    defer if (live) owner.close() catch unreachable;
+    defer if (live) owner.close() catch |err| {
+        std.debug.panic("test namespace cleanup failed: {s}", .{@errorName(err)});
+    };
     const original = owner.store.head;
     try owner.store.begin();
     try owner.commit("one");
     // Inject a stale database generation without rolling back its external seal.
     owner.store.invalidateIntegrity();
-    try owner.database.run("UPDATE meta SET generation=0,parent=?,head=? WHERE singleton=1", &.{ .{ .blob = &original.parent }, .{ .blob = &original.digest } });
+    try owner.database.run("UPDATE meta SET generation=0,parent=?,head=? WHERE singleton=1", &.{ .{
+        .blob = &original.parent,
+    }, .{ .blob = &original.digest } });
     try owner.close();
     live = false;
     try std.testing.expectError(error.RollbackDetected, Namespace.open(a, io, path));
@@ -349,7 +442,9 @@ test "seal failure invalidates custody after SQL commit and recovery publishes t
     defer a.free(path);
     var owner = try Namespace.open(a, io, path);
     var live = true;
-    defer if (live) owner.close() catch unreachable;
+    defer if (live) owner.close() catch |err| {
+        std.debug.panic("test namespace cleanup failed: {s}", .{@errorName(err)});
+    };
     const epoch = try owner.store.publicationEpoch();
     try owner.store.begin();
     const object = try owner.store.putObject("durable but not yet sealed");
@@ -362,11 +457,16 @@ test "seal failure invalidates custody after SQL commit and recovery publishes t
     try std.testing.expect(owner.store.fenced and !owner.store.transaction);
     try std.testing.expectError(error.StorageUnavailable, owner.store.publicationEpoch());
     try std.testing.expectError(error.StorageUnavailable, owner.store.begin());
-    try std.testing.expectEqual(@as(c_int, 0), c.unlinkat(owner.directory, "seal.next", c.AT_REMOVEDIR));
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.unlinkat(owner.directory, "seal.next", c.AT_REMOVEDIR),
+    );
     try owner.close();
     live = false;
     var recovered = try Namespace.open(a, io, path);
-    defer recovered.close() catch unreachable;
+    defer recovered.close() catch |err| {
+        std.debug.panic("test namespace cleanup failed: {s}", .{@errorName(err)});
+    };
     try std.testing.expectEqualDeep(committed, recovered.store.head);
     _ = try recovered.store.publicationEpoch();
     const bytes = try recovered.store.object(a, object, null);

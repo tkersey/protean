@@ -12,7 +12,6 @@ const Worker = @import("worker.zig").Worker;
 const c = @import("native_c");
 const identity = @import("identity.zig");
 const Shutdown = enum { park, cancel };
-
 /// One bounded, nonblocking fatal diagnostic. Error names contain no request,
 /// profile, credential, path or provider payload data.
 pub fn reportFailure(err: anyerror) u8 {
@@ -27,7 +26,6 @@ pub fn reportFailure(err: anyerror) u8 {
     _ = c.write(c.STDERR_FILENO, message.ptr, message.len);
     return 74;
 }
-
 fn Connection(comptime Types: type) type {
     return struct {
         application: *const discovery.Application,
@@ -40,118 +38,262 @@ fn Connection(comptime Types: type) type {
         limits: protocol.Limits = .{},
         client: ?*client_api.Client(Types) = null,
         launch_profile: ?discovery.LaunchProfile = null,
-
         fn call(self: *@This(), a: std.mem.Allocator, request: protocol.Call) !json.Value {
-            if (request.method == .initialize) {
-                if (self.initialized) return protocol.failure(a, request.id, .ProtocolState, "correct_request");
-                const versions = request.params.object.get("protocol_versions").?;
-                const accepted = protocol.accepts(versions) catch return protocol.failure(a, request.id, .InvalidParams, "correct_request");
-                if (json.get(request.params, "client_info")) |info| {
-                    protocol.closed(info, .{ .required = &.{ "name", "version" } }) catch
-                        return protocol.failure(a, request.id, .InvalidParams, "correct_request");
-                    for (info.object.values()) |value| if (value != .string or value.string.len > 128)
-                        return protocol.failure(a, request.id, .InvalidParams, "correct_request");
-                }
-                if (!accepted) {
-                    self.closing = true;
-                    var fault = try protocol.failure(a, request.id, .ProtocolState, "correct_request");
-                    var versions_out: std.array_list.Managed(json.Value) = .init(a);
-                    try versions_out.append(json.string(protocol.version));
-                    const error_value = fault.object.getPtr("error").?;
-                    try json.put(a, error_value.object.getPtr("data").?, "supported_versions", .{ .array = versions_out });
-                    return fault;
-                }
-                self.initialized = true;
-                var result = json.object();
-                try json.put(a, &result, "protocol_version", json.string(protocol.version));
-                try json.put(a, &result, "server_instance_id", json.string(self.instance));
-                var info = json.object();
-                try json.put(a, &info, "name", json.string("Protean native host"));
-                try json.put(a, &info, "version", json.string(@import("native_options").host_version));
-                try json.put(a, &result, "server_info", info);
-                try json.put(a, &result, "build_manifest_id", json.string(self.application.manifest_id));
-                try json.put(a, &result, "native_artifact_sha256", json.string(try a.dupe(u8, &std.fmt.bytesToHex(self.artifact_identity, .lower))));
-                const limits_bytes = try std.json.Stringify.valueAlloc(a, self.limits, .{});
-                const limits = try json.parse(a, limits_bytes, .{});
-                try json.put(a, &result, "limits", limits.value);
-                var capabilities = json.object();
-                var messages = false;
-                if (self.client) |client| for (client.service.handlers.entries) |entry| {
-                    messages = messages or entry.declaration.kind == .inbox;
-                };
-                try json.put(a, &capabilities, "task_events", .{ .bool = self.client != null });
-                try json.put(a, &capabilities, "message_input", .{ .bool = messages });
-                try json.put(a, &capabilities, "task_execution", .{ .bool = self.client != null });
-                try json.put(a, &capabilities, "task_reconciliation", .{ .bool = self.client != null });
-                try json.put(a, &capabilities, "placement", .{ .bool = if (self.client) |client| client.service.profile.placement != null else false });
-                try json.put(a, &capabilities, "semantic_construction", .{
-                    .bool = if (self.client) |client|
-                        client.service.profile.semantic_construction != null
-                    else
-                        false,
-                });
-                try json.put(a, &result, "capabilities", capabilities);
-                return protocol.response(a, request.id, result);
-            }
-            if (!self.initialized) return protocol.failure(a, request.id, .ProtocolState, "correct_request");
-            if (self.shutdown != null and (request.method == .@"task.submit" or request.method == .@"task.message" or request.method == .@"task.resume" or request.method == .@"task.respond" or request.method == .@"task.reconcile" or request.method == .@"task.adopt" or request.method == .placement))
-                return protocol.failure(a, request.id, .StateConflict, failureRecovery(.StateConflict));
-            switch (request.method) {
-                .shutdown => {
-                    const text = json.text(request.params.object.get("mode").?) catch return protocol.failure(a, request.id, .InvalidParams, "correct_request");
-                    const mode = std.meta.stringToEnum(Shutdown, text) orelse return protocol.failure(a, request.id, .InvalidParams, "correct_request");
-                    if (self.shutdown != null and self.shutdown.? != mode) return protocol.failure(a, request.id, .StateConflict, failureRecovery(.StateConflict));
-                    self.shutdown = mode;
-                    var result = json.object();
-                    try json.put(a, &result, "mode", json.string(@tagName(mode)));
-                    try json.put(a, &result, "accepted", .{ .bool = true });
-                    return protocol.response(a, request.id, result);
-                },
-                .ping => {
-                    var result = json.object();
-                    try json.put(a, &result, "server_instance_id", json.string(self.instance));
-                    return protocol.response(a, request.id, result);
-                },
-                .describe => {
-                    const launch = if (self.client) |client|
-                        if (!client.service.profile.authority.revoked and client.service.profile.authority.disclosure) self.launch_profile else null
-                    else
-                        null;
-                    const result = self.application.describe(a, request.params, launch) catch |err| return protocol.failure(a, request.id, failureKind(err), failureRecovery(failureKind(err)));
-                    return protocol.response(a, request.id, result);
-                },
-                .@"artifact.read" => if (self.client == null and json.get(request.params, "task_id") == null) {
-                    // Discovery-only launch authorizes only the same immutable
-                    // public schemas as describe, never task/private artifacts.
-                    const result = self.application.readSchemaArtifact(a, request.params) catch |err| return protocol.failure(a, request.id, failureKind(err), failureRecovery(failureKind(err)));
-                    return protocol.response(a, request.id, result);
-                },
-                else => {},
-            }
-            const client = self.client orelse return protocol.failure(a, request.id, .UnsupportedCapability, "correct_request");
+            if (request.method == .initialize) return self.initialize(a, request);
+            if (!self.initialized) return protocol.failure(
+                a,
+                request.id,
+                .ProtocolState,
+                "correct_request",
+            );
+            if (self.shutdown != null and
+                (request.method == .@"task.submit" or
+                    request.method == .@"task.message" or
+                    request.method == .@"task.resume" or
+                    request.method == .@"task.respond" or
+                    request.method == .@"task.reconcile" or
+                    request.method == .@"task.adopt" or
+                    request.method == .placement))
+                return protocol.failure(
+                    a,
+                    request.id,
+                    .StateConflict,
+                    failureRecovery(.StateConflict),
+                );
+            if (try self.control(a, request)) |result| return result;
+            const client = self.client orelse return protocol.failure(
+                a,
+                request.id,
+                .UnsupportedCapability,
+                "correct_request",
+            );
             const result = client.call(a, request.method, request.params) catch |err| {
-                const kind = failureKind(err);
-                if (kind == .CursorExpired) {
-                    const range = client.cursorRange(a, request.params) catch |range_error| return protocol.failure(a, request.id, failureKind(range_error), failureRecovery(failureKind(range_error)));
-                    var failure = try protocol.failure(a, request.id, kind, "read_status_or_result");
-                    const details = failure.object.getPtr("error").?.object.getPtr("data").?;
-                    try json.put(a, details, "earliest_available_seq", json.string(try std.fmt.allocPrint(a, "{d}", .{range.first})));
-                    try json.put(a, details, "high_water_seq", json.string(try std.fmt.allocPrint(a, "{d}", .{range.last})));
-                    return failure;
-                }
-                return protocol.failure(a, request.id, kind, failureRecovery(kind));
+                return self.clientFailure(a, request, client, err);
             };
             return protocol.response(a, request.id, result);
         }
-
-        fn member(self: *@This(), a: std.mem.Allocator, value: json.Value, batch: bool) !?json.Value {
+        fn requestShutdown(
+            self: *@This(),
+            a: std.mem.Allocator,
+            request: protocol.Call,
+        ) !json.Value {
+            const text = json.text(
+                request.params.object.get("mode").?,
+            ) catch return protocol.failure(
+                a,
+                request.id,
+                .InvalidParams,
+                "correct_request",
+            );
+            const mode = std.meta.stringToEnum(
+                Shutdown,
+                text,
+            ) orelse return protocol.failure(
+                a,
+                request.id,
+                .InvalidParams,
+                "correct_request",
+            );
+            if (self.shutdown != null and self.shutdown.? != mode) return protocol.failure(
+                a,
+                request.id,
+                .StateConflict,
+                failureRecovery(.StateConflict),
+            );
+            self.shutdown = mode;
+            var result = json.object();
+            try json.put(a, &result, "mode", json.string(@tagName(mode)));
+            try json.put(a, &result, "accepted", .{ .bool = true });
+            return protocol.response(a, request.id, result);
+        }
+        fn ping(self: *@This(), a: std.mem.Allocator, request: protocol.Call) !json.Value {
+            var result = json.object();
+            try json.put(a, &result, "server_instance_id", json.string(self.instance));
+            return protocol.response(a, request.id, result);
+        }
+        fn describe(self: *@This(), a: std.mem.Allocator, request: protocol.Call) !json.Value {
+            const launch = if (self.client) |client|
+                if (!client.service.profile.authority.revoked and
+                    client.service.profile.authority.disclosure) self.launch_profile else null
+            else
+                null;
+            const result = self.application.describe(
+                a,
+                request.params,
+                launch,
+            ) catch |err| return protocol.failure(
+                a,
+                request.id,
+                failureKind(err),
+                failureRecovery(failureKind(err)),
+            );
+            return protocol.response(a, request.id, result);
+        }
+        fn control(self: *@This(), a: std.mem.Allocator, request: protocol.Call) !?json.Value {
+            switch (request.method) {
+                .shutdown => return try self.requestShutdown(a, request),
+                .ping => return try self.ping(a, request),
+                .describe => return try self.describe(a, request),
+                .@"artifact.read" => if (self.client == null and json.get(
+                    request.params,
+                    "task_id",
+                ) == null) {
+                    // Discovery-only launch authorizes only the same immutable
+                    // public schemas as describe, never task/private artifacts.
+                    const result = self.application.readSchemaArtifact(
+                        a,
+                        request.params,
+                    ) catch |err| return try protocol.failure(
+                        a,
+                        request.id,
+                        failureKind(err),
+                        failureRecovery(failureKind(err)),
+                    );
+                    return try protocol.response(a, request.id, result);
+                },
+                else => {},
+            }
+            return null;
+        }
+        fn clientFailure(
+            _: *@This(),
+            a: std.mem.Allocator,
+            request: protocol.Call,
+            client: *client_api.Client(Types),
+            err: anyerror,
+        ) !json.Value {
+            const kind = failureKind(err);
+            if (kind == .CursorExpired) {
+                const range = client.cursorRange(
+                    a,
+                    request.params,
+                ) catch |range_error| return protocol.failure(
+                    a,
+                    request.id,
+                    failureKind(range_error),
+                    failureRecovery(failureKind(range_error)),
+                );
+                var failure = try protocol.failure(
+                    a,
+                    request.id,
+                    kind,
+                    "read_status_or_result",
+                );
+                const details = failure.object.getPtr("error").?.object.getPtr("data").?;
+                try json.put(
+                    a,
+                    details,
+                    "earliest_available_seq",
+                    json.string(try std.fmt.allocPrint(a, "{d}", .{range.first})),
+                );
+                try json.put(
+                    a,
+                    details,
+                    "high_water_seq",
+                    json.string(try std.fmt.allocPrint(a, "{d}", .{range.last})),
+                );
+                return failure;
+            }
+            return protocol.failure(a, request.id, kind, failureRecovery(kind));
+        }
+        fn initialize(self: *@This(), a: std.mem.Allocator, request: protocol.Call) !json.Value {
+            if (self.initialized) return protocol.failure(
+                a,
+                request.id,
+                .ProtocolState,
+                "correct_request",
+            );
+            const versions = request.params.object.get("protocol_versions").?;
+            const accepted = protocol.accepts(versions) catch return protocol.failure(
+                a,
+                request.id,
+                .InvalidParams,
+                "correct_request",
+            );
+            if (json.get(request.params, "client_info")) |info| {
+                protocol.closed(info, .{ .required = &.{ "name", "version" } }) catch
+                    return protocol.failure(a, request.id, .InvalidParams, "correct_request");
+                for (info.object.values()) |value| if (value != .string or value.string.len > 128)
+                    return protocol.failure(a, request.id, .InvalidParams, "correct_request");
+            }
+            if (!accepted) {
+                self.closing = true;
+                var fault = try protocol.failure(a, request.id, .ProtocolState, "correct_request");
+                var versions_out: std.array_list.Managed(json.Value) = .init(a);
+                try versions_out.append(json.string(protocol.version));
+                const error_value = fault.object.getPtr("error").?;
+                try json.put(a, error_value.object.getPtr(
+                    "data",
+                ).?, "supported_versions", .{ .array = versions_out });
+                return fault;
+            }
+            self.initialized = true;
+            var result = json.object();
+            try json.put(a, &result, "protocol_version", json.string(protocol.version));
+            try json.put(a, &result, "server_instance_id", json.string(self.instance));
+            var info = json.object();
+            try json.put(a, &info, "name", json.string("Protean native host"));
+            try json.put(a, &info, "version", json.string(@import("native_options").host_version));
+            try json.put(a, &result, "server_info", info);
+            try json.put(
+                a,
+                &result,
+                "build_manifest_id",
+                json.string(self.application.manifest_id),
+            );
+            try json.put(
+                a,
+                &result,
+                "native_artifact_sha256",
+                json.string(try a.dupe(u8, &std.fmt.bytesToHex(self.artifact_identity, .lower))),
+            );
+            const limits_bytes = try std.json.Stringify.valueAlloc(a, self.limits, .{});
+            const limits = try json.parse(a, limits_bytes, .{});
+            try json.put(a, &result, "limits", limits.value);
+            try json.put(a, &result, "capabilities", try self.describeCapabilities(a));
+            return protocol.response(a, request.id, result);
+        }
+        fn describeCapabilities(self: *@This(), a: std.mem.Allocator) !json.Value {
+            var capabilities = json.object();
+            var messages = false;
+            if (self.client) |client| for (client.service.handlers.entries) |entry| {
+                messages = messages or entry.declaration.kind == .inbox;
+            };
+            try json.put(a, &capabilities, "task_events", .{ .bool = self.client != null });
+            try json.put(a, &capabilities, "message_input", .{ .bool = messages });
+            try json.put(a, &capabilities, "task_execution", .{ .bool = self.client != null });
+            try json.put(a, &capabilities, "task_reconciliation", .{ .bool = self.client != null });
+            try json.put(a, &capabilities, "placement", .{
+                .bool = if (self.client) |client|
+                    client.service.profile.placement != null
+                else
+                    false,
+            });
+            try json.put(a, &capabilities, "semantic_construction", .{
+                .bool = if (self.client) |client|
+                    client.service.profile.semantic_construction != null
+                else
+                    false,
+            });
+            return capabilities;
+        }
+        fn member(
+            self: *@This(),
+            a: std.mem.Allocator,
+            value: json.Value,
+            batch: bool,
+        ) !?json.Value {
             return switch (protocol.admit(value, self.limits, batch)) {
                 .notification => null,
-                .failure => |fault| try protocol.failure(a, fault.id, fault.kind, "correct_request"),
+                .failure => |fault| try protocol.failure(
+                    a,
+                    fault.id,
+                    fault.kind,
+                    "correct_request",
+                ),
                 .call => |request| try self.call(a, request),
             };
         }
-
         fn frame(self: *@This(), a: std.mem.Allocator, value: json.Value) !?json.Value {
             if (self.client) |client| client.batch = value == .array;
             if (value != .array) return self.member(a, value, false);
@@ -160,12 +302,15 @@ fn Connection(comptime Types: type) type {
                 return try protocol.failure(a, .null, .InvalidRequest, "correct_request");
             };
             var results: std.array_list.Managed(json.Value) = .init(a);
-            for (value.array.items) |item| if (try self.member(a, item, true)) |result| try results.append(result);
+            for (value.array.items) |item| if (try self.member(
+                a,
+                item,
+                true,
+            )) |result| try results.append(result);
             return if (results.items.len == 0) null else .{ .array = results };
         }
     };
 }
-
 fn failureRecovery(kind: protocol.Kind) []const u8 {
     // Projection/encoding can fail after an admission has committed. Capacity
     // or internal failure is therefore not proof that a new operation is safe.
@@ -174,130 +319,91 @@ fn failureRecovery(kind: protocol.Kind) []const u8 {
         else => "correct_request",
     };
 }
-
 fn failureKind(err: anyerror) protocol.Kind {
     return switch (err) {
         error.Denied, error.UnknownTask, error.NotFound => .NotFound,
         error.OperationConflict => .OperationConflict,
-        error.CustodyNotLocal, error.CustodyNotRemote, error.StaleCustody, error.StaleController, error.UnsettledRemoteControl => .StateConflict,
-        error.Unauthorized, error.DisclosureDenied, error.KeyOwnerMismatch, error.SignatureVerificationFailed, error.SemanticPolicyDenied, error.GuardPolicyDenied => .Denied,
+        error.CustodyNotLocal,
+        error.CustodyNotRemote,
+        error.StaleCustody,
+        error.StaleController,
+        error.UnsettledRemoteControl,
+        => .StateConflict,
+        error.Unauthorized,
+        error.DisclosureDenied,
+        error.KeyOwnerMismatch,
+        error.SignatureVerificationFailed,
+        error.SemanticPolicyDenied,
+        error.GuardPolicyDenied,
+        => .Denied,
         error.StaleInteraction, error.QuestionMismatch, error.StaleOccurrence => .StaleInteraction,
         error.AnswerConflict => .AnswerConflict,
         error.CursorExpired => .CursorExpired,
         error.Capacity, error.OutOfMemory, error.Overloaded => .Overloaded,
-        error.TerminalTask, error.StaleRevision, error.UnsettledOccurrence, error.IncompatibleProfile, error.UnsupportedStateFormat, error.ShuttingDown, error.NonPortable, error.NonEmptyNamespace, error.AlreadyExists, error.ControllerRecoveryUnavailable, error.StaleInstructions, error.Canceled, error.ControllerConversionSchemaMismatch, error.ImpureControllerConversion, error.ControllerResultSchemaMismatch, error.IncompatibleControllerTrial => .StateConflict,
+        error.TerminalTask,
+        error.StaleRevision,
+        error.UnsettledOccurrence,
+        error.IncompatibleProfile,
+        error.UnsupportedStateFormat,
+        error.ShuttingDown,
+        error.NonPortable,
+        error.NonEmptyNamespace,
+        error.AlreadyExists,
+        error.ControllerRecoveryUnavailable,
+        error.StaleInstructions,
+        error.Canceled,
+        error.ControllerConversionSchemaMismatch,
+        error.ImpureControllerConversion,
+        error.ControllerResultSchemaMismatch,
+        error.IncompatibleControllerTrial,
+        => .StateConflict,
         error.MissingArtifact, error.ArtifactUnavailable => .ArtifactUnavailable,
-        error.UnsupportedCapability, error.GuardedMobilityUnsupported, error.ActiveObserverMobilityUnsupported, error.ScheduledObserverMobilityUnsupported => .UnsupportedCapability,
+        error.UnsupportedCapability,
+        error.GuardedMobilityUnsupported,
+        error.ActiveObserverMobilityUnsupported,
+        error.ScheduledObserverMobilityUnsupported,
+        => .UnsupportedCapability,
         error.StorageUnavailable, error.CorruptState => .StorageUnavailable,
-        error.InvalidParams, error.InvalidValue, error.InvalidJson, error.Overflow, error.InvalidCharacter, error.InvalidArchive, error.UnsafeStatePath => .InvalidParams,
+        error.InvalidParams,
+        error.InvalidValue,
+        error.InvalidJson,
+        error.Overflow,
+        error.InvalidCharacter,
+        error.InvalidArchive,
+        error.UnsafeStatePath,
+        => .InvalidParams,
         else => .InternalError,
     };
 }
-
-pub fn run(comptime Types: type, comptime Environment: type, init: std.process.Init, assets: discovery.Assets) !u8 {
+pub fn run(
+    comptime Types: type,
+    comptime Environment: type,
+    init: std.process.Init,
+    assets: discovery.Assets,
+) !u8 {
     var args = init.minimal.args.iterate();
     _ = args.next();
     const command = args.next() orelse "--help";
     if (std.mem.eql(u8, command, "--help")) {
         if (args.next() != null) return 64;
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Optional native placement: --placement-config FILE supplies a private signing-key file, pinned peers, disclosure policies and operator-selected transport commands. A model can select only configured peer names. Copying an archive grants no placement custody.\n\n");
-        if (comptime @hasDecl(Environment, "configure")) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Configured application commands:\nvalidate --config FILE\nrun --config FILE --task TEXT --state-dir PATH --authorize-inference --credential-file FILE\nserve --transport stdio --config FILE --state-dir PATH [--authorize-inference --credential-file FILE]\nresume --state-dir PATH [--task-id ID] [--config FILE] [--authorize-inference --credential-file FILE]\nUse --profile-task ID with serve to restore that task's frozen profile and snapshot.\nAn explicit --trust-root DER_FILE selects a TLS trust root. Credentials are never discovered.\n--test-provider selects loopback HTTPS with a built-in non-secret token; it requires --trust-root and rejects --credential-file.\nStatus/result read saved task data without loading execution configuration.\nOffline mode uses embedded deterministic fixtures and requires --offline.\n\n");
-        }
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Protean native application\n\n--help\ndescribe-build\nlicenses\ndemo --offline --state-dir PATH\nserve --transport stdio --offline [--state-dir PATH]\nstatus|result|resume|cancel --offline --state-dir PATH [--task-id ID]\nrun --offline --state-dir PATH --input-json JSON [--operation-id ID]\nrespond --offline --state-dir PATH --task-id ID --question-id ID --question-revision N --request-digest SHA256 --answer-json JSON [--operation-id ID]\nexport-checkpoint --offline --state-dir PATH [--task-id ID] --output FILE\nimport-checkpoint --offline --state-dir NEW_PATH --input FILE [--operation-id ID]\n\nA state directory enables durable tasks. Without it, serve provides discovery only.\nTask selection is required when more than one applicable task exists.\nWith --operation-id, resume/cancel/respond require --task-id; resume also requires --expected-revision. Preserve those parameters on retries.\n");
+        try printHelp(Environment, init.io);
         return 0;
     }
     if (std.mem.eql(u8, command, "describe-build") or std.mem.eql(u8, command, "licenses")) {
         if (args.next() != null) return 64;
-        var arena = std.heap.ArenaAllocator.init(init.gpa);
-        defer arena.deinit();
-        const a = arena.allocator();
-        const artifact = try identity.executable(init.io);
-        var manifest = (try json.parseAsset(a, assets.manifest, assets.manifest.len)).value;
-        try json.put(a, &manifest, "artifact_sha256", json.string(try a.dupe(u8, &std.fmt.bytesToHex(artifact.sha256, .lower))));
-        try json.put(a, &manifest, "artifact_bytes", json.string(try std.fmt.allocPrint(a, "{d}", .{artifact.bytes})));
-        try json.put(a, &manifest, "embedded_manifest_sha256", json.string(try discovery.digest(a, assets.manifest)));
-        var handlers = try registry.Registry.init(a, &Environment.handlers);
-        defer handlers.deinit();
-        var application = try discovery.Application.init(Types, a, assets, handlers);
-        defer application.deinit();
-        try json.put(a, &manifest, "protocol_schema_sha256", json.string(application.protocol_schema_sha256));
-        try std.Io.File.stdout().writeStreamingAll(init.io, try json.canonical(a, manifest));
-        try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+        try printManifest(Types, Environment, init, assets);
         return 0;
     }
-    const demo = std.mem.eql(u8, command, "demo");
-    const serving = std.mem.eql(u8, command, "serve");
-    const validating = std.mem.eql(u8, command, "validate");
-    const human = std.meta.stringToEnum(HumanCommand, command);
-    if (!demo and !serving and !validating and human == null) return 64;
-    var offline = false;
-    var test_provider = false;
-    var stdio = false;
-    var state_path: ?[]const u8 = null;
-    var config_path: ?[]const u8 = null;
-    var credential_path: ?[]const u8 = null;
-    var placement_path: ?[]const u8 = null;
-    var trust_root_path: ?[]const u8 = null;
-    var profile_task: ?[]const u8 = null;
-    var task_text: ?[]const u8 = null;
-    var authorize_inference = false;
-    var human_options: HumanOptions = .{};
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--offline") and !offline) offline = true else if (std.mem.eql(u8, arg, "--test-provider") and !test_provider) test_provider = true else if (std.mem.eql(u8, arg, "--transport") and !stdio and serving) {
-            if (!std.mem.eql(u8, args.next() orelse return 64, "stdio")) return 64;
-            stdio = true;
-        } else if (std.mem.eql(u8, arg, "--state-dir") and state_path == null) {
-            state_path = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--config") and config_path == null) {
-            config_path = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--credential-file") and credential_path == null) {
-            credential_path = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--placement-config") and placement_path == null) {
-            placement_path = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--trust-root") and trust_root_path == null) {
-            trust_root_path = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--profile-task") and serving and profile_task == null) {
-            profile_task = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--authorize-inference") and !authorize_inference) {
-            authorize_inference = true;
-        } else if (std.mem.eql(u8, arg, "--task") and human == .run and task_text == null) {
-            task_text = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--task-id") and human != null and human.? != .run and human.? != .@"import-checkpoint" and human_options.task_id == null) {
-            human_options.task_id = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--input-json") and human == .run and human_options.input_json == null) {
-            human_options.input_json = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--operation-id") and human != null and human.? != .status and human.? != .result and human.? != .@"export-checkpoint" and human_options.operation_id == null) {
-            human_options.operation_id = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--expected-revision") and human == .@"resume" and human_options.expected_revision == null) {
-            human_options.expected_revision = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--answer-json") and human == .respond and human_options.answer.value == null) {
-            human_options.answer.value = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--question-id") and human == .respond and human_options.answer.id == null) {
-            human_options.answer.id = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--question-revision") and human == .respond and human_options.answer.revision == null) {
-            human_options.answer.revision = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--request-digest") and human == .respond and human_options.answer.request == null) {
-            human_options.answer.request = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--input") and human == .@"import-checkpoint" and human_options.checkpoint_input == null) {
-            human_options.checkpoint_input = args.next() orelse return 64;
-        } else if (std.mem.eql(u8, arg, "--output") and human == .@"export-checkpoint" and human_options.checkpoint_output == null) {
-            human_options.checkpoint_output = args.next() orelse return 64;
-        } else return 64;
-    }
-    if ((serving and !stdio) or (!serving and !validating and state_path == null) or (human == .run and human_options.input_json == null and task_text == null)) return 64;
-    if ((demo and !offline) or (validating and state_path != null) or (offline and authorize_inference) or (task_text != null and human_options.input_json != null) or (profile_task != null and state_path == null)) return 64;
-    if (test_provider and (offline or credential_path != null or trust_root_path == null)) return 64;
-    if (comptime !@hasDecl(Environment, "configure")) {
-        if (!offline or validating or config_path != null or credential_path != null or trust_root_path != null or profile_task != null or authorize_inference or test_provider) return 64;
-    }
-    if (human == .respond and (human_options.answer.value == null or human_options.answer.id == null or human_options.answer.revision == null or human_options.answer.request == null)) return 64;
-    // A caller-named operation must not reselect mutable parameters on retry.
-    if (human_options.operation_id != null and (human == .@"resume" or human == .cancel or human == .respond)) {
-        if (human_options.task_id == null or (human == .@"resume" and human_options.expected_revision == null)) return 64;
-    }
-    if ((human == .@"import-checkpoint" and human_options.checkpoint_input == null) or (human == .@"export-checkpoint" and human_options.checkpoint_output == null)) return 64;
-
+    var options = LaunchOptions.parse(Environment, command, &args) catch return 64;
+    return runApplication(Types, Environment, init, assets, &options);
+}
+fn runApplication(
+    comptime Types: type,
+    comptime Environment: type,
+    init: std.process.Init,
+    assets: discovery.Assets,
+    options: *LaunchOptions,
+) !u8 {
     // The process allocator supports concurrent workers; each worker owns its
     // arena until join and publication. Actual allocation failure remains visible.
     const a = init.gpa;
@@ -305,125 +411,308 @@ pub fn run(comptime Types: type, comptime Environment: type, init: std.process.I
     defer handlers.deinit();
     var application = try discovery.Application.init(Types, a, assets, handlers);
     defer application.deinit();
-    var instance_identity: [16]u8 = undefined;
-    try init.io.randomSecure(&instance_identity);
-    const instance = std.fmt.bytesToHex(instance_identity, .lower);
+    const instance = try newInstance(init.io);
     const artifact_identity = try identity.executable(init.io);
     var namespace: ?Namespace = null;
-    defer if (namespace) |*owner| owner.close() catch {};
-    if (state_path) |path| namespace = Namespace.open(a, init.io, path) catch |err| return switch (err) {
-        error.Busy => 75,
-        error.UnsafeStatePath, error.ForeignNamespace => 64,
-        error.UnsupportedStateFormat => return err,
-        else => 74,
+    defer if (namespace) |*owner| owner.close() catch |err| {
+        _ = reportFailure(err);
     };
+    if (options.state_path) |path|
+        namespace = Namespace.open(a, init.io, path) catch |err| return namespaceCode(err);
     var profile_arena = std.heap.ArenaAllocator.init(a);
     defer profile_arena.deinit();
     const profile_allocator = profile_arena.allocator();
-    const grants = try profile_allocator.alloc(registry.Grant, handlers.entries.len);
-    for (handlers.entries, grants) |entry, *grant| grant.* = .{ .identity = entry.declaration.identity, .resource_role = entry.declaration.resource_role, .resource_identity = @splat(0) };
-    const profile_bytes = try std.json.Stringify.valueAlloc(profile_allocator, .{ .mode = "offline", .application = Types.application_id, .assets = try discovery.digest(profile_allocator, assets.application) }, .{});
-    var profile: tasks.Profile = .{ .id = "offline", .runtime_identity = artifact_identity.sha256, .bytes = profile_bytes, .authority = .{ .grants = grants, .principal = try std.fmt.allocPrint(profile_allocator, "uid:{d}", .{c.geteuid()}), .tenant = "local" } };
+    const initial = try offlineProfile(
+        Types,
+        profile_allocator,
+        assets,
+        handlers,
+        artifact_identity.sha256,
+    );
+    var profile = initial.profile;
     var service: ?tasks.Service(Types) = null;
-    defer if (service) |*owner| owner.close(a) catch {};
-    if (namespace) |*owner| service = try tasks.Service(Types).init(a, init.io, owner, assets, &application, handlers, profile);
-    if (comptime @hasDecl(Environment, "configure")) {
-        if (human != .status and human != .result) {
-            var frozen: ?tasks.FrozenInputs = null;
-            if (profile_task) |text| {
-                const id = client_api.identifier(16, json.string(text)) catch return 64;
-                frozen = service.?.frozenInputs(profile_allocator, id) catch return 64;
-            } else if (human == .@"import-checkpoint") {
-                frozen = service.?.frozenArchiveInputs(profile_allocator, human_options.checkpoint_input.?) catch return 64;
-            } else if (human != null and human.? != .run) {
-                const id = selectTask(Types, profile_allocator, &service.?, human_options.task_id, human == .@"resume" or human == .cancel) catch return 64;
-                frozen = service.?.frozenInputs(profile_allocator, id) catch return 64;
-            }
-            const admitted = Environment.configure(profile_allocator, init.io, .{ .offline = offline, .scratch_allocator = a, .test_provider = test_provider, .config_path = config_path, .credential_path = credential_path, .trust_root_path = trust_root_path }, frozen, assets) catch |err| {
-                _ = reportFailure(err);
-                return 64;
-            };
-            if (frozen) |saved| {
-                if (!std.mem.eql(u8, saved.profile, admitted.bytes) or !std.mem.eql(u8, saved.profile_id, admitted.id)) return 64;
-            }
-            profile.id = admitted.id;
-            profile.bytes = admitted.bytes;
-            profile.resources = admitted.resources;
-            profile.environment = admitted.environment;
-            profile.semantic_construction = admitted.semantic_construction;
-            profile.authority.inference = offline or authorize_inference;
-            profile.validate() catch return 64;
-            application.execution_mode = if (offline) .offline else .live;
-            if (service) |*owner| owner.profile = profile;
-        }
-    }
-    // Grant the finalized launch profile, including restored immutable inputs.
-    // Task admission checks the same digest derived from its durable references.
-    const resource_identity = try profile.resourceIdentity(a, application.image_identity);
-    for (grants) |*grant| grant.resource_identity = resource_identity;
-    if (placement_path) |path| {
-        if (service == null) return 64;
-        profile.placement = try @import("placement_configuration.zig").load(profile_allocator, init.io, path);
-        service.?.profile.placement = profile.placement;
-        try service.?.recoverPlacementFiles(a);
-    }
-    if (task_text) |text| {
-        if (comptime @hasDecl(Environment, "taskInput")) {
-            const input = Environment.taskInput(profile_allocator, text) catch return 64;
-            human_options.input_json = try json.canonical(profile_allocator, try @import("values.zig").toJson(Types.Input, profile_allocator, input));
-        } else return 64;
-    }
-    if (validating) {
-        var result = json.object();
-        try json.put(profile_allocator, &result, "valid", .{ .bool = true });
-        try json.put(profile_allocator, &result, "profile_id", json.string(profile.id));
-        try json.put(profile_allocator, &result, "profile_sha256", json.string(try discovery.digest(profile_allocator, profile.bytes)));
-        try std.Io.File.stdout().writeStreamingAll(init.io, try json.canonical(profile_allocator, result));
-        try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
-        return 0;
-    }
-    var client: ?client_api.Client(Types) = null;
-    if (service) |*owner| client = .{ .service = owner };
-    if (human) |selected| return humanCommand(Types, a, &service.?, &client.?, selected, human_options, &instance) catch |err| {
-        var arena = std.heap.ArenaAllocator.init(a);
-        defer arena.deinit();
-        const frame = arena.allocator();
-        const kind = failureKind(err);
-        var failure = json.object();
-        try json.put(frame, &failure, "error", json.string(@tagName(kind)));
-        try json.put(frame, &failure, "reason", json.string(@errorName(err)));
-        try json.put(frame, &failure, "recovery", json.string(failureRecovery(kind)));
-        try std.Io.File.stdout().writeStreamingAll(init.io, try json.canonical(frame, failure));
-        try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
-        return switch (kind) {
-            .StorageUnavailable, .InternalError => 74,
-            .Overloaded => 75,
-            else => 64,
-        };
+    defer if (service) |*owner| owner.close(a) catch |err| {
+        _ = reportFailure(err);
     };
-    if (demo) {
-        var arena = std.heap.ArenaAllocator.init(a);
-        defer arena.deinit();
-        const result = try @import("demo.zig").run(Types, Environment, arena.allocator(), &service.?, &client.?, &instance);
-        try std.Io.File.stdout().writeStreamingAll(init.io, try json.canonical(arena.allocator(), result));
-        try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
-        return 0;
-    }
-    var connection: Connection(Types) = .{
+    if (namespace) |*owner| service = try tasks.Service(Types).init(
+        a,
+        init.io,
+        owner,
+        assets,
+        &application,
+        handlers,
+        profile,
+    );
+    var launch: Launch(Types, Environment) = .{
+        .init = init,
+        .assets = assets,
+        .options = options,
+        .a = a,
+        .profile_allocator = profile_allocator,
+        .profile = &profile,
+        .grants = initial.grants,
+        .service = &service,
         .application = &application,
         .instance = &instance,
-        .artifact_identity = artifact_identity.sha256,
-        .client = if (client) |*value| value else null,
-        // Derive once from the finalized immutable launch inputs, using the
-        // same resource identity that issued the capability grants above.
-        .launch_profile = if (client != null) .{ .id = profile.id, .sha256 = @import("store.zig").digest(profile.bytes), .resource_identity = resource_identity } else null,
+        .artifact_identity = artifact_identity,
     };
-    return serve(Types, init.io, a, &connection);
+    if (try launch.configure()) |code| return code;
+    if (try launch.finalize()) |code| return code;
+    return launch.execute();
 }
-
-const HumanCommand = enum { run, status, result, @"resume", cancel, respond, @"export-checkpoint", @"import-checkpoint" };
-const AnswerOptions = struct { value: ?[]const u8 = null, id: ?[]const u8 = null, revision: ?[]const u8 = null, request: ?[]const u8 = null };
-
+const OfflineProfile = struct { profile: tasks.Profile, grants: []registry.Grant };
+fn offlineProfile(
+    comptime Types: type,
+    profile_allocator: std.mem.Allocator,
+    assets: discovery.Assets,
+    handlers: registry.Registry,
+    runtime_identity: [32]u8,
+) !OfflineProfile {
+    const grants = try profile_allocator.alloc(registry.Grant, handlers.entries.len);
+    for (handlers.entries, grants) |entry, *grant| grant.* = .{
+        .identity = entry.declaration.identity,
+        .resource_role = entry.declaration.resource_role,
+        .resource_identity = @splat(0),
+    };
+    const profile_bytes = try std.json.Stringify.valueAlloc(profile_allocator, .{
+        .mode = "offline",
+        .application = Types.application_id,
+        .assets = try discovery.digest(profile_allocator, assets.application),
+    }, .{});
+    const profile: tasks.Profile = .{
+        .id = "offline",
+        .runtime_identity = runtime_identity,
+        .bytes = profile_bytes,
+        .authority = .{
+            .grants = grants,
+            .principal = try std.fmt.allocPrint(profile_allocator, "uid:{d}", .{c.geteuid()}),
+            .tenant = "local",
+        },
+    };
+    return .{ .profile = profile, .grants = grants };
+}
+fn Launch(comptime Types: type, comptime Environment: type) type {
+    return struct {
+        init: std.process.Init,
+        assets: discovery.Assets,
+        options: *LaunchOptions,
+        a: std.mem.Allocator,
+        profile_allocator: std.mem.Allocator,
+        profile: *tasks.Profile,
+        grants: []registry.Grant,
+        service: *?tasks.Service(Types),
+        application: *discovery.Application,
+        instance: []const u8,
+        artifact_identity: identity.Identity,
+        resource_identity: [32]u8 = undefined,
+        fn configure(self: *@This()) !?u8 {
+            if (comptime @hasDecl(Environment, "configure")) {
+                if (self.options.human != .status and self.options.human != .result) {
+                    const frozen = self.frozenInputs() catch return 64;
+                    const admitted = Environment.configure(
+                        self.profile_allocator,
+                        self.init.io,
+                        .{
+                            .offline = self.options.offline,
+                            .scratch_allocator = self.a,
+                            .test_provider = self.options.test_provider,
+                            .config_path = self.options.config_path,
+                            .credential_path = self.options.credential_path,
+                            .trust_root_path = self.options.trust_root_path,
+                        },
+                        frozen,
+                        self.assets,
+                    ) catch |err| {
+                        _ = reportFailure(err);
+                        return 64;
+                    };
+                    if (frozen) |saved| {
+                        if (!std.mem.eql(u8, saved.profile, admitted.bytes) or
+                            !std.mem.eql(u8, saved.profile_id, admitted.id)) return 64;
+                    }
+                    self.profile.*.id = admitted.id;
+                    self.profile.*.bytes = admitted.bytes;
+                    self.profile.*.resources = admitted.resources;
+                    self.profile.*.environment = admitted.environment;
+                    self.profile.*.semantic_construction = admitted.semantic_construction;
+                    self.profile.*.authority.inference = self.options.offline or
+                        self.options.authorize_inference;
+                    self.profile.*.validate() catch return 64;
+                    self.application.execution_mode = if (self.options.offline) .offline else .live;
+                    if (self.service.*) |*owner| owner.profile = self.profile.*;
+                }
+            }
+            return null;
+        }
+        fn frozenInputs(self: *@This()) !?tasks.FrozenInputs {
+            var frozen: ?tasks.FrozenInputs = null;
+            if (self.options.profile_task) |text| {
+                const id = try client_api.identifier(16, json.string(text));
+                frozen = try self.service.*.?.frozenInputs(self.profile_allocator, id);
+            } else if (self.options.human == .@"import-checkpoint") {
+                frozen = try self.service.*.?.frozenArchiveInputs(
+                    self.profile_allocator,
+                    self.options.human_options.checkpoint_input.?,
+                );
+            } else if (self.options.human != null and self.options.human.? != .run) {
+                const id = try selectTask(
+                    Types,
+                    self.profile_allocator,
+                    &self.service.*.?,
+                    self.options.human_options.task_id,
+                    self.options.human == .@"resume" or self.options.human == .cancel,
+                );
+                frozen = try self.service.*.?.frozenInputs(self.profile_allocator, id);
+            }
+            return frozen;
+        }
+        fn finalize(self: *@This()) !?u8 {
+            // Grant the finalized launch profile, including restored immutable inputs.
+            // Task admission checks the same digest derived from its durable references.
+            self.resource_identity = try self.profile.*.resourceIdentity(
+                self.a,
+                self.application.image_identity,
+            );
+            for (self.grants) |*grant| grant.resource_identity = self.resource_identity;
+            if (self.options.placement_path) |path| {
+                if (self.service.* == null) return 64;
+                self.profile.*.placement = try @import("placement_configuration.zig").load(
+                    self.profile_allocator,
+                    self.init.io,
+                    path,
+                );
+                self.service.*.?.profile.placement = self.profile.*.placement;
+                try self.service.*.?.recoverPlacementFiles(self.a);
+            }
+            if (self.options.task_text) |text| {
+                if (comptime @hasDecl(Environment, "taskInput")) {
+                    const input = Environment.taskInput(
+                        self.profile_allocator,
+                        text,
+                    ) catch return 64;
+                    self.options.human_options.input_json = try json.canonical(
+                        self.profile_allocator,
+                        try @import("values.zig").toJson(
+                            Types.Input,
+                            self.profile_allocator,
+                            input,
+                        ),
+                    );
+                } else return 64;
+            }
+            return null;
+        }
+        fn execute(self: *@This()) !u8 {
+            if (self.options.validating) return self.validateOutput();
+            var client: ?client_api.Client(Types) = null;
+            if (self.service.*) |*owner| client = .{ .service = owner };
+            if (self.options.human) |selected| return humanCommand(
+                Types,
+                self.a,
+                &self.service.*.?,
+                &client.?,
+                selected,
+                self.options.human_options,
+                self.instance,
+            ) catch |err| return self.humanFailure(err);
+            if (self.options.demo) return self.demo(&self.service.*.?, &client.?);
+            var connection: Connection(Types) = .{
+                .application = self.application,
+                .instance = self.instance,
+                .artifact_identity = self.artifact_identity.sha256,
+                .client = if (client) |*value| value else null,
+                // Derive once from the finalized immutable launch inputs, using the
+                // same resource identity that issued the capability grants above.
+                .launch_profile = if (client != null) .{
+                    .id = self.profile.*.id,
+                    .sha256 = @import("store.zig").digest(self.profile.*.bytes),
+                    .resource_identity = self.resource_identity,
+                } else null,
+            };
+            return serve(Types, self.init.io, self.a, &connection);
+        }
+        fn validateOutput(self: *@This()) !u8 {
+            var result = json.object();
+            try json.put(self.profile_allocator, &result, "valid", .{ .bool = true });
+            try json.put(
+                self.profile_allocator,
+                &result,
+                "profile_id",
+                json.string(self.profile.*.id),
+            );
+            try json.put(
+                self.profile_allocator,
+                &result,
+                "profile_sha256",
+                json.string(try discovery.digest(self.profile_allocator, self.profile.*.bytes)),
+            );
+            try std.Io.File.stdout().writeStreamingAll(
+                self.init.io,
+                try json.canonical(self.profile_allocator, result),
+            );
+            try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
+            return 0;
+        }
+        fn humanFailure(self: *@This(), err: anyerror) !u8 {
+            var arena = std.heap.ArenaAllocator.init(self.a);
+            defer arena.deinit();
+            const frame = arena.allocator();
+            const kind = failureKind(err);
+            var failure = json.object();
+            try json.put(frame, &failure, "error", json.string(@tagName(kind)));
+            try json.put(frame, &failure, "reason", json.string(@errorName(err)));
+            try json.put(frame, &failure, "recovery", json.string(failureRecovery(kind)));
+            try std.Io.File.stdout().writeStreamingAll(
+                self.init.io,
+                try json.canonical(frame, failure),
+            );
+            try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
+            return switch (kind) {
+                .StorageUnavailable, .InternalError => 74,
+                .Overloaded => 75,
+                else => 64,
+            };
+        }
+        fn demo(
+            self: *@This(),
+            demo_service: *tasks.Service(Types),
+            demo_client: *client_api.Client(Types),
+        ) !u8 {
+            var arena = std.heap.ArenaAllocator.init(self.a);
+            defer arena.deinit();
+            const result = try @import("demo.zig").run(
+                Types,
+                Environment,
+                arena.allocator(),
+                demo_service,
+                demo_client,
+                self.instance,
+            );
+            try std.Io.File.stdout().writeStreamingAll(
+                self.init.io,
+                try json.canonical(arena.allocator(), result),
+            );
+            try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
+            return 0;
+        }
+    };
+}
+const HumanCommand = enum {
+    run,
+    status,
+    result,
+    @"resume",
+    cancel,
+    respond,
+    @"export-checkpoint",
+    @"import-checkpoint",
+};
+const AnswerOptions = struct {
+    value: ?[]const u8 = null,
+    id: ?[]const u8 = null,
+    revision: ?[]const u8 = null,
+    request: ?[]const u8 = null,
+};
 const HumanOptions = struct {
     task_id: ?[]const u8 = null,
     input_json: ?[]const u8 = null,
@@ -433,8 +722,13 @@ const HumanOptions = struct {
     checkpoint_input: ?[]const u8 = null,
     checkpoint_output: ?[]const u8 = null,
 };
-
-fn selectTask(comptime Types: type, a: std.mem.Allocator, service: *tasks.Service(Types), text: ?[]const u8, nonterminal: bool) ![16]u8 {
+fn selectTask(
+    comptime Types: type,
+    a: std.mem.Allocator,
+    service: *tasks.Service(Types),
+    text: ?[]const u8,
+    nonterminal: bool,
+) ![16]u8 {
     if (text) |value| return client_api.identifier(16, json.string(value));
     const ids = try service.namespace.store.taskIds(a, nonterminal);
     defer a.free(ids);
@@ -450,71 +744,223 @@ fn selectTask(comptime Types: type, a: std.mem.Allocator, service: *tasks.Servic
     }
     return selected orelse error.UnknownTask;
 }
-
 /// CLI selection and rendering only. All admissions and execution use the same
 /// client mapping, task owner and isolated I/O slot as the protocol front end.
-fn humanCommand(comptime Types: type, a: std.mem.Allocator, service: *tasks.Service(Types), client: *client_api.Client(Types), command: HumanCommand, options: HumanOptions, fallback_operation_id: []const u8) !u8 {
+fn humanCommand(
+    comptime Types: type,
+    a: std.mem.Allocator,
+    service: *tasks.Service(Types),
+    client: *client_api.Client(Types),
+    command: HumanCommand,
+    options: HumanOptions,
+    fallback_operation_id: []const u8,
+) !u8 {
     const operation_id = options.operation_id orelse fallback_operation_id;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const frame = arena.allocator();
     var params = json.object();
     try json.put(frame, &params, "client_operation_id", json.string(operation_id));
+    var operation: HumanOperation(Types) = .{
+        .frame = frame,
+        .service = service,
+        .client = client,
+        .options = options,
+        .params = &params,
+        .operation_id = operation_id,
+    };
     var id: [16]u8 = undefined;
     var imported: ?tasks.Admission = null;
     if (command == .@"import-checkpoint") {
         imported = try service.importCheckpoint(frame, operation_id, options.checkpoint_input.?);
         id = imported.?.receipt.task;
     } else if (command == .run) {
-        try json.put(frame, &params, "application_id", json.string(Types.application_id));
-        try json.put(frame, &params, "profile_id", json.string(service.profile.id));
-        var typed_input = json.object();
-        try json.put(frame, &typed_input, "schema_id", json.string(Types.input_schema_id));
-        try json.put(frame, &typed_input, "value", (try json.parse(frame, options.input_json.?, .{ .bytes = 256 * 1024 })).value);
-        try json.put(frame, &params, "input", typed_input);
-        const accepted = try client.call(frame, .@"task.submit", params);
-        id = try client_api.identifier(16, accepted.object.get("task_id").?);
+        id = try operation.submit();
     } else {
-        id = selectTask(Types, frame, service, options.task_id, command == .@"resume" or command == .cancel) catch return 64;
-        try json.put(frame, &params, "task_id", json.string(try frame.dupe(u8, &std.fmt.bytesToHex(id, .lower))));
-        if (command == .@"export-checkpoint") {
-            const exported = try service.exportCheckpoint(frame, id, options.checkpoint_output.?);
-            var result = json.object();
-            try json.put(frame, &result, "format", json.string("agent-native-checkpoint/1"));
-            try json.put(frame, &result, "task_id", params.object.get("task_id").?);
-            try json.put(frame, &result, "sha256", json.string(try frame.dupe(u8, &std.fmt.bytesToHex(exported.sha256, .lower))));
-            try json.put(frame, &result, "bytes", json.string(try std.fmt.allocPrint(frame, "{d}", .{exported.bytes})));
-            try std.Io.File.stdout().writeStreamingAll(service.io, try json.canonical(frame, result));
-            try std.Io.File.stdout().writeStreamingAll(service.io, "\n");
+        id = selectTask(
+            Types,
+            frame,
+            service,
+            options.task_id,
+            command == .@"resume" or command == .cancel,
+        ) catch return 64;
+        try json.put(
+            frame,
+            &params,
+            "task_id",
+            json.string(try frame.dupe(u8, &std.fmt.bytesToHex(id, .lower))),
+        );
+        if (command == .@"export-checkpoint") return operation.exportCheckpoint(id);
+        try operation.update(command, id);
+    }
+    return operation.finish(a, command, id, imported);
+}
+fn HumanOperation(comptime Types: type) type {
+    return struct {
+        frame: std.mem.Allocator,
+        service: *tasks.Service(Types),
+        client: *client_api.Client(Types),
+        options: HumanOptions,
+        params: *json.Value,
+        operation_id: []const u8,
+        fn finish(
+            self: *@This(),
+            a: std.mem.Allocator,
+            command: HumanCommand,
+            id: [16]u8,
+            imported: ?tasks.Admission,
+        ) !u8 {
+            const shutdown_incomplete = if (command == .run or
+                command == .@"resume" or
+                command == .cancel or
+                command == .respond) try driveHuman(
+                Types,
+                a,
+                self.service,
+                self.operation_id,
+            ) else false;
+            try json.put(
+                self.frame,
+                self.params,
+                "task_id",
+                json.string(try self.frame.dupe(u8, &std.fmt.bytesToHex(id, .lower))),
+            );
+            const result = if (imported) |admitted| try self.client.admission(
+                self.frame,
+                admitted,
+            ) else try self.client.call(
+                self.frame,
+                if (command == .status) .@"task.status" else .@"task.result",
+                self.params.*,
+            );
+            try std.Io.File.stdout().writeStreamingAll(
+                self.service.io,
+                try json.canonical(self.frame, result),
+            );
+            try std.Io.File.stdout().writeStreamingAll(self.service.io, "\n");
+            if (command != .status and command != .result and command != .@"import-checkpoint") {
+                return executionExit(result, shutdown_incomplete);
+            }
             return 0;
         }
-        if (command == .@"resume") {
-            var current = try service.task(frame, id);
-            defer current.deinit();
-            try json.put(frame, &params, "expected_revision", json.string(options.expected_revision orelse try std.fmt.allocPrint(frame, "{d}", .{current.value.revision})));
-            _ = try client.call(frame, .@"task.resume", params);
-        } else if (command == .cancel) _ = try client.call(frame, .@"task.cancel", params) else if (command == .respond) {
-            var answer = json.object();
-            try json.put(frame, &answer, "schema_id", json.string(Types.answer_schema_id));
-            try json.put(frame, &answer, "value", (try json.parse(frame, options.answer.value.?, .{ .bytes = 256 * 1024 })).value);
-            try json.put(frame, &params, "answer", answer);
-            try json.put(frame, &params, "question_id", json.string(options.answer.id.?));
-            try json.put(frame, &params, "question_revision", json.string(options.answer.revision.?));
-            try json.put(frame, &params, "request_digest", json.string(options.answer.request.?));
-            _ = try client.call(frame, .@"task.respond", params);
+        fn submit(self: *@This()) ![16]u8 {
+            try json.put(
+                self.frame,
+                self.params,
+                "application_id",
+                json.string(Types.application_id),
+            );
+            try json.put(
+                self.frame,
+                self.params,
+                "profile_id",
+                json.string(self.service.profile.id),
+            );
+            var typed_input = json.object();
+            try json.put(self.frame, &typed_input, "schema_id", json.string(Types.input_schema_id));
+            try json.put(
+                self.frame,
+                &typed_input,
+                "value",
+                (try json.parse(
+                    self.frame,
+                    self.options.input_json.?,
+                    .{ .bytes = 256 * 1024 },
+                )).value,
+            );
+            try json.put(self.frame, self.params, "input", typed_input);
+            const accepted = try self.client.call(self.frame, .@"task.submit", self.params.*);
+            return client_api.identifier(16, accepted.object.get("task_id").?);
         }
-    }
-    const shutdown_incomplete = if (command == .run or command == .@"resume" or command == .cancel or command == .respond) try driveHuman(Types, a, service, operation_id) else false;
-    try json.put(frame, &params, "task_id", json.string(try frame.dupe(u8, &std.fmt.bytesToHex(id, .lower))));
-    const result = if (imported) |admitted| try client.admission(frame, admitted) else try client.call(frame, if (command == .status) .@"task.status" else .@"task.result", params);
-    try std.Io.File.stdout().writeStreamingAll(service.io, try json.canonical(frame, result));
-    try std.Io.File.stdout().writeStreamingAll(service.io, "\n");
-    if (command != .status and command != .result and command != .@"import-checkpoint") {
-        return executionExit(result, shutdown_incomplete);
-    }
-    return 0;
+        fn exportCheckpoint(self: *@This(), id: [16]u8) !u8 {
+            const exported = try self.service.exportCheckpoint(
+                self.frame,
+                id,
+                self.options.checkpoint_output.?,
+            );
+            var result = json.object();
+            try json.put(self.frame, &result, "format", json.string("agent-native-checkpoint/1"));
+            try json.put(self.frame, &result, "task_id", self.params.object.get("task_id").?);
+            try json.put(
+                self.frame,
+                &result,
+                "sha256",
+                json.string(try self.frame.dupe(u8, &std.fmt.bytesToHex(exported.sha256, .lower))),
+            );
+            try json.put(
+                self.frame,
+                &result,
+                "bytes",
+                json.string(try std.fmt.allocPrint(self.frame, "{d}", .{exported.bytes})),
+            );
+            try std.Io.File.stdout().writeStreamingAll(
+                self.service.io,
+                try json.canonical(self.frame, result),
+            );
+            try std.Io.File.stdout().writeStreamingAll(self.service.io, "\n");
+            return 0;
+        }
+        fn update(self: *@This(), command: HumanCommand, id: [16]u8) !void {
+            if (command == .@"resume") {
+                var current = try self.service.task(self.frame, id);
+                defer current.deinit();
+                try json.put(
+                    self.frame,
+                    self.params,
+                    "expected_revision",
+                    json.string(
+                        self.options.expected_revision orelse try std.fmt.allocPrint(
+                            self.frame,
+                            "{d}",
+                            .{current.value.revision},
+                        ),
+                    ),
+                );
+                _ = try self.client.call(self.frame, .@"task.resume", self.params.*);
+            } else if (command == .cancel) _ = try self.client.call(
+                self.frame,
+                .@"task.cancel",
+                self.params.*,
+            ) else if (command == .respond) {
+                try self.respond();
+            }
+        }
+        fn respond(self: *@This()) !void {
+            var answer = json.object();
+            try json.put(self.frame, &answer, "schema_id", json.string(Types.answer_schema_id));
+            try json.put(
+                self.frame,
+                &answer,
+                "value",
+                (try json.parse(
+                    self.frame,
+                    self.options.answer.value.?,
+                    .{ .bytes = 256 * 1024 },
+                )).value,
+            );
+            try json.put(self.frame, self.params, "answer", answer);
+            try json.put(
+                self.frame,
+                self.params,
+                "question_id",
+                json.string(self.options.answer.id.?),
+            );
+            try json.put(
+                self.frame,
+                self.params,
+                "question_revision",
+                json.string(self.options.answer.revision.?),
+            );
+            try json.put(
+                self.frame,
+                self.params,
+                "request_digest",
+                json.string(self.options.answer.request.?),
+            );
+            _ = try self.client.call(self.frame, .@"task.respond", self.params.*);
+        }
+    };
 }
-
 fn executionExit(result: json.Value, shutdown_incomplete: bool) u8 {
     if (shutdown_incomplete) return 2;
     // Waiting for input can be part of cancellation cleanup. Readiness and
@@ -524,13 +970,20 @@ fn executionExit(result: json.Value, shutdown_incomplete: bool) u8 {
         if (result.object.get("associated_work_disposed")) |disposed| if (!disposed.bool) return 2;
     };
     // A terminal application failure does not imply settled cleanup.
-    if (result.object.get("outcome")) |outcome| if (json.get(outcome, "cleanup_complete")) |complete| if (!complete.bool) return 2;
+    if (result.object.get("outcome")) |outcome| if (json.get(
+        outcome,
+        "cleanup_complete",
+    )) |complete| if (!complete.bool) return 2;
     const status = result.object.get("status").?.string;
     if (std.mem.eql(u8, status, "failed")) return 1;
-    for ([_][]const u8{ "unknown", "blocked", "cancelling", "parked" }) |unfinished| if (std.mem.eql(u8, status, unfinished)) return 2;
+    for ([_][]const u8{
+        "unknown",
+        "blocked",
+        "cancelling",
+        "parked",
+    }) |unfinished| if (std.mem.eql(u8, status, unfinished)) return 2;
     return 0;
 }
-
 test "execution exit distinguishes application failure from incomplete cleanup" {
     const cases = .{
         .{ "{\"status\":\"failed\",\"outcome\":{\"cleanup_complete\":false}}", 2 },
@@ -542,10 +995,28 @@ test "execution exit distinguishes application failure from incomplete cleanup" 
         .{ "{\"status\":\"waiting_input\",\"ready\":false,\"cancellation\":null}", 0 },
         .{ "{\"status\":\"waiting_input\",\"ready\":false,\"cancellation\":\"requested\"}", 2 },
         .{ "{\"status\":\"waiting_input\",\"ready\":false,\"cancellation\":\"\"}", 2 },
-        .{ "{\"status\":\"cancelled\",\"ready\":true,\"cancellation\":\"requested\",\"outcome\":{\"cleanup_complete\":true}}", 0 },
-        .{ "{\"status\":\"cancelled\",\"ready\":true,\"cancellation\":\"requested\",\"associated_work_disposed\":false,\"outcome\":{\"cleanup_complete\":true}}", 2 },
-        .{ "{\"status\":\"cancelled\",\"ready\":true,\"cancellation\":\"requested\",\"associated_work_disposed\":true,\"outcome\":{\"cleanup_complete\":true}}", 0 },
-        .{ "{\"status\":\"completed\",\"ready\":true,\"cancellation\":null,\"associated_work_disposed\":false}", 0 },
+        .{
+            "{\"status\":\"cancelled\",\"ready\":true,\"cancellation\":\"requested" ++
+                "\",\"outcome\":{\"cleanup_complete\":true}}",
+            0,
+        },
+        .{
+            "{\"status\":\"cancelled\",\"ready\":true,\"cancellation\":\"requested" ++
+                "\",\"associated_work_disposed\":false,\"outcome\":{\"cleanup_complete" ++
+                "\":true}}",
+            2,
+        },
+        .{
+            "{\"status\":\"cancelled\",\"ready\":true,\"cancellation\":\"requested" ++
+                "\",\"associated_work_disposed\":true,\"outcome\":{\"cleanup_complete\"" ++
+                ":true}}",
+            0,
+        },
+        .{
+            "{\"status\":\"completed\",\"ready\":true,\"cancellation\":null,\"assoc" ++
+                "iated_work_disposed\":false}",
+            0,
+        },
         .{ "{\"status\":\"unknown\"}", 2 },
         .{ "{\"status\":\"blocked\"}", 2 },
         .{ "{\"status\":\"cancelling\"}", 2 },
@@ -558,28 +1029,38 @@ test "execution exit distinguishes application failure from incomplete cleanup" 
         try std.testing.expectEqual(@as(u8, 2), executionExit(result.value, true));
     }
 }
-
-fn driveHuman(comptime Types: type, a: std.mem.Allocator, service: *tasks.Service(Types), operation_id: []const u8) !bool {
+fn driveHuman(
+    comptime Types: type,
+    a: std.mem.Allocator,
+    service: *tasks.Service(Types),
+    operation_id: []const u8,
+) !bool {
     interrupts.store(0, .release);
     if (c.protean_native_signals_begin(interrupt) != 0) return error.IoUnavailable;
     defer c.protean_native_signals_end();
     const slot = try Worker.init(a, service.io);
     defer {
         if (slot.future != null) std.process.exit(2);
-        slot.deinit(a) catch {};
+        slot.deinit(a) catch |err| {
+            _ = reportFailure(err);
+        };
     }
     var shutdown_at: ?i64 = null;
-    while (true) {
+    while (true) { // tiger: event-loop
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
         const frame = arena.allocator();
         const signals = interrupts.load(.acquire);
         const time = std.Io.Clock.awake.now(service.io).toMilliseconds();
-        if (signals > 1 or (shutdown_at != null and time - shutdown_at.? >= 5000)) std.process.exit(2);
+        if (signals > 1 or (shutdown_at != null and time - shutdown_at.? >= 5000)) std.process.exit(
+            2,
+        );
         if (signals != 0 and shutdown_at == null) {
             shutdown_at = time;
             const digest = @import("store.zig").digest(operation_id);
-            const operation = try std.fmt.allocPrint(frame, "interrupt-{s}", .{std.fmt.bytesToHex(digest, .lower)});
+            const operation = try std.fmt.allocPrint(frame, "interrupt-{s}", .{
+                std.fmt.bytesToHex(digest, .lower),
+            });
             try service.cancelOwned(frame, operation, "human requested cancellation");
         }
         if (slot.future != null) {
@@ -592,10 +1073,18 @@ fn driveHuman(comptime Types: type, a: std.mem.Allocator, service: *tasks.Servic
         }
         const step = try service.pump(frame);
         switch (step) {
-            .work => |work| slot.start(work, service.profile.authority, service.profile.environment) catch try service.notSent(frame, work),
+            .work => |work| slot.start(
+                work,
+                service.profile.authority,
+                service.profile.environment,
+            ) catch try service.notSent(frame, work),
             .progressed => {},
             .waiting, .idle => {
-                if (!humanCanPark(slot.future != null, service.runnable.items.len != 0, service.placementActive())) {
+                if (!humanCanPark(
+                    slot.future != null,
+                    service.runnable.items.len != 0,
+                    service.placementActive(),
+                )) {
                     if (step == .idle) _ = c.poll(null, 0, 20);
                     continue;
                 }
@@ -605,12 +1094,10 @@ fn driveHuman(comptime Types: type, a: std.mem.Allocator, service: *tasks.Servic
         }
     }
 }
-
 var interrupts: std.atomic.Value(u32) = .init(0);
 fn interrupt(_: c_int) callconv(.c) void {
     _ = interrupts.fetchAdd(1, .monotonic);
 }
-
 fn requestIds(value: json.Value, buffer: *[16]transport_api.Id) []const transport_api.Id {
     var count: usize = 0;
     if (value == .array) {
@@ -625,62 +1112,93 @@ fn requestIds(value: json.Value, buffer: *[16]transport_api.Id) []const transpor
     }
     return buffer[0..count];
 }
-
 /// Parking freezes owned membership before disclosure. Emit bounded recovery
 /// pages, ending with exactly one server.closed frame. Advance only after the
 /// writer owns the page; backpressure leaves the next ID and closure pending.
-fn queueClosed(comptime Types: type, frame: std.mem.Allocator, connection: *Connection(Types), transport: *transport_api.Transport, mode: Shutdown, code: u8) !bool {
+fn queueClosed(
+    comptime Types: type,
+    frame: std.mem.Allocator,
+    connection: *Connection(Types),
+    transport: *transport_api.Transport,
+    mode: Shutdown,
+    code: u8,
+) !bool {
     if (!transport.canAdmit()) return false;
-    const owned: []const [16]u8 = if (connection.client) |client| client.service.owned.items else &.{};
+    const owned: []const [16]u8 = if (connection.client) |client|
+        client.service.owned.items
+    else
+        &.{};
     // Each fixed-width ID occupies 35 bytes including its separator. The fixed
     // envelope (including LF) fits 256 bytes for every mode/disposition. The
     // page cap also keeps structural tokens below the JSON frame profile.
-    const page_limit = @min(connection.limits.recovery_task_page, (transport.limits.frame_bytes -| 256) / 35);
+    const page_limit = @min(
+        connection.limits.recovery_task_page,
+        (transport.limits.frame_bytes -| 256) / 35,
+    );
     const remaining = owned.len - connection.recovery_offset;
     if (remaining != 0 and page_limit == 0) return error.Capacity;
     const end = connection.recovery_offset + @min(remaining, page_limit);
     const complete = end == owned.len;
     var params = json.object();
     try json.put(frame, &params, "mode", json.string(@tagName(mode)));
-    try json.put(frame, &params, "disposition", json.string(if (code == 2) "incomplete" else if (mode == .cancel) "cancelled" else "parked"));
+    try json.put(
+        frame,
+        &params,
+        "disposition",
+        json.string(
+            if (code == 2) "incomplete" else if (mode == .cancel) "cancelled" else "parked",
+        ),
+    );
     var pending: std.array_list.Managed(json.Value) = .init(frame);
     for (owned[connection.recovery_offset..end]) |id| {
         try pending.append(json.string(try frame.dupe(u8, &std.fmt.bytesToHex(id, .lower))));
     }
     try json.put(frame, &params, "recovery_tasks", .{ .array = pending });
-    try transport.enqueue(try json.frame(frame, try protocol.notification(frame, if (complete) "server.closed" else "server.recovery", params)), &.{}, connection.client != null);
+    try transport.enqueue(
+        try json.frame(
+            frame,
+            try protocol.notification(
+                frame,
+                if (complete) "server.closed" else "server.recovery",
+                params,
+            ),
+        ),
+        &.{},
+        connection.client != null,
+    );
     connection.recovery_offset = end;
     return complete;
 }
-
 /// Task settlement and complete protocol delivery are separate exit obligations.
 fn shutdownDisposition(code: u8, settled: bool, delivery_pending: bool) u8 {
     if (code != 0 and code != 2) return code;
     if (delivery_pending) return 74;
     return if (code == 0 and !settled) 2 else code;
 }
-
 fn shutdownCanPark(mode: Shutdown, code: u8, pump_idle: bool, placement_active: bool) bool {
     return mode == .park or code != 0 or (pump_idle and !placement_active);
 }
-
 fn humanCanPark(worker_live: bool, runnable: bool, placement_active: bool) bool {
     return !worker_live and !runnable and !placement_active;
 }
-
 test "cancel shutdown retains placement activity until quiescence or failure" {
     for ([_]bool{ false, true }) |idle| {
         for ([_]bool{ false, true }) |placement_active| {
-            try std.testing.expectEqual(idle and !placement_active, shutdownCanPark(.cancel, 0, idle, placement_active));
+            try std.testing.expectEqual(
+                idle and !placement_active,
+                shutdownCanPark(.cancel, 0, idle, placement_active),
+            );
             try std.testing.expect(shutdownCanPark(.park, 0, idle, placement_active));
             try std.testing.expect(shutdownCanPark(.cancel, 74, idle, placement_active));
             for ([_]bool{ false, true }) |worker_live| {
-                try std.testing.expectEqual(!worker_live and idle and !placement_active, humanCanPark(worker_live, !idle, placement_active));
+                try std.testing.expectEqual(
+                    !worker_live and idle and !placement_active,
+                    humanCanPark(worker_live, !idle, placement_active),
+                );
             }
         }
     }
 }
-
 test "shutdown deadline preserves task and delivery failure distinctions" {
     for ([_]bool{ false, true }) |settled| {
         try std.testing.expectEqual(74, shutdownDisposition(0, settled, true));
@@ -694,11 +1212,9 @@ test "shutdown deadline preserves task and delivery failure distinctions" {
     try std.testing.expectEqual(0, shutdownDisposition(0, true, false));
     try std.testing.expectEqual(2, shutdownDisposition(0, false, false));
 }
-
 test "orderly close preserves every recovery ID through full slot and byte queues" {
     const a = std.testing.allocator;
     const io = std.testing.io;
-    const Types = struct {};
     // Use the real nonblocking writer, including EAGAIN and subsequent drain.
     // Restore stdout before the test runner reports any result.
     const saved = c.dup(1);
@@ -713,128 +1229,231 @@ test "orderly close preserves every recovery ID through full slot and byte queue
     try std.testing.expectEqual(1, c.dup2(pipes[1], 1));
     for ([_]usize{ 0, 1, 40, 1024, 30_000 }) |task_count| {
         for ([_]bool{ false, true }) |byte_pressure| {
-            var arena = std.heap.ArenaAllocator.init(a);
-            defer arena.deinit();
-            const frame = arena.allocator();
-            const frame_bytes: usize = if (task_count < 30_000) 1024 else (protocol.Limits{}).frame_bytes;
-            var transport = try transport_api.Transport.init(a, io, .{ .frame_bytes = frame_bytes, .outbound_bytes = 4 * frame_bytes });
-            defer transport.deinit();
-            // Closure projects only the stable owned IDs, without touching stored
-            // task bodies. Real admission/parking is covered by the task-owner tests.
-            var service: tasks.Service(Types) = undefined;
-            service.owned = .empty;
-            defer service.owned.deinit(a);
-            try service.owned.resize(a, task_count);
-            for (service.owned.items, 0..) |*id, index| std.mem.writeInt(u128, id, index, .little);
-            var client: client_api.Client(Types) = .{ .service = &service };
-            var connection: Connection(Types) = .{ .application = undefined, .instance = "test", .artifact_identity = @splat(0), .client = if (task_count == 0) null else &client };
-            var expected: std.ArrayList(u8) = .empty;
-            defer expected.deinit(a);
-            const count: usize = if (byte_pressure) 4 else 64;
-            const ids = [_]transport_api.Id{try transport_api.Id.from(json.string("shutdown"))};
-            for (0..count) |index| {
-                const body = if (index + 1 == count) "{\"id\":\"shutdown\",\"result\":{}}" else "{\"method\":\"task.event\"}";
-                const padded = try frame.alloc(u8, if (byte_pressure) frame_bytes - 1 else body.len);
-                @memset(padded, ' ');
-                @memcpy(padded[0..body.len], body);
-                const bytes = if (byte_pressure) padded else body;
-                try transport.enqueue(bytes, if (index + 1 == count) &ids else &.{}, false);
-                try expected.appendSlice(a, bytes);
-                try expected.append(a, '\n');
-            }
-            var buffer: [4096]u8 = @splat('x');
-            while (true) {
-                const written = c.write(1, &buffer, buffer.len);
-                if (written < 0) {
-                    try std.testing.expectEqual(.AGAIN, std.c.errno(written));
-                    break;
-                }
-                try std.testing.expect(written > 0);
-            }
-            // A pipe may reject an atomic large write before its last byte fits.
-            while (true) {
-                const written = c.write(1, &buffer, 1);
-                if (written < 0) {
-                    try std.testing.expectEqual(.AGAIN, std.c.errno(written));
-                    break;
-                }
-                try std.testing.expectEqual(1, written);
-            }
-            try transport.flush(true);
-            try std.testing.expectEqual(count, transport.count);
-            for (0..2) |_| try std.testing.expect(!try queueClosed(Types, frame, &connection, &transport, .park, 0));
-            try std.testing.expectEqual(count, transport.count);
-            try std.testing.expectEqual(expected.items.len, transport.queued_bytes);
-            // The peer resumes within the unchanged deadline. Remove only the
-            // pipe filler, then let Transport itself retire queued frames.
-            while (true) {
-                const read = c.read(pipes[0], &buffer, buffer.len);
-                if (read < 0) {
-                    try std.testing.expectEqual(.AGAIN, std.c.errno(read));
-                    break;
-                }
-                try std.testing.expect(read > 0);
-            }
-            try transport.flush(true);
-            if (!byte_pressure) {
-                // Successful writes reset the stall clock without completing the
-                // queue. A hard deadline here is still an I/O failure.
-                try std.testing.expect(transport.count > 0 and transport.count < count);
-                try std.testing.expect(transport.output_progress != null);
-                try std.testing.expectEqual(74, shutdownDisposition(0, true, transport.count != 0));
-            }
-            var closed = try queueClosed(Types, frame, &connection, &transport, .park, 0);
-            var received: std.ArrayList(u8) = .empty;
-            defer received.deinit(a);
-            for (0..4096) |_| {
-                while (true) {
-                    const read = c.read(pipes[0], &buffer, buffer.len);
-                    if (read < 0) {
-                        try std.testing.expectEqual(.AGAIN, std.c.errno(read));
-                        break;
-                    }
-                    try std.testing.expect(read > 0);
-                    try received.appendSlice(a, buffer[0..@intCast(read)]);
-                }
-                if (transport.count == 0 and closed) break;
-                try transport.flush(true);
-                if (!closed) closed = try queueClosed(Types, frame, &connection, &transport, .park, 0);
-            }
-            try std.testing.expect(closed);
-            try std.testing.expectEqual(0, transport.count);
-            try std.testing.expectEqual(0, transport.queued_bytes);
-            try std.testing.expectEqual(0, transport.outstanding);
-            try std.testing.expectEqual(0, shutdownDisposition(0, true, transport.count != 0));
-            try std.testing.expect(received.items.len > expected.items.len);
-            try std.testing.expectEqualSlices(u8, expected.items, received.items[0..expected.items.len]);
-            const last = received.items[expected.items.len..];
-            if (task_count <= 1) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, last, "\n"));
-            var lines = std.mem.tokenizeScalar(u8, last, '\n');
-            var recovered: usize = 0;
-            var closures: usize = 0;
-            while (lines.next()) |line| {
-                var notice = try json.parse(a, line, .{});
-                defer notice.deinit();
-                const final = lines.peek() == null;
-                try std.testing.expectEqualStrings(if (final) "server.closed" else "server.recovery", notice.value.object.get("method").?.string);
-                if (final) closures += 1;
-                const params = notice.value.object.get("params").?;
-                try std.testing.expectEqualStrings("park", params.object.get("mode").?.string);
-                try std.testing.expectEqualStrings("parked", params.object.get("disposition").?.string);
-                if (!final) try std.testing.expect(params.object.get("recovery_tasks").?.array.items.len != 0);
-                for (params.object.get("recovery_tasks").?.array.items) |id| {
-                    try std.testing.expect(recovered < task_count);
-                    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(service.owned.items[recovered], .lower), id.string);
-                    recovered += 1;
-                }
-            }
-            try std.testing.expectEqual(task_count, recovered);
-            try std.testing.expectEqual(1, closures);
+            try closePressureCase(a, io, pipes[0], task_count, byte_pressure);
         }
     }
 }
-
-fn serve(comptime Types: type, io: std.Io, a: std.mem.Allocator, connection: *Connection(Types)) !u8 {
+const CloseTestTypes = struct {};
+fn closePressureCase(
+    a: std.mem.Allocator,
+    io: std.Io,
+    read_fd: c_int,
+    task_count: usize,
+    byte_pressure: bool,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const frame = arena.allocator();
+    const frame_bytes: usize = if (task_count < 30_000) 1024 else (protocol.Limits{}).frame_bytes;
+    var transport = try transport_api.Transport.init(a, io, .{
+        .frame_bytes = frame_bytes,
+        .outbound_bytes = 4 * frame_bytes,
+    });
+    defer transport.deinit();
+    // Closure projects only the stable owned IDs, without touching stored
+    // task bodies. Real admission/parking is covered by the task-owner tests.
+    var service: tasks.Service(CloseTestTypes) = undefined;
+    service.owned = .empty;
+    defer service.owned.deinit(a);
+    try service.owned.resize(a, task_count);
+    for (service.owned.items, 0..) |*id, index| std.mem.writeInt(u128, id, index, .little);
+    var client: client_api.Client(CloseTestTypes) = .{ .service = &service };
+    var connection: Connection(CloseTestTypes) = .{
+        .application = undefined,
+        .instance = "test",
+        .artifact_identity = @splat(0),
+        .client = if (task_count == 0) null else &client,
+    };
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(a);
+    const count: usize = if (byte_pressure) 4 else 64;
+    try queueClosePressure(a, frame, &transport, count, byte_pressure, frame_bytes, &expected);
+    try verifyBackpressure(
+        a,
+        frame,
+        read_fd,
+        &transport,
+        &connection,
+        count,
+        byte_pressure,
+        expected.items.len,
+    );
+    try recoverClosed(
+        a,
+        frame,
+        read_fd,
+        &transport,
+        &connection,
+        expected.items,
+        task_count,
+        service.owned.items,
+    );
+}
+fn queueClosePressure(
+    a: std.mem.Allocator,
+    frame: std.mem.Allocator,
+    transport: *transport_api.Transport,
+    count: usize,
+    byte_pressure: bool,
+    frame_bytes: usize,
+    expected: *std.ArrayList(u8),
+) !void {
+    const ids = [_]transport_api.Id{try transport_api.Id.from(json.string("shutdown"))};
+    for (0..count) |index| {
+        const body = if (index + 1 == count)
+            "{\"id\":\"shutdown\",\"result\":{}}"
+        else
+            "{\"method\":\"task.event\"}";
+        const padded = try frame.alloc(
+            u8,
+            if (byte_pressure) frame_bytes - 1 else body.len,
+        );
+        @memset(padded, ' ');
+        @memcpy(padded[0..body.len], body);
+        const bytes = if (byte_pressure) padded else body;
+        try transport.enqueue(bytes, if (index + 1 == count) &ids else &.{}, false);
+        try expected.appendSlice(a, bytes);
+        try expected.append(a, '\n');
+    }
+}
+fn verifyBackpressure(
+    a: std.mem.Allocator,
+    frame: std.mem.Allocator,
+    read_fd: c_int,
+    transport: *transport_api.Transport,
+    connection: *Connection(CloseTestTypes),
+    count: usize,
+    byte_pressure: bool,
+    expected_length: usize,
+) !void {
+    var buffer: [4096]u8 = @splat('x');
+    try fillPipe(&buffer, buffer.len);
+    try fillPipe(&buffer, 1);
+    try transport.flush(true);
+    try std.testing.expectEqual(count, transport.count);
+    for (0..2) |_| try std.testing.expect(
+        !try queueClosed(CloseTestTypes, frame, connection, transport, .park, 0),
+    );
+    try std.testing.expectEqual(count, transport.count);
+    try std.testing.expectEqual(expected_length, transport.queued_bytes);
+    // The peer resumes within the unchanged deadline. Remove only the
+    // pipe filler, then let Transport itself retire queued frames.
+    try drainPipe(a, read_fd, &buffer, null);
+    try transport.flush(true);
+    if (!byte_pressure) {
+        // Successful writes reset the stall clock without completing the
+        // queue. A hard deadline here is still an I/O failure.
+        try std.testing.expect(transport.count > 0 and transport.count < count);
+        try std.testing.expect(transport.output_progress != null);
+        try std.testing.expectEqual(74, shutdownDisposition(0, true, transport.count != 0));
+    }
+}
+fn recoverClosed(
+    a: std.mem.Allocator,
+    frame: std.mem.Allocator,
+    read_fd: c_int,
+    transport: *transport_api.Transport,
+    connection: *Connection(CloseTestTypes),
+    expected: []const u8,
+    task_count: usize,
+    owned: []const [16]u8,
+) !void {
+    var buffer: [4096]u8 = undefined;
+    var closed = try queueClosed(CloseTestTypes, frame, connection, transport, .park, 0);
+    var received: std.ArrayList(u8) = .empty;
+    defer received.deinit(a);
+    for (0..4096) |_| {
+        try drainPipe(a, read_fd, &buffer, &received);
+        if (transport.count == 0 and closed) break;
+        try transport.flush(true);
+        if (!closed) closed = try queueClosed(
+            CloseTestTypes,
+            frame,
+            connection,
+            transport,
+            .park,
+            0,
+        );
+    }
+    try std.testing.expect(closed);
+    try std.testing.expectEqual(0, transport.count);
+    try std.testing.expectEqual(0, transport.queued_bytes);
+    try std.testing.expectEqual(0, transport.outstanding);
+    try std.testing.expectEqual(0, shutdownDisposition(0, true, transport.count != 0));
+    try verifyClosed(a, received.items, expected, task_count, owned);
+}
+fn verifyClosed(
+    a: std.mem.Allocator,
+    received: []const u8,
+    expected: []const u8,
+    task_count: usize,
+    owned: []const [16]u8,
+) !void {
+    try std.testing.expect(received.len > expected.len);
+    try std.testing.expectEqualSlices(u8, expected, received[0..expected.len]);
+    const last = received[expected.len..];
+    if (task_count <= 1) try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, last, "\n"),
+    );
+    var lines = std.mem.tokenizeScalar(u8, last, '\n');
+    var recovered: usize = 0;
+    var closures: usize = 0;
+    while (lines.next()) |line| {
+        var notice = try json.parse(a, line, .{});
+        defer notice.deinit();
+        const final = lines.peek() == null;
+        try std.testing.expectEqualStrings(
+            if (final) "server.closed" else "server.recovery",
+            notice.value.object.get("method").?.string,
+        );
+        if (final) closures += 1;
+        const params = notice.value.object.get("params").?;
+        try std.testing.expectEqualStrings("park", params.object.get("mode").?.string);
+        try std.testing.expectEqualStrings(
+            "parked",
+            params.object.get("disposition").?.string,
+        );
+        if (!final) try std.testing.expect(
+            params.object.get("recovery_tasks").?.array.items.len != 0,
+        );
+        for (params.object.get("recovery_tasks").?.array.items) |id| {
+            try std.testing.expect(recovered < task_count);
+            try std.testing.expectEqualStrings(
+                &std.fmt.bytesToHex(owned[recovered], .lower),
+                id.string,
+            );
+            recovered += 1;
+        }
+    }
+    try std.testing.expectEqual(task_count, recovered);
+    try std.testing.expectEqual(1, closures);
+}
+fn fillPipe(buffer: []const u8, count: usize) !void {
+    var written = c.write(1, buffer.ptr, count);
+    while (written >= 0) : (written = c.write(1, buffer.ptr, count)) {
+        if (count == 1) {
+            try std.testing.expectEqual(1, written);
+        } else {
+            try std.testing.expect(written > 0);
+        }
+    }
+    try std.testing.expectEqual(.AGAIN, std.c.errno(written));
+}
+fn drainPipe(a: std.mem.Allocator, fd: c_int, buffer: []u8, output: ?*std.ArrayList(u8)) !void {
+    var read = c.read(fd, buffer.ptr, buffer.len);
+    while (read >= 0) : (read = c.read(fd, buffer.ptr, buffer.len)) {
+        try std.testing.expect(read > 0);
+        if (output) |bytes| try bytes.appendSlice(a, buffer[0..@intCast(read)]);
+    }
+    try std.testing.expectEqual(.AGAIN, std.c.errno(read));
+}
+fn serve(
+    comptime Types: type,
+    io: std.Io,
+    a: std.mem.Allocator,
+    connection: *Connection(Types),
+) !u8 {
     var transport = try transport_api.Transport.init(a, io, connection.limits);
     defer transport.deinit();
     interrupts.store(0, .release);
@@ -845,172 +1464,645 @@ fn serve(comptime Types: type, io: std.Io, a: std.mem.Allocator, connection: *Co
         // Unexpected failure with live I/O uses process-crash recovery. Never
         // release the namespace while a thread can still dispatch or publish.
         if (slot.future != null) std.process.exit(74);
-        slot.deinit(a) catch {};
+        slot.deinit(a) catch |err| {
+            _ = reportFailure(err);
+        };
     };
-    var shutdown_at: ?i64 = null;
-    var code: u8 = 0;
-    var writable = true;
-    var cancelled_owned = false;
-    var parked = false;
-    var closed_notice = false;
-    while (true) {
+    var host: HostLoop(Types) = .{
+        .transport = &transport,
+        .connection = connection,
+        .worker = worker,
+    };
+    while (true) { // tiger: event-loop
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
-        const frame = arena.allocator();
-        var progressed = false;
-        const time = transport.now();
-        const signals = interrupts.load(.acquire);
-        if (signals != 0 and shutdown_at == null) {
-            shutdown_at = time;
-            connection.shutdown = .cancel;
-        }
-        if (signals > 1) std.process.exit(2);
-        // Owner work can take longer than the output stall interval. Give the
-        // nonblocking writer an opportunity before classifying elapsed time as
-        // backpressure. A blocked writer makes no progress and still expires.
-        if (writable) transport.flush(if (connection.client) |client| !client.service.profile.authority.revoked and client.service.profile.authority.disclosure else true) catch {
-            writable = false;
-            code = 74;
-            if (shutdown_at == null) shutdown_at = time;
-        };
-        transport.deadlines() catch |err| {
-            _ = reportFailure(err);
-            if (shutdown_at == null) shutdown_at = time;
-            if (err == error.FrameTimeout) {
-                if (code != 64 and writable and transport.canAdmit()) try transport.enqueue(try json.frame(frame, try protocol.failure(frame, .null, .InvalidRequest, "reconnect")), &.{}, false);
-                code = 64;
-            } else {
-                writable = false;
-                // A stalled output channel is an I/O failure even with no task.
-                code = 74;
+        if (try host.tick(arena.allocator())) |code| return code;
+    }
+}
+fn HostLoop(comptime Types: type) type {
+    return struct {
+        transport: *transport_api.Transport,
+        connection: *Connection(Types),
+        worker: ?*Worker,
+        shutdown_at: ?i64 = null,
+        code: u8 = 0,
+        writable: bool = true,
+        cancelled_owned: bool = false,
+        parked: bool = false,
+        closed_notice: bool = false,
+        progressed: bool = false,
+        fn tick(self: *@This(), frame: std.mem.Allocator) !?u8 {
+            self.progressed = false;
+            const time = self.transport.now();
+            try self.prepare(frame, time);
+            try self.receive(frame, time);
+            if (self.transport.eof or
+                self.connection.closing or
+                !self.writable or
+                self.connection.shutdown != null)
+            {
+                if (self.shutdown_at == null) self.shutdown_at = time;
             }
-        };
-        // During explicit shutdown, bounded reads remain available while work
-        // drains. Once parked, only queued output drains. Fatal framing and EOF
-        // stop admissions immediately.
-        if (!parked and !connection.closing and code == 0 and writable and !transport.eof and transport.canAdmit()) {
-            const incoming = transport.next() catch |err| blk: {
-                if (shutdown_at == null) shutdown_at = time;
-                connection.closing = true;
-                code = if (err == error.TruncatedFrame or err == error.FrameTooLarge) 64 else 74;
-                if (err == error.FrameTooLarge and writable) try transport.enqueue(try json.frame(frame, try protocol.failure(frame, .null, .InvalidRequest, "reconnect")), &.{}, false);
-                break :blk null;
+            if (self.connection.closing and self.code == 0) self.code = 64;
+            if (self.shutdown_at != null and
+                self.connection.shutdown == null) self.connection.shutdown = .park;
+            const mode = self.connection.shutdown orelse .park;
+            try self.progress(frame, time, mode);
+            if (try self.shutdown(frame, time, mode)) |code| return code;
+            self.transport.wait(
+                !self.parked and !self.connection.closing and self.transport.canAdmit(),
+                if (self.progressed) 0 else 20,
+            ) catch {
+                self.writable = false;
+                self.code = 74;
+                if (self.shutdown_at == null) self.shutdown_at = self.transport.now();
             };
-            if (incoming) |bytes| {
-                const parsed: ?std.json.Parsed(json.Value) = json.parse(frame, bytes, .{}) catch |err| blk: {
-                    if (err == error.Capacity or err == error.OutOfMemory) {
-                        connection.closing = true;
-                        code = 64;
-                    }
-                    const fault = try protocol.failure(frame, .null, if (err == error.DuplicateKey) .InvalidRequest else .ParseError, "correct_request");
-                    if (writable) try transport.enqueue(try json.frame(frame, fault), &.{}, false);
-                    transport.consumed();
-                    progressed = true;
+            return null;
+        }
+        fn prepare(self: *@This(), frame: std.mem.Allocator, time: i64) !void {
+            const signals = interrupts.load(.acquire);
+            if (signals != 0 and self.shutdown_at == null) {
+                self.shutdown_at = time;
+                self.connection.shutdown = .cancel;
+            }
+            if (signals > 1) std.process.exit(2);
+            // Owner work can take longer than the output stall interval. Give the
+            // nonblocking writer an opportunity before classifying elapsed time as
+            // backpressure. A blocked writer makes no progress and still expires.
+            if (self.writable) self.transport.flush(
+                if (self.connection.client) |client| !client.service.profile.authority.revoked and
+                    client.service.profile.authority.disclosure else true,
+            ) catch {
+                self.writable = false;
+                self.code = 74;
+                if (self.shutdown_at == null) self.shutdown_at = time;
+            };
+            self.transport.deadlines() catch |err| {
+                _ = reportFailure(err);
+                if (self.shutdown_at == null) self.shutdown_at = time;
+                if (err == error.FrameTimeout) {
+                    if (self.code != 64 and
+                        self.writable and
+                        self.transport.canAdmit()) try self.transport.enqueue(
+                        try json.frame(
+                            frame,
+                            try protocol.failure(frame, .null, .InvalidRequest, "reconnect"),
+                        ),
+                        &.{},
+                        false,
+                    );
+                    self.code = 64;
+                } else {
+                    self.writable = false;
+                    // A stalled output channel is an I/O failure even with no task.
+                    self.code = 74;
+                }
+            };
+        }
+        fn receive(self: *@This(), frame: std.mem.Allocator, time: i64) !void {
+            // During explicit shutdown, bounded reads remain available while work
+            // drains. Once parked, only queued output drains. Fatal framing and EOF
+            // stop admissions immediately.
+            if (!self.parked and
+                !self.connection.closing and
+                self.code == 0 and
+                self.writable and
+                !self.transport.eof and
+                self.transport.canAdmit())
+            {
+                const incoming = self.transport.next() catch |err| blk: {
+                    if (self.shutdown_at == null) self.shutdown_at = time;
+                    self.connection.closing = true;
+                    self.code = if (err == error.TruncatedFrame or
+                        err == error.FrameTooLarge) 64 else 74;
+                    if (err == error.FrameTooLarge and self.writable) try self.transport.enqueue(
+                        try json.frame(
+                            frame,
+                            try protocol.failure(frame, .null, .InvalidRequest, "reconnect"),
+                        ),
+                        &.{},
+                        false,
+                    );
                     break :blk null;
                 };
-                if (parsed) |value| {
-                    var id_buffer: [16]transport_api.Id = undefined;
-                    const ids = requestIds(value.value, &id_buffer);
-                    const admitted = blk: {
-                        transport.preflight(ids) catch |err| {
-                            if (err == error.DuplicateId) {
-                                connection.closing = true;
-                                code = 64;
-                                const fault = try protocol.failure(frame, .null, .InvalidRequest, "reconnect");
-                                if (writable) try transport.enqueue(try json.frame(frame, fault), &.{}, false);
-                                transport.consumed();
-                            }
-                            break :blk false;
-                        };
-                        break :blk true;
-                    };
-                    if (admitted) {
-                        if (try connection.frame(frame, value.value)) |response| {
-                            const encoded = try json.frame(frame, response);
-                            try transport.enqueue(encoded, ids, connection.client != null);
-                        }
-                        transport.consumed();
-                        progressed = true;
-                    }
+                if (incoming) |bytes| {
+                    if (try self.parse(frame, bytes)) |value| try self.respond(frame, value.value);
                 }
             }
         }
-        if (transport.eof or connection.closing or !writable or connection.shutdown != null) {
-            if (shutdown_at == null) shutdown_at = time;
+        fn parse(
+            self: *@This(),
+            frame: std.mem.Allocator,
+            bytes: []const u8,
+        ) !?std.json.Parsed(json.Value) {
+            return json.parse(frame, bytes, .{}) catch |err| blk: {
+                if (err == error.Capacity or err == error.OutOfMemory) {
+                    self.connection.closing = true;
+                    self.code = 64;
+                }
+                const fault = try protocol.failure(
+                    frame,
+                    .null,
+                    if (err == error.DuplicateKey) .InvalidRequest else .ParseError,
+                    "correct_request",
+                );
+                if (self.writable) try self.transport.enqueue(
+                    try json.frame(frame, fault),
+                    &.{},
+                    false,
+                );
+                self.transport.consumed();
+                self.progressed = true;
+                break :blk null;
+            };
         }
-        if (connection.closing and code == 0) code = 64;
-        if (shutdown_at != null and connection.shutdown == null) connection.shutdown = .park;
-        const mode = connection.shutdown orelse .park;
-        if (connection.client) |client| {
-            const service = client.service;
-            const slot = worker.?;
-            if (shutdown_at != null and mode == .cancel and !cancelled_owned) {
-                try service.cancelOwned(frame, connection.instance, "host requested cancellation");
-                cancelled_owned = true;
+        fn respond(self: *@This(), frame: std.mem.Allocator, value: json.Value) !void {
+            var id_buffer: [16]transport_api.Id = undefined;
+            const ids = requestIds(value, &id_buffer);
+            const admitted = blk: {
+                self.transport.preflight(ids) catch |err| {
+                    if (err == error.DuplicateId) {
+                        self.connection.closing = true;
+                        self.code = 64;
+                        const fault = try protocol.failure(
+                            frame,
+                            .null,
+                            .InvalidRequest,
+                            "reconnect",
+                        );
+                        if (self.writable) try self.transport.enqueue(
+                            try json.frame(frame, fault),
+                            &.{},
+                            false,
+                        );
+                        self.transport.consumed();
+                    }
+                    break :blk false;
+                };
+                break :blk true;
+            };
+            if (admitted) {
+                if (try self.connection.frame(frame, value)) |response| {
+                    const encoded = try json.frame(frame, response);
+                    try self.transport.enqueue(encoded, ids, self.connection.client != null);
+                }
+                self.transport.consumed();
+                self.progressed = true;
             }
+        }
+        fn progress(self: *@This(), frame: std.mem.Allocator, time: i64, mode: Shutdown) !void {
+            if (self.connection.client) |client| {
+                const service = client.service;
+                const slot = self.worker.?;
+                if (self.shutdown_at != null and mode == .cancel and !self.cancelled_owned) {
+                    try service.cancelOwned(
+                        frame,
+                        self.connection.instance,
+                        "host requested cancellation",
+                    );
+                    self.cancelled_owned = true;
+                }
+                try self.finishWorker(frame, time, mode, service, slot);
+                const pump_idle = try self.pump(frame, time, mode, service, slot);
+                if (self.writable and
+                    self.shutdown_at == null and
+                    !self.closed_notice and
+                    self.transport.canAdmit())
+                {
+                    if (try client.notification(frame)) |notification| {
+                        try self.transport.enqueue(try json.frame(frame, notification), &.{}, true);
+                        self.progressed = true;
+                    }
+                }
+                if (self.shutdown_at != null and
+                    !self.parked and
+                    slot.future == null and
+                    shutdownCanPark(
+                        mode,
+                        self.code,
+                        pump_idle,
+                        service.placementActive(),
+                    ))
+                {
+                    if (!service.namespace.store.fenced) try service.park(frame);
+                    self.parked = true;
+                    if (self.code == 0 and try service.shutdownIncomplete(frame)) self.code = 2;
+                }
+            } else if (self.shutdown_at != null) self.parked = true;
+        }
+        fn finishWorker(
+            self: *@This(),
+            frame: std.mem.Allocator,
+            time: i64,
+            mode: Shutdown,
+            service: *tasks.Service(Types),
+            slot: *Worker,
+        ) !void {
             if (slot.future != null) {
-                const deadline_near = if (shutdown_at) |start| time - start >= connection.limits.output_stall_ms - 100 else false;
-                if ((try service.shouldCancelWork(slot.work)) or (shutdown_at != null and mode == .park) or deadline_near) slot.cancel();
+                const deadline_near = if (self.shutdown_at) |start|
+                    time - start >= self.connection.limits.output_stall_ms - 100
+                else
+                    false;
+                if ((try service.shouldCancelWork(
+                    slot.work,
+                )) or (self.shutdown_at != null and mode == .park) or deadline_near) slot.cancel();
                 if (slot.finished()) {
                     try slot.join();
                     const result = slot.result orelse .not_sent;
                     try service.completeWork(frame, slot.work, result);
-                    if (result == .unknown and shutdown_at != null and code == 0) code = 2;
+                    if (result == .unknown and
+                        self.shutdown_at != null and
+                        self.code == 0) self.code = 2;
                     try slot.release();
-                    progressed = true;
+                    self.progressed = true;
                 }
             }
+        }
+        fn pump(
+            self: *@This(),
+            frame: std.mem.Allocator,
+            time: i64,
+            mode: Shutdown,
+            service: *tasks.Service(Types),
+            slot: *Worker,
+        ) !bool {
             var pump_idle = true;
-            if (!parked and (shutdown_at == null or (mode == .cancel and code == 0))) {
+            if (!self.parked and
+                (self.shutdown_at == null or
+                    (mode == .cancel and
+                        self.code == 0)))
+            {
                 const step = service.pump(frame) catch |err| blk: {
-                    if (shutdown_at == null) shutdown_at = time;
+                    if (self.shutdown_at == null) self.shutdown_at = time;
                     _ = reportFailure(err);
-                    code = if (err == error.Denied) 2 else 74;
+                    self.code = if (err == error.Denied) 2 else 74;
                     break :blk tasks.Step.idle;
                 };
                 pump_idle = step == .idle;
                 switch (step) {
-                    .work => |work| slot.start(work, service.profile.authority, service.profile.environment) catch {
+                    .work => |work| slot.start(
+                        work,
+                        service.profile.authority,
+                        service.profile.environment,
+                    ) catch {
                         try service.notSent(frame, work);
                     },
-                    .progressed, .waiting => progressed = true,
+                    .progressed, .waiting => self.progressed = true,
                     .idle => {},
                 }
             }
-            if (writable and shutdown_at == null and !closed_notice and transport.canAdmit()) {
-                if (try client.notification(frame)) |notification| {
-                    try transport.enqueue(try json.frame(frame, notification), &.{}, true);
-                    progressed = true;
-                }
-            }
-            if (shutdown_at != null and !parked and slot.future == null and shutdownCanPark(mode, code, pump_idle, service.placementActive())) {
-                if (!service.namespace.store.fenced) try service.park(frame);
-                parked = true;
-                if (code == 0 and try service.shutdownIncomplete(frame)) code = 2;
-            }
-        } else if (shutdown_at != null) parked = true;
-        if (shutdown_at) |start| {
-            if (time - start >= connection.limits.output_stall_ms) {
-                // A joined worker is the only ordinary path to releasing the
-                // lock. At the hard deadline process exit terminates all native
-                // threads together; durable DISPATCHING recovers as UNKNOWN.
-                const worker_live = if (worker) |slot| slot.future != null else false;
-                const notice_pending = parked and writable and connection.initialized and !closed_notice and (code == 0 or code == 2);
-                const disposition = shutdownDisposition(code, parked and !worker_live, transport.count != 0 or notice_pending);
-                if (worker_live) std.process.exit(disposition);
-                return disposition;
-            }
-            if (parked) {
-                if (!closed_notice and writable and connection.initialized and (code == 0 or code == 2)) {
-                    closed_notice = try queueClosed(Types, frame, connection, &transport, mode, code);
-                }
-                if (!writable or transport.count == 0) return code;
-            }
+            return pump_idle;
         }
-        transport.wait(!parked and !connection.closing and transport.canAdmit(), if (progressed) 0 else 20) catch {
-            writable = false;
-            code = 74;
-            if (shutdown_at == null) shutdown_at = transport.now();
-        };
+        fn shutdown(self: *@This(), frame: std.mem.Allocator, time: i64, mode: Shutdown) !?u8 {
+            if (self.shutdown_at) |start| {
+                if (time - start >= self.connection.limits.output_stall_ms) {
+                    // A joined worker is the only ordinary path to releasing the
+                    // lock. At the hard deadline process exit terminates all native
+                    // threads together; durable DISPATCHING recovers as UNKNOWN.
+                    const worker_live = if (self.worker) |slot| slot.future != null else false;
+                    const notice_pending = self.parked and
+                        self.writable and
+                        self.connection.initialized and
+                        !self.closed_notice and
+                        (self.code == 0 or
+                            self.code == 2);
+                    const disposition = shutdownDisposition(
+                        self.code,
+                        self.parked and !worker_live,
+                        self.transport.count != 0 or notice_pending,
+                    );
+                    if (worker_live) std.process.exit(disposition);
+                    return disposition;
+                }
+                if (self.parked) {
+                    if (!self.closed_notice and
+                        self.writable and
+                        self.connection.initialized and
+                        (self.code == 0 or
+                            self.code == 2))
+                    {
+                        self.closed_notice = try queueClosed(
+                            Types,
+                            frame,
+                            self.connection,
+                            self.transport,
+                            mode,
+                            self.code,
+                        );
+                    }
+                    if (!self.writable or self.transport.count == 0) return self.code;
+                }
+            }
+            return null;
+        }
+    };
+}
+fn printHelp(comptime Environment: type, io: std.Io) !void {
+    try std.Io.File.stdout().writeStreamingAll(
+        io,
+        "Optional native placement: --placement-config FILE supplies a private " ++
+            "signing-key file, pinned peers, disclosure policies and operator-selec" ++
+            "ted transport commands. A model can select only configured peer names." ++
+            " Copying an archive grants no placement custody.\n\n",
+    );
+    if (comptime @hasDecl(Environment, "configure")) {
+        try std.Io.File.stdout().writeStreamingAll(
+            io,
+            "Configured application commands:\nvalidate --config FILE\nrun --config" ++
+                " FILE --task TEXT --state-dir PATH --authorize-inference --credential-" ++
+                "file FILE\nserve --transport stdio --config FILE --state-dir PATH [--a" ++
+                "uthorize-inference --credential-file FILE]\nresume --state-dir PATH [-" ++
+                "-task-id ID] [--config FILE] [--authorize-inference --credential-file " ++
+                "FILE]\nUse --profile-task ID with serve to restore that task's frozen " ++
+                "profile and snapshot.\nAn explicit --trust-root DER_FILE selects a TLS" ++
+                " trust root. Credentials are never discovered.\n--test-provider select" ++
+                "s loopback HTTPS with a built-in non-secret token; it requires --trust" ++
+                "-root and rejects --credential-file.\nStatus/result read saved task da" ++
+                "ta without loading execution configuration.\nOffline mode uses embedde" ++
+                "d deterministic fixtures and requires --offline.\n\n",
+        );
     }
+    try std.Io.File.stdout().writeStreamingAll(
+        io,
+        "Protean native application\n\n--help\ndescribe-build\nlicenses\ndemo -" ++
+            "-offline --state-dir PATH\nserve --transport stdio --offline [--state-" ++
+            "dir PATH]\nstatus|result|resume|cancel --offline --state-dir PATH [--t" ++
+            "ask-id ID]\nrun --offline --state-dir PATH --input-json JSON [--operat" ++
+            "ion-id ID]\nrespond --offline --state-dir PATH --task-id ID --question" ++
+            "-id ID --question-revision N --request-digest SHA256 --answer-json JSO" ++
+            "N [--operation-id ID]\nexport-checkpoint --offline --state-dir PATH [-" ++
+            "-task-id ID] --output FILE\nimport-checkpoint --offline --state-dir NE" ++
+            "W_PATH --input FILE [--operation-id ID]\n\nA state directory enables d" ++
+            "urable tasks. Without it, serve provides discovery only.\nTask selecti" ++
+            "on is required when more than one applicable task exists.\nWith --oper" ++
+            "ation-id, resume/cancel/respond require --task-id; resume also require" ++
+            "s --expected-revision. Preserve those parameters on retries.\n",
+    );
+}
+fn printManifest(
+    comptime Types: type,
+    comptime Environment: type,
+    init: std.process.Init,
+    assets: discovery.Assets,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(init.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const artifact = try identity.executable(init.io);
+    var manifest = (try json.parseAsset(a, assets.manifest, assets.manifest.len)).value;
+    try json.put(
+        a,
+        &manifest,
+        "artifact_sha256",
+        json.string(try a.dupe(u8, &std.fmt.bytesToHex(artifact.sha256, .lower))),
+    );
+    try json.put(
+        a,
+        &manifest,
+        "artifact_bytes",
+        json.string(try std.fmt.allocPrint(a, "{d}", .{artifact.bytes})),
+    );
+    try json.put(
+        a,
+        &manifest,
+        "embedded_manifest_sha256",
+        json.string(try discovery.digest(a, assets.manifest)),
+    );
+    var handlers = try registry.Registry.init(a, &Environment.handlers);
+    defer handlers.deinit();
+    var application = try discovery.Application.init(Types, a, assets, handlers);
+    defer application.deinit();
+    try json.put(
+        a,
+        &manifest,
+        "protocol_schema_sha256",
+        json.string(application.protocol_schema_sha256),
+    );
+    try std.Io.File.stdout().writeStreamingAll(init.io, try json.canonical(a, manifest));
+    try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+}
+const LaunchOptions = struct {
+    demo: bool,
+    serving: bool,
+    validating: bool,
+    human: ?HumanCommand,
+    offline: bool = false,
+    test_provider: bool = false,
+    stdio: bool = false,
+    state_path: ?[]const u8 = null,
+    config_path: ?[]const u8 = null,
+    credential_path: ?[]const u8 = null,
+    placement_path: ?[]const u8 = null,
+    trust_root_path: ?[]const u8 = null,
+    profile_task: ?[]const u8 = null,
+    task_text: ?[]const u8 = null,
+    authorize_inference: bool = false,
+    human_options: HumanOptions = .{},
+    fn parse(comptime Environment: type, command: []const u8, args: anytype) !LaunchOptions {
+        var result: LaunchOptions = .{
+            .demo = std.mem.eql(u8, command, "demo"),
+            .serving = std.mem.eql(u8, command, "serve"),
+            .validating = std.mem.eql(u8, command, "validate"),
+            .human = std.meta.stringToEnum(HumanCommand, command),
+        };
+        if (!result.demo and !result.serving and !result.validating and result.human == null)
+            return error.InvalidArguments;
+        while (args.next()) |arg| try result.consume(arg, args);
+        try result.validate(Environment);
+        return result;
+    }
+    fn consume(self: *LaunchOptions, arg: []const u8, args: anytype) !void {
+        if (std.mem.eql(
+            u8,
+            arg,
+            "--offline",
+        ) and !self.offline) self.offline = true else if (std.mem.eql(
+            u8,
+            arg,
+            "--test-provider",
+        ) and !self.test_provider) self.test_provider = true else if (std.mem.eql(
+            u8,
+            arg,
+            "--transport",
+        ) and !self.stdio and self.serving) {
+            if (!std.mem.eql(
+                u8,
+                args.next() orelse return error.InvalidArguments,
+                "stdio",
+            )) return error.InvalidArguments;
+            self.stdio = true;
+        } else if (std.mem.eql(u8, arg, "--state-dir") and self.state_path == null) {
+            self.state_path = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(u8, arg, "--config") and self.config_path == null) {
+            self.config_path = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(u8, arg, "--credential-file") and self.credential_path == null) {
+            self.credential_path = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(u8, arg, "--placement-config") and self.placement_path == null) {
+            self.placement_path = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(u8, arg, "--trust-root") and self.trust_root_path == null) {
+            self.trust_root_path = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--profile-task",
+        ) and self.serving and self.profile_task == null) {
+            self.profile_task = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(u8, arg, "--authorize-inference") and !self.authorize_inference) {
+            self.authorize_inference = true;
+        } else try self.consumeTask(arg, args);
+    }
+    fn consumeTask(self: *LaunchOptions, arg: []const u8, args: anytype) !void {
+        if (std.mem.eql(
+            u8,
+            arg,
+            "--task",
+        ) and self.human == .run and self.task_text == null) {
+            self.task_text = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--task-id",
+        ) and
+            self.human != null and
+            self.human.? != .run and
+            self.human.? != .@"import-checkpoint" and
+            self.human_options.task_id == null)
+        {
+            self.human_options.task_id = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--input-json",
+        ) and self.human == .run and self.human_options.input_json == null) {
+            self.human_options.input_json = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--operation-id",
+        ) and
+            self.human != null and
+            self.human.? != .status and
+            self.human.? != .result and
+            self.human.? != .@"export-checkpoint" and
+            self.human_options.operation_id == null)
+        {
+            self.human_options.operation_id = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--expected-revision",
+        ) and self.human == .@"resume" and self.human_options.expected_revision == null) {
+            self.human_options.expected_revision = args.next() orelse return error.InvalidArguments;
+        } else try self.consumeAnswer(arg, args);
+    }
+    fn consumeAnswer(self: *LaunchOptions, arg: []const u8, args: anytype) !void {
+        if (std.mem.eql(
+            u8,
+            arg,
+            "--answer-json",
+        ) and self.human == .respond and self.human_options.answer.value == null) {
+            self.human_options.answer.value = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--question-id",
+        ) and self.human == .respond and self.human_options.answer.id == null) {
+            self.human_options.answer.id = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--question-revision",
+        ) and self.human == .respond and self.human_options.answer.revision == null) {
+            self.human_options.answer.revision = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--request-digest",
+        ) and self.human == .respond and self.human_options.answer.request == null) {
+            self.human_options.answer.request = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--input",
+        ) and self.human == .@"import-checkpoint" and self.human_options.checkpoint_input == null) {
+            self.human_options.checkpoint_input = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--output",
+        ) and
+            self.human == .@"export-checkpoint" and
+            self.human_options.checkpoint_output == null)
+        {
+            self.human_options.checkpoint_output = args.next() orelse return error.InvalidArguments;
+        } else return error.InvalidArguments;
+    }
+    fn validate(self: LaunchOptions, comptime Environment: type) !void {
+        if ((self.serving and
+            !self.stdio) or
+            (!self.serving and
+                !self.validating and
+                self.state_path == null) or
+            (self.human == .run and
+                self.human_options.input_json == null and
+                self.task_text == null)) return error.InvalidArguments;
+        if ((self.demo and
+            !self.offline) or
+            (self.validating and
+                self.state_path != null) or
+            (self.offline and
+                self.authorize_inference) or
+            (self.task_text != null and
+                self.human_options.input_json != null) or
+            (self.profile_task != null and
+                self.state_path == null)) return error.InvalidArguments;
+        if (self.test_provider and
+            (self.offline or
+                self.credential_path != null or
+                self.trust_root_path == null)) return error.InvalidArguments;
+        if (comptime !@hasDecl(Environment, "configure")) {
+            if (!self.offline or
+                self.validating or
+                self.config_path != null or
+                self.credential_path != null or
+                self.trust_root_path != null or
+                self.profile_task != null or
+                self.authorize_inference or
+                self.test_provider) return error.InvalidArguments;
+        }
+        if (self.human == .respond and
+            (self.human_options.answer.value == null or
+                self.human_options.answer.id == null or
+                self.human_options.answer.revision == null or
+                self.human_options.answer.request == null)) return error.InvalidArguments;
+        // A caller-named operation must not reselect mutable parameters on retry.
+        if (self.human_options.operation_id != null and
+            (self.human == .@"resume" or
+                self.human == .cancel or
+                self.human == .respond))
+        {
+            if (self.human_options.task_id == null or
+                (self.human == .@"resume" and
+                    self.human_options.expected_revision == null)) return error.InvalidArguments;
+        }
+        if ((self.human == .@"import-checkpoint" and
+            self.human_options.checkpoint_input == null) or
+            (self.human == .@"export-checkpoint" and
+                self.human_options.checkpoint_output == null)) return error.InvalidArguments;
+    }
+};
+
+fn newInstance(io: std.Io) ![32]u8 {
+    var bytes: [16]u8 = undefined;
+    try io.randomSecure(&bytes);
+    return std.fmt.bytesToHex(bytes, .lower);
+}
+
+fn namespaceCode(err: anyerror) !u8 {
+    return switch (err) {
+        error.Busy => 75,
+        error.UnsafeStatePath, error.ForeignNamespace => 64,
+        error.UnsupportedStateFormat => err,
+        else => 74,
+    };
 }

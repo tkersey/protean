@@ -33,7 +33,12 @@ pub const Worker = struct {
         if (self.future != null) return error.Busy;
         a.destroy(self);
     }
-    pub fn start(self: *Worker, work: tasks.Work, authority: registry.Authority, environment: ?*anyopaque) !void {
+    pub fn start(
+        self: *Worker,
+        work: tasks.Work,
+        authority: registry.Authority,
+        environment: ?*anyopaque,
+    ) !void {
         if (self.future != null) return error.Busy;
         self.arena = .init(self.allocator);
         self.work = work;
@@ -51,44 +56,113 @@ pub const Worker = struct {
             return err;
         };
     }
+    fn rederiveWork(
+        self: *Worker,
+        saved: @import("state.zig").Reconciliation,
+        request: data.invocation.Request,
+        payload: []const u8,
+    ) !tasks.WorkResult {
+        const ctx: registry.RederivationContext = .{
+            .allocator = self.arena.allocator(),
+            .task = self.work.task,
+            .profile = self.work.profile,
+            .cancellation = &self.cancellation,
+        };
+        if (self.cancellation.load(.acquire)) return .{ .rederived = .unavailable };
+        const adapter = self.work.entry.declaration.recovery orelse return .{
+            .failure = error.UnsupportedRecovery,
+        };
+        const rederive = adapter.rederive orelse return .{
+            .failure = error.UnsupportedRecovery,
+        };
+        const finding = rederive(
+            ctx,
+            registry.RecoveryInput.fromReconciliation(
+                saved,
+                request.request_identity,
+                self.work.entry.declaration.inference,
+            ),
+            payload,
+            self.work.prepared,
+        ) catch |err| return switch (err) {
+            error.Canceled => .{ .rederived = .unavailable },
+            else => .{ .failure = err },
+        };
+        return .{ .rederived = finding };
+    }
+    fn lookupWork(
+        self: *Worker,
+        ctx: registry.Context,
+        request: data.invocation.Request,
+        payload: []const u8,
+        body: []const u8,
+    ) !tasks.WorkResult {
+        var saved = try @import("protean_contracts").decodeOwned(
+            @import("state.zig").Reconciliation,
+            ctx.allocator,
+            body,
+        );
+        defer saved.deinit();
+        const adapter = self.work.entry.declaration.recovery orelse
+            return error.UnsupportedRecovery;
+        const lookup = adapter.lookup orelse return error.UnsupportedRecovery;
+        return .{
+            .acquired = try lookup.acquire(
+                ctx,
+                registry.RecoveryInput.fromReconciliation(
+                    saved.value,
+                    request.request_identity,
+                    self.work.entry.declaration.inference,
+                ),
+                payload,
+                self.work.prepared,
+            ),
+        };
+    }
     fn invoke(self: *Worker) !tasks.WorkResult {
         const a = self.arena.allocator();
         var request = try data.invocation.decode(data.invocation.Request, a, self.work.request);
         defer request.deinit();
         const payload = try self.work.entry.payload(a, request.value.binding.payload);
         if (self.work.recovery) |item| {
-            var saved = try @import("protean_contracts").decodeOwned(@import("state.zig").Reconciliation, a, item.body);
+            var saved = try @import("protean_contracts").decodeOwned(
+                @import("state.zig").Reconciliation,
+                a,
+                item.body,
+            );
             defer saved.deinit();
-            if (saved.value.selection == .rederive) {
-                const ctx: registry.RederivationContext = .{ .allocator = a, .task = self.work.task, .profile = self.work.profile, .cancellation = &self.cancellation };
-                if (self.cancellation.load(.acquire)) return .{ .rederived = .unavailable };
-                const adapter = self.work.entry.declaration.recovery orelse return .{ .failure = error.UnsupportedRecovery };
-                const rederive = adapter.rederive orelse return .{ .failure = error.UnsupportedRecovery };
-                const finding = rederive(ctx, registry.RecoveryInput.fromReconciliation(saved.value, request.value.request_identity, self.work.entry.declaration.inference), payload, self.work.prepared) catch |err| return switch (err) {
-                    error.Canceled => .{ .rederived = .unavailable },
-                    else => .{ .failure = err },
-                };
-                return .{ .rederived = finding };
-            }
+            if (saved.value.selection == .rederive)
+                return self.rederiveWork(saved.value, request.value, payload);
         }
         const id = std.fmt.bytesToHex(self.work.task, .lower);
-        const ctx: registry.Context = .{ .allocator = a, .io = self.io, .authority = &self.authority, .task_id = &id, .profile = self.work.profile, .environment = self.environment, .cancellation = &self.cancellation };
+        const ctx: registry.Context = .{
+            .allocator = a,
+            .io = self.io,
+            .authority = &self.authority,
+            .task_id = &id,
+            .profile = self.work.profile,
+            .environment = self.environment,
+            .cancellation = &self.cancellation,
+        };
         try ctx.checkCancellation();
         if (self.work.operation == .workspace_build) {
             // Compilation has no external delivery. Cancellation is definitely
             // not sent and never invents an uncertain environmental effect.
-            return .{ .acquired = try @import("workspace_build.zig").run(ctx, self.work.prepared orelse return error.InvalidPreparedRequest) };
+            return .{
+                .acquired = try @import("workspace_build.zig").run(
+                    ctx,
+                    self.work.prepared orelse return error.InvalidPreparedRequest,
+                ),
+            };
         }
         self.invoked = true;
-        if (self.work.recovery) |item| {
-            var saved = try @import("protean_contracts").decodeOwned(@import("state.zig").Reconciliation, a, item.body);
-            defer saved.deinit();
-            const adapter = self.work.entry.declaration.recovery orelse return error.UnsupportedRecovery;
-            const lookup = adapter.lookup orelse return error.UnsupportedRecovery;
-            return .{ .acquired = try lookup.acquire(ctx, registry.RecoveryInput.fromReconciliation(saved.value, request.value.request_identity, self.work.entry.declaration.inference), payload, self.work.prepared) };
-        }
+        if (self.work.recovery) |item|
+            return self.lookupWork(ctx, request.value, payload, item.body);
         if (self.work.entry.declaration.capture) |adapter| {
-            return switch (try adapter.acquire(ctx, self.work.prepared orelse return error.InvalidPreparedRequest)) {
+            return switch (try adapter.acquire(
+                ctx,
+                self.work.prepared orelse return error.InvalidPreparedRequest,
+            )) {
                 .captured => |bytes| .{ .acquired = bytes },
                 .definitely_not_sent => |err| blk: {
                     self.invoked = false;
@@ -97,7 +171,12 @@ pub const Worker = struct {
                 .unknown => |err| err,
             };
         }
-        return .{ .acquired = try self.work.entry.declaration.invoke.?(ctx, self.work.prepared orelse payload) };
+        return .{
+            .acquired = try self.work.entry.declaration.invoke.?(
+                ctx,
+                self.work.prepared orelse payload,
+            ),
+        };
     }
     fn execute(self: *Worker) void {
         defer self.done.store(true, .release);
@@ -105,7 +184,10 @@ pub const Worker = struct {
             self.failure = err;
             // Failure decoding retained recovery inputs is operational, not
             // evidence that recovery was unavailable or the old effect unsent.
-            if (self.work.recovery != null and !self.invoked and err != error.Canceled) break :blk .{ .failure = err };
+            if (self.work.recovery != null and
+                !self.invoked and
+                err != error.Canceled)
+                break :blk .{ .failure = err };
             break :blk if (self.invoked) .unknown else .not_sent;
         };
     }
@@ -122,7 +204,9 @@ pub const Worker = struct {
     }
     pub fn finished(self: *Worker) bool {
         if (self.future == null) return false;
-        return if (self.cancel_future != null) self.joined.load(.acquire) else self.done.load(.acquire);
+        return if (self.cancel_future != null) self.joined.load(
+            .acquire,
+        ) else self.done.load(.acquire);
     }
     pub fn join(self: *Worker) !void {
         if (!self.finished()) return error.Busy;

@@ -2,7 +2,11 @@ const std = @import("std");
 
 pub const Role = enum { system, developer, user };
 pub fn isAdmitted(comptime Prompt: type) bool {
-    if (@typeInfo(Prompt) != .@"struct" or @typeInfo(Prompt).@"struct".field_names.len != 0) return false;
+    if (@typeInfo(
+        Prompt,
+    ) != .@"struct" or @typeInfo(
+        Prompt,
+    ).@"struct".field_names.len != 0) return false;
     inline for (.{ "prompt_role", "content" }) |name| {
         if (!@hasDecl(Prompt, name)) return false;
         if (!@typeInfo(@TypeOf(&@field(Prompt, name))).pointer.attrs.@"const") return false;

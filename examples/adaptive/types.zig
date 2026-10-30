@@ -37,11 +37,24 @@ pub const Report = struct {
     limitations: contracts.Vector(contracts.Utf8, null),
 };
 pub const ReportRejection = struct {
-    reason: enum { empty_report, empty_summary, empty_statement, missing_reasoning, missing_evidence, out_of_range, duplicate_evidence },
+    reason: enum {
+        empty_report,
+        empty_summary,
+        empty_statement,
+        missing_reasoning,
+        missing_evidence,
+        out_of_range,
+        duplicate_evidence,
+    },
     claim_index: ?u64,
     evidence_position: ?u64,
 };
-pub const Result = union(enum) { report: Report, no_result: Summary, refusal: Summary, capacity: Summary };
+pub const Result = union(enum) {
+    report: Report,
+    no_result: Summary,
+    refusal: Summary,
+    capacity: Summary,
+};
 pub const Action = union(enum) {
     list: struct { prefix: Path, after: Path },
     read: struct { path: Path, start: u64, maximum: u32 },
@@ -57,18 +70,85 @@ pub const Action = union(enum) {
     placement: struct { command: contracts.workspace.Placement },
 };
 pub const P = model.Profile(Action, .{
-    .{ .name = "list", .description = "List a page of the admitted immutable snapshot; next is the following page's after." },
-    .{ .name = "read", .description = "Read at most 4096 UTF-8 bytes. Successful reads append zero-indexed evidence." },
-    .{ .name = "ask", .description = "Ask for clarification needed for the current task.", .context_retention = .control },
-    .{ .name = "report", .description = "Finish with claims citing acquired evidence_indices, reasoning, and limitations. Observations and inferences require citations; inferences and hypotheses require reasoning." },
-    .{ .name = "stop", .description = "Stop honestly if the task cannot be supported by the admitted evidence." },
-    .{ .name = "inference_set", .description = "Select an approved profile and effort for the next inference, using the current control revision.", .context_retention = .control },
-    .{ .name = "skill_set", .description = "Load, deactivate or physically unload a pinned approved skill. Use an exact version and current control revision.", .context_retention = .control },
-    .{ .name = "inspect", .description = "Locate guard-like lines in source-file evidence by its global evidence_index. Generated results are not source files. Requires an active invariant-review skill; it is not a correctness proof." },
-    .{ .name = "program", .description = "Describe the Horos source-record contract, construct or inspect a program, or specialize its runtime with optional control/storage observations. Description sections include runtimes and executable retention, trace-divergence and hypothetical-reply examples. Construction never runs the guest algorithm or invokes another model." },
-    .{ .name = "work", .description = "Start, inspect, advance, pump, delegate, wait for, interact with, collect, park, or cancel retained computation. Choose a runtime at start or switch realizations at an exact guest cut; request_cut retains progress inside an interpreter operation. A pending child input never restricts your next action." },
-    .{ .name = "context", .description = "Inspect and materialize authorized evidence, including a revision-bound guest state view; choose a view for future inference or expand an omitted source range. Views preserve sources and coverage and do not advance the inspected work." },
-    .{ .name = "placement", .description = "Inspect operator-admitted sites, assess or move a controller or work, and route commands or result pages to remote work. Retry or withdraw a transfer by operation name. A published transfer remains frozen until its peer signs acceptance or refusal. Movement and peer communication remain optional." },
+    .{
+        .name = "list",
+        .description = "List a page of the admitted immutable snapshot; next is the " ++
+            "following page's after.",
+    },
+    .{
+        .name = "read",
+        .description = "Read at most 4096 UTF-8 bytes. Successful reads append " ++
+            "zero-indexed evidence.",
+    },
+    .{
+        .name = "ask",
+        .description = "Ask for clarification needed for the current task.",
+        .context_retention = .control,
+    },
+    .{
+        .name = "report",
+        .description = "Finish with claims citing acquired evidence_indices, " ++
+            "reasoning, and limitations. Observations and inferences " ++
+            "require citations; inferences and hypotheses require " ++
+            "reasoning.",
+    },
+    .{
+        .name = "stop",
+        .description = "Stop honestly if the task cannot be supported by the admitted evidence.",
+    },
+    .{
+        .name = "inference_set",
+        .description = "Select an approved profile and effort for the next " ++
+            "inference, using the current control revision.",
+        .context_retention = .control,
+    },
+    .{
+        .name = "skill_set",
+        .description = "Load, deactivate or physically unload a pinned approved " ++
+            "skill. Use an exact version and current control revision.",
+        .context_retention = .control,
+    },
+    .{
+        .name = "inspect",
+        .description = "Locate guard-like lines in source-file evidence by its " ++
+            "global evidence_index. Generated results are not source " ++
+            "files. Requires an active invariant-review skill; it is not " ++
+            "a correctness proof.",
+    },
+    .{
+        .name = "program",
+        .description = "Describe the Horos source-record contract, construct or " ++
+            "inspect a program, or specialize its runtime with optional " ++
+            "control/storage observations. Description sections include " ++
+            "runtimes and executable retention, trace-divergence and " ++
+            "hypothetical-reply examples. Construction never runs the " ++
+            "guest algorithm or invokes another model.",
+    },
+    .{
+        .name = "work",
+        .description = "Start, inspect, advance, pump, delegate, wait for, interact " ++
+            "with, collect, park, or cancel retained computation. Choose " ++
+            "a runtime at start or switch realizations at an exact guest " ++
+            "cut; request_cut retains progress inside an interpreter " ++
+            "operation. A pending child input never restricts your next " ++
+            "action.",
+    },
+    .{
+        .name = "context",
+        .description = "Inspect and materialize authorized evidence, including a " ++
+            "revision-bound guest state view; choose a view for future " ++
+            "inference or expand an omitted source range. Views preserve " ++
+            "sources and coverage and do not advance the inspected work.",
+    },
+    .{
+        .name = "placement",
+        .description = "Inspect operator-admitted sites, assess or move a " ++
+            "controller or work, and route commands or result pages to " ++
+            "remote work. Retry or withdraw a transfer by operation " ++
+            "name. A published transfer remains frozen until its peer " ++
+            "signs acceptance or refusal. Movement and peer " ++
+            "communication remain optional.",
+    },
 }, .{});
 pub fn ordinal(comptime name: []const u8) usize {
     return @backingInt(@field(std.meta.Tag(Action), name));
@@ -95,34 +175,89 @@ pub const Bindings = struct {
 pub const ListRequest = @FieldType(Action, "list");
 pub const ReadRequest = @FieldType(Action, "read");
 pub const ListEntry = struct { path: Path, bytes: u64 };
-pub const Listing = struct { entries: contracts.Vector(ListEntry, 32), truncated: bool, next: Path };
-pub const Evidence = struct { snapshot: [32]u8, path: Path, sha256: contracts.Text(64), start: u64, end: u64, file_bytes: u64, content: contracts.Text(4096) };
+pub const Listing = struct {
+    entries: contracts.Vector(ListEntry, 32),
+    truncated: bool,
+    next: Path,
+};
+pub const Evidence = struct {
+    snapshot: [32]u8,
+    path: Path,
+    sha256: contracts.Text(64),
+    start: u64,
+    end: u64,
+    file_bytes: u64,
+    content: contracts.Text(4096),
+};
 pub const ReadResult = union(enum) { found: Evidence, missing: Path, invalid: contracts.Text(128) };
 pub const ListObservation = struct { value: Listing, model_text: P.ResultText };
 pub const ReadObservation = struct { value: ReadResult, model_text: P.ResultText };
-pub const SourceEvidenceReference = struct { object: model.ArtifactReference, snapshot: [32]u8, path: Path, sha256: contracts.Text(64), start: u64, end: u64, file_bytes: u64 };
-pub const EvidenceReference = union(enum) { source: SourceEvidenceReference, workspace: contracts.workspace.Ref };
+pub const SourceEvidenceReference = struct {
+    object: model.ArtifactReference,
+    snapshot: [32]u8,
+    path: Path,
+    sha256: contracts.Text(64),
+    start: u64,
+    end: u64,
+    file_bytes: u64,
+};
+pub const EvidenceReference = union(enum) {
+    source: SourceEvidenceReference,
+    workspace: contracts.workspace.Ref,
+};
 pub const EvidenceList = contracts.Vector(EvidenceReference, null);
 pub const WorkOutcome = union(enum) {
     list: struct { request: ListRequest, result: Listing },
-    read: struct { request: ReadRequest, result: union(enum) { found: Evidence, missing: Path, invalid: contracts.Text(128) } },
+    read: struct {
+        request: ReadRequest,
+        result: union(enum) { found: Evidence, missing: Path, invalid: contracts.Text(128) },
+    },
     ask: struct { question: Question, answer: Answer },
     inspect: struct { evidence_index: u64, guard_count: u32 },
 };
 pub const WorkRequest = struct {
     context: model.AdaptiveContextReference,
     call_id: P.CallId,
-    action: union(enum) { list: ListRequest, read: ReadRequest, inspect: struct { evidence_index: u64, evidence: SourceEvidenceReference } },
+    action: union(enum) { list: ListRequest, read: ReadRequest, inspect: struct {
+        evidence_index: u64,
+        evidence: SourceEvidenceReference,
+    } },
 };
-pub const WorkArtifact = struct { version: u8, task: [16]u8, policy: [32]u8, context: model.AdaptiveContextReference, call_id: P.CallId, request: @FieldType(WorkRequest, "action"), outcome: WorkOutcome, evidence: ?Evidence, model_text: P.ResultText };
-pub const WorkReply = struct { artifact: model.ArtifactReference, evidence: ?SourceEvidenceReference };
-pub const WorkspaceRequest = struct { context: model.AdaptiveContextReference, call_id: P.CallId, action: contracts.workspace.Command };
+pub const WorkArtifact = struct {
+    version: u8,
+    task: [16]u8,
+    policy: [32]u8,
+    context: model.AdaptiveContextReference,
+    call_id: P.CallId,
+    request: @FieldType(WorkRequest, "action"),
+    outcome: WorkOutcome,
+    evidence: ?Evidence,
+    model_text: P.ResultText,
+};
+pub const WorkReply = struct {
+    artifact: model.ArtifactReference,
+    evidence: ?SourceEvidenceReference,
+};
+pub const WorkspaceRequest = struct {
+    context: model.AdaptiveContextReference,
+    call_id: P.CallId,
+    action: contracts.workspace.Command,
+};
 pub const ControllerCarry = struct { bindings: PolicyView, state: State };
 pub const ControllerPrivate = union(enum) { initial: Input, @"resume": ControllerCarry };
-pub const ControllerInput = struct { anchor: contracts.controller.TaskAnchor, private: ControllerPrivate };
+pub const ControllerInput = struct {
+    anchor: contracts.controller.TaskAnchor,
+    private: ControllerPrivate,
+};
 pub const Programs = contracts.Vector(contracts.workspace.Ref, null);
 pub const WorkspaceResult = struct { reply: contracts.workspace.Reply, evidence_index: ?u64 };
-pub const ResultValue = union(enum) { inline_text: Summary, work: model.ArtifactReference, control: model.ArtifactReference, report_rejection: ReportRejection, workspace: WorkspaceResult };
+pub const ResultValue = union(enum) {
+    inline_text: Summary,
+    work: model.ArtifactReference,
+    control: model.ArtifactReference,
+    report_rejection: ReportRejection,
+    workspace: WorkspaceResult,
+};
 pub const PendingResult = struct { call_id: P.CallId, output: ResultValue };
 pub const PendingResults = contracts.Vector(PendingResult, 1);
 pub const ControlReceipt = struct {
@@ -142,7 +277,17 @@ pub const ControlReceipt = struct {
     context_epoch: u64,
     eviction_generation: u64,
 };
-pub const ReceiptReference = struct { object: model.ArtifactReference, previous_revision: u64, next_revision: u64, disposition: @FieldType(ControlReceipt, "disposition"), rejection: controls.Rejection, next_profile: contracts.Text(64), next_effort: @FieldType(ControlReceipt, "next_effort"), context_epoch: u64, eviction_generation: u64 };
+pub const ReceiptReference = struct {
+    object: model.ArtifactReference,
+    previous_revision: u64,
+    next_revision: u64,
+    disposition: @FieldType(ControlReceipt, "disposition"),
+    rejection: controls.Rejection,
+    next_profile: contracts.Text(64),
+    next_effort: @FieldType(ControlReceipt, "next_effort"),
+    context_epoch: u64,
+    eviction_generation: u64,
+};
 pub const ReceiptArtifact = struct { receipt: ControlReceipt, model_text: P.ResultText };
 pub const Receipts = contracts.Vector(ReceiptReference, null);
 pub const State = struct {
@@ -171,17 +316,7 @@ pub const Output = struct {
 pub fn validateOutput(admission: anytype, output: Output) !void {
     const a = admission.allocator;
     for (output.evidence.items) |ref| switch (ref) {
-        .source => |source| {
-            const bytes = try admission.projected(source.object, work_identity);
-            defer a.free(bytes);
-            var artifact = try contracts.decodeOwned(WorkArtifact, a, bytes);
-            defer artifact.deinit();
-            const value = artifact.value;
-            if (value.version != 2 or !std.meta.eql(value.task, admission.task) or !std.meta.eql(value.policy, admission.profile)) return error.InvalidResultReference;
-            const item = value.evidence orelse return error.InvalidResultReference;
-            const expected: SourceEvidenceReference = .{ .object = source.object, .snapshot = item.snapshot, .path = item.path, .sha256 = item.sha256, .start = item.start, .end = item.end, .file_bytes = item.file_bytes };
-            try requireOutputReference(SourceEvidenceReference, a, source, expected);
-        },
+        .source => |source| try validateSource(admission, source),
         .workspace => |value| try admission.workspaceReference(value, .value),
     };
     for (output.programs.items) |program| try admission.workspaceReference(program, .program);
@@ -192,19 +327,37 @@ pub fn validateOutput(admission: anytype, output: Output) !void {
         defer artifact.deinit();
         const receipt = artifact.value.receipt;
         if (!std.meta.eql(receipt.task, admission.task)) return error.InvalidResultReference;
-        const expected: ReceiptReference = .{ .object = ref.object, .previous_revision = receipt.previous_revision, .next_revision = receipt.next_revision, .disposition = receipt.disposition, .rejection = receipt.rejection, .next_profile = receipt.next_profile, .next_effort = receipt.next_effort, .context_epoch = receipt.context_epoch, .eviction_generation = receipt.eviction_generation };
+        const expected: ReceiptReference = .{
+            .object = ref.object,
+            .previous_revision = receipt.previous_revision,
+            .next_revision = receipt.next_revision,
+            .disposition = receipt.disposition,
+            .rejection = receipt.rejection,
+            .next_profile = receipt.next_profile,
+            .next_effort = receipt.next_effort,
+            .context_epoch = receipt.context_epoch,
+            .eviction_generation = receipt.eviction_generation,
+        };
         try requireOutputReference(ReceiptReference, a, ref, expected);
     }
     if (output.result == .report) {
         const report = output.result.report;
-        if (report.summary.bytes.len == 0 or report.claims.items.len == 0) return error.InvalidResultReference;
+        if (report.summary.bytes.len == 0 or
+            report.claims.items.len == 0)
+            return error.InvalidResultReference;
         var cited = false;
         for (report.claims.items) |claim| {
-            if (claim.statement.bytes.len == 0 or (claim.kind != .observation and claim.reasoning.bytes.len == 0) or (claim.kind != .hypothesis and claim.evidence_indices.items.len == 0)) return error.InvalidResultReference;
+            if (claim.statement.bytes.len == 0 or
+                (claim.kind != .observation and
+                    claim.reasoning.bytes.len == 0) or
+                (claim.kind != .hypothesis and
+                    claim.evidence_indices.items.len == 0))
+                return error.InvalidResultReference;
             cited = cited or claim.evidence_indices.items.len != 0;
             for (claim.evidence_indices.items, 0..) |index, i| {
                 if (index >= output.evidence.items.len) return error.InvalidResultReference;
-                for (claim.evidence_indices.items[0..i]) |prior| if (prior == index) return error.InvalidResultReference;
+                for (claim.evidence_indices.items[0..i]) |prior| if (prior == index)
+                    return error.InvalidResultReference;
             }
         }
         if (!cited) return error.InvalidResultReference;
@@ -234,16 +387,45 @@ pub const Ready = struct {
     results: PendingResults,
 };
 pub const PreparationResult = union(enum) { ready: Ready, rejected: controls.Rejection };
-pub const PreparationProduct = struct { result: PreparationResult, receipt: ?contracts.Bytes(null) };
+pub const PreparationProduct = struct {
+    result: PreparationResult,
+    receipt: ?contracts.Bytes(null),
+};
 pub const PreparationCapture = struct { prepared: [32]u8 };
 // Version 3 removes cumulative quotas. These eight declaration bits retain
 // their named authority mapping; construction policy is admitted separately.
-pub const SkillConfig = struct { id: contracts.Text(64), version: contracts.Text(64), description: contracts.Text(256), markdown: contracts.Text(4096), tools: [8]bool };
-pub const Configuration = struct { workspace: contracts.Text(128), snapshot_root: contracts.Text(4096), endpoint: contracts.Text(2048), audience: contracts.Text(128), profiles: @FieldType(P.AdaptivePolicy, "profiles"), initial_profile: contracts.Text(64), initial_effort: @FieldType(model.AdaptiveSelection, "effective_effort"), skills: contracts.Vector(SkillConfig, null) };
+pub const SkillConfig = struct {
+    id: contracts.Text(64),
+    version: contracts.Text(64),
+    description: contracts.Text(256),
+    markdown: contracts.Text(4096),
+    tools: [8]bool,
+};
+pub const Configuration = struct {
+    workspace: contracts.Text(128),
+    snapshot_root: contracts.Text(4096),
+    endpoint: contracts.Text(2048),
+    audience: contracts.Text(128),
+    profiles: @FieldType(P.AdaptivePolicy, "profiles"),
+    initial_profile: contracts.Text(64),
+    initial_effort: @FieldType(model.AdaptiveSelection, "effective_effort"),
+    skills: contracts.Vector(SkillConfig, null),
+};
 pub const DataRow = struct { id: u64, key: u64, value: u64, group: u64 };
 pub const DataRows = contracts.Vector(DataRow, null);
-pub const ToolInputConfig = struct { id: contracts.Text(64), description: contracts.Text(256), rows: DataRows, relation: DataRows, selected: tool_types.Keys };
-pub const ToolConfiguration = struct { build: bool, run: bool, reconstruct: bool = false, inputs: contracts.Vector(ToolInputConfig, null) };
+pub const ToolInputConfig = struct {
+    id: contracts.Text(64),
+    description: contracts.Text(256),
+    rows: DataRows,
+    relation: DataRows,
+    selected: tool_types.Keys,
+};
+pub const ToolConfiguration = struct {
+    build: bool,
+    run: bool,
+    reconstruct: bool = false,
+    inputs: contracts.Vector(ToolInputConfig, null),
+};
 pub const SemanticConfiguration = struct {
     roots: contracts.Vector(contracts.Text(64), null),
     checkers: contracts.Vector(contracts.Text(128), null),
@@ -255,8 +437,18 @@ pub const ConfigurationV3 = struct {
     tools: ?ToolConfiguration,
     semantic_construction: ?SemanticConfiguration = null,
 };
-pub const ToolInputReference = struct { id: contracts.Text(64), description: contracts.Text(256), object: model.ArtifactReference };
-pub const ToolPolicy = struct { build: bool, run: bool, reconstruct: bool = false, catalog: model.ArtifactReference, inputs: contracts.Vector(ToolInputReference, null) };
+pub const ToolInputReference = struct {
+    id: contracts.Text(64),
+    description: contracts.Text(256),
+    object: model.ArtifactReference,
+};
+pub const ToolPolicy = struct {
+    build: bool,
+    run: bool,
+    reconstruct: bool = false,
+    catalog: model.ArtifactReference,
+    inputs: contracts.Vector(ToolInputReference, null),
+};
 // Ordinary wire contracts accompany the emitted Horos image. External
 // inspection tools can decode them without an adaptive execution implementation.
 pub const support_types = .{
@@ -306,3 +498,30 @@ pub const support_types = .{
     .{ .name = "Output", .T = Output },
     .{ .name = "Inbox", .T = protean.inbox.Profile(Message).Reply },
 };
+
+fn validateSource(admission: anytype, source: SourceEvidenceReference) !void {
+    const a = admission.allocator;
+    const bytes = try admission.projected(source.object, work_identity);
+    defer a.free(bytes);
+    var artifact = try contracts.decodeOwned(WorkArtifact, a, bytes);
+    defer artifact.deinit();
+    const value = artifact.value;
+    if (value.version != 2 or !std.meta.eql(
+        value.task,
+        admission.task,
+    ) or !std.meta.eql(
+        value.policy,
+        admission.profile,
+    )) return error.InvalidResultReference;
+    const item = value.evidence orelse return error.InvalidResultReference;
+    const expected: SourceEvidenceReference = .{
+        .object = source.object,
+        .snapshot = item.snapshot,
+        .path = item.path,
+        .sha256 = item.sha256,
+        .start = item.start,
+        .end = item.end,
+        .file_bytes = item.file_bytes,
+    };
+    try requireOutputReference(SourceEvidenceReference, a, source, expected);
+}

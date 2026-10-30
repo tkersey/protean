@@ -8,15 +8,24 @@ const client_api = @import("client.zig");
 const json = @import("json.zig");
 const values = @import("values.zig");
 
-pub fn run(comptime Types: type, comptime Environment: type, a: std.mem.Allocator, service: *tasks.Service(Types), client: *client_api.Client(Types), operation_id: []const u8) !json.Value {
+pub fn run(
+    comptime Types: type,
+    comptime Environment: type,
+    a: std.mem.Allocator,
+    service: *tasks.Service(Types),
+    client: *client_api.Client(Types),
+    operation_id: []const u8,
+) !json.Value {
     const slot = try Worker.init(a, service.io);
-    defer slot.deinit(a) catch unreachable;
+    defer slot.deinit(a) catch |err| {
+        std.debug.panic("idle demo worker cleanup failed: {s}", .{@errorName(err)});
+    };
     const accepted = try service.submit(a, operation_id, Environment.demo_input);
     var effects: u32 = 0;
     var yields: u32 = 0;
     // A scheduler turn may now be only an outer evaluator slice. It is not a
     // guest transition or an effect, so it cannot impose a task lifetime quota.
-    while (true) {
+    while (true) { // tiger: event-loop
         // Requests and projections are already durably owned by the service.
         // Keep only this iteration's decoded values; a long adaptive demo must
         // not retain every historical decoding in the caller's report arena.
@@ -26,26 +35,11 @@ pub fn run(comptime Types: type, comptime Environment: type, a: std.mem.Allocato
         const step = try service.pump(frame);
         switch (step) {
             .work => |work| {
-                slot.start(work, service.profile.authority, service.profile.environment) catch |err| {
-                    try service.notSent(frame, work);
-                    return err;
-                };
-                // Offline demo has no interactive input loop. Use the same
-                // acquisition path as CLI/stdio, including raw captures and
-                // definitely-not-sent versus unknown delivery classification.
-                while (!slot.finished()) _ = c.poll(null, 0, 1);
-                try slot.join();
-                defer slot.release() catch unreachable;
-                const result = slot.result orelse .not_sent;
-                try service.completeWork(frame, work, result);
-                if (result == .unknown or result == .not_sent) return slot.failure orelse error.DemoDidNotComplete;
+                try performWork(Types, frame, service, slot, work);
                 effects += 1;
             },
             .waiting => {
-                var question = (try service.pendingQuestion(frame, accepted.receipt.task)) orelse return error.DemoDidNotComplete;
-                defer question.deinit();
-                const id = try std.fmt.allocPrint(frame, "demo-answer-{s}", .{std.fmt.bytesToHex(question.value.id, .lower)});
-                _ = try service.respond(frame, id, accepted.receipt.task, question.value.id, question.value.revision, question.value.request_digest, question.value.answer_schema_id.bytes, try values.toJson(Types.Answer, frame, Environment.demo_answer));
+                try answerQuestion(Types, Environment, frame, service, accepted.receipt.task);
                 effects += 1;
             },
             .progressed, .idle => {},
@@ -55,16 +49,96 @@ pub fn run(comptime Types: type, comptime Environment: type, a: std.mem.Allocato
         if (current.value.outcome_kind == .yielded) yields += 1;
         if (!current.value.terminal()) continue;
         if (current.value.outcome_kind != .completed) return error.DemoDidNotComplete;
-        var params = json.object();
-        try json.put(a, &params, "task_id", json.string(try a.dupe(u8, &std.fmt.bytesToHex(accepted.receipt.task, .lower))));
-        const result = try client.call(a, .@"task.result", params);
-        var report = json.object();
-        try json.put(a, &report, "mode", json.string("offline-demo"));
-        try json.put(a, &report, "persistence", json.string("durable"));
-        try json.put(a, &report, "effects", try json.number(a, effects));
-        try json.put(a, &report, "yields", try json.number(a, yields));
-        try json.put(a, &report, "task_id", params.object.get("task_id").?);
-        try json.put(a, &report, "output", result.object.get("outcome").?.object.get("value") orelse return error.DemoCapacity);
-        return report;
+        return reportResult(Types, a, client, accepted.receipt.task, effects, yields);
     }
+}
+
+fn performWork(
+    comptime Types: type,
+    frame: std.mem.Allocator,
+    service: *tasks.Service(Types),
+    slot: *Worker,
+    work: tasks.Work,
+) !void {
+    slot.start(
+        work,
+        service.profile.authority,
+        service.profile.environment,
+    ) catch |err| {
+        try service.notSent(frame, work);
+        return err;
+    };
+    // Offline demo has no interactive input loop. Use the same
+    // acquisition path as CLI/stdio, including raw captures and
+    // definitely-not-sent versus unknown delivery classification.
+    while (!slot.finished()) _ = c.poll(null, 0, 1);
+    try slot.join();
+    defer slot.release() catch |err| {
+        std.debug.panic("joined demo worker release failed: {s}", .{@errorName(err)});
+    };
+    const result = slot.result orelse .not_sent;
+    try service.completeWork(frame, work, result);
+    if (result == .unknown or
+        result == .not_sent)
+    {
+        return slot.failure orelse error.DemoDidNotComplete;
+    }
+}
+
+fn answerQuestion(
+    comptime Types: type,
+    comptime Environment: type,
+    frame: std.mem.Allocator,
+    service: *tasks.Service(Types),
+    task_id: [16]u8,
+) !void {
+    var question = (try service.pendingQuestion(
+        frame,
+        task_id,
+    )) orelse return error.DemoDidNotComplete;
+    defer question.deinit();
+    const id = try std.fmt.allocPrint(frame, "demo-answer-{s}", .{
+        std.fmt.bytesToHex(question.value.id, .lower),
+    });
+    _ = try service.respond(
+        frame,
+        id,
+        task_id,
+        question.value.id,
+        question.value.revision,
+        question.value.request_digest,
+        question.value.answer_schema_id.bytes,
+        try values.toJson(Types.Answer, frame, Environment.demo_answer),
+    );
+}
+
+fn reportResult(
+    comptime Types: type,
+    a: std.mem.Allocator,
+    client: *client_api.Client(Types),
+    task_id: [16]u8,
+    effects: u32,
+    yields: u32,
+) !json.Value {
+    var params = json.object();
+    try json.put(
+        a,
+        &params,
+        "task_id",
+        json.string(try a.dupe(u8, &std.fmt.bytesToHex(task_id, .lower))),
+    );
+    const result = try client.call(a, .@"task.result", params);
+    var report = json.object();
+    try json.put(a, &report, "mode", json.string("offline-demo"));
+    try json.put(a, &report, "persistence", json.string("durable"));
+    try json.put(a, &report, "effects", try json.number(a, effects));
+    try json.put(a, &report, "yields", try json.number(a, yields));
+    try json.put(a, &report, "task_id", params.object.get("task_id").?);
+    try json.put(
+        a,
+        &report,
+        "output",
+        result.object.get("outcome").?.object.get("value") orelse return error.DemoCapacity,
+    );
+    return report;
 }

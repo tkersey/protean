@@ -32,7 +32,7 @@ fn vector(comptime T: type) bool {
 fn structured(comptime T: type) bool {
     return !json.isText(T) and @typeInfo(T) == .@"struct";
 }
-fn nodeCount(comptime T: type) usize {
+inline fn nodeCount(comptime T: type) usize {
     if (vector(T)) return 1 + nodeCount(T.Child);
     if (@typeInfo(T) == .optional) return 1 + nodeCount(@typeInfo(T).optional.child);
     if (@typeInfo(T) == .@"union") {
@@ -54,7 +54,7 @@ const Maxima = struct {
     nodes: usize = 0,
     nested: bool = false,
     sums: bool = false,
-    fn inspect(self: *Maxima, comptime name: []const u8, comptime T: type) void {
+    inline fn inspect(self: *Maxima, comptime name: []const u8, comptime T: type) void {
         self.names = @max(self.names, name.len);
         if (vector(T)) {
             self.nested = true;
@@ -65,10 +65,14 @@ const Maxima = struct {
         } else if (@typeInfo(T) == .@"union") {
             self.nested = true;
             self.sums = true;
-            for (@typeInfo(T).@"union".field_names, @typeInfo(T).@"union".field_types) |field, Child| self.inspect(field, Child);
+            for (@typeInfo(T).@"union".field_names, @typeInfo(
+                T,
+            ).@"union".field_types) |field, Child| self.inspect(field, Child);
         } else if (structured(T)) {
             self.nested = true;
-            for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field, Child| self.inspect(field, Child);
+            for (@typeInfo(T).@"struct".field_names, @typeInfo(
+                T,
+            ).@"struct".field_types) |field, Child| self.inspect(field, Child);
         } else if (@typeInfo(T) == .@"enum") {
             const info = @typeInfo(T).@"enum";
             self.enums = @max(self.enums, info.field_names.len);
@@ -86,7 +90,7 @@ pub const DecodeFailure = enum {
     capacity,
 };
 
-fn checkField(comptime name: []const u8, comptime T: type) void {
+inline fn checkField(comptime name: []const u8, comptime T: type) void {
     if (json.isText(T)) {
         return;
     }
@@ -95,7 +99,9 @@ fn checkField(comptime name: []const u8, comptime T: type) void {
         .@"struct" => checkPayload(T),
         .optional => |info| checkField(name, info.child),
         .@"union" => |info| {
-            if (info.tag_type == null) @compileError("Protean model codec requires a tagged union: " ++ name);
+            if (info.tag_type == null) @compileError(
+                "Protean model codec requires a tagged union: " ++ name,
+            );
             for (info.field_names, info.field_types) |field, Child| checkField(field, Child);
         },
         .bool => {},
@@ -146,7 +152,9 @@ pub fn Profile(comptime Answer: type) type {
                 result.nodes = @max(result.nodes, 1);
             } else {
                 var count: usize = 0;
-                for (@typeInfo(Variant).@"struct".field_names, @typeInfo(Variant).@"struct".field_types) |name, FieldType| {
+                for (@typeInfo(Variant).@"struct".field_names, @typeInfo(
+                    Variant,
+                ).@"struct".field_types) |name, FieldType| {
                     result.inspect(name, FieldType);
                     count += nodeCount(FieldType);
                 }
@@ -172,7 +180,10 @@ pub fn Profile(comptime Answer: type) type {
         /// their exact existing field-vector codec and encoding.
         pub const Node = struct { field: Field, children: u32, maximum_items: ?u64 };
         pub const maximum_fields = maxima.fields;
-        pub const Codec = if (maxima.nested) contracts.Vector(Node, maxima.nodes) else contracts.Vector(Field, maxima.fields);
+        pub const Codec = if (maxima.nested) contracts.Vector(
+            Node,
+            maxima.nodes,
+        ) else contracts.Vector(Field, maxima.fields);
         pub const Decoded = union(enum) { decoded: Answer, invalid: DecodeFailure };
 
         fn fieldValue(comptime name: []const u8, comptime T: type) Field {
@@ -190,7 +201,13 @@ pub fn Profile(comptime Answer: type) type {
             } else .{ .names = [_]FieldName{}, .tags = [_]u32{} };
             return .{
                 .name = .{ .bytes = name },
-                .kind = if (json.isText(T)) .text else if (vector(T)) .sequence else switch (@typeInfo(T)) {
+                .kind = if (json.isText(
+                    T,
+                )) .text else if (vector(
+                    T,
+                )) .sequence else switch (@typeInfo(
+                    T,
+                )) {
                     .bool => .boolean,
                     .int => |info| if (info.signedness == .signed)
                         .signed_integer
@@ -209,7 +226,12 @@ pub fn Profile(comptime Answer: type) type {
             };
         }
 
-        fn appendNodes(comptime name: []const u8, comptime T: type, nodes: []Node, cursor: *usize) void {
+        inline fn appendNodes(
+            comptime name: []const u8,
+            comptime T: type,
+            nodes: []Node,
+            cursor: *usize,
+        ) void {
             nodes[cursor.*] = .{
                 .field = fieldValue(name, T),
                 .children = if (vector(T) or @typeInfo(T) == .optional)
@@ -228,9 +250,23 @@ pub fn Profile(comptime Answer: type) type {
             } else if (@typeInfo(T) == .optional) {
                 appendNodes("", @typeInfo(T).optional.child, nodes, cursor);
             } else if (@typeInfo(T) == .@"union") {
-                for (@typeInfo(T).@"union".field_names, @typeInfo(T).@"union".field_types) |field, Child| appendNodes(field, Child, nodes, cursor);
+                for (@typeInfo(T).@"union".field_names, @typeInfo(
+                    T,
+                ).@"union".field_types) |field, Child| appendNodes(
+                    field,
+                    Child,
+                    nodes,
+                    cursor,
+                );
             } else if (structured(T)) {
-                for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field, Child| appendNodes(field, Child, nodes, cursor);
+                for (@typeInfo(T).@"struct".field_names, @typeInfo(
+                    T,
+                ).@"struct".field_types) |field, Child| appendNodes(
+                    field,
+                    Child,
+                    nodes,
+                    cursor,
+                );
             }
         }
 
@@ -240,11 +276,20 @@ pub fn Profile(comptime Answer: type) type {
             const Payload = variants[index];
             if (comptime maxima.nested) {
                 const nodes = comptime blk: {
-                    var result: [if (@typeInfo(Payload) == .@"enum") 1 else nodeCount(Payload) - 1]Node = undefined;
+                    var result: [
+                        if (@typeInfo(Payload) == .@"enum") 1 else nodeCount(Payload) - 1
+                    ]Node = undefined;
                     var cursor: usize = 0;
                     if (@typeInfo(Payload) == .@"enum") {
                         appendNodes("value", Payload, &result, &cursor);
-                    } else for (@typeInfo(Payload).@"struct".field_names, @typeInfo(Payload).@"struct".field_types) |name, FieldType| appendNodes(name, FieldType, &result, &cursor);
+                    } else for (@typeInfo(Payload).@"struct".field_names, @typeInfo(
+                        Payload,
+                    ).@"struct".field_types) |name, FieldType| appendNodes(
+                        name,
+                        FieldType,
+                        &result,
+                        &cursor,
+                    );
                     break :blk result;
                 };
                 return .{ .items = &nodes };
@@ -253,7 +298,9 @@ pub fn Profile(comptime Answer: type) type {
                 var result: [fieldCount(Payload)]Field = undefined;
                 if (@typeInfo(Payload) == .@"enum") {
                     result[0] = fieldValue("value", Payload);
-                } else for (@typeInfo(Payload).@"struct".field_names, @typeInfo(Payload).@"struct".field_types, 0..) |name, FieldType, i| {
+                } else for (@typeInfo(Payload).@"struct".field_names, @typeInfo(
+                    Payload,
+                ).@"struct".field_types, 0..) |name, FieldType, i| {
                     result[i] = fieldValue(name, FieldType);
                 }
                 break :blk result;

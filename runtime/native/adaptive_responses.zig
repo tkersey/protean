@@ -15,7 +15,9 @@ fn equal(left: []const u8, right: []const u8) bool {
 }
 fn identifier(bytes: []const u8) bool {
     if (bytes.len == 0) return false;
-    for (bytes) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_' and byte != '.') return false;
+    for (bytes) |byte| if (!std.ascii.isAlphanumeric(
+        byte,
+    ) and byte != '-' and byte != '_' and byte != '.') return false;
     return true;
 }
 fn sameReference(left: anytype, right: anytype) bool {
@@ -25,7 +27,10 @@ fn object(ctx: registry.ProjectionContext, ref: anytype, limit: usize) ![]u8 {
     if (ref.bytes == 0 or ref.bytes > limit) return error.Capacity;
     const bytes = try ctx.object(.{ .digest = ref.digest, .bytes = ref.bytes }, limit);
     errdefer ctx.allocator.free(bytes);
-    if (bytes.len != ref.bytes or !equal(&storage.digest(bytes), &ref.digest)) return error.InvalidArtifact;
+    if (bytes.len != ref.bytes or !equal(
+        &storage.digest(bytes),
+        &ref.digest,
+    )) return error.InvalidArtifact;
     return bytes;
 }
 
@@ -36,21 +41,56 @@ pub fn Admission(comptime P: type) type {
         pub const Selected = struct { profile: Profile, transport: responses.Settings };
 
         pub fn policy(a: std.mem.Allocator, bytes: []const u8) !Policy {
-            const parsed = try json.parse(a, bytes, .{ .bytes = bytes.len, .tokens = bytes.len, .members = bytes.len });
-            const value = try values.fromJson(Policy, a, json.get(parsed.value, "adaptive") orelse return error.InvalidConfiguration);
-            if (!equal(value.schema.bytes, P.adaptive_policy_identity) or value.audience.bytes.len == 0 or
+            const parsed = try json.parse(a, bytes, .{
+                .bytes = bytes.len,
+                .tokens = bytes.len,
+                .members = bytes.len,
+            });
+            const value = try values.fromJson(
+                Policy,
+                a,
+                json.get(parsed.value, "adaptive") orelse return error.InvalidConfiguration,
+            );
+            if (!equal(
+                value.schema.bytes,
+                P.adaptive_policy_identity,
+            ) or value.audience.bytes.len == 0 or
                 value.profiles.items.len == 0 or
                 value.catalog.bytes == 0) return error.InvalidConfiguration;
-            for (value.core_tools, value.permitted_tools) |core, permitted| if (core and !permitted) return error.InvalidConfiguration;
+            for (value.core_tools, value.permitted_tools) |core, permitted| if (core and
+                !permitted)
+                return error.InvalidConfiguration;
             for (value.profiles.items, 0..) |entry, index| {
-                if (!identifier(entry.id.bytes) or entry.model.bytes.len == 0 or contracts.exceeds(entry.model.bytes.len, P.representation.model_id_bytes) or
+                if (!identifier(
+                    entry.id.bytes,
+                ) or entry.model.bytes.len == 0 or contracts.exceeds(
+                    entry.model.bytes.len,
+                    P.representation.model_id_bytes,
+                ) or
                     !identifier(entry.opaque_family.bytes) or entry.efforts.items.len == 0 or
                     entry.max_output_tokens == 0 or
-                    (P.representation.provider_response_bytes != null and (entry.response_bytes == null or entry.response_bytes.? > P.representation.provider_response_bytes.?)) or
-                    (entry.effort_update and entry.reasoning_mode != .standard)) return error.InvalidConfiguration;
-                for (value.profiles.items[0..index]) |earlier| if (equal(earlier.id.bytes, entry.id.bytes)) return error.InvalidConfiguration;
-                for (entry.efforts.items, 0..) |effort, n| for (entry.efforts.items[0..n]) |earlier| if (effort == earlier) return error.InvalidConfiguration;
-                _ = try (https.Config{ .endpoint = value.endpoint.bytes, .token = "validation", .request_limit = entry.request_bytes, .response_limit = entry.response_bytes, .timeout_ms = entry.timeout_ms }).validate();
+                    (P.representation.provider_response_bytes != null and
+                        (entry.response_bytes == null or
+                            entry.response_bytes.? > P.representation.provider_response_bytes.?)) or
+                    (entry.effort_update and
+                        entry.reasoning_mode != .standard))
+                    return error.InvalidConfiguration;
+                for (value.profiles.items[0..index]) |earlier| if (equal(
+                    earlier.id.bytes,
+                    entry.id.bytes,
+                )) return error.InvalidConfiguration;
+                for (entry.efforts.items, 0..) |effort, n| {
+                    for (entry.efforts.items[0..n]) |earlier| {
+                        if (effort == earlier) return error.InvalidConfiguration;
+                    }
+                }
+                _ = try (https.Config{
+                    .endpoint = value.endpoint.bytes,
+                    .token = "validation",
+                    .request_limit = entry.request_bytes,
+                    .response_limit = entry.response_bytes,
+                    .timeout_ms = entry.timeout_ms,
+                }).validate();
             }
             return value;
         }
@@ -63,26 +103,46 @@ pub fn Admission(comptime P: type) type {
 
         pub fn select(a: std.mem.Allocator, frozen: Policy, request: P.AdaptiveRequest) !Selected {
             var selected: ?Profile = null;
-            for (frozen.profiles.items) |entry| if (equal(entry.id.bytes, request.selection.profile_id.bytes)) {
+            for (frozen.profiles.items) |entry| if (equal(
+                entry.id.bytes,
+                request.selection.profile_id.bytes,
+            )) {
                 selected = entry;
             };
             const entry = selected orelse return error.UnknownInferenceProfile;
             const selected_digest = try profileDigest(a, entry);
-            if (!equal(&request.selection.profile_digest, &selected_digest)) return error.IncompatibleProfile;
+            if (!equal(
+                &request.selection.profile_digest,
+                &selected_digest,
+            )) return error.IncompatibleProfile;
             var supported = false;
-            for (entry.efforts.items) |effort| supported = supported or effort == request.selection.effective_effort;
+            for (entry.efforts.items) |effort| supported = supported or
+                effort == request.selection.effective_effort;
             if (!supported) return error.UnsupportedEffort;
             const invocation = request.invocation;
-            const reasoning = invocation.parameters.reasoning orelse return error.IncompatibleProfile;
+            const reasoning = invocation.parameters.reasoning orelse
+                return error.IncompatibleProfile;
             const top_effort = reasoning.effort orelse return error.IncompatibleProfile;
             supported = false;
             for (entry.efforts.items) |effort| supported = supported or effort == top_effort;
-            if (!supported or (!entry.effort_update and top_effort != request.selection.effective_effort) or reasoning.summary != null or
-                !equal(invocation.model.bytes, entry.model.bytes) or invocation.parameters.max_output_tokens != entry.max_output_tokens or invocation.parameters.temperature != null or
+            if (!supported or
+                (!entry.effort_update and
+                    top_effort != request.selection.effective_effort) or
+                reasoning.summary != null or
+                !equal(invocation.model.bytes, entry.model.bytes) or
+                invocation.parameters.max_output_tokens != entry.max_output_tokens or
+                invocation.parameters.temperature != null or
                 !equal(invocation.protocol.bytes, "agent.model.protocol.openai-responses-v2") or
-                invocation.response_policy.store or invocation.response_policy.stream or invocation.response_policy.background or
-                invocation.selection.parallel_calls or invocation.selection.maximum_calls > 1 or invocation.selection.minimum_calls > invocation.selection.maximum_calls or
-                invocation.maximum_provider_response_bytes != entry.response_bytes or !std.meta.eql(invocation.normalization_limits, P.normalizationLimits())) return error.IncompatibleProfile;
+                invocation.response_policy.store or
+                invocation.response_policy.stream or
+                invocation.response_policy.background or
+                invocation.selection.parallel_calls or
+                invocation.selection.maximum_calls > 1 or
+                invocation.selection.minimum_calls > invocation.selection.maximum_calls or
+                invocation.maximum_provider_response_bytes != entry.response_bytes or !std.meta.eql(
+                invocation.normalization_limits,
+                P.normalizationLimits(),
+            )) return error.IncompatibleProfile;
             return .{ .profile = entry, .transport = .{
                 .endpoint = frozen.endpoint,
                 .audience = frozen.audience,
@@ -95,8 +155,15 @@ pub fn Admission(comptime P: type) type {
             } };
         }
 
-        pub fn catalog(ctx: registry.ProjectionContext, frozen: Policy) !contracts.Decoded(P.AdaptiveCatalog) {
-            const bytes = try object(ctx, frozen.catalog, std.math.cast(usize, frozen.catalog.bytes) orelse return error.Capacity);
+        pub fn catalog(
+            ctx: registry.ProjectionContext,
+            frozen: Policy,
+        ) !contracts.Decoded(P.AdaptiveCatalog) {
+            const bytes = try object(
+                ctx,
+                frozen.catalog,
+                std.math.cast(usize, frozen.catalog.bytes) orelse return error.Capacity,
+            );
             defer ctx.allocator.free(bytes);
             var decoded = try contracts.decodeOwned(P.AdaptiveCatalog, ctx.allocator, bytes);
             errdefer decoded.deinit();
@@ -109,26 +176,54 @@ pub fn Admission(comptime P: type) type {
         pub fn validateCatalog(frozen: Policy, value: P.AdaptiveCatalog) !void {
             const entries = value.skills.items;
             for (entries, 0..) |entry, index| {
-                if (!identifier(entry.id.bytes) or !identifier(entry.version.bytes) or entry.instructions.bytes == 0) return error.InvalidSkill;
-                for (entries[0..index]) |earlier| if (equal(entry.id.bytes, earlier.id.bytes)) return error.InvalidSkill;
-                for (entry.tools, frozen.permitted_tools) |enabled, permitted| if (enabled and !permitted) return error.InvalidSkill;
+                if (!identifier(entry.id.bytes) or !identifier(
+                    entry.version.bytes,
+                ) or entry.instructions.bytes == 0) return error.InvalidSkill;
+                for (entries[0..index]) |earlier| if (equal(
+                    entry.id.bytes,
+                    earlier.id.bytes,
+                )) return error.InvalidSkill;
+                for (entry.tools, frozen.permitted_tools) |enabled, permitted| if (enabled and
+                    !permitted)
+                    return error.InvalidSkill;
             }
         }
 
-        pub fn bind(ctx: registry.ProjectionContext, frozen: Policy, request: P.AdaptiveRequest, skills: P.AdaptiveCatalog) !Selected {
-            if (!equal(&request.policy, &storage.digest(ctx.profile)) or !sameReference(request.plan.catalog, frozen.catalog)) return error.IncompatibleProfile;
+        pub fn bind(
+            ctx: registry.ProjectionContext,
+            frozen: Policy,
+            request: P.AdaptiveRequest,
+            skills: P.AdaptiveCatalog,
+        ) !Selected {
+            if (!equal(&request.policy, &storage.digest(ctx.profile)) or !sameReference(
+                request.plan.catalog,
+                frozen.catalog,
+            )) return error.IncompatibleProfile;
             const selected = try select(ctx.allocator, frozen, request);
             var materialized = frozen.core_tools;
             var permitted = frozen.core_tools;
             for (request.plan.skills.items, 0..) |loaded, index| {
                 var found: ?P.AdaptiveSkill = null;
-                for (skills.skills.items) |entry| if (equal(entry.id.bytes, loaded.skill_id.bytes) and equal(entry.version.bytes, loaded.version.bytes)) {
+                for (skills.skills.items) |entry| if (equal(
+                    entry.id.bytes,
+                    loaded.skill_id.bytes,
+                ) and equal(entry.version.bytes, loaded.version.bytes)) {
                     found = entry;
                 };
                 const entry = found orelse return error.UnknownSkill;
-                if (!sameReference(entry.instructions, loaded.resource) or loaded.introduced_at > request.plan.watermark) return error.InvalidSkill;
-                for (request.plan.skills.items[0..index]) |earlier| if (equal(earlier.skill_id.bytes, loaded.skill_id.bytes)) return error.InvalidSkill;
-                const body = try object(ctx, entry.instructions, std.math.cast(usize, entry.instructions.bytes) orelse return error.Capacity);
+                if (!sameReference(
+                    entry.instructions,
+                    loaded.resource,
+                ) or loaded.introduced_at > request.plan.watermark) return error.InvalidSkill;
+                for (request.plan.skills.items[0..index]) |earlier| if (equal(
+                    earlier.skill_id.bytes,
+                    loaded.skill_id.bytes,
+                )) return error.InvalidSkill;
+                const body = try object(
+                    ctx,
+                    entry.instructions,
+                    std.math.cast(usize, entry.instructions.bytes) orelse return error.Capacity,
+                );
                 defer ctx.allocator.free(body);
                 if (!std.unicode.utf8ValidateSlice(body)) return error.InvalidSkill;
                 for (entry.tools, 0..) |enabled, ordinal| {
@@ -136,22 +231,45 @@ pub fn Admission(comptime P: type) type {
                     permitted[ordinal] = permitted[ordinal] or (enabled and loaded.active);
                 }
             }
+            try bindDeclarations(ctx, request, materialized, permitted);
+            return selected;
+        }
+        fn bindDeclarations(
+            ctx: registry.ProjectionContext,
+            request: P.AdaptiveRequest,
+            materialized: [P.declaration_count]bool,
+            permitted: [P.declaration_count]bool,
+        ) !void {
             var tool_index: usize = 0;
             const declarations = P.allDeclarations().items;
-            for (materialized, permitted, request.materialized, request.offered, 0..) |defined, allowed, claimed, offered, ordinal| {
+            for (
+                materialized,
+                permitted,
+                request.materialized,
+                request.offered,
+                0..,
+            ) |defined, allowed, claimed, offered, ordinal| {
                 if (defined != claimed or (offered and !allowed)) return error.InvalidDeclaration;
                 if (defined) {
-                    if (tool_index == request.invocation.tools.items.len) return error.InvalidDeclaration;
-                    const expected = try contracts.encodeOwned(P.ToolDeclaration, ctx.allocator, declarations[ordinal]);
+                    if (tool_index == request.invocation.tools.items.len)
+                        return error.InvalidDeclaration;
+                    const expected = try contracts.encodeOwned(
+                        P.ToolDeclaration,
+                        ctx.allocator,
+                        declarations[ordinal],
+                    );
                     defer ctx.allocator.free(expected);
-                    const actual = try contracts.encodeOwned(P.ToolDeclaration, ctx.allocator, request.invocation.tools.items[tool_index]);
+                    const actual = try contracts.encodeOwned(
+                        P.ToolDeclaration,
+                        ctx.allocator,
+                        request.invocation.tools.items[tool_index],
+                    );
                     defer ctx.allocator.free(actual);
                     if (!equal(expected, actual)) return error.InvalidDeclaration;
                     tool_index += 1;
                 }
             }
             if (tool_index != request.invocation.tools.items.len) return error.InvalidDeclaration;
-            return selected;
         }
     };
 }
@@ -165,15 +283,29 @@ pub fn Adapter(comptime P: type) type {
         pub const Context = @import("adaptive_context.zig").Projection(P);
         pub const Prepared = P.AdaptivePrepared;
         pub fn declaration() registry.Declaration {
-            return .{ .identity = P.identity, .resource_role = "inference", .kind = .leaf, .inference = true, .background = true, .payload_schema = struct {
-                fn schema(a: std.mem.Allocator) ![]u8 {
-                    return values.schemaBytes(P.AdaptiveRequest, a);
-                }
-            }.schema, .resume_schema = struct {
-                fn schema(a: std.mem.Allocator) ![]u8 {
-                    return values.schemaBytes(P.AdaptiveResult, a);
-                }
-            }.schema, .capture = .{ .prepare = prepare, .acquire = acquire, .interpret = interpret, .dependencies = dependencies } };
+            return .{
+                .identity = P.identity,
+                .resource_role = "inference",
+                .kind = .leaf,
+                .inference = true,
+                .background = true,
+                .payload_schema = struct {
+                    fn schema(a: std.mem.Allocator) ![]u8 {
+                        return values.schemaBytes(P.AdaptiveRequest, a);
+                    }
+                }.schema,
+                .resume_schema = struct {
+                    fn schema(a: std.mem.Allocator) ![]u8 {
+                        return values.schemaBytes(P.AdaptiveResult, a);
+                    }
+                }.schema,
+                .capture = .{
+                    .prepare = prepare,
+                    .acquire = acquire,
+                    .interpret = interpret,
+                    .dependencies = dependencies,
+                },
+            };
         }
 
         fn dependencies(a: std.mem.Allocator, objects: []const []const u8) ![]registry.Dependency {
@@ -181,19 +313,38 @@ pub fn Adapter(comptime P: type) type {
             defer references.deinit();
             if (objects.len == 0) return references.finish();
             const Ref = @FieldType(P.AdaptiveContext, "source_capture");
-            for (objects[0 .. objects.len - 1]) |bytes| try references.object(P.HistoryChunk, Ref, bytes, @import("adaptive_history.zig").identity);
-            try references.object(P.AdaptiveContext, Ref, objects[objects.len - 1], P.adaptive_context_identity);
+            for (objects[0 .. objects.len - 1]) |bytes| try references.object(
+                P.HistoryChunk,
+                Ref,
+                bytes,
+                @import("adaptive_history.zig").identity,
+            );
+            try references.object(
+                P.AdaptiveContext,
+                Ref,
+                objects[objects.len - 1],
+                P.adaptive_context_identity,
+            );
             return references.finish();
         }
 
-        pub fn offerGeneral(ctx: registry.ProjectionContext, bytes: []const u8, required: [P.declaration_count]bool) ![]u8 {
+        pub fn offerGeneral(
+            ctx: registry.ProjectionContext,
+            bytes: []const u8,
+            required: [P.declaration_count]bool,
+        ) ![]u8 {
             var request = try contracts.decodeOwned(P.AdaptiveRequest, ctx.allocator, bytes);
             defer request.deinit();
             const policy = try A.policy(ctx.allocator, ctx.profile);
             var catalog = try A.catalog(ctx, policy);
             defer catalog.deinit();
             _ = try A.bind(ctx, policy, request.value, catalog.value);
-            for (required, policy.core_tools, policy.permitted_tools, 0..) |needed, defined, permitted, i| {
+            for (
+                required,
+                policy.core_tools,
+                policy.permitted_tools,
+                0..,
+            ) |needed, defined, permitted, i| {
                 if (needed and defined and permitted) request.value.offered[i] = true;
             }
             request.value.invocation.selection.maximum_calls = 1;
@@ -213,16 +364,97 @@ pub fn Adapter(comptime P: type) type {
         const Projected = struct { prepared: []u8, context: Context.Rendered };
         // Both consumers share one projection. The caller keeps decoded request
         // and catalog owners alive until it has consumed this borrowed view.
-        fn project(ctx: registry.ProjectionContext, request: P.AdaptiveRequest, policy: A.Policy, selected: A.Selected, catalog: P.AdaptiveCatalog) !Projected {
+        fn project(
+            ctx: registry.ProjectionContext,
+            request: P.AdaptiveRequest,
+            policy: A.Policy,
+            selected: A.Selected,
+            catalog: P.AdaptiveCatalog,
+        ) !Projected {
             var projected = try Context.render(ctx, request, policy, selected, catalog);
             const a = ctx.allocator;
+            try appendController(ctx, &projected);
+            try appendTrial(ctx, &projected);
+            var body = json.object();
+            try json.put(a, &body, "model", json.string(selected.transport.model.bytes));
+            try json.put(a, &body, "input", projected.input);
+            try json.put(a, &body, "tools", projected.core_tools);
+            if (selected.transport.max_output_tokens) |maximum| try json.put(
+                a,
+                &body,
+                "max_output_tokens",
+                try json.number(a, maximum),
+            );
+            var reasoning = json.object();
+            try json.put(a, &reasoning, "effort", json.string(selected.transport.effort.bytes));
+            try json.put(
+                a,
+                &reasoning,
+                "mode",
+                json.string(@tagName(selected.profile.reasoning_mode)),
+            );
+            try json.put(
+                a,
+                &reasoning,
+                "context",
+                json.string(@tagName(selected.profile.reasoning_context)),
+            );
+            try json.put(a, &body, "reasoning", reasoning);
+            try appendToolChoice(a, &body, request);
+            inline for (.{
+                "parallel_tool_calls",
+                "store",
+                "stream",
+                "background",
+            }) |key| try json.put(a, &body, key, .{ .bool = false });
+            try json.put(a, &body, "truncation", json.string("disabled"));
+            if (selected.profile.explicit_cache) {
+                var cache = json.object();
+                try json.put(a, &cache, "mode", json.string("explicit"));
+                try json.put(a, &cache, "ttl", json.string("30m"));
+                if (selected.profile.cache_diagnostics) {
+                    if (projected.prior_response_id) |id| try json.put(
+                        a,
+                        &cache,
+                        "comparison_response_id",
+                        json.string(id),
+                    );
+                }
+                try json.put(a, &body, "prompt_cache_options", cache);
+            }
+            const rendered = try json.canonicalOptional(a, body, selected.transport.request_bytes);
+            return .{
+                .prepared = try contracts.encodeOwned(
+                    Prepared,
+                    a,
+                    .{ .version = 1, .request = request, .body = .{ .bytes = rendered } },
+                ),
+                .context = projected,
+            };
+        }
+
+        fn appendController(ctx: registry.ProjectionContext, projected: *Context.Rendered) !void {
+            const a = ctx.allocator;
             if (ctx.controller) |controller| {
-                const overlay = try ctx.object(controller.overlay, std.math.cast(usize, controller.overlay.bytes) orelse return error.Capacity);
+                const overlay = try ctx.object(
+                    controller.overlay,
+                    std.math.cast(usize, controller.overlay.bytes) orelse return error.Capacity,
+                );
                 defer a.free(overlay);
-                var parsed = try json.parse(a, overlay, .{ .bytes = overlay.len, .tokens = overlay.len, .members = overlay.len });
+                var parsed = try json.parse(a, overlay, .{
+                    .bytes = overlay.len,
+                    .tokens = overlay.len,
+                    .members = overlay.len,
+                });
                 defer parsed.deinit();
                 inline for (.{ .{ "user", "user" }, .{ "control", "developer" } }) |part| {
-                    const text = try json.canonical(a, json.get(parsed.value, part[0]) orelse return error.InvalidControllerBinding);
+                    const text = try json.canonical(
+                        a,
+                        json.get(
+                            parsed.value,
+                            part[0],
+                        ) orelse return error.InvalidControllerBinding,
+                    );
                     var message = json.object();
                     try json.put(a, &message, "role", json.string(part[1]));
                     var content: json.Value = .{ .array = .init(a) };
@@ -234,31 +466,58 @@ pub fn Adapter(comptime P: type) type {
                     try projected.input.array.append(message);
                 }
             }
+        }
+
+        fn appendTrial(ctx: registry.ProjectionContext, projected: *Context.Rendered) !void {
+            const a = ctx.allocator;
             if (ctx.trial) |trial| {
-                const bytes = try ctx.object(trial.view, std.math.cast(usize, trial.view.bytes) orelse return error.Capacity);
+                const bytes = try ctx.object(
+                    trial.view,
+                    std.math.cast(usize, trial.view.bytes) orelse return error.Capacity,
+                );
                 defer a.free(bytes);
                 var view = try contracts.decodeOwned(contracts.controller.OwnerView, a, bytes);
                 defer view.deinit();
                 var trial_context = json.object();
                 try json.put(a, &trial_context, "role", json.string("isolated_controller_trial"));
-                try json.put(a, &trial_context, "authority", json.string("Root commands are proposals only. This trial cannot adopt a controller or change the live task."));
-                try json.put(a, &trial_context, "work", json.string(try a.dupe(u8, &std.fmt.bytesToHex(trial.work, .lower))));
-                try json.put(a, &trial_context, "frozen_task_view", try @import("values.zig").toJson(contracts.controller.OwnerView, a, view.value));
+                try json.put(
+                    a,
+                    &trial_context,
+                    "authority",
+                    json.string(
+                        "Root commands are proposals only. This trial cannot adopt a " ++
+                            "controller or change the live task.",
+                    ),
+                );
+                try json.put(
+                    a,
+                    &trial_context,
+                    "work",
+                    json.string(try a.dupe(u8, &std.fmt.bytesToHex(trial.work, .lower))),
+                );
+                try json.put(
+                    a,
+                    &trial_context,
+                    "frozen_task_view",
+                    try @import("values.zig").toJson(contracts.controller.OwnerView, a, view.value),
+                );
                 var message = json.object();
                 try json.put(a, &message, "role", json.string("developer"));
-                try json.put(a, &message, "content", json.string(try json.canonical(a, trial_context)));
+                try json.put(
+                    a,
+                    &message,
+                    "content",
+                    json.string(try json.canonical(a, trial_context)),
+                );
                 try projected.input.array.append(message);
             }
-            var body = json.object();
-            try json.put(a, &body, "model", json.string(selected.transport.model.bytes));
-            try json.put(a, &body, "input", projected.input);
-            try json.put(a, &body, "tools", projected.core_tools);
-            if (selected.transport.max_output_tokens) |maximum| try json.put(a, &body, "max_output_tokens", try json.number(a, maximum));
-            var reasoning = json.object();
-            try json.put(a, &reasoning, "effort", json.string(selected.transport.effort.bytes));
-            try json.put(a, &reasoning, "mode", json.string(@tagName(selected.profile.reasoning_mode)));
-            try json.put(a, &reasoning, "context", json.string(@tagName(selected.profile.reasoning_context)));
-            try json.put(a, &body, "reasoning", reasoning);
+        }
+
+        fn appendToolChoice(
+            a: std.mem.Allocator,
+            body: *json.Value,
+            request: P.AdaptiveRequest,
+        ) !void {
             var allowed: json.Value = .{ .array = .init(a) };
             for (request.offered, P.allDeclarations().items) |offered, tool| if (offered) {
                 var item = json.object();
@@ -269,58 +528,97 @@ pub fn Adapter(comptime P: type) type {
             const selection = request.invocation.selection;
             if (selection.maximum_calls == 0 or allowed.array.items.len == 0) {
                 if (selection.minimum_calls != 0) return error.InvalidDeclaration;
-                try json.put(a, &body, "tool_choice", json.string("none"));
+                try json.put(a, body, "tool_choice", json.string("none"));
             } else {
                 var choice = json.object();
                 try json.put(a, &choice, "type", json.string("allowed_tools"));
-                try json.put(a, &choice, "mode", json.string(if (selection.minimum_calls == 1) "required" else "auto"));
+                try json.put(
+                    a,
+                    &choice,
+                    "mode",
+                    json.string(if (selection.minimum_calls == 1) "required" else "auto"),
+                );
                 try json.put(a, &choice, "tools", allowed);
-                try json.put(a, &body, "tool_choice", choice);
+                try json.put(a, body, "tool_choice", choice);
             }
-            inline for (.{ "parallel_tool_calls", "store", "stream", "background" }) |key| try json.put(a, &body, key, .{ .bool = false });
-            try json.put(a, &body, "truncation", json.string("disabled"));
-            if (selected.profile.explicit_cache) {
-                var cache = json.object();
-                try json.put(a, &cache, "mode", json.string("explicit"));
-                try json.put(a, &cache, "ttl", json.string("30m"));
-                if (selected.profile.cache_diagnostics) if (projected.prior_response_id) |id| try json.put(a, &cache, "comparison_response_id", json.string(id));
-                try json.put(a, &body, "prompt_cache_options", cache);
-            }
-            const rendered = try json.canonicalOptional(a, body, selected.transport.request_bytes);
-            return .{ .prepared = try contracts.encodeOwned(Prepared, a, .{ .version = 1, .request = request, .body = .{ .bytes = rendered } }), .context = projected };
         }
 
         pub fn acquire(ctx: registry.Context, bytes: []const u8) !registry.Acquisition {
             ctx.checkCancellation() catch |err| return .{ .definitely_not_sent = err };
-            var prepared = contracts.decodeOwned(Prepared, ctx.allocator, bytes) catch |err| return .{ .definitely_not_sent = err };
+            var prepared = contracts.decodeOwned(
+                Prepared,
+                ctx.allocator,
+                bytes,
+            ) catch |err| return .{ .definitely_not_sent = err };
             defer prepared.deinit();
-            if (prepared.value.version != 1 or !equal(&prepared.value.request.policy, &storage.digest(ctx.profile))) return .{ .definitely_not_sent = error.IncompatibleProfile };
-            const policy = A.policy(ctx.allocator, ctx.profile) catch |err| return .{ .definitely_not_sent = err };
-            const selected = A.select(ctx.allocator, policy, prepared.value.request) catch |err| return .{ .definitely_not_sent = err };
+            if (prepared.value.version != 1 or !equal(
+                &prepared.value.request.policy,
+                &storage.digest(ctx.profile),
+            )) return .{ .definitely_not_sent = error.IncompatibleProfile };
+            const policy = A.policy(
+                ctx.allocator,
+                ctx.profile,
+            ) catch |err| return .{
+                .definitely_not_sent = err,
+            };
+            const selected = A.select(
+                ctx.allocator,
+                policy,
+                prepared.value.request,
+            ) catch |err| return .{ .definitely_not_sent = err };
             // Selection is re-admitted under the frozen catalog at acquisition,
             // rather than reading the newest mutable launch configuration.
-            const body = json.parseAsset(ctx.allocator, prepared.value.body.bytes, selected.transport.request_bytes orelse prepared.value.body.bytes.len) catch |err| return .{ .definitely_not_sent = err };
-            const reasoning = json.get(body.value, "reasoning") orelse return .{ .definitely_not_sent = error.InvalidPreparedRequest };
-            const maximum = json.get(body.value, "max_output_tokens");
-            if (!jsonTextEquals(body.value, "model", selected.transport.model.bytes) or
+            const body = json.parseAsset(
+                ctx.allocator,
+                prepared.value.body.bytes,
+                selected.transport.request_bytes orelse prepared.value.body.bytes.len,
+            ) catch |err| return .{ .definitely_not_sent = err };
+            validatePrepared(body.value, selected, prepared.value.request) catch |err| {
+                return .{ .definitely_not_sent = err };
+            };
+            return responses.acquireSettings(ctx, selected.transport, prepared.value.body.bytes);
+        }
+
+        fn validatePrepared(
+            body: json.Value,
+            selected: A.Selected,
+            request: P.AdaptiveRequest,
+        ) !void {
+            const reasoning = json.get(body, "reasoning") orelse
+                return error.InvalidPreparedRequest;
+            const maximum = json.get(body, "max_output_tokens");
+            if (!jsonTextEquals(body, "model", selected.transport.model.bytes) or
                 !jsonTextEquals(reasoning, "effort", selected.transport.effort.bytes) or
                 !jsonTextEquals(reasoning, "mode", @tagName(selected.profile.reasoning_mode)) or
-                !jsonTextEquals(reasoning, "context", @tagName(selected.profile.reasoning_context)) or
-                !jsonTextEquals(body.value, "truncation", "disabled")) return .{ .definitely_not_sent = error.InvalidPreparedRequest };
+                !jsonTextEquals(
+                    reasoning,
+                    "context",
+                    @tagName(selected.profile.reasoning_context),
+                ) or
+                !jsonTextEquals(body, "truncation", "disabled"))
+                return error.InvalidPreparedRequest;
             if (selected.transport.max_output_tokens) |expected| {
-                const actual = maximum orelse return .{ .definitely_not_sent = error.InvalidPreparedRequest };
-                if (actual != .number_string) return .{ .definitely_not_sent = error.InvalidPreparedRequest };
-                const tokens = json.numberInteger(u32, actual.number_string) catch return .{ .definitely_not_sent = error.InvalidPreparedRequest };
-                if (tokens != expected) return .{ .definitely_not_sent = error.InvalidPreparedRequest };
-            } else if (maximum != null) return .{ .definitely_not_sent = error.InvalidPreparedRequest };
-            const input = json.get(body.value, "input") orelse return .{ .definitely_not_sent = error.InvalidPreparedRequest };
-            const effective = Context.effectiveEffort(input, prepared.value.request.invocation.parameters.reasoning.?.effort.?) catch return .{ .definitely_not_sent = error.InvalidPreparedRequest };
-            if (effective != prepared.value.request.selection.effective_effort) return .{ .definitely_not_sent = error.InvalidPreparedRequest };
+                const actual = maximum orelse return error.InvalidPreparedRequest;
+                if (actual != .number_string) return error.InvalidPreparedRequest;
+                const tokens = json.numberInteger(
+                    u32,
+                    actual.number_string,
+                ) catch return error.InvalidPreparedRequest;
+                if (tokens != expected) return error.InvalidPreparedRequest;
+            } else if (maximum != null) return error.InvalidPreparedRequest;
+            const input = json.get(body, "input") orelse
+                return error.InvalidPreparedRequest;
+            const effective = Context.effectiveEffort(
+                input,
+                request.invocation.parameters.reasoning.?.effort.?,
+            ) catch return error.InvalidPreparedRequest;
+            if (effective != request.selection.effective_effort)
+                return error.InvalidPreparedRequest;
             inline for (.{ "parallel_tool_calls", "store", "stream", "background" }) |key| {
-                const flag = json.get(body.value, key) orelse return .{ .definitely_not_sent = error.InvalidPreparedRequest };
-                if (flag != .bool or flag.bool) return .{ .definitely_not_sent = error.InvalidPreparedRequest };
+                const flag = json.get(body, key) orelse
+                    return error.InvalidPreparedRequest;
+                if (flag != .bool or flag.bool) return error.InvalidPreparedRequest;
             }
-            return responses.acquireSettings(ctx, selected.transport, prepared.value.body.bytes);
         }
 
         fn jsonTextEquals(value: json.Value, key: []const u8, expected: []const u8) bool {
@@ -358,21 +656,42 @@ pub fn Adapter(comptime P: type) type {
             const observed: Usage = .{
                 .input_tokens = optionalCount(json.get(value, "input_tokens"), &valid),
                 .output_tokens = optionalCount(json.get(value, "output_tokens"), &valid),
-                .cached_input_tokens = detail(value, "input_tokens_details", "cached_tokens", &valid),
-                .cache_write_tokens = detail(value, "input_tokens_details", "cache_write_tokens", &valid),
-                .reasoning_tokens = detail(value, "output_tokens_details", "reasoning_tokens", &valid),
+                .cached_input_tokens = detail(
+                    value,
+                    "input_tokens_details",
+                    "cached_tokens",
+                    &valid,
+                ),
+                .cache_write_tokens = detail(
+                    value,
+                    "input_tokens_details",
+                    "cache_write_tokens",
+                    &valid,
+                ),
+                .reasoning_tokens = detail(
+                    value,
+                    "output_tokens_details",
+                    "reasoning_tokens",
+                    &valid,
+                ),
             };
             if (observed.input_tokens) |input| {
                 const cached = observed.cached_input_tokens orelse 0;
                 const written = observed.cache_write_tokens orelse 0;
                 if (cached > input or written > input -| cached) valid = false;
             }
-            if (observed.output_tokens) |output| if ((observed.reasoning_tokens orelse 0) > output) {
+            if (observed.output_tokens) |output| if ((observed.reasoning_tokens orelse
+                0) > output)
+            {
                 valid = false;
             };
             return .{ .value = observed, .valid = valid };
         }
-        fn encode(ctx: registry.ProjectionContext, result: P.AdaptiveResult, objects: []const []const u8) !registry.Projection {
+        fn encode(
+            ctx: registry.ProjectionContext,
+            result: P.AdaptiveResult,
+            objects: []const []const u8,
+        ) !registry.Projection {
             const bytes = try contracts.encodeOwned(P.AdaptiveResult, ctx.allocator, result);
             const tokens = if (result.usage) |available| available.output_tokens else null;
             if (contracts.exceeds(bytes.len, P.representation.maximum_adaptive_reply_bytes)) {
@@ -386,12 +705,30 @@ pub fn Adapter(comptime P: type) type {
             }
             return .{ .reply = bytes, .objects = objects, .output_tokens = tokens };
         }
-        fn unsupported(ctx: registry.ProjectionContext, reason: @FieldType(P.Result, "unsupported_response"), observed: ?Usage) !registry.Projection {
-            return encode(ctx, .{ .result = .{ .unsupported_response = reason }, .replay = null, .replay_status = if (reason == .normalization_limit) .capacity else .unsupported, .usage = observed }, &.{});
+        fn unsupported(
+            ctx: registry.ProjectionContext,
+            reason: @FieldType(P.Result, "unsupported_response"),
+            observed: ?Usage,
+        ) !registry.Projection {
+            return encode(ctx, .{
+                .result = .{ .unsupported_response = reason },
+                .replay = null,
+                .replay_status = if (reason == .normalization_limit) .capacity else .unsupported,
+                .usage = observed,
+            }, &.{});
         }
 
-        pub fn interpret(ctx: registry.ProjectionContext, request_bytes: []const u8, prepared_bytes: []const u8, captured: []const u8) !registry.Projection {
-            var request = try contracts.decodeOwned(P.AdaptiveRequest, ctx.allocator, request_bytes);
+        pub fn interpret(
+            ctx: registry.ProjectionContext,
+            request_bytes: []const u8,
+            prepared_bytes: []const u8,
+            captured: []const u8,
+        ) !registry.Projection {
+            var request = try contracts.decodeOwned(
+                P.AdaptiveRequest,
+                ctx.allocator,
+                request_bytes,
+            );
             defer request.deinit();
             const policy = try A.policy(ctx.allocator, ctx.profile);
             var catalog = try A.catalog(ctx, policy);
@@ -402,64 +739,214 @@ pub fn Adapter(comptime P: type) type {
             if (!equal(projection.prepared, prepared_bytes)) return error.InvalidCapture;
             var raw = try contracts.decodeOwned(responses.Raw, ctx.allocator, captured);
             defer raw.deinit();
-            if (raw.value.status < 200 or raw.value.status >= 300) return encode(ctx, .{ .result = .{ .provider_failure = .{ .kind = .http_status, .http_status = raw.value.status } }, .replay = null, .replay_status = .unsupported, .usage = null }, &.{});
-            if (!raw.value.identity_encoding) return unsupported(ctx, .unsupported_output_item, null);
-            if (!std.unicode.utf8ValidateSlice(raw.value.body.bytes)) return unsupported(ctx, .invalid_utf8, null);
-            const parsed = json.parse(ctx.allocator, raw.value.body.bytes, .{ .bytes = selected.transport.response_bytes orelse raw.value.body.bytes.len, .tokens = raw.value.body.bytes.len, .members = raw.value.body.bytes.len }) catch |err| return unsupported(ctx, if (err == error.Capacity) .normalization_limit else .malformed_json, null);
-            const body = parsed.value;
+            return interpretRaw(ctx, .{
+                .request = request.value,
+                .policy = policy,
+                .catalog = catalog.value,
+                .selected = selected,
+                .projected = projection.context,
+                .prepared = prepared_bytes,
+                .captured = captured,
+            }, raw.value);
+        }
+
+        const Interpretation = struct {
+            request: P.AdaptiveRequest,
+            policy: A.Policy,
+            catalog: P.AdaptiveCatalog,
+            selected: A.Selected,
+            projected: Context.Rendered,
+            prepared: []const u8,
+            captured: []const u8,
+        };
+
+        fn interpretRaw(
+            ctx: registry.ProjectionContext,
+            input: Interpretation,
+            raw: responses.Raw,
+        ) !registry.Projection {
+            if (raw.status < 200 or raw.status >= 300) return encode(ctx, .{
+                .result = .{ .provider_failure = .{
+                    .kind = .http_status,
+                    .http_status = raw.status,
+                } },
+                .replay = null,
+                .replay_status = .unsupported,
+                .usage = null,
+            }, &.{});
+            if (!raw.identity_encoding) return unsupported(
+                ctx,
+                .unsupported_output_item,
+                null,
+            );
+            if (!std.unicode.utf8ValidateSlice(raw.body.bytes))
+                return unsupported(ctx, .invalid_utf8, null);
+            const parsed = json.parse(ctx.allocator, raw.body.bytes, .{
+                .bytes = input.selected.transport.response_bytes orelse raw.body.bytes.len,
+                .tokens = raw.body.bytes.len,
+                .members = raw.body.bytes.len,
+            }) catch |err| return unsupported(
+                ctx,
+                if (err == error.Capacity) .normalization_limit else .malformed_json,
+                null,
+            );
+            return interpretBody(ctx, input, parsed.value);
+        }
+
+        fn interpretBody(
+            ctx: registry.ProjectionContext,
+            input: Interpretation,
+            body: json.Value,
+        ) !registry.Projection {
             const observed = usage(body);
-            if (jsonTextEquals(body, "status", "failed") or jsonTextEquals(body, "status", "incomplete")) return encode(ctx, .{ .result = .{ .provider_failure = .{ .kind = if (jsonTextEquals(body, "status", "failed")) .response_failed else .response_incomplete, .http_status = 0 } }, .replay = null, .replay_status = .unsupported, .usage = observed.value }, &.{});
-            if (!jsonTextEquals(body, "status", "completed") or (json.get(body, "error") orelse return unsupported(ctx, .unsupported_status, observed.value)) != .null) return unsupported(ctx, .unsupported_status, observed.value);
-            const output = json.get(body, "output") orelse return unsupported(ctx, .unsupported_status, observed.value);
+            if (jsonTextEquals(body, "status", "failed") or
+                jsonTextEquals(body, "status", "incomplete"))
+                return encode(ctx, .{
+                    .result = .{ .provider_failure = .{
+                        .kind = if (jsonTextEquals(
+                            body,
+                            "status",
+                            "failed",
+                        )) .response_failed else .response_incomplete,
+                        .http_status = 0,
+                    } },
+                    .replay = null,
+                    .replay_status = .unsupported,
+                    .usage = observed.value,
+                }, &.{});
+            if (!jsonTextEquals(body, "status", "completed") or
+                (json.get(body, "error") orelse
+                    return unsupported(
+                        ctx,
+                        .unsupported_status,
+                        observed.value,
+                    )) != .null) return unsupported(ctx, .unsupported_status, observed.value);
+            const output = json.get(body, "output") orelse
+                return unsupported(ctx, .unsupported_status, observed.value);
             if (output != .array) return unsupported(ctx, .unsupported_output_item, observed.value);
-            if (contracts.exceeds(output.array.items.len, P.representation.maximum_output_items)) return unsupported(ctx, .normalization_limit, observed.value);
-            const normalized = responses.OutputNormalizer(P).normalize(ctx.allocator, request.value.invocation, output) catch |err| return unsupported(ctx, if (err == error.Capacity) .normalization_limit else if (err == error.MixedRefusal) .mixed_refusal else .unsupported_output_item, observed.value);
+            if (contracts.exceeds(
+                output.array.items.len,
+                P.representation.maximum_output_items,
+            )) return unsupported(ctx, .normalization_limit, observed.value);
+            const normalized = responses.OutputNormalizer(P).normalize(
+                ctx.allocator,
+                input.request.invocation,
+                output,
+            ) catch |err| return unsupported(
+                ctx,
+                switch (err) {
+                    error.Capacity => .normalization_limit,
+                    error.MixedRefusal => .mixed_refusal,
+                    else => .unsupported_output_item,
+                },
+                observed.value,
+            );
             if (!observed.valid) return unsupported(ctx, .unsupported_output_item, observed.value);
-            var projected = projection.context;
+            return completeInterpretation(ctx, input, body, output, normalized, observed.value);
+        }
+
+        fn completeInterpretation(
+            ctx: registry.ProjectionContext,
+            input: Interpretation,
+            body: json.Value,
+            output: json.Value,
+            normalized: P.Result,
+            observed: ?Usage,
+        ) !registry.Projection {
+            var projected = input.projected;
             for (output.array.items) |item| {
                 try projected.history.array.append(try responses.replayItem(ctx.allocator, item));
                 const reasoning_item = jsonTextEquals(item, "type", "reasoning");
-                try projected.origins.append(ctx.allocator, .{ .watermark = request.value.plan.watermark, .reasoning_skills = if (reasoning_item) projected.reasoning_skills else .{ .items = &.{} }, .reasoning_tools = if (reasoning_item) request.value.materialized else @splat(false) });
+                try projected.origins.append(ctx.allocator, .{
+                    .watermark = input.request.plan.watermark,
+                    .reasoning_skills = if (reasoning_item) projected.reasoning_skills else .{
+                        .items = &.{},
+                    },
+                    .reasoning_tools = if (reasoning_item) input.request.materialized else @splat(
+                        false,
+                    ),
+                });
             }
-            var pending = Context.pending(ctx.allocator, projected.history) catch return unsupported(ctx, .unsupported_output_item, observed.value);
+            var pending = Context.pending(
+                ctx.allocator,
+                projected.history,
+            ) catch return unsupported(ctx, .unsupported_output_item, observed);
             pending.deinit();
             var response_id: ?contracts.Utf8 = null;
             if (json.get(body, "id")) |id| {
-                if (id != .string or id.string.len == 0) return unsupported(ctx, .unsupported_output_item, observed.value);
+                if (id != .string or id.string.len == 0) return unsupported(
+                    ctx,
+                    .unsupported_output_item,
+                    observed,
+                );
                 response_id = .{ .bytes = id.string };
             }
-            const watermark = try std.math.add(u64, request.value.plan.watermark, 1);
+            return publishInterpretation(ctx, input, projected, response_id, normalized, observed);
+        }
+
+        fn publishInterpretation(
+            ctx: registry.ProjectionContext,
+            input: Interpretation,
+            projected: Context.Rendered,
+            response_id: ?contracts.Utf8,
+            normalized: P.Result,
+            observed: ?Usage,
+        ) !registry.Projection {
+            const watermark = try std.math.add(u64, input.request.plan.watermark, 1);
             var context: P.AdaptiveContext = undefined;
             context.schema = .{ .bytes = P.adaptive_context_identity };
-            context.policy = request.value.policy;
+            context.policy = input.request.policy;
             context.task = ctx.task;
             context.tenant = .{ .bytes = ctx.tenant };
-            context.audience = policy.audience;
-            context.selection = request.value.selection;
-            context.top_effort = request.value.invocation.parameters.reasoning.?.effort.?;
-            context.plan = request.value.plan;
+            context.audience = input.policy.audience;
+            context.selection = input.request.selection;
+            context.top_effort = input.request.invocation.parameters.reasoning.?.effort.?;
+            context.plan = input.request.plan;
             context.watermark = watermark;
-            context.source_capture = .{ .digest = storage.digest(captured), .bytes = captured.len };
-            context.source_request = .{ .digest = storage.digest(prepared_bytes), .bytes = prepared_bytes.len };
+            context.source_capture = .{
+                .digest = storage.digest(input.captured),
+                .bytes = input.captured.len,
+            };
+            context.source_request = .{
+                .digest = storage.digest(input.prepared),
+                .bytes = input.prepared.len,
+            };
             context.response_id = response_id;
             var objects: std.ArrayList([]const u8) = .empty;
-            const published = try @import("adaptive_history.zig").History(P).publish(ctx, projected.history_base, projected.unchanged_prefix, projected.history, projected.origins.items, request.value.plan, catalog.value);
+            const published = try @import("adaptive_history.zig").History(P).publish(
+                ctx,
+                projected.history_base,
+                projected.unchanged_prefix,
+                projected.history,
+                projected.origins.items,
+                input.request.plan,
+                input.catalog,
+            );
             context.history = published.root;
             try objects.appendSlice(ctx.allocator, published.objects);
             const artifact = try contracts.encodeOwned(P.AdaptiveContext, ctx.allocator, context);
             try objects.append(ctx.allocator, artifact);
-            return encode(ctx, .{ .result = normalized, .replay_status = .complete, .usage = observed.value, .replay = .{
-                .object = .{ .digest = storage.digest(artifact), .bytes = artifact.len },
-                .schema = .{ .bytes = P.adaptive_context_identity },
-                .policy = request.value.policy,
-                .selection = request.value.selection.profile_digest,
-                .task = ctx.task,
-                .tenant = .{ .bytes = ctx.tenant },
-                .audience = policy.audience,
-                .epoch = request.value.plan.epoch,
-                .watermark = watermark,
-                .eviction_generation = request.value.plan.eviction_generation,
-            } }, try objects.toOwnedSlice(ctx.allocator));
+            return encode(
+                ctx,
+                .{
+                    .result = normalized,
+                    .replay_status = .complete,
+                    .usage = observed,
+                    .replay = .{
+                        .object = .{ .digest = storage.digest(artifact), .bytes = artifact.len },
+                        .schema = .{ .bytes = P.adaptive_context_identity },
+                        .policy = input.request.policy,
+                        .selection = input.request.selection.profile_digest,
+                        .task = ctx.task,
+                        .tenant = .{ .bytes = ctx.tenant },
+                        .audience = input.policy.audience,
+                        .epoch = input.request.plan.epoch,
+                        .watermark = watermark,
+                        .eviction_generation = input.request.plan.eviction_generation,
+                    },
+                },
+                try objects.toOwnedSlice(ctx.allocator),
+            );
         }
     };
 }

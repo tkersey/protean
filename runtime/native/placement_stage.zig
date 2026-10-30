@@ -6,23 +6,45 @@ const p = @import("placement.zig");
 const namespace = @import("namespace.zig");
 
 pub fn path(a: std.mem.Allocator, directory: []const u8, offer: p.Offer) ![]u8 {
-    return std.fmt.allocPrint(a, "{s}/placement-{s}.par", .{ directory, std.fmt.bytesToHex(try p.digest(p.Offer, a, offer), .lower) });
+    return std.fmt.allocPrint(a, "{s}/placement-{s}.par", .{
+        directory,
+        std.fmt.bytesToHex(try p.digest(p.Offer, a, offer), .lower),
+    });
 }
 
 fn size(fd: c_int) !u64 {
     var stat: c.struct_protean_native_stat = undefined;
     if (c.protean_native_fstat(fd, &stat) != 0) return error.StorageUnavailable;
-    if (stat.st_mode & c.S_IFMT != c.S_IFREG or stat.st_mode & 0o077 != 0 or stat.st_uid != c.geteuid() or stat.st_nlink != 1 or stat.st_size < 0) return error.UnsafeStatePath;
+    if (stat.st_mode & c.S_IFMT != c.S_IFREG or
+        stat.st_mode & 0o077 != 0 or
+        stat.st_uid != c.geteuid() or
+        stat.st_nlink != 1 or
+        stat.st_size < 0)
+    {
+        return error.UnsafeStatePath;
+    }
     return @intCast(stat.st_size);
 }
 
 fn stagingName(name: []const u8) bool {
-    if (name.len != 78 or !std.mem.startsWith(u8, name, "placement-") or !std.mem.endsWith(u8, name, ".par")) return false;
+    if (name.len != 78 or
+        !std.mem.startsWith(u8, name, "placement-") or
+        !std.mem.endsWith(u8, name, ".par"))
+    {
+        return false;
+    }
     for (name[10..74]) |byte| if (!std.ascii.isHex(byte)) return false;
     return true;
 }
 
-fn admitGrowth(a: std.mem.Allocator, io: std.Io, dir: c_int, limits: p.StagingLimits, added_file: bool, growth: u64) !void {
+fn admitGrowth(
+    a: std.mem.Allocator,
+    io: std.Io,
+    dir: c_int,
+    limits: p.StagingLimits,
+    added_file: bool,
+    growth: u64,
+) !void {
     var occupied: p.StagingLimits = .{ .bytes = 0, .files = 0 };
     const directory: std.Io.Dir = .{ .handle = dir };
     var iterator = directory.iterate();
@@ -37,14 +59,29 @@ fn admitGrowth(a: std.mem.Allocator, io: std.Io, dir: c_int, limits: p.StagingLi
         occupied.files = try std.math.add(usize, occupied.files, 1);
     }
     if (added_file and occupied.files >= limits.files) return error.Capacity;
-    if (growth != 0 and (occupied.bytes > limits.bytes or growth > limits.bytes - occupied.bytes)) return error.Capacity;
+    if (growth != 0 and
+        (occupied.bytes > limits.bytes or
+            growth > limits.bytes - occupied.bytes))
+    {
+        return error.Capacity;
+    }
 }
 
-pub fn retire(a: std.mem.Allocator, directory: []const u8, comptime kind: enum { placement, outgoing }, identity: p.Digest) !void {
+pub fn retire(
+    a: std.mem.Allocator,
+    directory: []const u8,
+    comptime kind: enum { placement, outgoing },
+    identity: p.Digest,
+) !void {
     const dir = try namespace.openDirectory(a, directory, false, true);
     defer _ = c.close(dir);
     if (c.flock(dir, c.LOCK_EX | c.LOCK_NB) != 0) return error.Busy;
-    const name = try std.fmt.allocPrintSentinel(a, "{s}-{s}.par", .{ @tagName(kind), std.fmt.bytesToHex(identity, .lower) }, 0);
+    const name = try std.fmt.allocPrintSentinel(
+        a,
+        "{s}-{s}.par",
+        .{ @tagName(kind), std.fmt.bytesToHex(identity, .lower) },
+        0,
+    );
     defer a.free(name);
     const fd = c.openat(dir, name.ptr, c.O_RDONLY | c.O_NONBLOCK | c.O_NOFOLLOW | c.O_CLOEXEC);
     if (fd < 0) return if (std.c.errno(fd) == .NOENT) {} else error.StorageUnavailable;
@@ -54,13 +91,31 @@ pub fn retire(a: std.mem.Allocator, directory: []const u8, comptime kind: enum {
     if (c.unlinkat(dir, name.ptr, 0) != 0 or c.fsync(dir) != 0) return error.StorageUnavailable;
 }
 
-pub fn write(a: std.mem.Allocator, io: std.Io, directory: []const u8, limits: ?p.StagingLimits, offer: p.Offer, offset: u64, bytes: []const u8) !u64 {
-    if (bytes.len > 32768 or offset > offer.archive_bytes or bytes.len > offer.archive_bytes - offset) return error.InvalidTransfer;
+pub fn write(
+    a: std.mem.Allocator,
+    io: std.Io,
+    directory: []const u8,
+    limits: ?p.StagingLimits,
+    offer: p.Offer,
+    offset: u64,
+    bytes: []const u8,
+) !u64 {
+    if (bytes.len > 32768 or
+        offset > offer.archive_bytes or
+        bytes.len > offer.archive_bytes - offset)
+    {
+        return error.InvalidTransfer;
+    }
     if (limits) |bound| if (offer.archive_bytes > bound.bytes) return error.Capacity;
     const dir = try namespace.openDirectory(a, directory, false, true);
     defer _ = c.close(dir);
     if (c.flock(dir, c.LOCK_EX | c.LOCK_NB) != 0) return error.Busy;
-    const name = try std.fmt.allocPrintSentinel(a, "placement-{s}.par", .{std.fmt.bytesToHex(try p.digest(p.Offer, a, offer), .lower)}, 0);
+    const name = try std.fmt.allocPrintSentinel(
+        a,
+        "placement-{s}.par",
+        .{std.fmt.bytesToHex(try p.digest(p.Offer, a, offer), .lower)},
+        0,
+    );
     defer a.free(name);
     var fd = c.openat(dir, name.ptr, c.O_RDWR | c.O_NONBLOCK | c.O_NOFOLLOW | c.O_CLOEXEC);
     const fresh = fd < 0;
@@ -73,10 +128,21 @@ pub fn write(a: std.mem.Allocator, io: std.Io, directory: []const u8, limits: ?p
     const next_size = @max(current_size, offset + bytes.len);
     if (limits) |bound| try admitGrowth(a, io, dir, bound, fresh, next_size - current_size);
     if (fresh) {
-        fd = c.openat(dir, name.ptr, c.O_RDWR | c.O_CREAT | c.O_EXCL | c.O_NONBLOCK | c.O_NOFOLLOW | c.O_CLOEXEC, @as(c_uint, 0o600));
+        fd = c.openat(
+            dir,
+            name.ptr,
+            c.O_RDWR | c.O_CREAT | c.O_EXCL | c.O_NONBLOCK | c.O_NOFOLLOW | c.O_CLOEXEC,
+            @as(c_uint, 0o600),
+        );
         if (fd < 0) return error.StorageUnavailable;
     }
     if (c.flock(fd, c.LOCK_EX | c.LOCK_NB) != 0) return error.Busy;
+    try writeRange(fd, offset, bytes, current_size);
+    if (c.fsync(fd) != 0 or c.fsync(dir) != 0) return error.StorageUnavailable;
+    return next_size;
+}
+
+fn writeRange(fd: c_int, offset: u64, bytes: []const u8, current_size: u64) !void {
     const overlap: usize = @intCast(@min(bytes.len, current_size - offset));
     var buffer: [32768]u8 = undefined;
     var read: usize = 0;
@@ -89,13 +155,16 @@ pub fn write(a: std.mem.Allocator, io: std.Io, directory: []const u8, limits: ?p
     if (!std.mem.eql(u8, buffer[0..overlap], bytes[0..overlap])) return error.OperationConflict;
     var written = overlap;
     while (written < bytes.len) {
-        const n = c.pwrite(fd, bytes[written..].ptr, bytes.len - written, @intCast(offset + written));
+        const n = c.pwrite(
+            fd,
+            bytes[written..].ptr,
+            bytes.len - written,
+            @intCast(offset + written),
+        );
         if (n < 0 and std.c.errno(n) == .INTR) continue;
         if (n <= 0) return error.StorageUnavailable;
         written += @intCast(n);
     }
-    if (c.fsync(fd) != 0 or c.fsync(dir) != 0) return error.StorageUnavailable;
-    return next_size;
 }
 
 test "placement staging resumes exact prefixes and rejects conflicting bytes" {
@@ -112,8 +181,14 @@ test "placement staging resumes exact prefixes and rejects conflicting bytes" {
     offer.archive_bytes = 6;
     try std.testing.expectEqual(@as(u64, 3), try write(a, io, directory, null, offer, 0, "abc"));
     try std.testing.expectEqual(@as(u64, 3), try write(a, io, directory, null, offer, 0, "abc"));
-    try std.testing.expectError(error.OperationConflict, write(a, io, directory, null, offer, 0, "abd"));
-    try std.testing.expectError(error.InvalidTransfer, write(a, io, directory, null, offer, 4, "e"));
+    try std.testing.expectError(
+        error.OperationConflict,
+        write(a, io, directory, null, offer, 0, "abd"),
+    );
+    try std.testing.expectError(
+        error.InvalidTransfer,
+        write(a, io, directory, null, offer, 4, "e"),
+    );
     try std.testing.expectEqual(@as(u64, 4), try write(a, io, directory, null, offer, 2, "cd"));
     try std.testing.expectEqual(@as(u64, 6), try write(a, io, directory, null, offer, 4, "ef"));
     try std.testing.expectEqual(@as(u64, 6), try write(a, io, directory, null, offer, 0, ""));

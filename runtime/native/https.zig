@@ -17,11 +17,21 @@ pub const Config = struct {
             self.request_limit == 0 or
             self.response_limit == 0 or
             self.timeout_ms == 0) return error.InvalidConfiguration;
-        for (self.endpoint) |byte| if (byte <= 0x20 or byte >= 0x7f or byte == '\\') return error.InvalidConfiguration;
+        for (self.endpoint) |byte| if (byte <= 0x20 or
+            byte >= 0x7f or
+            byte == '\\') return error.InvalidConfiguration;
         for (self.token) |byte| if (byte <= 0x20 or byte >= 0x7f) return error.InvalidConfiguration;
         if (self.trust_root) |root| if (root.len == 0) return error.InvalidConfiguration;
         const uri = std.Uri.parse(self.endpoint) catch return error.InvalidConfiguration;
-        if (!std.mem.eql(u8, uri.scheme, "https") or uri.host == null or uri.user != null or uri.password != null or uri.fragment != null) return error.InvalidConfiguration;
+        if (!std.mem.eql(
+            u8,
+            uri.scheme,
+            "https",
+        ) or
+            uri.host == null or
+            uri.user != null or
+            uri.password != null or
+            uri.fragment != null) return error.InvalidConfiguration;
         return uri;
     }
 };
@@ -61,7 +71,11 @@ const Exchange = struct {
     }
 
     fn send(self: *Exchange) !Capture {
-        var client: std.http.Client = .{ .allocator = self.a, .io = self.io, .read_buffer_size = 16 * 1024 };
+        var client: std.http.Client = .{
+            .allocator = self.a,
+            .io = self.io,
+            .read_buffer_size = 16 * 1024,
+        };
         defer client.deinit();
         if (self.config.trust_root) |der| {
             const now = std.Io.Clock.real.now(self.io);
@@ -90,7 +104,10 @@ const Exchange = struct {
         try request.connection.?.flush();
         var response = try request.receiveHead(&.{});
         const identity_encoding = response.head.content_encoding == .identity;
-        if (response.head.content_length) |length| if (self.config.response_limit != null and length > self.config.response_limit.?) return error.ResponseCapacity;
+        if (response.head.content_length) |length| {
+            if (self.config.response_limit != null and length > self.config.response_limit.?)
+                return error.ResponseCapacity;
+        }
         var request_id: ?[]const u8 = null;
         var headers = response.head.iterateHeaders();
         while (headers.next()) |header| {
@@ -99,8 +116,14 @@ const Exchange = struct {
             request_id = try self.a.dupe(u8, header.value);
         }
         const status: u16 = @intCast(@backingInt(response.head.status));
-        const expected_length = if (response.head.transfer_encoding == .none) response.head.content_length else null;
-        const bytes = response.reader(&.{}).allocRemaining(self.a, if (self.config.response_limit) |limit| .limited(limit) else .unlimited) catch |err| switch (err) {
+        const expected_length = if (response.head.transfer_encoding == .none)
+            response.head.content_length
+        else
+            null;
+        const bytes = response.reader(&.{}).allocRemaining(
+            self.a,
+            if (self.config.response_limit) |limit| .limited(limit) else .unlimited,
+        ) catch |err| switch (err) {
             error.StreamTooLong => return error.ResponseCapacity,
             error.ReadFailed => return response.bodyErr() orelse err,
             else => return err,
@@ -108,7 +131,12 @@ const Exchange = struct {
         // The standard fixed-length reader propagates transport EOF unchanged;
         // allocRemaining accepts EOF even when declared body bytes are missing.
         if (expected_length) |length| if (bytes.len != length) return error.TruncatedResponse;
-        return .{ .status = status, .identity_encoding = identity_encoding, .request_id = request_id, .body = bytes };
+        return .{
+            .status = status,
+            .identity_encoding = identity_encoding,
+            .request_id = request_id,
+            .body = bytes,
+        };
     }
 };
 
@@ -118,16 +146,27 @@ fn deadline(io: std.Io, milliseconds: u32) std.Io.Cancelable!void {
 
 pub fn post(a: std.mem.Allocator, io: std.Io, config: Config, body: []const u8) Outcome {
     const uri = config.validate() catch |err| return .{ .definitely_not_sent = err };
-    if (config.request_limit != null and body.len > config.request_limit.?) return .{ .definitely_not_sent = error.RequestCapacity };
+    if (config.request_limit != null and body.len > config.request_limit.?) return .{
+        .definitely_not_sent = error.RequestCapacity,
+    };
     // This arena is touched only by the exchange task until it joins. Results
     // losing a race with the timer remain owned here and cannot leak.
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    var exchange: Exchange = .{ .a = arena.allocator(), .io = io, .config = config, .uri = uri, .body = body };
+    var exchange: Exchange = .{
+        .a = arena.allocator(),
+        .io = io,
+        .config = config,
+        .uri = uri,
+        .body = body,
+    };
     const Event = union(enum) { response: void, timer: std.Io.Cancelable!void };
     var events: [2]Event = undefined;
     var select = std.Io.Select(Event).init(io, &events);
-    if (config.timeout_ms) |milliseconds| select.concurrent(.timer, deadline, .{ io, milliseconds }) catch |err| return .{ .definitely_not_sent = err };
+    if (config.timeout_ms) |milliseconds| select.concurrent(.timer, deadline, .{
+        io,
+        milliseconds,
+    }) catch |err| return .{ .definitely_not_sent = err };
     select.concurrent(.response, Exchange.perform, .{&exchange}) catch |err| {
         select.cancelDiscard();
         return .{ .definitely_not_sent = err };
@@ -142,16 +181,40 @@ pub fn post(a: std.mem.Allocator, io: std.Io, config: Config, body: []const u8) 
             a.free(bytes);
             return .{ .unknown = err };
         } else null;
-        return .{ .captured = .{ .status = capture.status, .identity_encoding = capture.identity_encoding, .request_id = id, .body = bytes } };
+        return .{ .captured = .{
+            .status = capture.status,
+            .identity_encoding = capture.identity_encoding,
+            .request_id = id,
+            .body = bytes,
+        } };
     }
-    const failure = if (first == null) error.Canceled else if (first.? == .timer) error.Timeout else exchange.failure orelse error.TransportFailure;
+    const failure = if (first == null)
+        error.Canceled
+    else if (first.? == .timer)
+        error.Timeout
+    else
+        exchange.failure orelse error.TransportFailure;
     return if (exchange.sent) .{ .unknown = failure } else .{ .definitely_not_sent = failure };
 }
 
-test "HTTPS configuration rejects plaintext, authority confusion and header injection before dispatch" {
-    for ([_][]const u8{ "http://example.test/v1/responses", "https://user@example.test/", "https://example.test/#fragment", "https://example.test/\r\nx: y" }) |endpoint| {
-        try std.testing.expectError(error.InvalidConfiguration, (Config{ .endpoint = endpoint, .token = "fixture" }).validate());
+test "HTTPS rejects plaintext, authority confusion and header injection before dispatch" {
+    for ([_][]const u8{
+        "http://example.test/v1/responses",
+        "https://user@example.test/",
+        "https://example.test/#fragment",
+        "https://example.test/\r\nx: y",
+    }) |endpoint| {
+        try std.testing.expectError(
+            error.InvalidConfiguration,
+            (Config{ .endpoint = endpoint, .token = "fixture" }).validate(),
+        );
     }
-    try std.testing.expectError(error.InvalidConfiguration, (Config{ .endpoint = "https://example.test/", .token = "x\r\ny" }).validate());
-    _ = try (Config{ .endpoint = "https://example.test/v1/responses", .token = "fixture" }).validate();
+    try std.testing.expectError(
+        error.InvalidConfiguration,
+        (Config{ .endpoint = "https://example.test/", .token = "x\r\ny" }).validate(),
+    );
+    _ = try (Config{
+        .endpoint = "https://example.test/v1/responses",
+        .token = "fixture",
+    }).validate();
 }

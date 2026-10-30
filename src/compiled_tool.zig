@@ -39,7 +39,16 @@ fn exported(object: data.component.Object, name: []const u8) !Id {
     return error.InvalidCompiledTool;
 }
 fn descriptor(spec: Specification, function: Id) Descriptor {
-    return .{ .identity = spec.identity, .payload = spec.payload, .result = spec.result, .implementation = .{ .local = function }, .role = spec.role, .model_offered = spec.model_offered, .name = spec.name, .description = spec.description };
+    return .{
+        .identity = spec.identity,
+        .payload = spec.payload,
+        .result = spec.result,
+        .implementation = .{ .local = function },
+        .role = spec.role,
+        .model_offered = spec.model_offered,
+        .name = spec.name,
+        .description = spec.description,
+    };
 }
 
 /// Admit actual code, not an alleged purity summary. This import profile has
@@ -53,6 +62,112 @@ pub fn declare(c: Context, spec: Specification) !Descriptor {
     var decoded = try data.component.decode(c.builder.allocator(), spec.object);
     defer decoded.deinit();
     const object = decoded.object;
+    try validateObject(c, spec, object);
+    const function = object.program.functions[@intCast(try exported(object, spec.entry))];
+    if (function.inputs.len != 1 or function.regions.len != 0) return error.InvalidCompiledTool;
+    const a = c.builder.allocator();
+    try validateInterface(a, c, spec, object, function);
+    const effects = try functionEffects(a, spec, object, function.effects);
+    for (c.registry.compiled_imports.items) |prior| {
+        if (!std.mem.eql(u8, prior.instance, spec.instance)) continue;
+        if (!std.mem.eql(
+            u8,
+            prior.object,
+            spec.object,
+        ) or prior.effects.len != spec.effects.len) return error.InvalidCompiledTool;
+        for (prior.effects) |effect| if (try binding(
+            spec.effects,
+            effect.symbol,
+        ) != effect.effect) return error.InvalidCompiledTool;
+        if (std.mem.eql(u8, prior.entry, spec.entry)) {
+            const declared = c.builder.functions.items[@intCast(prior.function)];
+            if (declared.result != spec.result or c.builder.variables.items[
+                @intCast(declared.parameters[0])
+            ] != spec.payload)
+                return error.InvalidCompiledTool;
+            return descriptor(spec, prior.function);
+        }
+    }
+    const declared = try c.builder.declare(&.{spec.payload}, spec.result, effects, &.{});
+    const stored = c.registry.arena.allocator();
+    try c.registry.compiled_imports.append(stored, .{
+        .function = declared,
+        .instance = try stored.dupe(u8, spec.instance),
+        .entry = try stored.dupe(u8, spec.entry),
+        .object = try stored.dupe(u8, spec.object),
+        .effects = try source.own([]const admission.CompiledEffect, stored, spec.effects),
+    });
+    return descriptor(spec, declared);
+}
+
+pub fn link(
+    allocator: std.mem.Allocator,
+    module: source.Module,
+    registry: *const admission.Registry,
+    options: source.CompileOptions,
+) !source.Compiled {
+    options.resetObservations();
+    return linkInternal(allocator, module, registry, options) catch |err| {
+        if (options.diagnostic) |diagnostic| diagnostic.code = err;
+        return err;
+    };
+}
+fn linkInternal(
+    allocator: std.mem.Allocator,
+    module: source.Module,
+    registry: *const admission.Registry,
+    options: source.CompileOptions,
+) !source.Compiled {
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    var inputs = try LinkInputs.collect(a, module.entry, registry);
+    var compiled = try source.component.compileObserved(a, module, .{
+        .imports = inputs.imports.items,
+        .exports = inputs.exports.items,
+        .borrows = inputs.borrows.items,
+    }, options);
+    defer compiled.deinit();
+    const bytes = try a.alloc(u8, try data.component.encodedLength(compiled.object));
+    _ = try compiled.encode(a, bytes);
+    try inputs.instances.append(a, .{ .key = wrapper_key, .object = bytes });
+    options.stage(.target_check);
+    if (options.semantic_statistics) |stats| stats.* = .{};
+    var observer: LinkObserver = .{ .options = options };
+    const linked = try data.linker.linkWithCompilation(
+        allocator,
+        inputs.instances.items,
+        inputs.bindings.items,
+        .{ .instance = wrapper_key, .symbol = "main" },
+        .{
+            .contract = options.contract,
+            .objective = options.objective,
+            .image_growth_bytes = options.image_growth_bytes,
+            .max_image_bytes = options.max_image_bytes,
+            .profile = options.profile,
+            .work_limit = options.semantic_work_limit,
+            .round_limit = options.semantic_round_limit,
+            .statistics = options.semantic_statistics,
+            .observer = .{ .context = &observer, .enter = LinkObserver.enter },
+            .coalescing = options.coalescing,
+        },
+    );
+    options.stage(.complete);
+    // Move both owners into the ordinary compile result. No source or emitter
+    // survives, and no independently supplied analysis is trusted at runtime.
+    return .{ .arena = linked.arena, .program = linked.program, .flow = linked.flow };
+}
+
+const LinkObserver = struct {
+    options: source.CompileOptions,
+    fn enter(pointer: *anyopaque, stage: data.closed_compilation.Stage) void {
+        const self: *LinkObserver = @ptrCast(@alignCast(pointer));
+        self.options.stage(if (stage == .p01) .coalescing else .semantic_optimization);
+        if (self.options.compilation_observer) |observer| observer.enter(observer.context, stage);
+    }
+};
+
+fn validateObject(c: Context, spec: Specification, object: data.component.Object) !void {
     if (object.imports.len != spec.effects.len) return error.InvalidCompiledTool;
     for (object.imports) |symbol| {
         if (symbol.reference.kind != .effect) return error.InvalidCompiledTool;
@@ -66,137 +181,133 @@ pub fn declare(c: Context, spec: Specification) !Descriptor {
             return error.InvalidCompiledTool;
     }
     for (object.program.effects, 0..) |effect, id| {
-        if (@import("model_invocation.zig").isModelIdentity(effect.identity)) return error.InvalidCompiledTool;
+        if (@import("model_invocation.zig").isModelIdentity(
+            effect.identity,
+        )) return error.InvalidCompiledTool;
         if (!effect.external) continue;
         var imported = false;
-        for (object.imports) |symbol| if (symbol.reference.kind == .effect and symbol.reference.id == id) {
+        for (object.imports) |symbol| if (symbol.reference.kind == .effect and
+            symbol.reference.id == id)
+        {
             imported = true;
         };
         if (!imported) return error.InvalidCompiledTool;
     }
     for (object.program.schemas) |schema| {
-        if (schema == .internal and schema.internal == .resumption and schema.internal.resumption.use == .multi)
+        if (schema == .internal and schema.internal == .resumption and
+            schema.internal.resumption.use == .multi)
             return error.InvalidCompiledTool;
     }
-    const function = object.program.functions[@intCast(try exported(object, spec.entry))];
-    if (function.inputs.len != 1 or function.regions.len != 0) return error.InvalidCompiledTool;
-    const a = c.builder.allocator();
+}
+
+fn validateInterface(
+    a: std.mem.Allocator,
+    c: Context,
+    spec: Specification,
+    object: data.component.Object,
+    function: anytype,
+) !void {
     const object_facts = try data.admission.schemas(a, object.program.schemas);
     const local_facts = try data.admission.schemas(a, c.builder.schemas.items);
     if (spec.payload >= local_facts.exportable.len or spec.result >= local_facts.exportable.len or
-        !local_facts.exportable[@intCast(spec.payload)] or !local_facts.exportable[@intCast(spec.result)] or
+        !local_facts.exportable[
+            @intCast(spec.payload)
+        ] or !local_facts.exportable[
+        @intCast(spec.result)
+    ] or
         !object_facts.exportable[@intCast(function.layout.slots[@intCast(function.inputs[0])])] or
         !object_facts.exportable[@intCast(function.result)]) return error.InvalidCompiledTool;
+}
+
+fn functionEffects(
+    a: std.mem.Allocator,
+    spec: Specification,
+    object: data.component.Object,
+    function_effects: []const Id,
+) ![]const Id {
     var effects: std.ArrayList(Id) = .empty;
-    for (function.effects) |effect| {
+    for (function_effects) |effect| {
         var provided: ?Id = null;
-        for (object.imports) |symbol| if (symbol.reference.kind == .effect and symbol.reference.id == effect) {
+        for (object.imports) |symbol| if (symbol.reference.kind == .effect and
+            symbol.reference.id == effect)
+        {
             provided = try binding(spec.effects, symbol.name);
         };
         const id = provided orelse return error.InvalidCompiledTool;
         if (std.mem.indexOfScalar(Id, effects.items, id) == null) try effects.append(a, id);
     }
     std.mem.sort(Id, effects.items, {}, std.sort.asc(Id));
-    for (c.registry.compiled_imports.items) |prior| {
-        if (!std.mem.eql(u8, prior.instance, spec.instance)) continue;
-        if (!std.mem.eql(u8, prior.object, spec.object) or prior.effects.len != spec.effects.len) return error.InvalidCompiledTool;
-        for (prior.effects) |effect| if (try binding(spec.effects, effect.symbol) != effect.effect) return error.InvalidCompiledTool;
-        if (std.mem.eql(u8, prior.entry, spec.entry)) {
-            const declared = c.builder.functions.items[@intCast(prior.function)];
-            if (declared.result != spec.result or c.builder.variables.items[@intCast(declared.parameters[0])] != spec.payload)
-                return error.InvalidCompiledTool;
-            return descriptor(spec, prior.function);
-        }
-    }
-    const declared = try c.builder.declare(&.{spec.payload}, spec.result, effects.items, &.{});
-    const stored = c.registry.arena.allocator();
-    try c.registry.compiled_imports.append(stored, .{ .function = declared, .instance = try stored.dupe(u8, spec.instance), .entry = try stored.dupe(u8, spec.entry), .object = try stored.dupe(u8, spec.object), .effects = try source.own([]const admission.CompiledEffect, stored, spec.effects) });
-    return descriptor(spec, declared);
+    return effects.items;
 }
 
-pub fn link(allocator: std.mem.Allocator, module: source.Module, registry: *const admission.Registry, options: source.CompileOptions) !source.Compiled {
-    options.resetObservations();
-    return linkInternal(allocator, module, registry, options) catch |err| {
-        if (options.diagnostic) |diagnostic| diagnostic.code = err;
-        return err;
-    };
-}
-fn linkInternal(allocator: std.mem.Allocator, module: source.Module, registry: *const admission.Registry, options: source.CompileOptions) !source.Compiled {
-    var scratch = std.heap.ArenaAllocator.init(allocator);
-    defer scratch.deinit();
-    const a = scratch.allocator();
-    var imports: std.ArrayList(data.component.Symbol) = .empty;
-    var borrows: std.ArrayList(data.borrow_contract.Summary) = .empty;
-    var exports: std.ArrayList(data.component.Symbol) = .empty;
-    var instances: std.ArrayList(data.linker.Instance) = .empty;
-    var bindings: std.ArrayList(data.linker.Binding) = .empty;
-    var effects: std.ArrayList(Id) = .empty;
-    try exports.append(a, .{ .name = "main", .reference = .{ .kind = .function, .id = module.entry } });
-    for (registry.compiled_imports.items, 0..) |item, index| {
+const LinkInputs = struct {
+    imports: std.ArrayList(data.component.Symbol) = .empty,
+    borrows: std.ArrayList(data.borrow_contract.Summary) = .empty,
+    exports: std.ArrayList(data.component.Symbol) = .empty,
+    instances: std.ArrayList(data.linker.Instance) = .empty,
+    bindings: std.ArrayList(data.linker.Binding) = .empty,
+    effects: std.ArrayList(Id) = .empty,
+
+    fn collect(a: std.mem.Allocator, entry: Id, registry: *const admission.Registry) !LinkInputs {
+        var result: LinkInputs = .{};
+        try result.exports.append(a, .{ .name = "main", .reference = .{
+            .kind = .function,
+            .id = entry,
+        } });
+        for (registry.compiled_imports.items, 0..) |item, index| try result.add(a, item, index);
+        return result;
+    }
+
+    fn add(
+        self: *LinkInputs,
+        a: std.mem.Allocator,
+        item: admission.CompiledImport,
+        index: usize,
+    ) !void {
         const name = try a.print("import-{d}", .{index});
-        try imports.append(a, .{ .name = name, .reference = .{ .kind = .function, .id = item.function } });
+        try self.imports.append(a, .{ .name = name, .reference = .{
+            .kind = .function,
+            .id = item.function,
+        } });
         // The value-only tool boundary requires this guarantee. The linker
         // derives it from the bound implementation; an effect role is no proof.
-        try borrows.append(a, if (item.participant) item.borrows else .{ .function = item.function });
-        try bindings.append(a, .{ .required = .{ .instance = wrapper_key, .symbol = name }, .supplied = .{ .instance = item.instance, .symbol = item.entry } });
+        try self.borrows.append(a, if (item.participant) item.borrows else .{
+            .function = item.function,
+        });
+        try self.bindings.append(a, .{ .required = .{
+            .instance = wrapper_key,
+            .symbol = name,
+        }, .supplied = .{ .instance = item.instance, .symbol = item.entry } });
         var existing = false;
-        for (instances.items) |instance| if (std.mem.eql(u8, instance.key, item.instance)) {
+        for (self.instances.items) |instance| if (std.mem.eql(u8, instance.key, item.instance)) {
             existing = true;
         };
-        if (existing) continue;
-        try instances.append(a, .{ .key = item.instance, .object = item.object });
+        if (existing) return;
+        try self.instances.append(a, .{ .key = item.instance, .object = item.object });
         for (item.functions, 0..) |function, function_index| {
             const symbol = try a.print("helper-{d}-{d}", .{ index, function_index });
-            try exports.append(a, .{ .name = symbol, .reference = .{ .kind = .function, .id = function.function } });
-            try bindings.append(a, .{
+            try self.exports.append(a, .{ .name = symbol, .reference = .{
+                .kind = .function,
+                .id = function.function,
+            } });
+            try self.bindings.append(a, .{
                 .required = .{ .instance = item.instance, .symbol = function.symbol },
                 .supplied = .{ .instance = wrapper_key, .symbol = symbol },
             });
         }
         for (item.effects) |effect| {
             const symbol = try a.print("effect-{d}", .{effect.effect});
-            if (std.mem.indexOfScalar(Id, effects.items, effect.effect) == null) {
-                try effects.append(a, effect.effect);
-                try exports.append(a, .{ .name = symbol, .reference = .{ .kind = .effect, .id = effect.effect } });
+            if (std.mem.indexOfScalar(Id, self.effects.items, effect.effect) == null) {
+                try self.effects.append(a, effect.effect);
+                try self.exports.append(a, .{ .name = symbol, .reference = .{
+                    .kind = .effect,
+                    .id = effect.effect,
+                } });
             }
-            try bindings.append(a, .{ .required = .{ .instance = item.instance, .symbol = effect.symbol }, .supplied = .{ .instance = wrapper_key, .symbol = symbol } });
+            try self.bindings.append(a, .{ .required = .{
+                .instance = item.instance,
+                .symbol = effect.symbol,
+            }, .supplied = .{ .instance = wrapper_key, .symbol = symbol } });
         }
-    }
-    var compiled = try source.component.compileObserved(a, module, .{
-        .imports = imports.items,
-        .exports = exports.items,
-        .borrows = borrows.items,
-    }, options);
-    defer compiled.deinit();
-    const bytes = try a.alloc(u8, try data.component.encodedLength(compiled.object));
-    _ = try compiled.encode(a, bytes);
-    try instances.append(a, .{ .key = wrapper_key, .object = bytes });
-    options.stage(.target_check);
-    if (options.semantic_statistics) |stats| stats.* = .{};
-    var observer: LinkObserver = .{ .options = options };
-    const linked = try data.linker.linkWithCompilation(allocator, instances.items, bindings.items, .{ .instance = wrapper_key, .symbol = "main" }, .{
-        .contract = options.contract,
-        .objective = options.objective,
-        .image_growth_bytes = options.image_growth_bytes,
-        .max_image_bytes = options.max_image_bytes,
-        .profile = options.profile,
-        .work_limit = options.semantic_work_limit,
-        .round_limit = options.semantic_round_limit,
-        .statistics = options.semantic_statistics,
-        .observer = .{ .context = &observer, .enter = LinkObserver.enter },
-        .coalescing = options.coalescing,
-    });
-    options.stage(.complete);
-    // Move both owners into the ordinary compile result. No source or emitter
-    // survives, and no independently supplied analysis is trusted at runtime.
-    return .{ .arena = linked.arena, .program = linked.program, .flow = linked.flow };
-}
-
-const LinkObserver = struct {
-    options: source.CompileOptions,
-    fn enter(pointer: *anyopaque, stage: data.closed_compilation.Stage) void {
-        const self: *LinkObserver = @ptrCast(@alignCast(pointer));
-        self.options.stage(if (stage == .p01) .coalescing else .semantic_optimization);
-        if (self.options.compilation_observer) |observer| observer.enter(observer.context, stage);
     }
 };

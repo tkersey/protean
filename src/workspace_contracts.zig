@@ -3,7 +3,20 @@
 const c = @import("contracts.zig");
 pub const identity = "protean-workspace/5";
 pub const Ref = struct {
-    kind: enum { program, work, port, value, schema, source, provenance, view, runtime, residual, candidate, controller },
+    kind: enum {
+        program,
+        work,
+        port,
+        value,
+        schema,
+        source,
+        provenance,
+        view,
+        runtime,
+        residual,
+        candidate,
+        controller,
+    },
     id: c.Text(64),
 };
 pub const Page = struct { offset: u64 = 0, maximum: u32 = 16384 };
@@ -50,7 +63,11 @@ pub const Policy = struct {
 pub const Expected = struct { work: Ref, execution_revision: u64, control_revision: u64 };
 pub const RuntimeChoice = union(enum) { packaged: struct {}, selected: Ref };
 pub const RuntimeHooks = struct { control: bool = false, storage: bool = false };
-pub const ControllerCut = struct { epoch: u64, execution_revision: u64, realization_revision: u64 = 0 };
+pub const ControllerCut = struct {
+    epoch: u64,
+    execution_revision: u64,
+    realization_revision: u64 = 0,
+};
 pub const SemanticTarget = union(enum) {
     runtime: Ref,
     work: struct { expected: Expected, realization_revision: u64 },
@@ -83,7 +100,14 @@ pub const InspectionTarget = union(enum) {
 pub const Exposure = struct { effect: u64, class: enum { observation, input, alternative } };
 pub const Interpretation = union(enum) {
     none: struct {},
-    model: struct { port: Ref, generation: u64, profile_id: c.Text(64), effort: c.Text(16), subproblem: c.Utf8, inputs: c.Vector(Ref, null) },
+    model: struct {
+        port: Ref,
+        generation: u64,
+        profile_id: c.Text(64),
+        effort: c.Text(16),
+        subproblem: c.Utf8,
+        inputs: c.Vector(Ref, null),
+    },
     snapshot: struct { port: Ref, generation: u64, path: c.Utf8, offset: u64, maximum: u64 },
 };
 pub const Adoption = struct {
@@ -95,8 +119,30 @@ pub const Adoption = struct {
     reason: c.Text(256),
 };
 pub const Program = union(enum) {
-    describe: struct { section: enum { source_records, values, components, examples, bindings, runtimes, retention_query, divergence_query, hypothetical_reply, controller_contract, current_controller, semantic_candidates, source_derivations }, page: Page },
-    build: struct { source: SourceInput, source_kind: SourceKind, exposures: c.Vector(Exposure, null), role: ProgramRole = .computation },
+    describe: struct {
+        section: enum {
+            source_records,
+            values,
+            components,
+            examples,
+            bindings,
+            runtimes,
+            retention_query,
+            divergence_query,
+            hypothetical_reply,
+            controller_contract,
+            current_controller,
+            semantic_candidates,
+            source_derivations,
+        },
+        page: Page,
+    },
+    build: struct {
+        source: SourceInput,
+        source_kind: SourceKind,
+        exposures: c.Vector(Exposure, null),
+        role: ProgramRole = .computation,
+    },
     inspect: struct { target: InspectionTarget, page: Page },
     specialize: struct { program: Ref, hooks: RuntimeHooks = .{} },
     derive: struct { ancestor: SemanticTarget, program: Ref, proposal: SourceInput },
@@ -111,7 +157,10 @@ pub const ValidationOutcome = enum {
     interrupted,
     unavailable_dependency,
 };
-pub const Trial = union(enum) { none: struct {}, synthetic: struct { responses: c.Vector(struct { identity: c.Utf8, payload: Ref, response: Ref }, null), live_inference: bool = false } };
+pub const Trial = union(enum) { none: struct {}, synthetic: struct {
+    responses: c.Vector(struct { identity: c.Utf8, payload: Ref, response: Ref }, null),
+    live_inference: bool = false,
+} };
 pub const ObserverPolicy = struct {
     delivery: enum { sampled, lossless } = .sampled,
     cadence: u64 = 1,
@@ -128,14 +177,26 @@ pub const Observe = struct {
 pub const Work = union(enum) {
     observe: Observe,
     stop_observing: Expected,
-    start: struct { program: Ref, input: ValueInput, policy: Policy, runtime: RuntimeChoice = .{ .packaged = .{} }, trial: Trial = .{ .none = .{} } },
+    start: struct { program: Ref, input: ValueInput, policy: Policy, runtime: RuntimeChoice = .{
+        .packaged = .{},
+    }, trial: Trial = .{ .none = .{} } },
     inspect: struct { work: Ref },
     advance: Expected,
     /// Bound physical evaluator progress without claiming a new guest cut.
     pump: struct { expected: Expected, base_quantum: u64 = 65536 },
-    delegate: struct { expected: Expected, policy: Policy, interpretation: Interpretation = .{ .none = .{} } },
+    delegate: struct { expected: Expected, policy: Policy, interpretation: Interpretation = .{
+        .none = .{},
+    } },
     wait: struct { works: c.Vector(Ref, null), after: u64 },
-    interact: struct { expected: Expected, port: Ref, generation: u64, command: union(enum) { resume_value: ValueInput, finish: struct {} } },
+    interact: struct {
+        expected: Expected,
+        port: Ref,
+        generation: u64,
+        command: union(enum) {
+            resume_value: ValueInput,
+            finish: struct {},
+        },
+    },
     collect: struct { works: c.Vector(Ref, null) },
     park: Expected,
     cancel: struct { expected: Expected, reason: c.Text(256) },
@@ -158,13 +219,23 @@ pub const Placement = union(enum) {
     assess: struct { subject: PlacementSubject, site: c.Text(128) },
     /// Names an idempotent move of the current owned continuation. Controller
     /// movement occurs after this action's reply is durably captured.
-    move: struct { operation: c.Text(128), subject: PlacementSubject, site: c.Text(128), custody_epoch: u64 },
+    move: struct {
+        operation: c.Text(128),
+        subject: PlacementSubject,
+        site: c.Text(128),
+        custody_epoch: u64,
+    },
     retry: struct { operation: c.Text(128) },
     withdraw: struct { operation: c.Text(128) },
     control: struct { operation: c.Text(128), command: Work },
     expand: struct { operation: c.Text(128), work: Ref, reference: Ref, page: Page },
 };
-pub const Command = union(enum) { program: Program, work: Work, context: Context, placement: Placement };
+pub const Command = union(enum) {
+    program: Program,
+    work: Work,
+    context: Context,
+    placement: Placement,
+};
 /// Full observations remain retained; only the requested page enters inference.
 /// A rejection is ordinary result data and never changes the next action set.
 pub const Reply = struct {

@@ -47,7 +47,11 @@ fn input(items: []const P.OutputItem) Inputs {
     } }, .offered = .{ true, false }, .policy = batch_policy };
 }
 
-fn execute(comptime T: type, program: horos.data.activation.Program, value: Inputs) !contracts.Decoded(T) {
+fn execute(
+    comptime T: type,
+    program: horos.data.activation.Program,
+    value: Inputs,
+) !contracts.Decoded(T) {
     const bytes = try contracts.encodeOwned(Inputs, allocator, value);
     defer allocator.free(bytes);
     const image = try allocator.alloc(u8, try horos.data.program_image.encodedLength(program));
@@ -62,7 +66,11 @@ fn execute(comptime T: type, program: horos.data.activation.Program, value: Inpu
     return contracts.decodeOwned(T, allocator, outcome.record.completed);
 }
 
-fn expectRejected(program: horos.data.activation.Program, value: Inputs, expected: P.InterpretationFailure) !void {
+fn expectRejected(
+    program: horos.data.activation.Program,
+    value: Inputs,
+    expected: P.InterpretationFailure,
+) !void {
     var observed = try execute(P.BatchInterpretation, program, value);
     defer observed.deinit();
     try std.testing.expectEqual(expected, observed.value.rejected);
@@ -75,7 +83,10 @@ test "actual Kosmos preserves every admitted call and enforces current call poli
     defer registry.deinit();
     const context = try protean.Context.init(&b, &registry);
     const entry = try P.interpretAll(context);
-    var compiled = try horos.program.compile(allocator, try context.author.module(entry, try context.schema(void)));
+    var compiled = try horos.program.compile(
+        allocator,
+        try context.author.module(entry, try context.schema(void)),
+    );
     defer compiled.deinit();
     const items = [_]P.OutputItem{
         .{ .reasoning = .{ .summary = .{ .bytes = "context" } } },
@@ -115,7 +126,10 @@ test "actual Kosmos rejects forged declaration association variants and offer cu
     defer registry.deinit();
     const context = try protean.Context.init(&b, &registry);
     const entry = try P.interpretAll(context);
-    var compiled = try horos.program.compile(allocator, try context.author.module(entry, try context.schema(void)));
+    var compiled = try horos.program.compile(
+        allocator,
+        try context.author.module(entry, try context.schema(void)),
+    );
     defer compiled.deinit();
     var items = [_]P.OutputItem{item(42)};
     items[0].function_call.name.bytes = "other";
@@ -135,7 +149,10 @@ test "actual Kosmos rejects forged declaration association variants and offer cu
     inline for (.{
         .{ P.Result{ .refusal = .{ .bytes = "declined" } }, P.InterpretationFailure.refusal },
         .{ P.Result{ .transport_failure = .interrupted }, P.InterpretationFailure.transport },
-        .{ P.Result{ .provider_failure = .{ .kind = .http_status, .http_status = 503 } }, P.InterpretationFailure.provider },
+        .{
+            P.Result{ .provider_failure = .{ .kind = .http_status, .http_status = 503 } },
+            P.InterpretationFailure.provider,
+        },
         .{ P.Result{ .unsupported_response = .invalid_utf8 }, P.InterpretationFailure.unsupported },
     }) |case| {
         var failed = input(&.{});
@@ -151,7 +168,10 @@ test "single answer convenience rejects multiple calls instead of choosing one" 
     defer registry.deinit();
     const context = try protean.Context.init(&b, &registry);
     const entry = try P.interpreter(context);
-    var compiled = try horos.program.compile(allocator, try context.author.module(entry, try context.schema(void)));
+    var compiled = try horos.program.compile(
+        allocator,
+        try context.author.module(entry, try context.schema(void)),
+    );
     defer compiled.deinit();
     const items = [_]P.OutputItem{ item(42), item(73) };
     var value = input(items[0..1]);

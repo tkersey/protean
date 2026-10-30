@@ -7,7 +7,16 @@ pub const boot_identity = effect_prefix ++ "boot_ready";
 pub const offer_identity = effect_prefix ++ "offer";
 pub const handoff_identity = effect_prefix ++ "handoff";
 pub const TaskAnchor = struct { task: [16]u8 };
-pub const Import = enum { task_view, deliberate, workspace, question, inbox, snapshot, inspect, context };
+pub const Import = enum {
+    task_view,
+    deliberate,
+    workspace,
+    question,
+    inbox,
+    snapshot,
+    inspect,
+    context,
+};
 pub const Diagnostic = struct {
     operation: [32]u8,
     code: c.Utf8,
