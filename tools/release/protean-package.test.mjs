@@ -37,3 +37,36 @@ test('final archive rejects a different executed native identity', () => {
   f.packageInput.identityBytes = Buffer.from(JSON.stringify(f.native));
   assert.throws(() => sealProteanProduct(f.packageInput));
 });
+
+for (const target of ['x86_64-linux-musl', 'x86_64-linux.5.10-musl', 'x86_64-linux.5.10...7.2-musl', 'x86_64-linux.5.10.1...7.2.3-musl'])
+  test(`final archive preserves supported native target ${target}`, () => {
+    const f = proteanFixture({target}), receipt = JSON.parse(sealProteanProduct(f.packageInput));
+    assert.equal(receipt.identity.target, target);
+  });
+
+for (const target of [
+  'aarch64-linux.5.10...7.2-musl', 'x86_64-macos.5.10...7.2-musl', 'x86_64-linux.5.10...7.2-gnu',
+  'x86_64-linux.5.10...7.2-musleabihf', 'x86_64-linux.5-musl', 'x86_64-linux.5.10..7.2-musl',
+  'x86_64-linux.5.10...-musl', 'x86_64-linux.05.10...7.2-musl', 'x86_64-linux.5.10.1.2-musl',
+  'x86_64-linux.7.2...5.10-musl', 'x86_64-linux.18446744073709551616.0-musl',
+  'x86_64-linux-musl.1.2', 'x86_64-linux-musl\n', '', null,
+]) test(`final archive rejects internally consistent unsupported target ${JSON.stringify(target)}`, () => {
+  const f = proteanFixture(), build = JSON.parse(f.packageInput.buildBytes);
+  build.target = target; f.native.identity.target = target;
+  f.packageInput.buildBytes = Buffer.from(JSON.stringify(build));
+  f.packageInput.identityBytes = Buffer.from(JSON.stringify(f.native));
+  assert.throws(() => sealProteanProduct(f.packageInput), /target/);
+});
+
+test('different supported target strings cannot stand in for the executed native identity', () => {
+  const f = proteanFixture(), build = JSON.parse(f.packageInput.buildBytes); build.target = 'x86_64-linux-musl';
+  f.packageInput.buildBytes = Buffer.from(JSON.stringify(build));
+  assert.throws(() => sealProteanProduct(f.packageInput), /differs from executed native identity/);
+});
+
+test('native receipt preserves the source-owned SQLite filename inventory', () => {
+  const f = proteanFixture(), receipt = JSON.parse(sealProteanProduct(f.packageInput));
+  assert.deepEqual(Object.keys(receipt.identity.dependencies.sqlite.files), ['sqlite3.c', 'sqlite3.h']);
+  assert.deepEqual(receipt.identity.dependencies.sqlite.files, f.native.identity.dependencies.sqlite.files);
+  assert.deepEqual(sealProteanProduct(f.packageInput), sealProteanProduct(f.packageInput));
+});

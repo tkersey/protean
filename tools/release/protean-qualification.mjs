@@ -3,7 +3,7 @@ import {GitHubReader, githubCommand} from './github.mjs';
 import {encodeRecord, sha256} from './encoding.mjs';
 import {parseEvidenceJson} from './evidence-json.mjs';
 import {parseVersion} from './version.mjs';
-import {proteanIdentityFields, proteanNativeArchive} from './protean-package.mjs';
+import {proteanIdentityFields, proteanNativeArchive, validateProteanLinuxTarget} from './protean-package.mjs';
 
 const repository = 'tkersey/protean', repositoryId = 1328996555;
 const lane = name => `Qualification / ${name} / linux-x86_64`;
@@ -104,7 +104,7 @@ export function validateProteanPayloads(payloads, {commit, tree}) {
   }
   assert.match(native.artifact_sha256, /^[0-9a-f]{64}$/);
   assert.equal(placement.artifact_sha256, native.artifact_sha256, 'placement did not execute the packaged binary');
-  assert.equal(native.identity.compiler.version, '0.17.0'); assert.equal(native.identity.target, 'x86_64-linux-musl');
+  assert.equal(native.identity.compiler.version, '0.17.0'); validateProteanLinuxTarget(native.identity.target);
   assert.equal(native.identity.dependencies.boundary, inventory.dependencies.horos.commit);
   assert.equal(native.identity.dependencies.world, inventory.dependencies.kosmos.commit);
   assert.equal(native.identity.dependencies.dependency_lock_sha256, inventory.lockSha256);

@@ -63,3 +63,28 @@ for (const [name, mutate] of [
   const f = proteanFixture(); mutate(f);
   await assert.rejects(admitProteanQualification({runId: 17, commit: f.commit, tree: f.tree}, f.command));
 });
+
+test('payload qualification preserves the original canonical Linux target including kernel range', () => {
+  const f = proteanFixture(), result = validateProteanPayloads(f.payloads, f);
+  assert.equal(result.native.identity.target, 'x86_64-linux.5.10...7.2-musl');
+  assert.equal(result.product.identity.target, result.native.identity.target);
+});
+
+for (const target of ['aarch64-linux.5.10...7.2-musl', 'x86_64-macos.5.10...7.2-musl',
+  'x86_64-linux.5.10...7.2-gnu', 'x86_64-linux.7.2...5.10-musl', 'x86_64-linux.5.10..7.2-musl'])
+  test(`payload qualification rejects matching but unsupported target ${target}`, () => {
+    const f = proteanFixture();
+    for (const name of ['native-identity.json', 'native-placement-identity.json', 'downstream-identity.json', 'protean-native.json']) {
+      const value = JSON.parse(f.payloads.get(name)); value.identity.target = target;
+      f.payloads.set(name, Buffer.from(JSON.stringify(value)));
+    }
+    assert.throws(() => validateProteanPayloads(f.payloads, f), /target/);
+  });
+
+for (const name of ['native-placement-identity.json', 'downstream-identity.json', 'protean-native.json'])
+  test(`payload qualification retains exact target equality for ${name}`, () => {
+    const f = proteanFixture(), value = JSON.parse(f.payloads.get(name));
+    value.identity.target = 'x86_64-linux.5.10.1...7.2-musl';
+    f.payloads.set(name, Buffer.from(JSON.stringify(value)));
+    assert.throws(() => validateProteanPayloads(f.payloads, f));
+  });

@@ -4,7 +4,7 @@ import {encodeRecord, sha256} from './encoding.mjs';
 import {proteanJobs} from './protean-qualification.mjs';
 import {proteanNativeArchive, sealProteanProduct} from './protean-package.mjs';
 
-export function proteanFixture() {
+export function proteanFixture({target = 'x86_64-linux.5.10...7.2-musl'} = {}) {
   const input = metadata('protean'), commit = input.source.commit, tree = input.source.tree;
   const horosRecord = metadata('horos');
   const horos = {id: 3, record: horosRecord, recordSha256: sha256(encodeRecord(horosRecord)),
@@ -36,8 +36,12 @@ export function proteanFixture() {
   const executableBytes = Buffer.from('synthetic executed binary'), applicationBytes = Buffer.from('{"synthetic":"application"}');
   const programBytes = Buffer.from('synthetic admitted program'), archiveBytes = Buffer.from('synthetic final product archive');
   const identity = {program_sha256: sha256(programBytes), application_assets_sha256: sha256(applicationBytes),
-    dependencies: {boundary: commit, world: commit, dependency_lock_sha256: sha256(lockBytes), sqlite: {lockSha256: sha256(nativeLockBytes)}},
-    compiler: {version: '0.17.0', executable_sha256: 'c'.repeat(64), library_inventory_sha256: 'd'.repeat(64)}, target: 'x86_64-linux-musl'};
+    dependencies: {boundary: commit, world: commit, dependency_lock_sha256: sha256(lockBytes),
+      sqlite: {lockSha256: sha256(nativeLockBytes), files: {
+        'sqlite3.c': {bytes: 9515341, sha256: 'e'.repeat(64)},
+        'sqlite3.h': {bytes: 690838, sha256: 'f'.repeat(64)},
+      }}},
+    compiler: {version: '0.17.0', executable_sha256: 'c'.repeat(64), library_inventory_sha256: 'd'.repeat(64)}, target};
   const native = {identity, artifact_sha256: sha256(executableBytes)};
   const build = {format: 'agent-native-build/v2', optimize: 'safe', ...identity, artifact_sha256: native.artifact_sha256};
   const packageInput = {commit, archiveName: proteanNativeArchive(commit), archiveBytes, executableBytes,
