@@ -136,7 +136,8 @@ pub fn build(b: *std.Build) void {
     if (graph.native_enabled) graph.nativeBuild() else graph.missingNative();
     graph.pureChecks();
     graph.releaseChecks();
-    graph.releaseSource();
+    const release_source = graph.releaseSource();
+    graph.nativeDownstream(release_source);
 }
 
 const BuildGraph = struct {
@@ -204,13 +205,7 @@ const BuildGraph = struct {
         s.workspacePeers();
         s.workspaceSemantics();
         s.publishNative();
-        const product_supported =
-            (s.native_target.result.os.tag == .macos and
-                s.native_target.result.cpu.arch == .aarch64) or
-            (s.native_target.result.os.tag == .linux and
-                s.native_target.result.cpu.arch == .x86_64 and
-                s.native_target.result.abi == .musl);
-        if (product_supported) {
+        if (s.nativeProductSupported()) {
             s.productBuild();
             s.nativeSmoke();
             s.runtimeDiagnostics();
@@ -222,6 +217,15 @@ const BuildGraph = struct {
         s.scheduler();
         s.adaptiveResponse();
         s.nativeCrash();
+    }
+
+    fn nativeProductSupported(s: *BuildGraph) bool {
+        return s.native_enabled and
+            ((s.native_target.result.os.tag == .macos and
+                s.native_target.result.cpu.arch == .aarch64) or
+                (s.native_target.result.os.tag == .linux and
+                    s.native_target.result.cpu.arch == .x86_64 and
+                    s.native_target.result.abi == .musl));
     }
 
     fn configure(s: *BuildGraph) void {
@@ -1350,7 +1354,7 @@ const BuildGraph = struct {
         s.check.dependOn(step);
     }
 
-    fn releaseSource(s: *BuildGraph) void {
+    fn releaseSource(s: *BuildGraph) std.Build.LazyPath {
         const revision = s.b.addSystemCommand(&.{
             "git", "--no-replace-objects", "rev-parse", "HEAD",
         });
@@ -1369,6 +1373,31 @@ const BuildGraph = struct {
             .install_dir = .prefix,
             .install_subdir = "release-source",
         }).step);
+        return output;
+    }
+
+    fn nativeDownstream(s: *BuildGraph, source: std.Build.LazyPath) void {
+        const step = s.b.step(
+            "check-native-downstream",
+            "Independently acquire, build, install and execute the full source consumer",
+        );
+        if (!s.nativeProductSupported()) {
+            step.dependOn(s.native_executable);
+            return;
+        }
+        const run = nativeCheckCommand(s.b);
+        run.addDirectoryArg2(s.b.graph.path(.global_cache, ""), .{
+            .prefix = "ZIG_GLOBAL_CACHE_DIR=",
+            .make_absolute = true,
+        });
+        run.addDirectoryArg2(source, .{
+            .prefix = "PROTEAN_RELEASE_SOURCE_DIRECTORY=",
+            .make_absolute = true,
+        });
+        run.addArgs(&.{ "node", "test/protean/installations.mjs" });
+        run.addDirectoryArg2(s.b.path(".protean-native/inputs"), .{ .make_absolute = true });
+        run.addArtifactArg(s.adaptive_product.executable);
+        step.dependOn(&run.step);
     }
 };
 

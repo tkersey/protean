@@ -127,15 +127,23 @@ zig run tools/native/dependencies.zig -- setup \
   conformance/protean/native-dependencies.lock.json \
   .protean-native/inputs "$(command -v zig)"
 
-zig build check-protean check-native-https -Doptimize=safe
-zig build check-native -Doptimize=safe
-node test/protean/installations.mjs .protean-native/inputs zig-out/bin/protean
+zig build check-protean check-native check-native-downstream -Doptimize=safe --summary all
 ```
 
 These are selectable entry points, not permission to run every command beyond
 the shared deadline. The default native aggregate uses the retained smoke and
 owner/workspace checks. Explicit diagnostic targets retain their own coverage
 and do not automatically become required again.
+
+The explicit local `check-native-downstream` target starts the existing downstream
+witness after the same build graph has produced its full source archive and native
+reference executable. It runs alongside independent owner/workspace checks and
+joins the same final build result. The consumer still extracts fresh sources,
+creates a fresh package, builds independently, rejects altered upstream inputs,
+and executes the installed product behind the native isolation boundary. Only
+compiler work is reusable through the selected Zig global cache; every witness
+executes. This target is separate from `check-native` and does not change the
+existing Linux qualification lanes.
 
 ## Compilation, caching and artifacts
 
