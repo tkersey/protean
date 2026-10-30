@@ -16,6 +16,10 @@ var guest_segment_proofs: @import("../guest_segment_proofs.zig") = .{};
 
 pub fn Operations(comptime Types: type, comptime Self: type) type {
     return struct {
+        pub fn retainGuestSegmentProof(key: state.Digest) void {
+            guest_segment_proofs.retain(key);
+        }
+
         const inspectionRuntime = Inspection.inspectionRuntime;
         const samePublication = Access.samePublication;
         const store = Lifecycle.store;
@@ -230,7 +234,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                         !std.meta.eql(storage.digest(outcome), ctx.work.outcome.digest) or
                         outcome.len != ctx.work.outcome.bytes)
                         return error.InvalidArchive;
-                    guest_segment_proofs.retain(fact_key);
+                    retainGuestSegmentProof(fact_key);
                 }
 
                 fn validateExecution(ctx: *@This(), encoded_control: []const u8) !void {

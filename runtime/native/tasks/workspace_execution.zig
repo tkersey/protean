@@ -19,8 +19,6 @@ const Work = task_types.Work;
 const operation = task_types.operation;
 const same = task_types.same;
 
-var guest_segment_proofs: @import("../guest_segment_proofs.zig") = .{};
-
 pub fn Operations(comptime Types: type, comptime Self: type) type {
     return struct {
         const blockControllerRequest = Succession.blockControllerRequest;
@@ -249,7 +247,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .occurrence = null,
             }));
             if (publication.segment) |segment|
-                guest_segment_proofs.retain(
+                GuestValidation.retainGuestSegmentProof(
                     try guestSegmentKey(try guestSegmentFact(segment, value.*)),
                 );
         }
