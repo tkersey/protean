@@ -135,6 +135,9 @@ pub fn build(b: *std.Build) void {
     graph.nativeSteps();
     if (graph.native_enabled) graph.nativeBuild() else graph.missingNative();
     graph.pureChecks();
+    graph.releaseChecks();
+    const release_source = graph.releaseSource();
+    graph.nativeDownstream(release_source);
 }
 
 const BuildGraph = struct {
@@ -202,13 +205,7 @@ const BuildGraph = struct {
         s.workspacePeers();
         s.workspaceSemantics();
         s.publishNative();
-        const product_supported =
-            (s.native_target.result.os.tag == .macos and
-                s.native_target.result.cpu.arch == .aarch64) or
-            (s.native_target.result.os.tag == .linux and
-                s.native_target.result.cpu.arch == .x86_64 and
-                s.native_target.result.abi == .musl);
-        if (product_supported) {
+        if (s.nativeProductSupported()) {
             s.productBuild();
             s.nativeSmoke();
             s.runtimeDiagnostics();
@@ -220,6 +217,15 @@ const BuildGraph = struct {
         s.scheduler();
         s.adaptiveResponse();
         s.nativeCrash();
+    }
+
+    fn nativeProductSupported(s: *BuildGraph) bool {
+        return s.native_enabled and
+            ((s.native_target.result.os.tag == .macos and
+                s.native_target.result.cpu.arch == .aarch64) or
+                (s.native_target.result.os.tag == .linux and
+                    s.native_target.result.cpu.arch == .x86_64 and
+                    s.native_target.result.abi == .musl));
     }
 
     fn configure(s: *BuildGraph) void {
@@ -1330,6 +1336,68 @@ const BuildGraph = struct {
         s.b.step("check-authoring-core", "Check retained authoring contracts").dependOn(s.check);
         s.b.step("check", "Check Protean authoring").dependOn(s.aggregate);
         s.b.default_step = s.aggregate;
+    }
+
+    fn releaseChecks(s: *BuildGraph) void {
+        const tests = s.b.addTest(.{
+            .root_module = s.b.createModule(.{
+                .root_source_file = s.b.path("tools/native/refresh.zig"),
+                .target = s.b.graph.host,
+                .optimize = .safe,
+            }),
+            .use_llvm = if (linuxX86(s.b.graph.host)) false else null,
+        });
+        const run = s.b.addRunArtifact(tests);
+        run.has_side_effects = true;
+        const step = s.b.step("check-release-tools", "Check native source refresh and coherence");
+        step.dependOn(&run.step);
+        s.check.dependOn(step);
+    }
+
+    fn releaseSource(s: *BuildGraph) std.Build.LazyPath {
+        const revision = s.b.addSystemCommand(&.{
+            "git", "--no-replace-objects", "rev-parse", "HEAD",
+        });
+        revision.setCwd(s.b.path(""));
+        revision.has_side_effects = true;
+        const prepare = s.b.addRunArtifact(s.host_tool);
+        prepare.addArg("source-build");
+        prepare.addDirectoryArg2(s.b.path(""), .{ .make_absolute = true });
+        const output = prepare.addOutputDirectoryArg2("release-source", .{ .make_absolute = true });
+        prepare.addFileArg2(.zig_exe, .{ .make_absolute = true });
+        prepare.addFileContentArg2(revision.captureStdOut(.{}), .{});
+        prepare.has_side_effects = true;
+        s.b.step("release-source", "Prepare authenticated full source and lock identities")
+            .dependOn(&s.b.addInstallDirectory(.{
+            .source_dir = output,
+            .install_dir = .prefix,
+            .install_subdir = "release-source",
+        }).step);
+        return output;
+    }
+
+    fn nativeDownstream(s: *BuildGraph, source: std.Build.LazyPath) void {
+        const step = s.b.step(
+            "check-native-downstream",
+            "Independently acquire, build, install and execute the full source consumer",
+        );
+        if (!s.nativeProductSupported()) {
+            step.dependOn(s.native_executable);
+            return;
+        }
+        const run = nativeCheckCommand(s.b);
+        run.addDirectoryArg2(s.b.graph.path(.global_cache, ""), .{
+            .prefix = "ZIG_GLOBAL_CACHE_DIR=",
+            .make_absolute = true,
+        });
+        run.addDirectoryArg2(source, .{
+            .prefix = "PROTEAN_RELEASE_SOURCE_DIRECTORY=",
+            .make_absolute = true,
+        });
+        run.addArgs(&.{ "node", "test/protean/installations.mjs" });
+        run.addDirectoryArg2(s.b.path(".protean-native/inputs"), .{ .make_absolute = true });
+        run.addArtifactArg(s.adaptive_product.executable);
+        step.dependOn(&run.step);
     }
 };
 

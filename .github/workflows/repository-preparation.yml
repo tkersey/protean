@@ -1,0 +1,96 @@
+name: Repository preparation
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+  workflow_run:
+    workflows: ['Zig 0.17 qualification', 'Repository owner review']
+    types: [completed]
+concurrency:
+  group: repository-native-preparation
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+jobs:
+  prepare:
+    name: Native candidate preparation
+    if: github.ref == 'refs/heads/main' && (vars.REPOSITORY_AUTOMATION == 'propose' || vars.REPOSITORY_AUTOMATION == 'promote')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: repository-automation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '26.9.0'
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.0'
+          mirror: https://zigmirror.com
+          use-cache: false
+          use-tool-cache: true
+      - name: Install native preparation sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap apparmor
+          sudo install -o root -g root -m 0644 tools/release/bwrap.apparmor /etc/apparmor.d/repository-review-bwrap
+          sudo apparmor_parser --replace /etc/apparmor.d/repository-review-bwrap
+          bwrap --version
+      - name: Compile accepted native preparation tool
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --quiet
+          zig build-exe tools/native/dependencies.zig -O safe -femit-bin="$RUNNER_TEMP/protean-refresh"
+      - name: Mint repository-local read authority
+        id: observer
+        env:
+          REPOSITORY_APP_CLIENT_ID: ${{ vars.REPOSITORY_APP_CLIENT_ID }}
+          REPOSITORY_APP_PRIVATE_KEY: ${{ secrets.REPOSITORY_APP_PRIVATE_KEY }}
+        run: node tools/release/app-token.mjs create tkersey/protean observer "$RUNNER_TEMP/preparation-app.json"
+      - name: Observe frozen source and original generation
+        id: plan
+        env:
+          GH_TOKEN: ${{ steps.observer.outputs.token }}
+        run: node tools/release/protean-preparation-runner.mjs plan "$GITHUB_WORKSPACE" "$RUNNER_TEMP/protean-refresh" "$(command -v zig)" "$RUNNER_TEMP/preparation" "$RUNNER_TEMP/preparation-app.json"
+      - name: Preserve original generation start
+        if: steps.plan.outputs.ready == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ steps.plan.outputs.start_name }}
+          path: ${{ runner.temp }}/preparation/${{ steps.plan.outputs.start_name }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 90
+      - name: Generate frozen native candidate
+        id: generate
+        if: steps.plan.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ steps.observer.outputs.token }}
+        run: node tools/release/protean-preparation-runner.mjs generate "$GITHUB_WORKSPACE" "$RUNNER_TEMP/protean-refresh" "$(command -v zig)" "$RUNNER_TEMP/preparation" "$RUNNER_TEMP/preparation-app.json"
+      - name: Upload original preparation evidence
+        if: steps.generate.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ steps.generate.outputs.name }}
+          path: ${{ runner.temp }}/preparation/${{ steps.generate.outputs.name }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain failed native diagnostics
+        if: failure() && steps.plan.outputs.ready == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: protean-preparation-diagnostic-${{ github.run_id }}
+          path: ${{ runner.temp }}/preparation/native/host-captures
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Revoke repository-local read credential
+        if: always() && steps.observer.outputs.token != ''
+        env:
+          GH_TOKEN: ${{ steps.observer.outputs.token }}
+        run: node tools/release/app-token.mjs revoke

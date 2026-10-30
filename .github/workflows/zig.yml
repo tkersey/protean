@@ -69,6 +69,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '26.9.0'
@@ -161,6 +163,9 @@ jobs:
       - name: Check source inventory
         if: matrix.lane == 'authoring'
         run: sh tools/check_zig_paths.sh
+      - name: Test repository-local release boundaries
+        if: matrix.lane == 'authoring'
+        run: node tools/release/test.mjs
       - name: Restore locked native transport bytes
         if: ${{ !matrix.product_consumer }}
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -232,6 +237,11 @@ jobs:
         with:
           path: .zig-cache-upload
           key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Prepare final full source archive
+        if: matrix.lane == 'downstream'
+        run: |
+          zig run tools/native/dependencies.zig -- source "$PWD" \
+            "$RUNNER_TEMP/protean-release-source" "$(command -v zig)" "$(git rev-parse HEAD)"
       - name: Run retained qualification
         run: |
           set -o pipefail
@@ -304,6 +314,25 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ github.token }}
+          PROTEAN_RELEASE_SOURCE_DIRECTORY: ${{ runner.temp }}/protean-release-source
+      - name: Retain consumer-tested source archive
+        if: matrix.lane == 'downstream'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: source.tar
+          path: ${{ runner.temp }}/protean-release-source/source.tar
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain native source and package identities
+        if: matrix.lane == 'downstream'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: source.json
+          path: ${{ runner.temp }}/protean-release-source/source.json
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
       - name: Retain independently qualified build identity
         if: matrix.lane == 'native' || matrix.lane == 'native-placement' || matrix.lane == 'downstream'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -326,16 +355,29 @@ jobs:
           cp examples/adaptive/adaptive.example.json "$output/adaptive-example/"
           cp -R examples/adaptive/skills "$output/adaptive-example/skills"
           cp -R "$RUNNER_TEMP/protean-qualification/protean/adaptive" "$output/adaptive-program"
-          tar -czf "$RUNNER_TEMP/protean-$RUNNER_OS-$RUNNER_ARCH-$GITHUB_SHA.tar.gz" \
+          source_commit="$(git rev-parse HEAD)"
+          archive="$RUNNER_TEMP/protean-$RUNNER_OS-$RUNNER_ARCH-$source_commit.tar.gz"
+          tar -czf "$archive" \
             -C "$output" protean protean.build.json install.mjs RUNBOOK.md ADAPTIVE.md adaptive-program adaptive-example
+          node tools/release/protean-package.mjs "$archive" \
+            "$RUNNER_TEMP/native-identity.json" "$RUNNER_TEMP/protean-native.json"
       - name: Retain executed adaptive application
         if: matrix.lane == 'native'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: protean-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}.tar.gz
+          name: protean-${{ runner.os }}-${{ runner.arch }}-${{ github.event.pull_request.head.sha || github.sha }}.tar.gz
           path: ${{ runner.temp }}/protean-*.tar.gz
           archive: false
           overwrite: true
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain final native archive identity
+        if: matrix.lane == 'native'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: protean-native.json
+          path: ${{ runner.temp }}/protean-native.json
+          archive: false
           if-no-files-found: error
           retention-days: 14
       - name: Admit a complete bounded cache snapshot
@@ -377,6 +419,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
+          QUALIFICATION_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
           QUALIFICATION: ${{ needs.qualify.result }}
           TIGER_STYLE: ${{ needs.tiger-style.result }}
           DIAGNOSTIC_LANE: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane || 'all' }}
@@ -399,18 +442,23 @@ jobs:
           import {promisify} from 'node:util';
           import {createHash} from 'node:crypto';
           const execute = promisify(execFile), repo = process.env.GH_REPO;
-          const api = async path => (await execute('gh', ['api', `repos/${repo}/${path}`], {encoding: 'buffer'})).stdout;
-          const artifacts = JSON.parse(await api(`actions/runs/${process.env.RUN_ID}/artifacts?per_page=100`)).artifacts;
-          const load = async lane => {
-            const matches = artifacts.filter(value => value.name === `${lane}-identity.json`);
+          const api = async path => (await execute('gh', ['api', `repos/${repo}/${path}`], {encoding: 'buffer', maxBuffer: 256 * 1024 * 1024, timeout: 60000})).stdout;
+          const inventory = JSON.parse(await api(`actions/runs/${process.env.RUN_ID}/artifacts?per_page=100`));
+          assert(inventory.total_count <= 100);
+          const artifacts = inventory.artifacts, digest = bytes => createHash('sha256').update(bytes).digest('hex');
+          const load = async name => {
+            const matches = artifacts.filter(value => value.name === name);
             assert.equal(matches.length, 1);
             const artifact = matches[0];
             assert.equal(artifact.expired, false);
+            assert.equal(String(artifact.workflow_run.id), process.env.RUN_ID);
+            assert.equal(artifact.workflow_run.head_sha, process.env.QUALIFICATION_HEAD);
             const bytes = await api(`actions/artifacts/${artifact.id}/zip`);
-            assert.equal(`sha256:${createHash('sha256').update(bytes).digest('hex')}`, artifact.digest);
-            return JSON.parse(bytes);
+            assert.equal(bytes.length, artifact.size_in_bytes);
+            assert.equal(`sha256:${digest(bytes)}`, artifact.digest);
+            return bytes;
           };
-          const [native, placement, downstream] = await Promise.all(['native', 'native-placement', 'downstream'].map(load));
+          const [native, placement, downstream] = await Promise.all(['native', 'native-placement', 'downstream'].map(async lane => JSON.parse(await load(`${lane}-identity.json`))));
           for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target']) {
             assert.notEqual(native.identity[key], undefined, key);
             assert.deepEqual(downstream.identity[key], native.identity[key], key);
@@ -418,6 +466,22 @@ jobs:
           }
           assert.notEqual(native.artifact_sha256, undefined);
           assert.equal(placement.artifact_sha256, native.artifact_sha256, 'placement executed the packaged native binary');
+          const [sourceBytes, archive, productBytes] = await Promise.all(['source.json', 'source.tar', 'protean-native.json'].map(load));
+          const source = JSON.parse(sourceBytes), product = JSON.parse(productBytes);
+          assert.equal(source.commit, process.env.QUALIFICATION_HEAD);
+          assert.equal(source.sha256, digest(archive)); assert.equal(source.size, archive.length);
+          assert.deepEqual(downstream.source, {commit: source.commit, tree: source.tree, archiveSha256: source.sha256,
+            receiptSha256: digest(sourceBytes), packageIdentity: source.packageIdentity,
+            lockSha256: source.lockSha256, nativeLockSha256: source.nativeLockSha256});
+          assert.equal(downstream.package, source.packageIdentity);
+          assert.equal(source.lockSha256, native.identity.dependencies.dependency_lock_sha256);
+          assert.equal(source.nativeLockSha256, native.identity.dependencies.sqlite.lockSha256);
+          assert.equal(product.commit, source.commit); assert.equal(product.platform, 'linux-x86_64');
+          assert.deepEqual(product.identity, native.identity);
+          assert.equal(product.executable.sha256, native.artifact_sha256);
+          assert.equal(product.archive.name, `protean-Linux-X64-${source.commit}.tar.gz`);
+          const finalArchive = await load(product.archive.name);
+          assert.equal(product.archive.sha256, digest(finalArchive)); assert.equal(product.archive.bytes, finalArchive.length);
           console.log('Independent native and downstream build identities agree; placement executed the packaged product.');
           JS
           started="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq .created_at)"

@@ -1,0 +1,18 @@
+.{
+    .name = .protean,
+    .version = "8.0.1",
+    .dependencies = .{
+        .horos = .{
+            .url = "git+https://github.com/tkersey/horos#2fbcc41c98887bcd6ece56060d263730394b1bc6",
+            .hash = "horos-8.0.0-flclaIItVgCRBCbUEysErcsQyVqsukGf2Q8X2is_wRuU",
+        },
+    },
+    .minimum_zig_version = "0.17.0",
+    .paths = .{
+        "LICENSE",                               "README.md",                                   "build.zig",        "build_protean.zig",        "build_native.zig",         "build.zig.zon",
+        "src",                                   "runtime/native",                              "tools/native",     "tools/check_zig_paths.sh", "repo_zig_paths.txt",       "examples/adaptive",
+        "conformance/protean",                   "docs",                                        "test/protean",     "test/support",             "test/authoring_tests.zig", "test/consumers/adaptive/build.zig",
+        "test/consumers/adaptive/build.zig.zon", "test/consumers/adaptive/package_surface.zig", "tools/evaluation",
+    },
+    .fingerprint = 0x50216bba84371874,
+}

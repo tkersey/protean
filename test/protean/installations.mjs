@@ -2,6 +2,7 @@
 // acquisition/build/install command runs behind a native executable allowlist.
 import assert from 'node:assert/strict';
 import {execFileSync, spawnSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import {copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {basename, dirname, join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
@@ -13,6 +14,7 @@ if (process.argv.length === 3 && process.argv[2] === '--help') { console.log(usa
 if (process.argv.length > 4 || process.argv.slice(2).some(arg => arg.startsWith('-'))) throw new Error(usage);
 
 const root = resolve(import.meta.dirname, '../..');
+const releaseDirectory = process.env.PROTEAN_RELEASE_SOURCE_DIRECTORY ? realpathSync(process.env.PROTEAN_RELEASE_SOURCE_DIRECTORY) : null;
 // Linux CI reserves its final minute for identity publication and cleanup.
 // macOS runs the same correctness checks without a wall-time performance gate.
 const deadline = process.platform === 'linux' ? performance.now() + 540_000 : null;
@@ -34,13 +36,14 @@ delete env.NODE_OPTIONS; delete env.NODE_TEST_CONTEXT; delete env.TAR_OPTIONS;
 let prefix;
 if (process.platform === 'darwin') {
   const profile = join(scratch, 'build.sb');
+  const nativeGit = realpathSync(execFileSync('/usr/bin/xcrun', ['--find', 'git'], {encoding: 'utf8'}).trim());
   // Zig discovers the installed macOS SDK through these native system tools.
   // Denying them changes compiler bootstrap behavior inside this fixture.
-  writeFileSync(profile, `(version 1)\n(allow default)\n(deny process-exec)\n(allow process-exec (literal ${JSON.stringify(zig)}) (literal ${JSON.stringify(realpathSync("/usr/bin/tar"))}) (literal "/usr/bin/unzip") (literal "/usr/bin/xcode-select") (literal "/usr/bin/xcrun") (subpath ${JSON.stringify(scratch)}) (subpath ${JSON.stringify(cache)}))\n`);
+  writeFileSync(profile, `(version 1)\n(allow default)\n(deny process-exec)\n(allow process-exec (literal ${JSON.stringify(zig)}) (literal ${JSON.stringify(realpathSync("/usr/bin/tar"))}) (literal "/usr/bin/git") (literal ${JSON.stringify(nativeGit)}) (literal "/usr/bin/unzip") (literal "/usr/bin/xcode-select") (literal "/usr/bin/xcrun") (subpath ${JSON.stringify(scratch)}) (subpath ${JSON.stringify(cache)}))\n`);
   prefix = ['/usr/bin/sandbox-exec', '-f', profile];
 } else if (process.platform === 'linux') {
   prefix = ['/usr/bin/bwrap', '--unshare-user', '--die-with-parent', '--new-session', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp'];
-  for (const path of ['/usr/lib', '/lib', '/lib64', '/etc/ssl', '/etc/resolv.conf', '/etc/hosts', '/etc/nsswitch.conf', '/usr/bin/tar', '/usr/bin/gzip', '/usr/bin/unzip', zig, library, root])
+  for (const path of ['/usr/lib', '/lib', '/lib64', '/etc/ssl', '/etc/resolv.conf', '/etc/hosts', '/etc/nsswitch.conf', '/usr/bin/git', '/usr/bin/tar', '/usr/bin/gzip', '/usr/bin/unzip', zig, library, root, ...(releaseDirectory ? [releaseDirectory] : [])])
     if (existsSync(path)) prefix.push('--ro-bind', path, path);
   // Native metadata reads Zig's license beside its executable or library.
   // Expose those regular sidecar files without mounting an executable directory.
@@ -72,26 +75,39 @@ try {
   // An absolute interpreter path also fails, not only PATH lookup.
   run(process.execPath, ['--version'], scratch, {failure: true});
   if (existsSync('/usr/bin/python3')) run('/usr/bin/python3', ['--version'], scratch, {failure: true});
-  const sourceLock = join(root, 'conformance/protean/dependencies.lock.json');
-  const nativeLock = join(root, 'conformance/protean/native-dependencies.lock.json');
+  const started = performance.now();
+  const exportRoot = join(scratch, 'source');
+  let sourceReceipt = null, sourceEvidence = null;
+  if (releaseDirectory) {
+    const verified = run(zig, ['run', join(root, 'tools/native/dependencies.zig'), '--', 'verify-release-source',
+      root, join(releaseDirectory, 'source.tar'), join(releaseDirectory, 'source.json'), exportRoot, zig]);
+    sourceReceipt = JSON.parse(verified);
+    sourceEvidence = {commit: sourceReceipt.commit, tree: sourceReceipt.tree, archiveSha256: sourceReceipt.sha256,
+      receiptSha256: createHash('sha256').update(verified).digest('hex'), packageIdentity: sourceReceipt.packageIdentity,
+      lockSha256: sourceReceipt.lockSha256, nativeLockSha256: sourceReceipt.nativeLockSha256};
+  } else {
+    mkdirSync(exportRoot);
+    const declared = [...readFileSync(join(root, 'build.zig.zon'), 'utf8').split('.paths = .{')[1].split('},')[0].matchAll(/"([^"]+)"/g)].map(match => match[1]);
+    const sourceFiles = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], {cwd: root}).toString().split('\0').filter(Boolean);
+    for (const file of sourceFiles) if (declared.some(path => file === path || file.startsWith(path + '/')) && existsSync(join(root, file))) {
+      const target = join(exportRoot, file); mkdirSync(dirname(target), {recursive: true}); copyFileSync(join(root, file), target);
+    }
+  }
+  const sourceFacts = sourceReceipt ?? JSON.parse(run(zig, ['run', join(root, 'tools/native/dependencies.zig'), '--', 'source-manifest', exportRoot]));
+  const sourceLock = join(exportRoot, 'conformance/protean/dependencies.lock.json');
+  const nativeLock = join(exportRoot, 'conformance/protean/native-dependencies.lock.json');
   const lock = JSON.parse(readFileSync(sourceLock)), sqlite = JSON.parse(readFileSync(nativeLock)).sqlite;
   // Cached transport bytes are optional and remain untrusted until native setup
   // authenticates them. No source or pre-generated manifest is copied.
   const seed = resolve(process.argv[2] ?? join(root, '.protean-native/inputs'));
   for (const name of [`horos-${lock.boundary.commit}.tar.gz`, `kosmos-${lock.world.commit}.tar.gz`, `${sqlite.archive.root}.zip`])
     if (existsSync(join(seed, name))) copyFileSync(join(seed, name), join(inputs, name));
-  const started = performance.now();
-  run(zig, ['run', join(root, 'tools/native/dependencies.zig'), '--', 'setup', sourceLock, nativeLock, inputs, zig]);
-  // Export declared source from the working candidate, excluding ignored local
-  // stores/caches and their sockets. Zig still owns the package and its hash.
-  const exportRoot = join(scratch, 'source'); mkdirSync(exportRoot);
-  const declared = [...readFileSync(join(root, 'build.zig.zon'), 'utf8').split('.paths = .{')[1].split('},')[0].matchAll(/"([^"]+)"/g)].map(match => match[1]);
-  const sourceFiles = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], {cwd: root}).toString().split('\0').filter(Boolean);
-  for (const file of sourceFiles) if (declared.some(path => file === path || file.startsWith(path + '/')) && existsSync(join(root, file))) {
-    const target = join(exportRoot, file); mkdirSync(dirname(target), {recursive: true}); copyFileSync(join(root, file), target);
-  }
+  run(zig, ['run', join(exportRoot, 'tools/native/dependencies.zig'), '--', 'setup', sourceLock, nativeLock, inputs, zig]);
   const packageHash = run(zig, ['fetch', exportRoot]);
-  assert.match(packageHash, /^protean-8\.0\.0-[A-Za-z0-9_-]+$/);
+  const packagePrefix = `protean-${sourceFacts.manifest.version}-`;
+  assert.ok(packageHash.startsWith(packagePrefix));
+  assert.match(packageHash.slice(packagePrefix.length), /^[A-Za-z0-9_-]{44}$/);
+  if (sourceReceipt) assert.equal(packageHash, sourceReceipt.packageIdentity);
   const packageDir = join(scratch, 'package'); mkdirSync(packageDir);
   run('/usr/bin/tar', ['-xzf', join(cache, 'p', `${packageHash}.tar.gz`), '-C', packageDir]);
   const source = join(packageDir, 'source');
@@ -106,9 +122,9 @@ try {
     'src/clarification.zig', 'src/value_equality.zig', 'src/authoring_imports.zig'])
     assert(!existsSync(join(source, retired)), `retired package member: ${retired}`);
   const consumer = scratch;
-  copyFileSync(join(root, 'test/consumers/adaptive/build.zig'), join(consumer, 'build.zig'));
-  copyFileSync(join(root, 'test/consumers/adaptive/package_surface.zig'), join(consumer, 'package_surface.zig'));
-  const zon = readFileSync(join(root, 'test/consumers/adaptive/build.zig.zon'), 'utf8').replace('.path = "../../.."', '.path = "package/source"');
+  copyFileSync(join(source, 'test/consumers/adaptive/build.zig'), join(consumer, 'build.zig'));
+  copyFileSync(join(source, 'test/consumers/adaptive/package_surface.zig'), join(consumer, 'package_surface.zig'));
+  const zon = readFileSync(join(source, 'test/consumers/adaptive/build.zig.zon'), 'utf8').replace('.path = "../../.."', '.path = "package/source"');
   writeFileSync(join(consumer, 'build.zig.zon'), zon);
   const prefixDir = join(scratch, 'installed');
   const buildArgs = ['build', '-Doptimize=safe', `-Dkosmos-source=${join(inputs, 'kosmos')}`, `-Dsqlite-source=${join(inputs, 'sqlite')}`, '--prefix', prefixDir, '--prefix-exe-dir', 'executables', '--summary', 'all'];
@@ -173,7 +189,7 @@ try {
     installedExecution = {admission_revision: task.revision, execution_revision: current.revision, cancellation_revision: cancelled.revision, elapsed_ms: performance.now() - executionStarted};
     console.error(`downstream installed execution: ${Math.round(installedExecution.elapsed_ms)} ms`);
   } finally { await client.close(); }
-  console.log(JSON.stringify({downstream: 'public addNativeSystem', node_free_acquisition_build_install: true, package: packageHash, target: manifest.target, program: manifest.program_sha256, identity, installed_execution: installedExecution, elapsed_seconds: (performance.now() - started) / 1000}));
+  console.log(JSON.stringify({downstream: 'public addNativeSystem', node_free_acquisition_build_install: true, package: packageHash, target: manifest.target, program: manifest.program_sha256, identity, source: sourceEvidence, installed_execution: installedExecution, elapsed_seconds: (performance.now() - started) / 1000}));
 } finally {
   rmSync(scratch, {recursive: true, force: true});
 }

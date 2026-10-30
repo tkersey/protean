@@ -1,0 +1,14 @@
+.{
+    .name = .kosmos,
+    .version = "9.1.1",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0xda7fbe49074dc2bd,
+    .dependencies = .{
+        .horos = .{
+            .url = "git+https://github.com/tkersey/horos#2fbcc41c98887bcd6ece56060d263730394b1bc6",
+            .hash = "horos-8.0.0-flclaIItVgCRBCbUEysErcsQyVqsukGf2Q8X2is_wRuU",
+            .lazy = true,
+        },
+    },
+    .paths = .{ "LICENSE", "README.md", "build.zig", "build.zig.zon", "build-profile.json", "package.json", "bin", "src", "test", "test_semantic.zig", "test_semantic_driver.zig", "test_semantic_specialization.zig", "bench_semantics.zig", "docs/rename.md", "docs/kernel-abi.md", "docs/verification.md", "docs/runtime-bundles.md", "docs/executable-semantics.md", "docs/semantic-economy.md" },
+}
