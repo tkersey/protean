@@ -1,6 +1,6 @@
 # Repository-local releases: Protean
 
-Status: implementation contract, not implemented automation. This document replaces the Protean portion of the proposed shared `align` / coordinated-stack-publication architecture. The implementation remains outstanding until the acceptance requirements below have executable evidence.
+Status: native refresh, source production, separate preparation and writer workflows, original review ownership, qualification admission, and immutable publication are implemented locally. Final native qualification, serial implementation reviews, deployment, and live commissioning remain outstanding until their required evidence is retained. This document replaces the Protean portion of the proposed shared `align` / coordinated-stack-publication architecture.
 
 ## Decision and invariant
 
@@ -23,7 +23,7 @@ Automatic propagation follows qualified publications, not every qualified develo
 
 The inspected baseline was commit `e4bbeaa1739905579f798c1bef5b72d9c4523d60`, package 8.0.0, Zig 0.17.0, selecting Horos `7d34f2c72e818665be4d519fde4f2cef9c986048` and Kosmos `e3ac443b97c31bda4ebe42b7cafb99e4ce721906`. These are historical inspection coordinates, not update targets. Inspect current source and active work before implementation.
 
-The inspected native dependency tool exposes setup, manifest production, and verification, but not a complete source-lock refresh generator. Implementing that generator is required; do not replace it with string substitutions or pretend it already exists.
+The native dependency tool now exposes `refresh`, `coherence`, `source`, `source-build`, `source-manifest` and `verify-release-source` alongside setup and build-manifest verification. The refresh uses native semantic manifest parsing and the existing authenticated source admission.
 
 `.github/workflows/zig.yml`, `.github/CI.md`, and current repository instructions remain authoritative for native, placement, downstream, retained-runtime, source, and other qualification. Keep package versions separate from application contracts, protocol, ABI, and state formats.
 
@@ -52,6 +52,52 @@ Prepare a required Protean package-version change in the same candidate before f
 Add a local and CI coherence check using authenticated local inputs. It checks lock/manifest consistency, exact shared Horos commit and package hash against the selected Kosmos, source and package inventories, toolchain constraints, generated identities, and version mirrors. Deliberately mismatched commit/hash/version cases must fail. Ordinary builds must neither discover newer upstreams nor fail solely because an upstream release exists.
 
 Historical `publicationObservation` fields must describe observations actually made when the candidate was generated. Do not rewrite a published source lock just to record a later release, and do not create self-referential source hashes. Current release evidence is external to the source-selection authority.
+
+## Implemented source and artifact boundaries
+
+Run the native refresh against one authenticated Kosmos record and its derived
+Horos record store. Its JSON request contains the exact base commit/tree,
+prepared package version, Kosmos record/archive/local Git repository, and upstream
+record directory. The output is retained only after full source admission,
+projection, package reconstruction and coherence succeed:
+
+```sh
+zig run tools/native/dependencies.zig -- refresh ROOT INPUT_JSON OUTPUT_ABSOLUTE ABS_ZIG
+zig run tools/native/dependencies.zig -- coherence ROOT VERIFIED_SOURCES ABS_ZIG
+zig run tools/native/dependencies.zig -- source ROOT OUTPUT_ABSOLUTE ABS_ZIG EXPECTED_COMMIT
+zig run tools/native/dependencies.zig -- verify-release-source ROOT SOURCE_TAR SOURCE_JSON EXTRACT_ABSOLUTE ABS_ZIG
+```
+
+`source` retains immutable `source.tar` and `source.json` bytes from a clean exact
+Git head. The receipt binds the full Git inventory, native parsed manifest,
+package identity, both lock digests, compiler and selected dependency commits
+and trees. A conflicting output remains unchanged. `zig build release-source`
+uses a build-owned output directory and admits a changed clean head on later
+builds while preserving those identities. Neither command establishes product
+qualification by itself.
+
+The existing downstream CI lane independently verifies and consumes that exact
+full source archive before retaining it. Its native acquisition/build boundary
+continues to reject Node and Python, and its installed consumer still rejects
+changed Horos/Kosmos inputs and exercises execution and cancellation. The native
+lane seals the final application archive against its already executed binary,
+program and application bytes. Native placement consumes that same binary;
+downstream builds independently. The terminal gate binds all three identities,
+both source lock digests, the consumed source receipt and final native archive.
+
+`protean-qualification.mjs` admits only the unique original automatic run with
+all eleven lanes, TigerStyle and the terminal gate successful within the original
+600-second clock. It retains the seven final source/product/identity payloads
+with their original run, size and digest bindings. `protean-assemble.mjs` derives
+Horos from the authenticated Kosmos publication and binds the source definitions
+to the native Git inventory before constructing the Protean publication record.
+The adapter does not accept an independently selected Horos release.
+
+Frozen native producer fixtures exercise the exact source identities across the
+three repositories. Their README files distinguish unpublished source evidence
+from full qualification and authenticated publication. The raw single-file
+artifact API path still requires a live Actions observation before deployment
+can be claimed verified.
 
 ## One local PR and existing review machinery
 
@@ -86,3 +132,112 @@ Test wrong transitive Horos bindings; corrupt source/archive/package/profile/API
 Live authorized testing must exercise a real Kosmos release handoff, generated Protean PR, full review, protected merge, actual post-merge qualification, and local final-artifact publication. Demonstrate normal clean installation and retained-task behavior without controller credentials or sibling checkouts. Mocks alone do not establish deployment.
 
 The implementation is complete only when the native refresh, coherence gate, consumer workflow, original review integration, protected promotion, local publisher, and actual acceptance evidence exist. This document, a detector, a draft PR, or an unexecuted workflow does not satisfy completion. Report implemented, tested, qualified, enabled, published, and installed states separately.
+
+
+### Publication of qualified Protean artifacts
+
+The repository-local publisher runs on accepted main after original qualification
+and owner review. It also observes its own hourly schedule. Both controls must
+permit publication: REPOSITORY_AUTOMATION is propose or promote, and
+RELEASE_PUBLICATION_ENABLED is true. Defaults are off and false.
+
+The workflow compiles the accepted native manifest parser before introducing
+credentials. A read-only App token admits the original landed qualification,
+review history, exact final artifacts, and completed Kosmos and its derived Horos publication.
+It selects the dependencies already recorded in this source. An unrelated newer
+release cannot replace them. Missing matching publication is a concrete blocker.
+
+The local commands are:
+
+```sh
+node tools/release/protean-publication-runner.mjs prepare "$CONTROL" "$NATIVE_TOOL" "$ZIG" "$OUTPUT" "$OBSERVER_IDENTITY"
+node tools/release/protean-publication-runner.mjs publish "$CONTROL" "$NATIVE_TOOL" "$ZIG" "$OUTPUT" "$PUBLISHER_IDENTITY"
+```
+
+Preparation seals the original source archive, inventory, executed native package and independent placement/downstream identities
+with the original qualification, reviewed publication boundary, landing mapping,
+owner closeout, and authenticated original review artifact envelopes. It records
+compiler, publisher Node, and reviewer binary identities separately. It neither
+rebuilds artifacts nor transfers executable qualification across equal Git trees.
+
+The trusted workflow attests the finalized record and payloads with pinned
+GitHub artifact attestation tooling, then obtains a separate repository-local
+publication token. The writer verifies the expected signer and recomputes the
+admission from original observations before staging and before publication.
+Only missing identical assets are uploaded. Conflicting tags, drafts, or bytes
+remain untouched. Publication requires immutable-release protection and finishes
+by checking the platform release attestation, source tag, and every asset.
+A matching completed release is a verified no-op, without a bookkeeping commit
+or another version bump. An interrupted matching draft resumes from observed
+missing assets; changed source or expired original evidence blocks recovery.
+
+The release never installs an executable or migrates a saved task.
+Live App-created PRs, protected merging, authenticated Actions model review,
+immutable publication and interrupted-write recovery require an owner-approved
+commissioning environment; local adapter tests do not establish those effects.
+
+### Native preparation and ordinary proposal operation
+
+`Repository preparation` observes its own hourly schedule and local qualification
+and owner-review completions. It runs only when `REPOSITORY_AUTOMATION` is
+`propose` or `promote`. Its accepted-main tool reads the committed ZON manifest,
+admits published Kosmos records, derives the exact Horos publication from the selected Kosmos, selects a forward compatible successor, and
+combines that patch impact with the original reviewed Protean publication boundary.
+A pending higher approved version is preserved. A selected development pin ahead
+of published Kosmos releases is never downgraded. A new major or breaking upstream
+migration requires ordinary implementation and review.
+
+The preparation job compiles its exact accepted native tool before obtaining an
+App observer token. Native code runs inside the required network-isolated
+bubblewrap sandbox under the scoped AppArmor profile, with no write credential
+or host credential environment. It retains the exact two generated source files,
+original result, source-manifest/refresh/coherence stdout and stderr, compiler and tool
+identities, original admitted dependency record, and own version decision.
+The workflow uploads a generation-start artifact before native generation.
+An existing original preparation is reused; an interrupted or failed equivalent
+generation remains held until its original evidence is recovered. Deleting or
+expiring an artifact does not authorize another invocation.
+
+`Repository automation` runs separately after preparation completes. It uses
+only authenticated original preparation artifacts, validates exact native file
+bytes against the proposed Git tree, and creates or advances the one ordinary
+`automation/dependency-release` PR, assigned to `tkersey`. It does not regenerate
+candidate source. The App writer token is minted only after the accepted native
+manifest reader is compiled. The bounded native manifest reader receives only PATH and a private temporary directory; it reads data and does not execute candidate code.
+
+The exact local entry points are:
+
+```sh
+node tools/release/protean-preparation-runner.mjs plan "$CONTROL" "$NATIVE_TOOL" "$ZIG" "$OUTPUT" "$OBSERVER_IDENTITY"
+node tools/release/protean-preparation-runner.mjs generate "$CONTROL" "$NATIVE_TOOL" "$ZIG" "$OUTPUT" "$OBSERVER_IDENTITY"
+node tools/release/protean-automation-runner.mjs "$CONTROL" "$NATIVE_TOOL" "$ZIG" "$WRITER_IDENTITY"
+```
+
+The workflow owns the original run ID and the start/result artifact uploads;
+calling a local command alone does not create authenticated Actions evidence.
+The two workflows use independent serialized concurrency groups with cancellation
+disabled and retain the 600-second job ceiling. Native generation also has a
+shared 600-second process deadline with group cleanup. Required qualification
+and the owner model's original policy and review counts remain unchanged.
+
+Promotion uses the original successful qualification and exact owner closeout,
+checks effective branch protection, and requests protected rebase auto-merge.
+`propose`, `off`, a draft, or `automation-hold` cancels automation-owned pending
+auto-merge. Failed qualification, unresolved review, stale bases, edited heads,
+and unavailable original evidence hold the proposal. An admitted successor
+requires closure of the original epoch. Automation never treats an owner closure
+or manually disabled auto-merge as permission to resume. After reopening and
+removing a hold, the repository owner must post this fresh, unedited exact comment:
+
+```text
+/repository-automation resume FULL_CURRENT_HEAD_SHA
+```
+
+The owner input retains compact original preparation provenance, including every
+non-file byte and the original run, job, workflow, and artifact identities.
+Published original review evidence retains that same input. After the native
+artifact expires, the reader hydrates the two file payloads from the exact
+reviewed Git head and verifies the reconstructed original artifact digest and
+size. It never reruns historical native code. Inputs that exceed the bounded
+owner context fail before review starts and require recovery of bounded original
+evidence. Unpublished evidence without a recoverable original remains blocked.

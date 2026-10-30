@@ -188,3 +188,7 @@ test/protean/workspace_test_support.zig
 tools/native/build_entry.zig
 tools/native/dependencies.zig
 tools/native/emit.zig
+tools/native/refresh.zig
+tools/native/release_artifact.zig
+tools/native/release_edit.zig
+tools/native/release_source.zig

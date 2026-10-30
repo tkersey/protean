@@ -135,6 +135,8 @@ pub fn build(b: *std.Build) void {
     graph.nativeSteps();
     if (graph.native_enabled) graph.nativeBuild() else graph.missingNative();
     graph.pureChecks();
+    graph.releaseChecks();
+    graph.releaseSource();
 }
 
 const BuildGraph = struct {
@@ -1330,6 +1332,43 @@ const BuildGraph = struct {
         s.b.step("check-authoring-core", "Check retained authoring contracts").dependOn(s.check);
         s.b.step("check", "Check Protean authoring").dependOn(s.aggregate);
         s.b.default_step = s.aggregate;
+    }
+
+    fn releaseChecks(s: *BuildGraph) void {
+        const tests = s.b.addTest(.{
+            .root_module = s.b.createModule(.{
+                .root_source_file = s.b.path("tools/native/refresh.zig"),
+                .target = s.b.graph.host,
+                .optimize = .safe,
+            }),
+            .use_llvm = if (linuxX86(s.b.graph.host)) false else null,
+        });
+        const run = s.b.addRunArtifact(tests);
+        run.has_side_effects = true;
+        const step = s.b.step("check-release-tools", "Check native source refresh and coherence");
+        step.dependOn(&run.step);
+        s.check.dependOn(step);
+    }
+
+    fn releaseSource(s: *BuildGraph) void {
+        const revision = s.b.addSystemCommand(&.{
+            "git", "--no-replace-objects", "rev-parse", "HEAD",
+        });
+        revision.setCwd(s.b.path(""));
+        revision.has_side_effects = true;
+        const prepare = s.b.addRunArtifact(s.host_tool);
+        prepare.addArg("source-build");
+        prepare.addDirectoryArg2(s.b.path(""), .{ .make_absolute = true });
+        const output = prepare.addOutputDirectoryArg2("release-source", .{ .make_absolute = true });
+        prepare.addFileArg2(.zig_exe, .{ .make_absolute = true });
+        prepare.addFileContentArg2(revision.captureStdOut(.{}), .{});
+        prepare.has_side_effects = true;
+        s.b.step("release-source", "Prepare authenticated full source and lock identities")
+            .dependOn(&s.b.addInstallDirectory(.{
+            .source_dir = output,
+            .install_dir = .prefix,
+            .install_subdir = "release-source",
+        }).step);
     }
 };
 

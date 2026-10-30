@@ -50,7 +50,8 @@ native, placement and downstream witnesses, and verifies that placement used
 the packaged native binary. Downstream builds independently; it does not borrow
 the native lane's executable. No paid provider calls are made.
 
-`installations.mjs` creates a fresh source package and consumer. Its OS execution
+`installations.mjs` independently verifies and consumes the final full source
+archive produced in the downstream lane, then creates a fresh package and consumer. Its OS execution
 boundary excludes Node/Python from acquisition, source emission, public build,
 installation, inspection and offline execution. Node remains the external
 controller. Both changed-input rejection checks remain required.
@@ -158,6 +159,12 @@ optional cache failures do not waive required build, test or artifact failures.
 Setup-Zig's automatic compiler-cache post-hook stays disabled. The downstream
 witness uses fresh sources and metadata even when matching compiler work is
 available.
+
+The downstream lane retains `source.tar` and its native `source.json` receipt only
+after that exact source passes its consumer. The native lane seals the executed
+application archive in `protean-native.json`; the terminal gate binds the archive
+and source receipt to the existing three independent identity observations.
+These additions retain the same original-trigger deadline and lane inventory.
 
 The executed product artifact contains the adaptive executable, manifest,
 program/contracts, runbooks and approved example resources. Identity artifacts

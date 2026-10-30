@@ -16,19 +16,24 @@ comptime {
     );
 }
 
-const Context = struct {
+pub const Context = struct {
     a: Allocator,
     scratch: Allocator,
     io: std.Io,
     environ: ?*const std.process.Environ.Map = null,
 
-    fn join(c: Context, parts: []const []const u8) ![]const u8 {
+    pub fn join(c: Context, parts: []const []const u8) ![]const u8 {
         return std.fs.path.join(c.a, parts);
     }
-    fn read(c: Context, path: []const u8, limit: ?usize) ![]u8 {
+    pub fn read(c: Context, path: []const u8, limit: ?usize) ![]u8 {
         return c.readWithAllocator(c.a, path, limit);
     }
-    fn readWithAllocator(c: Context, allocator: Allocator, path: []const u8, limit: ?usize) ![]u8 {
+    pub fn readWithAllocator(
+        c: Context,
+        allocator: Allocator,
+        path: []const u8,
+        limit: ?usize,
+    ) ![]u8 {
         var file = try Dir.cwd().openFile(c.io, path, .{
             .follow_symlinks = false,
             .allow_directory = false,
@@ -53,12 +58,12 @@ const Context = struct {
             return error.InputChanged;
         return bytes;
     }
-    fn json(c: Context, path: []const u8) !Value {
+    pub fn json(c: Context, path: []const u8) !Value {
         const bytes = try c.read(path, 1024 * 1024);
         defer c.a.free(bytes);
         return std.json.parseFromSliceLeaky(Value, c.a, bytes, .{ .allocate = .alloc_always });
     }
-    fn digest(c: Context, bytes: []const u8) ![]const u8 {
+    pub fn digest(c: Context, bytes: []const u8) ![]const u8 {
         var hash: [32]u8 = undefined;
         if (comptime @hasDecl(@import("root"), "native_hash")) {
             const optimized = @import("root").native_hash;
@@ -69,15 +74,15 @@ const Context = struct {
         } else std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
         return c.a.dupe(u8, &std.fmt.bytesToHex(hash, .lower));
     }
-    fn fileDigest(c: Context, path: []const u8) ![]const u8 {
+    pub fn fileDigest(c: Context, path: []const u8) ![]const u8 {
         const bytes = try c.readWithAllocator(c.scratch, path, max_file);
         defer c.scratch.free(bytes);
         return c.digest(bytes);
     }
-    fn encode(c: Context, input: anytype) ![]const u8 {
+    pub fn encode(c: Context, input: anytype) ![]const u8 {
         return std.json.Stringify.valueAlloc(c.a, input, .{});
     }
-    fn value(c: Context, input: anytype) !Value {
+    pub fn value(c: Context, input: anytype) !Value {
         return std.json.parseFromSliceLeaky(
             Value,
             c.a,
@@ -85,7 +90,7 @@ const Context = struct {
             .{ .allocate = .alloc_always },
         );
     }
-    fn put(c: Context, object: *Value, key: []const u8, input: anytype) !void {
+    pub fn put(c: Context, object: *Value, key: []const u8, input: anytype) !void {
         try object.object.put(c.a, key, try c.value(input));
     }
 };
@@ -102,25 +107,25 @@ fn stable(a: std.Io.File.Stat, b: std.Io.File.Stat) bool {
         std.meta.eql(a.mtime, b.mtime) and
         std.meta.eql(a.ctime, b.ctime);
 }
-fn field(v: Value, name: []const u8) !Value {
+pub fn field(v: Value, name: []const u8) !Value {
     if (v != .object) return error.InvalidMetadata;
     return v.object.get(name) orelse error.InvalidMetadata;
 }
-fn string(v: Value) ![]const u8 {
+pub fn string(v: Value) ![]const u8 {
     return if (v == .string) v.string else error.InvalidMetadata;
 }
-fn text(v: Value, name: []const u8) ![]const u8 {
+pub fn text(v: Value, name: []const u8) ![]const u8 {
     return string(try field(v, name));
 }
-fn number(v: Value) !u64 {
+pub fn number(v: Value) !u64 {
     if (v != .integer or v.integer < 0) return error.InvalidMetadata;
     return @intCast(v.integer);
 }
-fn equal(a: []const u8, b: []const u8) !void {
+pub fn equal(a: []const u8, b: []const u8) !void {
     if (!std.mem.eql(u8, a, b)) return error.IdentityMismatch;
 }
 
-const Inventory = struct {
+pub const Inventory = struct {
     files: std.ArrayList(Value) = .empty,
     bytes: u64 = 0,
     maximum_entries: usize = 10000,
@@ -196,7 +201,7 @@ const Inventory = struct {
         }
         if (!stable(before, try dir.stat(c.io))) return error.InputChanged;
     }
-    fn load(c: Context, path: []const u8, maximum: usize) !Inventory {
+    pub fn load(c: Context, path: []const u8, maximum: usize) !Inventory {
         const named = try Dir.cwd().statFile(c.io, path, .{ .follow_symlinks = false });
         if (named.kind != .directory) return error.InvalidFile;
         var root = try Dir.cwd().openDir(c.io, path, .{ .follow_symlinks = false });
@@ -210,7 +215,7 @@ const Inventory = struct {
         )) return error.InputChanged;
         return result;
     }
-    fn identity(inventory: Inventory, c: Context) ![]const u8 {
+    pub fn identity(inventory: Inventory, c: Context) ![]const u8 {
         return c.digest(try c.encode(inventory.files.items));
     }
     // Preserve the established compiler-library identity projection. Source
@@ -241,7 +246,7 @@ const Inventory = struct {
         }
         return c.digest(try c.encode(rows.items));
     }
-    fn verify(inventory: Inventory, c: Context, expected: Value) !void {
+    pub fn verify(inventory: Inventory, c: Context, expected: Value) !void {
         try equal(try inventory.identity(c), try text(expected, "inventorySha256"));
         if (inventory.files.items.len != try number(
             try field(expected, "entries"),
@@ -251,7 +256,7 @@ const Inventory = struct {
     }
 };
 
-fn lockAt(c: Context, path: []const u8) !Value {
+pub fn lockAt(c: Context, path: []const u8) !Value {
     const lock = try c.json(path);
     try equal(try text(lock, "format"), "agent-native-source-lock/v2");
     const status = try text(lock, "status");
@@ -266,18 +271,32 @@ fn lockAt(c: Context, path: []const u8) !Value {
         if (commit.len != 40) return error.InvalidMetadata;
         var decoded: [20]u8 = undefined;
         _ = try std.fmt.hexToBytes(&decoded, commit);
-        try equal(
-            try text(try field(item, "archive"), "url"),
-            try std.fmt.allocPrint(c.a, "https://github.com/{s}/archive/{s}.tar.gz", .{
+        const archive = try field(item, "archive");
+        if (archive != .object) return error.InvalidMetadata;
+        if (archive.object.get("format")) |format| {
+            try equal(try string(format), "repository-source-tar/v1");
+            try @import("release_edit.zig").version(try text(item, "version"));
+            try equal(try text(archive, "url"), try std.fmt.allocPrint(
+                c.a,
+                "https://github.com/{s}/releases/download/v{s}/source.tar",
+                .{
+                    repository,
+                    try text(item, "version"),
+                },
+            ));
+        } else try equal(try text(archive, "url"), try std.fmt.allocPrint(
+            c.a,
+            "https://github.com/{s}/archive/{s}.tar.gz",
+            .{
                 repository,
                 commit,
-            }),
-        );
+            },
+        ));
     }
     return lock;
 }
 
-fn verifySource(c: Context, path: []const u8, expected: Value, package: bool) !void {
+pub fn verifySource(c: Context, path: []const u8, expected: Value, package: bool) !void {
     const inventory = try Inventory.load(c, path, 10000);
     if (package) {
         const profiles = try field(try field(expected, "package"), "profiles");
@@ -419,7 +438,7 @@ fn manifest(c: Context, args: []const []const u8) !void {
     try Dir.cwd().writeFile(c.io, .{ .sub_path = args[13], .data = try c.encode(result) });
 }
 
-fn exists(c: Context, path: []const u8) !bool {
+pub fn exists(c: Context, path: []const u8) !bool {
     _ = Dir.cwd().statFile(c.io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
@@ -427,7 +446,7 @@ fn exists(c: Context, path: []const u8) !bool {
     return true;
 }
 
-fn command(c: Context, argv: []const []const u8, limit: usize) ![]const u8 {
+pub fn command(c: Context, argv: []const []const u8, limit: usize) ![]const u8 {
     var environ = if (c.environ) |value| try value.clone(
         c.a,
     ) else std.process.Environ.Map.init(c.a);
@@ -437,6 +456,7 @@ fn command(c: Context, argv: []const []const u8, limit: usize) ![]const u8 {
     _ = environ.swapRemove("UNZIPOPT");
     _ = environ.swapRemove("ZIPINFO");
     _ = environ.swapRemove("ZIPINFOOPT");
+    if (std.mem.eql(u8, argv[0], "git")) try gitEnvironment(c.a, &environ);
     try environ.put("LC_ALL", "C");
     try environ.put("TZ", "UTC");
     const result = try std.process.run(
@@ -455,6 +475,19 @@ fn command(c: Context, argv: []const []const u8, limit: usize) ![]const u8 {
         return error.CommandFailed;
     }
     return result.stdout;
+}
+
+fn gitEnvironment(a: Allocator, environ: *std.process.Environ.Map) !void {
+    var selected: std.ArrayList([]const u8) = .empty;
+    var iterator = environ.iterator();
+    while (iterator.next()) |entry| {
+        if (std.mem.startsWith(u8, entry.key_ptr.*, "GIT_"))
+            try selected.append(a, entry.key_ptr.*);
+    }
+    defer selected.deinit(a);
+    for (selected.items) |name| _ = environ.swapRemove(name);
+    try environ.put("GIT_CONFIG_NOSYSTEM", "1");
+    try environ.put("GIT_CONFIG_GLOBAL", "/dev/null");
 }
 
 fn download(c: Context, first_url: []const u8, length: usize) anyerror![]u8 {
@@ -520,7 +553,7 @@ fn archiveAt(c: Context, path: []const u8, expected: Value, offline: bool) ![]co
     return bytes;
 }
 
-fn stageDirectory(c: Context, parent: []const u8) ![]const u8 {
+pub fn stageDirectory(c: Context, parent: []const u8) ![]const u8 {
     var random: [16]u8 = undefined;
     c.io.random(&random);
     const path = try c.join(&.{
@@ -567,11 +600,12 @@ fn sourceAt(
     try validateSourceArchive(c, archive, name, item);
     const source = try c.join(&.{ stage, "source" });
     try Dir.cwd().createDir(c.io, source, .default_dir);
-    _ = try command(
-        c,
-        &.{ "tar", "-xzf", archive, "--strip-components=1", "--no-same-owner", "-C", source },
-        65536,
-    );
+    const release_archive = (try field(item, "archive")).object.contains("format");
+    const extract: []const []const u8 = if (release_archive)
+        &.{ "tar", "-xf", archive, "--no-same-owner", "-C", source }
+    else
+        &.{ "tar", "-xzf", archive, "--strip-components=1", "--no-same-owner", "-C", source };
+    _ = try command(c, extract, 65536);
     // Archive transports may vary permission bits through the caller's umask.
     // Normalize to the locked source profile before checking its entire tree.
     const inventory = try Inventory.load(c, source, 10000);
@@ -682,6 +716,15 @@ pub fn main(init: std.process.Init) !void {
     const operation = iterator.next() orelse return error.ExpectedCommand;
     var args: std.ArrayList([]const u8) = .empty;
     while (iterator.next()) |arg| try args.append(c.a, arg);
+    if (std.mem.eql(u8, operation, "refresh")) return @import("refresh.zig").prepare(c, args.items);
+    if (std.mem.eql(u8, operation, "coherence")) return @import("refresh.zig").check(c, args.items);
+    const release = @import("release_artifact.zig");
+    if (std.mem.eql(u8, operation, "source")) return release.prepare(c, args.items, false);
+    if (std.mem.eql(u8, operation, "source-build")) return release.prepare(c, args.items, true);
+    if (std.mem.eql(u8, operation, "verify-release-source")) return release.verify(c, args.items);
+    if (std.mem.eql(u8, operation, "source-manifest")) return release.describe(c, args.items);
+    if (std.mem.eql(u8, operation, "manifest-version"))
+        return release.manifestVersion(c, args.items);
     if (std.mem.eql(u8, operation, "setup")) return setup(c, args.items);
     if (std.mem.eql(u8, operation, "manifest")) return manifest(c, args.items);
     if (std.mem.eql(u8, operation, "verify-horos")) {
@@ -793,6 +836,53 @@ test "native source lock cannot silently reinterpret the former delivery format"
     );
 }
 
+test "repository release source transports retain ordinary offline setup admission" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var environ = try std.testing.environ.createMap(arena.allocator());
+    const c: Context = .{
+        .a = arena.allocator(),
+        .scratch = std.testing.allocator,
+        .io = std.testing.io,
+        .environ = &environ,
+    };
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(c.io, ".", c.a);
+    const reference = try c.join(&.{ root, "reference" });
+    try Dir.cwd().createDir(c.io, reference, .default_dir);
+    const file_path = try c.join(&.{ reference, "file" });
+    try Dir.cwd().writeFile(c.io, .{ .sub_path = file_path, .data = "source" });
+    var file = try Dir.cwd().openFile(c.io, file_path, .{});
+    try file.setPermissions(c.io, .fromMode(0o644));
+    file.close(c.io);
+    const inventory = try Inventory.load(c, reference, 2);
+    var buffer = std.Io.Writer.Allocating.init(c.a);
+    var tar: std.tar.Writer = .{ .underlying_writer = &buffer.writer };
+    try tar.writeFileBytes("file", "source", .{ .mode = 0o644 });
+    try tar.finishPedantically();
+    const commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const transport = try c.join(&.{ root, "horos-" ++ commit ++ ".tar.gz" });
+    try Dir.cwd().writeFile(c.io, .{ .sub_path = transport, .data = buffer.written() });
+    const item = try c.value(.{
+        .commit = commit,
+        .archive = .{
+            .format = "repository-source-tar/v1",
+            .bytes = buffer.written().len,
+            .sha256 = try c.digest(buffer.written()),
+        },
+        .source = .{ .entries = 1, .bytes = 6, .inventorySha256 = try inventory.identity(c) },
+    });
+    const admitted = try sourceAt(c, root, "horos", item, true);
+    try equal("source", try c.read(try c.join(&.{ admitted, "file" }), 1024));
+    try equal(admitted, try sourceAt(c, root, "horos", item, true));
+    try Dir.cwd().writeFile(c.io, .{
+        .sub_path = try c.join(&.{ admitted, "file" }),
+        .data = "tampered",
+    });
+    try std.testing.expectError(error.IdentityMismatch, sourceAt(c, root, "horos", item, true));
+}
+
 fn dependencyLicenses(c: Context, args: []const []const u8, library_path: []const u8) ![]Value {
     var licenses: std.ArrayList(Value) = .empty;
     inline for (.{ "Protean", "Kosmos", "Horos" }, 3..) |component, index| {
@@ -857,8 +947,22 @@ fn runtimeDependencies(target: []const u8) []const []const u8 {
 }
 
 fn validateSourceArchive(c: Context, archive: []const u8, name: []const u8, item: Value) !void {
-    const names = try command(c, &.{ "tar", "-tzf", archive }, 4 * 1024 * 1024);
+    const release_archive = (try field(item, "archive")).object.contains("format");
     const prefix = try std.fmt.allocPrint(c.a, "{s}-{s}", .{ name, try text(item, "commit") });
+    try validateTar(c, archive, prefix, release_archive);
+}
+
+pub fn validateTar(
+    c: Context,
+    archive: []const u8,
+    prefix: []const u8,
+    release_archive: bool,
+) !void {
+    const names = try command(c, &.{
+        "tar",
+        if (release_archive) "-tf" else "-tzf",
+        archive,
+    }, 4 * 1024 * 1024);
     var lines = std.mem.tokenizeScalar(u8, names, '\n');
     var count: usize = 0;
     var seen: std.StringHashMap(void) = .init(c.a);
@@ -872,7 +976,7 @@ fn validateSourceArchive(c: Context, archive: []const u8, name: []const u8, item
         ) != null or seen.contains(path)) return error.InvalidArchive;
         try seen.put(path, {});
         var parts = std.mem.splitScalar(u8, path, '/');
-        try equal(parts.next() orelse return error.InvalidArchive, prefix);
+        if (!release_archive) try equal(parts.next() orelse return error.InvalidArchive, prefix);
         var depth: usize = 0;
         while (parts.next()) |part| {
             depth += 1;
@@ -883,7 +987,11 @@ fn validateSourceArchive(c: Context, archive: []const u8, name: []const u8, item
                 return error.InvalidArchive;
         }
     }
-    const details = try command(c, &.{ "tar", "-tvzf", archive }, 4 * 1024 * 1024);
+    const details = try command(c, &.{
+        "tar",
+        if (release_archive) "-tvf" else "-tvzf",
+        archive,
+    }, 4 * 1024 * 1024);
     lines = std.mem.tokenizeScalar(u8, details, '\n');
     var detail_count: usize = 0;
     while (lines.next()) |line| {

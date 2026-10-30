@@ -1,0 +1,25 @@
+{
+  "zig": "0.17.0",
+  "target": "wasm32-freestanding",
+  "hostMode": "safe",
+  "kernelMode": "small",
+  "stackBytes": 65536,
+  "maximumMemoryBytes": 268435456,
+  "defaults": {
+    "input": 65536,
+    "working": 134217728,
+    "output": 65536
+  },
+  "wasmBackend": "llvm",
+  "wasmLinker": "lld",
+  "cpu": "lime1",
+  "features": [
+    "bulk_memory_opt",
+    "call_indirect_overlong",
+    "extended_const",
+    "multivalue",
+    "mutable_globals",
+    "nontrapping_fptoint",
+    "sign_ext"
+  ]
+}
