@@ -40,12 +40,12 @@ test('source movement and disabled automation prevent preparation planning',asyn
   f.state.mode='off';assert.equal((await f.run()).status,'disabled');assert.deepEqual(f.state.calls,[]);
 });
 for(const change of ['draft','hold','active'])test(`current ${change} proposal prevents a new native epoch`,async()=>{
-  const f=fixture();f.state.pulls=[{state:'open',head:{sha:head},draft:change==='draft',labels:change==='hold'?[{name:'automation-hold'}]:[]}];
+  const f=fixture();f.state.pulls=[{state:'open',body:`<!-- repository-proposal/v1 ${digest} -->\n\nBase: \`${base}\`\nHead: \`${head}\`\n`,head:{sha:head},draft:change==='draft',labels:change==='hold'?[{name:'automation-hold'}]:[]}];
   if(change==='active'){f.state.unfinished=true;await assert.rejects(f.run(),/epoch/);}else assert.equal((await f.run()).status,'held');
   assert.ok(!f.state.calls.includes('prior'));
 });
 test('closed original epoch admits a changed source decision for preparation',async()=>{
-  const f=fixture();f.state.pulls=[{state:'open',head:{sha:head},draft:false,labels:[]}];
+  const f=fixture();f.state.pulls=[{state:'open',body:`<!-- repository-proposal/v1 ${digest} -->\n\nBase: \`${base}\`\nHead: \`${head}\`\n`,head:{sha:head},draft:false,labels:[]}];
   assert.equal((await f.run()).status,'ready');assert.ok(f.state.calls.includes('retire'));
 });
 for(const key of ['role','permissions','expiresAt'])test(`preparation refuses invalid observer ${key}`,async()=>{

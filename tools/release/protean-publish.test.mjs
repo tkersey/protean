@@ -1,3 +1,7 @@
+import {mkdtempSync, rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {preparePublication, publishPrepared, admitPublicationUpstream} from './protean-publication-runner.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {publishProtean} from './protean-publish.mjs';
@@ -316,4 +320,42 @@ test('missing final product and invented product platforms fail before network a
   extra.set('unqualified-macos.tar.gz', Buffer.from('unqualified'));
   await assert.rejects(f.publish({recordBytes: produceRecord(added, extra), payloads: extra}), /unsupported additional product/);
   assert.equal(f.state.calls.length, 0);
+});
+
+for (const invalidUpstream of [false, true]) test(`prepared runner reaches the actual publisher with ${invalidUpstream ? 'rejected' : 'authenticated'} upstream`, async t => {
+  const value = fixture(), directory = mkdtempSync(join(tmpdir(), 'protean-composed-publication-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  const output = join(directory, 'publication'), admissions = [];
+  const services = {
+    enabled: async () => true,
+    prepare: async () => ({status: 'ready', recordBytes: value.options.recordBytes, payloads: value.options.payloads}),
+    verifyAttestation: async () => {},
+    verifyPublished: value.options.verifyPublished,
+    admitUpstream: async input => {
+      admissions.push(input);
+      if (invalidUpstream) throw new Error('original upstream attestation rejected');
+      const admitted = await value.options.admitUpstream(input);
+      return admitPublicationUpstream(input.dependency, undefined, async request => {
+        const selected = request.repository === 'tkersey/kosmos' ? admitted.kosmos : admitted.horos;
+        assert.equal(request.releaseId, selected.id);
+        return selected;
+      });
+    },
+  };
+  await preparePublication(output, services);
+  const execute = () => publishPrepared(output, services, input => publishProtean({...input, client: value.options.client}));
+  if (invalidUpstream) {
+    await assert.rejects(execute, /original upstream attestation rejected/);
+    assert.equal(value.writes().length, 0);
+  } else {
+    assert.equal((await execute()).status, 'published');
+    assert.deepEqual([...new Set(admissions.map(input => input.stage))], ['prepare', 'publish']);
+    for (const dependency of value.record.dependencies.filter(item => item.repository.name === 'tkersey/kosmos')) assert.ok(admissions.some(input =>
+      input.dependency.repository.name === dependency.repository.name && input.dependency.release.id === dependency.release.id));
+    value.state.calls = [];
+    services.prepare = async () => {throw new Error('expired qualification must not be rerun');};
+    assert.equal((await execute()).status, 'unchanged');
+    assert.equal(value.writes().length, 0);
+    assert.equal(admissions.at(-1).stage, 'existing');
+  }
 });

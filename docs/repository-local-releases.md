@@ -221,7 +221,10 @@ shared 600-second process deadline with group cleanup. Required qualification
 and the owner model's original policy and review counts remain unchanged.
 
 Promotion uses the original successful qualification and exact owner closeout,
-checks effective branch protection, and requests protected rebase auto-merge.
+checks effective branch protection, and uses the normal protected rebase merge
+operation for an already `MERGEABLE/CLEAN` PR with `expectedHeadOid`.
+Required checks and human approvals remain mandatory; no administrative bypass
+is used. An uncertain merge response requires exact landing readback.
 `propose`, `off`, a draft, or `automation-hold` cancels automation-owned pending
 auto-merge. Failed qualification, unresolved review, stale bases, edited heads,
 and unavailable original evidence hold the proposal. An admitted successor
@@ -232,6 +235,19 @@ removing a hold, the repository owner must post this fresh, unedited exact comme
 ```text
 /repository-automation resume FULL_CURRENT_HEAD_SHA
 ```
+
+
+A completed candidate stays frozen while its base remains current. After the base
+advances, its authenticated closed epoch permits a fresh candidate and fresh
+qualification/review. If a branch update succeeded before the PR description
+update, the writer authenticates the described predecessor and actual successor
+independently, then finishes only the missing metadata update. Further base
+movement does not authorize another source transition during that recovery.
+Unknown source edits, altered metadata, or unavailable original evidence hold
+recovery. Branch updates use atomic expected-head checks; PR metadata uses
+before/after observations and has no claimed atomic conditional-edit guarantee.
+Historical closure/reopen and hold-label removal still require explicit owner
+resume; removing the hold alone does not grant authority.
 
 The owner input retains compact original preparation provenance, including every
 non-file byte and the original run, job, workflow, and artifact identities.

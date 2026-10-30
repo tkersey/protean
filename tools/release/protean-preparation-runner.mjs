@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {appendFileSync,mkdirSync,readFileSync,writeFileSync} from 'node:fs';
 import {join,resolve} from 'node:path';
+import {describedProposalSubject} from './protean-proposal.mjs';
 import {ProteanProposalClient} from './protean-proposal-github.mjs';
 import {GitHubReader,githubCommand} from './github.mjs';
 import {jobPermissions} from './app-token.mjs';
@@ -55,6 +56,8 @@ export async function planProteanPreparation({controlCommit,identity,native},{cl
   const source=await sourceReader(client);
   if(source.commit!==controlCommit)return {status:'held',reason:'Accepted main changed; observe the current source before preparation.'};
   const actor=await actorReader(identity,command),current=(await pulls(client)).find(value=>value.state==='open')??null;
+  if(current && describedProposalSubject(current.body).head!==current.head.sha)
+    return {status:'held',reason:'Complete the admitted successor metadata recovery before preparing another source.'};
   const frozen=await freeze(current,source,{client,command});
   const selected=await plan({source,client,command,native,actor,frozen});
   if(selected.status!=='prepare')return selected;
@@ -100,7 +103,7 @@ if(import.meta.main){
     mkdirSync(directory,{mode:0o700});result=await planProteanPreparation({controlCommit,identity,native});
     if(result.status==='ready'){
       writeFileSync(join(directory,'plan.json'),encodeRecord(result),{flag:'wx',mode:0o400});
-      writeFileSync(join(directory,'start.json'),encodeRecord({schema:'protean-preparation-start/v1',base:controlCommit,
+      writeFileSync(join(directory,preparationStartName(result.decisionSha256)),encodeRecord({schema:'protean-preparation-start/v1',base:controlCommit,
         runId:Number(process.env.GITHUB_RUN_ID),decisionSha256:result.decisionSha256}),{flag:'wx',mode:0o400});
       if(process.env.GITHUB_OUTPUT)appendFileSync(process.env.GITHUB_OUTPUT,`ready=true\nstart_name=${preparationStartName(result.decisionSha256)}\n`);
     }
@@ -112,7 +115,7 @@ if(import.meta.main){
     const generated=await generateProteanPreparation({plan,tool,compiler,outputDirectory:join(directory,'native'),runId:Number(process.env.GITHUB_RUN_ID)},
       {native});
     const name=preparationName(controlCommit,generated.result.candidate.head);
-    writeFileSync(join(directory,'preparation.json'),generated.bytes,{flag:'wx',mode:0o400});
+    writeFileSync(join(directory,name),generated.bytes,{flag:'wx',mode:0o400});
     if(process.env.GITHUB_OUTPUT)appendFileSync(process.env.GITHUB_OUTPUT,`name=${name}\n`);
     result={status:'prepared',base:controlCommit,head:generated.result.candidate.head};
   }

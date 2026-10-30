@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import test from 'node:test';
-import {proposalBranch, proposalMessage, proposalCommitOid} from './protean-proposal.mjs';
+import {proposalBranch, proposalDescription, proposalMessage, proposalCommitOid} from './protean-proposal.mjs';
 import {metadata} from './test-support.mjs';
 import {encodeRecord} from './encoding.mjs';
 import {currentProteanSource, appActor, storedProteanCandidate, preparationPulls, promotionRequirements,
@@ -50,6 +50,7 @@ async function fixture() {
   };
   const pull = {id: 52, number: 52, state: 'open', head: {ref: proposalBranch, sha: candidate.head, repo: {id: 1328996555}},
     base: {ref: 'main', repo: {id: 1328996555}}};
+  pull.body = proposalDescription(candidate).body; pull.title = `Prepare Protean ${candidate.version}`;
   let result = {status: 'absent'};
   const retire = retireProteanProposal({client, native, actor, command, readResult: async () => result});
   return {candidate, client, native, actor, values, tree, run, runs, command, pull,
@@ -149,4 +150,21 @@ test('original prepared candidate stays frozen before its first PR is created',a
   const f=await fixture(),readPreparation=async value=>{assert.deepEqual(value,{base});return {candidate:f.candidate};};
   assert.deepEqual(await frozenProteanCandidate(null,{commit:base},{readPreparation}),f.candidate);
   assert.equal(await frozenProteanCandidate(null,{commit:base},{readPreparation:async()=>null}),null);
+});
+
+
+test('retirement binds original source and closure independently of edited explanatory prose', async () => {
+  const f = await fixture();
+  const envelope = {schema: 'repository-review-result/v1', context: {repository: 'tkersey/protean', base,
+    head: f.candidate.head, tree: f.candidate.tree, pullNumber: 52}, status: 'blocked', reason: 'Original closed owner epoch.',
+    epochClosed: true, turn: 1, previousSha256: null, stateSha256: null, retainedEvidence: null};
+  f.setReview({status: 'blocked', bytes: Buffer.from(JSON.stringify(envelope)), run: {id: 20}, artifact: {id: 21}});
+  f.pull.body += 'Reviewed explanatory rationale.\n'; f.pull.title = 'Human explanatory title';
+  assert.equal((await f.retire()).review.runId, 20);
+});
+
+test('retirement cannot substitute an unrelated described subject for the observed branch', async () => {
+  const f = await fixture();
+  f.pull.body = f.pull.body.replace(`Head: \`${f.candidate.head}\``, `Head: \`${'f'.repeat(40)}\``);
+  await assert.rejects(f.retire(), /live branch differs/);
 });

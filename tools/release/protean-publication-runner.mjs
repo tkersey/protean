@@ -41,6 +41,21 @@ export async function publicationEnabled(client) {
   return mode?.value !== undefined && mode.value !== 'off' && publish?.value === 'true';
 }
 
+export async function admitPublicationUpstream(dependency, command = githubCommand, admit = admitPublishedRelease) {
+  assert.equal(dependency.repository.name, 'tkersey/kosmos');
+  const directory = mkdtempSync(join(tmpdir(), 'protean-upstream-publication-'));
+  try {
+    const kosmos = await admit({repository: 'tkersey/kosmos', releaseId: dependency.release.id,
+      outputDirectory: join(directory, 'kosmos')}, command);
+    assert.equal(kosmos.record.dependencies.length, 1);
+    const derived = kosmos.record.dependencies[0];
+    assert.equal(derived.repository.name, 'tkersey/horos');
+    const horos = await admit({repository: 'tkersey/horos', releaseId: derived.release.id,
+      outputDirectory: join(directory, 'horos')}, command);
+    return {kosmos, horos};
+  } finally {rmSync(directory, {recursive: true, force: true});}
+}
+
 export function publicationServices({controlDirectory, nativePath, compilerPath, identity, command = githubCommand}) {
   const root = realpathSync(controlDirectory), client = new ProteanProposalClient();
   const git = args => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], {cwd: root, encoding: 'utf8'}).trim();
@@ -77,7 +92,7 @@ export function publicationServices({controlDirectory, nativePath, compilerPath,
     const node = {name: 'node', version: process.versions.node, platform: `${process.platform}-${process.arch === 'x64' ? 'x86_64' : process.arch}`,
       sha256: sha256(readRegular(process.execPath, 256 * 1024 * 1024))};
     return {status: 'ready', ...sealProteanPublication({boundary, qualification, manifestBytes, admission, node, admitted, lockBytes, nativeLockBytes})};
-  }, verifyAttestation: async (path, record) => {
+  }, admitUpstream: ({dependency}) => admitPublicationUpstream(dependency, command), verifyAttestation: async (path, record) => {
     const verified = parseEvidenceJson(await command(attestationArguments(path, record)));
     assert.ok(Array.isArray(verified) && verified.length > 0, 'publication admission attestation missing');
   }, verifyPublished: async ({release, recordBytes}) => {
@@ -131,7 +146,7 @@ export async function publishPrepared(directory, services, publish = publishProt
     assert.deepEqual(current.recordBytes, recordBytes, 'original publication evidence or source changed');
     assert.deepEqual(current.payloads, payloads, 'qualified publication payload changed');
   };
-  return publish({recordBytes, payloads, admit, verifyPublished: services.verifyPublished});
+  return publish({recordBytes, payloads, admit, admitUpstream: services.admitUpstream, verifyPublished: services.verifyPublished});
 }
 
 if (import.meta.main) {

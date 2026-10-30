@@ -15,11 +15,11 @@ import {readProteanPreparation} from './protean-preparation-artifact.mjs';
 import {nativeCandidateBinding} from './protean-proposal.mjs';
 import {manifestOperations} from './protean-native-manifest.mjs';
 import {sourceManifest} from './release-observation.mjs';
-import {proposeProtean, promoteProtean, pauseProteanProposals} from './protean-proposal.mjs';
+import {proposeProtean, promoteProtean, pauseProteanProposals, recoverProposalMetadata} from './protean-proposal.mjs';
 import {createProteanPromotionAdmission} from './protean-promotion-admission.mjs';
 import {admitOwnerResume, reportAutomationStatus} from './proposal-authority.mjs';
 import {appActor, currentProteanSource, proteanBoundaryOperations, originalProteanQualification,
-  observationPages, preparationPulls, promotionRequirements, retireProteanProposal, frozenProteanCandidate} from './release-observation.mjs';
+  observationPages, preparationPulls, promotionRequirements, storedProteanCandidate, retireProteanProposal, frozenProteanCandidate} from './release-observation.mjs';
 
 function writerIdentity(identity) {
   assert.equal(identity.repository, 'tkersey/protean'); assert.equal(identity.repositoryId, 1328996555);
@@ -33,6 +33,10 @@ function reason(error) {
 
 export function automationOperations({client, command, native, actor}) {
   return {
+    recover: pull => recoverProposalMetadata({pull, actor, client,
+      readCandidate: head => storedProteanCandidate(head, {client, command, native, actor}),
+      admitRetirement: retireProteanProposal({client, command, native, actor}),
+      admitResume: value => admitOwnerResume(value, client)}),
     plan: (source,frozen=null) => proteanPreparationPlan({source,client,command,native,actor,frozen}),
     freeze: (pull,source) => frozenProteanCandidate(pull,source,{client,command}),
     preparation: selection => readProteanPreparation(selection,command),
@@ -95,6 +99,8 @@ export async function runProteanAutomation({controlCommit, identity = null, nati
   try {
     const pulls = await preparationPulls(client);
     currentPull = pulls.find(pull => pull.state === 'open') ?? null;
+    const recovery = await actions.recover(currentPull);
+    if (recovery !== null) {candidate = recovery.candidate; return finish(recovery.result);}
     const frozen=await actions.freeze(currentPull,source);
     const plan=await actions.plan(source,frozen);
     if(plan.status!=='prepare')return finish(plan);
