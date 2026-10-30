@@ -51,7 +51,7 @@ export function automationOperations({client, command, native, actor}) {
   };
 }
 
-export async function runProteanAutomation({controlCommit, identity = null, native}, {
+export async function runProteanAutomation({controlCommit, identity = null, native, configuredMode = 'off'}, {
   client = new ProteanProposalClient(), command = githubCommand,
   actorReader = appActor, sourceReader = currentProteanSource, pause = pauseProteanProposals,
   reportReview = reportProteanReview, reportStatus = reportAutomationStatus,
@@ -65,7 +65,8 @@ export async function runProteanAutomation({controlCommit, identity = null, nati
     try { pauses = await pause({actor, client}); }
     catch (error) { return {status: 'blocked', pauseVerified: false, reason: reason(error)}; }
   }
-  const mode = await automationMode(client), source = await sourceReader(client);
+  if (actor === null) assert.ok(['off', 'propose', 'promote'].includes(configuredMode), 'invalid configured automation mode');
+  const mode = actor === null ? configuredMode : await automationMode(client), source = await sourceReader(client);
   const pendingVersion = native.read(await sourceManifest(client, source.commit));
   const checks = [];
   if (actor !== null) {
@@ -77,7 +78,8 @@ export async function runProteanAutomation({controlCommit, identity = null, nati
       } catch (error) { checks.push({number: pull.number, status: 'blocked', reason: reason(error)}); }
     }
   }
-  const observed = {mode, source, pendingVersion, pauses, checks, pauseVerified: actor !== null};
+  const observed = {mode, modeSource: actor === null ? 'workflow configuration' : 'live repository variable',
+    source, pendingVersion, pauses, checks, pauseVerified: actor !== null};
   if (actor === null) {
     const releases = await observationPages(client, '/releases');
     return {...observed, status: mode === 'off' ? 'disabled' : 'blocked',
@@ -152,7 +154,7 @@ if (import.meta.main) {
   assert.equal(git(['status', '--porcelain=v1', '--untracked-files=no']), '', 'trusted control checkout changed');
   if (process.env.GITHUB_SHA) assert.equal(controlCommit, process.env.GITHUB_SHA);
   const identity = identityPath ? parseEvidenceJson(readRegular(resolve(identityPath), 1024 * 1024)) : null;
-  const result = await runProteanAutomation({controlCommit, identity, native: manifestOperations(resolve(toolPath),resolve(compilerPath))});
+  const result = await runProteanAutomation({controlCommit, identity, configuredMode: process.env.REPOSITORY_AUTOMATION || 'off', native: manifestOperations(resolve(toolPath),resolve(compilerPath))});
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY,
     `\nRepository automation observation\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\`\n`);
   process.stdout.write(`${JSON.stringify(result)}\n`);

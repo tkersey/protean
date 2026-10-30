@@ -164,8 +164,8 @@ pub fn prepare(c: Context, args: []const []const u8, build_owned: bool) !void {
     if (!std.fs.path.isAbsolute(args[1]) or !std.fs.path.isAbsolute(args[2]))
         return error.ExpectedAbsolutePath;
     const r = @import("refresh.zig").runner(c);
-    const owner = if (build_owned) try source.BuildOutput.acquire(r, args[1]) else null;
-    defer if (owner) |value| value.close(c.io);
+    const owner = try source.BuildOutput.acquire(r, args[1]);
+    defer owner.close(c.io);
     const commit = try clean(c, args[0], if (args.len == 4) args[3] else null);
     const parent = std.fs.path.dirname(args[1]) orelse return error.ExpectedAbsolutePath;
     const stage = try native.stageDirectory(c, parent);
@@ -173,10 +173,17 @@ pub fn prepare(c: Context, args: []const []const u8, build_owned: bool) !void {
         std.log.err("source staging cleanup failed: {s}", .{@errorName(err)});
     const snapshot = try source.prepare(r, args[0], stage);
     try equal(snapshot.commit, commit);
-    const record = try receipt(c, snapshot, args[2], try Compiler.observe(c, args[2]));
-    const archive = try source.readArchive(r, snapshot.archive);
+    var compiler = try source.CapturedCompiler.acquire(r, args[2], stage, c.environ);
+    defer compiler.close(c.io);
+    var selected = c;
+    selected.environ = &compiler.env;
+    const record = try receipt(selected, snapshot, compiler.path, .{
+        .sha256 = compiler.sha256,
+        .platform = source.compilerPlatform(),
+    });
+    const archive = try source.testedArchive(r, snapshot);
     _ = try clean(c, args[0], commit);
-    if (owner) |value| return value.retain(c.io, archive, record);
+    if (build_owned) return owner.retain(c.io, archive, record);
     try Dir.cwd().createDirPath(c.io, args[1]);
     const archive_path = try c.join(&.{ args[1], "source.tar" });
     const record_path = try c.join(&.{ args[1], "source.json" });
@@ -190,7 +197,12 @@ fn admit(c: Context, args: []const []const u8) ![]const u8 {
     if (args.len != 5) return error.ExpectedRootArchiveReceiptOutputZig;
     if (!std.fs.path.isAbsolute(args[3]) or !std.fs.path.isAbsolute(args[4]))
         return error.ExpectedAbsolutePath;
-    const bytes = try c.read(args[2], 4 << 20);
+    const bytes = source.readBounded(@import("refresh.zig").runner(c), args[2], 4 << 20) catch |err|
+        switch (err) {
+            error.InvalidSourceArchive => return error.InvalidFile,
+            error.SourceChanged => return error.InputChanged,
+            else => return err,
+        };
     const record = try std.json.parseFromSliceLeaky(Value, c.a, bytes, .{});
     const commit = try clean(c, args[0], try text(record, "commit"));
     const snapshot = try source.verify(
@@ -203,7 +215,20 @@ fn admit(c: Context, args: []const []const u8) ![]const u8 {
     );
     errdefer Dir.cwd().deleteTree(c.io, args[3]) catch |err|
         std.log.err("rejected source cleanup failed: {s}", .{@errorName(err)});
-    const actual = try receipt(c, snapshot, args[4], try Compiler.declared(record));
+    const parent = std.fs.path.dirname(args[3]) orelse return error.ExpectedAbsolutePath;
+    const stage = try native.stageDirectory(c, parent);
+    defer Dir.cwd().deleteTree(c.io, stage) catch |err|
+        std.log.err("compiler staging cleanup failed: {s}", .{@errorName(err)});
+    var compiler = try source.CapturedCompiler.acquire(
+        @import("refresh.zig").runner(c),
+        args[4],
+        stage,
+        c.environ,
+    );
+    defer compiler.close(c.io);
+    var selected = c;
+    selected.environ = &compiler.env;
+    const actual = try receipt(selected, snapshot, compiler.path, try Compiler.declared(record));
     try equal(bytes, actual);
     _ = try clean(c, args[0], commit);
     return actual;
@@ -358,4 +383,31 @@ test "build source replaces changed heads while immutable output preserves accep
         f.base, output, f.zig, old_commit,
     }, true));
     try equal(accepted, try c.fileDigest(path));
+}
+
+test "external receipt FIFOs and oversized files fail before source admission" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const c: Context = .{
+        .a = arena.allocator(),
+        .scratch = std.testing.allocator,
+        .io = std.testing.io,
+    };
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(c.io, ".", c.a);
+    const receipt_path = try c.join(&.{ root, "receipt" });
+    const output = try c.join(&.{ root, "output" });
+    _ = try native.command(c, &.{ "mkfifo", receipt_path }, 1024);
+    try std.testing.expectError(error.InvalidFile, admit(c, &.{
+        root, "unused-archive", receipt_path, output, "/unused-compiler",
+    }));
+    try Dir.cwd().deleteFile(c.io, receipt_path);
+    var file = try Dir.cwd().createFile(c.io, receipt_path, .{ .exclusive = true });
+    defer file.close(c.io);
+    try file.setLength(c.io, (4 << 20) + 1);
+    try std.testing.expectError(error.InvalidFile, admit(c, &.{
+        root, "unused-archive", receipt_path, output, "/unused-compiler",
+    }));
+    try std.testing.expect(!try native.exists(c, output));
 }

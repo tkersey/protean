@@ -56,6 +56,7 @@ jobs:
         if: always() && steps.native.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.writer.outputs.token || github.token }}
+          REPOSITORY_AUTOMATION: ${{ vars.REPOSITORY_AUTOMATION || 'off' }}
           APP_IDENTITY: ${{ steps.writer.outcome == 'success' && format('{0}/automation-app.json', runner.temp) || '' }}
         run: |
           args=("$GITHUB_WORKSPACE" "$RUNNER_TEMP/protean-refresh" "$(command -v zig)")

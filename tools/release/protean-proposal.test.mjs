@@ -88,7 +88,8 @@ function fixture(t, executablePath = null) {
     autoMerge: null, events: [], issueEvents: [], comments: [], owner: {id: 1, login: 'tkersey', type: 'User'}, admissions: [], retirements: [], resumes: [],
     protected: true, protection: {required_status_checks: {strict: true, checks: [{context: 'qualification', app_id: 123}]}},
     rules: [], autoMergeAllowed: true, rebaseAllowed: true, onRequest: null, onGraphql: null, failAfter: null, failBefore: null};
-  const reply = body => ({status: 200, body: structuredClone(body)});
+  const reply = body => ({status: 200, body: structuredClone(body?.head?.repo && body.base?.repo ?
+    {auto_merge: state.autoMerge === null ? null : {enabled_by: {id: actor.id, login: state.autoMerge.enabledBy?.login}}, ...body} : body)});
   const client = {
     async request(request) {
       const method = request.method ?? 'GET', path = request.path;
@@ -911,4 +912,28 @@ for (const change of ['missing', 'ambiguous', 'wrong actor'])
     else if (change === 'ambiguous') f.state.events.push({...structuredClone(transition), id: 'ANOTHER'});
     else transition.actor.login = 'unknown-human';
     await assert.rejects(lifecycle.recover(), /fresh unedited/); assert.equal(f.writes().length, 0);
+  });
+
+
+for (const operation of ['pause', 'promote']) for (const ownership of ['human', 'missing', 'contradictory', 'removed'])
+  test(`${operation} honors current REST auto merge ownership ${ownership} after the final GraphQL observation`, async t => {
+    const f = fixture(t); await f.propose(); f.state.mode = 'off';
+    f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+    let histories = 0, deciding = false, changed = false;
+    f.state.onGraphql = kind => {
+      if (kind === 'ProposalHistory' && ++histories === (operation === 'pause' ? 2 : 1)) deciding = true;
+    };
+    f.state.onRequest = request => {
+      if (!deciding || request.path !== '/pulls/1') return;
+      deciding = false; changed = true;
+      if (ownership === 'human') f.state.pulls[0].auto_merge = {enabled_by: {id: 123, login: 'human'}};
+      if (ownership === 'missing') f.state.pulls[0].auto_merge = undefined;
+      if (ownership === 'contradictory') f.state.pulls[0].auto_merge = {enabled_by: {id: 123, login: actor.login}};
+      if (ownership === 'removed') {f.state.pulls[0].auto_merge = null; f.state.autoMerge = null;}
+    };
+    f.state.calls = [];
+    const run = () => operation === 'pause' ? pauseProteanProposals({actor, client: f.options.client}) : f.promote();
+    if (ownership === 'removed') assert.deepEqual(await run(), operation === 'pause' ? [] : {status: 'disabled', number: 1});
+    else await assert.rejects(run, /unknown auto-merge owner/);
+    assert.equal(changed, true); assert.equal(f.writes().length, 0);
   });

@@ -421,6 +421,13 @@ async function successorProposal({client, candidate, actor, pull, timeline, bran
 
 function held(reason, pull) { return {status: 'held', reason, ...(pull ? {number: pull.number} : {})}; }
 
+function ownsCurrentAutoMerge(pull, actor) {
+  if (pull.auto_merge === null) return false;
+  assert.equal(pull.auto_merge?.enabled_by?.login, actor.login, 'cannot cancel unknown auto-merge owner');
+  assert.equal(pull.auto_merge.enabled_by.id, actor.id, 'cannot cancel unknown auto-merge owner');
+  return true;
+}
+
 export async function pauseProteanProposals({actor, client = new ProteanProposalClient()}) {
   await repository(client); identifier(actor.id);
   const results = [];
@@ -443,6 +450,7 @@ export async function pauseProteanProposals({actor, client = new ProteanProposal
     assert.equal(deciding.user?.id, actor.id); assert.equal(deciding.user?.login, actor.login);
     if (deciding.state !== 'open' || !requiresPause(deciding, await mode(client))) continue;
     assert.equal(deciding.node_id, latest.node_id);
+    if (!ownsCurrentAutoMerge(deciding, actor)) continue;
     await writeObserved(() => client.graphql(disableMerge, {input: {pullRequestId: deciding.node_id}}), async () => {
       const observed = await get(client, `/pulls/${pull.number}`);
       assert.equal((await history(client, observed)).autoMerge, null, 'auto-merge cancellation not observed');
@@ -583,7 +591,11 @@ export async function promoteProtean({candidate: input, number, actor, admitProm
   if (selectedMode !== 'promote') {
     if (timeline.autoMerge !== null && pull.state === 'open') {
       assert.equal(timeline.autoMerge.enabledBy?.login, actor.login, 'cannot cancel unknown auto-merge owner');
+      const deciding = await get(client, `/pulls/${number}`);
+      owned(deciding, actor);
+      assert.equal(deciding.node_id, pull.node_id);
       assert.notEqual(await mode(client), 'promote', 'promotion control changed; reobserve');
+      if (deciding.state !== 'open' || !ownsCurrentAutoMerge(deciding, actor)) return {status: 'disabled', number};
       await writeObserved(() => client.graphql(disableMerge, {input: {pullRequestId: pull.node_id}}), async () => {
         const current = await get(client, `/pulls/${number}`);
         assert.equal((await history(client, current)).autoMerge, null, 'auto-merge cancellation not observed');

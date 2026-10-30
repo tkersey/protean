@@ -25,6 +25,13 @@ The inspected baseline was commit `e4bbeaa1739905579f798c1bef5b72d9c4523d60`, pa
 
 The native dependency tool now exposes `refresh`, `coherence`, `source`, `source-build`, `source-manifest` and `verify-release-source` alongside setup and build-manifest verification. The refresh uses native semantic manifest parsing and the existing authenticated source admission.
 
+Native source admission opens regular files without blocking on FIFOs and checks
+raw and PAX sizes before iterator arithmetic. Output exclusion belongs to the
+opened directory, so alternate path spellings share the same lock. Replacement
+removes the old receipt before publishing new archive bytes. Compiler execution
+and its recorded digest use the same captured executable; native Zig library
+discovery retains the original installation and explicit compiler environment.
+
 `.github/workflows/zig.yml`, `.github/CI.md`, and current repository instructions remain authoritative for native, placement, downstream, retained-runtime, source, and other qualification. Keep package versions separate from application contracts, protocol, ABI, and state formats.
 
 ## Repository-local discovery
@@ -108,6 +115,19 @@ Once qualification starts, freeze the candidate. New upstreams become later work
 Actuating/CAS retain review ownership: approved model/reasoning parity, original receipts, full auxiliary inventory, applicable focused-file reviews, adjudication, and five consecutive credited standard reviews on an unchanged candidate. Any missing unattended execution or authenticated closeout interface is an explicit implementation dependency. Do not implement a second review engine, local clean counter, or substitute label/comment/check-title verdict.
 
 Protected automatic merge requires explicit enablement, effective protections, an unchanged admissible subject, allowed generated diff, complete qualification, complete credited review, and resolved threads. Required human approvals remain required unless the owner explicitly changes their policy. No direct `main` pushes or administrative bypass.
+
+Observer, start marker, and check reporter use the same original review subject.
+Missing evidence preserves the durable invocation identity across repeated polls.
+Recovering a failed or stale check display requires the authenticated original
+pending result; a terminal owner result cannot reopen. The owner process deadline
+includes elapsed setup and leaves one minute within both the eight-minute step
+and ten-minute job limits for termination, diagnostics, and retention.
+
+Without an App credential, automation reads the workflow's configured mode and
+reports read-only source and release observations without querying the Variables
+API. Cancellation remains unverified, and publication reports the missing
+credential before credentialed control reads. Enabled writers reobserve live
+controls and the currently observed auto-merge owner before cancellation.
 
 Preserve every existing qualification lane, supported platform, artifact identity comparison, retained-runtime check, first-attempt/original-trigger rule, and 600-second elapsed budget from workflow creation. New jobs stay within ten minutes without resetting product clocks. Missing, skipped, neutral, diagnostic, expired, wrong-subject, interrupted, or timed-out results do not pass. Do not retry a failed product subject until green or create empty commits to manufacture another admissible attempt.
 
