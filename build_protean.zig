@@ -1190,10 +1190,7 @@ const BuildGraph = struct {
                 "Qualify native " ++ group[0] ++ " contracts",
             );
             const tests = s.native_graph.testModule(checks, suite);
-            if (comptime std.mem.eql(u8, group[0], "tasks")) {
-                if (linuxX86(s.b.graph.host))
-                    tests.use_llvm = false;
-            }
+            if (linuxX86(s.b.graph.host)) tests.use_llvm = false;
             s.b.step(
                 "build-native-owner-" ++ group[0] ++ "-check",
                 "Build the retained native " ++ group[0] ++ " test executable",
