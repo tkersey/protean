@@ -21,7 +21,9 @@ export async function discoverKosmosRelease(selected,{versionPreparation=false,r
       const value=await admit({repository:'tkersey/kosmos',releaseId:id,outputDirectory:join(directory,'release')},command);
       assert.equal(value.id,id);assert.equal(value.record.repository.name,'tkersey/kosmos');
       assert.equal(value.recordSha256,sha256(value.payloads.get('release.json')??encodeRecord(value.record)));
-      return {id:value.id,record:value.record,recordSha256:value.recordSha256,source:value.record.source};
+      const boundary=value.payloads.get('publication-boundary.json');
+      return {id:value.id,record:value.record,recordSha256:value.recordSha256,source:value.record.source,
+        payloads:new Map(boundary===undefined?[]:[['publication-boundary.json',Buffer.from(boundary)]])};
     }finally{rmSync(directory,{recursive:true,force:true});}
   };
   let successor;
@@ -35,10 +37,6 @@ export async function discoverKosmosRelease(selected,{versionPreparation=false,r
   }
   if(successor?.source.commit===selected.commit)assert.equal(successor.source.version,selected.version);
   if(successor===null)return null;
-  if(successor.source.commit!==selected.commit){
-    assert.equal(successor.record.compatibility.disposition,'compatible','upstream breaking migration requires ordinary implementation');
-    assert.notEqual(successor.record.compatibility.impact,'major','upstream major migration requires ordinary implementation');
-  }
   const before=parseVersion(selected.version),after=parseVersion(successor.source.version);
   assert.ok(after.some((part,index)=>part>before[index]&&after.slice(0,index).every((value,i)=>value===before[i]))||
     after.every((part,index)=>part===before[index]),'upstream publication would downgrade dependency');
@@ -47,8 +45,9 @@ export async function discoverKosmosRelease(selected,{versionPreparation=false,r
 
 export function mechanicalVersion(boundary,upstreamChanged){
   if(!upstreamChanged)return boundary.version;
-  if(boundary.record.baseline===null)return boundary.version;
-  return prepareVersion({published:boundary.record.baseline.source.version,pending:boundary.version,declarations:['patch'],publicationRequired:true});
+  const published=boundary.record.baseline?.source.version??boundary.record.bootstrap?.initialVersion;
+  assert.ok(published,'authenticated publication or bootstrap version required');
+  return prepareVersion({published,pending:boundary.version,declarations:['patch'],publicationRequired:true});
 }
 
 export async function proteanPreparationPlan({source,client,native,actor,frozen=null,command=githubCommand},{

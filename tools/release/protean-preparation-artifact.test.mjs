@@ -4,7 +4,9 @@ import {mkdtempSync, mkdirSync, writeFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {serializePreparation, readPreparationBytes, preparationName, readProteanPreparation, preparationWorkflow, preparationJob, compactProteanPreparation, hydrateProteanPreparation} from './protean-preparation-artifact.mjs';
-import {mechanicalPaths, nativeCandidateBinding, proposalMessage, proposalCommitOid} from './protean-proposal.mjs';
+import {mechanicalPaths, nativeCandidateBinding, proposalMessage, proposalCommitOid, proposalDescription} from './protean-proposal.mjs';
+import {proteanBoundaryOperations} from './release-observation.mjs';
+import {createHash} from 'node:crypto';
 import {metadata} from './test-support.mjs';
 import {encodeRecord, sha256} from './encoding.mjs';
 
@@ -130,6 +132,29 @@ test('compact original provenance restores artifact identity from exact Git sour
   const restored=hydrateProteanPreparation(compact,original.candidate.files,{base:f.base,head:original.candidate.head});
   assert.deepEqual(restored.bytes,original.bytes);assert.equal(restored.artifact.digest,original.artifact.digest);
   assert.deepEqual(restored.derivedAdmissionBytes,original.derivedAdmissionBytes);
+});
+
+test('native version classification retains explanatory prose and authenticates exact retained source',async t=>{
+  const f=remoteFixture(t),original=await f.read(),compact=compactProteanPreparation(original),candidate=original.candidate;
+  const lock=candidate.files.get('conformance/protean/dependencies.lock.json');
+  let baseLock=lock;
+  const client={request:async({path})=>{
+    assert.ok(path===`/contents/conformance/protean/dependencies.lock.json?ref=${candidate.head}`||
+      path===`/contents/conformance/protean/dependencies.lock.json?ref=${candidate.base}`);
+    const bytes=path.endsWith(candidate.base)?baseLock:lock;
+    return {status:200,body:{type:'file',encoding:'base64',content:bytes.toString('base64'),
+      sha:createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')}};
+  }};
+  const actor={id:123,login:'fixture[bot]'},classify=proteanBoundaryOperations({client,actor}).classifyVersionPreparation;
+  const input={subject:{base:candidate.base,head:candidate.head,tree:candidate.tree},
+    pull:{user:actor,body:proposalDescription(candidate).body+'\nOperator explanation retained.'},
+    context:{preparation:compact},baseManifestBytes:Buffer.from('previous manifest'),
+    manifestBytes:candidate.files.get('build.zig.zon'),originalCommits:[{message:candidate.message}]};
+  assert.deepEqual(await classify(input),{versionOnly:true});
+  await assert.rejects(classify({...input,pull:{...input.pull,body:input.pull.body.replace(proposalDescription(candidate).marker,'<!-- repository-proposal/v1 '+ 'f'.repeat(64)+' -->')}}),/binding changed/);
+  await assert.rejects(classify({...input,manifestBytes:Buffer.from('substituted manifest')}));
+  baseLock=Buffer.from('previous dependency lock');
+  assert.deepEqual(await classify(input),{versionOnly:false});
 });
 
 for(const[name,change]of[

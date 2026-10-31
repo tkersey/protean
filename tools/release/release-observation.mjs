@@ -140,7 +140,7 @@ export function proteanBoundaryOperations({client = new ProteanProposalClient(),
       for (const path of mechanicalPaths) files.set(path, path === 'build.zig.zon' ? manifestBytes : await sourceFile(client, subject.head, path));
       const retained = hydrateProteanPreparation(context.preparation, files, subject), candidate = retained.candidate;
       assert.equal(candidate.tree, subject.tree); assert.equal(originalCommits[0].message, candidate.message);
-      assert.equal(pull.body, proposalDescription(candidate).body, 'native preparation description changed');
+      assert.ok(pull.body.startsWith(`${proposalDescription(candidate).marker}\n`), 'native preparation binding changed');
       const baseLock = await sourceFile(client, subject.base, 'conformance/protean/dependencies.lock.json');
       return {versionOnly: !baseManifestBytes.equals(manifestBytes) && baseLock.equals(files.get('conformance/protean/dependencies.lock.json'))};
     },
@@ -231,4 +231,24 @@ export async function frozenProteanCandidate(pull,source,{client,command=githubC
   if(!frozen)return null;
   assert.equal(candidate.base,source.commit,'active original candidate has a stale base; close its owner epoch before successor preparation');
   return candidate;
+}
+
+export function admitUnproposedProtean({client, native, actor, command = githubCommand, readResult = readReviewResult,
+  readCandidate = head => storedProteanCandidate(head, {client, native, actor, command})}) {
+  return async ({head}) => {
+    const previousCandidate = await readCandidate(head);
+    assert.equal(previousCandidate.head, head, 'unknown branch source differs from original preparation');
+    const observe = async () => {
+      const values = await preparationPulls(client);
+      assert.ok(!values.some(pull => pull.state === 'open' || pull.head.sha === head),
+        'candidate has proposal history; preserve its original owner epoch');
+      assert.equal((await observationPages(client, `/commits/${head}/pulls`)).length, 0,
+        'candidate has proposal history; preserve its original owner epoch');
+      const result = await readResult({repository: 'tkersey/protean', base: previousCandidate.base, head,
+        tree: previousCandidate.tree, purpose: 'pull'}, command);
+      assert.equal(result.status, 'absent', 'original owner invocation must be recovered and closed before branch replacement');
+    };
+    await observe();
+    return {unproposed: true, previousCandidate};
+  };
 }

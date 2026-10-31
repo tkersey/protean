@@ -178,10 +178,7 @@ async function discover(reader, admit, root, selected, releaseId, versionDecisio
   if(frozen!==null)assert.equal(successor.recordSha256,frozen.kosmosRecordSha256,'frozen upstream record changed');
   assert.ok(compareVersion(successor.source.version,selected.version)>=0,'upstream version downgrade');
   const changed=successor.source.commit!==selected.commit;
-  if(changed){
-    assert.equal(successor.record.compatibility.disposition,'compatible','upstream breaking migration requires ordinary implementation');
-    assert.notEqual(successor.record.compatibility.impact,'major','upstream major migration requires ordinary implementation');
-  }else assert.equal(successor.source.version,selected.version);
+  if(!changed)assert.equal(successor.source.version,selected.version);
   return {...successor,changed};
 }
 

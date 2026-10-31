@@ -1,3 +1,4 @@
+import {mechanicalVersion} from './protean-preparation-plan.mjs';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import test from 'node:test';
@@ -289,4 +290,16 @@ test('source movement during boundary observation prevents publication', async (
     if (path === '/git/ref/heads/main' && ++reads === 2) value.setMain(value.root.sha);
   };
   await assert.rejects(value.run(), /source changed/);
+});
+
+for (const pending of ['2.5.0', '2.6.0']) test('bootstrap dependency candidate includes its required version from ' + pending, async () => {
+  const value = fixture(); value.addChange({version: pending}); const bootstrap = value.bootstrap('2.5.0');
+  const original = await value.run({bootstrap: bootstrap.subject});
+  assert.equal(mechanicalVersion(original, false), pending);
+  const version = mechanicalVersion(original, true);
+  assert.equal(version, pending === '2.5.0' ? '2.5.1' : pending);
+  value.addChange({version, impact: 'patch'});
+  const landed = await value.run({bootstrap: bootstrap.subject});
+  assert.equal(landed.version, version); assert.equal(landed.status, 'ready');
+  assert.equal(mechanicalVersion(landed, false), version);
 });

@@ -57,7 +57,11 @@ contracts together. The shared metadata helper checks their correspondence and
 records the selected target, optimization, compiler/library identity, source
 locks, storage profile, SQLite flags, and license notices. Cross-compiled target
 artifacts are never executed to produce build metadata. The public API and the
-in-repository build share this implementation and the target's static C library.
+in-repository product share this implementation and the same native module.
+Linux musl products compile the SQLite and native C sources with the executable
+and link the optimized hash primitives from a static library. macOS products
+and repository test roots retain the shared static C library. Both arrangements
+preserve the target, C flags, translated headers and native input admission.
 
 See `test/consumers/adaptive/build.zig` for a complete downstream recipe:
 

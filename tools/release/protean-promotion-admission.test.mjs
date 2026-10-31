@@ -16,7 +16,7 @@ const qualificationBytes = Buffer.from('accepted qualification workflow');
 const person = {name: 'Release', email: 'release@example.test', date: '2026-10-30T00:00:00Z'};
 const file = bytes => ({type: 'file', encoding: 'base64', content: bytes.toString('base64')});
 
-async function fixture() {
+async function fixture(reviewImpact = versionPreparationImpact) {
   const upstream = proteanFixture().admitted[1];
   const candidate = {base, baseTree: 'd'.repeat(40), tree, version: '1.0.1', author: person, committer: person,
     files: new Map(mechanicalPaths.map(path => [path, Buffer.from('native generated fixture ' + path)])),
@@ -77,7 +77,7 @@ async function fixture() {
     const body = replies.get(args[1]); return Buffer.isBuffer(body) ? Buffer.from(body) : Buffer.from(JSON.stringify(body));
   };
   const source = await admitProteanQualification({runId: 17, commit: candidate.head, tree, event: 'pull_request'}, command);
-  const body = impactBlock(versionPreparationImpact);
+  const body = impactBlock(reviewImpact);
   const context = {repository, pullNumber: 42, base, head: candidate.head, tree, impact: impactInput(body, base, candidate.head),
     qualification: {runId: 17, workflow: source.workflow, evidenceSha256: sha256(source.evidence), originalEvidence: source.evidence.toString('base64')},
     acceptedRequirements: expected.acceptedRequirements};
@@ -298,6 +298,18 @@ for (const [name, mutate] of [
   ['changed original qualification workflow', v => {v.replies.set(`repos/${repository}/contents/.github/workflows/zig.yml?ref=${v.candidate.head}`, file(Buffer.from('changed')));}],
 ]) test(`landing refuses ${name}`, async () => {
   const value = await fixture(); value.merged(); mutate(value); await assert.rejects(value.land());
+});
+
+for (const disposition of ['compatible', 'breaking']) test(`promotion refuses reviewed major ${disposition} impact`, async () => {
+  const value = await fixture({...versionPreparationImpact, impact: 'major', disposition});
+  await assert.rejects(value.promote(), /reviewed (major|breaking) migration/);
+});
+
+test('promotion preserves original impact admission after explanatory prose changes', async () => {
+  const value = await fixture();
+  value.state.pull.body += '\nReviewed operational explanation.\n';
+  const result = await value.promote();
+  assert.deepEqual(result.record.impact, value.context.impact);
 });
 
 for (const field of ['pullNumber', 'bootstrap']) test(`promotion rejects original owner evidence with wrong ${field}`, async () => {

@@ -170,7 +170,8 @@ const BuildGraph = struct {
     native_horos: *std.Build.Module = undefined,
     native_protean: *std.Build.Module = undefined,
     native_kosmos: *std.Build.Module = undefined,
-    public_environment: *std.Build.Module = undefined,
+    archive_environment: *std.Build.Module = undefined,
+    product_environment: *std.Build.Module = undefined,
     checked_kosmos: *std.Build.Module = undefined,
     checked_environment: *std.Build.Module = undefined,
     native_suite: *std.Build.Module = undefined,
@@ -727,6 +728,7 @@ const BuildGraph = struct {
             s.native_admission,
             s.sqlite_source,
             &s.native_guard.step,
+            .archive,
         );
         // Host-default Linux packaging selects musl. Explicit unsupported target
         // requests are rejected by the public helper before creating emitters.
@@ -792,7 +794,7 @@ const BuildGraph = struct {
                 }),
             );
         }
-        s.public_environment = if (host_target) s.host_environment else nativeEnvironment(
+        s.archive_environment = if (host_target) s.host_environment else nativeEnvironment(
             s.b,
             s.native_target,
             s.optimize,
@@ -804,7 +806,23 @@ const BuildGraph = struct {
             s.native_admission,
             s.sqlite_source,
             &s.native_guard.step,
+            .archive,
         );
+        s.product_environment = if (linuxX86(s.native_target) and
+            s.native_target.result.abi == .musl) nativeEnvironment(
+            s.b,
+            s.native_target,
+            s.optimize,
+            s.native_kosmos,
+            s.native_data,
+            s.native_contracts,
+            s.native_horos,
+            s.native_protean,
+            s.native_admission,
+            s.sqlite_source,
+            &s.native_guard.step,
+            .{ .direct_c = s.archive_environment.import_table.get("native_c").? },
+        ) else s.archive_environment;
         // Executed native checks use the delivered ABI when it runs on this
         // host. This also shares its C library instead of compiling a GNU-only
         // SQLite copy solely for tests of a musl product.
@@ -819,7 +837,7 @@ const BuildGraph = struct {
             s.native_graph.contracts = s.native_contracts;
         }
         s.checked_kosmos = if (native_on_host) s.native_kosmos else s.kosmos;
-        s.checked_environment = if (native_on_host) s.public_environment else s.host_environment;
+        s.checked_environment = if (native_on_host) s.archive_environment else s.host_environment;
     }
 
     fn workspaceGeneral(s: *BuildGraph) void {
@@ -990,7 +1008,7 @@ const BuildGraph = struct {
         s.b.modules.put(
             s.b.allocator,
             s.b.dupe("protean_native"),
-            s.public_environment,
+            s.product_environment,
         ) catch @panic("out of memory");
         s.b.modules.put(
             s.b.allocator,
@@ -1016,7 +1034,7 @@ const BuildGraph = struct {
             .horos = s.horos,
             .data = s.data,
             .contracts = s.contracts,
-            .native = s.public_environment,
+            .native = s.product_environment,
             .native_data = s.native_data,
             .native_contracts = s.native_contracts,
             .native_protean = s.native_protean,
@@ -1413,6 +1431,7 @@ fn nativeEnvironment(
     admission: *std.Build.Module,
     sqlite_source: std.Build.LazyPath,
     gate: *std.Build.Step,
+    compilation: union(enum) { archive, direct_c: *std.Build.Module },
 ) *std.Build.Module {
     const options = b.addOptions();
     options.addOption(
@@ -1424,17 +1443,18 @@ fn nativeEnvironment(
     options.addOption([]const u8, "host_version", @import("build.zig.zon").version);
     // The exact admitted 0.17 compiler still supplies build-time translate-c.
     // Keep translation bound to that target/compiler tuple; @cImport is gone.
-    const translated = b.addTranslateC(.{
-        .root_source_file = b.path("runtime/native/native_c.h"),
-        .target = target,
-        .optimize = optimize,
-    });
-    translated.addIncludePath(sqlite_source);
-    translated.step.dependOn(gate);
-    // C has a stable ABI here. Compile the large SQLite translation unit once
-    // for this target, rather than again inside every executable and test root.
-    const translated_module = translated.createModule();
-    const c_library = nativeLibrary(b, target, optimize, sqlite_source, gate);
+    const translated_module = switch (compilation) {
+        .archive => nativeTranslatedModule(b, target, optimize, sqlite_source, gate),
+        .direct_c => |module| module,
+    };
+    const c_library = nativeLibrary(
+        b,
+        target,
+        optimize,
+        sqlite_source,
+        gate,
+        compilation == .archive,
+    );
     const module = b.createModule(.{
         .root_source_file = b.path("runtime/native/root.zig"),
         .target = target,
@@ -1453,7 +1473,25 @@ fn nativeEnvironment(
     });
     module.addOptions("native_options", options);
     module.linkLibrary(c_library);
+    if (compilation == .direct_c) nativeCSourceFiles(b, module, sqlite_source, optimize);
     return module;
+}
+
+fn nativeTranslatedModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    sqlite_source: std.Build.LazyPath,
+    gate: *std.Build.Step,
+) *std.Build.Module {
+    const translated = b.addTranslateC(.{
+        .root_source_file = b.path("runtime/native/native_c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    translated.addIncludePath(sqlite_source);
+    translated.step.dependOn(gate);
+    return translated.createModule();
 }
 
 // Keep nested Node qualifiers on the build's selected toolchain and prefix.
@@ -1498,6 +1536,7 @@ fn nativeLibrary(
     optimize: std.lang.Optimize,
     sqlite_source: std.Build.LazyPath,
     gate: *std.Build.Step,
+    include_c: bool,
 ) *std.Build.Step.Compile {
     const c_module = b.createModule(.{
         .root_source_file = b.path("runtime/native/hash.zig"),
@@ -1506,23 +1545,32 @@ fn nativeLibrary(
         .strip = optimize != .debug,
         .link_libc = true,
     });
-    c_module.addIncludePath(sqlite_source);
-    c_module.addCSourceFile(.{
-        .file = sqlite_source.path(b, "sqlite3.c"),
-        .flags = @import("build_native.zig").sqliteFlags(optimize),
-    });
-    c_module.addCSourceFile(
-        .{
-            .file = b.path("runtime/native/native_c.c"),
-            .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" },
-        },
-    );
+    if (include_c) nativeCSourceFiles(b, c_module, sqlite_source, optimize);
     const c_library = b.addLibrary(.{
-        .name = "protean-native-c",
+        .name = if (include_c) "protean-native-c" else "protean-native-hash",
         .linkage = .static,
         .root_module = c_module,
         .use_llvm = true,
     });
     c_library.step.dependOn(gate);
     return c_library;
+}
+
+fn nativeCSourceFiles(
+    b: *std.Build,
+    module: *std.Build.Module,
+    sqlite_source: std.Build.LazyPath,
+    optimize: std.lang.Optimize,
+) void {
+    module.addIncludePath(sqlite_source);
+    module.addCSourceFile(.{
+        .file = sqlite_source.path(b, "sqlite3.c"),
+        .flags = @import("build_native.zig").sqliteFlags(optimize),
+    });
+    module.addCSourceFile(
+        .{
+            .file = b.path("runtime/native/native_c.c"),
+            .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" },
+        },
+    );
 }

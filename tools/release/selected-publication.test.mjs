@@ -55,3 +55,30 @@ test('unsupported upstream repository is rejected before discovery', async () =>
   const f = fixture(); f.input.repository = 'tkersey/protean';
   await assert.rejects(() => admitSelectedPublication(f.input, () => assert.fail('unexpected network'), f.admit));
 });
+
+for (const position of ['before', 'after']) test('unrelated future publication schema preserves selected admission ' + position, async () => {
+  const f = fixture(), future = {...metadata('horos'), schema: 'repository-release/v2'};
+  future.source.commit = 'f'.repeat(40);
+  const bytes = encodeRecord(future), other = {id: 5, draft: false, prerelease: false};
+  if (position === 'before') f.releases.unshift(other); else f.releases.push(other);
+  const command = async args => {
+    if (args[1] === 'repos/tkersey/horos/releases/5/assets?per_page=100&page=1')
+      return Buffer.from(JSON.stringify([{id: 6, name: 'release.json', size: bytes.length, digest: 'sha256:' + sha256(bytes)}]));
+    if (args[1] === 'repos/tkersey/horos/releases/assets/6') return bytes;
+    return f.command(args);
+  };
+  assert.equal(await admitSelectedPublication(f.input, command, f.admit), f.admitted);
+  assert.deepEqual(f.seen.map(value => value.releaseId), [3]);
+});
+
+test('future schema claiming selected source still fails before admission', async () => {
+  const f = fixture(), bytes = encodeRecord({...metadata('horos'), schema: 'repository-release/v2'});
+  const command = async args => {
+    if (args[1] === 'repos/tkersey/horos/releases/3/assets?per_page=100&page=1')
+      return Buffer.from(JSON.stringify([{id: 4, name: 'release.json', size: bytes.length, digest: 'sha256:' + sha256(bytes)}]));
+    if (args[1] === 'repos/tkersey/horos/releases/assets/4') return bytes;
+    return f.command(args);
+  };
+  await assert.rejects(() => admitSelectedPublication(f.input, command, f.admit));
+  assert.equal(f.seen.length, 0);
+});

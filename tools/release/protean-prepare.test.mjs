@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {attachCompatibility} from './compatibility-test-support.mjs';
 import {execFileSync} from 'node:child_process';
 import {mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, chmodSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -51,6 +52,7 @@ function fixture(t, selectedPublished = false) {
     records.set(`tkersey/${name}`, record);
   }
   const record = records.get('tkersey/kosmos');
+  const compatibilityPayloads=attachCompatibility(record,selected);
   const state = {calls: [], admissions: [], selected, mutate: null, sourceChange: false, badManifest: false,
     extraSource: false, missingOutput: false, wrongMode: false, badArchive: false, forgedDerived: false};
   const options = {
@@ -64,7 +66,7 @@ function fixture(t, selectedPublished = false) {
       writeFileSync(join(outputDirectory,'release.json'),bytes);
       writeFileSync(join(outputDirectory,'source.tar'),state.badArchive ? 'corrupt' : archive);
       return {id:releaseId,record:original,recordSha256:sha256(bytes),
-        payloads:new Map([['source.tar',archive]]),paths:new Map([['release.json',join(outputDirectory,'release.json')],['source.tar',join(outputDirectory,'source.tar')]]),
+        payloads:new Map([['source.tar',archive],...(repository==='tkersey/kosmos'?compatibilityPayloads:[])]),paths:new Map([['release.json',join(outputDirectory,'release.json')],['source.tar',join(outputDirectory,'source.tar')]]),
         admissionVerification:Buffer.from('test-only authentication')};
     },
     async cloneRepository({repository,commit,destination}) {
@@ -101,7 +103,7 @@ function fixture(t, selectedPublished = false) {
   const input=()=>({base,baseTree,tool:{path:executable,sha256:executableSha256,sourceCommit:base},
     compiler:{path:executable,sha256:executableSha256,sourceCommit:base},outputDirectory:join(root,`output-${counter++}`),
     versionDecision:decision(),admitVersionDecision:async({decisionBytes})=>sha256(decisionBytes),author:{name:'Protean Automation',email:'fixture@example.invalid'}});
-  return {root,state,record,head,selected,base,baseTree,options,input,decision,
+  return {root,state,record,head,selected,base,baseTree,options,input,decision,git,upstream,compatibilityPayloads,
     prepare:(changes={},overrides={})=>prepareProtean({...input(),...changes},{...options,...overrides})};
 }
 
@@ -213,5 +215,29 @@ test('native generation consumes exactly the approved Kosmos and derived Horos d
 test('native generation rejects changed bytes under the frozen release identity before refresh',async t=>{
   const f=fixture(t),decision=f.decision();decision.kosmosRecordSha256='f'.repeat(64);
   await assert.rejects(f.prepare({versionDecision:decision}),/frozen upstream record changed/);
+  assert.deepEqual(f.state.calls,['source-manifest']);
+});
+
+test('native preparation blocks a frozen patch whose predecessor crossed a breaking boundary',async t=>{
+  const f=fixture(t),previous=structuredClone(f.record),name=previous.repository.name.split('/')[1];
+  previous.source.version='9.0.0';previous.source.packageIdentity=`${name}-9.0.0-${'a'.repeat(44)}`;previous.tag='v9.0.0';
+  previous.compatibility.impact='major';previous.compatibility.disposition='breaking';
+  const previousPayloads=attachCompatibility(previous,f.selected),previousBytes=encodeRecord(previous);
+  writeFileSync(join(f.upstream,'README.md'),'compatible patch after breaking publication\n');
+  f.git(f.upstream,['add','.']);f.git(f.upstream,['commit','--quiet','-m','Compatible patch']);
+  Object.assign(f.record.source,{commit:f.git(f.upstream,['rev-parse','HEAD']),tree:f.git(f.upstream,['rev-parse','HEAD^{tree}']),
+    version:'9.0.1',packageIdentity:`${name}-9.0.1-${'a'.repeat(44)}`});f.record.tag='v9.0.1';
+  Object.assign(f.record.qualification.run,{commit:f.record.source.commit,tree:f.record.source.tree});
+  Object.assign(f.record.review.landing,{commit:f.record.source.commit,tree:f.record.source.tree});
+  const payloads=attachCompatibility(f.record,previous.source.commit,{baseline:{releaseId:6,recordSha256:sha256(previousBytes),source:previous.source}});
+  for(const [name,bytes] of payloads)f.compatibilityPayloads.set(name,bytes);
+  const admit=f.options.admitPublishedRelease;
+  f.options.admitPublishedRelease=async request=>{
+    const value=await admit(request);
+    if(request.releaseId!==6)return value;
+    writeFileSync(value.paths.get('release.json'),previousBytes);
+    return {...value,id:6,record:previous,recordSha256:sha256(previousBytes),payloads:new Map([...value.payloads,...previousPayloads])};
+  };
+  await assert.rejects(f.prepare(),/breaking migration/);
   assert.deepEqual(f.state.calls,['source-manifest']);
 });

@@ -45,7 +45,7 @@ if (operation === 'key') {
     files.add(file);
     if (!file.endsWith('.zig')) continue;
     const source = readFileSync(file, 'utf8');
-    const calls = [...source.matchAll(/@(import|embedFile)\s*\(\s*"([^"\\]*)"\s*\)/g)];
+    const calls = [...source.matchAll(/@(import|embedFile)\s*\(\s*"([^"\\]*)"\s*,?\s*\)/g)];
     if (calls.length !== [...source.matchAll(/@(import|embedFile)\b/g)].length) conservative = true;
     for (const [, kind, name] of calls) {
       const relative = posix.normalize(posix.join(dirname(file), name));

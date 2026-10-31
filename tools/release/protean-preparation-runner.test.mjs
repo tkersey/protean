@@ -5,6 +5,7 @@ import {createHash} from 'node:crypto';
 import {jobPermissions} from './app-token.mjs';
 import {encodeRecord,sha256} from './encoding.mjs';
 import {metadata} from './test-support.mjs';
+import {attachCompatibility} from './compatibility-test-support.mjs';
 import {discoverKosmosRelease,proteanPreparationPlan,mechanicalVersion} from './protean-preparation-plan.mjs';
 import {planProteanPreparation,priorPreparationAttempt,preparationStartName,generateProteanPreparation} from './protean-preparation-runner.mjs';
 
@@ -52,10 +53,10 @@ for(const key of ['role','permissions','expiresAt'])test(`preparation refuses in
   const f=fixture();f.input.identity[key]=key==='role'?'writer':key==='permissions'?{}:'2000-01-01T00:00:00Z';
   await assert.rejects(f.run());assert.deepEqual(f.state.calls,[]);
 });
-test('prospective mechanical impact bumps only from admitted publication and preserves pending higher version',()=>{
+test('prospective mechanical impact uses admitted publication or bootstrap and preserves pending higher version',()=>{
   const b={version:'9.1.0',record:{baseline:{source:{version:'9.1.0'}}}};
   assert.equal(mechanicalVersion(b,true),'9.1.1');assert.equal(mechanicalVersion(b,false),'9.1.0');
-  b.version='10.0.0';assert.equal(mechanicalVersion(b,true),'10.0.0');b.record.baseline=null;assert.equal(mechanicalVersion(b,true),'10.0.0');
+  b.version='10.0.0';assert.equal(mechanicalVersion(b,true),'10.0.0');b.record.baseline=null;b.record.bootstrap={initialVersion:'9.1.0'};assert.equal(mechanicalVersion(b,true),'10.0.0');
 });
 test('native own manifest and Git-authenticated selected lock decide prospective dependency preparation',async()=>{
   const selected={commit:'e'.repeat(40),tree:'f'.repeat(40),version:'1.0.0'};
@@ -73,7 +74,8 @@ test('native own manifest and Git-authenticated selected lock decide prospective
 test('upstream discovery authenticates canonical publications and blocks reviewed major migration',async()=>{
   const record=metadata('kosmos'),selected={commit:'e'.repeat(40),tree:'f'.repeat(40),version:'0.1.0'};
   const reader={async api(){return {sha:selected.commit,tree:{sha:"f".repeat(40)}};},async verifyRepository(){},async releases(){return [{id:1,assets:[{name:'release.json'}]},{id:2,assets:[{name:'source.tar'}]}];},async forward(a,b){return a===b||(a===selected.commit&&b===record.source.commit);}};
-  const admit=async()=>({id:1,record,recordSha256:sha256(encodeRecord(record)),payloads:new Map()});
+  const admit=async()=>{const payloads=attachCompatibility(record,selected.commit);
+    return {id:1,record,recordSha256:sha256(encodeRecord(record)),payloads};};
   const result=await discoverKosmosRelease(selected,{reader,admit});assert.equal(result.id,1);
   record.compatibility.impact='major';await assert.rejects(discoverKosmosRelease(selected,{reader,admit}),/major migration/);
 });

@@ -4,6 +4,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {GitHubReader, githubCommand} from './github.mjs';
 import {readRecord} from './record.mjs';
+import {parseEvidenceJson} from './evidence-json.mjs';
 import {sha256} from './encoding.mjs';
 import {admitPublishedRelease} from './release-admission.mjs';
 
@@ -32,8 +33,8 @@ export async function admitSelectedPublication({repository, commit, tree, packag
     const asset = records[0]; assert.ok(asset.size > 0 && asset.size <= 1024 * 1024);
     const bytes = await command(['api', `repos/${repository}/releases/assets/${asset.id}`, '-H', 'Accept: application/octet-stream'], asset.size + 1);
     assert.equal(bytes.length, asset.size); assert.equal(asset.digest, `sha256:${sha256(bytes)}`);
+    if (parseEvidenceJson(bytes)?.source?.commit !== commit) continue;
     const hint = readRecord(bytes);
-    if (hint.source.commit !== commit) continue;
     assert.equal(hint.repository.name, repository);
     assert.equal(selected, null, 'multiple completed releases claim the exact selected source');
     const directory = mkdtempSync(join(tmpdir(), 'selected-publication-'));

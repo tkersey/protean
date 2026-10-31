@@ -147,6 +147,7 @@ function preparedCandidate() {
 
 test('automation review retains authenticated compact preparation before original owner dispatch',async()=>{
   const f=fixture(),candidate=preparedCandidate();f.pull.head.ref=proposalBranch;f.pull.body=proposalDescription(candidate).body;
+  f.pull.body += '\nReviewed explanation outside the unchanged proposal and impact bindings.\n';
   let calls=0;const compact={schema:'test-only compact authenticated preparation',head};
   f.preparation.readPreparation=async subject=>{calls++;assert.deepEqual(subject,{base,head});return {candidate};};
   f.preparation.compactPreparation=value=>{assert.equal(value.candidate,candidate);return compact;};

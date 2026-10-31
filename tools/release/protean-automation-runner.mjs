@@ -19,7 +19,7 @@ import {proposeProtean, promoteProtean, pauseProteanProposals, recoverProposalMe
 import {createProteanPromotionAdmission} from './protean-promotion-admission.mjs';
 import {admitOwnerResume, reportAutomationStatus} from './proposal-authority.mjs';
 import {appActor, currentProteanSource, proteanBoundaryOperations, originalProteanQualification,
-  observationPages, preparationPulls, promotionRequirements, storedProteanCandidate, retireProteanProposal, frozenProteanCandidate} from './release-observation.mjs';
+  observationPages, preparationPulls, promotionRequirements, storedProteanCandidate, admitUnproposedProtean, retireProteanProposal, frozenProteanCandidate} from './release-observation.mjs';
 
 function writerIdentity(identity) {
   assert.equal(identity.repository, 'tkersey/protean'); assert.equal(identity.repositoryId, 1328996555);
@@ -41,6 +41,7 @@ export function automationOperations({client, command, native, actor}) {
     freeze: (pull,source) => frozenProteanCandidate(pull,source,{client,command}),
     preparation: selection => readProteanPreparation(selection,command),
     retire: retireProteanProposal({client, command, native, actor}),
+    orphan: admitUnproposedProtean({client, command, native, actor}),
     resume: value => admitOwnerResume(value, client),
     propose: value => proposeProtean({...value, actor, client}),
     promote: value => promoteProtean({...value, actor, client}),
@@ -121,7 +122,7 @@ export async function runProteanAutomation({controlCommit, identity = null, nati
       assert.deepEqual(nativeCandidateBinding(proposed),retained.binding,'proposal differs from original native generation');
       return retained.binding;
     };
-    const proposed = await actions.propose({candidate, admitCandidate, admitRetirement: actions.retire, admitResume: actions.resume});
+    const proposed = await actions.propose({candidate, admitCandidate, admitRetirement: actions.retire, admitResume: actions.resume, admitOrphan: actions.orphan});
     if (proposed.number !== undefined) currentPull = {number: proposed.number};
     if (proposed.status !== 'proposal open') return finish(proposed);
     const review = await reportReview({number: proposed.number, appId: identity.appId},

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {requireCompatibleSource,sourceCompatibility} from './upstream-compatibility.mjs';
 
 export async function selectedSourceTree(reader,selected){
   assert.match(selected.commit,/^[0-9a-f]{40}$/);
@@ -22,11 +23,12 @@ export async function selectPublishedSource(reader,selected,admitted,{publicatio
     if(release.source.tree===tree)return true;
     if(await reader.forward(release.source.commit,selected.commit))return false;
     for(const anchor of anchors)if(await reader.forward(anchor,release.source.commit))return true;
-    return false;
+    return (await sourceCompatibility(reader,selected,tree,release,async id=>admitted.find(value=>value.id===id))).related;
   };
   if(frozenReleaseId!==undefined){
     const release=admitted.find(value=>value.id===frozenReleaseId);assert.ok(release,'frozen upstream publication disappeared');
-    assert.ok(await reachable(release),'frozen upstream lineage changed');return release;
+    assert.ok(await reachable(release),'frozen upstream lineage changed');
+    await requireCompatibleSource(reader,selected,tree,release,async id=>admitted.find(value=>value.id===id));return release;
   }
   let successor=null;
   for(const release of admitted){
@@ -35,7 +37,9 @@ export async function selectPublishedSource(reader,selected,admitted,{publicatio
     else if(await reader.forward(successor.source.commit,release.source.commit))successor=release;
     else assert.ok(await reader.forward(release.source.commit,successor.source.commit),'divergent successor publications');
   }
-  if(successor!==null)return successor;
+  if(successor!==null){
+    await requireCompatibleSource(reader,selected,tree,successor,async id=>admitted.find(value=>value.id===id));return successor;
+  }
   if(!publicationRequired)return null;
   const exact=commits.get(selected.commit);
   if(exact!==undefined)return exact;
@@ -43,39 +47,16 @@ export async function selectPublishedSource(reader,selected,admitted,{publicatio
   return equivalents[0]??null;
 }
 
-async function releaseHint(reader,release){
-  const assets=release.assets?.filter(asset=>asset.name==='release.json');
-  if(!assets||assets.length!==1)return null;
-  const asset=assets[0];
-  if(!Number.isSafeInteger(asset.id)||asset.id<=0||!Number.isSafeInteger(asset.size)||asset.size<=0||asset.size>1024*1024)return null;
-  try{
-    const {readRecord}=await import('./record.mjs');
-    return readRecord(await reader.command(['api',`repos/${reader.repository}/releases/assets/${asset.id}`,'-H','Accept: application/octet-stream'],asset.size+1));
-  }catch{return null;}
-}
-
-export async function admitFrozenSource(reader,selected,releaseId,admitOne,{readHint=releaseHint}={}){
+export async function admitFrozenSource(reader,selected,releaseId,admitOne){
   assert.ok(Number.isSafeInteger(releaseId)&&releaseId>0);
-  const release=await admitOne(releaseId);assert.equal(release.id,releaseId);
+  const cache=new Map();
+  const admitted=async id=>{if(!cache.has(id))cache.set(id,await admitOne(id));return cache.get(id);};
+  const release=await admitted(releaseId);assert.equal(release.id,releaseId);
   assert.match(release.source.commit,/^[0-9a-f]{40}$/);assert.match(release.source.tree,/^[0-9a-f]{40}$/);
   const tree=await selectedSourceTree(reader,selected);
   if(release.source.commit===selected.commit)assert.equal(release.source.tree,tree,'selected publication Git tree differs');
   if(release.source.tree===tree)return release;
   assert.ok(!await reader.forward(release.source.commit,selected.commit),'frozen publication predates selected development source');
-  if(await reader.forward(selected.commit,release.source.commit))return release;
-  const seen=new Set([releaseId]);
-  for(const observed of await reader.releases()){
-    if(seen.has(observed.id))continue;seen.add(observed.id);
-    assert.ok(seen.size<=10000,'equivalent publication discovery capacity exceeded');
-    let hint;
-    try{
-      hint=await readHint(reader,observed);
-      if(hint?.source?.tree!==tree||!await reader.forward(hint.source.commit,release.source.commit))continue;
-    }catch{continue;}
-    let anchor;
-    try{anchor=await admitOne(observed.id);}catch{continue;}
-    assert.equal(anchor.id,observed.id);
-    if(anchor.source.tree===tree&&await reader.forward(anchor.source.commit,release.source.commit))return release;
-  }
-  throw new Error('frozen publication has no authenticated selected source or equivalent publication anchor');
+  await requireCompatibleSource(reader,selected,tree,release,admitted);
+  return release;
 }

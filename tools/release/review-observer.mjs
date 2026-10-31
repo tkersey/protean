@@ -100,7 +100,7 @@ export async function observeProteanReview({controlCommit, requestedPull = null}
         assert.ok(prepared, 'original native preparation is unavailable; recover it before owner review');
         assert.equal(prepared.candidate.base, base); assert.equal(prepared.candidate.head, head);
         assert.equal(prepared.candidate.tree, tree);
-        assert.equal(pull.body, proposalDescription(prepared.candidate).body, 'native preparation description changed');
+        assert.ok(pull.body.startsWith(`${proposalDescription(prepared.candidate).marker}\n`), 'native preparation binding changed');
         context.preparation = compactPreparation(prepared);
       }
       assert.ok(Buffer.byteLength(JSON.stringify(context)) <= 4 * 1024 * 1024,

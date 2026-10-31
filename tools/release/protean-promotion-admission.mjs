@@ -314,6 +314,8 @@ async function reviewedEvidence({candidate, pull, qualificationRunId}, options) 
   assert.deepEqual(review.context.acceptedRequirements, options.expected.acceptedRequirements);
   for (const [key, value] of Object.entries(options.expected.reviewSettings)) assert.equal(review.binding[key], value, `review runtime changed: ${key}`);
   const impact = requireCurrentImpact(review.context.impact, pull.body, candidate.base, candidate.head);
+  assert.equal(impact.disposition, 'compatible', 'reviewed breaking migration requires ordinary implementation');
+  assert.notEqual(impact.impact, 'major', 'reviewed major migration requires ordinary implementation');
   return {qualification, artifact, review, impact};
 }
 
