@@ -35,7 +35,7 @@ Discovered library paths remain absolute when the package consumer changes
 directories. Before extraction succeeds, filesystem-returned names and kinds
 must exactly match authenticated files and directory prefixes. A filesystem that
 aliases or rewrites those names rejects the source and cleans up the new
-extraction; representable case and Unicode names remain supported.
+extraction; representable case and Unicode names remain supported. Source cardinality is bounded by the existing archive byte limit, not a separate file-count cap. Build-driven native tests receive the exact invoking compiler; direct diagnostic `zig test` invocations must set `RELEASE_TEST_ZIG` to its absolute path.
 
 `.github/workflows/zig.yml`, `.github/CI.md`, and current repository instructions remain authoritative for native, placement, downstream, retained-runtime, source, and other qualification. Keep package versions separate from application contracts, protocol, ABI, and state formats.
 
@@ -64,6 +64,8 @@ Prepare a required Protean package-version change in the same candidate before f
 Add a local and CI coherence check using authenticated local inputs. It checks lock/manifest consistency, exact shared Horos commit and package hash against the selected Kosmos, source and package inventories, toolchain constraints, generated identities, and version mirrors. Deliberately mismatched commit/hash/version cases must fail. Ordinary builds must neither discover newer upstreams nor fail solely because an upstream release exists.
 
 Historical `publicationObservation` fields must describe observations actually made when the candidate was generated. Do not rewrite a published source lock just to record a later release, and do not create self-referential source hashes. Current release evidence is external to the source-selection authority.
+
+Qualification correspondence retains the original API evidence bytes and their digest. Later observations compare the admitted run, attempt, source, workflow, platform, job/step outcomes and clocks, and artifact identities. Mutable repository descriptions, avatars, display titles, runner names, and download URLs do not invalidate that evidence. Fresh qualification admission still checks the actual current artifacts and required outcomes.
 
 ## Implemented source and artifact boundaries
 
@@ -121,12 +123,16 @@ Actuating/CAS retain review ownership: approved model/reasoning parity, original
 
 Protected automatic merge requires explicit enablement, effective protections, an unchanged admissible subject, allowed generated diff, complete qualification, complete credited review, and resolved threads. Required human approvals remain required unless the owner explicitly changes their policy. No direct `main` pushes or administrative bypass.
 
+Original receipt bytes come from parent-captured command output, not model-writable receipt files. Each retained turn preserves prior executions and owner dispositions; a confirmation requires the preceding completed initial fold. Reasoned reassessment may resolve a hold, but cannot erase an accepted epoch invalidation or replace an original outcome. Interrupted invocation diagnostics retain available captures and CAS attempt/session identity before bounded credential cleanup; unsupported entries are reported without discarding the other retained evidence. Diagnostics permit investigation, not review credit or an automatic retry.
+
 Observer, start marker, and check reporter use the same original review subject.
 Missing evidence preserves the durable invocation identity across repeated polls.
 Recovering a failed or stale check display requires the authenticated original
 pending result; a terminal owner result cannot reopen. The owner process deadline
 includes elapsed setup and leaves one minute within both the eight-minute step
 and ten-minute job limits for termination, diagnostics, and retention.
+
+Pending automation-owned merges are reconciled again when an invocation finishes, including held, blocked, and early-exit paths. The reported mode comes from that reconciliation. A pause acknowledgement requires an observed absence of the pending request. A merge that completed during cancellation is reported separately with pause unverified and landed qualification still required; it is never reported as successfully cancelled. Unknown merge-request ownership blocks cancellation.
 
 Without an App credential, automation reads the workflow's configured mode and
 reports read-only source and release observations without querying the Variables

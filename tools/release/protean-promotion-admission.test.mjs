@@ -328,3 +328,11 @@ for (const field of ['nativeResultBytes', 'kosmosRecordBytes', 'files']) test(`p
   await assert.rejects(value.promote());
   assert.equal(value.state.calls.length, 0);
 });
+
+for (const operation of ['promotion', 'landing']) test(operation + ' retains qualification across mutable repository metadata', async () => {
+  const value = await fixture();
+  value.qualifications.get(17).run.repository.description = 'Updated after owner review';
+  value.qualifications.get(17).run.head_repository.description = 'Current upstream description';
+  if (operation === 'promotion') await value.promote();
+  else {value.merged(); await value.land();}
+});

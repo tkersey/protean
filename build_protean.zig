@@ -1366,6 +1366,7 @@ const BuildGraph = struct {
             .use_llvm = if (linuxX86(s.b.graph.host)) false else null,
         });
         const run = s.b.addRunArtifact(tests);
+        releaseTestCompiler(run);
         run.has_side_effects = true;
         const step = s.b.step("check-release-tools", "Check native source refresh and coherence");
         step.dependOn(&run.step);
@@ -1511,6 +1512,14 @@ fn nativeCheckCommand(b: *std.Build) *std.Build.Step.Run {
     run.has_side_effects = true; // Checked stdio must never cache qualification.
     run.expectExitCode(0);
     return run;
+}
+
+fn releaseTestCompiler(run: *std.Build.Step.Run) void {
+    const b = run.step.owner;
+    const command = run.argv.toOwnedSlice(b.allocator) catch @panic("out of memory");
+    run.addArg("env");
+    run.addFileArg2(.zig_exe, .{ .prefix = "RELEASE_TEST_ZIG=", .make_absolute = true });
+    run.argv.appendSlice(b.allocator, command) catch @panic("out of memory");
 }
 
 fn nodeCommand(b: *std.Build) *std.Build.Step.Run {

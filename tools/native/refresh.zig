@@ -935,7 +935,7 @@ fn fixtureBase(c: Context, root: []const u8, horos: Value, kosmos: Value) ![]con
 }
 
 fn fixture(c: Context, root: []const u8) !Fixture {
-    const zig = std.mem.trim(u8, try native.command(c, &.{ "which", "zig" }, 65536), "\r\n ");
+    const zig = try source.testCompiler(c.a);
     const horos = try fixtureHoros(c, root, zig);
     const kosmos = try fixtureKosmos(c, root, horos);
     const base = try fixtureBase(c, root, horos, kosmos);

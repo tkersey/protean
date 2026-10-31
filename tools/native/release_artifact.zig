@@ -293,7 +293,7 @@ fn fixture(c: Context, root: []const u8) !struct { base: []const u8, zig: []cons
     try fixtureCommit(c, base);
     return .{
         .base = base,
-        .zig = std.mem.trim(u8, try native.command(c, &.{ "which", "zig" }, 65536), "\r\n "),
+        .zig = try source.testCompiler(c.a),
     };
 }
 

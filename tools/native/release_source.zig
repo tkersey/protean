@@ -1,7 +1,6 @@
 const std = @import("std");
 const Dir = std.Io.Dir;
 const maximum_bytes = 64 << 20;
-const maximum_files = 10000;
 
 const Entry = struct {
     path: []const u8,
@@ -61,7 +60,7 @@ fn inventory(r: anytype, repository: []const u8, commit: []const u8) ![]Entry {
             if (records.next() != null) return error.InvalidGitInventory;
             break;
         }
-        if (entries.items.len == maximum_files or record.len < 54 or
+        if (record.len < 54 or
             !std.mem.eql(u8, record[6..12], " blob ") or
             record[52] != '\t') return error.InvalidGitInventory;
         const mode = try gitMode(record[0..6]);
@@ -584,6 +583,16 @@ pub fn verify(
     };
 }
 
+pub fn testCompiler(a: std.mem.Allocator) ![]const u8 {
+    const path = std.testing.environ.getAlloc(a, "RELEASE_TEST_ZIG") catch |err| {
+        if (err == error.EnvironmentVariableMissing) return error.MissingTestCompiler;
+        return err;
+    };
+    errdefer a.free(path);
+    if (!std.fs.path.isAbsolute(path)) return error.AbsolutePathRequired;
+    return path;
+}
+
 const TestRunner = struct {
     a: std.mem.Allocator,
     io: std.Io = std.testing.io,
@@ -1080,7 +1089,7 @@ test "captured native Zig preserves library discovery and configured compiler en
     const r: TestRunner = .{ .a = arena.allocator(), .env = &env };
     const root = try temporary(r);
     defer removeFixture(r, root);
-    const supplied = std.mem.trim(u8, (try r.run(&.{ "which", "zig" }, root, true)).stdout, "\r\n");
+    const supplied = try testCompiler(r.a);
     var compiler = try CapturedCompiler.acquire(r, supplied, root, &env);
     defer compiler.close(r.io);
     const selected: TestRunner = .{ .a = r.a, .env = &compiler.env };
@@ -1165,7 +1174,7 @@ test "forwarding compiler wrappers preserve configured execution without library
     const r: TestRunner = .{ .a = arena.allocator(), .env = &env };
     const root = try temporary(r);
     defer removeFixture(r, root);
-    const supplied = std.mem.trim(u8, (try r.run(&.{ "which", "zig" }, root, true)).stdout, "\r\n");
+    const supplied = try testCompiler(r.a);
     try env.put("PINNED_ZIG", supplied);
     const wrapper = try r.path(&.{ root, "forward" });
     try writeExecutable(r, wrapper, "#!/bin/sh\nexec \"$PINNED_ZIG\" \"$@\"\n");
@@ -1296,7 +1305,7 @@ test "compiler library discovered below producer cwd remains absolute in another
     const r: TestRunner = .{ .a = arena.allocator(), .env = &env };
     const root = try temporary(r);
     defer removeFixture(r, root);
-    const supplied = std.mem.trim(u8, (try r.run(&.{ "which", "zig" }, root, true)).stdout, "\r\n");
+    const supplied = try testCompiler(r.a);
     const original = try Dir.cwd().realPathFileAlloc(r.io, supplied, r.a);
     const cwd = try Dir.cwd().openDir(r.io, ".", .{});
     defer cwd.close(r.io);
@@ -1314,10 +1323,65 @@ test "compiler library discovered below producer cwd remains absolute in another
     var compiler = try CapturedCompiler.acquire(r, local, root, &env);
     defer compiler.close(r.io);
     try std.testing.expect(std.fs.path.isAbsolute(compiler.env.get("ZIG_LIB_DIR").?));
+    try std.testing.expectEqualStrings(library_path, compiler.env.get("ZIG_LIB_DIR").?);
     const elsewhere = try r.path(&.{ root, "elsewhere" });
     try Dir.cwd().createDir(r.io, elsewhere, .default_dir);
     const probe = try r.path(&.{ elsewhere, "probe.zig" });
-    try r.write(probe, "test { try @import(\"std\").testing.expect(true); }\n");
+    try r.write(probe,
+        \\export fn captured_library_probe() usize { return @sizeOf(@import("std").Io.File); }
+    );
+    const emitted = try std.fmt.allocPrint(r.a, "-femit-bin={s}/probe.o", .{elsewhere});
     const selected: TestRunner = .{ .a = r.a, .env = &compiler.env };
-    _ = try selected.run(&.{ compiler.path, "test", probe }, elsewhere, true);
+    _ = try selected.run(&.{ compiler.path, "build-obj", probe, emitted }, elsewhere, true);
+}
+
+test "source cardinality follows archive bytes beyond ten thousand regular files" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r: TestRunner = .{ .a = arena.allocator() };
+    const root = try temporary(r);
+    defer removeFixture(r, root);
+    const repo = try r.path(&.{ root, "repo" });
+    try fixture(r, repo);
+    const blob = std.mem.trim(u8, (try r.run(
+        &.{ "git", "rev-parse", "HEAD:ordinary" },
+        repo,
+        true,
+    )).stdout, "\r\n");
+    var index: std.Io.Writer.Allocating = .init(r.a);
+    for (0..9999) |number| try index.writer.print(
+        "100644 {s}\ttiny/{d:0>5}\n",
+        .{ blob, number },
+    );
+    const index_path = try r.path(&.{ root, "index-input" });
+    try r.write(index_path, index.written());
+    _ = try r.run(&.{
+        "sh", "-c", "git update-index --index-info < \"$1\"", "index-input", index_path,
+    }, repo, true);
+    try commitFixture(r, repo);
+    const snapshot = try prepare(r, repo, root);
+    try std.testing.expectEqual(@as(usize, 10001), snapshot.files.len);
+    try std.testing.expect(snapshot.size < maximum_bytes);
+    const oversized_path = try r.path(&.{ root, "oversized.tar" });
+    var oversized = try Dir.cwd().createFile(r.io, oversized_path, .{ .exclusive = true });
+    defer oversized.close(r.io);
+    try oversized.setLength(r.io, maximum_bytes + 1);
+    try std.testing.expectError(error.InvalidSourceArchive, readArchive(r, oversized_path));
+    var directory = try Dir.cwd().openDir(r.io, try r.path(&.{ snapshot.source, "tiny" }), .{
+        .iterate = true,
+    });
+    defer directory.close(r.io);
+    var iterator = directory.iterate();
+    var count: usize = 0;
+    while (try iterator.next(r.io)) |entry| {
+        try std.testing.expectEqual(std.Io.File.Kind.file, entry.kind);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 9999), count);
+    for ([_][]const u8{ "tiny/00000", "tiny/09998" }) |path| {
+        try std.testing.expectEqualStrings("source\n", try readArchive(
+            r,
+            try r.path(&.{ snapshot.source, path }),
+        ));
+    }
 }
