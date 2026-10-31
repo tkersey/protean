@@ -1,9 +1,9 @@
 {
   "format": "agent-native-source-lock/v2",
-  "status": "development-integration",
+  "status": "released-integration",
   "boundary": {
     "repository": "tkersey/horos",
-    "commit": "7d34f2c72e818665be4d519fde4f2cef9c986048",
+    "commit": "a541cbe0ebd142f35b4cecc0774aea983541f972",
     "gitTree": "f0836a935ffac4225399ce7fcc5ed1e1965165de",
     "version": "8.0.0",
     "source": {
@@ -12,9 +12,9 @@
       "bytes": 10347252
     },
     "archive": {
-      "url": "https://github.com/tkersey/horos/archive/7d34f2c72e818665be4d519fde4f2cef9c986048.tar.gz",
-      "sha256": "a5059ab0b8143852b409bb8d95f2a7275dc82b57a9d4d6b83a20a0b85a5cb8f6",
-      "bytes": 1877822,
+      "url": "https://github.com/tkersey/horos/archive/a541cbe0ebd142f35b4cecc0774aea983541f972.tar.gz",
+      "sha256": "5ac494058db637014fdea41f14796021b39b156c856dd71f10f53260738c796f",
+      "bytes": 1877803,
       "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
     "authentication": "Complete public archive paths, Git blob identities and executable modes authenticated against the recorded Git tree.",
@@ -129,18 +129,18 @@
   },
   "world": {
     "repository": "tkersey/kosmos",
-    "commit": "e3ac443b97c31bda4ebe42b7cafb99e4ce721906",
-    "gitTree": "f43ba132c9f0abee9bafc5c980469c4098dd220d",
+    "commit": "9dbbc949f70559a0538f65d20fe03ec447fe9246",
+    "gitTree": "564b302c44f64727ee9bea372888ee35003bc6ab",
     "version": "9.1.0",
     "source": {
-      "inventorySha256": "37bc4c9097f0d46ef01701f16aa21dbcbb970ee49eb62d742cfceaa51a67c46b",
+      "inventorySha256": "84f16b794ac78de677c42ca33e02e4c3709ec093696de80cc552215a3ddbe8b4",
       "entries": 216,
-      "bytes": 3539168
+      "bytes": 3542414
     },
     "archive": {
-      "url": "https://github.com/tkersey/kosmos/archive/e3ac443b97c31bda4ebe42b7cafb99e4ce721906.tar.gz",
-      "sha256": "c4974f5d3d2c3a85cf5228de7d81d1f91091ffc60b6b53b0acdd41f652c8aec9",
-      "bytes": 792451,
+      "url": "https://github.com/tkersey/kosmos/archive/9dbbc949f70559a0538f65d20fe03ec447fe9246.tar.gz",
+      "sha256": "840d34206440a4f8c6d9933a5ece30fb32a9bd7a49cea032bd6821b347695cbb",
+      "bytes": 793090,
       "origin": "GitHub commit archive authenticated against the complete Git tree."
     },
     "authentication": "Complete public archive paths, Git blob identities and executable modes authenticated against the recorded Git tree."
@@ -154,18 +154,19 @@
     "architecture": "arm64"
   },
   "publicationObservation": {
-    "compatiblePublishedReleaseObserved": false,
-    "releases": [],
+    "compatiblePublishedReleaseObserved": true,
+    "releases": [
+      "https://github.com/tkersey/horos/releases/tag/v8.0.0",
+      "https://github.com/tkersey/kosmos/releases/tag/v9.1.0"
+    ],
     "pullRequests": [
-      "https://github.com/tkersey/horos/pull/180",
-      "https://github.com/tkersey/kosmos/pull/78"
+      "https://github.com/tkersey/kosmos/pull/81"
     ]
   },
   "limitations": [
-    "Exact public development commits; no release or installed-runtime transition is claimed.",
     "Controlled-provider qualification does not establish live-provider availability or model quality; existing saved tasks retain their original executable and image bindings."
   ],
   "notes": [
-    "Consumer-aware construction and logical execution context integration using independently authenticated public source archives."
+    "Horos 8.0.0 and Kosmos 9.1.0 source integration using independently authenticated public source archives."
   ]
 }
