@@ -30,7 +30,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             self: *Self,
             a: std.mem.Allocator,
             value: reuse.Definition,
-        ) !void {
+        ) anyerror!void {
             try reuse.validate(a, Lifecycle.store(self), value);
             if (self.reuse_provenance_validation) return;
             var queue: Origins = .{ .a = a };
