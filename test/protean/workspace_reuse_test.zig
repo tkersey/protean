@@ -27,6 +27,7 @@ pub fn run(comptime Types: type, h: anytype) !void {
     try answer(h, task_a, work_a, "source-answer", 2);
     try expectResult(h, task_a, work_a, "source-result", 12);
     try deniedRetain(h, task_a, program_a);
+    try interruptedRetain(h, task_a, program_a);
     const retained = try command(h, task_a, "retain-original", .{ .program = .{ .retain = .{
         .program = program_a,
         .scope = .{ .bytes = "methods" },
@@ -46,6 +47,7 @@ pub fn run(comptime Types: type, h: anytype) !void {
     const imported = try lostImportReply(Types, h, task_b, locator);
     const program_b = imported.program orelse return error.ExpectedProgram;
     try expectImport(h, task_a, task_b, program_a, program_b, locator);
+    try revokedReplay(h, task_b, locator);
     const replayed = try command(h, task_b, "import-original", .{ .program = .{ .import = .{
         .locator = locator,
     } } });
@@ -152,6 +154,86 @@ fn deniedRetain(h: anytype, task: Task, program: wc.Ref) !void {
     defer rows.deinit();
     try std.testing.expectEqual(.row, try rows.step());
     try std.testing.expectEqual(@as(i64, 0), try rows.integer(0));
+}
+
+const PublicationInterruption = struct {
+    revoked: *bool,
+    exhaust: bool,
+    calls: u32 = 0,
+
+    fn disclose(
+        context: ?*anyopaque,
+        _: native.registry.Authority,
+        _: native.reuse_policy.Scope,
+        frozen: native.reuse_policy.Frozen,
+    ) !void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        try std.testing.expect(frozen.artifacts.len != 0);
+        try std.testing.expect(frozen.history.len != 0);
+        try std.testing.expect(frozen.description.len != 0);
+        self.calls += 1;
+        if (self.calls != 2) return;
+        if (self.exhaust) return error.OutOfMemory;
+        self.revoked.* = true;
+    }
+};
+
+fn interruptedRetain(h: anytype, task: Task, program: wc.Ref) !void {
+    const original = h.service.profile.reuse;
+    const authority = h.service.profile.authority;
+    defer h.service.profile.reuse = original;
+    defer h.service.profile.authority = authority;
+    const generation = h.namespace.store.head.generation;
+    for ([_]bool{ false, true }, 0..) |exhaust, index| {
+        h.service.profile.authority = authority;
+        var interruption: PublicationInterruption = .{
+            .revoked = &h.service.profile.authority.revoked,
+            .exhaust = exhaust,
+        };
+        h.service.profile.reuse.context = &interruption;
+        h.service.profile.reuse.disclosure = PublicationInterruption.disclose;
+        const result = h.service.workspaceCommand(
+            h.scratch,
+            try std.fmt.allocPrint(h.scratch, "interrupted-retain-{d}", .{index}),
+            task,
+            .{ .program = .{ .retain = .{
+                .program = program,
+                .scope = .{ .bytes = "methods" },
+                .description = .{
+                    .name = .{ .bytes = "unpublished" },
+                    .purpose = .{ .bytes = "Interrupted before publication" },
+                },
+            } } },
+        );
+        if (exhaust) {
+            try std.testing.expectError(error.OutOfMemory, result);
+        } else {
+            try std.testing.expectEqual(.rejected, (try result).disposition);
+        }
+        try std.testing.expectEqual(@as(u32, 2), interruption.calls);
+        try std.testing.expectEqual(generation, h.namespace.store.head.generation);
+        var rows = try h.namespace.store.database.prepare(
+            "SELECT count(*) FROM reuse_definitions",
+            &.{},
+        );
+        defer rows.deinit();
+        try std.testing.expectEqual(.row, try rows.step());
+        try std.testing.expectEqual(@as(i64, 0), try rows.integer(0));
+    }
+}
+
+fn revokedReplay(h: anytype, task: Task, locator: wc.RetainedLocator) !void {
+    const original = h.service.profile.reuse;
+    defer h.service.profile.reuse = original;
+    h.service.profile.reuse = .{};
+    const generation = h.namespace.store.head.generation;
+    const reply = try h.service.workspaceCommand(h.scratch, "import-original", task, .{
+        .program = .{ .import = .{ .locator = locator } },
+    });
+    try std.testing.expectEqual(.rejected, reply.disposition);
+    try std.testing.expect(reply.program == null);
+    try std.testing.expect(std.mem.indexOf(u8, reply.observation_json.bytes, locator.id.bytes) == null);
+    try std.testing.expectEqual(generation, h.namespace.store.head.generation);
 }
 
 fn command(h: anytype, task: Task, id: []const u8, value: wc.Command) !wc.Reply {

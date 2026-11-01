@@ -21,6 +21,7 @@ pub const adaptive_responses = @import("adaptive_responses.zig");
 pub const repository = @import("repository.zig");
 pub const tool_construction = @import("tool_construction.zig");
 pub const configuration = @import("configuration.zig");
+pub const reuse_policy = @import("reuse_policy.zig");
 pub const workspace = @import("workspace_state.zig");
 pub const workspace_instrument = @import("workspace_instrument.zig");
 pub const tasks = @import("tasks.zig");
