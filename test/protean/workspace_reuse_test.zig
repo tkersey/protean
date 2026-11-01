@@ -65,7 +65,12 @@ pub fn run(comptime Types: type, h: anytype) !void {
     try expectAbsent(h, task_b);
 }
 
-fn lostImportReply(comptime Types: type, h: anytype, task: Task, locator: wc.RetainedLocator) !wc.Reply {
+fn lostImportReply(
+    comptime Types: type,
+    h: anytype,
+    task: Task,
+    locator: wc.RetainedLocator,
+) !wc.Reply {
     var failed_reply: support.AfterCommitAllocator = .{
         .backing = h.scratch,
         .namespace = &h.namespace,

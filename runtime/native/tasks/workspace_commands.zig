@@ -278,29 +278,16 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             program: wc.Program,
         ) !WorkspaceExecution {
             switch (program) {
-                .retain => |request| return .{ .admitted = try Reuse.retain(
+                .retain, .import => return .{ .admitted = try executeProgramReuse(
                     self,
                     a,
                     operation_id,
                     task_id,
-                    request,
+                    program,
                 ) },
-                .import => |request| return .{ .admitted = try Reuse.importProgram(
-                    self,
-                    a,
-                    operation_id,
-                    task_id,
-                    request,
-                ) },
-                .find => |request| return .{ .observation = try Discovery.find(
-                    self,
-                    a,
-                    request.scope.bytes,
-                    request.query.bytes,
-                    request.maximum,
-                    request.page_bytes,
-                    basis,
-                ) },
+                .find => |request| return .{
+                    .observation = try executeProgramFind(self, a, request, basis),
+                },
                 .adopt => |command_value| return executeProgramAdopt(
                     self,
                     a,
@@ -347,6 +334,35 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     program,
                 ) },
             }
+        }
+        fn executeProgramReuse(
+            self: *Self,
+            a: std.mem.Allocator,
+            operation_id: []const u8,
+            task_id: state.TaskId,
+            program: wc.Program,
+        ) !task_types.Admission {
+            return switch (program) {
+                .retain => |request| Reuse.retain(self, a, operation_id, task_id, request),
+                .import => |request| Reuse.importProgram(self, a, operation_id, task_id, request),
+                else => error.InvalidState,
+            };
+        }
+        fn executeProgramFind(
+            self: *Self,
+            a: std.mem.Allocator,
+            request: wc.Find,
+            basis: ?workspace.ReadObservation,
+        ) !json.Value {
+            return Discovery.find(
+                self,
+                a,
+                request.scope.bytes,
+                request.query.bytes,
+                request.maximum,
+                request.page_bytes,
+                basis,
+            );
         }
         fn executeProgramAdopt(
             self: *Self,
