@@ -424,7 +424,9 @@ responses under current authority.
 
 The supported route retains complete canonical `source_records` computation
 modules, including their immutable helpers, literals and typed exposures. It
-preserves the original publication history and reconstructs admission through
+supports reuse between tasks in the same namespace, principal and tenant, with
+a compatible application and profile. Cross-principal sharing is unsupported.
+It preserves the original publication history and reconstructs admission through
 the current compiler. Controller programs, component recipes, derived-source
 documents and live task custody are not exported by this route. A selected
 version never changes when another definition uses the same name.
