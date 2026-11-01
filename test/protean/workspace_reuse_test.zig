@@ -232,7 +232,11 @@ fn revokedReplay(h: anytype, task: Task, locator: wc.RetainedLocator) !void {
     });
     try std.testing.expectEqual(.rejected, reply.disposition);
     try std.testing.expect(reply.program == null);
-    try std.testing.expect(std.mem.indexOf(u8, reply.observation_json.bytes, locator.id.bytes) == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        reply.observation_json.bytes,
+        locator.id.bytes,
+    ) == null);
     try std.testing.expectEqual(generation, h.namespace.store.head.generation);
 }
 
