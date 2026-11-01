@@ -24,7 +24,7 @@ pub fn run(comptime Types: type, h: anytype) !void {
     const program_a = try build(h, task_a, "reuse-build", 7);
     const work_a = try start(h, task_a, program_a, "reuse-source-start", 3);
     try waitForQuestion(h, task_a, work_a, "source-progress");
-    try answer(h, task_a, work_a, "source-answer", "2");
+    try answer(h, task_a, work_a, "source-answer", 2);
     try expectResult(h, task_a, work_a, "source-result", 12);
     try deniedRetain(h, task_a, program_a);
     const retained = try command(h, task_a, "retain-original", .{ .program = .{ .retain = .{
@@ -55,7 +55,7 @@ pub fn run(comptime Types: type, h: anytype) !void {
     try reopen(Types, h);
     try expectAbsent(h, task_a);
     try revise(h, task_b, locator);
-    try answer(h, task_b, work_b, "destination-answer", "5");
+    try answer(h, task_b, work_b, "destination-answer", 5);
     try expectResult(h, task_b, work_b, "destination-result", 32);
     var finished = try h.service.workspaceWork(a, task_b, work_b);
     defer finished.deinit();
@@ -210,7 +210,7 @@ fn waitForQuestion(h: anytype, task: Task, id: [32]u8, prefix: []const u8) !void
     return error.QuestionNotReached;
 }
 
-fn answer(h: anytype, task: Task, id: [32]u8, operation: []const u8, response: []const u8) !void {
+fn answer(h: anytype, task: Task, id: [32]u8, operation: []const u8, response: u64) !void {
     const a = h.scratch;
     var work = try h.service.workspaceWork(a, task, id);
     defer work.deinit();
@@ -227,7 +227,10 @@ fn answer(h: anytype, task: Task, id: [32]u8, operation: []const u8, response: [
         .generation = port.value.generation,
         .command = .{ .resume_value = .{ .inline_json = .{
             .schema = try support.workspaceRef(a, .schema, port.value.interface.argument.digest),
-            .json_text = .{ .bytes = response },
+            .json_text = .{ .bytes = try native.json.canonical(
+                a,
+                try native.values.toJson(u64, a, response),
+            ) },
         } } },
     });
 }
