@@ -26,6 +26,7 @@ pub fn run(comptime Types: type, h: anytype) !void {
     try waitForQuestion(h, task_a, work_a, "source-progress");
     try answer(h, task_a, work_a, "source-answer", 2);
     try expectResult(h, task_a, work_a, "source-result", 12);
+    try invalidRetain(h, task_a, program_a);
     try deniedRetain(h, task_a, program_a);
     try interruptedRetain(h, task_a, program_a);
     const retained = try command(h, task_a, "retain-original", .{ .program = .{ .retain = .{
@@ -126,6 +127,29 @@ fn deniedAccess(h: anytype, task: Task, locator: wc.RetainedLocator) !void {
         ) == null);
     }
     try std.testing.expectEqual(generation, h.namespace.store.head.generation);
+}
+
+fn invalidRetain(h: anytype, task: Task, program: wc.Ref) !void {
+    const generation = h.namespace.store.head.generation;
+    const reply = try h.service.workspaceCommand(h.scratch, "invalid-retain", task, .{
+        .program = .{ .retain = .{
+            .program = program,
+            .scope = .{ .bytes = "methods" },
+            .description = .{
+                .name = .{ .bytes = "" },
+                .purpose = .{ .bytes = "An empty name cannot become an importable definition" },
+            },
+        } },
+    });
+    try std.testing.expectEqual(.rejected, reply.disposition);
+    try std.testing.expectEqual(generation, h.namespace.store.head.generation);
+    var rows = try h.namespace.store.database.prepare(
+        "SELECT count(*) FROM reuse_definitions",
+        &.{},
+    );
+    defer rows.deinit();
+    try std.testing.expectEqual(.row, try rows.step());
+    try std.testing.expectEqual(@as(i64, 0), try rows.integer(0));
 }
 
 fn deniedRetain(h: anytype, task: Task, program: wc.Ref) !void {

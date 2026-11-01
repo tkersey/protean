@@ -40,7 +40,7 @@ pub fn validate(
     definition: Definition,
 ) !void {
     if (definition.version != 1) return error.UnsupportedCapability;
-    try validateArtifact(a, definition);
+    try validateConstruction(a, definition);
     var inspected = try @import("archive.zig").inspect(a, store, definition.origin, null);
     defer inspected.task.deinit();
     if (!std.meta.eql(inspected.task.value.id, definition.source_task))
@@ -70,7 +70,7 @@ pub fn validate(
     try validatePublication(a, store, definition);
 }
 
-fn validateArtifact(a: std.mem.Allocator, definition: Definition) !void {
+pub fn validateConstruction(a: std.mem.Allocator, definition: Definition) !void {
     const artifact = definition.artifact;
     if (artifact.source_kind != .source_records or artifact.catalog != null or
         artifact.controller != null or artifact.controller_schemas.items.len != 0)

@@ -136,6 +136,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .artifact = artifact,
                 .origin = origin,
             };
+            try reuse.validateConstruction(a, definition);
             const frozen = try freezeDisclosure(a, store, definition, self.assets.manifest);
             try self.profile.reuse.disclose(self.profile.authority, scope, frozen);
             return .{
