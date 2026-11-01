@@ -158,6 +158,9 @@ pub const Origins = struct {
             defer self.a.free(bytes);
             var receipt = try contracts.decodeOwned(state.Receipt, self.a, bytes);
             defer receipt.deinit();
+            if (receipt.value.method != .workspace or
+                (receipt.value.workspace_kind != .retained and
+                    receipt.value.workspace_kind != .imported)) continue;
             try state.visitWorkspaceReceipt(self.a, source, receipt.value, self);
         }
         for (origin.records.items) |row| {

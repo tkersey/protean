@@ -229,7 +229,9 @@ fn Audit(comptime Source: type) type {
         }
         fn recordValue(self: *Self, key: Key, ref: Ref) !void {
             if (!self.tasks.contains(key.task)) return error.CorruptState;
-            try self.records.put(self.a, key, ref);
+            const entry = try self.records.getOrPut(self.a, key);
+            if (entry.found_existing) return error.CorruptState;
+            entry.value_ptr.* = ref;
             inline for (@typeInfo(storage.RecordKind).@"enum".field_names) |name| {
                 if (key.kind == @field(storage.RecordKind, name)) {
                     const T = storage.Record(name);

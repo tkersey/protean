@@ -57,6 +57,7 @@ test {
 // Private history internals are exposed only to the repository's test graph.
 pub const testing = if (@import("builtin").is_test) struct {
     pub const retention = @import("retention.zig");
+    pub const reuse = @import("reuse_state.zig");
     pub const adaptive_history = @import("adaptive_history.zig");
     pub const state = @import("state.zig");
     pub const occurrence = @import("occurrence.zig");

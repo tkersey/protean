@@ -108,6 +108,12 @@ profile replacement, paging and input-history checks, but no longer exercises
 those large-history memory and repeated scheduling workloads. These changes alter
 verification scope, not supported product inputs or production semantics.
 
+The normalization-boundary test runs each single/batch case through the ordinary
+model responder, which calls the same checked observed responder and projects
+its interpretation. It no longer repeats every limit through the observed-result
+wrapper. All normalization fields and independent policy limits remain checked;
+separate observed-result tests retain provenance and original-authority coverage.
+
 ## Local feedback
 
 Local macOS verification uses a **600-second shared wall-clock deadline per

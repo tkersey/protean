@@ -97,7 +97,47 @@ fn auditCatalog(comptime Types: type, h: anytype) !void {
         );
         try std.testing.expect(!store.fenced);
     }
+    try duplicateCatalogRecord(h);
     try reopen(Types, h);
+}
+
+fn duplicateCatalogRecord(h: anytype) !void {
+    const store = &h.namespace.store;
+    var definition = definition: {
+        var rows = try store.database.prepare(
+            "SELECT o.body FROM reuse_definitions d JOIN objects o ON o.digest=d.body " ++
+                "ORDER BY d.body LIMIT 1",
+            &.{},
+        );
+        defer rows.deinit();
+        try std.testing.expectEqual(.row, try rows.step());
+        break :definition try contracts.decodeOwned(
+            native.testing.reuse.Definition,
+            h.scratch,
+            try rows.bytes(0),
+        );
+    };
+    defer definition.deinit();
+    const original = definition.value.origin.records.items;
+    try std.testing.expect(original.len > 0);
+    const records = try h.scratch.alloc(native.testing.state.ArchiveRecord, original.len + 1);
+    defer h.scratch.free(records);
+    @memcpy(records[0..original.len], original);
+    records[original.len] = original[0];
+    var malformed = definition.value;
+    malformed.origin.records.items = records;
+    const prepared = try store.prepareDefinition(h.scratch, malformed);
+    defer h.scratch.free(prepared.bytes);
+    defer h.scratch.free(prepared.children);
+    try store.begin();
+    defer store.rollback();
+    store.invalidateIntegrity();
+    _ = try store.retainDefinition(prepared);
+    try std.testing.expectError(
+        error.CorruptState,
+        native.testing.retention.verify(store, h.handlers),
+    );
+    try std.testing.expect(!store.fenced);
 }
 
 fn authoredDiscovery(h: anytype, task: Task, locator: wc.RetainedLocator) !void {

@@ -419,17 +419,15 @@ test "model responder derives held offers and preserves the complete semantic re
 
 test "dynamic normalization bounds preserve reply-schema compatibility before model I/O" {
     inline for (.{ false, true }) |multiple| {
-        inline for (.{ false, true }) |observed| {
-            var compiled = try compileResponder(P, multiple, observed);
-            defer compiled.deinit();
-            inline for (.{
-                "maximum_output_items",    "maximum_call_id_bytes",     "maximum_name_bytes",
-                "maximum_arguments_bytes", "maximum_result_text_bytes",
-            }) |field| {
-                try checkNormalizationField(compiled.program, field);
-            }
-            try checkIndependentLimits(compiled.program);
+        var compiled = try compileModel(P, multiple);
+        defer compiled.deinit();
+        inline for (.{
+            "maximum_output_items",    "maximum_call_id_bytes",     "maximum_name_bytes",
+            "maximum_arguments_bytes", "maximum_result_text_bytes",
+        }) |field| {
+            try checkNormalizationField(compiled.program, field);
         }
+        try checkIndependentLimits(compiled.program);
     }
 }
 
