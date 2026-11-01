@@ -56,7 +56,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 std.log.err("unpublished program cleanup failed: {s}", .{@errorName(err)});
             };
             try io.randomSecure(&self.owner_epoch);
-            _ = try store(&self).auditRetention(handlers, application.image_identity);
+            _ = try store(&self).auditTaskRetention(handlers, application.image_identity);
             try recover(&self, a, null);
             try recoverWorkspace(&self, a);
             try recoverControllerResiduals(&self, a, null);

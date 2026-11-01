@@ -34,6 +34,22 @@ pub const Definition = struct {
     origin: state.Archive,
 };
 
+pub fn sameOwner(
+    a: std.mem.Allocator,
+    store: *storage.Store,
+    definition: Definition,
+    principal: []const u8,
+    tenant: []const u8,
+) !bool {
+    const bytes = try store.object(a, definition.origin.task, null);
+    defer a.free(bytes);
+    var origin = try contracts.decodeOwned(state.Task, a, bytes);
+    defer origin.deinit();
+    if (!std.meta.eql(origin.value.id, definition.source_task)) return error.CorruptState;
+    return std.mem.eql(u8, origin.value.principal.bytes, principal) and
+        std.mem.eql(u8, origin.value.tenant.bytes, tenant);
+}
+
 pub fn validate(
     a: std.mem.Allocator,
     store: *storage.Store,
@@ -114,3 +130,43 @@ fn validatePublication(
     }
     return error.InvalidArchive;
 }
+
+pub const Origins = struct {
+    a: std.mem.Allocator,
+    references: std.AutoArrayHashMapUnmanaged(state.Reference, void) = .empty,
+
+    pub fn deinit(self: *Origins) void {
+        self.references.deinit(self.a);
+    }
+
+    pub fn add(_: *Origins, _: state.Reference) !void {}
+    pub fn reply(_: *Origins, _: @import("occurrence.zig").Acquired) !void {}
+    pub fn observerSource(_: *Origins, _: state.Reference) !void {}
+
+    pub fn reuseDefinition(self: *Origins, ref: state.Reference) !void {
+        try self.references.put(self.a, ref, {});
+    }
+
+    pub fn typed(self: *Origins, comptime T: type, ref: state.Reference, value: T) !void {
+        if (T == Definition) return self.reuseDefinition(ref);
+        try state.visitReferences(T, value, self);
+    }
+
+    pub fn scan(self: *Origins, source: anytype, origin: state.Archive) !void {
+        for (origin.operations.items) |row| {
+            const bytes = try source.object(self.a, row.body, null);
+            defer self.a.free(bytes);
+            var receipt = try contracts.decodeOwned(state.Receipt, self.a, bytes);
+            defer receipt.deinit();
+            try state.visitWorkspaceReceipt(self.a, source, receipt.value, self);
+        }
+        for (origin.records.items) |row| {
+            if (row.kind != .workspace_reply) continue;
+            const bytes = try source.object(self.a, row.body, null);
+            defer self.a.free(bytes);
+            var decoded = try contracts.decodeOwned(workspace.ReplyObservation, self.a, bytes);
+            defer decoded.deinit();
+            try state.visitReferences(workspace.ReplyObservation, decoded.value, self);
+        }
+    }
+};

@@ -6129,7 +6129,7 @@ const WaitTypes = struct {
     pub const Input = void;
     pub const Output = contracts.workspace.Reply;
     pub const Failure = void;
-    pub const Message = @FieldType(contracts.workspace.Work, "wait");
+    pub const Message = contracts.workspace.Command;
 };
 const WaitApplication = struct {
     pub fn emit(c: @import("protean").Context) !source.Module {
@@ -6137,8 +6137,6 @@ const WaitApplication = struct {
         const b = c.builder;
         const unit = try b.scalar(void);
         const output = try interop.schemaId(c.author, try c.schema(WaitTypes.Output));
-        const command = try interop.schemaId(c.author, try c.schema(contracts.workspace.Command));
-        const work_command = try interop.schemaId(c.author, try c.schema(contracts.workspace.Work));
         const inbox = try interop.operationId(
             c.author,
             try @import("protean").inbox.Profile(WaitTypes.Message).declare(c),
@@ -6160,8 +6158,6 @@ const WaitApplication = struct {
             b,
             unit,
             output,
-            command,
-            work_command,
             inbox,
             workspace,
             inbox_schema,
@@ -6960,10 +6956,10 @@ const AuthoredWaitCase = struct {
             .work,
             self.initial.value.id,
         );
-        self.selection = .{
+        self.selection = .{ .work = .{ .wait = .{
             .works = .{ .items = &self.selection_work },
             .after = self.initial.value.event_watermark,
-        };
+        } } };
         _ = try self.fixture.service.message(
             self.fixture.scratch,
             try std.fmt.allocPrint(self.fixture.scratch, "{s}-selection", .{self.prefix}),
@@ -16056,8 +16052,6 @@ fn emitWaitBody(
     b: *source.Builder,
     unit: Id,
     output: Id,
-    command: Id,
-    work_command: Id,
     inbox: Id,
     workspace: Id,
     inbox_schema: Id,
@@ -16071,18 +16065,6 @@ fn emitWaitBody(
     const message = try b.variable(message_schema);
     const id = try b.variable(message_id_schema);
     const selection = try b.variable(selection_schema);
-    const selected_work = try b.primitive(
-        work_command,
-        .variant,
-        &.{try b.reference(selection)},
-        @backingInt(std.meta.Tag(contracts.workspace.Work).wait),
-    );
-    const selected_command = try b.primitive(
-        command,
-        .variant,
-        &.{selected_work},
-        @backingInt(std.meta.Tag(contracts.workspace.Command).work),
-    );
     const reply = try b.variable(output);
     const ignored = try b.variable(inbox_schema);
     const finish = try b.bind(
@@ -16092,7 +16074,7 @@ fn emitWaitBody(
     );
     const wait = try b.bind(
         reply,
-        try b.term(.{ .perform = .{ .effect = workspace, .payload = selected_command } }),
+        try b.term(.{ .perform = .{ .effect = workspace, .payload = try b.reference(selection) } }),
         finish,
     );
     const unpack = try b.term(.{ .unpack_product = .{

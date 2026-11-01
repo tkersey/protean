@@ -274,6 +274,24 @@ pub const Reader = struct {
         }
         return error.MissingArtifact;
     }
+    pub fn objectReference(self: *Reader, id: state.Digest, limit: ?usize) !state.Reference {
+        const objects = self.manifest.value.objects.items;
+        var first: usize = 0;
+        var end = objects.len;
+        while (first < end) {
+            const middle = first + (end - first) / 2;
+            const reference = objects[middle];
+            switch (std.mem.order(u8, &reference.digest, &id)) {
+                .lt => first = middle + 1,
+                .gt => end = middle,
+                .eq => {
+                    if (limit) |maximum| if (reference.bytes > maximum) return error.Capacity;
+                    return reference;
+                },
+            }
+        }
+        return error.MissingArtifact;
+    }
     pub fn acquire(self: *Reader, store: *storage.Store) !void {
         if (!store.transaction or store.fenced) return error.InvalidState;
         const prefix = try self.allocator.alloc(u8, self.prefix.len);

@@ -33,7 +33,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         ) anyerror!void {
             try reuse.validate(a, Lifecycle.store(self), value);
             if (self.reuse_provenance_validation) return;
-            var queue: Origins = .{ .a = a };
+            var queue: reuse.Origins = .{ .a = a };
             defer queue.deinit();
             try validateOrigin(self, a, value.origin, &queue);
             try validateQueued(self, a, &queue);
@@ -43,15 +43,15 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             self: *Self,
             a: std.mem.Allocator,
             origin: state.Archive,
-        ) !void {
+        ) anyerror!void {
             if (self.reuse_provenance_validation) return;
-            var queue: Origins = .{ .a = a };
+            var queue: reuse.Origins = .{ .a = a };
             defer queue.deinit();
             try queue.scan(Lifecycle.store(self), origin);
             try validateQueued(self, a, &queue);
         }
 
-        fn validateQueued(self: *Self, a: std.mem.Allocator, queue: *Origins) !void {
+        fn validateQueued(self: *Self, a: std.mem.Allocator, queue: *reuse.Origins) !void {
             var index: usize = 0;
             while (index < queue.references.count()) : (index += 1) {
                 const ref = queue.references.keys()[index];
@@ -68,7 +68,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             self: *Self,
             a: std.mem.Allocator,
             origin: state.Archive,
-            queue: *Origins,
+            queue: *reuse.Origins,
         ) !void {
             const store = Lifecycle.store(self);
             try queue.scan(store, origin);
@@ -86,7 +86,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 self,
                 a,
                 parent.value,
-                origin.records.items,
+                origin,
                 .inspect,
             );
             try view.close();
@@ -113,16 +113,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (artifact.source_kind != .source_records or artifact.catalog != null or
                 artifact.controller != null) return error.UnsupportedCapability;
             const origin = try archive.prepare(a, store, task_id, self.assets.manifest);
-            try validateArchiveOrigins(self, a, origin);
-            const previous_validation = self.reuse_provenance_validation;
-            self.reuse_provenance_validation = true;
-            defer self.reuse_provenance_validation = previous_validation;
             try Occurrences.validateArchiveAdmissions(self, a, parent.value, origin);
             try Snapshots.validateWorkspaceArchive(
                 self,
                 a,
                 parent.value,
-                origin.records.items,
+                origin,
                 .inspect,
             );
             const definition: reuse.Definition = .{
@@ -195,46 +191,6 @@ const References = struct {
 
     pub fn add(self: *References, ref: state.Reference) !void {
         try self.refs.put(self.a, ref, {});
-    }
-};
-
-pub const Origins = struct {
-    a: std.mem.Allocator,
-    references: std.AutoArrayHashMapUnmanaged(state.Reference, void) = .empty,
-
-    pub fn deinit(self: *Origins) void {
-        self.references.deinit(self.a);
-    }
-
-    pub fn add(_: *Origins, _: state.Reference) !void {}
-    pub fn reply(_: *Origins, _: @import("../occurrence.zig").Acquired) !void {}
-    pub fn observerSource(_: *Origins, _: state.Reference) !void {}
-
-    pub fn reuseDefinition(self: *Origins, ref: state.Reference) !void {
-        try self.references.put(self.a, ref, {});
-    }
-
-    pub fn typed(self: *Origins, comptime T: type, ref: state.Reference, value: T) !void {
-        if (T == reuse.Definition) return self.reuseDefinition(ref);
-        try state.visitReferences(T, value, self);
-    }
-
-    pub fn scan(self: *Origins, source: anytype, origin: state.Archive) !void {
-        for (origin.operations.items) |row| {
-            const bytes = try source.object(self.a, row.body, null);
-            defer self.a.free(bytes);
-            var receipt = try contracts.decodeOwned(state.Receipt, self.a, bytes);
-            defer receipt.deinit();
-            try state.visitWorkspaceReceipt(self.a, source, receipt.value, self);
-        }
-        for (origin.records.items) |row| {
-            if (row.kind != .workspace_reply) continue;
-            const bytes = try source.object(self.a, row.body, null);
-            defer self.a.free(bytes);
-            var decoded = try contracts.decodeOwned(workspace.ReplyObservation, self.a, bytes);
-            defer decoded.deinit();
-            try state.visitReferences(workspace.ReplyObservation, decoded.value, self);
-        }
     }
 };
 

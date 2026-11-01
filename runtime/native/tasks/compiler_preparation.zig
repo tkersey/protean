@@ -434,7 +434,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (store(self).transaction or self.compiler_facts == null)
                 return error.InvalidState;
             try prepareCompilerOrigin(self, manifest, source);
-            const Reuse = @import("reuse_preparation.zig");
+            const Reuse = @import("../reuse_state.zig");
             var origins: Reuse.Origins = .{ .a = self.allocator };
             defer origins.deinit();
             try origins.scan(source, manifest);

@@ -42,8 +42,11 @@ pub fn run(comptime Types: type, h: anytype) !void {
     try expectAbsent(h, task_a);
     try reopen(Types, h);
     try expectAbsent(h, task_a);
+    try auditCatalog(Types, h);
+    try foreignOwners(Types, h, locator);
     const task_b = (try h.service.submit(a, "reuse-destination", {})).receipt.task;
     try discover(h, task_b, locator);
+    try authoredDiscovery(h, task_b, locator);
     try deniedAccess(h, task_b, locator);
     const imported = try lostImportReply(Types, h, task_b, locator);
     const program_b = imported.program orelse return error.ExpectedProgram;
@@ -57,16 +60,158 @@ pub fn run(comptime Types: type, h: anytype) !void {
     try waitForQuestion(h, task_b, work_b, "destination-progress");
     try reopen(Types, h);
     try expectAbsent(h, task_a);
-    try revise(h, task_b, locator);
+    const revision = try revise(h, task_b, locator);
     try answer(h, task_b, work_b, "destination-answer", 5);
     try expectResult(h, task_b, work_b, "destination-result", 32);
     var finished = try h.service.workspaceWork(a, task_b, work_b);
     defer finished.deinit();
     try std.testing.expectEqualDeep(try support.nativeIdentity(program_b), finished.value.program);
+    try validateAndExport(h, task_b);
     try settle(h, task_b, "settle-destination");
     try h.service.discardTask(a, task_b);
     try reopen(Types, h);
     try expectAbsent(h, task_b);
+    try auditCatalog(Types, h);
+    try restoreRevision(Types, h, revision);
+}
+
+fn auditCatalog(comptime Types: type, h: anytype) !void {
+    const store = &h.namespace.store;
+    const task_only = try store.auditTaskRetention(h.handlers, h.application.image_identity);
+    try std.testing.expectEqual(@as(u64, 0), task_only.objects);
+    const full = try store.auditRetention(h.handlers, h.application.image_identity);
+    try std.testing.expect(full.objects > 0 and full.edges > 0);
+    {
+        try store.begin();
+        defer store.rollback();
+        store.invalidateIntegrity();
+        try store.database.exec(
+            "DELETE FROM dependencies WHERE parent=" ++
+                "(SELECT body FROM reuse_definitions ORDER BY body LIMIT 1)",
+        );
+        const unaffected = try native.testing.retention.verifyTasks(store, h.handlers);
+        try std.testing.expectEqual(@as(u64, 0), unaffected.objects);
+        try std.testing.expectError(
+            error.CorruptState,
+            native.testing.retention.verify(store, h.handlers),
+        );
+        try std.testing.expect(!store.fenced);
+    }
+    try reopen(Types, h);
+}
+
+fn authoredDiscovery(h: anytype, task: Task, locator: wc.RetainedLocator) !void {
+    _ = try h.service.message(h.scratch, "authored-discovery", task, .{ .program = .{ .find = .{
+        .scope = locator.scope,
+        .query = .{ .bytes = "adjust" },
+    } } });
+    for (0..128) |_| {
+        const step = try h.service.pump(h.scratch);
+        try std.testing.expect(step != .work);
+        var rows = try h.namespace.store.database.prepare(
+            "SELECT o.body FROM records r JOIN objects o ON o.digest=r.body " ++
+                "WHERE r.kind='workspace_reply' AND r.task=?",
+            &.{.{ .blob = &task }},
+        );
+        defer rows.deinit();
+        if (try rows.step() != .row) continue;
+        var saved = try contracts.decodeOwned(
+            native.workspace.ReplyObservation,
+            h.scratch,
+            try rows.bytes(0),
+        );
+        defer saved.deinit();
+        try std.testing.expect(saved.value.evidence == .read);
+        try std.testing.expect(saved.value.evidence.read == .reuse);
+        const selected = saved.value.evidence.read.reuse.selection;
+        try std.testing.expect(selected == .find);
+        try std.testing.expectEqual(@as(usize, 1), selected.find.definitions.items.len);
+        var expected: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&expected, locator.id.bytes);
+        try std.testing.expectEqualDeep(expected, selected.find.definitions.items[0].digest);
+        return;
+    }
+    return error.ExpectedAuthoredDiscovery;
+}
+
+fn validateAndExport(h: anytype, task: Task) !void {
+    try h.service.validateWorkspace(h.scratch, task);
+    const path = try std.fmt.allocPrint(
+        h.scratch,
+        "{s}/reuse.tar",
+        .{h.path_buffer[0..h.length]},
+    );
+    _ = try h.service.exportCheckpoint(h.scratch, task, path);
+    var tables = try h.namespace.store.database.prepare(
+        "SELECT count(*) FROM sqlite_temp_master WHERE type='table' AND " ++
+            "name IN ('tasks','records','events','operations')",
+        &.{},
+    );
+    defer tables.deinit();
+    try std.testing.expectEqual(.row, try tables.step());
+    try std.testing.expectEqual(@as(i64, 0), try tables.integer(0));
+}
+
+fn restoreRevision(comptime Types: type, h: anytype, locator: wc.RetainedLocator) !void {
+    var phase: []const u8 = "import nested definition";
+    errdefer std.debug.print("reuse restoration: {s}\n", .{phase});
+    const task = (try h.service.submit(h.scratch, "reuse-third-task", {})).receipt.task;
+    const imported = try command(h, task, "import-nested", .{ .program = .{ .import = .{
+        .locator = locator,
+    } } });
+    const program = imported.program orelse return error.ExpectedProgram;
+    const path = try std.fmt.allocPrint(
+        h.scratch,
+        "{s}/nested-reuse.tar",
+        .{h.path_buffer[0..h.length]},
+    );
+    phase = "export destination";
+    _ = try h.service.exportCheckpoint(h.scratch, task, path);
+    phase = "restore destination";
+    try inspectRestored(Types, h, path, task);
+    phase = "execute nested definition";
+    const work = try start(h, task, program, "nested-start", 4);
+    try waitForQuestion(h, task, work, "nested-progress");
+    try answer(h, task, work, "nested-answer", 6);
+    try expectResult(h, task, work, "nested-result", 110);
+    try settle(h, task, "settle-third-task");
+    try h.service.discardTask(h.scratch, task);
+}
+
+fn inspectRestored(comptime Types: type, h: anytype, path: []const u8, task: Task) !void {
+    try closeFixture(h);
+    try inspectCopy(Types, h, path, task);
+    try openFixture(Types, h);
+}
+
+fn inspectCopy(comptime Types: type, h: anytype, path: []const u8, task: Task) !void {
+    const target = try std.fmt.allocPrint(
+        h.scratch,
+        "{s}/nested-restored",
+        .{h.path_buffer[0..h.length]},
+    );
+    var namespace = try native.Namespace.open(h.a, h.io, target);
+    defer support.expectCleanup(namespace.close());
+    var profile = h.profile;
+    profile.reuse = .{};
+    var service = try native.tasks.Service(Types).init(
+        h.a,
+        h.io,
+        &namespace,
+        h.assets,
+        &h.application,
+        h.handlers,
+        profile,
+    );
+    defer support.expectCleanup(service.close(h.a));
+    const restored = try service.importCheckpoint(h.scratch, "restore-nested", path);
+    try std.testing.expectEqualDeep(task, restored.receipt.task);
+    try service.validateWorkspace(h.scratch, task);
+    try std.testing.expectEqual(.idle, try service.pump(h.scratch));
+    var rows = try namespace.store.database.prepare("SELECT count(*) FROM reuse_definitions", &.{});
+    defer rows.deinit();
+    try std.testing.expectEqual(.row, try rows.step());
+    try std.testing.expectEqual(@as(i64, 0), try rows.integer(0));
 }
 
 fn lostImportReply(
@@ -127,6 +272,86 @@ fn deniedAccess(h: anytype, task: Task, locator: wc.RetainedLocator) !void {
         ) == null);
     }
     try std.testing.expectEqual(generation, h.namespace.store.head.generation);
+}
+
+fn foreignOwners(comptime Types: type, h: anytype, locator: wc.RetainedLocator) !void {
+    const original_profile = h.profile;
+    const original_grants = h.grants;
+    defer {
+        h.profile = original_profile;
+        h.grants = original_grants;
+    }
+    for (0..2) |axis| {
+        h.profile = original_profile;
+        h.grants = original_grants;
+        if (axis == 0) {
+            h.profile.authority.principal = "foreign";
+        } else {
+            h.profile.authority.tenant = "foreign";
+        }
+        const scopes = try h.scratch.dupe(
+            @TypeOf(h.profile.reuse.scopes[0]),
+            h.profile.reuse.scopes,
+        );
+        for (scopes) |*scope| {
+            scope.principal = h.profile.authority.principal;
+            scope.tenant = h.profile.authority.tenant;
+        }
+        h.profile.reuse.scopes = scopes;
+        for (&h.grants) |*grant| grant.resource_identity = try h.profile.resourceIdentity(
+            h.scratch,
+            h.application.image_identity,
+        );
+        try reopen(Types, h);
+        const task = (try h.service.submit(h.scratch, "foreign-owner", {})).receipt.task;
+        try foreignAccess(h, task, locator);
+        try settle(h, task, "settle-foreign");
+        try h.service.discardTask(h.scratch, task);
+    }
+    h.profile = original_profile;
+    h.grants = original_grants;
+    try reopen(Types, h);
+}
+
+fn foreignAccess(h: anytype, task: Task, locator: wc.RetainedLocator) !void {
+    const found = try command(h, task, "foreign-find", .{ .program = .{ .find = .{
+        .scope = locator.scope,
+        .query = .{ .bytes = "adjust" },
+    } } });
+    var result = try native.json.parse(h.scratch, found.observation_json.bytes, .{});
+    defer result.deinit();
+    const records = result.value.object.get("records").?.array.items;
+    try std.testing.expectEqual(@as(usize, 0), records.len);
+    try std.testing.expectEqualStrings("0", result.value.object.get("scanned").?.number_string);
+    const missing_id: [64]u8 = @splat('0');
+    const missing: wc.RetainedLocator = .{
+        .scope = locator.scope,
+        .id = .{ .bytes = &missing_id },
+    };
+    const requests = [_]wc.Command{
+        .{ .program = .{ .inspect = .{ .target = .{ .retained = locator }, .page = .{} } } },
+        .{ .program = .{ .inspect = .{ .target = .{ .retained = missing }, .page = .{} } } },
+        .{ .program = .{ .import = .{ .locator = locator } } },
+        .{ .program = .{ .import = .{ .locator = missing } } },
+    };
+    var observed: [requests.len]wc.Reply = undefined;
+    for (requests, &observed, 0..) |request, *reply, index| {
+        reply.* = try h.service.workspaceCommand(
+            h.scratch,
+            try std.fmt.allocPrint(h.scratch, "foreign-{d}", .{index}),
+            task,
+            request,
+        );
+        try std.testing.expectEqual(.rejected, reply.disposition);
+    }
+    try std.testing.expectEqualStrings(
+        observed[0].observation_json.bytes,
+        observed[1].observation_json.bytes,
+    );
+    try std.testing.expectEqualStrings(
+        observed[2].observation_json.bytes,
+        observed[3].observation_json.bytes,
+    );
 }
 
 fn invalidRetain(h: anytype, task: Task, program: wc.Ref) !void {
@@ -424,7 +649,7 @@ fn expectImport(
     try std.testing.expect(locator.id.bytes.len == 64);
 }
 
-fn revise(h: anytype, task: Task, original: wc.RetainedLocator) !void {
+fn revise(h: anytype, task: Task, original: wc.RetainedLocator) !wc.RetainedLocator {
     const program = try build(h, task, "build-revision", 100);
     const reply = try command(h, task, "retain-revision", .{ .program = .{ .retain = .{
         .program = program,
@@ -442,6 +667,15 @@ fn revise(h: anytype, task: Task, original: wc.RetainedLocator) !void {
     });
     try std.testing.expectEqual(.rejected, conflict.disposition);
     try std.testing.expectEqual(generation, h.namespace.store.head.generation);
+    const second = try command(h, task, "retain-revision-again", .{ .program = .{ .retain = .{
+        .program = program,
+        .scope = original.scope,
+        .description = .{
+            .name = .{ .bytes = "adjust" },
+            .purpose = .{ .bytes = "Same code with a later immutable history" },
+        },
+    } } });
+    return retainedLocator(h.scratch, second);
 }
 
 fn settle(h: anytype, task: Task, id: []const u8) !void {
@@ -476,11 +710,19 @@ fn expectAbsent(h: anytype, task: Task) !void {
 }
 
 fn reopen(comptime Types: type, h: anytype) !void {
+    try closeFixture(h);
+    try openFixture(Types, h);
+}
+
+fn closeFixture(h: anytype) !void {
     try h.service.park(h.scratch);
     try h.service.close(h.scratch);
     h.service_open = false;
     try h.namespace.close();
     h.namespace_open = false;
+}
+
+fn openFixture(comptime Types: type, h: anytype) !void {
     h.namespace = try native.Namespace.open(h.a, h.io, h.path);
     h.namespace_open = true;
     h.service = try native.tasks.Service(Types).init(

@@ -100,8 +100,8 @@ pub const Store = struct {
     sealed_generation: ?u64 = null,
     projecting: bool = false,
     context_cache: @import("adaptive_context.zig").Cache = .{},
-    retention_epoch: ?u64 = null,
-    retention_image: ?Digest = null,
+    task_retention_epoch: ?u64 = null,
+    task_retention_image: ?Digest = null,
 
     /// The namespace owner has already authenticated the directory, acquired
     /// its OS lock and decided whether this is a new or existing database.
@@ -187,8 +187,8 @@ pub const Store = struct {
     /// Invalidating custody never grants validation authority for the new epoch.
     pub fn invalidateIntegrity(self: *Store) void {
         self.context_cache.deinit(self.allocator);
-        self.retention_epoch = null;
-        self.retention_image = null;
+        self.task_retention_epoch = null;
+        self.task_retention_image = null;
         self.sealed_generation = null;
         self.integrity_epoch = std.math.add(u64, self.integrity_epoch, 1) catch {
             self.fenced = true;
@@ -231,16 +231,35 @@ pub const Store = struct {
         handlers: @import("registry.zig").Registry,
         image: Digest,
     ) !@import("retention.zig").Statistics {
+        return self.auditRetentionScope(handlers, image, true);
+    }
+    pub fn auditTaskRetention(
+        self: *Store,
+        handlers: @import("registry.zig").Registry,
+        image: Digest,
+    ) !@import("retention.zig").Statistics {
+        return self.auditRetentionScope(handlers, image, false);
+    }
+    fn auditRetentionScope(
+        self: *Store,
+        handlers: @import("registry.zig").Registry,
+        image: Digest,
+        catalog: bool,
+    ) !@import("retention.zig").Statistics {
         const opened = !self.transaction;
         if (opened) try self.begin();
         defer if (opened) self.rollback();
-        const statistics = @import("retention.zig").verify(self, handlers) catch |err| {
+        const retention = @import("retention.zig");
+        const statistics = (if (catalog)
+            retention.verify(self, handlers)
+        else
+            retention.verifyTasks(self, handlers)) catch |err| {
             if (err != error.OutOfMemory and err != error.Capacity) self.fence();
             return err;
         };
         if (opened and self.sealed_generation == self.head.generation) {
-            self.retention_epoch = self.integrity_epoch;
-            self.retention_image = image;
+            self.task_retention_epoch = self.integrity_epoch;
+            self.task_retention_image = image;
         }
         return statistics;
     }
@@ -265,9 +284,10 @@ pub const Store = struct {
         operation: anytype,
     ) anyerror!Result {
         if (!self.transaction and self.sealed_generation == self.head.generation and
-            (self.retention_epoch != self.integrity_epoch or self.retention_image == null or
-                !std.meta.eql(self.retention_image.?, binding.application)))
-            _ = try self.auditRetention(handlers, binding.application);
+            (self.task_retention_epoch != self.integrity_epoch or
+                self.task_retention_image == null or
+                !std.meta.eql(self.task_retention_image.?, binding.application)))
+            _ = try self.auditTaskRetention(handlers, binding.application);
         var scope = try ProjectionScope.open(self, binding);
         const result = operation.run(@as(@import("registry.zig").ProjectionContext, .{
             .allocator = a,
@@ -382,8 +402,11 @@ pub const Store = struct {
                 !std.meta.eql(ctx.trial, scope.binding.trial))
                 return error.InvalidContext;
             if (scope.opened and store.sealed_generation == store.head.generation and
-                store.retention_epoch == scope.epoch and store.retention_image != null and
-                std.meta.eql(store.retention_image.?, scope.binding.application)) owner = store;
+                store.task_retention_epoch == scope.epoch and store.task_retention_image != null and
+                std.meta.eql(
+                    store.task_retention_image.?,
+                    scope.binding.application,
+                )) owner = store;
         }
         return @import("adaptive_context.zig").Projection(P).validate(
             ctx,
@@ -762,7 +785,7 @@ pub const Store = struct {
         }
     }
 
-    fn retainReference(self: *Store, parent: state.Reference, child: state.Reference) !void {
+    pub fn retainReference(self: *Store, parent: state.Reference, child: state.Reference) !void {
         try self.writing();
         if (parent.bytes > std.math.maxInt(i64) or
             child.bytes > std.math.maxInt(i64))

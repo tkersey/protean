@@ -35,10 +35,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     const bytes = try store(self).definitionBytes(a, locator.scope.bytes, id) orelse
                         return error.ArtifactUnavailable;
                     defer a.free(bytes);
+                    const reference: state.Reference = .{ .digest = id, .bytes = bytes.len };
+                    if (!try owned(self, a, reference)) return error.ArtifactUnavailable;
                     break :blk .{ .inspect = .{
                         .locator = locator,
                         .page = request.page,
-                        .definition = .{ .digest = id, .bytes = bytes.len },
+                        .definition = reference,
                     } };
                 },
                 else => return error.InvalidState,
@@ -61,6 +63,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 const bytes = try cursor.bytes(0);
                 if (bytes.len != 32) return error.CorruptState;
                 const reference = try store(self).objectReference(bytes[0..32].*, null);
+                if (!try owned(self, a, reference)) continue;
                 try definitions.append(a, reference);
             }
             return .{
@@ -88,6 +91,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             const observation = basis orelse try capture(self, a, 0, command);
             if (observation != .reuse) return error.InvalidArchive;
             try binding(command, observation.reuse.selection);
+            if (basis != null) try requireOwnedSelection(self, a, observation.reuse.selection);
             return renderFind(self, a, observation.reuse.selection.find);
         }
 
@@ -147,7 +151,33 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             const observation = basis orelse try capture(self, a, 0, command);
             if (observation != .reuse) return error.InvalidArchive;
             try binding(command, observation.reuse.selection);
+            if (basis != null) try requireOwnedSelection(self, a, observation.reuse.selection);
             return renderInspect(self, a, observation.reuse.selection.inspect);
+        }
+
+        fn owned(self: *Self, a: std.mem.Allocator, reference: state.Reference) !bool {
+            const bytes = try store(self).object(a, reference, null);
+            defer a.free(bytes);
+            var definition = try contracts.decodeOwned(retained.Definition, a, bytes);
+            defer definition.deinit();
+            return retained.sameOwner(
+                a,
+                store(self),
+                definition.value,
+                self.profile.authority.principal,
+                self.profile.authority.tenant,
+            );
+        }
+
+        fn requireOwnedSelection(self: *Self, a: std.mem.Allocator, selected: Selection) !void {
+            switch (selected) {
+                .find => |found| for (found.definitions.items) |reference| {
+                    if (!try owned(self, a, reference)) return error.ArtifactUnavailable;
+                },
+                .inspect => |inspected| {
+                    if (!try owned(self, a, inspected.definition)) return error.ArtifactUnavailable;
+                },
+            }
         }
 
         fn renderInspect(self: *Self, a: std.mem.Allocator, selected: Inspect) !json.Value {
@@ -214,6 +244,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             defer scratch.deinit();
             var definition = try load(self, scratch.allocator(), scope, reference);
             defer definition.deinit();
+            if (!try retained.sameOwner(
+                scratch.allocator(),
+                store(self),
+                definition.value,
+                self.profile.authority.principal,
+                self.profile.authority.tenant,
+            )) return error.InvalidArchive;
             try retained.validate(scratch.allocator(), store(self), definition.value);
         }
 

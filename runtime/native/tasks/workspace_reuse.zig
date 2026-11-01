@@ -173,6 +173,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             defer a.free(bytes);
             var decoded = try contracts.decodeOwned(reuse.Definition, a, bytes);
             errdefer decoded.deinit();
+            if (!try reuse.sameOwner(
+                a,
+                Lifecycle.store(self),
+                decoded.value,
+                self.profile.authority.principal,
+                self.profile.authority.tenant,
+            )) return error.ArtifactUnavailable;
             if (!std.mem.eql(u8, decoded.value.scope.bytes, locator.scope.bytes))
                 return error.CorruptState;
             try Lifecycle.store(self).checkDependencies(
@@ -191,6 +198,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             defer a.free(bytes);
             var decoded = try contracts.decodeOwned(reuse.Definition, a, bytes);
             defer decoded.deinit();
+            if (!try reuse.sameOwner(
+                a,
+                store,
+                decoded.value,
+                self.profile.authority.principal,
+                self.profile.authority.tenant,
+            )) return error.ArtifactUnavailable;
             var arena = std.heap.ArenaAllocator.init(a);
             defer arena.deinit();
             const scratch = arena.allocator();
