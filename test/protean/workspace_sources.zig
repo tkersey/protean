@@ -266,7 +266,12 @@ pub fn reusableQuestion(b: *source.Builder, increment: u64) !source.Module {
     return b.module(entry, unit);
 }
 
-fn reusableAdd(b: *source.Builder, schema: source.Id, left: source.Id, right: source.Id) !source.Id {
+fn reusableAdd(
+    b: *source.Builder,
+    schema: source.Id,
+    left: source.Id,
+    right: source.Id,
+) !source.Id {
     const fault = try b.failureLiteral(try b.constant(void, {}));
     return b.value(.{ .schema = schema, .expression = .{ .primitive = .{
         .opcode = .integer_add,

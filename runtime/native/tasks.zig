@@ -66,6 +66,7 @@ pub fn Service(comptime Types: type) type {
         checked_workspace_runtimes: std.AutoHashMapUnmanaged(CompilerFact, u64) = .empty,
         runtime_cache: ?RuntimeCache = null,
         compiler_facts: ?*CompilerFacts = null,
+        reuse_provenance_validation: bool = false,
         // Import may use ordinary mutation projections only through an existing
         // matching receipt. Missing receipts must never execute a new mutation.
         workspace_replay: ?struct {

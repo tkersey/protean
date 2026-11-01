@@ -433,6 +433,27 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         pub fn prepareCompilerFacts(self: *Self, manifest: state.Archive, source: anytype) !void {
             if (store(self).transaction or self.compiler_facts == null)
                 return error.InvalidState;
+            try prepareCompilerOrigin(self, manifest, source);
+            const Reuse = @import("reuse_preparation.zig");
+            var origins: Reuse.Origins = .{ .a = self.allocator };
+            defer origins.deinit();
+            try origins.scan(source, manifest);
+            var index: usize = 0;
+            while (index < origins.references.count()) : (index += 1) {
+                const ref = origins.references.keys()[index];
+                const bytes = try source.object(self.allocator, ref, null);
+                defer self.allocator.free(bytes);
+                var definition = try contracts.decodeOwned(
+                    @import("../reuse_state.zig").Definition,
+                    self.allocator,
+                    bytes,
+                );
+                defer definition.deinit();
+                try prepareCompilerOrigin(self, definition.value.origin, source);
+                try origins.scan(source, definition.value.origin);
+            }
+        }
+        fn prepareCompilerOrigin(self: *Self, manifest: state.Archive, source: anytype) !void {
             try validateArchiveRuntimePolicies(self, manifest, source);
             try prepareArchiveCompilerEvents(self, manifest, source);
             try prepareArchiveCompilerCaptures(self, manifest, source);

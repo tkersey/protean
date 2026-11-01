@@ -10,6 +10,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
     return struct {
         const Lifecycle = @import("lifecycle.zig").Operations(Types, Self);
         const Programs = @import("workspace_programs.zig").Operations(Types, Self);
+        const Preparation = @import("reuse_preparation.zig").Operations(Types, Self);
 
         pub fn retained(
             self: *Self,
@@ -27,7 +28,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             defer a.free(bytes);
             var definition = try contracts.decodeOwned(reuse.Definition, a, bytes);
             defer definition.deinit();
-            try reuse.validate(a, store, definition.value);
+            try Preparation.validateDefinition(self, a, definition.value);
             if (!std.meta.eql(definition.value.source_task, parent.id) or
                 !std.meta.eql(
                     definition.value.program.digest,
@@ -83,7 +84,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             defer a.free(definition_bytes);
             var definition = try contracts.decodeOwned(reuse.Definition, a, definition_bytes);
             defer definition.deinit();
-            try reuse.validate(a, store, definition.value);
+            try Preparation.validateDefinition(self, a, definition.value);
             if (!std.mem.eql(u8, definition.value.scope.bytes, value.locator.scope.bytes))
                 return error.InvalidArchive;
             try sameEncoded(

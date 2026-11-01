@@ -34,7 +34,7 @@ TigerStyle and still cannot pass the terminal gate.
 | `owners` | All 46 retained native task/response/model-custody owner tests, including their participant imports. |
 | `owner-adaptive-control` | All nine retained adaptive owner tests. |
 | `owner-support` | Native unit/context and process-crash recovery checks. |
-| `workspace` | The 16 workspace execution and construction tests. |
+| `workspace` | The 17 workspace execution and construction tests. |
 | `workspace-retention` | The three retained-work, wait and delegated-answer tests. |
 | `workspace-history` | The three history, cancellation-read and allocation-failure tests. |
 | `correspondence` | Independent source-oracle agreement, capsule restoration and duplicate-custody rejection. |
@@ -93,9 +93,9 @@ The invalid-output recovery test retains all three selected rejection cases.
 The surviving construction and custody tests do not replace those successful
 end-to-end recovery sequences.
 
-Workspace execution, retention and history still run once each across 22 tests.
+Workspace execution, retention and history still run once each across 23 tests.
 CI compiles the three existing filtered groups separately; the full unfiltered
-root is retained for local grouped execution. The 16 execution tests run in three
+root is retained for local grouped execution. The 17 execution tests run in three
 independent processes using the existing qualification runner, which rejects
 omissions, overlaps, skips, failures and leaks. Local execution uses those same
 partitions alongside retention and history. Selected list fixtures are reduced

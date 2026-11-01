@@ -1000,20 +1000,48 @@ pub const Store = struct {
         if (try query.step() != .row) return null;
         return try self.recordObject(a, try query.bytes(0));
     }
-    pub fn retainDefinition(
+    pub const PreparedDefinition = struct {
+        scope: []const u8,
+        bytes: []const u8,
+        reference: state.Reference,
+        children: []const state.Reference,
+    };
+
+    pub fn prepareDefinition(
         self: *Store,
+        a: std.mem.Allocator,
         definition: @import("reuse_state.zig").Definition,
-    ) !state.Reference {
+    ) !PreparedDefinition {
+        if (self.transaction) return error.InvalidState;
+        const T = @import("reuse_state.zig").Definition;
+        const bytes = try contracts.encodeOwned(T, a, definition);
+        errdefer a.free(bytes);
+        var references = struct {
+            allocator: std.mem.Allocator,
+            children: std.AutoArrayHashMapUnmanaged(state.Reference, void) = .empty,
+            pub fn add(this: *@This(), ref: state.Reference) !void {
+                try this.children.put(this.allocator, ref, {});
+            }
+        }{ .allocator = a };
+        defer references.children.deinit(a);
+        try state.visitReferences(T, definition, &references);
+        return .{
+            .scope = definition.scope.bytes,
+            .bytes = bytes,
+            .reference = .{ .digest = digest(bytes), .bytes = bytes.len },
+            .children = try a.dupe(state.Reference, references.children.keys()),
+        };
+    }
+
+    pub fn retainDefinition(self: *Store, prepared: PreparedDefinition) !state.Reference {
         try self.writing();
         errdefer self.rollback();
-        const T = @import("reuse_state.zig").Definition;
-        const bytes = try contracts.encodeOwned(T, self.allocator, definition);
-        defer self.allocator.free(bytes);
-        const ref = try self.putObject(bytes);
-        try self.retainValue(T, ref, definition);
+        const ref = try self.putObject(prepared.bytes);
+        if (!std.meta.eql(ref, prepared.reference)) return error.CorruptState;
+        for (prepared.children) |child| try self.retainReference(ref, child);
         try self.database.run(
             "INSERT OR IGNORE INTO reuse_definitions(scope,body) VALUES(?,?)",
-            &.{ .{ .text = definition.scope.bytes }, .{ .blob = &ref.digest } },
+            &.{ .{ .text = prepared.scope }, .{ .blob = &ref.digest } },
         );
         return ref;
     }

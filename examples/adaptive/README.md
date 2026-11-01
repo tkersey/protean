@@ -336,7 +336,7 @@ The output retains every acquired evidence entry in its original order, tagged
 `source` or `workspace`, plus constructed program references in `programs`.
 Claims may share evidence; a claim cannot repeat an index. These checks establish
 membership and structural support, not the truth of model-written statements.
-Application 8.0.0 uses context v7 and native state format 20 in a **new namespace**.
+Application 8.0.0 uses context v7 and native state format 21 in a **new namespace**.
 Keep an existing task's namespace, original image, and exact executable together;
 continue it with that executable. Do not point the new binary at its old namespace
 or transplant the old continuation. Building this repository does not update an

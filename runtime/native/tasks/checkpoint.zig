@@ -219,6 +219,14 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             // Restore only inside the unpublished transaction, then admit the
             // original operation identities and all related input history.
             try store(self).restoreArchiveIndex(a, manifest, value);
+            try @import("reuse_preparation.zig").Operations(Types, Self).validateArchiveOrigins(
+                self,
+                a,
+                manifest,
+            );
+            const prior_validation = self.reuse_provenance_validation;
+            self.reuse_provenance_validation = true;
+            defer self.reuse_provenance_validation = prior_validation;
             try validateArchiveAdmissions(self, a, value, manifest);
             try validateWorkspaceArchive(self, a, value, manifest.records.items, .retain);
             // This transaction contains untrusted, unpublished archive data.

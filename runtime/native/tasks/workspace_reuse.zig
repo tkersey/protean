@@ -7,7 +7,6 @@ const workspace = @import("../workspace_state.zig");
 const wp = @import("../workspace_projection.zig");
 const json = @import("../json.zig");
 const values = @import("../values.zig");
-const archive = @import("../archive.zig");
 const task_types = @import("types.zig");
 const preparation = @import("reuse_preparation.zig");
 const wc = contracts.workspace;
@@ -48,6 +47,10 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             );
             defer prepared.deinit();
             const store = Lifecycle.store(self);
+            const encoded = try store.prepareDefinition(
+                prepared.arena.allocator(),
+                prepared.definition,
+            );
             try recheck(self, a, prepared.parent);
             try self.profile.reuse.disclose(
                 self.profile.authority,
@@ -58,8 +61,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             defer store.rollback();
             try recheck(self, a, prepared.parent);
             try self.profile.reuse.authorize(self.profile.authority, request.scope.bytes, .retain);
-            try archive.retainAssets(a, store, self.assets.manifest);
-            const definition = try store.retainDefinition(prepared.definition);
+            try retainPreparedAssets(store, prepared);
+            const definition = try store.retainDefinition(encoded);
             return Publication.workspaceCommit(
                 self,
                 a,
@@ -97,7 +100,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (store.transaction) return error.CompilerPreparationRequired;
             var definition = try readDefinition(self, a, request.locator);
             defer definition.deinit();
-            try reuse.validate(a, store, definition.value);
+            try Preparation.validateDefinition(self, a, definition.value);
             try Programs.validateProgramCompiler(self, a, .{
                 .id = try workspace.custodyId(a, task_id, definition.value.program.digest),
                 .task = task_id,
@@ -235,6 +238,22 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             return result;
         }
     };
+}
+
+fn retainPreparedAssets(store: *storage.Store, prepared: preparation.Prepared) !void {
+    const origin = prepared.definition.origin;
+    for (prepared.disclosure.history) |object| {
+        if (std.meta.eql(object.reference, origin.build)) {
+            _ = try store.putObject(object.bytes);
+            continue;
+        }
+        for (origin.schemas.items) |schema| {
+            if (std.meta.eql(object.reference, schema.definition)) {
+                _ = try store.putObject(object.bytes);
+                break;
+            }
+        }
+    }
 }
 
 pub fn locatorId(locator: wc.RetainedLocator) !state.Digest {

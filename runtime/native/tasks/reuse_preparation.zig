@@ -5,6 +5,7 @@ const workspace = @import("../workspace_state.zig");
 const archive = @import("../archive.zig");
 const reuse = @import("../reuse_state.zig");
 const policy = @import("../reuse_policy.zig");
+const storage = @import("../store.zig");
 
 pub const Prepared = struct {
     arena: std.heap.ArenaAllocator,
@@ -24,6 +25,72 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         const Programs = @import("workspace_programs.zig").Operations(Types, Self);
         const Occurrences = @import("archive_occurrences.zig").Operations(Types, Self);
         const Snapshots = @import("workspace_snapshots.zig").Operations(Types, Self);
+
+        pub fn validateDefinition(
+            self: *Self,
+            a: std.mem.Allocator,
+            value: reuse.Definition,
+        ) !void {
+            try reuse.validate(a, Lifecycle.store(self), value);
+            if (self.reuse_provenance_validation) return;
+            var queue: Origins = .{ .a = a };
+            defer queue.deinit();
+            try validateOrigin(self, a, value.origin, &queue);
+            try validateQueued(self, a, &queue);
+        }
+
+        pub fn validateArchiveOrigins(
+            self: *Self,
+            a: std.mem.Allocator,
+            origin: state.Archive,
+        ) !void {
+            if (self.reuse_provenance_validation) return;
+            var queue: Origins = .{ .a = a };
+            defer queue.deinit();
+            try queue.scan(Lifecycle.store(self), origin);
+            try validateQueued(self, a, &queue);
+        }
+
+        fn validateQueued(self: *Self, a: std.mem.Allocator, queue: *Origins) !void {
+            var index: usize = 0;
+            while (index < queue.references.count()) : (index += 1) {
+                const ref = queue.references.keys()[index];
+                const bytes = try Lifecycle.store(self).object(a, ref, null);
+                defer a.free(bytes);
+                var definition = try contracts.decodeOwned(reuse.Definition, a, bytes);
+                defer definition.deinit();
+                try reuse.validate(a, Lifecycle.store(self), definition.value);
+                try validateOrigin(self, a, definition.value.origin, queue);
+            }
+        }
+
+        fn validateOrigin(
+            self: *Self,
+            a: std.mem.Allocator,
+            origin: state.Archive,
+            queue: *Origins,
+        ) !void {
+            const store = Lifecycle.store(self);
+            try queue.scan(store, origin);
+            const bytes = try store.object(a, origin.task, null);
+            defer a.free(bytes);
+            var parent = try contracts.decodeOwned(state.Task, a, bytes);
+            defer parent.deinit();
+            var view = try HistoricalIndex.open(store, origin, parent.value);
+            defer view.close() catch store.fence();
+            const previous = self.reuse_provenance_validation;
+            self.reuse_provenance_validation = true;
+            defer self.reuse_provenance_validation = previous;
+            try Occurrences.validateArchiveAdmissions(self, a, parent.value, origin);
+            try Snapshots.validateWorkspaceArchive(
+                self,
+                a,
+                parent.value,
+                origin.records.items,
+                .inspect,
+            );
+            try view.close();
+        }
 
         pub fn prepare(
             self: *Self,
@@ -46,6 +113,10 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (artifact.source_kind != .source_records or artifact.catalog != null or
                 artifact.controller != null) return error.UnsupportedCapability;
             const origin = try archive.prepare(a, store, task_id, self.assets.manifest);
+            try validateArchiveOrigins(self, a, origin);
+            const previous_validation = self.reuse_provenance_validation;
+            self.reuse_provenance_validation = true;
+            defer self.reuse_provenance_validation = previous_validation;
             try Occurrences.validateArchiveAdmissions(self, a, parent.value, origin);
             try Snapshots.validateWorkspaceArchive(
                 self,
@@ -123,5 +194,108 @@ const References = struct {
 
     pub fn add(self: *References, ref: state.Reference) !void {
         try self.refs.put(self.a, ref, {});
+    }
+};
+
+pub const Origins = struct {
+    a: std.mem.Allocator,
+    references: std.AutoArrayHashMapUnmanaged(state.Reference, void) = .empty,
+
+    pub fn deinit(self: *Origins) void {
+        self.references.deinit(self.a);
+    }
+
+    pub fn add(_: *Origins, _: state.Reference) !void {}
+    pub fn reply(_: *Origins, _: @import("../occurrence.zig").Acquired) !void {}
+    pub fn observerSource(_: *Origins, _: state.Reference) !void {}
+
+    pub fn reuseDefinition(self: *Origins, ref: state.Reference) !void {
+        try self.references.put(self.a, ref, {});
+    }
+
+    pub fn typed(self: *Origins, comptime T: type, ref: state.Reference, value: T) !void {
+        if (T == reuse.Definition) return self.reuseDefinition(ref);
+        try state.visitReferences(T, value, self);
+    }
+
+    pub fn scan(self: *Origins, source: anytype, origin: state.Archive) !void {
+        for (origin.operations.items) |row| {
+            const bytes = try source.object(self.a, row.body, null);
+            defer self.a.free(bytes);
+            var receipt = try contracts.decodeOwned(state.Receipt, self.a, bytes);
+            defer receipt.deinit();
+            try state.visitWorkspaceReceipt(self.a, source, receipt.value, self);
+        }
+        for (origin.records.items) |row| {
+            if (row.kind != .workspace_reply) continue;
+            const bytes = try source.object(self.a, row.body, null);
+            defer self.a.free(bytes);
+            var decoded = try contracts.decodeOwned(workspace.ReplyObservation, self.a, bytes);
+            defer decoded.deinit();
+            try state.visitReferences(workspace.ReplyObservation, decoded.value, self);
+        }
+    }
+};
+
+const HistoricalIndex = struct {
+    store: *storage.Store,
+    live: bool = true,
+
+    fn open(store: *storage.Store, origin: state.Archive, task: state.Task) !HistoricalIndex {
+        var result: HistoricalIndex = .{ .store = store };
+        errdefer result.close() catch store.fence();
+        try store.database.exec(
+            "CREATE TEMP TABLE tasks AS SELECT * FROM main.tasks WHERE 0;" ++
+                "CREATE TEMP TABLE records AS SELECT * FROM main.records WHERE 0;" ++
+                "CREATE TEMP TABLE events AS SELECT * FROM main.events WHERE 0;" ++
+                "CREATE TEMP TABLE operations AS SELECT * FROM main.operations WHERE 0;",
+        );
+        try store.database.run("INSERT INTO temp.tasks VALUES(?,?,?,?)", &.{
+            .{ .blob = &task.id },
+            .{ .integer = std.math.cast(i64, task.revision) orelse return error.Capacity },
+            .{ .integer = @intFromBool(task.terminal()) },
+            .{ .blob = &origin.task.digest },
+        });
+        try result.populate(origin, task.id);
+        return result;
+    }
+
+    fn populate(self: *HistoricalIndex, origin: state.Archive, task: state.TaskId) !void {
+        const database = self.store.database;
+        for (origin.records.items) |row| {
+            try database.run("INSERT INTO temp.records VALUES(?,?,?,?)", &.{
+                .{ .text = @tagName(row.kind) },
+                .{ .blob = &row.id },
+                .{ .blob = &task },
+                .{ .blob = &row.body.digest },
+            });
+        }
+        for (origin.events.items) |row| {
+            try database.run("INSERT INTO temp.events VALUES(?,?,?,?)", &.{
+                .{ .blob = &task },
+                .{ .integer = std.math.cast(i64, row.seq) orelse return error.Capacity },
+                .{ .integer = std.math.cast(i64, row.revision) orelse return error.Capacity },
+                .{ .blob = &row.body.digest },
+            });
+        }
+        for (origin.operations.items) |row| {
+            try database.run("INSERT INTO temp.operations VALUES(?,?,?,?)", &.{
+                .{ .text = row.key.bytes },
+                .{ .blob = &row.request },
+                .{ .blob = &row.body.digest },
+                .{ .blob = &task },
+            });
+        }
+    }
+
+    fn close(self: *HistoricalIndex) !void {
+        if (!self.live) return;
+        try self.store.database.exec(
+            "DROP TABLE IF EXISTS temp.operations;" ++
+                "DROP TABLE IF EXISTS temp.events;" ++
+                "DROP TABLE IF EXISTS temp.records;" ++
+                "DROP TABLE IF EXISTS temp.tasks;",
+        );
+        self.live = false;
     }
 };

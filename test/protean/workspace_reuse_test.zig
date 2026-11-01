@@ -26,6 +26,7 @@ pub fn run(comptime Types: type, h: anytype) !void {
     try waitForQuestion(h, task_a, work_a, "source-progress");
     try answer(h, task_a, work_a, "source-answer", "2");
     try expectResult(h, task_a, work_a, "source-result", 12);
+    try deniedRetain(h, task_a, program_a);
     const retained = try command(h, task_a, "retain-original", .{ .program = .{ .retain = .{
         .program = program_a,
         .scope = .{ .bytes = "methods" },
@@ -123,6 +124,34 @@ fn deniedAccess(h: anytype, task: Task, locator: wc.RetainedLocator) !void {
         ) == null);
     }
     try std.testing.expectEqual(generation, h.namespace.store.head.generation);
+}
+
+fn deniedRetain(h: anytype, task: Task, program: wc.Ref) !void {
+    const original = h.service.profile.reuse;
+    defer h.service.profile.reuse = original;
+    var scopes = [_]@TypeOf(original.scopes[0]){original.scopes[0]};
+    scopes[0].disclose_all = false;
+    h.service.profile.reuse.scopes = &scopes;
+    const generation = h.namespace.store.head.generation;
+    const reply = try h.service.workspaceCommand(h.scratch, "denied-retain", task, .{
+        .program = .{ .retain = .{
+            .program = program,
+            .scope = .{ .bytes = "methods" },
+            .description = .{
+                .name = .{ .bytes = "private description" },
+                .purpose = .{ .bytes = "private source and evidence" },
+            },
+        } },
+    });
+    try std.testing.expectEqual(.rejected, reply.disposition);
+    try std.testing.expectEqual(generation, h.namespace.store.head.generation);
+    var rows = try h.namespace.store.database.prepare(
+        "SELECT count(*) FROM reuse_definitions",
+        &.{},
+    );
+    defer rows.deinit();
+    try std.testing.expectEqual(.row, try rows.step());
+    try std.testing.expectEqual(@as(i64, 0), try rows.integer(0));
 }
 
 fn command(h: anytype, task: Task, id: []const u8, value: wc.Command) !wc.Reply {
@@ -240,6 +269,7 @@ fn discover(h: anytype, task: Task, locator: wc.RetainedLocator) !void {
     } } });
     const parsed = try native.json.parse(h.scratch, reply.observation_json.bytes, .{});
     const records = parsed.value.object.get("records").?.array.items;
+    try std.testing.expect(parsed.value.object.get("truncated").?.bool);
     try std.testing.expectEqual(@as(usize, 1), records.len);
     const found = try native.values.fromJson(
         wc.RetainedLocator,
@@ -293,6 +323,12 @@ fn revise(h: anytype, task: Task, original: wc.RetainedLocator) !void {
     } } });
     const revision = try retainedLocator(h.scratch, reply);
     try std.testing.expect(!std.mem.eql(u8, revision.id.bytes, original.id.bytes));
+    const generation = h.namespace.store.head.generation;
+    const conflict = try h.service.workspaceCommand(h.scratch, "import-original", task, .{
+        .program = .{ .import = .{ .locator = revision } },
+    });
+    try std.testing.expectEqual(.rejected, conflict.disposition);
+    try std.testing.expectEqual(generation, h.namespace.store.head.generation);
 }
 
 fn settle(h: anytype, task: Task, id: []const u8) !void {

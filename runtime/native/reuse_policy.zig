@@ -69,6 +69,7 @@ pub const Policy = struct {
         authority: registry.Authority,
         scope_name: []const u8,
     ) !Scope {
+        if (self.scopes.len == 0) return error.ArtifactUnavailable;
         if (authority.revoked or !authority.disclosure) return error.Denied;
         for (self.scopes) |scope| {
             if (std.mem.eql(u8, scope.name, scope_name) and
@@ -148,5 +149,8 @@ test "disclosure receives complete frozen bytes and cannot be bypassed by scope 
     policy.disclosure = Check.check;
     try std.testing.expectError(error.Denied, policy.disclose(authority, "shared", frozen));
     const unconfigured: Policy = .{};
-    try std.testing.expectError(error.Denied, unconfigured.disclose(authority, "shared", frozen));
+    try std.testing.expectError(
+        error.ArtifactUnavailable,
+        unconfigured.disclose(authority, "shared", frozen),
+    );
 }
