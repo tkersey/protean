@@ -125,7 +125,7 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
     const executable = b.addExecutable(.{
         .name = options.name,
         .root_module = root,
-        .use_llvm = if (linuxX86(target)) true else null,
+        .use_llvm = if (linuxX86(target)) false else null,
     });
     const install = b.addInstallArtifact(executable, .{});
     return .{
