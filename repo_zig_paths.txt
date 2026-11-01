@@ -45,6 +45,8 @@ runtime/native/registry.zig
 runtime/native/repository.zig
 runtime/native/responses.zig
 runtime/native/retention.zig
+runtime/native/reuse_policy.zig
+runtime/native/reuse_state.zig
 runtime/native/root.zig
 runtime/native/schemas.zig
 runtime/native/source_preflight.zig
@@ -65,6 +67,7 @@ runtime/native/tasks/controller_protocol.zig
 runtime/native/tasks/controller_residuals.zig
 runtime/native/tasks/controller_state.zig
 runtime/native/tasks/controller_succession.zig
+runtime/native/tasks/disposal.zig
 runtime/native/tasks/lifecycle.zig
 runtime/native/tasks/messages.zig
 runtime/native/tasks/placement_control.zig
@@ -73,6 +76,9 @@ runtime/native/tasks/placement_transport.zig
 runtime/native/tasks/reconciliation.zig
 runtime/native/tasks/records.zig
 runtime/native/tasks/remote_work.zig
+runtime/native/tasks/reuse_discovery.zig
+runtime/native/tasks/reuse_preparation.zig
+runtime/native/tasks/reuse_validation.zig
 runtime/native/tasks/root_execution.zig
 runtime/native/tasks/scheduling.zig
 runtime/native/tasks/succession_validation.zig
@@ -100,6 +106,7 @@ runtime/native/tasks/workspace_realization.zig
 runtime/native/tasks/workspace_records.zig
 runtime/native/tasks/workspace_replay.zig
 runtime/native/tasks/workspace_residual_validation.zig
+runtime/native/tasks/workspace_reuse.zig
 runtime/native/tasks/workspace_snapshots.zig
 runtime/native/tasks/workspace_sources.zig
 runtime/native/tasks/workspace_start.zig
@@ -181,6 +188,7 @@ test/protean/runtime_mobility_source.zig
 test/protean/skill_unknown_field.zig
 test/protean/values.zig
 test/protean/workspace_programs.zig
+test/protean/workspace_reuse_test.zig
 test/protean/workspace_runtime.zig
 test/protean/workspace_semantics.zig
 test/protean/workspace_sources.zig

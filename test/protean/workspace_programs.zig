@@ -6227,6 +6227,26 @@ const WaitScenario = enum {
     incompatible_wait,
 };
 
+test "BUILD-REUSE retained code survives source deletion and destination recovery" {
+    const protean = @import("protean");
+    const reuse = @import("workspace_reuse_test.zig");
+    var compiled = try protean.compile(std.testing.allocator, protean.system(.{
+        .InitialArgs = void,
+        .Result = WaitTypes.Output,
+        .Failure = void,
+        .application = WaitApplication,
+    }));
+    defer compiled.deinit();
+    var fixture: AuthoredWaitFixture = .{};
+    defer fixture.deinit();
+    try fixture.initImage(&compiled);
+    try fixture.initHandlers();
+    try fixture.initProfile();
+    reuse.configure(&fixture.profile);
+    try fixture.initOwner();
+    try reuse.run(WaitTypes, &fixture);
+}
+
 const AuthoredWaitFixture = struct {
     a: std.mem.Allocator = std.testing.allocator,
     io: std.Io = std.testing.io,

@@ -736,6 +736,10 @@ pub fn Service(comptime Types: type) type {
             const domain = @import("tasks/workspace_start.zig").Operations(Types, Self);
             return domain.workspaceStart(self, a, operation_id, task_id, program_id, input, policy);
         }
+        pub fn discardTask(self: *Self, a: std.mem.Allocator, task_id: state.TaskId) !void {
+            const domain = @import("tasks/disposal.zig").Operations(Types, Self);
+            return domain.discardTask(self, a, task_id);
+        }
         pub fn workspacePump(
             self: *Self,
             a: std.mem.Allocator,

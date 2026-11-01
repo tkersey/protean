@@ -58,6 +58,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         const Access = @import("workspace_access.zig").Operations(Types, Self);
         const Admission = @import("workspace_admission.zig").Operations(Types, Self);
         const Commands = @import("workspace_commands.zig").Operations(Types, Self);
+        const Discovery = @import("reuse_discovery.zig").Operations(Types, Self);
         const ControlValidation =
             @import("workspace_control_validation.zig").Operations(Types, Self);
         const Observations = @import("workspace_observations.zig").Operations(Types, Self);
@@ -340,6 +341,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                             const at = switch (evidence.value.evidence.read) {
                                 .immutable => return error.InvalidArchive,
                                 .semantic_policy => |value| value.event_watermark,
+                                .reuse => |value| value.event_watermark,
                                 .scope => |value| value,
                                 .controller => |value| value.event_watermark,
                                 .residual => |value| value.event_watermark,
@@ -639,7 +641,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             one: *[1]wc.Ref,
         ) !void {
             if (p == .build or p == .specialize or p == .adopt or
-                p == .derive or p == .validate) return error.InvalidState;
+                p == .derive or p == .validate or p == .retain or p == .import)
+                return error.InvalidState;
+            if (p == .find or (p == .inspect and p.inspect.target == .retained)) {
+                basis.* = try Discovery.capture(self, a, parent.event_high, p);
+                return;
+            }
             if (p == .describe and p.describe.section == .semantic_candidates)
                 basis.* = .{ .semantic_policy = .{
                     .policy = try workspaceSemanticPolicy(self, a),
@@ -771,6 +778,10 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .immutable => {},
                 .semantic_policy => |observed| {
                     if (observed.event_watermark > parent.event_high) return error.InvalidArchive;
+                },
+                .reuse => |observed| {
+                    if (observed.event_watermark > parent.event_high) return error.InvalidArchive;
+                    try Discovery.validate(self, a, command.program, observed);
                 },
                 .residual => return error.InvalidArchive,
                 .controller => |observed| try validateControllerReadObservation(
@@ -1001,6 +1012,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     else => return error.InvalidArchive,
                 },
                 .program => |p| {
+                    if (p == .find or (p == .inspect and p.inspect.target == .retained))
+                        expected.* = .reuse;
                     if (p == .describe and p.describe.section == .current_controller) {
                         expected.* = .controller;
                     }
@@ -1180,6 +1193,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 controller_read,
                 checked,
             );
+            if (basis == .reuse) return .{
+                .disposition = .observed,
+                .observation_json = .{ .bytes = try json.canonical(
+                    a,
+                    try Discovery.historical(self, a, basis.reuse),
+                ) },
+            };
             return try workspaceCommandFromIn(
                 self,
                 a,
@@ -1201,6 +1221,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             const watermark: ?u64 = switch (basis) {
                 .immutable => null,
                 .semantic_policy => |observed| observed.event_watermark,
+                .reuse => |observed| observed.event_watermark,
                 .scope => |at| at,
                 .controller => |observed| observed.event_watermark,
                 .residual => |observed| observed.event_watermark,

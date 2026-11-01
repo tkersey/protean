@@ -231,6 +231,50 @@ pub fn binaryQuestion(b: *source.Builder) !source.Module {
     return b.module(entry, unit);
 }
 
+pub fn reusableQuestion(b: *source.Builder, increment: u64) !source.Module {
+    const unit = try b.scalar(void);
+    const number = try b.scalar(u64);
+    const helper = try b.declare(&.{number}, number, &.{}, &.{});
+    try b.define(helper, try b.pure(try reusableAdd(
+        b,
+        number,
+        try b.reference(b.parameter(helper, 0)),
+        try b.constant(u64, increment),
+    )));
+    const ask = try b.effect(.{
+        .identity = "example/current-adjustment",
+        .payload = number,
+        .result = number,
+        .external = false,
+    });
+    const entry = try b.declare(&.{number}, number, &.{ask}, &.{});
+    const adjusted = try b.variable(number);
+    const answer = try b.variable(number);
+    const initial = try b.reference(b.parameter(entry, 0));
+    try b.define(entry, try b.bind(adjusted, try b.term(.{ .call = .{
+        .function = helper,
+        .arguments = &.{initial},
+    } }), try b.bind(answer, try b.term(.{ .perform = .{
+        .effect = ask,
+        .payload = initial,
+    } }), try b.pure(try reusableAdd(
+        b,
+        number,
+        try b.reference(adjusted),
+        try b.reference(answer),
+    )))));
+    return b.module(entry, unit);
+}
+
+fn reusableAdd(b: *source.Builder, schema: source.Id, left: source.Id, right: source.Id) !source.Id {
+    const fault = try b.failureLiteral(try b.constant(void, {}));
+    return b.value(.{ .schema = schema, .expression = .{ .primitive = .{
+        .opcode = .integer_add,
+        .operands = &.{ left, right },
+        .failures = &.{.{ .kind = .arithmetic_overflow, .value = fault }},
+    } } });
+}
+
 pub const SemanticGuestInput = struct { yields: u64, seed: u64 };
 
 pub fn semanticGuest(b: *source.Builder) !source.Module {

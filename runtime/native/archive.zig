@@ -16,6 +16,21 @@ const temporary_length = temporary_prefix.len + 32;
 pub const Exported = struct { sha256: state.Digest, bytes: u64 };
 const Blob = struct { reference: state.Reference, bytes: []const u8 };
 const SchemaSet = struct { schemas: []const state.ArchiveSchema, blobs: []const Blob };
+const primary_schemas = .{
+    .{ "task", state.Task },
+    .{ "event", state.Event },
+    .{ "receipt", state.Receipt },
+};
+
+pub fn schemaBytes(a: std.mem.Allocator, name: []const u8) ![]u8 {
+    inline for (primary_schemas) |entry| {
+        if (std.mem.eql(u8, name, entry[0])) return schemaDefinition(entry[1], a, a);
+    }
+    inline for (@typeInfo(state.RecordKind).@"enum".field_names) |kind| {
+        if (std.mem.eql(u8, name, kind)) return schemaDefinition(storage.Record(kind), a, a);
+    }
+    return error.InvalidArchive;
+}
 
 fn schemaDefinition(comptime T: type, a: std.mem.Allocator, backing: std.mem.Allocator) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(backing);
@@ -26,11 +41,7 @@ fn schemaDefinition(comptime T: type, a: std.mem.Allocator, backing: std.mem.All
 fn schemaSet(a: std.mem.Allocator, backing: std.mem.Allocator) !SchemaSet {
     var schemas: std.ArrayList(state.ArchiveSchema) = .empty;
     var blobs: std.ArrayList(Blob) = .empty;
-    inline for (.{
-        .{ "task", state.Task },
-        .{ "event", state.Event },
-        .{ "receipt", state.Receipt },
-    }) |entry| {
+    inline for (primary_schemas) |entry| {
         const bytes = try schemaDefinition(entry[1], a, backing);
         const reference: state.Reference = .{ .digest = storage.digest(bytes), .bytes = bytes.len };
         try schemas.append(a, .{ .name = .{ .bytes = entry[0] }, .definition = reference });
@@ -365,6 +376,9 @@ const Collector = struct {
     }
     pub fn observerSource(self: *Collector, ref: state.Reference) !void {
         try state.visitObserverSource(self.allocator, self.store, ref, self);
+    }
+    pub fn reuseDefinition(self: *Collector, ref: state.Reference) !void {
+        try state.visitReuseDefinition(self.allocator, self.store, ref, self);
     }
 };
 

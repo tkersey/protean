@@ -35,11 +35,13 @@ pub const Profile = struct {
     resources: []const []const u8 = &.{},
     placement: ?*const @import("../placement.zig").Configuration = null,
     semantic_construction: ?SemanticPolicy = null,
+    reuse: @import("../reuse_policy.zig").Policy = .{},
 
     pub fn validate(self: Profile) !void {
         _ = try name(self.id);
         _ = try name(self.authority.principal);
         if (self.authority.revoked) return error.Denied;
+        try self.reuse.validate();
     }
 
     pub fn resourceIdentity(

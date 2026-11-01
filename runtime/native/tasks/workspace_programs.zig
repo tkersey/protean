@@ -924,7 +924,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             defer a.free(declared_controller);
             if (!same(actual_controller, declared_controller)) return error.CorruptState;
         }
-        fn storeProgramCustody(
+        pub fn storeProgramCustody(
             self: *Self,
             a: std.mem.Allocator,
             task_id: state.TaskId,

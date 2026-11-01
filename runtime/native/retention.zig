@@ -160,6 +160,9 @@ const Audit = struct {
             pub fn observerSource(this: *@This(), ref: state.Reference) !void {
                 try state.visitObserverSource(this.audit.a, this.audit.store, ref, this.audit);
             }
+            pub fn reuseDefinition(this: *@This(), ref: state.Reference) !void {
+                try state.visitReuseDefinition(this.audit.a, this.audit.store, ref, this.audit);
+            }
         }{ .audit = self, .parent = parent };
         try state.visitReferences(T, input, &sink);
     }

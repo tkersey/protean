@@ -3,6 +3,7 @@
 const std = @import("std");
 const c = @import("native_c");
 const json = @import("json.zig");
+pub const ReusePolicy = @import("reuse_policy.zig").Policy;
 pub const SemanticPolicy = struct {
     roots: []const [32]u8,
     checkers: []const []const u8,
@@ -23,7 +24,60 @@ pub const Admitted = struct {
     resources: []const []const u8 = &.{},
     environment: ?*anyopaque = null,
     semantic_construction: ?SemanticPolicy = null,
+    reuse: ReusePolicy = .{},
 };
+
+pub fn reusePolicy(a: std.mem.Allocator, value: json.Value) !ReusePolicy {
+    if (value == .null) return .{};
+    if (value != .array) return error.InvalidConfiguration;
+    const scopes = try a.alloc(@import("reuse_policy.zig").Scope, value.array.items.len);
+    errdefer a.free(scopes);
+    for (value.array.items, scopes) |item, *scope| {
+        try @import("protocol.zig").closed(item, .{ .required = &.{
+            "name", "principal", "tenant", "read", "retain", "import", "disclose_all",
+        } });
+        scope.* = .{
+            .name = try json.text(item.object.get("name").?),
+            .principal = try json.text(item.object.get("principal").?),
+            .tenant = try json.text(item.object.get("tenant").?),
+            .read = try configurationBool(item.object.get("read").?),
+            .retain = try configurationBool(item.object.get("retain").?),
+            .import = try configurationBool(item.object.get("import").?),
+            .disclose_all = try configurationBool(item.object.get("disclose_all").?),
+        };
+    }
+    const policy: ReusePolicy = .{ .scopes = scopes };
+    try policy.validate();
+    return policy;
+}
+
+fn configurationBool(value: json.Value) !bool {
+    if (value != .bool) return error.InvalidConfiguration;
+    return value.bool;
+}
+
+test "reuse scope configuration requires explicit grants and unique scopes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var parsed = try json.parse(a,
+        \\[{"name":"shared","principal":"owner","tenant":"local","read":true,
+        \\"retain":false,"import":true,"disclose_all":false}]
+    , .{});
+    defer parsed.deinit();
+    const policy = try reusePolicy(a, parsed.value);
+    const authority: @import("registry.zig").Authority = .{
+        .grants = &.{},
+        .principal = "owner",
+        .tenant = "local",
+    };
+    try policy.authorize(authority, "shared", .read);
+    try policy.authorize(authority, "shared", .import);
+    try std.testing.expectError(error.Denied, policy.authorize(authority, "shared", .retain));
+    try std.testing.expectEqual(@as(usize, 0), (try reusePolicy(a, .null)).scopes.len);
+    try parsed.value.array.append(parsed.value.array.items[0]);
+    try std.testing.expectError(error.InvalidConfiguration, reusePolicy(a, parsed.value));
+}
 
 pub fn semanticPolicy(a: std.mem.Allocator, value: json.Value) !?SemanticPolicy {
     if (value == .null) return null;

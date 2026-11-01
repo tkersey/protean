@@ -74,6 +74,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         const Observations = @import("workspace_observations.zig").Operations(Types, Self);
         const Observers = @import("workspace_observers.zig").Operations(Types, Self);
         const Programs = @import("workspace_programs.zig").Operations(Types, Self);
+        const Reuse = @import("workspace_reuse.zig").Operations(Types, Self);
+        const Discovery = @import("reuse_discovery.zig").Operations(Types, Self);
         const Publication = @import("workspace_publication.zig").Operations(Types, Self);
         const Replay = @import("workspace_replay.zig").Operations(Types, Self);
         const Snapshots = @import("workspace_snapshots.zig").Operations(Types, Self);
@@ -191,7 +193,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     return error.CorruptState)
             else
                 null;
-            const program = if (!rejected and command == .program and command.program == .build)
+            const program = if (!rejected and command == .program and
+                (command.program == .build or command.program == .import))
                 try values.fromJson(wc.Ref, a, observation.object.get("program") orelse
                     return error.CorruptState)
             else
@@ -275,6 +278,29 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             program: wc.Program,
         ) !WorkspaceExecution {
             switch (program) {
+                .retain => |request| return .{ .admitted = try Reuse.retain(
+                    self,
+                    a,
+                    operation_id,
+                    task_id,
+                    request,
+                ) },
+                .import => |request| return .{ .admitted = try Reuse.importProgram(
+                    self,
+                    a,
+                    operation_id,
+                    task_id,
+                    request,
+                ) },
+                .find => |request| return .{ .observation = try Discovery.find(
+                    self,
+                    a,
+                    request.scope.bytes,
+                    request.query.bytes,
+                    request.maximum,
+                    request.page_bytes,
+                    basis,
+                ) },
                 .adopt => |command_value| return executeProgramAdopt(
                     self,
                     a,
@@ -434,6 +460,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     ),
                 };
             }
+            if (request.target == .retained) return .{ .observation = try Discovery.inspect(
+                self,
+                a,
+                request.target.retained,
+                request.page,
+                basis,
+            ) };
             if (request.target == .semantic_source) {
                 return .{ .observation = try workspaceSemanticSource(
                     self,
@@ -1299,6 +1332,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             defer a.free(bytes);
             var observation =
                 switch (receipt_value.workspace_kind orelse return error.CorruptState) {
+                    .retained, .imported => try Reuse.observation(self, a, receipt_value, bytes),
                     .controller => try admittedControllerObservation(
                         a,
                         task_id,

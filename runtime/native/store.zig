@@ -167,6 +167,9 @@ pub const Store = struct {
             \\CREATE TABLE events(task BLOB NOT NULL REFERENCES tasks(id), seq INTEGER NOT NULL, revision INTEGER NOT NULL, body BLOB NOT NULL REFERENCES objects(digest), PRIMARY KEY(task,seq)) WITHOUT ROWID;
             \\CREATE TABLE placement_decisions(transfer BLOB PRIMARY KEY CHECK(length(transfer)=32), body BLOB NOT NULL) WITHOUT ROWID;
             \\CREATE TABLE local_admissions(task BLOB PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE) WITHOUT ROWID;
+            \\CREATE TABLE reuse_definitions(scope TEXT NOT NULL, body BLOB NOT NULL REFERENCES objects(digest), PRIMARY KEY(scope,body)) WITHOUT ROWID;
+            \\CREATE TRIGGER reuse_definition_immutable BEFORE UPDATE ON reuse_definitions BEGIN SELECT RAISE(ABORT,'retained definition is immutable'); END;
+            \\CREATE TRIGGER reuse_object_immutable BEFORE UPDATE ON objects WHEN EXISTS(SELECT 1 FROM reuse_definitions WHERE body=OLD.digest) BEGIN SELECT RAISE(ABORT,'retained definition is immutable'); END;
         );
         try database.run("INSERT INTO meta VALUES(1,?, ?,0,?,?)", &.{ .{
             .integer = format,
@@ -427,6 +430,9 @@ pub const Store = struct {
             }
             pub fn observerSource(_: *@This(), _: state.Reference) !void {
                 @compileError("context dependencies cannot contain host observer evidence");
+            }
+            pub fn reuseDefinition(_: *@This(), _: state.Reference) !void {
+                @compileError("context dependencies cannot contain host reuse observations");
             }
         }{ .store = self, .parent = parent };
         try state.visitReferencesAs(T, Ref, value, &sink);
@@ -812,6 +818,9 @@ pub const Store = struct {
             pub fn observerSource(this: *@This(), ref: state.Reference) !void {
                 try state.visitObserverSource(this.store.allocator, this.store, ref, this);
             }
+            pub fn reuseDefinition(this: *@This(), ref: state.Reference) !void {
+                try state.visitReuseDefinition(this.store.allocator, this.store, ref, this);
+            }
             pub fn typed(this: *@This(), comptime V: type, ref: state.Reference, item: V) !void {
                 try this.store.retainValueDirect(V, ref, item);
             }
@@ -986,6 +995,57 @@ pub const Store = struct {
         var query = try self.database.prepare(
             "SELECT body FROM records WHERE kind=? AND id=? AND task=?",
             &.{ .{ .text = kind }, .{ .blob = &id }, .{ .blob = &task } },
+        );
+        defer query.deinit();
+        if (try query.step() != .row) return null;
+        return try self.recordObject(a, try query.bytes(0));
+    }
+    pub fn retainDefinition(
+        self: *Store,
+        definition: @import("reuse_state.zig").Definition,
+    ) !state.Reference {
+        try self.writing();
+        errdefer self.rollback();
+        const T = @import("reuse_state.zig").Definition;
+        const bytes = try contracts.encodeOwned(T, self.allocator, definition);
+        defer self.allocator.free(bytes);
+        const ref = try self.putObject(bytes);
+        try self.retainValue(T, ref, definition);
+        try self.database.run(
+            "INSERT OR IGNORE INTO reuse_definitions(scope,body) VALUES(?,?)",
+            &.{ .{ .text = definition.scope.bytes }, .{ .blob = &ref.digest } },
+        );
+        return ref;
+    }
+    pub fn eraseTask(self: *Store, task: state.TaskId, revision: u64) !void {
+        try self.writing();
+        errdefer self.rollback();
+        var selected = try self.database.prepare(
+            "SELECT revision,terminal FROM tasks WHERE id=?",
+            &.{.{ .blob = &task }},
+        );
+        defer selected.deinit();
+        if (try selected.step() != .row) return error.ArtifactUnavailable;
+        if (try selected.integer(0) != revision or try selected.integer(1) != 1)
+            return error.InvalidState;
+        inline for (.{ "operations", "events", "records" }) |table| {
+            try self.database.run("DELETE FROM " ++ table ++ " WHERE task=?", &.{.{
+                .blob = &task,
+            }});
+        }
+        try self.database.run("DELETE FROM tasks WHERE id=?", &.{.{ .blob = &task }});
+        if (try self.database.changes() != 1) return error.CorruptState;
+    }
+    pub fn definitionBytes(
+        self: *Store,
+        a: std.mem.Allocator,
+        scope: []const u8,
+        id: Digest,
+    ) !?[]u8 {
+        try self.checkIntegrity();
+        var query = try self.database.prepare(
+            "SELECT body FROM reuse_definitions WHERE scope=? AND body=?",
+            &.{ .{ .text = scope }, .{ .blob = &id } },
         );
         defer query.deinit();
         if (try query.step() != .row) return null;
@@ -1624,6 +1684,62 @@ fn retentionFixtureTask(reference: state.Reference) state.Task {
     task.checkpoint = reference;
     task.outcome = reference;
     return task;
+}
+
+test "read snapshots retain definition history without a catalog root" {
+    const a = std.testing.allocator;
+    const db = try sqlite.Database.open(a, ":memory:", true);
+    defer closeTestDatabase(db);
+    var store = try Store.init(a, db, true, @splat(7));
+    try store.begin();
+    defer store.rollback();
+    const code = try store.putObject("canonical source fixture");
+    const history = try store.putObject("mandatory historical dependency");
+    const T = @import("reuse_state.zig").Definition;
+    var definition = std.mem.zeroes(T);
+    definition.version = 1;
+    definition.scope.bytes = "shared";
+    definition.description = .{ .name = .{ .bytes = "fixture" }, .purpose = .{ .bytes = "test" } };
+    definition.program = code;
+    definition.artifact.source = code;
+    definition.artifact.image = code;
+    definition.artifact.input_schema = code;
+    definition.artifact.result_schema = code;
+    definition.artifact.failure_schema = code;
+    definition.origin.task = code;
+    definition.origin.build = code;
+    definition.origin.objects.items = &.{history};
+    const definition_bytes = try contracts.encodeOwned(T, a, definition);
+    defer a.free(definition_bytes);
+    const reference = try store.putObject(definition_bytes);
+    const W = @import("workspace_state.zig").ReadObservation;
+    const observed: W = .{ .reuse = .{
+        .selection = .{ .find = .{
+            .request = .{ .scope = .{ .bytes = "shared" }, .query = .{ .bytes = "" } },
+            .definitions = .{ .items = &.{reference} },
+        } },
+        .event_watermark = 0,
+    } };
+    const bytes = try contracts.encodeOwned(W, a, observed);
+    defer a.free(bytes);
+    const owner = try store.putObject(bytes);
+    try store.retainValue(W, owner, observed);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        try store.scalar("SELECT count(*) FROM reuse_definitions"),
+    );
+    try store.checkDependencies(T, state.Reference, reference, definition);
+    try std.testing.expectError(error.Constraint, db.run(
+        "DELETE FROM objects WHERE digest=?",
+        &.{.{ .blob = &history.digest }},
+    ));
+    try db.run("DELETE FROM dependencies WHERE parent=? AND child=?", &.{
+        .{ .blob = &reference.digest }, .{ .blob = &history.digest },
+    });
+    try std.testing.expectError(
+        error.CorruptState,
+        store.checkDependencies(T, state.Reference, reference, definition),
+    );
 }
 
 test "typed host roots retain exact dependencies including uninterpreted captures" {

@@ -1,7 +1,7 @@
 //! Model actions select ordinary Horos programs and native workspace operations.
 //! Text fields carry canonical runtime-schema JSON; they are never native code.
 const c = @import("contracts.zig");
-pub const identity = "protean-workspace/5";
+pub const identity = "protean-workspace/6";
 pub const Ref = struct {
     kind: enum {
         program,
@@ -16,6 +16,8 @@ pub const Ref = struct {
         residual,
         candidate,
         controller,
+        retained,
+        imported,
     },
     id: c.Text(64),
 };
@@ -94,6 +96,7 @@ pub const SemanticModule = union(enum) {
 };
 pub const InspectionTarget = union(enum) {
     program: Ref,
+    retained: RetainedLocator,
     semantic_source: struct { subject: SemanticTarget, section: SemanticSection },
     consumer: struct { program: Ref, function: u64, binding: u64 },
 };
@@ -118,7 +121,24 @@ pub const Adoption = struct {
     trial: union(enum) { none: struct {}, selected: Ref } = .{ .none = .{} },
     reason: c.Text(256),
 };
+pub const RetainedLocator = struct { scope: c.Text(128), id: c.Text(64) };
+pub const RetainedDescription = struct { name: c.Text(128), purpose: c.Text(1024) };
+pub const Retain = struct {
+    program: Ref,
+    scope: c.Text(128),
+    description: RetainedDescription,
+};
+pub const Import = struct { locator: RetainedLocator };
+pub const Find = struct {
+    scope: c.Text(128),
+    query: c.Text(256),
+    maximum: u32 = 16,
+    page_bytes: u32 = 16384,
+};
 pub const Program = union(enum) {
+    retain: Retain,
+    find: Find,
+    import: Import,
     describe: struct {
         section: enum {
             source_records,

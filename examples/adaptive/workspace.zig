@@ -66,6 +66,8 @@ fn authorizeCatalog(
     }
     if (command == .program and
         (command.program == .specialize or
+            command.program == .retain or
+            command.program == .import or
             command.program == .derive or
             command.program == .validate))
     {

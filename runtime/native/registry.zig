@@ -144,6 +144,9 @@ pub const ProjectionReferences = struct {
             pub fn observerSource(_: *@This(), _: state.Reference) !void {
                 @compileError("host observer evidence requires the host dependency codec");
             }
+            pub fn reuseDefinition(_: *@This(), _: state.Reference) !void {
+                @compileError("host reuse observations require the host dependency codec");
+            }
         }{ .collector = self, .parent = .{
             .digest = @import("store.zig").digest(bytes),
             .bytes = bytes.len,
