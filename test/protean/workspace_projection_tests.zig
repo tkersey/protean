@@ -386,13 +386,15 @@ fn preparationCutTamper(f: *Fixture) !void {
     const changed = try f.namespace.store.putObject(
         try contracts.encodeOwned(State.Attempt, f.permanent, attempt.value),
     );
-    try f.namespace.store.putRecord(
-        State.Attempt,
-        "attempt",
-        attempt.value.id,
-        f.task,
-        attempt.value,
+    try f.namespace.store.database.run(
+        "UPDATE records SET body=? WHERE kind='attempt' AND id=? AND task=?",
+        &.{
+            .{ .blob = &changed.digest },
+            .{ .blob = &attempt.value.id },
+            .{ .blob = &f.task },
+        },
     );
+    try std.testing.expectEqual(1, try f.namespace.store.database.changes());
     var replaced = false;
     for (records) |*record| {
         if (record.kind != .attempt or !std.meta.eql(record.id, attempt.value.id)) continue;
