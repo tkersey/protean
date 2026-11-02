@@ -82,6 +82,13 @@ pub const ControllerProjection = struct {
     overlay: state.Reference,
 };
 pub const TrialProjection = struct { work: state.Digest, view: state.Reference };
+pub const ConsumerCut = struct {
+    event_watermark: u64,
+    controller: ?state.Digest,
+    controller_epoch: u64,
+    next_message: u64,
+};
+
 pub const ProjectionBinding = struct {
     task: state.TaskId,
     tenant: []const u8,
@@ -91,7 +98,7 @@ pub const ProjectionBinding = struct {
     controller: ?ControllerProjection = null,
     trial: ?TrialProjection = null,
     execution: ?state.Digest = null,
-    current: bool = false,
+    consumer_cut: ?ConsumerCut = null,
 };
 
 /// Pure projection inputs: immutable objects and frozen task bindings, with no
@@ -106,7 +113,7 @@ pub const ProjectionContext = struct {
     controller: ?ControllerProjection = null,
     trial: ?TrialProjection = null,
     execution: ?state.Digest = null,
-    current: bool = false,
+    consumer_cut: ?ConsumerCut = null,
     objects: ReadView,
 
     pub fn object(self: ProjectionContext, ref: state.Reference, limit: usize) ![]u8 {

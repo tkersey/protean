@@ -64,7 +64,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     false,
                 );
                 try expectWork(target.?.work, selected.expected);
-                try expectPort(target.?, selected);
+                try expectPort(self, a, target.?, selected);
                 if (model == null) return error.InvalidConsumer;
             } else if (model != null) return error.InvalidConsumer;
             return .{
@@ -94,11 +94,28 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 work.control_revision != expected.control_revision) return error.StaleConsumer;
         }
 
-        fn expectPort(observed: workspace.WorkObservation, selected: anytype) !void {
+        fn expectPort(
+            self: *Self,
+            a: std.mem.Allocator,
+            observed: workspace.WorkObservation,
+            selected: anytype,
+        ) !void {
             const work = observed.work;
             const port = work.current_port orelse return error.StaleConsumer;
             const pending = observed.occurrence orelse return error.StaleConsumer;
-            if (!std.meta.eql(port.digest, try wp.identity(selected.port, .port)) or
+            const bytes = try store(self).object(a, port, null);
+            defer a.free(bytes);
+            var retained = try contracts.decodeOwned(
+                workspace.Port,
+                a,
+                bytes,
+            );
+            defer retained.deinit();
+            if (!std.meta.eql(retained.value.id, try wp.identity(selected.port, .port)) or
+                !std.meta.eql(retained.value.task, work.task) or
+                !std.meta.eql(retained.value.work, work.id) or
+                !std.meta.eql(retained.value.occurrence, pending.id) or
+                retained.value.generation != selected.generation or
                 work.port_generation != selected.generation or pending.state != .ready)
                 return error.StaleConsumer;
         }
@@ -169,7 +186,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     selected.expected.work,
                     false,
                 );
-                try expectPort(current, selected);
+                try expectPort(self, a, current, selected);
             }
         }
 
@@ -215,7 +232,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (observed.selection.target == .model) {
                 const target = observed.target orelse return error.InvalidArchive;
                 try expectWork(target.work, observed.selection.target.model.expected);
-                try expectPort(target, observed.selection.target.model);
+                try expectPort(self, a, target, observed.selection.target.model);
                 try validateWork(self, a, parent, target, records, checked);
                 if (observed.model == null) return error.InvalidArchive;
             } else if (observed.target != null or observed.model != null)

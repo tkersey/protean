@@ -191,9 +191,12 @@ protected user/policy material, skills, action declarations and the causal suffi
 The final serialized request is budget checked. Each immutable preparation links
 to its selected view, which retains the actual result, work, program, input and
 consumer observation. View publication and request preparation remain distinct
-events. Replay returns its historical receipt without selecting or dispatching
-again. `context.expand` exposes scoped proposal and provenance observations;
-private provider captures remain private.
+events. Each preparation retains its event cut and exact attempt; response
+interpretation and archive validation reconstruct the applicability decision at
+that cut. Missing preparation evidence makes an archive inadmissible. Fresh
+operations check their own current cut. Replay returns its historical receipt
+without selecting or dispatching again. `context.expand` exposes scoped proposal
+and provenance observations; private provider captures remain private.
 
 The seed and emitted successor expose projection preparation rejection and
 return once to ordinary context. If ordinary preparation also fails, they park

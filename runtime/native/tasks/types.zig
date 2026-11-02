@@ -376,6 +376,7 @@ pub const ControllerRuntimeCut = struct {
 
 pub const StartDelegation = struct {
     record: workspace.Delegation,
+    view: ?workspace.ViewArtifact = null,
     request: state.Digest,
     policy: workspace.RunPolicy,
     command: @FieldType(wc.Work, "delegate"),

@@ -100,13 +100,19 @@ fn rejected(reply: wc.Reply) !void {
 
 fn assertWorkBinding(f: *Fixture, run: recovery.Run, mutation: enum {
     incomplete,
+    failed,
+    cancelled,
     result,
 }) !void {
     var saved = try f.service.workspaceWork(f.permanent, f.task, try recovery.refId(run.work));
     defer saved.deinit();
     var altered = saved.value;
-    if (mutation == .incomplete) altered.outcome_kind =
-        .yielded else altered.result_value = altered.input_value;
+    switch (mutation) {
+        .incomplete => altered.outcome_kind = .yielded,
+        .failed => altered.outcome_kind = .failed,
+        .cancelled => altered.outcome_kind = .cancelled,
+        .result => altered.result_value = altered.input_value,
+    }
     try f.namespace.store.begin();
     defer f.namespace.store.rollback();
     try f.namespace.store.putRecord(
@@ -162,6 +168,8 @@ test "projection owner authenticates observations schemas completion and result 
     const consumer = try f.consumer();
     const valid = try project(&f, program, consumer);
     try assertWorkBinding(&f, valid, .incomplete);
+    try assertWorkBinding(&f, valid, .failed);
+    try assertWorkBinding(&f, valid, .cancelled);
     try assertWorkBinding(&f, valid, .result);
     const lookalike = try project(&f, program, .{
         .kind = .observation,
@@ -236,6 +244,9 @@ fn archiveProjection(f: *Fixture, projected: wc.Ref, prepared: []const u8) !void
     try f.service.completeWork(f.permanent, f.pending, .not_sent);
     const path = try std.fmt.allocPrint(f.permanent, "{s}/projection.agnx", .{f.directory});
     _ = try f.service.exportCheckpoint(f.permanent, f.task, path);
+    try f.service.close(f.a);
+    try f.namespace.close();
+    f.live = false;
     const destination = try std.fmt.allocPrint(f.permanent, "{s}/imported", .{f.directory});
     var namespace = try native.Namespace.open(f.a, f.io, destination);
     defer cleanup("projection imported namespace.close", namespace.close());
@@ -303,9 +314,95 @@ fn missingConsumerArchive(f: *Fixture, consumer: wc.Ref) !void {
     try std.testing.expectEqual(index.records.items.len - 1, retained.items.len);
     var facts = try f.service.prepareWorkspaceValidation(f.task);
     defer facts.deinit();
+    try f.service.validateWorkspaceRecordsPrepared(
+        f.permanent,
+        f.task,
+        index.records.items,
+        &facts,
+    );
     try std.testing.expectError(
         error.InvalidArchive,
         f.service.validateWorkspaceRecordsPrepared(f.permanent, f.task, retained.items, &facts),
+    );
+}
+
+fn validateArchive(f: *Fixture) !void {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(f.assets.manifest, &digest, .{});
+    const index = try f.namespace.store.archiveIndex(f.permanent, f.task, .{
+        .digest = digest,
+        .bytes = f.assets.manifest.len,
+    });
+    var facts = try f.service.prepareWorkspaceValidation(f.task);
+    defer facts.deinit();
+    try f.service.validateWorkspaceRecordsPrepared(
+        f.permanent,
+        f.task,
+        index.records.items,
+        &facts,
+    );
+}
+
+fn resumeInference(f: *Fixture) !void {
+    var parent = try f.service.task(f.permanent, f.task);
+    defer parent.deinit();
+    _ = try f.service.resumeTask(
+        f.permanent,
+        "projection-archive-resume",
+        f.task,
+        parent.value.revision,
+    );
+    try f.next();
+}
+
+fn preparationCutTamper(f: *Fixture) !void {
+    const State = native.testing.state;
+    var digest: State.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(f.assets.manifest, &digest, .{});
+    const index = try f.namespace.store.archiveIndex(f.permanent, f.task, .{
+        .digest = digest,
+        .bytes = f.assets.manifest.len,
+    });
+    const records = try f.permanent.dupe(State.ArchiveRecord, index.records.items);
+    const bytes = (try f.namespace.store.recordBytes(
+        f.permanent,
+        "attempt",
+        f.pending.attempt,
+        f.task,
+    )) orelse return error.MissingProjectionAttempt;
+    var attempt = try contracts.decodeOwned(State.Attempt, f.permanent, bytes);
+    defer attempt.deinit();
+    attempt.value.preparation_cut = try std.math.add(u64, attempt.value.preparation_cut.?, 1);
+    var facts = try f.service.prepareWorkspaceValidation(f.task);
+    defer facts.deinit();
+    try f.service.validateWorkspaceRecordsPrepared(
+        f.permanent,
+        f.task,
+        records,
+        &facts,
+    );
+    try f.namespace.store.begin();
+    defer f.namespace.store.rollback();
+    const changed = try f.namespace.store.putObject(
+        try contracts.encodeOwned(State.Attempt, f.permanent, attempt.value),
+    );
+    try f.namespace.store.putRecord(
+        State.Attempt,
+        "attempt",
+        attempt.value.id,
+        f.task,
+        attempt.value,
+    );
+    var replaced = false;
+    for (records) |*record| {
+        if (record.kind != .attempt or !std.meta.eql(record.id, attempt.value.id)) continue;
+        record.body = changed;
+        replaced = true;
+    }
+    try std.testing.expect(replaced);
+    try std.testing.expectError(
+        error.InvalidArchive,
+        f.service.validateWorkspaceRecordsPrepared(f.permanent, f.task, records, &facts),
     );
 }
 
@@ -325,12 +422,15 @@ test "projection receipts preserve exact requests and reject substituted archive
     const original_prepared = try f.permanent.dupe(u8, f.pending.prepared.?);
     const operation = try selectionOperation(&f, projected);
     try receiptReplay(&f, valid.result, projected, operation);
+    try f.service.completeWork(f.permanent, f.pending, .not_sent);
     try missingConsumerArchive(&f, consumer);
     const ordinary = try f.service.workspaceCommand(f.permanent, "ordinary-view", f.task, .{
         .context = .{ .select = .{ .values = .{ .items = &.{valid.result} } } },
     });
     try std.testing.expectEqual(.observed, ordinary.disposition);
     try std.testing.expect(!std.mem.eql(u8, projected.id.bytes, ordinary.selected_view.?.id.bytes));
+    try validateArchive(&f);
+    try preparationCutTamper(&f);
     try support.expectContextOutputBound(
         &f.service,
         f.permanent,
@@ -339,6 +439,7 @@ test "projection receipts preserve exact requests and reject substituted archive
         ordinary.selected_view.?,
         null,
     );
+    try resumeInference(&f);
     _ = try f.service.message(f.permanent, "projection-amendment", f.task, .{
         .message = .{ .bytes = "The required source revision is now eight." },
     });
@@ -372,15 +473,23 @@ fn pendingQuestion(f: *Fixture) !Pending {
     for (0..128) |_| {
         var saved = try f.service.workspaceWork(f.permanent, f.task, try recovery.refId(reference));
         defer saved.deinit();
-        if (saved.value.current_port) |port| return .{
-            .expected = .{
-                .work = reference,
-                .execution_revision = saved.value.execution_revision,
-                .control_revision = saved.value.control_revision,
-            },
-            .port = try support.workspaceRef(f.permanent, .port, port.digest),
-            .generation = saved.value.port_generation,
-        };
+        if (saved.value.current_port) |port_ref| {
+            var port = try contracts.decodeOwned(
+                native.workspace.Port,
+                f.permanent,
+                try f.namespace.store.object(f.permanent, port_ref, null),
+            );
+            defer port.deinit();
+            return .{
+                .expected = .{
+                    .work = reference,
+                    .execution_revision = saved.value.execution_revision,
+                    .control_revision = saved.value.control_revision,
+                },
+                .port = try support.workspaceRef(f.permanent, .port, port.value.id),
+                .generation = port.value.generation,
+            };
+        }
         _ = try f.perform(.{ .work = .{ .command = .{ .inspect = .{ .work = reference } } } });
     }
     return error.ProjectionPendingPortDidNotArrive;
@@ -458,12 +567,7 @@ fn delegatedCapture(f: *Fixture, pending: Pending, result: wc.Ref) !void {
         }
         if (step.work.subject_work == null) {
             f.pending = step.work;
-            var parent = try f.service.task(f.permanent, f.task);
-            defer parent.deinit();
-            try f.send(.{ .work = .{ .command = .{ .wait = .{
-                .works = .{ .items = &.{pending.expected.work} },
-                .after = parent.value.event_high,
-            } } } });
+            try waitForDelegation(f, pending);
             continue;
         }
         try assertDelegationBinding(f, pending, step.work);
@@ -478,6 +582,33 @@ fn delegatedCapture(f: *Fixture, pending: Pending, result: wc.Ref) !void {
         return;
     }
     return error.ProjectedDelegationDidNotArrive;
+}
+
+fn waitForDelegation(f: *Fixture, pending: Pending) !void {
+    var prepared = try contracts.decodeOwned(
+        t.P.AdaptivePrepared,
+        f.permanent,
+        f.pending.prepared.?,
+    );
+    defer prepared.deinit();
+    for (prepared.value.request.results.items) |result| {
+        const reply = try native.json.parseAsset(
+            f.permanent,
+            result.output.bytes,
+            result.output.bytes.len,
+        );
+        const disposition = reply.value.object.get("disposition") orelse continue;
+        if (std.mem.eql(u8, disposition.string, "rejected")) {
+            std.debug.print("delegated action rejected: {s}\n", .{result.output.bytes});
+            return error.DelegationActionRejected;
+        }
+    }
+    var parent = try f.service.task(f.permanent, f.task);
+    defer parent.deinit();
+    try f.send(.{ .work = .{ .command = .{ .wait = .{
+        .works = .{ .items = &.{pending.expected.work} },
+        .after = parent.value.event_high,
+    } } } });
 }
 
 fn assertDelegationBinding(f: *Fixture, pending: Pending, work: native.tasks.Work) !void {
@@ -495,13 +626,13 @@ fn assertDelegationBinding(f: *Fixture, pending: Pending, work: native.tasks.Wor
     defer delegation.deinit();
     try std.testing.expectEqualDeep(instrument, delegation.value.instrument);
     try std.testing.expectEqualDeep(original, delegation.value.work);
-    try std.testing.expectEqualDeep(try recovery.refId(pending.port), delegation.value.port.digest);
     var port = try contracts.decodeOwned(
         native.workspace.Port,
         f.permanent,
         try f.namespace.store.object(f.permanent, delegation.value.port, null),
     );
     defer port.deinit();
+    try std.testing.expectEqualDeep(try recovery.refId(pending.port), port.value.id);
     try std.testing.expectEqualDeep(original, port.value.work);
     try std.testing.expectEqual(pending.generation, port.value.generation);
     try std.testing.expectEqualDeep(f.task, delegation.value.task);
@@ -738,6 +869,8 @@ fn rejectSourceSlices(
         .{ .value = sources[2], .offset = 0, .length = 1 },
         .{ .value = sources[3], .offset = 0, .length = 1 },
         .{ .value = sources[0], .offset = length, .length = 1 },
+        .{ .value = sources[0], .offset = std.math.maxInt(u64), .length = 1 },
+        .{ .value = sources[0], .offset = 1, .length = std.math.maxInt(u64) },
     };
     for (slices) |slice| {
         const projected = try projectBlocks(

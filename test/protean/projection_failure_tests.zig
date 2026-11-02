@@ -9,6 +9,7 @@ const wc = contracts.workspace;
 const Fixture = recovery.Fixture;
 const Commands = native.testing.workspace_commands.Operations(t, native.tasks.Service(t));
 const ns = native.testing.state;
+const cleanup = @import("native_test_support.zig").cleanup;
 
 fn projector(a: std.mem.Allocator, doublings: usize) ![]u8 {
     var b = horos.source.Builder.init(a);
@@ -177,6 +178,107 @@ fn afterPublication(f: *Fixture, command: native.workspace.Authorized) !void {
     try std.testing.expectEqualDeep(head, f.namespace.store.head);
 }
 
+const MissingView = struct {
+    var active: ?*MissingView = null;
+
+    fixture: *Fixture,
+    original: @FieldType(native.registry.CaptureAdapter, "prepare"),
+    view: wc.Ref,
+    record_id: ns.Digest,
+    after: u64,
+    observations: u64 = 0,
+
+    fn prepare(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
+        const self = active orelse return error.MissingFaultFixture;
+        var input = try contracts.decodeOwned(t.Preparation, ctx.allocator, bytes);
+        defer input.deinit();
+        const selected = input.value.state.selected_view orelse return self.original(ctx, bytes);
+        const cut = ctx.consumer_cut orelse return self.original(ctx, bytes);
+        if (cut.event_watermark <= self.after or
+            !std.mem.eql(u8, selected.id.bytes, self.view.id.bytes))
+            return self.original(ctx, bytes);
+        const store = &self.fixture.namespace.store;
+        try std.testing.expect(store.projecting);
+        try store.database.exec("SAVEPOINT projection_missing_view;");
+        defer cleanup("projection missing view rollback", store.database.exec(
+            "ROLLBACK TO projection_missing_view; RELEASE projection_missing_view;",
+        ));
+        try store.database.run(
+            "DELETE FROM records WHERE kind='workspace_view' AND id=? AND task=?",
+            &.{ .{ .blob = &self.record_id }, .{ .blob = &self.fixture.task } },
+        );
+        try std.testing.expectEqual(1, try store.database.changes());
+        self.observations += 1;
+        return self.original(ctx, bytes);
+    }
+};
+
+fn preparationEntry(f: *Fixture) !*native.registry.Entry {
+    for (@constCast(f.handlers.entries)) |*entry| {
+        if (std.mem.eql(u8, entry.declaration.identity, t.prepare_identity)) return entry;
+    }
+    return error.PreparationHandlerMissing;
+}
+
+fn missingDependency(f: *Fixture, result: wc.Ref) !void {
+    _ = try f.perform(.{ .context = .{ .command = .{ .select = .{ .projected = result } } } });
+    const selected = f.prepared.selected_view orelse return error.MissingProjectedRequest;
+    const original = try f.permanent.dupe(u8, f.pending.prepared.?);
+    const before = (try f.service.task(f.permanent, f.task)).value;
+    const entry = try preparationEntry(f);
+    var fault: MissingView = .{
+        .fixture = f,
+        .original = entry.declaration.capture.?.prepare,
+        .view = try support.workspaceRef(f.permanent, .view, selected.digest),
+        .record_id = try native.workspace.custodyId(f.permanent, f.task, selected.digest),
+        .after = before.event_high,
+    };
+    MissingView.active = &fault;
+    defer MissingView.active = null;
+    entry.declaration.capture.?.prepare = MissingView.prepare;
+    defer entry.declaration.capture.?.prepare = fault.original;
+    const calls = f.calls;
+    _ = try f.perform(.{ .context = .{ .command = .{ .inspect = .{ .page = .{} } } } });
+    try std.testing.expect(fault.observations != 0);
+    try std.testing.expectEqual(calls + 1, f.calls);
+    try std.testing.expectEqual(.projection_recovery, f.prepared.request.plan.reason);
+    try std.testing.expect(f.prepared.selected_view == null);
+    try std.testing.expect(f.prepared.request.plan.research == null);
+    for ([_][]const u8{
+        "Projection preparation rejected: unavailable.",
+        "domain 41 revision 7",
+        "An unavailable member is incomplete, never absent.",
+    }) |text| try std.testing.expect(std.mem.indexOf(u8, f.prepared.body.bytes, text) != null);
+    try requireRetainedPrepared(f, original);
+    try std.testing.expect((try f.namespace.store.recordBytes(
+        f.permanent,
+        "workspace_view",
+        fault.record_id,
+        f.task,
+    )) != null);
+    const after = (try f.service.task(f.permanent, f.task)).value;
+    try std.testing.expectEqual(before.inference_attempts + 1, after.inference_attempts);
+    const attempt = f.pending.attempt;
+    for (0..3) |_| {
+        const step = try f.service.pump(f.permanent);
+        try std.testing.expect(step != .work);
+    }
+    try std.testing.expectEqualDeep(attempt, f.pending.attempt);
+    const unchanged = (try f.service.task(f.permanent, f.task)).value;
+    try std.testing.expectEqual(after.inference_attempts, unchanged.inference_attempts);
+    try std.testing.expect(!unchanged.terminal());
+}
+
+fn requireRetainedPrepared(f: *Fixture, original: []const u8) !void {
+    var digest: ns.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(original, &digest, .{});
+    const saved = try f.namespace.store.object(f.permanent, .{
+        .digest = digest,
+        .bytes = original.len,
+    }, null);
+    try std.testing.expectEqualSlices(u8, original, saved);
+}
+
 test "projection publication preserves rollback and committed receipt under allocation failure" {
     var f: Fixture = undefined;
     try f.init();
@@ -187,6 +289,7 @@ test "projection publication preserves rollback and committed receipt under allo
     try beforePublication(&f, command);
     try afterPublication(&f, command);
     try std.testing.expectEqualSlices(u8, original, f.pending.prepared.?);
+    try missingDependency(&f, result.result);
     _ = try f.service.submit(f.permanent, "after-projection-fault", .{ .task = .{
         .bytes = "Independent task remains admissible after projection rollback.",
     } });

@@ -5,6 +5,7 @@ const state = @import("../state.zig");
 const occurrence = @import("../occurrence.zig");
 const storage = @import("../store.zig");
 const registry = @import("../registry.zig");
+const json = @import("../json.zig");
 const workspace = @import("../workspace_state.zig");
 const build_job = @import("../workspace_build.zig");
 const wp = @import("../workspace_projection.zig");
@@ -46,6 +47,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             mode: enum { inspect, retain },
             checked: *Snapshots.SnapshotValidation,
         ) !void {
+            try validatePreparationEvents(self, value, records);
             // Per-record scratch is backed by the service allocator so replay
             // releases it even when the enclosing request allocator is an arena.
             // A projected capture must reproduce its committed reply, replay
@@ -85,6 +87,9 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             var attempt =
                 try record(self, state.Attempt, temporary, "attempt", row.id, value.id);
             defer attempt.deinit();
+            if (!std.meta.eql(attempt.value.id, row.id) or
+                !std.meta.eql(attempt.value.task, value.id)) return error.InvalidArchive;
+            try validatePreparationAttempt(self, temporary, value, attempt.value);
             try requireArchiveRecord(records, .occurrence, attempt.value.occurrence);
             var saved = try record(
                 self,
@@ -227,12 +232,19 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                         (validation.attempt.prepared != null) !=
                             (validation.entry.declaration.capture != null))
                         return error.InvalidArchive;
-                    const attempt_binding = try projectionBindingAt(
+                    var attempt_binding = try projectionBindingAt(
                         validation.service,
                         validation.a,
                         validation.value,
                         validation.saved,
                         validation.attempt.controller_context,
+                    );
+                    attempt_binding = try Worker.withPreparationCut(
+                        validation.service,
+                        validation.a,
+                        validation.value,
+                        attempt_binding,
+                        validation.attempt.preparation_cut,
                     );
                     if (validation.entry.declaration.capture) |adapter| {
                         const prepared = try store(validation.service).object(
@@ -266,6 +278,108 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     }
                 }
             };
+        }
+        fn preparationReference(a: std.mem.Allocator, attempt: state.Attempt) !state.Reference {
+            const bytes = try contracts.encodeOwned(state.Attempt, a, attempt);
+            defer a.free(bytes);
+            return .{ .digest = storage.digest(bytes), .bytes = bytes.len };
+        }
+
+        fn validatePreparationAttempt(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            attempt: state.Attempt,
+        ) !void {
+            const required = attempt.operation == .environment and attempt.prepared != null;
+            if (required != (attempt.preparation_cut != null)) return error.InvalidArchive;
+            const cut = attempt.preparation_cut orelse return;
+            const sequence = std.math.add(u64, cut, 1) catch return error.InvalidArchive;
+            if (sequence > parent.event_high) return error.InvalidArchive;
+            var query = try store(self).database.prepare(
+                "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+                    "WHERE e.task=? AND e.seq=?",
+                &.{ .{ .blob = &parent.id }, .{
+                    .integer = std.math.cast(i64, sequence) orelse return error.InvalidArchive,
+                } },
+            );
+            defer query.deinit();
+            if (try query.step() != .row) return error.InvalidArchive;
+            var event = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+            defer event.deinit();
+            if (event.value.kind != .preparation or event.value.seq != sequence or
+                !std.meta.eql(event.value.task, parent.id) or
+                !std.meta.eql(
+                    event.value.preparation_attempt,
+                    @as(?state.Reference, try preparationReference(a, attempt)),
+                ))
+                return error.InvalidArchive;
+        }
+
+        fn validatePreparationEvents(
+            self: *Self,
+            parent: state.Task,
+            records: []const state.ArchiveRecord,
+        ) !void {
+            var query = try store(self).database.prepare(
+                "SELECT e.seq,o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+                    "WHERE e.task=? ORDER BY e.seq",
+                &.{.{ .blob = &parent.id }},
+            );
+            defer query.deinit();
+            while (try query.step() == .row) {
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const event = try contracts.decodeOwned(state.Event, a, try query.bytes(1));
+                const value = event.value;
+                if ((value.kind == .preparation) != (value.preparation_attempt != null))
+                    return error.InvalidArchive;
+                const reference = value.preparation_attempt orelse continue;
+                const sequence = std.math.cast(u64, try query.integer(0)) orelse
+                    return error.InvalidArchive;
+                if (sequence == 0 or value.seq != sequence or sequence > parent.event_high or
+                    !std.meta.eql(value.task, parent.id)) return error.InvalidArchive;
+                const bytes = try store(self).object(a, reference, null);
+                const attempt = try contracts.decodeOwned(state.Attempt, a, bytes);
+                if (!std.meta.eql(attempt.value.task, parent.id) or
+                    attempt.value.operation != .environment or attempt.value.prepared == null or
+                    attempt.value.preparation_cut != sequence - 1 or
+                    !std.meta.eql(reference, try preparationReference(a, attempt.value)))
+                    return error.InvalidArchive;
+                try validatePreparationData(a, value, attempt.value);
+                try requirePreparationRecord(records, attempt.value.id, reference);
+            }
+        }
+
+        fn validatePreparationData(
+            a: std.mem.Allocator,
+            event: state.Event,
+            attempt: state.Attempt,
+        ) !void {
+            var data_value = try json.parse(a, event.data.bytes, .{});
+            defer data_value.deinit();
+            inline for (.{ .{ "occurrence_id", "occurrence" }, .{ "attempt_id", "id" } }) |field| {
+                const text = try json.text(json.get(data_value.value, field[0]) orelse
+                    return error.InvalidArchive);
+                var id: state.Digest = undefined;
+                if (text.len != id.len * 2) return error.InvalidArchive;
+                _ = std.fmt.hexToBytes(&id, text) catch return error.InvalidArchive;
+                if (!std.meta.eql(id, @field(attempt, field[1]))) return error.InvalidArchive;
+            }
+        }
+
+        fn requirePreparationRecord(
+            records: []const state.ArchiveRecord,
+            id: state.Digest,
+            reference: state.Reference,
+        ) !void {
+            for (records) |row| {
+                if (row.kind != .attempt or !std.meta.eql(row.id, id)) continue;
+                if (!std.meta.eql(row.body, reference)) return error.InvalidArchive;
+                return;
+            }
+            return error.InvalidArchive;
         }
         fn validateCaptureProjection(
             self: *Self,

@@ -276,7 +276,7 @@ pub const Store = struct {
             .controller = binding.controller,
             .trial = binding.trial,
             .execution = binding.execution,
-            .current = binding.current,
+            .consumer_cut = binding.consumer_cut,
             .objects = .{
                 .source = &scope,
                 .read_object = ProjectionScope.read,
@@ -349,11 +349,18 @@ pub const Store = struct {
             !std.mem.eql(u8, observed.tenant.bytes, scope.binding.tenant) or
             !std.meta.eql(observed.policy.digest, digest(scope.binding.profile)))
             return error.InvalidConsumer;
-        if (!scope.binding.current) return;
+        const cut = scope.binding.consumer_cut orelse return;
         const task_bytes = try scope.store.taskBytes(a, saved.task);
         defer a.free(task_bytes);
         var parent = try contracts.decodeOwned(state.Task, a, task_bytes);
         defer parent.deinit();
+        if (cut.event_watermark > parent.value.event_high or
+            observed.controller.event_watermark > cut.event_watermark)
+            return error.StaleConsumer;
+        parent.value.controller = cut.controller;
+        parent.value.controller_epoch = cut.controller_epoch;
+        parent.value.next_message = cut.next_message;
+        parent.value.event_high = cut.event_watermark;
         try observed.requireTask(parent.value);
         if (observed.input_revision != try scope.store.userInputRevision(
             a,
@@ -361,10 +368,10 @@ pub const Store = struct {
             parent.value.event_high,
         )) return error.StaleConsumer;
         for (observed.selection.required_current.items) |requirement|
-            try requireCurrentWork(scope, a, saved.task, requirement, null);
+            try requireWorkAt(scope, a, saved.task, requirement, null, cut.event_watermark);
         if (observed.selection.target == .model) {
             const target = observed.selection.target.model;
-            try requireCurrentWork(scope, a, saved.task, target.expected, target);
+            try requireWorkAt(scope, a, saved.task, target.expected, target, cut.event_watermark);
         }
     }
 
@@ -386,37 +393,102 @@ pub const Store = struct {
         return 0;
     }
 
-    fn requireCurrentWork(
+    fn requireWorkAt(
         scope: *ProjectionScope,
         a: std.mem.Allocator,
         task: state.TaskId,
         expected: contracts.workspace.Expected,
         target: ?@FieldType(contracts.workspace.ConsumerTarget, "model"),
+        at: u64,
+    ) !void {
+        const wp = @import("workspace_projection.zig");
+        const id = try wp.identity(expected.work, .work);
+        var observed = try scope.store.workObservationAt(a, task, id, at);
+        defer observed.deinit();
+        const work = observed.value.work;
+        if (target == null and (work.execution_revision != expected.execution_revision or
+            work.control_revision != expected.control_revision)) return error.StaleConsumer;
+        if (target) |selected| try scope.store.requireObservedPort(a, observed.value, selected);
+    }
+
+    fn workObservationAt(
+        self: *Store,
+        a: std.mem.Allocator,
+        task: state.TaskId,
+        work: state.Digest,
+        at: u64,
+    ) !contracts.Decoded(@import("workspace_state.zig").WorkObservation) {
+        var query = try self.database.prepare(
+            "SELECT e.seq,o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+                "WHERE e.task=? AND e.seq<=? ORDER BY e.seq DESC",
+            &.{ .{ .blob = &task }, .{
+                .integer = std.math.cast(i64, at) orelse return error.InvalidState,
+            } },
+        );
+        defer query.deinit();
+        while (try query.step() == .row) {
+            var event = try contracts.decodeOwned(state.Event, a, try query.bytes(1));
+            defer event.deinit();
+            const sequence = std.math.cast(u64, try query.integer(0)) orelse
+                return error.CorruptState;
+            if (!std.meta.eql(event.value.task, task) or
+                event.value.seq != sequence) return error.CorruptState;
+            for (event.value.workspace_publications.items) |publication| {
+                if (!std.meta.eql(publication.work, work)) continue;
+                return self.publicationObservation(a, task, publication, event.value.seq);
+            }
+        }
+        return error.ProjectionUnavailable;
+    }
+
+    fn publicationObservation(
+        self: *Store,
+        a: std.mem.Allocator,
+        task: state.TaskId,
+        publication: state.WorkPublication,
+        event: u64,
+    ) !contracts.Decoded(@import("workspace_state.zig").WorkObservation) {
+        const w = @import("workspace_state.zig");
+        const bytes = try self.acquiredObject(a, publication.observation, null);
+        defer a.free(bytes);
+        var observed = try contracts.decodeOwned(w.WorkObservation, a, bytes);
+        errdefer observed.deinit();
+        const work = observed.value.work;
+        if (!std.meta.eql(work.task, task) or !std.meta.eql(work.id, publication.work) or
+            work.execution_revision != publication.execution_revision or
+            work.control_revision != publication.control_revision or
+            work.event_watermark > event)
+            return error.CorruptState;
+        return observed;
+    }
+
+    fn requireObservedPort(
+        self: *Store,
+        a: std.mem.Allocator,
+        observed: @import("workspace_state.zig").WorkObservation,
+        selected: @FieldType(contracts.workspace.ConsumerTarget, "model"),
     ) !void {
         const w = @import("workspace_state.zig");
         const wp = @import("workspace_projection.zig");
-        const id = try wp.identity(expected.work, .work);
-        const bytes = (try scope.store.recordBytes(
-            a,
-            "workspace_work",
-            id,
-            task,
-        )) orelse return error.ProjectionUnavailable;
+        const work = observed.work;
+        const reference = work.current_port orelse return error.StaleConsumer;
+        const pending = observed.occurrence orelse return error.StaleConsumer;
+        const bytes = try self.object(a, reference, null);
         defer a.free(bytes);
-        var current = try contracts.decodeOwned(w.Work, a, bytes);
-        defer current.deinit();
-        const work = current.value;
-        if (!std.meta.eql(
-            work.task,
-            task,
-        ) or !std.meta.eql(work.id, id)) return error.StaleConsumer;
-        if (target == null and (work.execution_revision != expected.execution_revision or
-            work.control_revision != expected.control_revision)) return error.StaleConsumer;
-        if (target) |selected| {
-            const port = work.current_port orelse return error.StaleConsumer;
-            if (!std.meta.eql(port.digest, try wp.identity(selected.port, .port)) or
-                work.port_generation != selected.generation) return error.StaleConsumer;
-        }
+        var port = try contracts.decodeOwned(w.Port, a, bytes);
+        defer port.deinit();
+        if (!std.meta.eql(port.value.id, try wp.identity(selected.port, .port)) or
+            !std.meta.eql(port.value.work, work.id) or
+            !std.meta.eql(port.value.task, work.task) or
+            port.value.generation != selected.generation or
+            work.port_generation != selected.generation or
+            !std.meta.eql(work.current_occurrence, @as(?state.Digest, port.value.occurrence)) or
+            !std.meta.eql(pending.id, port.value.occurrence) or
+            !std.meta.eql(pending.task, work.task) or
+            !std.meta.eql(pending.work, @as(?state.Digest, work.id)) or
+            !std.meta.eql(pending.request, port.value.request_identity) or
+            !std.meta.eql(pending.request_object, port.value.request) or pending.state != .ready)
+            return error.StaleConsumer;
     }
 
     const ProjectionScope = struct {

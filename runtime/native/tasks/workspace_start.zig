@@ -259,6 +259,11 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 if (target.value.control_revision + 1 != record_value.control_revision or
                     !std.meta.eql(target.value.current_port, record_value.port) or
                     target.value.cancellation != null) return error.StaleRevision;
+                const context: ?state.Reference = if (bound.view) |view|
+                    try Contexts.publishWorkspaceView(self, a, start.task_id, view)
+                else
+                    null;
+                if (!std.meta.eql(context, record_value.context)) return error.InvalidDelegation;
                 target.value.control_revision = record_value.control_revision;
                 target.value.policy = bound.policy;
                 target.value.event_watermark = parent.event_high + 1;

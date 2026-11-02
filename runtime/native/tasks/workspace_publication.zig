@@ -398,6 +398,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             var context = try prepareDelegatedContext(self, a, parent, selection);
             defer if (context) |*selected| selected.deinit();
             if (context) |selected| try selected.requireModel(a, authorized.model);
+            const view: ?workspace.ViewArtifact = if (context) |selected| selected.view else null;
+            const context_ref = try delegatedViewReference(a, view);
             var built = try instrument.build(a, kind);
             defer built.deinit();
             try store(self).begin();
@@ -421,10 +423,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .model = authorized.model,
                 .snapshot = if (kind == .snapshot) authorized.snapshot else null,
                 .inputs = .{ .items = inputs },
-                .context = if (context) |selected|
-                    try Contexts.publishWorkspaceView(self, a, task_id, selected.view)
-                else
-                    null,
+                .context = context_ref,
             };
             return startDelegatedInstrument(
                 self,
@@ -435,7 +434,18 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 record_value,
                 request,
                 selection,
+                view,
             );
+        }
+
+        fn delegatedViewReference(
+            a: std.mem.Allocator,
+            view: ?workspace.ViewArtifact,
+        ) !?state.Reference {
+            const selected = view orelse return null;
+            const bytes = try contracts.encodeOwned(workspace.ViewArtifact, a, selected);
+            defer a.free(bytes);
+            return .{ .digest = storage.digest(bytes), .bytes = bytes.len };
         }
 
         fn prepareDelegatedInputs(
@@ -555,6 +565,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             record_value: workspace.Delegation,
             request: state.Digest,
             selection: anytype,
+            view: ?workspace.ViewArtifact,
         ) !Admission {
             const record_bytes = try contracts.encodeOwned(workspace.Delegation, a, record_value);
             defer a.free(record_bytes);
@@ -574,6 +585,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 null,
                 .{
                     .record = record_value,
+                    .view = view,
                     .request = request,
                     .policy = selection.policy,
                     .command = selection,

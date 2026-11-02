@@ -760,7 +760,7 @@ fn completeSibling(f: *Fixture, original: native.workspace.Work) !void {
             .execution_revision = original.execution_revision,
             .control_revision = original.control_revision,
         },
-        .port = try reference(f.permanent, .port, saved_port.digest),
+        .port = try reference(f.permanent, .port, port.value.id),
         .generation = original.port_generation,
         .command = .{ .resume_value = .{ .inline_json = .{
             .schema = try reference(f.permanent, .schema, port.value.interface.argument.digest),

@@ -558,6 +558,16 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (event_cut == 0 or event_cut > parent.event_high or expected_next_message == 0 or
                 expected_next_message > parent.next_message)
                 return error.InvalidArchive;
+            if (try controllerNextMessageAt(self, a, parent, event_cut) != expected_next_message)
+                return error.InvalidArchive;
+        }
+        pub fn controllerNextMessageAt(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            event_cut: u64,
+        ) !u64 {
+            if (event_cut == 0 or event_cut > parent.event_high) return error.InvalidArchive;
             var next_message: u64 = 1;
             var events = try store(self).database.prepare(
                 "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body WH" ++
@@ -573,7 +583,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 if (saved.value.kind == .message_queued) next_message =
                     try std.math.add(u64, next_message, 1);
             }
-            if (next_message != expected_next_message) return error.InvalidArchive;
+            return next_message;
         }
     };
 }

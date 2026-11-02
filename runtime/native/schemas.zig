@@ -246,7 +246,7 @@ fn eventFields(kind: state.EventType) []const EventField {
         },
         .imported => &.{.{ .name = "archive_sha256", .kind = .digest }},
         .reconciled => &.{.{ .name = "reconciliation_id", .kind = .digest }},
-        .workspace_read => &.{
+        .workspace_read, .preparation => &.{
             .{ .name = "occurrence_id", .kind = .digest },
             .{ .name = "attempt_id", .kind = .digest, .optional = true },
         },

@@ -619,7 +619,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 false;
             try store(self).begin();
             defer store(self).rollback();
-            try store(self).createRecord(state.Attempt, "attempt", attempt, value.id, .{
+            const local_attempt: state.Attempt = .{
                 .id = attempt,
                 .task = value.id,
                 .occurrence = pending.id,
@@ -632,14 +632,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .controller_context = controller_context,
                 .controller_read = controller_read,
                 .dispatch_checkpoint = if (reads_mutable) initial.checkpoint else null,
-            });
-            try store(self).putRecord(
-                Occurrence,
-                "occurrence",
-                pending.id,
-                value.id,
-                pending,
-            );
+                .preparation_cut = if (operation_kind == .environment and prepared != null)
+                    initial.event_high
+                else
+                    null,
+            };
+            try publishPreparation(self, a, value, local_attempt);
+            try store(self).putRecord(Occurrence, "occurrence", pending.id, value.id, pending);
             if (reads_mutable) try acquisitionReadEvent(
                 self,
                 a,
@@ -659,6 +658,36 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .residual = pending.residual,
             });
             return .{ .work = work };
+        }
+        fn publishPreparation(
+            self: *Self,
+            a: std.mem.Allocator,
+            value: *state.Task,
+            attempt: state.Attempt,
+        ) !void {
+            try store(self).createRecord(state.Attempt, "attempt", attempt.id, value.id, attempt);
+            const cut = attempt.preparation_cut orelse return;
+            if (cut != value.event_high) return error.CorruptState;
+            const body = try encodeOwned(state.Attempt, a, attempt);
+            defer a.free(body);
+            const payload = try std.fmt.allocPrint(
+                a,
+                "{{\"attempt_id\":\"{s}\",\"occurrence_id\":\"{s}\"}}",
+                .{
+                    std.fmt.bytesToHex(attempt.id, .lower),
+                    std.fmt.bytesToHex(attempt.occurrence, .lower),
+                },
+            );
+            defer a.free(payload);
+            value.event_high = try std.math.add(u64, cut, 1);
+            try store(self).putEvent(.{
+                .task = value.id,
+                .seq = value.event_high,
+                .revision = value.revision,
+                .kind = .preparation,
+                .data = .{ .bytes = payload },
+                .preparation_attempt = try store(self).putObject(body),
+            });
         }
         pub fn projectionBinding(self: *Self, value: state.Task) registry.ProjectionBinding {
             return .{
@@ -685,13 +714,14 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 var attempt = try record(self, state.Attempt, a, "attempt", id, value.id);
                 defer attempt.deinit();
                 if (!std.meta.eql(attempt.value.occurrence, pending.id)) return error.CorruptState;
-                return projectionBindingAt(
+                const binding = try projectionBindingAt(
                     self,
                     a,
                     value,
                     pending,
                     attempt.value.controller_context,
                 );
+                return withPreparationCut(self, a, value, binding, attempt.value.preparation_cut);
             }
             return projectionBindingAt(
                 self,
@@ -700,6 +730,38 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 pending,
                 try currentControllerContext(self, a, value, pending),
             );
+        }
+        pub fn withPreparationCut(
+            self: *Self,
+            a: std.mem.Allocator,
+            value: state.Task,
+            original: registry.ProjectionBinding,
+            cut: ?u64,
+        ) !registry.ProjectionBinding {
+            const watermark = cut orelse return original;
+            if (watermark == 0 or watermark > value.event_high) return error.InvalidPreparedRequest;
+            var binding = original;
+            if (watermark == value.event_high) {
+                binding.consumer_cut = .{
+                    .event_watermark = watermark,
+                    .controller = value.controller,
+                    .controller_epoch = value.controller_epoch,
+                    .next_message = value.next_message,
+                };
+                return binding;
+            }
+            binding.consumer_cut = .{
+                .event_watermark = watermark,
+                .controller = try controllerAt(self, a, value, watermark),
+                .controller_epoch = try controllerEpochAt(self, a, value, watermark),
+                .next_message = try controller_context_ops.controllerNextMessageAt(
+                    self,
+                    a,
+                    value,
+                    watermark,
+                ),
+            };
+            return binding;
         }
         fn currentControllerContext(
             self: *Self,
@@ -849,8 +911,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             adapter: registry.CaptureAdapter,
             payload: []const u8,
         ) ![]u8 {
-            var binding = try occurrenceProjectionBinding(self, a, value, pending);
-            binding.current = true;
+            const binding = try withPreparationCut(
+                self,
+                a,
+                value,
+                try occurrenceProjectionBinding(self, a, value, pending),
+                value.event_high,
+            );
             return store(self).project(
                 []u8,
                 a,
