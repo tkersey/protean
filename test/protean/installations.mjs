@@ -59,6 +59,10 @@ function run(executable, args, cwd = scratch, {failure = false, diagnostic, time
   console.error(`downstream ${operation}: started`);
   const result = spawnSync(command[0], command.slice(1), {cwd, env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout});
   console.error(`downstream ${operation}: ${Math.round(performance.now() - started)} ms, status ${result.status}, signal ${result.signal}`);
+  if (result.error || result.signal) {
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+  }
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.signal, null, result.stderr);
   if (failure) {

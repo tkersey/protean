@@ -22,6 +22,8 @@ pub fn build(b: *std.Build) void {
         .@"sqlite-source" = sqlite,
     });
     const surface = b.addTest(.{
+        .use_llvm = if (b.graph.host.result.os.tag == .linux and
+            b.graph.host.result.cpu.arch == .x86_64) false else null,
         .root_module = b.createModule(.{
             .root_source_file = b.path("package_surface.zig"),
             .target = b.graph.host,
