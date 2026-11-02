@@ -160,9 +160,15 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     return err;
                 return workspaceRejection(a, err);
             };
+            var retain_arena = std.heap.ArenaAllocator.init(a);
+            defer retain_arena.deinit();
+            const execution_allocator = if (command == .program and command.program == .retain)
+                retain_arena.allocator()
+            else
+                a;
             const executed = workspaceExecute(
                 self,
-                a,
+                execution_allocator,
                 operation_id,
                 task_id,
                 admitted,

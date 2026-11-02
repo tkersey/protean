@@ -68,7 +68,7 @@ fn Audit(comptime Source: type) type {
             try self.add(child);
             try self.edges.put(self.a, .{ .parent = parent.digest, .child = child.digest }, {});
         }
-        fn imageIdentity(self: *Self, ref: Ref) !Digest {
+        pub fn imageIdentity(self: *Self, ref: Ref) !Digest {
             try self.add(ref);
             if (self.images.get(ref.digest)) |identity| return identity;
             // A saved request belongs to its task's canonical program, independently
@@ -81,74 +81,11 @@ fn Audit(comptime Source: type) type {
             return decoded.identity;
         }
         fn occurrenceImage(self: *Self, saved: occurrence.Occurrence) !Digest {
-            var route = try self.record(.execution_route, saved.task, saved.id);
-            defer route.deinit();
-            if (!std.meta.eql(route.value.work, saved.work) or
-                !std.meta.eql(route.value.residual, saved.residual) or
-                !std.meta.eql(route.value.task, saved.task) or
-                !std.meta.eql(route.value.id, saved.id))
-            {
-                return error.CorruptState;
-            }
-            var image = self.tasks.get(saved.task).?.image;
-            if (saved.work) |id| {
-                var work = try self.record(.workspace_work, saved.task, id);
-                defer work.deinit();
-                var program = try self.record(
-                    .workspace_program,
-                    saved.task,
-                    try @import("workspace_state.zig").custodyId(
-                        self.a,
-                        saved.task,
-                        work.value.program,
-                    ),
-                );
-                defer program.deinit();
-                image = program.value.description.image;
-                if (!std.meta.eql(
-                    route.value.delegation,
-                    work.value.delegation,
-                )) return error.CorruptState;
-            } else if (route.value.controller) |id| {
-                var cursor = self.tasks.get(saved.task).?.controller;
-                var last_epoch: ?u64 = null;
-                image = found: {
-                    while (cursor) |current| {
-                        var binding = try self.record(.controller_binding, saved.task, current);
-                        defer binding.deinit();
-                        if (last_epoch) |epoch| {
-                            if (binding.value.epoch >= epoch) return error.CorruptState;
-                        }
-                        if (std.meta.eql(current, id)) {
-                            var program = try self.record(
-                                .workspace_program,
-                                saved.task,
-                                try @import("workspace_state.zig").custodyId(
-                                    self.a,
-                                    saved.task,
-                                    binding.value.program,
-                                ),
-                            );
-                            defer program.deinit();
-                            if (program.value.description.controller == null or !std.meta.eql(
-                                program.value.description.image,
-                                binding.value.image,
-                            ) or !std.meta.eql(
-                                binding.value.program_identity,
-                                route.value.program_identity,
-                            )) return error.CorruptState;
-                            break :found binding.value.image;
-                        }
-                        last_epoch = binding.value.epoch;
-                        cursor = binding.value.predecessor;
-                    }
-                    return error.CorruptState;
-                };
-            }
-            if (!std.meta.eql(image, route.value.image)) return error.CorruptState;
-            const identity = try self.imageIdentity(image);
-            if (!std.meta.eql(identity, route.value.program_identity)) return error.CorruptState;
-            return identity;
+            return @import("archived_routes.zig").resolve(
+                self,
+                self.tasks.get(saved.task).?,
+                saved,
+            );
         }
         fn value(self: *Self, comptime T: type, parent: Ref, input: T) !void {
             var sink = struct {
@@ -404,7 +341,7 @@ fn Audit(comptime Source: type) type {
                 if (check_recovery) try self.reconciliations();
             }
         }
-        fn record(
+        pub fn record(
             self: *Self,
             comptime kind: storage.RecordKind,
             task: state.TaskId,

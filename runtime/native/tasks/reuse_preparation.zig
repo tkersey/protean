@@ -26,6 +26,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         const Occurrences = @import("archive_occurrences.zig").Operations(Types, Self);
         const Snapshots = @import("workspace_snapshots.zig").Operations(Types, Self);
 
+        const Validation = enum { historical, executable };
+
         pub fn validateDefinition(
             self: *Self,
             a: std.mem.Allocator,
@@ -33,10 +35,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         ) anyerror!void {
             try reuse.validate(a, Lifecycle.store(self), value);
             if (self.reuse_provenance_validation) return;
-            var queue: reuse.Origins = .{ .a = a };
-            defer queue.deinit();
-            try validateOrigin(self, a, value.origin, &queue);
-            try validateQueued(self, a, &queue);
+            for ([_]Validation{ .historical, .executable }) |validation| {
+                var queue: reuse.Origins = .{ .a = a };
+                defer queue.deinit();
+                try validateOrigin(self, a, value.origin, &queue, validation);
+                try validateQueued(self, a, &queue, validation);
+            }
         }
 
         pub fn validateArchiveOrigins(
@@ -45,13 +49,32 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             origin: state.Archive,
         ) anyerror!void {
             if (self.reuse_provenance_validation) return;
-            var queue: reuse.Origins = .{ .a = a };
-            defer queue.deinit();
-            try queue.scanPublications(Lifecycle.store(self), origin);
-            try validateQueued(self, a, &queue);
+            for ([_]Validation{ .historical, .executable }) |validation| {
+                var queue: reuse.Origins = .{ .a = a };
+                defer queue.deinit();
+                try scanOrigins(Lifecycle.store(self), origin, &queue, validation);
+                try validateQueued(self, a, &queue, validation);
+            }
         }
 
-        fn validateQueued(self: *Self, a: std.mem.Allocator, queue: *reuse.Origins) !void {
+        fn scanOrigins(
+            store: *storage.Store,
+            origin: state.Archive,
+            queue: *reuse.Origins,
+            validation: Validation,
+        ) !void {
+            switch (validation) {
+                .historical => try queue.scan(store, origin),
+                .executable => try queue.scanPublications(store, origin),
+            }
+        }
+
+        fn validateQueued(
+            self: *Self,
+            a: std.mem.Allocator,
+            queue: *reuse.Origins,
+            validation: Validation,
+        ) !void {
             var index: usize = 0;
             while (index < queue.references.count()) : (index += 1) {
                 const ref = queue.references.keys()[index];
@@ -60,7 +83,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 var definition = try contracts.decodeOwned(reuse.Definition, a, bytes);
                 defer definition.deinit();
                 try reuse.validate(a, Lifecycle.store(self), definition.value);
-                try validateOrigin(self, a, definition.value.origin, queue);
+                try validateOrigin(self, a, definition.value.origin, queue, validation);
             }
         }
 
@@ -69,26 +92,34 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             a: std.mem.Allocator,
             origin: state.Archive,
             queue: *reuse.Origins,
+            validation: Validation,
         ) !void {
             const store = Lifecycle.store(self);
-            try queue.scanPublications(store, origin);
+            try scanOrigins(store, origin, queue, validation);
             const bytes = try store.object(a, origin.task, null);
             defer a.free(bytes);
             var parent = try contracts.decodeOwned(state.Task, a, bytes);
             defer parent.deinit();
+            if (!std.mem.eql(u8, parent.value.principal.bytes, self.profile.authority.principal) or
+                !std.mem.eql(u8, parent.value.tenant.bytes, self.profile.authority.tenant))
+                return error.InvalidArchive;
             var view = try HistoricalIndex.open(store, origin, parent.value);
             defer view.close() catch store.fence();
             const previous = self.reuse_provenance_validation;
             self.reuse_provenance_validation = true;
             defer self.reuse_provenance_validation = previous;
-            try Occurrences.validateArchiveAdmissions(self, a, parent.value, origin);
-            try Snapshots.validateWorkspaceArchive(
-                self,
-                a,
-                parent.value,
-                origin,
-                .inspect,
-            );
+            switch (validation) {
+                .historical => try Occurrences.validateHistoricalAdmissions(
+                    self,
+                    a,
+                    parent.value,
+                    origin,
+                ),
+                .executable => {
+                    try Occurrences.validateArchiveAdmissions(self, a, parent.value, origin);
+                    try Snapshots.validateWorkspaceArchive(self, a, parent.value, origin, .inspect);
+                },
+            }
             try view.close();
         }
 

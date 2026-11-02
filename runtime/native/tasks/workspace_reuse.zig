@@ -24,11 +24,18 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         pub fn retain(
             self: *Self,
             a: std.mem.Allocator,
-            operation_id: []const u8,
+            original_operation_id: []const u8,
             task_id: state.TaskId,
-            request: wc.Retain,
+            original_request: wc.Retain,
         ) !task_types.Admission {
             try Lifecycle.allowed(self);
+            const invocation = try RetainInvocation.snapshot(
+                a,
+                original_operation_id,
+                original_request,
+            );
+            const operation_id = invocation.operation_id;
+            const request = invocation.request;
             const identity = try task_types.operation(reuse.RetainRequest, a, .{
                 .task = task_id,
                 .retain = request,
@@ -255,6 +262,32 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         }
     };
 }
+
+const RetainInvocation = struct {
+    operation_id: []const u8,
+    request: wc.Retain,
+
+    fn snapshot(
+        a: std.mem.Allocator,
+        operation_id: []const u8,
+        request: wc.Retain,
+    ) !RetainInvocation {
+        return .{
+            .operation_id = try a.dupe(u8, operation_id),
+            .request = .{
+                .program = .{
+                    .kind = request.program.kind,
+                    .id = .{ .bytes = try a.dupe(u8, request.program.id.bytes) },
+                },
+                .scope = .{ .bytes = try a.dupe(u8, request.scope.bytes) },
+                .description = .{
+                    .name = .{ .bytes = try a.dupe(u8, request.description.name.bytes) },
+                    .purpose = .{ .bytes = try a.dupe(u8, request.description.purpose.bytes) },
+                },
+            },
+        };
+    }
+};
 
 fn retainPreparedAssets(store: *storage.Store, prepared: preparation.Prepared) !void {
     const origin = prepared.definition.origin;

@@ -4325,6 +4325,8 @@ fn expectSemanticCaptureSettled(
     a: std.mem.Allocator,
     captured: native.testing.state.Capture,
     cancellation: bool,
+    approved: ?native.tasks.SemanticPolicy,
+    retained: *?contracts.workspace.RetainedLocator,
 ) !contracts.Decoded(contracts.workspace.Reply) {
     const store = &service.namespace.store;
     var acquired = false;
@@ -4343,11 +4345,15 @@ fn expectSemanticCaptureSettled(
         defer pending.deinit();
         if (pending.value.state == .settled_reply) {
             try std.testing.expect(!consumed);
-            if (!acquired and !cancellation) try expectSemanticActivationDenied(
-                service,
-                a,
-                captured,
-            );
+            if (!acquired and !cancellation) {
+                try expectSemanticActivationDenied(service, a, captured);
+                retained.* = try @import("workspace_reuse_semantic_test.zig").retain(
+                    service,
+                    a,
+                    captured,
+                    approved,
+                );
+            }
             acquired = true;
             try std.testing.expectEqualDeep(
                 captured.attempt,
@@ -6070,11 +6076,14 @@ fn snapshotContextRetainedSettlement(
     revoked: anytype,
 ) !void {
     phase.* = "settle";
+    var retained: ?contracts.workspace.RetainedLocator = null;
     var settled = expectSemanticCaptureSettled(
         &fixture.service.*,
         fixture.scratch,
         captured,
         !validation,
+        fixture.approved_policy,
+        &retained,
     ) catch |err| {
         std.debug.print("semantic settlement: {s}\n", .{@errorName(err)});
         return err;
@@ -6118,6 +6127,8 @@ fn snapshotContextRetainedSettlement(
     phase.* = "canonical validation";
     fixture.service.*.profile.semantic_construction = fixture.approved_policy;
     try fixture.service.*.validateWorkspace(fixture.scratch, task_id);
+    if (retained) |locator|
+        try @import("workspace_reuse_semantic_test.zig").run(ContextTypes, fixture, locator);
 }
 
 const WaitTypes = struct {

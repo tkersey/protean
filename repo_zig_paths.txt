@@ -15,6 +15,7 @@ runtime/native/adaptive_context.zig
 runtime/native/adaptive_history.zig
 runtime/native/adaptive_responses.zig
 runtime/native/archive.zig
+runtime/native/archived_routes.zig
 runtime/native/client.zig
 runtime/native/configuration.zig
 runtime/native/controller_construction.zig
@@ -188,7 +189,10 @@ test/protean/runtime_mobility_source.zig
 test/protean/skill_unknown_field.zig
 test/protean/values.zig
 test/protean/workspace_programs.zig
+test/protean/workspace_reuse_admission_test.zig
 test/protean/workspace_reuse_recovery_test.zig
+test/protean/workspace_reuse_semantic_test.zig
+test/protean/workspace_reuse_snapshot_test.zig
 test/protean/workspace_reuse_test.zig
 test/protean/workspace_runtime.zig
 test/protean/workspace_semantics.zig

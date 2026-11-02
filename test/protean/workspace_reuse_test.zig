@@ -75,6 +75,8 @@ pub fn run(comptime Types: type, h: anytype) !void {
     try auditCatalog(Types, h);
     try restoreRevision(Types, h, revision);
     try @import("workspace_reuse_recovery_test.zig").run(Types, h, locator);
+    try @import("workspace_reuse_snapshot_test.zig").run(Types, h, locator);
+    try @import("workspace_reuse_admission_test.zig").run(Types, h, locator);
 }
 
 fn auditCatalog(comptime Types: type, h: anytype) !void {

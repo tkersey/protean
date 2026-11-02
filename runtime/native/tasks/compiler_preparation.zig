@@ -437,7 +437,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             const Reuse = @import("../reuse_state.zig");
             var origins: Reuse.Origins = .{ .a = self.allocator };
             defer origins.deinit();
-            try origins.scan(source, manifest);
+            try origins.scanPublications(source, manifest);
             var index: usize = 0;
             while (index < origins.references.count()) : (index += 1) {
                 const ref = origins.references.keys()[index];
@@ -450,7 +450,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 );
                 defer definition.deinit();
                 try prepareCompilerOrigin(self, definition.value.origin, source);
-                try origins.scan(source, definition.value.origin);
+                try origins.scanPublications(source, definition.value.origin);
             }
         }
         fn prepareCompilerOrigin(self: *Self, manifest: state.Archive, source: anytype) !void {
