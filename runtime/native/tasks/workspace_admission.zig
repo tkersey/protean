@@ -40,6 +40,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         const Inspection = @import("workspace_inspection.zig").Operations(Types, Self);
         const Observers = @import("workspace_observers.zig").Operations(Types, Self);
         const Programs = @import("workspace_programs.zig").Operations(Types, Self);
+        const Reuse = @import("reuse_validation.zig").Operations(Types, Self);
         const Realization = @import("workspace_realization.zig").Operations(Types, Self);
         const replay_ops = @import("workspace_replay.zig").Operations(Types, Self);
         const Snapshots = @import("workspace_snapshots.zig").Operations(Types, Self);
@@ -505,6 +506,21 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     });
                     try ctx.publicationShape();
                     const request = switch (ctx.command) {
+                        .retain => |selected| try Reuse.retained(
+                            ctx.self,
+                            ctx.a,
+                            ctx.parent,
+                            ctx.event_value,
+                            ctx.admission,
+                            selected,
+                        ),
+                        .import => |selected| try Reuse.imported(
+                            ctx.self,
+                            ctx.a,
+                            ctx.parent,
+                            ctx.admission,
+                            selected,
+                        ),
                         .realize_controller => |selection| try ctx.requestRealizeController(
                             selection,
                         ),
@@ -531,6 +547,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     const items = ctx.event_value.workspace_publications.items;
                     const kind: @FieldType(wc.Ref, "kind") = switch (ctx.command) {
                         .build => .program,
+                        .retain => .retained,
+                        .import => .imported,
                         .realize_controller => .controller,
                         .residual => .residual,
                         .specialize => .runtime,
@@ -544,6 +562,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     };
                     if (ctx.admission.kind != kind) return error.InvalidArchive;
                     const count: usize = switch (ctx.command) {
+                        .retain, .import => 0,
                         .build,
                         .context,
                         .specialize,

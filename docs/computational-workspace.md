@@ -313,7 +313,7 @@ cancellation cleanup.
 
 ## Reconstructing the active controller
 
-Application 8 uses `protean-workspace/5` and native state writer 20. The packaged
+Application 8 uses `protean-workspace/6` and native state writer 21. The packaged
 seed is an ordinary controller artifact built through the same source constructor
 as later candidates. `program.describe` with `current_controller` pages the
 actual binding, epoch, program, source, interfaces and residual references.
@@ -634,8 +634,8 @@ families and suite-specific comparison arms, records actual costs, and leaves
 quality adjudication explicit. No live model efficacy or token-saving percentage
 is claimed.
 
-Application 8.0.0 uses `protean-workspace/5`, context v7, output v5 and native
-state format 20. Older namespaces require their compatible executable. The
+Application 8.0.0 uses `protean-workspace/6`, context v7, output v5 and native
+state format 21. Older namespaces require their compatible executable. The
 [dependency lock](../conformance/protean/dependencies.lock.json) binds the local
 Horos 8.0.0 and Kosmos 9.1.0 source archives and their exact commits. The
 [implementation report](semantic-construction-report.md) points to current tuple

@@ -34,7 +34,7 @@ TigerStyle and still cannot pass the terminal gate.
 | `owners` | All 46 retained native task/response/model-custody owner tests, including their participant imports. |
 | `owner-adaptive-control` | All nine retained adaptive owner tests. |
 | `owner-support` | Native unit/context and process-crash recovery checks. |
-| `workspace` | The 16 workspace execution and construction tests. |
+| `workspace` | The 17 workspace execution and construction tests. |
 | `workspace-retention` | The three retained-work, wait and delegated-answer tests. |
 | `workspace-history` | The three history, cancellation-read and allocation-failure tests. |
 | `correspondence` | Independent source-oracle agreement, capsule restoration and duplicate-custody rejection. |
@@ -93,9 +93,9 @@ The invalid-output recovery test retains all three selected rejection cases.
 The surviving construction and custody tests do not replace those successful
 end-to-end recovery sequences.
 
-Workspace execution, retention and history still run once each across 22 tests.
+Workspace execution, retention and history still run once each across 23 tests.
 CI compiles the three existing filtered groups separately; the full unfiltered
-root is retained for local grouped execution. The 16 execution tests run in three
+root is retained for local grouped execution. The 17 execution tests run in three
 independent processes using the existing qualification runner, which rejects
 omissions, overlaps, skips, failures and leaks. Local execution uses those same
 partitions alongside retention and history. Selected list fixtures are reduced
@@ -107,6 +107,12 @@ It retains noncooperative work beyond the initial quantum, replay, cancellation,
 profile replacement, paging and input-history checks, but no longer exercises
 those large-history memory and repeated scheduling workloads. These changes alter
 verification scope, not supported product inputs or production semantics.
+
+The normalization-boundary test runs each single/batch case through the ordinary
+model responder, which calls the same checked observed responder and projects
+its interpretation. It no longer repeats every limit through the observed-result
+wrapper. All normalization fields and independent policy limits remain checked;
+separate observed-result tests retain provenance and original-authority coverage.
 
 ## Local feedback
 
@@ -147,11 +153,14 @@ existing Linux qualification lanes.
 
 ## Compilation, caching and artifacts
 
-The five authoring test roots, both native owner test roots, and all three general
-workspace groups use Zig's native x86-64 backend on Linux, retaining safe
-optimization and every selected test. macOS keeps its existing backend;
-the production native executable keeps LLVM. This reduces repeated LLVM test
-compilation but does not exercise those test bodies through LLVM on Linux.
+The five authoring test roots, both native owner test roots, all three general
+workspace groups, the crash-recovery probe and the production executable use
+Zig's native x86-64 backend on Linux, retaining safe optimization and every
+selected test. The independent downstream consumer uses the same public build
+choice. macOS keeps its existing backend. Context tests and native C/hash
+libraries retain LLVM. These Linux paths do not establish LLVM code-generation
+coverage; deployment, placement, crash recovery and the independent consumer
+execute the selected native-backend binaries.
 Compile-time rejection and independent execution checks remain selected.
 
 Exact compiled-artifact keys bind compiler identity, target, recipe and source

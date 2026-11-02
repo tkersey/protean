@@ -61,7 +61,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         pub fn workspaceIsRead(command: wc.Command) bool {
             return switch (command) {
                 .program => |p| p != .build and p != .specialize and p != .adopt and
-                    p != .derive and p != .validate,
+                    p != .derive and p != .validate and p != .retain and p != .import,
                 .work => |w| w == .inspect or w == .collect or w == .wait,
                 .context => |c| c == .inspect or c == .expand,
                 .placement => false,

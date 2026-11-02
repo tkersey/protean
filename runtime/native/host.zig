@@ -535,6 +535,7 @@ fn Launch(comptime Types: type, comptime Environment: type) type {
                     self.profile.*.resources = admitted.resources;
                     self.profile.*.environment = admitted.environment;
                     self.profile.*.semantic_construction = admitted.semantic_construction;
+                    self.profile.*.reuse = admitted.reuse;
                     self.profile.*.authority.inference = self.options.offline or
                         self.options.authorize_inference;
                     self.profile.*.validate() catch return 64;

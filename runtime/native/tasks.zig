@@ -66,6 +66,7 @@ pub fn Service(comptime Types: type) type {
         checked_workspace_runtimes: std.AutoHashMapUnmanaged(CompilerFact, u64) = .empty,
         runtime_cache: ?RuntimeCache = null,
         compiler_facts: ?*CompilerFacts = null,
+        reuse_provenance_validation: bool = false,
         // Import may use ordinary mutation projections only through an existing
         // matching receipt. Missing receipts must never execute a new mutation.
         workspace_replay: ?struct {
@@ -735,6 +736,10 @@ pub fn Service(comptime Types: type) type {
         ) !Admission {
             const domain = @import("tasks/workspace_start.zig").Operations(Types, Self);
             return domain.workspaceStart(self, a, operation_id, task_id, program_id, input, policy);
+        }
+        pub fn discardTask(self: *Self, a: std.mem.Allocator, task_id: state.TaskId) !void {
+            const domain = @import("tasks/disposal.zig").Operations(Types, Self);
+            return domain.discardTask(self, a, task_id);
         }
         pub fn workspacePump(
             self: *Self,

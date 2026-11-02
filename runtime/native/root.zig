@@ -21,6 +21,7 @@ pub const adaptive_responses = @import("adaptive_responses.zig");
 pub const repository = @import("repository.zig");
 pub const tool_construction = @import("tool_construction.zig");
 pub const configuration = @import("configuration.zig");
+pub const reuse_policy = @import("reuse_policy.zig");
 pub const workspace = @import("workspace_state.zig");
 pub const workspace_instrument = @import("workspace_instrument.zig");
 pub const tasks = @import("tasks.zig");
@@ -55,6 +56,9 @@ test {
 
 // Private history internals are exposed only to the repository's test graph.
 pub const testing = if (@import("builtin").is_test) struct {
+    pub const archive = @import("archive.zig");
+    pub const retention = @import("retention.zig");
+    pub const reuse = @import("reuse_state.zig");
     pub const adaptive_history = @import("adaptive_history.zig");
     pub const state = @import("state.zig");
     pub const occurrence = @import("occurrence.zig");

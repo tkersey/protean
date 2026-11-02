@@ -64,7 +64,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             const prior_compiler_facts = self.compiler_facts;
             if (self.compiler_facts == null) self.compiler_facts = &compiler_facts;
             defer self.compiler_facts = prior_compiler_facts;
-            _ = try store(self).auditRetention(self.handlers, self.application.image_identity);
+            _ = try store(self).auditTaskRetention(self.handlers, self.application.image_identity);
             var value = try self.task(a, task_id);
             defer value.deinit();
             try compatible(self, value.value);
@@ -80,7 +80,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     self,
                     arena.allocator(),
                     value.value,
-                    index.records.items,
+                    index,
                     .inspect,
                 );
             }
@@ -173,9 +173,16 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (self.compiler_facts == null) self.compiler_facts = &compiler_facts;
             defer self.compiler_facts = prior_compiler_facts;
             try prepareCompilerFacts(self, reader.manifest.value, &reader);
+            var retention = try @import("../retention.zig").prepareArchive(
+                self.allocator,
+                &reader,
+                self.handlers,
+            );
+            defer retention.deinit();
             try store(self).begin();
             defer store(self).rollback();
             try reader.acquire(store(self));
+            try retention.retain(store(self));
             var inspected = inspected: {
                 var arena = std.heap.ArenaAllocator.init(self.allocator);
                 defer arena.deinit();
@@ -220,7 +227,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             // original operation identities and all related input history.
             try store(self).restoreArchiveIndex(a, manifest, value);
             try validateArchiveAdmissions(self, a, value, manifest);
-            try validateWorkspaceArchive(self, a, value, manifest.records.items, .retain);
+            try validateWorkspaceArchive(self, a, value, manifest, .retain);
             // This transaction contains untrusted, unpublished archive data.
             // Reuse the closure validator without treating semantic rejection
             // as corruption of the committed namespace. Store integrity and

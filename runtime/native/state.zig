@@ -28,6 +28,16 @@ pub inline fn visitReferencesAs(
     if (T == occurrence.Acquired) try collector.reply(value);
     if (T == @import("workspace_state.zig").Observer.Incomplete)
         try collector.observerSource(value.source);
+    if (T == @import("reuse_state.zig").Import)
+        try collector.reuseDefinition(value.definition);
+    if (T == @import("workspace_state.zig").ReadObservation and value == .reuse) {
+        switch (value.reuse.selection) {
+            .find => |selected| for (selected.definitions.items) |ref| {
+                try collector.reuseDefinition(ref);
+            },
+            .inspect => |selected| try collector.reuseDefinition(selected.definition),
+        }
+    }
     switch (@typeInfo(T)) {
         .@"struct" => |info| {
             inline for (info.field_names, info.field_types) |name, Field| {
@@ -71,6 +81,19 @@ pub fn visitObserverSource(
     const bytes = try store.object(a, ref, null);
     defer a.free(bytes);
     const T = @import("workspace_state.zig").WorkObservation;
+    var decoded = try contracts.decodeOwned(T, a, bytes);
+    defer decoded.deinit();
+    try collector.typed(T, ref, decoded.value);
+}
+pub fn visitReuseDefinition(
+    a: std.mem.Allocator,
+    store: anytype,
+    ref: Reference,
+    collector: anytype,
+) anyerror!void {
+    const bytes = try store.object(a, ref, null);
+    defer a.free(bytes);
+    const T = @import("reuse_state.zig").Definition;
     var decoded = try contracts.decodeOwned(T, a, bytes);
     defer decoded.deinit();
     try collector.typed(T, ref, decoded.value);
@@ -837,6 +860,8 @@ pub fn visitWorkspaceReceipt(
         .{ .residual, ControllerResidual },
         .{ .controller, w.ControllerRealization },
         .{ .candidate, w.SemanticObservation },
+        .{ .retained, @import("reuse_state.zig").Definition },
+        .{ .imported, @import("reuse_state.zig").Import },
     }) |entry| {
         if (kind == entry[0]) {
             const T = entry[1];
@@ -1057,6 +1082,9 @@ fn validateWorkspaceReceiptValue(
             controllerExecutionIdentity(receipt.task),
             id,
         )) return error.CorruptState;
+    } else if (T == @import("reuse_state.zig").Import) {
+        if (!std.meta.eql(value.task, receipt.task) or
+            !std.meta.eql(ref.digest, id)) return error.CorruptState;
     } else if (T == w.SemanticObservation) {
         const expected = if (value.candidate) |candidate|
             candidate.digest

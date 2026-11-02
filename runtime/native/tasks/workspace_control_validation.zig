@@ -473,6 +473,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     switch (decoded) {
                         .stop_observing => {},
                         .build,
+                        .retain,
+                        .import,
                         .context,
                         .specialize,
                         .semantic,

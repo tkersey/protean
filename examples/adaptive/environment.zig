@@ -362,6 +362,7 @@ const ConfigurationAdmission = struct {
     tool_config: ?t.ToolConfiguration = null,
     semantic_config: ?t.SemanticConfiguration = null,
     semantic_policy: ?native.configuration.SemanticPolicy = null,
+    reuse_policy: native.configuration.ReusePolicy = .{},
     configuration_digest: ?[]const u8 = null,
     resources: std.ArrayList([]const u8) = .empty,
     skills: std.ArrayList(t.P.AdaptiveSkill) = .empty,
@@ -408,6 +409,8 @@ const ConfigurationAdmission = struct {
             });
             if (parsed.value == .object and !parsed.value.object.contains("semantic_construction"))
                 try native.json.put(s.a, &parsed.value, "semantic_construction", .null);
+            if (parsed.value == .object and !parsed.value.object.contains("reuse_scopes"))
+                try native.json.put(s.a, &parsed.value, "reuse_scopes", .null);
             if (parsed.value == .object) if (parsed.value.object.getPtr("tools")) |tools| {
                 if (tools.* == .object and !tools.object.contains(
                     "reconstruct",
@@ -426,6 +429,11 @@ const ConfigurationAdmission = struct {
                 s.a,
                 parsed.value.object.get("semantic_construction").?,
             );
+            s.reuse_policy = try native.configuration.reusePolicy(
+                s.a,
+                parsed.value.object.get("reuse_scopes").?,
+            );
+            _ = parsed.value.object.swapRemove("reuse_scopes");
             if (s.frozen) |saved| {
                 const saved_profile = try native.json.parse(s.a, saved.profile, .{
                     .bytes = saved.profile.len,
@@ -846,6 +854,7 @@ const ConfigurationAdmission = struct {
             .resources = s.resources.items,
             .environment = owner,
             .semantic_construction = s.semantic_policy,
+            .reuse = s.reuse_policy,
         };
     }
 

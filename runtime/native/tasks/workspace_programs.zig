@@ -700,9 +700,6 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             role: wc.ProgramRole,
             diagnostic: *construction.Diagnostic,
         ) !Admission {
-            var parent = try self.task(a, task_id);
-            defer parent.deinit();
-            try compatible(self, parent.value);
             const Request = workspace.BuildRequest;
             const request = try operation(Request, a, .{
                 .task = task_id,
@@ -713,6 +710,9 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .role = role,
             });
             if (try replay(self, a, operation_id, request)) |prior| return prior;
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            try compatible(self, parent.value);
             try requireCustody(self, a, task_id, null);
             if (workspaceParentStopped(self, parent.value)) return error.InvalidState;
             if (catalog) |ref| try workspaceSnapshotAccess(parent.value, ref);
@@ -924,7 +924,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             defer a.free(declared_controller);
             if (!same(actual_controller, declared_controller)) return error.CorruptState;
         }
-        fn storeProgramCustody(
+        pub fn storeProgramCustody(
             self: *Self,
             a: std.mem.Allocator,
             task_id: state.TaskId,

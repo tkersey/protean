@@ -125,7 +125,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 var saved = try contracts.decodeOwned(state.Receipt, a, bytes);
                 defer saved.deinit();
                 if (saved.value.method == .submit) {
-                    var original = try self.task(a, saved.value.task);
+                    var original = try Tasks.receiptTask(self, a, saved.value.task);
                     defer original.deinit();
                     // The original alias is resolved only on first admission.
                     // Retrying it after a launch configuration change recovers
