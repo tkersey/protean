@@ -21,7 +21,7 @@ pub fn configure(profile: *native.tasks.Profile) void {
 pub fn run(comptime Types: type, h: anytype) !void {
     const a = h.scratch;
     const task_a = (try h.service.submit(a, "reuse-source", {})).receipt.task;
-    const program_a = try build(h, task_a, "reuse-build", 7);
+    const program_a = try authoredBuild(h, task_a, 7);
     const work_a = try start(h, task_a, program_a, "reuse-source-start", 3);
     try waitForQuestion(h, task_a, work_a, "source-progress");
     try answer(h, task_a, work_a, "source-answer", 2);
@@ -43,6 +43,7 @@ pub fn run(comptime Types: type, h: anytype) !void {
     try reopen(Types, h);
     try expectAbsent(h, task_a);
     try auditCatalog(Types, h);
+    try crossProfileRead(Types, h, locator);
     try foreignOwners(Types, h, locator);
     const task_b = (try h.service.submit(a, "reuse-destination", {})).receipt.task;
     try discover(h, task_b, locator);
@@ -73,6 +74,7 @@ pub fn run(comptime Types: type, h: anytype) !void {
     try expectAbsent(h, task_b);
     try auditCatalog(Types, h);
     try restoreRevision(Types, h, revision);
+    try @import("workspace_reuse_recovery_test.zig").run(Types, h, locator);
 }
 
 fn auditCatalog(comptime Types: type, h: anytype) !void {
@@ -208,7 +210,7 @@ fn restoreRevision(comptime Types: type, h: anytype, locator: wc.RetainedLocator
     phase = "export destination";
     _ = try h.service.exportCheckpoint(h.scratch, task, path);
     phase = "restore destination";
-    try inspectRestored(Types, h, path, task);
+    try inspectRestored(Types, h, path, task, "nested-restored");
     phase = "execute nested definition";
     const work = try start(h, task, program, "nested-start", 4);
     try waitForQuestion(h, task, work, "nested-progress");
@@ -218,17 +220,29 @@ fn restoreRevision(comptime Types: type, h: anytype, locator: wc.RetainedLocator
     try h.service.discardTask(h.scratch, task);
 }
 
-fn inspectRestored(comptime Types: type, h: anytype, path: []const u8, task: Task) !void {
+fn inspectRestored(
+    comptime Types: type,
+    h: anytype,
+    path: []const u8,
+    task: Task,
+    destination: []const u8,
+) !void {
     try closeFixture(h);
-    try inspectCopy(Types, h, path, task);
+    try inspectCopy(Types, h, path, task, destination);
     try openFixture(Types, h);
 }
 
-fn inspectCopy(comptime Types: type, h: anytype, path: []const u8, task: Task) !void {
+fn inspectCopy(
+    comptime Types: type,
+    h: anytype,
+    path: []const u8,
+    task: Task,
+    destination: []const u8,
+) !void {
     const target = try std.fmt.allocPrint(
         h.scratch,
-        "{s}/nested-restored",
-        .{h.path_buffer[0..h.length]},
+        "{s}/{s}",
+        .{ h.path_buffer[0..h.length], destination },
     );
     var namespace = try native.Namespace.open(h.a, h.io, target);
     defer support.expectCleanup(namespace.close());
@@ -252,6 +266,45 @@ fn inspectCopy(comptime Types: type, h: anytype, path: []const u8, task: Task) !
     defer rows.deinit();
     try std.testing.expectEqual(.row, try rows.step());
     try std.testing.expectEqual(@as(i64, 0), try rows.integer(0));
+}
+
+fn crossProfileRead(comptime Types: type, h: anytype, locator: wc.RetainedLocator) !void {
+    const original_profile = h.profile;
+    const original_grants = h.grants;
+    defer {
+        h.profile = original_profile;
+        h.grants = original_grants;
+    }
+    try closeFixture(h);
+    h.profile.bytes = "reuse-reader-profile";
+    for (&h.grants) |*grant| grant.resource_identity = try h.profile.resourceIdentity(
+        h.scratch,
+        h.application.image_identity,
+    );
+    try openFixture(Types, h);
+    const task = (try h.service.submit(h.scratch, "reuse-profile-reader", {})).receipt.task;
+    try authoredDiscovery(h, task, locator);
+    const generation = h.namespace.store.head.generation;
+    const rejected = try h.service.workspaceCommand(h.scratch, "incompatible-import", task, .{
+        .program = .{ .import = .{ .locator = locator } },
+    });
+    try std.testing.expectEqual(.rejected, rejected.disposition);
+    try std.testing.expect(rejected.program == null);
+    try std.testing.expectEqual(generation, h.namespace.store.head.generation);
+    try h.service.validateWorkspace(h.scratch, task);
+    const path = try std.fmt.allocPrint(
+        h.scratch,
+        "{s}/reuse-read.tar",
+        .{h.path_buffer[0..h.length]},
+    );
+    _ = try h.service.exportCheckpoint(h.scratch, task, path);
+    try inspectRestored(Types, h, path, task, "read-restored");
+    try settle(h, task, "settle-profile-reader");
+    try h.service.discardTask(h.scratch, task);
+    try closeFixture(h);
+    h.profile = original_profile;
+    h.grants = original_grants;
+    try openFixture(Types, h);
 }
 
 fn lostImportReply(
@@ -539,16 +592,55 @@ fn command(h: anytype, task: Task, id: []const u8, value: wc.Command) !wc.Reply 
 }
 
 fn build(h: anytype, task: Task, id: []const u8, increment: u64) !wc.Ref {
+    const reply = try command(h, task, id, try buildRequest(h, increment));
+    return reply.program orelse error.ExpectedProgram;
+}
+
+fn buildRequest(h: anytype, increment: u64) !wc.Command {
     var builder = source.Builder.init(h.a);
     defer builder.deinit();
     const module = try @import("workspace_sources.zig").reusableQuestion(&builder, increment);
     const document = try native.source_records.encode(h.scratch, module);
-    const reply = try command(h, task, id, .{ .program = .{ .build = .{
+    return .{ .program = .{ .build = .{
         .source = .{ .json_text = .{ .bytes = document } },
         .source_kind = .source_records,
         .exposures = .{ .items = &.{.{ .effect = 0, .class = .input }} },
-    } } });
-    return reply.program orelse error.ExpectedProgram;
+    } } };
+}
+
+fn authoredBuild(h: anytype, task: Task, increment: u64) !wc.Ref {
+    _ = try h.service.message(h.scratch, "authored-build", task, try buildRequest(h, increment));
+    for (0..128) |_| {
+        const step = try h.service.pump(h.scratch);
+        if (step == .work) try completeBuild(h, task, step.work);
+        var rows = try h.namespace.store.database.prepare(
+            "SELECT o.body FROM records r JOIN objects o ON o.digest=r.body " ++
+                "WHERE r.kind='workspace_program' AND r.task=?",
+            &.{.{ .blob = &task }},
+        );
+        defer rows.deinit();
+        if (try rows.step() != .row) continue;
+        var program = try contracts.decodeOwned(
+            native.workspace.Program,
+            h.scratch,
+            try rows.bytes(0),
+        );
+        defer program.deinit();
+        return support.workspaceRef(h.scratch, .program, program.value.artifact.digest);
+    }
+    return error.ExpectedAuthoredProgram;
+}
+
+fn completeBuild(h: anytype, task: Task, work: anytype) !void {
+    try std.testing.expectEqual(.workspace_build, work.operation);
+    try std.testing.expectEqualDeep(task, work.task);
+    const worker = try native.testing.Worker.init(h.a, h.io);
+    defer support.expectCleanup(worker.deinit(h.a));
+    try worker.start(work, h.profile.authority, null);
+    while (!worker.finished()) try h.io.sleep(.fromMilliseconds(1), .awake);
+    try worker.join();
+    defer support.expectCleanup(worker.release());
+    try h.service.completeWork(h.scratch, work, worker.result.?);
 }
 
 fn start(h: anytype, task: Task, program: wc.Ref, id: []const u8, input: u64) ![32]u8 {

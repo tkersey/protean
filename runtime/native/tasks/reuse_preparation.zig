@@ -47,7 +47,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (self.reuse_provenance_validation) return;
             var queue: reuse.Origins = .{ .a = a };
             defer queue.deinit();
-            try queue.scan(Lifecycle.store(self), origin);
+            try queue.scanPublications(Lifecycle.store(self), origin);
             try validateQueued(self, a, &queue);
         }
 
@@ -71,7 +71,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             queue: *reuse.Origins,
         ) !void {
             const store = Lifecycle.store(self);
-            try queue.scan(store, origin);
+            try queue.scanPublications(store, origin);
             const bytes = try store.object(a, origin.task, null);
             defer a.free(bytes);
             var parent = try contracts.decodeOwned(state.Task, a, bytes);
@@ -133,6 +133,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .origin = origin,
             };
             try reuse.validateConstruction(a, definition);
+            try reuse.validatePublication(a, store, definition);
             const frozen = try freezeDisclosure(a, store, definition, self.assets.manifest);
             try self.profile.reuse.disclose(self.profile.authority, scope, frozen);
             return .{
@@ -206,6 +207,13 @@ const HistoricalIndex = struct {
                 "CREATE TEMP TABLE records AS SELECT * FROM main.records WHERE 0;" ++
                 "CREATE TEMP TABLE events AS SELECT * FROM main.events WHERE 0;" ++
                 "CREATE TEMP TABLE operations AS SELECT * FROM main.operations WHERE 0;",
+        );
+        try store.database.exec(
+            "CREATE UNIQUE INDEX temp.historical_tasks ON tasks(id);" ++
+                "CREATE UNIQUE INDEX temp.historical_records ON records(kind,id);" ++
+                "CREATE UNIQUE INDEX temp.historical_events ON events(task,seq);" ++
+                "CREATE UNIQUE INDEX temp.historical_operations ON operations(id);" ++
+                "CREATE INDEX temp.historical_operation_tasks ON operations(task,id);",
         );
         try store.database.run("INSERT INTO temp.tasks VALUES(?,?,?,?)", &.{
             .{ .blob = &task.id },

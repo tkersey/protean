@@ -94,7 +94,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             // authenticate the original model call; this owner enforces custody.
             return workspaceCommandAuthorized(self, a, operation_id, task_id, .{
                 .command = command,
-            });
+            }) catch |err| {
+                if (store(self).fenced or err == error.OutOfMemory or
+                    err == error.StorageUnavailable or command != .program or
+                    (command.program != .retain and command.program != .import)) return err;
+                return workspaceRejection(a, err);
+            };
         }
         fn workspaceCommandAuthorized(
             self: *Self,
@@ -1348,7 +1353,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             defer a.free(bytes);
             var observation =
                 switch (receipt_value.workspace_kind orelse return error.CorruptState) {
-                    .retained, .imported => try Reuse.observation(self, a, receipt_value, bytes),
+                    .retained, .imported => try Reuse.observation(self, a, admitted, bytes),
                     .controller => try admittedControllerObservation(
                         a,
                         task_id,

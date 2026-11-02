@@ -29,15 +29,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             request: wc.Retain,
         ) !task_types.Admission {
             try Lifecycle.allowed(self);
-            try authorizeCurrent(self, request.scope.bytes, .retain);
             const identity = try task_types.operation(reuse.RetainRequest, a, .{
                 .task = task_id,
                 .retain = request,
             });
-            if (try Records.replay(self, a, operation_id, identity)) |prior| {
-                if (self.workspace_replay == null) try discloseReceipt(self, a, prior.receipt);
-                return prior;
-            }
+            if (try Records.replay(self, a, operation_id, identity)) |prior| return prior;
+            try authorizeCurrent(self, request.scope.bytes, .retain);
             var prepared = try Preparation.prepare(
                 self,
                 task_id,
@@ -87,12 +84,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             request: wc.Import,
         ) !task_types.Admission {
             try Lifecycle.allowed(self);
-            try authorizeCurrent(self, request.locator.scope.bytes, .import);
             const identity = try task_types.operation(reuse.ImportRequest, a, .{
                 .task = task_id,
                 .import = request,
             });
             if (try Records.replay(self, a, operation_id, identity)) |prior| return prior;
+            try authorizeCurrent(self, request.locator.scope.bytes, .import);
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try recheck(self, a, parent.value);
@@ -220,13 +217,16 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         pub fn observation(
             self: *Self,
             a: std.mem.Allocator,
-            receipt: state.Receipt,
+            admission: task_types.Admission,
             bytes: []const u8,
         ) !json.Value {
+            const receipt = admission.receipt;
             if (receipt.workspace_kind == .retained) {
                 var decoded = try contracts.decodeOwned(reuse.Definition, a, bytes);
                 defer decoded.deinit();
                 try authorizeCurrent(self, decoded.value.scope.bytes, .retain);
+                if (admission.replayed and self.workspace_replay == null)
+                    try discloseReceipt(self, a, receipt);
                 var result = json.object();
                 try json.put(a, &result, "retained", try locatorJson(
                     a,

@@ -1,5 +1,6 @@
 const std = @import("std");
 const contracts = @import("protean_contracts");
+const data = @import("horos_data");
 const state = @import("state.zig");
 const workspace = @import("workspace_state.zig");
 const storage = @import("store.zig");
@@ -100,7 +101,7 @@ pub fn validateConstruction(a: std.mem.Allocator, definition: Definition) !void 
         return error.InvalidArchive;
 }
 
-fn validatePublication(
+pub fn validatePublication(
     a: std.mem.Allocator,
     store: *storage.Store,
     definition: Definition,
@@ -128,7 +129,88 @@ fn validatePublication(
                 std.meta.eql(observed.value.program, definition.program)) return;
         }
     }
+    if (try capturedPublication(a, store, definition)) return;
     return error.InvalidArchive;
+}
+
+fn capturedPublication(a: std.mem.Allocator, store: *storage.Store, value: Definition) !bool {
+    var captures: std.AutoHashMap(state.Digest, state.Reference) = .init(a);
+    defer captures.deinit();
+    for (value.origin.records.items) |row| {
+        if (row.kind != .capture) continue;
+        const entry = try captures.getOrPut(row.id);
+        if (entry.found_existing) return error.InvalidArchive;
+        entry.value_ptr.* = row.body;
+    }
+    for (value.origin.records.items) |row| {
+        if (row.kind != .attempt) continue;
+        const bytes = try store.object(a, row.body, null);
+        defer a.free(bytes);
+        var attempt = try contracts.decodeOwned(state.Attempt, a, bytes);
+        defer attempt.deinit();
+        if (attempt.value.operation != .workspace_build) continue;
+        if (!std.meta.eql(attempt.value.id, row.id) or
+            !std.meta.eql(attempt.value.task, value.source_task)) return error.InvalidArchive;
+        const capture = captures.get(row.id) orelse continue;
+        if (try capturePublishes(a, store, value, attempt.value, capture)) return true;
+    }
+    return false;
+}
+
+fn capturePublishes(
+    a: std.mem.Allocator,
+    store: *storage.Store,
+    value: Definition,
+    attempt: state.Attempt,
+    reference: state.Reference,
+) !bool {
+    const bytes = try store.object(a, reference, null);
+    defer a.free(bytes);
+    var raw = try contracts.decodeOwned(state.Capture, a, bytes);
+    defer raw.deinit();
+    const capture = raw.value;
+    const projection = capture.projection orelse return false;
+    if (capture.disposition != .complete or capture.response == null or
+        !std.meta.eql(capture.task, value.source_task) or
+        !std.meta.eql(capture.attempt, attempt.id) or
+        !std.meta.eql(capture.occurrence, attempt.occurrence)) return error.InvalidArchive;
+    const projected = try store.object(a, projection.reply, null);
+    defer a.free(projected);
+    var bound = try data.invocation.decode(data.invocation.Result, a, projected);
+    defer bound.deinit();
+    var reply = try contracts.decodeOwned(contracts.workspace.Reply, a, bound.value.value);
+    defer reply.deinit();
+    if (reply.value.disposition != .admitted) return false;
+    const program = reply.value.program orelse return false;
+    const id = try @import("workspace_projection.zig").identity(program, .program);
+    if (!std.meta.eql(id, value.program.digest)) return false;
+    const occurrence_ref = @import("archive.zig").record(
+        value.origin,
+        .occurrence,
+        attempt.occurrence,
+    ) orelse return error.InvalidArchive;
+    const occurrence_bytes = try store.object(a, occurrence_ref, null);
+    defer a.free(occurrence_bytes);
+    var occurrence = try contracts.decodeOwned(
+        @import("occurrence.zig").Occurrence,
+        a,
+        occurrence_bytes,
+    );
+    defer occurrence.deinit();
+    const acquired = switch (occurrence.value.state) {
+        .settled_reply => |selected| selected,
+        .admitted => |selected| if (selected == .reply)
+            selected.reply
+        else
+            return error.InvalidArchive,
+        else => return error.InvalidArchive,
+    };
+    if (!std.meta.eql(occurrence.value.task, value.source_task) or
+        !std.meta.eql(occurrence.value.id, attempt.occurrence) or
+        !std.meta.eql(bound.value.request_identity, occurrence.value.request) or
+        !std.meta.eql(acquired.attempt, attempt.id) or
+        !std.meta.eql(acquired.reply, projection.reply.digest)) return error.InvalidArchive;
+    return true;
 }
 
 pub const Origins = struct {
@@ -153,6 +235,18 @@ pub const Origins = struct {
     }
 
     pub fn scan(self: *Origins, source: anytype, origin: state.Archive) !void {
+        try self.scanPublications(source, origin);
+        for (origin.records.items) |row| {
+            if (row.kind != .workspace_reply) continue;
+            const bytes = try source.object(self.a, row.body, null);
+            defer self.a.free(bytes);
+            var decoded = try contracts.decodeOwned(workspace.ReplyObservation, self.a, bytes);
+            defer decoded.deinit();
+            try state.visitReferences(workspace.ReplyObservation, decoded.value, self);
+        }
+    }
+
+    pub fn scanPublications(self: *Origins, source: anytype, origin: state.Archive) !void {
         for (origin.operations.items) |row| {
             const bytes = try source.object(self.a, row.body, null);
             defer self.a.free(bytes);
@@ -162,14 +256,6 @@ pub const Origins = struct {
                 (receipt.value.workspace_kind != .retained and
                     receipt.value.workspace_kind != .imported)) continue;
             try state.visitWorkspaceReceipt(self.a, source, receipt.value, self);
-        }
-        for (origin.records.items) |row| {
-            if (row.kind != .workspace_reply) continue;
-            const bytes = try source.object(self.a, row.body, null);
-            defer self.a.free(bytes);
-            var decoded = try contracts.decodeOwned(workspace.ReplyObservation, self.a, bytes);
-            defer decoded.deinit();
-            try state.visitReferences(workspace.ReplyObservation, decoded.value, self);
         }
     }
 };

@@ -188,6 +188,7 @@ test/protean/runtime_mobility_source.zig
 test/protean/skill_unknown_field.zig
 test/protean/values.zig
 test/protean/workspace_programs.zig
+test/protean/workspace_reuse_recovery_test.zig
 test/protean/workspace_reuse_test.zig
 test/protean/workspace_runtime.zig
 test/protean/workspace_semantics.zig
