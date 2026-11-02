@@ -241,7 +241,81 @@ fn assertForeignTask(f: *Fixture, result: wc.Ref) !void {
     try std.testing.expectEqualStrings("CorruptState", parsed.value.object.get("error").?.string);
 }
 
-fn archiveProjection(f: *Fixture, projected: wc.Ref, prepared: []const u8) !void {
+const RealizedProjector = struct {
+    work: wc.Ref,
+    historical: []const u8,
+    current: []const u8,
+    view: []const u8,
+};
+
+fn realizeProjector(f: *Fixture, run: recovery.Run) !RealizedProjector {
+    const selected = f.prepared.selected_view orelse return error.MissingProjectedRequest;
+    const view = try f.namespace.store.object(f.permanent, .{
+        .digest = selected.digest,
+        .bytes = selected.bytes,
+    }, null);
+    var before = try f.service.workspaceWork(f.permanent, f.task, try recovery.refId(run.work));
+    defer before.deinit();
+    try std.testing.expectEqual(.completed, before.value.outcome_kind);
+    const historical = try contracts.encodeOwned(native.workspace.Work, f.permanent, before.value);
+    const artifact = try contracts.decodeOwned(native.workspace.ViewArtifact, f.permanent, view);
+    try std.testing.expectEqualSlices(u8, historical, try f.namespace.store.object(
+        f.permanent,
+        artifact.value.projection.?.work,
+        null,
+    ));
+    _ = try f.perform(.{ .work = .{ .command = .{ .realize = .{
+        .expected = .{
+            .work = run.work,
+            .execution_revision = before.value.execution_revision,
+            .control_revision = before.value.control_revision,
+        },
+        .realization_revision = before.value.realization_revision,
+        .runtime = .{ .packaged = .{} },
+    } } } });
+    var after = try f.service.workspaceWork(f.permanent, f.task, try recovery.refId(run.work));
+    defer after.deinit();
+    try std.testing.expectEqual(
+        before.value.realization_revision + 1,
+        after.value.realization_revision,
+    );
+    try std.testing.expectEqual(before.value.control_revision + 1, after.value.control_revision);
+    try std.testing.expectEqual(before.value.execution_revision, after.value.execution_revision);
+    try std.testing.expectEqual(.completed, after.value.outcome_kind);
+    try std.testing.expectEqualDeep(before.value.result_value, after.value.result_value);
+    try std.testing.expectEqualDeep(selected, f.prepared.selected_view.?);
+    try assertRenderedAggregate(f, f.prepared.body.bytes, run.result);
+    try unpublishedRetainedWork(f, before.value, after.value.control_revision);
+    return .{
+        .work = run.work,
+        .historical = historical,
+        .current = try contracts.encodeOwned(native.workspace.Work, f.permanent, after.value),
+        .view = view,
+    };
+}
+
+fn unpublishedRetainedWork(f: *Fixture, retained: native.workspace.Work, revision: u64) !void {
+    try Snapshots.validateWorkspacePublication(&f.service, f.permanent, f.task, .{
+        .work = retained,
+        .occurrence = null,
+    });
+    var altered = retained;
+    altered.control_revision = try std.math.add(u64, revision, 1);
+    try std.testing.expectError(
+        error.InvalidArchive,
+        Snapshots.validateWorkspacePublication(&f.service, f.permanent, f.task, .{
+            .work = altered,
+            .occurrence = null,
+        }),
+    );
+}
+
+fn archiveProjection(
+    f: *Fixture,
+    projected: wc.Ref,
+    prepared: []const u8,
+    realized: RealizedProjector,
+) !void {
     try f.service.completeWork(f.permanent, f.pending, .not_sent);
     const path = try std.fmt.allocPrint(f.permanent, "{s}/projection.agnx", .{f.directory});
     _ = try f.service.exportCheckpoint(f.permanent, f.task, path);
@@ -273,6 +347,7 @@ fn archiveProjection(f: *Fixture, projected: wc.Ref, prepared: []const u8) !void
     )) orelse return error.ImportedProjectionMissing;
     const view = try contracts.decodeOwned(native.workspace.View, f.permanent, bytes);
     try std.testing.expect(view.value.description.projection != null);
+    try importedRealization(f, &service, &namespace, view.value, realized);
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(prepared, &digest, .{});
     const retained = try namespace.store.object(f.permanent, .{
@@ -280,6 +355,28 @@ fn archiveProjection(f: *Fixture, projected: wc.Ref, prepared: []const u8) !void
         .bytes = prepared.len,
     }, null);
     try std.testing.expectEqualSlices(u8, prepared, retained);
+}
+
+fn importedRealization(
+    f: *Fixture,
+    service: *native.tasks.Service(t),
+    namespace: *native.Namespace,
+    view: native.workspace.View,
+    realized: RealizedProjector,
+) !void {
+    const artifact = try namespace.store.object(f.permanent, view.artifact, null);
+    try std.testing.expectEqualSlices(u8, realized.view, artifact);
+    const historical = try namespace.store.object(
+        f.permanent,
+        view.description.projection.?.work,
+        null,
+    );
+    try std.testing.expectEqualSlices(u8, realized.historical, historical);
+    var current = try service.workspaceWork(f.permanent, f.task, try recovery.refId(realized.work));
+    defer current.deinit();
+    const bytes = try contracts.encodeOwned(native.workspace.Work, f.permanent, current.value);
+    try std.testing.expectEqualSlices(u8, realized.current, bytes);
+    try std.testing.expect(!std.mem.eql(u8, historical, bytes));
 }
 
 fn amendmentRecovery(f: *Fixture) !void {
@@ -437,6 +534,7 @@ test "projection receipts preserve exact requests and reject substituted archive
     const original_prepared = try f.permanent.dupe(u8, f.pending.prepared.?);
     const operation = try selectionOperation(&f, projected);
     try receiptReplay(&f, valid.result, projected, operation);
+    const realized = try realizeProjector(&f, valid);
     try f.service.completeWork(f.permanent, f.pending, .not_sent);
     try missingConsumerArchive(&f, consumer);
     const ordinary = try f.service.workspaceCommand(f.permanent, "ordinary-view", f.task, .{
@@ -463,7 +561,7 @@ test "projection receipts preserve exact requests and reject substituted archive
     try rejected(try select(&f, "fresh-stale-selection", valid.result));
     try amendmentRecovery(&f);
     try assertForeignTask(&f, valid.result);
-    try archiveProjection(&f, projected, original_prepared);
+    try archiveProjection(&f, projected, original_prepared, realized);
 }
 
 const Pending = struct { expected: wc.Expected, port: wc.Ref, generation: u64 };

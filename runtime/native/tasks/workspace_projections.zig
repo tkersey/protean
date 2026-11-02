@@ -7,6 +7,7 @@ const wp = @import("../workspace_projection.zig");
 const values = @import("../values.zig");
 const proposal = @import("../projection_proposal.zig");
 const construction = @import("../program_construction.zig");
+const WorkspaceValueReference = @import("types.zig").WorkspaceValueReference;
 const wc = contracts.workspace;
 
 pub fn Operations(comptime Types: type, comptime Self: type) type {
@@ -74,6 +75,48 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             errdefer arena.deinit();
             const a = arena.allocator();
             const value = try Contexts.workspaceValueReference(self, a, parent.id, result);
+            var work = try self.workspaceWork(a, parent.id, try projectionWork(self, a, value));
+            defer work.deinit();
+            const prepared = try reconstruct(self, a, parent, value, work.value, target, current);
+            return .{ .arena = arena, .view = prepared.view, .consumer = prepared.consumer };
+        }
+
+        pub fn restore(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            parent: state.Task,
+            result: wc.Ref,
+            target: wc.ConsumerTarget,
+            retained: state.Reference,
+        ) !Admitted {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const a = arena.allocator();
+            var saved = try contracts.decodeOwned(
+                workspace.ViewArtifact,
+                a,
+                try store(self).object(a, retained, null),
+            );
+            defer saved.deinit();
+            const selected = saved.value.projection orelse return error.InvalidArchive;
+            var work = try contracts.decodeOwned(
+                workspace.Work,
+                a,
+                try store(self).object(a, selected.work, null),
+            );
+            defer work.deinit();
+            const value = try Contexts.workspaceValueReference(self, a, parent.id, result);
+            const prepared = try reconstruct(self, a, parent, value, work.value, target, false);
+            const actual = try contracts.encodeOwned(workspace.ViewArtifact, a, prepared.view);
+            if (!std.meta.eql(reference(actual), retained)) return error.InvalidArchive;
+            return .{ .arena = arena, .view = prepared.view, .consumer = prepared.consumer };
+        }
+
+        fn projectionWork(
+            self: *Self,
+            a: std.mem.Allocator,
+            value: WorkspaceValueReference,
+        ) !state.Digest {
             var origin = try contracts.decodeOwned(
                 workspace.Derivation,
                 a,
@@ -82,22 +125,36 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             defer origin.deinit();
             if (origin.value.kind != .computation and origin.value.kind != .trial)
                 return error.InvalidProjection;
-            var work = try self.workspaceWork(
-                a,
-                parent.id,
-                origin.value.work orelse return error.InvalidProjection,
-            );
-            defer work.deinit();
-            var program = try self.workspaceProgram(a, parent.id, work.value.program);
+            return origin.value.work orelse return error.InvalidProjection;
+        }
+
+        const Prepared = struct {
+            view: workspace.ViewArtifact,
+            consumer: @FieldType(Admitted, "consumer"),
+        };
+
+        fn reconstruct(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            value: WorkspaceValueReference,
+            work: workspace.Work,
+            target: wc.ConsumerTarget,
+            current: bool,
+        ) !Prepared {
+            if (!std.meta.eql(work.task, parent.id) or
+                !std.meta.eql(work.id, try projectionWork(self, a, value)))
+                return error.InvalidProjection;
+            var program = try self.workspaceProgram(a, parent.id, work.program);
             defer program.deinit();
-            try validateResult(self, a, parent, work.value, program.value, value.artifact);
+            try validateResult(self, a, parent, work, program.value, value.artifact);
             var decoded = try proposal.decodeResult(
                 a,
                 try store(self).object(a, value.schema, null),
                 try store(self).object(a, value.value, null),
             );
             defer decoded.deinit();
-            try matchInput(self, a, work.value, program.value, decoded.header.consumer);
+            try matchInput(self, a, work, program.value, decoded.header.consumer);
             var observed = try Consumers.open(self, a, parent.id, decoded.header.consumer);
             defer observed.deinit();
             const consumer = observed.value.evidence.read.consumer;
@@ -109,22 +166,22 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             );
             if (!std.mem.eql(u8, expected_target, actual_target)) return error.ConsumerMismatch;
             if (current) try Consumers.applicable(self, a, parent, consumer);
-            try validateTrial(work.value, consumer);
+            try validateTrial(work, consumer);
             try validateLineage(self, a, parent.id, value.artifact);
             const references = try admitBlocks(self, a, parent.id, decoded.header.blocks.items);
-            const work_bytes = try contracts.encodeOwned(workspace.Work, a, work.value);
+            const work_bytes = try contracts.encodeOwned(workspace.Work, a, work);
             const observation_bytes = try contracts.encodeOwned(
                 workspace.ReplyObservation,
                 a,
                 observed.value,
             );
-            return .{ .arena = arena, .consumer = try consumerIdentity(a, consumer), .view = .{
+            return .{ .consumer = try consumerIdentity(a, consumer), .view = .{
                 .values = .{ .items = &.{} },
                 .projection = .{
                     .result = value.artifact,
                     .work = reference(work_bytes),
                     .program = program.value.artifact,
-                    .input = work.value.input_value orelse return error.InvalidProjection,
+                    .input = work.input_value orelse return error.InvalidProjection,
                     .observation = reference(observation_bytes),
                     .values = .{ .items = references },
                 },

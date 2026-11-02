@@ -230,25 +230,15 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                             Types,
                             Self,
                         );
-                        var admitted = try Projections.admit(
+                        var admitted = try Projections.restore(
                             ctx.self,
                             ctx.a,
                             ctx.parent,
                             selection.projected,
                             .{ .controller = .{} },
-                            false,
+                            try store(ctx.self).objectReference(ctx.identity, null),
                         );
                         defer admitted.deinit();
-                        const bytes = try contracts.encodeOwned(
-                            workspace.ViewArtifact,
-                            ctx.a,
-                            admitted.view,
-                        );
-                        defer ctx.a.free(bytes);
-                        if (!std.meta.eql(
-                            storage.digest(bytes),
-                            ctx.identity,
-                        )) return error.InvalidArchive;
                         return;
                     }
                     const refs = try ctx.a.alloc(state.Reference, selection.values.items.len);

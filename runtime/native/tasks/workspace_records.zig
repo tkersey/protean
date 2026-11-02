@@ -392,23 +392,15 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 defer observed.deinit();
                 if (observed.value.evidence != .read or observed.value.evidence.read != .consumer)
                     return error.InvalidArchive;
-                var rebuilt = try Projections.admit(
+                var rebuilt = try Projections.restore(
                     self,
                     frame,
                     parent,
                     try wp.reference(frame, .value, selected.result.digest),
                     observed.value.evidence.read.consumer.selection.target,
-                    false,
+                    record_value.value.artifact,
                 );
                 defer rebuilt.deinit();
-                const actual = try contracts.encodeOwned(
-                    workspace.ViewArtifact,
-                    frame,
-                    rebuilt.view,
-                );
-                defer frame.free(actual);
-                if (!std.meta.eql(storage.digest(actual), record_value.value.artifact.digest))
-                    return error.InvalidArchive;
             }
             _ = try workspaceViewObservation(
                 self,

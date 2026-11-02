@@ -666,7 +666,14 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (context) |selected| {
                 if (value.inputs.items.len != 0) return error.InvalidArchive;
                 const Projections = @import("workspace_projections.zig").Operations(Types, Self);
-                var admitted = try Projections.select(
+                var admitted = if (selected == .projected) try Projections.restore(
+                    self,
+                    a,
+                    parent,
+                    selected.projected,
+                    Projections.delegatedTarget(selection),
+                    value.context.?,
+                ) else try Projections.select(
                     self,
                     a,
                     parent,
