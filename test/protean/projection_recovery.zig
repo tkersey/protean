@@ -37,6 +37,7 @@ pub const Fixture = struct {
     pending: native.tasks.Work,
     prepared: t.P.AdaptivePrepared,
     calls: u64 = 0,
+    owner_operations: u64 = 0,
     live: bool = false,
 
     pub fn init(self: *Fixture) !void {
@@ -87,6 +88,7 @@ pub const Fixture = struct {
         );
         errdefer cleanup("projection service.close", self.service.close(self.a));
         self.calls = 0;
+        self.owner_operations = 0;
         self.live = true;
         self.task = (try self.service.submit(self.permanent, "projection-task", .{ .task = .{
             .bytes = "Examine every distinct member of declared domain 41 revision 7. " ++
@@ -287,6 +289,82 @@ pub const Fixture = struct {
             observed = try self.perform(.{ .work = .{ .command = .{ .inspect = .{
                 .work = work,
             } } } });
+        }
+        return error.ProjectionWorkDidNotComplete;
+    }
+
+    fn ownerOperation(self: *Fixture) ![]const u8 {
+        self.owner_operations += 1;
+        return std.fmt.allocPrint(self.permanent, "projection-owner-{d}", .{self.owner_operations});
+    }
+
+    fn ownerCommand(self: *Fixture, command: wc.Command) !native.json.Value {
+        const reply = try self.service.workspaceCommand(
+            self.permanent,
+            try self.ownerOperation(),
+            self.task,
+            command,
+        );
+        try std.testing.expect(reply.disposition != .rejected);
+        return (try native.json.parse(self.permanent, reply.observation_json.bytes, .{})).value;
+    }
+
+    pub fn ownerMaterialize(
+        self: *Fixture,
+        schema: wc.Ref,
+        wanted: native.json.Value,
+        sources: []const wc.Ref,
+    ) !wc.Ref {
+        const observed = try self.ownerCommand(.{ .context = .{ .materialize = .{
+            .input = .{ .value = .{ .inline_json = .{
+                .schema = schema,
+                .json_text = .{ .bytes = try native.json.canonical(self.permanent, wanted) },
+            } } },
+            .sources = .{ .items = sources },
+        } } });
+        return self.ref(observed, "value");
+    }
+
+    pub fn ownerRun(self: *Fixture, program: wc.Ref, input: wc.Ref) !Run {
+        const before = (try self.service.task(self.permanent, self.task)).value.inference_attempts;
+        const observed = try self.ownerCommand(.{ .work = .{ .start = .{
+            .program = program,
+            .input = .{ .reference = input },
+            .policy = .{ .stop = .terminal, .continuation = .owner_scheduled },
+        } } });
+        const work = try self.ref(observed, "work");
+        for (0..128) |_| {
+            var current = try self.service.workspaceWork(
+                self.permanent,
+                self.task,
+                try refId(work),
+            );
+            defer current.deinit();
+            if (current.value.outcome_kind == .completed) {
+                const after = (try self.service.task(self.permanent, self.task)).value;
+                try std.testing.expectEqual(before, after.inference_attempts);
+                return .{
+                    .work = work,
+                    .result = try @import("workspace_test_support.zig").workspaceRef(
+                        self.permanent,
+                        .value,
+                        current.value.result_value.?.digest,
+                    ),
+                };
+            }
+            try std.testing.expect(!current.value.terminal());
+            _ = try self.service.workspacePump(
+                self.permanent,
+                try self.ownerOperation(),
+                self.task,
+                .{
+                    .expected = .{
+                        .work = work,
+                        .execution_revision = current.value.execution_revision,
+                        .control_revision = current.value.control_revision,
+                    },
+                },
+            );
         }
         return error.ProjectionWorkDidNotComplete;
     }
@@ -642,8 +720,8 @@ fn checkVariant(f: *Fixture, program: Program, consumer: wc.Ref, specimen: Case)
         .consumer = consumer,
         .value = specimen.evidence,
     });
-    const input = try f.materialize(program.input_schema, encoded, specimen.sources);
-    try requireRepaired(f, specimen, try f.run(program.program, input));
+    const input = try f.ownerMaterialize(program.input_schema, encoded, specimen.sources);
+    try requireRepaired(f, specimen, try f.ownerRun(program.program, input));
 }
 
 fn requireRepaired(f: *Fixture, specimen: Case, run: Run) !void {

@@ -8,6 +8,7 @@ const cleanup = @import("native_test_support.zig").cleanup;
 const t = @import("adaptive_types");
 const wc = contracts.workspace;
 const Fixture = recovery.Fixture;
+const Commands = native.testing.workspace_commands.Operations(t, native.tasks.Service(t));
 const Snapshots = native.testing.workspace_snapshots.Operations(t, native.tasks.Service(t));
 const Aggregate = struct { total: u64, missing: contracts.Vector(u64, null) };
 const Input = wc.ProjectionInput(Aggregate);
@@ -81,11 +82,11 @@ fn build(f: *Fixture, mode: Mode) !recovery.Program {
 }
 
 fn project(f: *Fixture, program: recovery.Program, consumer: wc.Ref) !recovery.Run {
-    const input = try f.materialize(program.input_schema, try f.json(Input, .{
+    const input = try f.ownerMaterialize(program.input_schema, try f.json(Input, .{
         .consumer = consumer,
         .value = aggregate,
     }), &.{});
-    return f.run(program.program, input);
+    return f.ownerRun(program.program, input);
 }
 
 fn select(f: *Fixture, id: []const u8, result: wc.Ref) !wc.Reply {
@@ -969,6 +970,39 @@ fn assertPresentation(
     try std.testing.expectEqualDeep(try recovery.refId(sources[0]), retained[4].digest);
 }
 
+fn rejectSourceSlice(f: *Fixture, consumer: wc.Ref, result: wc.Ref, index: usize) !void {
+    const bytes = (try f.namespace.store.recordBytes(
+        f.permanent,
+        "workspace_reply",
+        try recovery.refId(consumer),
+        f.task,
+    )) orelse return error.MissingConsumerObservation;
+    var observed = try contracts.decodeOwned(native.workspace.ReplyObservation, f.permanent, bytes);
+    defer observed.deinit();
+    var before = try f.service.task(f.permanent, f.task);
+    defer before.deinit();
+    const reply = try Commands.workspaceCommandFrom(
+        &f.service,
+        f.permanent,
+        try std.fmt.allocPrint(f.permanent, "projection-invalid-source-{d}", .{index}),
+        f.task,
+        .{
+            .command = .{ .context = .{ .select = .{ .projected = result } } },
+            .consumer = observed.value.evidence.read.consumer.interface,
+        },
+        null,
+    );
+    try rejected(reply);
+    const parsed = try native.json.parse(f.permanent, reply.observation_json.bytes, .{});
+    try std.testing.expectEqualStrings(
+        "InvalidSourceSlice",
+        parsed.value.object.get("error").?.string,
+    );
+    var after = try f.service.task(f.permanent, f.task);
+    defer after.deinit();
+    try std.testing.expectEqualDeep(before.value, after.value);
+}
+
 fn rejectSourceSlices(
     f: *Fixture,
     program: recovery.Program,
@@ -977,6 +1011,7 @@ fn rejectSourceSlices(
     length: usize,
 ) !void {
     const prior = f.prepared.selected_view;
+    const prepared = try f.permanent.dupe(u8, f.prepared.body.bytes);
     const slices = [_]@FieldType(wc.PresentationBlock, "source"){
         .{ .value = sources[1], .offset = 0, .length = 1 },
         .{ .value = sources[2], .offset = 0, .length = 1 },
@@ -985,16 +1020,15 @@ fn rejectSourceSlices(
         .{ .value = sources[0], .offset = std.math.maxInt(u64), .length = 1 },
         .{ .value = sources[0], .offset = 1, .length = std.math.maxInt(u64) },
     };
-    for (slices) |slice| {
-        const projected = try projectBlocks(
-            f,
-            program,
-            consumer,
-            &.{.{ .source = slice }},
-            sources,
-        );
-        try rejectAction(f, projected.result, "InvalidSourceSlice");
+    for (slices, 0..) |slice, index| {
+        const input = try f.ownerMaterialize(program.input_schema, try f.json(PresentedInput, .{
+            .consumer = consumer,
+            .value = .{ .blocks = .{ .items = &.{.{ .source = slice }} }, .value = aggregate },
+        }), sources);
+        const projected = try f.ownerRun(program.program, input);
+        try rejectSourceSlice(f, consumer, projected.result, index);
         try std.testing.expectEqualDeep(prior, f.prepared.selected_view);
+        try std.testing.expectEqualSlices(u8, prepared, f.prepared.body.bytes);
     }
 }
 

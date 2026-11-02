@@ -50,6 +50,13 @@ disjoint selections cover all nineteen tests exactly once. Local qualification
 executes all six groups together. Separating the long repair and authenticity
 checks gives them independent runners without removing assertions or cases.
 
+The repair's original construction, comparison, selection and restart run through
+the adaptive controller. Generated scan variations and repeated boundary-test
+projector setup use the same native workspace command and execution owners
+directly. They retain every program execution, input, independent assessment and
+rejection case while avoiding repeated model turns for setup. Actual request
+capture still checks seed, constructed successor and delegated consumers.
+
 The native lane publishes its completed product before deployment checks so
 placement can proceed concurrently. The placement consumer authenticates the
 current-run artifact and executes those exact bytes. The terminal gate compares
@@ -146,11 +153,10 @@ and do not automatically become required again.
 
 ## Compilation, caching and artifacts
 
-The five authoring test roots, the native task-owner test root, all three general
+The five authoring test roots, the native task and adaptive owner test roots, all three general
 workspace groups, and the downstream package-surface test use Zig's native x86-64
 backend on Linux, retaining safe optimization and every selected test. The
-execution-heavy adaptive owner tests use LLVM on both platforms, as does the
-production native executable. The native-backend suites avoid repeated LLVM
+production native executable uses LLVM. The native-backend suites avoid repeated LLVM
 compilation but do not exercise LLVM-generated code on Linux.
 Compile-time rejection and independent execution checks remain selected.
 
