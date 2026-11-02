@@ -16,6 +16,13 @@ const Admission = task_types.Admission;
 const Work = task_types.Work;
 const WorkspaceExecution = task_types.WorkspaceExecution;
 
+const StartInput = struct {
+    program: state.Digest,
+    input: []u8,
+    origin: ?state.Reference,
+    runtime: ?state.Reference,
+};
+
 pub fn Operations(comptime Types: type, comptime Self: type) type {
     return struct {
         const allowed = Lifecycle.allowed;
@@ -749,12 +756,6 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 ),
             };
         }
-        pub const StartInput = struct {
-            program: state.Digest,
-            input: []u8,
-            origin: ?state.Reference,
-            runtime: ?state.Reference,
-        };
         pub fn workspaceStartInput(
             self: *Self,
             a: std.mem.Allocator,
