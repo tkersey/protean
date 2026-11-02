@@ -119,6 +119,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             basis: ?workspace.ReadObservation,
         ) !wc.Reply {
             try allowed(self);
+            if (try retiredWorkspaceCommand(self, a, operation_id, task_id, admitted)) |reply|
+                return reply;
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             var observers = Observers.CurrentObservers.init(a, task_id, parent.value.event_high);
@@ -126,6 +128,79 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             return workspaceCommandFromIn(self, a, operation_id, task_id, admitted, basis, .{
                 .current = &observers,
             });
+        }
+        fn retiredWorkspaceCommand(
+            self: *Self,
+            a: std.mem.Allocator,
+            operation_id: []const u8,
+            task_id: state.TaskId,
+            authorized: workspace.Authorized,
+        ) !?wc.Reply {
+            if (self.workspace_replay != null or self.reuse_provenance_validation) return null;
+            const Retirement = @import("retirement.zig").Operations(Types, Self);
+            var owner = (try Retirement.owner(self, a, task_id)) orelse return null;
+            defer owner.deinit();
+            if (authorized.command == .placement) return try Retirement.placement(
+                self,
+                a,
+                owner,
+                operation_id,
+                authorized.command.placement,
+            );
+            if (authorized.command == .program and authorized.command.program == .adopt)
+                return try retiredAdoption(self, a, owner, authorized.command);
+            if (Access.workspaceIsRead(authorized.command)) return error.UnknownTask;
+            var saved = try Retirement.receipt(self, a, operation_id, task_id);
+            defer saved.deinit();
+            if (saved.value.method != .workspace) return error.OperationConflict;
+            const admitted: Admission = .{ .receipt = saved.value, .replayed = true };
+            const observation = (try retiredWorkspaceObservation(
+                self,
+                a,
+                owner,
+                authorized,
+                admitted,
+            )) orelse try workspaceAdmissionObservation(self, a, task_id, admitted);
+            return try workspaceObservedReply(a, authorized.command, observation);
+        }
+        fn retiredWorkspaceObservation(
+            self: *Self,
+            a: std.mem.Allocator,
+            owner: @import("retirement.zig").Owner,
+            authorized: workspace.Authorized,
+            admitted: Admission,
+        ) !?json.Value {
+            const Requests = @import("retirement_requests.zig").Operations(Types, Self);
+            var view = try @import("retirement.zig").Read.open(store(self), owner);
+            defer view.close() catch store(self).fence();
+            const request = try Requests.request(self, a, owner.task.value.id, authorized);
+            if (!std.meta.eql(request, admitted.receipt.request_digest))
+                return error.OperationConflict;
+            const kind = admitted.receipt.workspace_kind orelse return error.CorruptState;
+            const observation = if (kind == .retained or kind == .imported)
+                null
+            else
+                try workspaceAdmissionObservation(self, a, owner.task.value.id, admitted);
+            try view.close();
+            return observation;
+        }
+        fn retiredAdoption(
+            self: *Self,
+            a: std.mem.Allocator,
+            owner: @import("retirement.zig").Owner,
+            command: wc.Command,
+        ) !wc.Reply {
+            var view = try @import("retirement.zig").Read.open(store(self), owner);
+            defer view.close() catch store(self).fence();
+            try compatible(self, owner.task.value);
+            const result = try executeProgramAdopt(
+                self,
+                a,
+                owner.task.value.id,
+                command.program.adopt,
+            );
+            try view.close();
+            return workspaceObservedReply(a, command, result.observation);
         }
         pub fn workspaceCommandFromIn(
             self: *Self,
@@ -440,16 +515,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             authorized: workspace.Authorized,
             request: @FieldType(wc.Program, "build"),
         ) !WorkspaceExecution {
-            const text = switch (request.source) {
-                .json_text => |inline_text| try a.dupe(u8, inline_text.bytes),
-                .reference => |ref| try workspaceBuildSource(
-                    self,
-                    a,
-                    task_id,
-                    ref,
-                    request.source_kind,
-                ),
-            };
+            const text = try workspaceBuildText(self, a, task_id, request);
             defer a.free(text);
             var diagnostic: construction.Diagnostic = .{};
             const admitted = workspaceBuildKind(
@@ -468,6 +534,23 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 return workspaceBuildFailure(a, err, diagnostic);
             };
             return .{ .admitted = admitted };
+        }
+        pub fn workspaceBuildText(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            request: @FieldType(wc.Program, "build"),
+        ) ![]u8 {
+            return switch (request.source) {
+                .json_text => |inline_text| a.dupe(u8, inline_text.bytes),
+                .reference => |ref| workspaceBuildSource(
+                    self,
+                    a,
+                    task_id,
+                    ref,
+                    request.source_kind,
+                ),
+            };
         }
         fn executeProgramInspect(
             self: *Self,
@@ -646,6 +729,38 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             task_id: state.TaskId,
             request: @FieldType(wc.Work, "start"),
         ) !WorkspaceExecution {
+            const prepared = try workspaceStartInput(self, a, task_id, request);
+            defer a.free(prepared.input);
+            return .{
+                .admitted = try workspaceStartAdmitted(
+                    self,
+                    a,
+                    operation_id,
+                    task_id,
+                    prepared.program,
+                    prepared.input,
+                    request.policy,
+                    prepared.origin,
+                    null,
+                    prepared.runtime,
+                    request.trial,
+                    null,
+                    null,
+                ),
+            };
+        }
+        pub const StartInput = struct {
+            program: state.Digest,
+            input: []u8,
+            origin: ?state.Reference,
+            runtime: ?state.Reference,
+        };
+        pub fn workspaceStartInput(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            request: @FieldType(wc.Work, "start"),
+        ) !StartInput {
             const program_id = try wp.identity(request.program, .program);
             var program = try self.workspaceProgram(a, task_id, program_id);
             defer program.deinit();
@@ -677,7 +792,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     break :blk try store(self).object(a, value.value, null);
                 },
             };
-            defer a.free(input);
+            errdefer a.free(input);
             const selected: ?state.Reference = if (request.runtime == .selected) blk: {
                 var selected = try workspaceRuntime(
                     self,
@@ -690,21 +805,10 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 break :blk selected.record.value.artifact;
             } else null;
             return .{
-                .admitted = try workspaceStartAdmitted(
-                    self,
-                    a,
-                    operation_id,
-                    task_id,
-                    program_id,
-                    input,
-                    request.policy,
-                    origin,
-                    null,
-                    selected,
-                    request.trial,
-                    null,
-                    null,
-                ),
+                .program = program_id,
+                .input = input,
+                .origin = origin,
+                .runtime = selected,
             };
         }
         fn executeWorkInspect(

@@ -432,8 +432,9 @@ fn discard(h: anytype, task: Task, operation: []const u8) !void {
         defer parent.deinit();
         if (try h.service.taskCleanupComplete(h.scratch, parent.value)) {
             try h.service.discardTask(h.scratch, task);
-            inline for (.{ "records", "events", "operations" }) |table|
+            inline for (.{ "records", "events", "local_admissions" }) |table|
                 try std.testing.expectEqual(@as(i64, 0), try count(h, task, table, ""));
+            try std.testing.expect(try count(h, task, "operations", "") > 0);
             return;
         }
         try std.testing.expect(try h.service.pump(h.scratch) != .work);

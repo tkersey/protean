@@ -22,7 +22,7 @@ pub fn run(
     h.namespace_open = false;
     defer support.expectCleanup(reopen(Types, h));
     const forged = try path(h, "admission-forged.tar");
-    const rejected = try probeReader(Types, h, task, valid, forged);
+    const rejected = try probeReader(Types, h, task, valid, forged, locator);
     const restored = try probeRestore(Types, h, forged);
     std.debug.print("passive submit admission rejected: reader={any}, restore={any}\n", .{
         rejected, restored,
@@ -35,7 +35,7 @@ fn reader(h: anytype, locator: contracts.workspace.RetainedLocator) !Task {
     _ = try h.service.message(h.scratch, "admission-find", task, .{ .program = .{ .find = .{
         .scope = locator.scope,
         .query = .{ .bytes = "no matching admission witness" },
-        .maximum = 1,
+        .maximum = 64,
     } } });
     for (0..128) |_| {
         try std.testing.expect(try h.service.pump(h.scratch) != .work);
@@ -56,6 +56,7 @@ fn probeReader(
     task: Task,
     valid: []const u8,
     forged: []const u8,
+    locator: contracts.workspace.RetainedLocator,
 ) !bool {
     var namespace = try native.Namespace.open(h.a, h.io, try path(h, "admission-reader"));
     defer support.expectCleanup(namespace.close());
@@ -70,7 +71,7 @@ fn probeReader(
     );
     defer support.expectCleanup(service.close(h.a));
     _ = try service.importCheckpoint(h.scratch, "import-admission-reader", valid);
-    try forge(&namespace, h.scratch, task);
+    try forge(&namespace, h.scratch, task, locator);
     _ = try archive.write(
         h.a,
         h.io,
@@ -115,7 +116,12 @@ fn rejects(result: anytype) !bool {
     }
 }
 
-fn forge(namespace: *native.Namespace, a: std.mem.Allocator, task: Task) !void {
+fn forge(
+    namespace: *native.Namespace,
+    a: std.mem.Allocator,
+    task: Task,
+    locator: contracts.workspace.RetainedLocator,
+) !void {
     const store = &namespace.store;
     var observed = try readObservation(namespace, a, task);
     defer observed.deinit();
@@ -123,8 +129,14 @@ fn forge(namespace: *native.Namespace, a: std.mem.Allocator, task: Task) !void {
     try std.testing.expect(observed.value.evidence.read == .reuse);
     const selection = &observed.value.evidence.read.reuse.selection;
     try std.testing.expect(selection.* == .find);
-    try std.testing.expectEqual(@as(usize, 1), selection.find.definitions.items.len);
-    const bytes = try store.object(a, selection.find.definitions.items[0], null);
+    const definitions = try a.dupe(state.Reference, selection.find.definitions.items);
+    selection.find.definitions.items = definitions;
+    var target: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&target, locator.id.bytes);
+    const selected = for (definitions) |*reference| {
+        if (std.mem.eql(u8, &reference.digest, &target)) break reference;
+    } else return error.ExpectedNestedDefinition;
+    const bytes = try store.object(a, selected.*, null);
     defer a.free(bytes);
     var definition = try contracts.decodeOwned(reuse.Definition, a, bytes);
     defer definition.deinit();
@@ -139,7 +151,8 @@ fn forge(namespace: *native.Namespace, a: std.mem.Allocator, task: Task) !void {
     defer store.rollback();
     store.invalidateIntegrity();
     const reference = try store.retainDefinition(prepared);
-    selection.find.definitions.items = &.{reference};
+    selected.* = reference;
+    std.mem.sort(state.Reference, definitions, {}, lessReference);
     try store.database.run("DELETE FROM records WHERE kind='workspace_reply' AND task=?", &.{.{
         .blob = &task,
     }});
@@ -156,9 +169,9 @@ fn forge(namespace: *native.Namespace, a: std.mem.Allocator, task: Task) !void {
 fn forgeSubmit(namespace: *native.Namespace, a: std.mem.Allocator, origin: *state.Archive) !void {
     const store = &namespace.store;
     const operations = try a.dupe(state.ArchiveOperation, origin.operations.items);
-    const objects = try a.dupe(state.Reference, origin.objects.items);
+    const objects = try a.alloc(state.Reference, origin.objects.items.len + 1);
+    @memcpy(objects[0..origin.objects.items.len], origin.objects.items);
     origin.operations.items = operations;
-    origin.objects.items = objects;
     var changed = false;
     for (operations) |*row| {
         const bytes = try store.object(a, row.body, null);
@@ -168,6 +181,7 @@ fn forgeSubmit(namespace: *native.Namespace, a: std.mem.Allocator, origin: *stat
         if (receipt.value.method != .submit) continue;
         try std.testing.expect(!changed);
         const old = row.body;
+        try std.testing.expect(try receiptReferenced(store, origin.objects.items, old));
         receipt.value.request_digest[0] ^= 1;
         row.request = receipt.value.request_digest;
         const encoded = try contracts.encodeOwned(state.Receipt, a, receipt.value);
@@ -176,20 +190,35 @@ fn forgeSubmit(namespace: *native.Namespace, a: std.mem.Allocator, origin: *stat
         defer store.rollback();
         row.body = try store.putObject(encoded);
         _ = try store.commit("test.forge-submit-receipt");
-        var replaced = false;
-        for (objects) |*object| if (std.meta.eql(object.*, old)) {
-            object.* = row.body;
-            replaced = true;
-        };
-        try std.testing.expect(replaced);
+        objects[origin.objects.items.len] = row.body;
         changed = true;
     }
     try std.testing.expect(changed);
-    std.mem.sort(state.Reference, objects, {}, struct {
-        fn less(_: void, left: state.Reference, right: state.Reference) bool {
-            return std.mem.order(u8, &left.digest, &right.digest) == .lt;
+    origin.objects.items = objects;
+    std.mem.sort(state.Reference, objects, {}, lessReference);
+}
+
+fn lessReference(_: void, left: state.Reference, right: state.Reference) bool {
+    return std.mem.order(u8, &left.digest, &right.digest) == .lt;
+}
+
+fn receiptReferenced(
+    store: *@FieldType(native.Namespace, "store"),
+    objects: []const state.Reference,
+    receipt: state.Reference,
+) !bool {
+    var rows = try store.database.prepare(
+        "SELECT parent FROM dependencies WHERE child=?",
+        &.{.{ .blob = &receipt.digest }},
+    );
+    defer rows.deinit();
+    while (try rows.step() == .row) {
+        const parent = try rows.bytes(0);
+        for (objects) |object| {
+            if (std.mem.eql(u8, parent, &object.digest)) return true;
         }
-    }.less);
+    }
+    return false;
 }
 
 fn readObservation(

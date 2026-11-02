@@ -5,6 +5,7 @@ const source = @import("horos").source;
 const support = @import("workspace_test_support.zig");
 const wc = contracts.workspace;
 const Task = native.testing.state.TaskId;
+const retirement = @import("workspace_reuse_retirement_test.zig");
 
 pub fn configure(profile: *native.tasks.Profile) void {
     profile.reuse = .{ .scopes = &.{.{
@@ -20,34 +21,38 @@ pub fn configure(profile: *native.tasks.Profile) void {
 
 pub fn run(comptime Types: type, h: anytype) !void {
     const a = h.scratch;
-    const task_a = (try h.service.submit(a, "reuse-source", {})).receipt.task;
+    const submitted = try h.service.submit(a, "reuse-source", {});
+    const task_a = submitted.receipt.task;
     const program_a = try authoredBuild(h, task_a, 7);
     const work_a = try start(h, task_a, program_a, "reuse-source-start", 3);
+    try retirement.parkSource(h, task_a, work_a);
     try waitForQuestion(h, task_a, work_a, "source-progress");
     try answer(h, task_a, work_a, "source-answer", 2);
     try expectResult(h, task_a, work_a, "source-result", 12);
     try invalidRetain(h, task_a, program_a);
     try deniedRetain(h, task_a, program_a);
     try interruptedRetain(h, task_a, program_a);
-    const retained = try command(h, task_a, "retain-original", .{ .program = .{ .retain = .{
+    const retain_request: wc.Command = .{ .program = .{ .retain = .{
         .program = program_a,
         .scope = .{ .bytes = "methods" },
         .description = .{ .name = .{ .bytes = "adjust" }, .purpose = .{
             .bytes = "Add the immutable helper increment and a current typed adjustment.",
         } },
-    } } });
+    } } };
+    const retained = try command(h, task_a, "retain-original", retain_request);
     const locator = try retainedLocator(a, retained);
     try settle(h, task_a, "settle-source");
     try h.service.discardTask(a, task_a);
     try expectAbsent(h, task_a);
     try reopen(Types, h);
     try expectAbsent(h, task_a);
+    try retirement.source(h, submitted.receipt, retain_request, retained);
     try auditCatalog(Types, h);
     try crossProfileRead(Types, h, locator);
     try foreignOwners(Types, h, locator);
     const task_b = (try h.service.submit(a, "reuse-destination", {})).receipt.task;
     try discover(h, task_b, locator);
-    try authoredDiscovery(h, task_b, locator);
+    try authoredDiscovery(h, task_b, locator, "destination-discovery");
     try deniedAccess(h, task_b, locator);
     const imported = try lostImportReply(Types, h, task_b, locator);
     const program_b = imported.program orelse return error.ExpectedProgram;
@@ -72,55 +77,69 @@ pub fn run(comptime Types: type, h: anytype) !void {
     try h.service.discardTask(a, task_b);
     try reopen(Types, h);
     try expectAbsent(h, task_b);
+    try retirement.destination(h, task_b, locator, imported);
     try auditCatalog(Types, h);
     try restoreRevision(Types, h, revision);
     try @import("workspace_reuse_recovery_test.zig").run(Types, h, locator);
     try @import("workspace_reuse_snapshot_test.zig").run(Types, h, locator);
-    try @import("workspace_reuse_admission_test.zig").run(Types, h, locator);
+    try @import("workspace_reuse_admission_test.zig").run(Types, h, revision);
 }
 
 fn auditCatalog(comptime Types: type, h: anytype) !void {
     const store = &h.namespace.store;
     const task_only = try store.auditTaskRetention(h.handlers, h.application.image_identity);
-    try std.testing.expectEqual(@as(u64, 0), task_only.objects);
+    try std.testing.expect(task_only.objects > 0);
     const full = try store.auditRetention(h.handlers, h.application.image_identity);
     try std.testing.expect(full.objects > 0 and full.edges > 0);
-    {
-        try store.begin();
-        defer store.rollback();
-        store.invalidateIntegrity();
-        try store.database.exec(
-            "DELETE FROM dependencies WHERE parent=" ++
-                "(SELECT body FROM reuse_definitions ORDER BY body LIMIT 1)",
-        );
-        const unaffected = try native.testing.retention.verifyTasks(store, h.handlers);
-        try std.testing.expectEqual(@as(u64, 0), unaffected.objects);
-        try std.testing.expectError(
-            error.CorruptState,
-            native.testing.retention.verify(store, h.handlers),
-        );
-        try std.testing.expect(!store.fenced);
-    }
+    try catalogOnlyRoot(h, task_only.objects);
     try duplicateCatalogRecord(h);
     try reopen(Types, h);
 }
 
+fn catalogOnlyRoot(h: anytype, task_objects: u64) !void {
+    const store = &h.namespace.store;
+    var definition = try catalogDefinition(h);
+    defer definition.deinit();
+    definition.value.description.name.bytes = "catalog-only root";
+    const prepared = try store.prepareDefinition(h.scratch, definition.value);
+    defer h.scratch.free(prepared.bytes);
+    defer h.scratch.free(prepared.children);
+    try store.begin();
+    defer store.rollback();
+    store.invalidateIntegrity();
+    const reference = try store.retainDefinition(prepared);
+    _ = try native.testing.retention.verify(store, h.handlers);
+    try store.database.run("DELETE FROM dependencies WHERE parent=?", &.{.{
+        .blob = &reference.digest,
+    }});
+    const unaffected = try native.testing.retention.verifyTasks(store, h.handlers);
+    try std.testing.expectEqual(task_objects, unaffected.objects);
+    try std.testing.expectError(
+        error.CorruptState,
+        native.testing.retention.verify(store, h.handlers),
+    );
+    try std.testing.expect(!store.fenced);
+}
+
+fn catalogDefinition(h: anytype) !contracts.Decoded(native.testing.reuse.Definition) {
+    const store = &h.namespace.store;
+    var rows = try store.database.prepare(
+        "SELECT o.body FROM reuse_definitions d JOIN objects o ON o.digest=d.body " ++
+            "ORDER BY d.body LIMIT 1",
+        &.{},
+    );
+    defer rows.deinit();
+    try std.testing.expectEqual(.row, try rows.step());
+    return contracts.decodeOwned(
+        native.testing.reuse.Definition,
+        h.scratch,
+        try rows.bytes(0),
+    );
+}
+
 fn duplicateCatalogRecord(h: anytype) !void {
     const store = &h.namespace.store;
-    var definition = definition: {
-        var rows = try store.database.prepare(
-            "SELECT o.body FROM reuse_definitions d JOIN objects o ON o.digest=d.body " ++
-                "ORDER BY d.body LIMIT 1",
-            &.{},
-        );
-        defer rows.deinit();
-        try std.testing.expectEqual(.row, try rows.step());
-        break :definition try contracts.decodeOwned(
-            native.testing.reuse.Definition,
-            h.scratch,
-            try rows.bytes(0),
-        );
-    };
+    var definition = try catalogDefinition(h);
     defer definition.deinit();
     const original = definition.value.origin.records.items;
     try std.testing.expect(original.len > 0);
@@ -144,8 +163,13 @@ fn duplicateCatalogRecord(h: anytype) !void {
     try std.testing.expect(!store.fenced);
 }
 
-fn authoredDiscovery(h: anytype, task: Task, locator: wc.RetainedLocator) !void {
-    _ = try h.service.message(h.scratch, "authored-discovery", task, .{ .program = .{ .find = .{
+fn authoredDiscovery(
+    h: anytype,
+    task: Task,
+    locator: wc.RetainedLocator,
+    operation: []const u8,
+) !void {
+    _ = try h.service.message(h.scratch, operation, task, .{ .program = .{ .find = .{
         .scope = locator.scope,
         .query = .{ .bytes = "adjust" },
     } } });
@@ -188,7 +212,7 @@ fn validateAndExport(h: anytype, task: Task) !void {
     _ = try h.service.exportCheckpoint(h.scratch, task, path);
     var tables = try h.namespace.store.database.prepare(
         "SELECT count(*) FROM sqlite_temp_master WHERE type='table' AND " ++
-            "name IN ('tasks','records','events','operations')",
+            "name IN ('tasks','records','events','operations','retired_tasks')",
         &.{},
     );
     defer tables.deinit();
@@ -285,7 +309,7 @@ fn crossProfileRead(comptime Types: type, h: anytype, locator: wc.RetainedLocato
     );
     try openFixture(Types, h);
     const task = (try h.service.submit(h.scratch, "reuse-profile-reader", {})).receipt.task;
-    try authoredDiscovery(h, task, locator);
+    try authoredDiscovery(h, task, locator, "profile-discovery");
     const generation = h.namespace.store.head.generation;
     const rejected = try h.service.workspaceCommand(h.scratch, "incompatible-import", task, .{
         .program = .{ .import = .{ .locator = locator } },
@@ -832,7 +856,7 @@ fn expectAbsent(h: anytype, task: Task) !void {
     defer rows.deinit();
     try std.testing.expectEqual(.row, try rows.step());
     try std.testing.expectEqual(@as(i64, 0), try rows.integer(0));
-    inline for (.{ "records", "events", "operations" }) |table| {
+    inline for (.{ "records", "events", "local_admissions" }) |table| {
         var indexed = try h.namespace.store.database.prepare(
             "SELECT count(*) FROM " ++ table ++ " WHERE task=?",
             &.{.{ .blob = &task }},

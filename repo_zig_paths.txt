@@ -27,6 +27,7 @@ runtime/native/entry.zig
 runtime/native/guest_segment_proofs.zig
 runtime/native/hash.zig
 runtime/native/hash_abi.zig
+runtime/native/historical_index.zig
 runtime/native/host.zig
 runtime/native/https.zig
 runtime/native/identity.zig
@@ -77,6 +78,8 @@ runtime/native/tasks/placement_transport.zig
 runtime/native/tasks/reconciliation.zig
 runtime/native/tasks/records.zig
 runtime/native/tasks/remote_work.zig
+runtime/native/tasks/retirement.zig
+runtime/native/tasks/retirement_requests.zig
 runtime/native/tasks/reuse_discovery.zig
 runtime/native/tasks/reuse_preparation.zig
 runtime/native/tasks/reuse_validation.zig
@@ -174,6 +177,7 @@ test/protean/model_unknown_field.zig
 test/protean/model_unknown_parameter.zig
 test/protean/model_unsupported_codec.zig
 test/protean/native_adaptive_tests.zig
+test/protean/native_archive_message_test.zig
 test/protean/native_owner_tests.zig
 test/protean/native_recovery_crash.zig
 test/protean/native_responses.zig
@@ -191,6 +195,7 @@ test/protean/values.zig
 test/protean/workspace_programs.zig
 test/protean/workspace_reuse_admission_test.zig
 test/protean/workspace_reuse_recovery_test.zig
+test/protean/workspace_reuse_retirement_test.zig
 test/protean/workspace_reuse_semantic_test.zig
 test/protean/workspace_reuse_snapshot_test.zig
 test/protean/workspace_reuse_test.zig

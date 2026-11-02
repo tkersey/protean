@@ -38,8 +38,9 @@ fn variant(comptime Types: type, h: anytype, locator: wc.RetainedLocator, alias:
     const operation = if (alias) "snapshot-operation" else "snapshot-request";
     const submit = try std.fmt.allocPrint(h.scratch, "{s}-task", .{operation});
     const task = (try h.service.submit(h.scratch, submit, {})).receipt.task;
-    defer support.expectCleanup(discard(h, task));
-    const imported = try h.service.workspaceCommand(h.scratch, "snapshot-input", task, .{
+    defer support.expectCleanup(discard(h, task, operation));
+    const input_id = try std.fmt.allocPrint(h.scratch, "{s}-input", .{operation});
+    const imported = try h.service.workspaceCommand(h.scratch, input_id, task, .{
         .program = .{ .import = .{ .locator = locator } },
     });
     try std.testing.expectEqual(.observed, imported.disposition);
@@ -207,10 +208,10 @@ fn inspectCopy(
     try service.validateWorkspace(h.scratch, task);
 }
 
-fn discard(h: anytype, task: Task) !void {
+fn discard(h: anytype, task: Task, operation: []const u8) !void {
     _ = try h.service.requestCancel(
         h.scratch,
-        "snapshot-cancel",
+        try std.fmt.allocPrint(h.scratch, "{s}-cancel", .{operation}),
         task,
         "Snapshot witness finished",
     );

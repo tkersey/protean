@@ -580,14 +580,14 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             a: std.mem.Allocator,
             start: WorkspaceStartAdmission,
         ) !Admission {
-            var parent = try self.task(a, start.task_id);
-            defer parent.deinit();
-            try compatible(self, parent.value);
             const request = try workspaceStartRequest(a, start);
             if (try replay(self, a, start.operation_id, request)) |prior| {
                 if (start.preparation != null) return error.OperationConflict;
                 return prior;
             }
+            var parent = try self.task(a, start.task_id);
+            defer parent.deinit();
+            try compatible(self, parent.value);
             try requireCustody(self, a, start.task_id, null);
             var predecessor = try workspaceStartPredecessor(self, a, start, parent.value);
             defer if (predecessor) |*prior| prior.deinit();

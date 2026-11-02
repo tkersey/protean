@@ -120,6 +120,39 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             schema_id: []const u8,
             answer_json: json.Value,
         ) !Admission {
+            const Retirement = @import("retirement.zig").Operations(Types, Self);
+            if (try Retirement.respond(self, a, .{
+                .operation_id = id,
+                .task = task_id,
+                .question = question_id,
+                .revision = revision,
+                .request = request_digest,
+                .schema = schema_id,
+                .json = answer_json,
+            })) |prior| return prior;
+            return respondCurrent(
+                self,
+                a,
+                id,
+                task_id,
+                question_id,
+                revision,
+                request_digest,
+                schema_id,
+                answer_json,
+            );
+        }
+        fn respondCurrent(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: []const u8,
+            task_id: state.TaskId,
+            question_id: state.Digest,
+            revision: u64,
+            request_digest: state.Digest,
+            schema_id: []const u8,
+            answer_json: json.Value,
+        ) !Admission {
             var decoded = try self.task(a, task_id);
             defer decoded.deinit();
             const value = decoded.value;
@@ -156,7 +189,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 return replayAnswer(self, a, id, request, question, answer);
             return admitAnswer(self, a, id, request, value, question, question_id, answer);
         }
-        fn encodeAnswer(
+        pub fn encodeAnswer(
             self: *Self,
             a: std.mem.Allocator,
             schema_id: []const u8,

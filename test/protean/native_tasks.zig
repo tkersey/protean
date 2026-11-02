@@ -784,6 +784,7 @@ fn ownerRecovery(captured: bool, image: []const u8) !void {
     try fixture.cancelledArchive();
     try fixture.captureFailures();
     try fixture.eventPagination();
+    if (captured) try @import("workspace_reuse_retirement_test.zig").primary(&fixture);
 }
 
 const OwnerRecoveryFixture = struct {
@@ -1264,6 +1265,10 @@ const OwnerRecoveryFixture = struct {
                         saved.value,
                         self.queued_message.receipt.message.?,
                         self.path_buffer[0..self.length],
+                    );
+                    try @import("native_archive_message_test.zig").rejectLeafMessage(
+                        self,
+                        self.queued_message.receipt.message.?,
                     );
                     checked_consumed_history = true;
                 }
@@ -5403,6 +5408,7 @@ fn pureRecovery(scenario: PureRecoveryCase) !void {
     if (try fixture.failureSettlement()) return;
     if (try fixture.settle()) return;
     try fixture.success();
+    if (scenario == .valid) try @import("workspace_reuse_retirement_test.zig").recovery(&fixture);
 }
 
 const PureRecoveryFixture = struct {

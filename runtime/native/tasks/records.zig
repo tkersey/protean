@@ -53,7 +53,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             defer a.free(bytes);
             var decoded = try contracts.decodeOwned(state.Receipt, a, bytes);
             defer decoded.deinit();
-            var bound_task = try self.task(a, decoded.value.task);
+            var bound_task = try Tasks.receiptTask(self, a, decoded.value.task);
             defer bound_task.deinit();
             var saved = decoded.value;
             saved.client_operation_id = .{

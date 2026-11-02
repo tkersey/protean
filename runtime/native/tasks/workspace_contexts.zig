@@ -60,8 +60,6 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             snapshot: ?state.Reference,
             input: ?state.Reference,
         ) !Admission {
-            var parent = try self.task(a, task_id);
-            defer parent.deinit();
             const Request = workspace.ContextRequest;
             const request = try operation(Request, a, .{
                 .task = task_id,
@@ -70,6 +68,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .input = input,
             });
             if (try replay(self, a, operation_id, request)) |prior| return prior;
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
             try requireCustody(self, a, task_id, null);
             if (workspaceParentStopped(self, parent.value)) return error.InvalidState;
             var compiler_facts: Compiler.CompilerFacts = .{ .allocator = self.allocator };

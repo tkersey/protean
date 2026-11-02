@@ -47,6 +47,24 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             try allowed(self);
             const bytes = try store(self).taskBytes(a, id);
             defer a.free(bytes);
+            return authorizedTask(self, a, id, bytes);
+        }
+        pub fn receiptTask(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+        ) !contracts.Decoded(state.Task) {
+            try allowed(self);
+            const bytes = try store(self).receiptTaskBytes(a, id);
+            defer a.free(bytes);
+            return authorizedTask(self, a, id, bytes);
+        }
+        fn authorizedTask(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            bytes: []const u8,
+        ) !contracts.Decoded(state.Task) {
             var decoded = try contracts.decodeOwned(state.Task, a, bytes);
             errdefer decoded.deinit();
             if (!same(decoded.value.principal.bytes, self.profile.authority.principal) or !same(

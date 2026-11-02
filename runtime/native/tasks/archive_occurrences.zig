@@ -99,13 +99,22 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             index: state.Archive,
         ) !void {
             try validateTypedPayloads(self, a, value, index);
-            try validateHistoricalAdmissions(self, a, value, index);
+            try validateAdmissions(self, a, value, index, true);
         }
         pub fn validateHistoricalAdmissions(
             self: *Self,
             a: std.mem.Allocator,
             value: state.Task,
             index: state.Archive,
+        ) !void {
+            try validateAdmissions(self, a, value, index, false);
+        }
+        fn validateAdmissions(
+            self: *Self,
+            a: std.mem.Allocator,
+            value: state.Task,
+            index: state.Archive,
+            check_inbox_kind: bool,
         ) !void {
             // The operation index preserves original identity even when a repeated
             // answer also has aliases. Messages, receipts and inbox history are one
@@ -115,6 +124,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .a = a,
                 .value = value,
                 .index = index,
+                .check_inbox_kind = check_inbox_kind,
                 .receipts = .init(a),
                 .ordinals = .init(a),
             };
@@ -163,6 +173,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 a: std.mem.Allocator,
                 value: state.Task,
                 index: state.Archive,
+                check_inbox_kind: bool,
                 receipts: std.AutoHashMap(state.Digest, state.Digest),
                 ordinals: std.AutoHashMap(u64, void),
                 submitted: bool = false,
@@ -414,6 +425,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                         .store = store(admission.service),
                     };
                     try view.validateRequest(admission.value, saved.value, request.value);
+                    if (admission.check_inbox_kind) {
+                        const entry = try admission.service.handlers.resolve(
+                            request.value,
+                            request.value.binding.program_identity,
+                        );
+                        if (entry.declaration.kind != .inbox) return error.InvalidArchive;
+                    }
                     const bound = try store(admission.service).acquiredObject(
                         temporary,
                         acquired.reply,

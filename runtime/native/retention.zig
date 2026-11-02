@@ -231,7 +231,8 @@ fn Audit(comptime Source: type) type {
         }
         fn receiptRoots(self: *Self) !void {
             var rows = try self.source.database.prepare(
-                "SELECT task,request,receipt FROM operations",
+                "SELECT o.task,o.request,o.receipt FROM operations o LEFT JOIN retired_tasks r" ++
+                    " ON r.id=o.task WHERE r.id IS NULL",
                 &.{},
             );
             defer rows.deinit();
@@ -322,6 +323,58 @@ fn Audit(comptime Source: type) type {
             for (archive.operations.items) |row| try self.receiptValue(task, row.request, row.body);
             try self.projections();
             return task;
+        }
+        fn retirementRoots(self: *Self) !void {
+            var rows = try self.source.database.prepare(
+                "SELECT r.id,r.body,t.id FROM retired_tasks r LEFT JOIN tasks t ON t.id=r.id",
+                &.{},
+            );
+            defer rows.deinit();
+            while (try rows.step() == .row) {
+                const task = try fixed(16, try rows.bytes(0));
+                if (!rows.isNull(2)) return error.CorruptState;
+                const ref = try self.indexed(try rows.bytes(1));
+                var decoded = try contracts.decodeOwned(
+                    state.Archive,
+                    self.source.allocator,
+                    try self.body(ref),
+                );
+                defer decoded.deinit();
+                var inspected = try @import("archive.zig").inspect(
+                    self.a,
+                    self.source,
+                    decoded.value,
+                    null,
+                );
+                defer inspected.task.deinit();
+                if (!inspected.task.value.terminal() or
+                    !std.meta.eql(task, inspected.task.value.id)) return error.CorruptState;
+                try self.retiredOperations(task, decoded.value);
+                try self.value(state.Archive, ref, decoded.value);
+                if (!std.meta.eql(task, try self.archiveRoots(decoded.value)))
+                    return error.CorruptState;
+                try self.reconciliations();
+            }
+        }
+        fn retiredOperations(self: *Self, task: state.TaskId, archive: state.Archive) !void {
+            var count = try self.source.database.prepare(
+                "SELECT count(*) FROM operations WHERE task=?",
+                &.{.{ .blob = &task }},
+            );
+            defer count.deinit();
+            if (try count.step() != .row or
+                try count.integer(0) != archive.operations.items.len) return error.CorruptState;
+            for (archive.operations.items) |operation| {
+                var row = try self.source.database.prepare(
+                    "SELECT request,receipt,task FROM operations WHERE id=?",
+                    &.{.{ .text = operation.key.bytes }},
+                );
+                defer row.deinit();
+                if (try row.step() != .row or
+                    !same(try row.bytes(0), &operation.request) or
+                    !same(try row.bytes(1), &operation.body.digest) or
+                    !same(try row.bytes(2), &task)) return error.CorruptState;
+            }
         }
         fn retainedOrigins(self: *Self, comptime check_recovery: bool) !void {
             var index: usize = 0;
@@ -819,6 +872,7 @@ fn verifyScope(store: *storage.Store, handlers: registry.Registry, catalog: bool
     try audit.otherRoots();
     try audit.projections();
     try audit.reconciliations();
+    try audit.retirementRoots();
     if (catalog) try audit.catalogRoots();
     try audit.retainedOrigins(true);
     return audit.finish();

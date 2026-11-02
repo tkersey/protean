@@ -163,6 +163,10 @@ pub const Store = struct {
             \\CREATE TABLE tasks(id BLOB PRIMARY KEY CHECK(length(id)=16), revision INTEGER NOT NULL, terminal INTEGER NOT NULL CHECK(terminal IN(0,1)), body BLOB NOT NULL REFERENCES objects(digest)) WITHOUT ROWID;
             \\CREATE TABLE operations(id TEXT PRIMARY KEY, request BLOB NOT NULL CHECK(length(request)=32), receipt BLOB NOT NULL REFERENCES objects(digest), task BLOB NOT NULL CHECK(length(task)=16)) WITHOUT ROWID;
             \\CREATE INDEX operation_tasks ON operations(task,id);
+            \\CREATE TABLE retired_tasks(id BLOB PRIMARY KEY CHECK(length(id)=16), body BLOB NOT NULL REFERENCES objects(digest)) WITHOUT ROWID;
+            \\CREATE TRIGGER live_task_not_retired BEFORE INSERT ON tasks WHEN EXISTS(SELECT 1 FROM retired_tasks WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT,'task is retired'); END;
+            \\CREATE TRIGGER retired_task_immutable BEFORE UPDATE ON retired_tasks BEGIN SELECT RAISE(ABORT,'retired task is immutable'); END;
+            \\CREATE TRIGGER retired_archive_immutable BEFORE UPDATE ON objects WHEN EXISTS(SELECT 1 FROM retired_tasks WHERE body=OLD.digest) BEGIN SELECT RAISE(ABORT,'retired archive is immutable'); END;
             \\CREATE TABLE records(kind TEXT NOT NULL, id BLOB NOT NULL, task BLOB NOT NULL REFERENCES tasks(id), body BLOB NOT NULL REFERENCES objects(digest), PRIMARY KEY(kind,id)) WITHOUT ROWID;
             \\CREATE TABLE events(task BLOB NOT NULL REFERENCES tasks(id), seq INTEGER NOT NULL, revision INTEGER NOT NULL, body BLOB NOT NULL REFERENCES objects(digest), PRIMARY KEY(task,seq)) WITHOUT ROWID;
             \\CREATE TABLE placement_decisions(transfer BLOB PRIMARY KEY CHECK(length(transfer)=32), body BLOB NOT NULL) WITHOUT ROWID;
@@ -1039,6 +1043,15 @@ pub const Store = struct {
         const T = @import("reuse_state.zig").Definition;
         const bytes = try contracts.encodeOwned(T, a, definition);
         errdefer a.free(bytes);
+        return .{
+            .scope = definition.scope.bytes,
+            .bytes = bytes,
+            .reference = .{ .digest = digest(bytes), .bytes = bytes.len },
+            .children = try prepareReferences(T, a, definition),
+        };
+    }
+
+    fn prepareReferences(comptime T: type, a: std.mem.Allocator, value: T) ![]state.Reference {
         var references = struct {
             allocator: std.mem.Allocator,
             children: std.AutoArrayHashMapUnmanaged(state.Reference, void) = .empty,
@@ -1047,13 +1060,8 @@ pub const Store = struct {
             }
         }{ .allocator = a };
         defer references.children.deinit(a);
-        try state.visitReferences(T, definition, &references);
-        return .{
-            .scope = definition.scope.bytes,
-            .bytes = bytes,
-            .reference = .{ .digest = digest(bytes), .bytes = bytes.len },
-            .children = try a.dupe(state.Reference, references.children.keys()),
-        };
+        try state.visitReferences(T, value, &references);
+        return a.dupe(state.Reference, references.children.keys());
     }
 
     pub fn retainDefinition(self: *Store, prepared: PreparedDefinition) !state.Reference {
@@ -1068,18 +1076,113 @@ pub const Store = struct {
         );
         return ref;
     }
-    pub fn eraseTask(self: *Store, task: state.TaskId, revision: u64) !void {
+    pub const PreparedRetirement = struct {
+        task: state.TaskId,
+        revision: u64,
+        archive: state.Archive,
+        bytes: []const u8,
+        reference: state.Reference,
+        assets: []const []const u8,
+        children: []const state.Reference,
+    };
+
+    pub fn prepareRetirement(
+        self: *Store,
+        a: std.mem.Allocator,
+        archive: state.Archive,
+        build: []const u8,
+    ) !PreparedRetirement {
+        if (self.transaction) return error.InvalidState;
+        const task_bytes = try self.object(a, archive.task, null);
+        defer a.free(task_bytes);
+        var task = try contracts.decodeOwned(state.Task, a, task_bytes);
+        defer task.deinit();
+        if (!task.value.terminal()) return error.InvalidState;
+        const bytes = try contracts.encodeOwned(state.Archive, a, archive);
+        errdefer a.free(bytes);
+        const assets = try prepareArchiveAssets(a, archive, build);
+        errdefer {
+            for (assets[1..]) |asset| a.free(asset);
+            a.free(assets);
+        }
+        return .{
+            .task = task.value.id,
+            .revision = task.value.revision,
+            .archive = archive,
+            .bytes = bytes,
+            .reference = .{ .digest = digest(bytes), .bytes = bytes.len },
+            .assets = assets,
+            .children = try prepareReferences(state.Archive, a, archive),
+        };
+    }
+
+    fn prepareArchiveAssets(
+        a: std.mem.Allocator,
+        archive: state.Archive,
+        build: []const u8,
+    ) ![][]const u8 {
+        const count = try std.math.add(usize, archive.schemas.items.len, 1);
+        const assets = try a.alloc([]const u8, count);
+        var prepared: usize = 1;
+        errdefer {
+            for (assets[1..prepared]) |asset| a.free(asset);
+            a.free(assets);
+        }
+        assets[0] = build;
+        for (archive.schemas.items, assets[1..]) |schema, *asset| {
+            asset.* = try @import("archive.zig").schemaBytes(a, schema.name.bytes);
+            prepared += 1;
+        }
+        return assets;
+    }
+
+    pub fn retirement(
+        self: *Store,
+        a: std.mem.Allocator,
+        task: state.TaskId,
+    ) !?contracts.Decoded(state.Archive) {
+        try self.checkIntegrity();
+        var query = try self.database.prepare(
+            "SELECT body FROM retired_tasks WHERE id=?",
+            &.{.{ .blob = &task }},
+        );
+        defer query.deinit();
+        if (try query.step() != .row) return null;
+        const bytes = try self.recordObject(a, try query.bytes(0));
+        defer a.free(bytes);
+        return try contracts.decodeOwned(state.Archive, a, bytes);
+    }
+
+    pub fn receiptTaskBytes(self: *Store, a: std.mem.Allocator, task: state.TaskId) ![]u8 {
+        return self.taskBytes(a, task) catch |err| {
+            if (err != error.UnknownTask) return err;
+            var retired = (try self.retirement(a, task)) orelse return err;
+            defer retired.deinit();
+            return self.object(a, retired.value.task, null);
+        };
+    }
+
+    pub fn eraseTask(self: *Store, prepared: PreparedRetirement) !void {
         try self.writing();
         errdefer self.rollback();
+        const task = prepared.task;
         var selected = try self.database.prepare(
-            "SELECT revision,terminal FROM tasks WHERE id=?",
+            "SELECT revision,terminal,body FROM tasks WHERE id=?",
             &.{.{ .blob = &task }},
         );
         defer selected.deinit();
         if (try selected.step() != .row) return error.ArtifactUnavailable;
-        if (try selected.integer(0) != revision or try selected.integer(1) != 1)
+        if (try selected.integer(0) != prepared.revision or try selected.integer(1) != 1 or
+            !std.mem.eql(u8, try selected.bytes(2), &prepared.archive.task.digest))
             return error.InvalidState;
-        inline for (.{ "operations", "events", "records" }) |table| {
+        for (prepared.assets) |bytes| _ = try self.putObject(bytes);
+        const reference = try self.putObject(prepared.bytes);
+        if (!std.meta.eql(reference, prepared.reference)) return error.CorruptState;
+        for (prepared.children) |child| try self.retainReference(reference, child);
+        try self.database.run("INSERT INTO retired_tasks VALUES(?,?)", &.{
+            .{ .blob = &task }, .{ .blob = &reference.digest },
+        });
+        inline for (.{ "events", "records" }) |table| {
             try self.database.run("DELETE FROM " ++ table ++ " WHERE task=?", &.{.{
                 .blob = &task,
             }});
@@ -1318,6 +1421,12 @@ pub const Store = struct {
             task.revision > std.math.maxInt(i64) or
             try self.scalar("SELECT count(*) FROM tasks") != 0)
             return error.InvalidState;
+        var retired = try self.database.prepare(
+            "SELECT 1 FROM retired_tasks WHERE id=?",
+            &.{.{ .blob = &task.id }},
+        );
+        defer retired.deinit();
+        if (try retired.step() == .row) return error.InvalidState;
         const bytes = try contracts.encodeOwned(state.Task, a, task);
         defer a.free(bytes);
         const body = try self.putObject(bytes);

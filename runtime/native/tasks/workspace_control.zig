@@ -403,9 +403,6 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             expected_control: u64,
             command: workspace.Command,
         ) !Admission {
-            var parent = try self.task(a, task_id);
-            defer parent.deinit();
-            try compatible(self, parent.value);
             const Request = workspace.ControlRequest;
             const request = try operation(Request, a, .{
                 .task = task_id,
@@ -420,6 +417,9 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .command = command,
             } };
             if (try replay(self, a, operation_id, request)) |prior| return prior;
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            try compatible(self, parent.value);
             try requireCustody(self, a, task_id, work_id);
             var saved = try self.workspaceWork(a, task_id, work_id);
             defer saved.deinit();

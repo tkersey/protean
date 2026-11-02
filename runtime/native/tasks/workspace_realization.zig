@@ -648,6 +648,9 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             task_id: state.TaskId,
             command: @FieldType(wc.Work, "realize"),
         ) !Admission {
+            const requested = try workspaceRealizeRequest(self, a, task_id, command);
+            const request = try operation(workspace.RealizeRequest, a, requested);
+            if (try replay(self, a, operation_id, request)) |prior| return prior;
             var selected: ?SelectedRuntime =
                 if (command.runtime == .selected) try workspaceRuntime(
                     self,
@@ -657,21 +660,9 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     null,
                 ) else null;
             defer if (selected) |*item| item.deinit();
-            const target: ?state.Reference =
-                if (selected) |item|
-                    item.record.value.artifact
-                else
-                    null;
-            const work_id = try wp.identity(command.expected.work, .work);
-            const request = try operation(workspace.RealizeRequest, a, .{
-                .task = task_id,
-                .work = work_id,
-                .execution = command.expected.execution_revision,
-                .control = command.expected.control_revision,
-                .realization = command.realization_revision,
-                .runtime = target,
-            });
-            if (try replay(self, a, operation_id, request)) |prior| return prior;
+            const target = requested.runtime;
+            if (selected) |item| if (!std.meta.eql(item.record.value.artifact, target.?))
+                return error.CorruptState;
             if (selected) |*item| try requireSemanticPolicy(
                 self,
                 kosmos.RuntimeCompiler.approvedRootIdentity(&item.admitted),
@@ -708,6 +699,26 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 request,
                 command.realization_revision,
             );
+        }
+        pub fn workspaceRealizeRequest(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            command: @FieldType(wc.Work, "realize"),
+        ) !workspace.RealizeRequest {
+            var parent = try Tasks.receiptTask(self, a, task_id);
+            defer parent.deinit();
+            return .{
+                .task = task_id,
+                .work = try wp.identity(command.expected.work, .work),
+                .execution = command.expected.execution_revision,
+                .control = command.expected.control_revision,
+                .realization = command.realization_revision,
+                .runtime = if (command.runtime == .selected) try store(self).objectReference(
+                    try wp.identity(command.runtime.selected, .runtime),
+                    null,
+                ) else null,
+            };
         }
         fn realizeWorkspaceRuntime(
             self: *Self,

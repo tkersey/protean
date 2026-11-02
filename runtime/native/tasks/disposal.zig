@@ -1,5 +1,6 @@
 const std = @import("std");
 const state = @import("../state.zig");
+const archive = @import("../archive.zig");
 
 pub fn Operations(comptime Types: type, comptime Self: type) type {
     return struct {
@@ -19,11 +20,25 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 if (std.meta.eql(active.task, task_id)) try Lifecycle.retire(self, a);
             }
             const store = Lifecycle.store(self);
+            var arena = std.heap.ArenaAllocator.init(a);
+            defer arena.deinit();
+            const snapshot = try archive.prepare(
+                arena.allocator(),
+                store,
+                task_id,
+                self.assets.manifest,
+            );
+            const prepared = try store.prepareRetirement(
+                arena.allocator(),
+                snapshot,
+                self.assets.manifest,
+            );
             try store.begin();
             defer store.rollback();
             try Lifecycle.allowed(self);
             try Lifecycle.requireCustody(self, a, task_id, null);
-            try store.eraseTask(task_id, parent.value.revision);
+            if (prepared.revision != parent.value.revision) return error.StaleRevision;
+            try store.eraseTask(prepared);
             store.invalidateIntegrity();
             try self.namespace.commit("task.discard");
             var index: usize = 0;
