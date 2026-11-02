@@ -225,8 +225,10 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 var decoded = try contracts.decodeOwned(reuse.Definition, a, bytes);
                 defer decoded.deinit();
                 try authorizeCurrent(self, decoded.value.scope.bytes, .retain);
-                if (admission.replayed and self.workspace_replay == null)
+                if (admission.replayed and self.workspace_replay == null) {
                     try discloseReceipt(self, a, receipt);
+                    try authorizeCurrent(self, decoded.value.scope.bytes, .retain);
+                }
                 var result = json.object();
                 try json.put(a, &result, "retained", try locatorJson(
                     a,

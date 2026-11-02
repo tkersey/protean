@@ -63,6 +63,7 @@ fn authoredRetain(comptime Types: type, h: anytype, locator: wc.RetainedLocator)
     try std.testing.expectEqual(@as(u32, 1), disclosure.calls);
     try expectPreserved(h, task, .retained, saved, false);
     h.service.profile.reuse = original;
+    try revokedRetainReplay(h, task, request, saved);
     try settleReply(h, task, .retained, saved);
     try discard(h, task, "discard-authored-retain");
 }
@@ -85,6 +86,50 @@ const DeniedDisclosure = struct {
         return error.Denied;
     }
 };
+
+const RevokingDisclosure = struct {
+    revoked: *bool,
+    calls: u32 = 0,
+
+    fn check(
+        context: ?*anyopaque,
+        _: native.registry.Authority,
+        scope: native.reuse_policy.Scope,
+        frozen: native.reuse_policy.Frozen,
+    ) !void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        try std.testing.expect(scope.retain);
+        try std.testing.expect(frozen.artifacts.len != 0);
+        try std.testing.expect(frozen.history.len != 0);
+        try std.testing.expect(frozen.description.len != 0);
+        self.calls += 1;
+        self.revoked.* = true;
+    }
+};
+
+fn revokedRetainReplay(h: anytype, task: Task, request: wc.Command, saved: Saved) !void {
+    const authority = h.service.profile.authority;
+    const policy = h.service.profile.reuse;
+    defer h.service.profile.authority = authority;
+    defer h.service.profile.reuse = policy;
+    var disclosure: RevokingDisclosure = .{ .revoked = &h.service.profile.authority.revoked };
+    h.service.profile.reuse.context = &disclosure;
+    h.service.profile.reuse.disclosure = RevokingDisclosure.check;
+    const operation = std.fmt.bytesToHex(saved.receipt.occurrence, .lower);
+    const reply = try h.service.workspaceCommand(h.scratch, &operation, task, request);
+    try std.testing.expectEqual(@as(u32, 1), disclosure.calls);
+    try std.testing.expect(h.service.profile.authority.revoked);
+    try std.testing.expectEqual(.rejected, reply.disposition);
+    try std.testing.expect(reply.program == null);
+    const locator = std.fmt.bytesToHex(saved.receipt.workspace, .lower);
+    try std.testing.expect(std.mem.indexOf(u8, reply.observation_json.bytes, &locator) == null);
+    var parsed = try native.json.parse(h.scratch, reply.observation_json.bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expect(!parsed.value.object.contains("retained"));
+    h.service.profile.authority = authority;
+    h.service.profile.reuse = policy;
+    try expectPreserved(h, task, .retained, saved, false);
+}
 
 const ReceiptCut = struct {
     digest: state.Digest,
