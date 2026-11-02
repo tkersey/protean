@@ -4325,6 +4325,8 @@ fn expectSemanticCaptureSettled(
     a: std.mem.Allocator,
     captured: native.testing.state.Capture,
     cancellation: bool,
+    approved: ?native.tasks.SemanticPolicy,
+    retained: *?contracts.workspace.RetainedLocator,
 ) !contracts.Decoded(contracts.workspace.Reply) {
     const store = &service.namespace.store;
     var acquired = false;
@@ -4343,11 +4345,15 @@ fn expectSemanticCaptureSettled(
         defer pending.deinit();
         if (pending.value.state == .settled_reply) {
             try std.testing.expect(!consumed);
-            if (!acquired and !cancellation) try expectSemanticActivationDenied(
-                service,
-                a,
-                captured,
-            );
+            if (!acquired and !cancellation) {
+                try expectSemanticActivationDenied(service, a, captured);
+                retained.* = try @import("workspace_reuse_semantic_test.zig").retain(
+                    service,
+                    a,
+                    captured,
+                    approved,
+                );
+            }
             acquired = true;
             try std.testing.expectEqualDeep(
                 captured.attempt,
@@ -6070,11 +6076,14 @@ fn snapshotContextRetainedSettlement(
     revoked: anytype,
 ) !void {
     phase.* = "settle";
+    var retained: ?contracts.workspace.RetainedLocator = null;
     var settled = expectSemanticCaptureSettled(
         &fixture.service.*,
         fixture.scratch,
         captured,
         !validation,
+        fixture.approved_policy,
+        &retained,
     ) catch |err| {
         std.debug.print("semantic settlement: {s}\n", .{@errorName(err)});
         return err;
@@ -6118,6 +6127,8 @@ fn snapshotContextRetainedSettlement(
     phase.* = "canonical validation";
     fixture.service.*.profile.semantic_construction = fixture.approved_policy;
     try fixture.service.*.validateWorkspace(fixture.scratch, task_id);
+    if (retained) |locator|
+        try @import("workspace_reuse_semantic_test.zig").run(ContextTypes, fixture, locator);
 }
 
 const WaitTypes = struct {
@@ -6129,7 +6140,7 @@ const WaitTypes = struct {
     pub const Input = void;
     pub const Output = contracts.workspace.Reply;
     pub const Failure = void;
-    pub const Message = @FieldType(contracts.workspace.Work, "wait");
+    pub const Message = contracts.workspace.Command;
 };
 const WaitApplication = struct {
     pub fn emit(c: @import("protean").Context) !source.Module {
@@ -6137,8 +6148,6 @@ const WaitApplication = struct {
         const b = c.builder;
         const unit = try b.scalar(void);
         const output = try interop.schemaId(c.author, try c.schema(WaitTypes.Output));
-        const command = try interop.schemaId(c.author, try c.schema(contracts.workspace.Command));
-        const work_command = try interop.schemaId(c.author, try c.schema(contracts.workspace.Work));
         const inbox = try interop.operationId(
             c.author,
             try @import("protean").inbox.Profile(WaitTypes.Message).declare(c),
@@ -6160,8 +6169,6 @@ const WaitApplication = struct {
             b,
             unit,
             output,
-            command,
-            work_command,
             inbox,
             workspace,
             inbox_schema,
@@ -6226,6 +6233,26 @@ const WaitScenario = enum {
     reopened_control,
     incompatible_wait,
 };
+
+test "BUILD-REUSE retained code survives source deletion and destination recovery" {
+    const protean = @import("protean");
+    const reuse = @import("workspace_reuse_test.zig");
+    var compiled = try protean.compile(std.testing.allocator, protean.system(.{
+        .InitialArgs = void,
+        .Result = WaitTypes.Output,
+        .Failure = void,
+        .application = WaitApplication,
+    }));
+    defer compiled.deinit();
+    var fixture: AuthoredWaitFixture = .{};
+    defer fixture.deinit();
+    try fixture.initImage(&compiled);
+    try fixture.initHandlers();
+    try fixture.initProfile();
+    reuse.configure(&fixture.profile);
+    try fixture.initOwner();
+    try reuse.run(WaitTypes, &fixture);
+}
 
 const AuthoredWaitFixture = struct {
     a: std.mem.Allocator = std.testing.allocator,
@@ -6940,10 +6967,10 @@ const AuthoredWaitCase = struct {
             .work,
             self.initial.value.id,
         );
-        self.selection = .{
+        self.selection = .{ .work = .{ .wait = .{
             .works = .{ .items = &self.selection_work },
             .after = self.initial.value.event_watermark,
-        };
+        } } };
         _ = try self.fixture.service.message(
             self.fixture.scratch,
             try std.fmt.allocPrint(self.fixture.scratch, "{s}-selection", .{self.prefix}),
@@ -16036,8 +16063,6 @@ fn emitWaitBody(
     b: *source.Builder,
     unit: Id,
     output: Id,
-    command: Id,
-    work_command: Id,
     inbox: Id,
     workspace: Id,
     inbox_schema: Id,
@@ -16051,18 +16076,6 @@ fn emitWaitBody(
     const message = try b.variable(message_schema);
     const id = try b.variable(message_id_schema);
     const selection = try b.variable(selection_schema);
-    const selected_work = try b.primitive(
-        work_command,
-        .variant,
-        &.{try b.reference(selection)},
-        @backingInt(std.meta.Tag(contracts.workspace.Work).wait),
-    );
-    const selected_command = try b.primitive(
-        command,
-        .variant,
-        &.{selected_work},
-        @backingInt(std.meta.Tag(contracts.workspace.Command).work),
-    );
     const reply = try b.variable(output);
     const ignored = try b.variable(inbox_schema);
     const finish = try b.bind(
@@ -16072,7 +16085,7 @@ fn emitWaitBody(
     );
     const wait = try b.bind(
         reply,
-        try b.term(.{ .perform = .{ .effect = workspace, .payload = selected_command } }),
+        try b.term(.{ .perform = .{ .effect = workspace, .payload = try b.reference(selection) } }),
         finish,
     );
     const unpack = try b.term(.{ .unpack_product = .{

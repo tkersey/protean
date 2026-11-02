@@ -336,7 +336,7 @@ The output retains every acquired evidence entry in its original order, tagged
 `source` or `workspace`, plus constructed program references in `programs`.
 Claims may share evidence; a claim cannot repeat an index. These checks establish
 membership and structural support, not the truth of model-written statements.
-Application 8.0.0 uses context v7 and native state format 20 in a **new namespace**.
+Application 8.0.0 uses context v7 and native state format 21 in a **new namespace**.
 Keep an existing task's namespace, original image, and exact executable together;
 continue it with that executable. Do not point the new binary at its old namespace
 or transplant the old continuation. Building this repository does not update an
@@ -412,3 +412,52 @@ handoff starts the successor; it does not return into the old controller. Failed
 preparation returns an ordinary diagnostic. Replacement and trials are optional.
 See [controller contracts and continuity](../../docs/computational-workspace.md#reconstructing-the-active-controller)
 for schemas, cleanup, provenance and historical-resume boundaries.
+## Durable executable reuse
+
+`program.retain` publishes a task-owned program into an explicitly configured
+reuse scope. `program.find` returns exact immutable locators and authored
+descriptions. Inspect a locator with `program.inspect` and
+`target.retained`; `program.import` then creates ordinary program ownership in
+the current task. Import starts no Work. Use the returned program with ordinary
+construction, composition and `work.start`, supplying current inputs and typed
+responses under current authority.
+
+The supported route retains complete canonical `source_records` computation
+modules, including their immutable helpers, literals and typed exposures. It
+supports reuse between tasks in the same namespace, principal and tenant, with
+a compatible application and profile. Cross-principal sharing is unsupported.
+It preserves the original publication history and reconstructs admission through
+the current compiler. Controller programs, component recipes, derived-source
+documents and live task custody are not exported by this route. A selected
+version never changes when another definition uses the same name.
+
+Reuse is optional. Descriptions are untrusted task data, not installed
+instructions, verified outcomes or permission grants. Historical evidence keeps
+its original inputs and scope. Direct solving remains available; importing or
+running a retained program establishes no claim of improved model performance.
+
+The launch configuration may include `reuse_scopes`, an array of objects with
+`name`, `principal`, `tenant`, `read`, `retain`, `import`, and `disclose_all`.
+Principal and tenant must exactly match the authenticated launch authority.
+Permissions default to no scopes. `disclose_all: true` explicitly permits
+disclosure of the complete code, description and required historical closure in
+that scope. Native embedders may instead supply a disclosure callback. Current
+launch settings govern access after reopen; stored task profiles cannot grant
+reuse permission.
+
+Search scans a bounded selection and limits response bytes. Its
+`coverage: "selected_snapshot"` and truncation fields deliberately do not promise
+complete catalog coverage. Inspection pages the canonical source and authored
+description without activating code. Permission revocation prevents new
+discovery, inspection, retention and import according to the configured grants;
+already imported immutable code remains under ordinary destination custody.
+
+The `BUILD-REUSE` native qualification fixture is a runnable example in
+`test/protean/workspace_reuse_test.zig`. It uses an immutable arithmetic helper
+and a typed adjustment question, deletes the settled source task, reopens,
+imports into a distinct task, and recovers its waiting Work before answering.
+After the repository's native dependency setup, run it with:
+
+```sh
+zig build check-workspace-general -Dworkspace-group=execution -Doptimize=safe
+```

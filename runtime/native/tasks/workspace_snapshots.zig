@@ -92,7 +92,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .bytes = self.assets.manifest.len,
             });
             phase = "records";
-            try validateWorkspaceRecords(self, a, task_id, index.records.items);
+            try validateWorkspaceArchive(self, a, parent.value, index, .records);
         }
         pub fn validateDelegation(
             self: *Self,
@@ -193,6 +193,31 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         ) !void {
             var phase: []const u8 = "task";
             errdefer std.debug.print("workspace records: {s}\n", .{phase});
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var parent = try self.task(a, task_id);
+            defer parent.deinit();
+            phase = "archive records";
+            var index = try store(self).archiveIndex(
+                a,
+                task_id,
+                compilerReference(self.assets.manifest),
+            );
+            index.records = .{ .items = records };
+            try validateWorkspaceArchive(self, a, parent.value, index, .records);
+        }
+        pub fn validateWorkspaceArchive(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            parent: state.Task,
+            manifest: state.Archive,
+            mode: enum {
+                records,
+                inspect,
+                retain,
+            },
+        ) !void {
             var compiler_facts: Compiler.CompilerFacts = .{ .allocator = self.allocator };
             defer compiler_facts.deinit();
             const prior_compiler_facts = self.compiler_facts;
@@ -201,25 +226,15 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var parent = try self.task(a, task_id);
-            defer parent.deinit();
-            phase = "archive records";
-            try validateWorkspaceArchive(self, a, parent.value, records, .records);
-        }
-        pub fn validateWorkspaceArchive(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            parent: state.Task,
-            records: []const state.ArchiveRecord,
-            mode: enum {
-                records,
-                inspect,
-                retain,
-            },
-        ) !void {
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
+            try @import("reuse_preparation.zig").Operations(Types, Self).validateArchiveOrigins(
+                self,
+                a,
+                manifest,
+            );
+            const prior_validation = self.reuse_provenance_validation;
+            self.reuse_provenance_validation = true;
+            defer self.reuse_provenance_validation = prior_validation;
+            const records = manifest.records.items;
             var checked: SnapshotValidation = .{
                 .allocator = a,
                 .observer_successors = .init(self.allocator, parent.id),

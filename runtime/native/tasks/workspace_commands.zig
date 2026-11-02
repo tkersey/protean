@@ -74,6 +74,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         const Observations = @import("workspace_observations.zig").Operations(Types, Self);
         const Observers = @import("workspace_observers.zig").Operations(Types, Self);
         const Programs = @import("workspace_programs.zig").Operations(Types, Self);
+        const Reuse = @import("workspace_reuse.zig").Operations(Types, Self);
+        const Discovery = @import("reuse_discovery.zig").Operations(Types, Self);
         const Publication = @import("workspace_publication.zig").Operations(Types, Self);
         const Replay = @import("workspace_replay.zig").Operations(Types, Self);
         const Snapshots = @import("workspace_snapshots.zig").Operations(Types, Self);
@@ -92,7 +94,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             // authenticate the original model call; this owner enforces custody.
             return workspaceCommandAuthorized(self, a, operation_id, task_id, .{
                 .command = command,
-            });
+            }) catch |err| {
+                if (store(self).fenced or err == error.OutOfMemory or
+                    err == error.StorageUnavailable or command != .program or
+                    (command.program != .retain and command.program != .import)) return err;
+                return workspaceRejection(a, err);
+            };
         }
         fn workspaceCommandAuthorized(
             self: *Self,
@@ -153,9 +160,15 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     return err;
                 return workspaceRejection(a, err);
             };
+            var retain_arena = std.heap.ArenaAllocator.init(a);
+            defer retain_arena.deinit();
+            const execution_allocator = if (command == .program and command.program == .retain)
+                retain_arena.allocator()
+            else
+                a;
             const executed = workspaceExecute(
                 self,
-                a,
+                execution_allocator,
                 operation_id,
                 task_id,
                 admitted,
@@ -191,7 +204,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     return error.CorruptState)
             else
                 null;
-            const program = if (!rejected and command == .program and command.program == .build)
+            const program = if (!rejected and command == .program and
+                (command.program == .build or command.program == .import))
                 try values.fromJson(wc.Ref, a, observation.object.get("program") orelse
                     return error.CorruptState)
             else
@@ -275,6 +289,16 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             program: wc.Program,
         ) !WorkspaceExecution {
             switch (program) {
+                .retain, .import => return .{ .admitted = try executeProgramReuse(
+                    self,
+                    a,
+                    operation_id,
+                    task_id,
+                    program,
+                ) },
+                .find => |request| return .{
+                    .observation = try executeProgramFind(self, a, request, basis),
+                },
                 .adopt => |command_value| return executeProgramAdopt(
                     self,
                     a,
@@ -321,6 +345,35 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     program,
                 ) },
             }
+        }
+        fn executeProgramReuse(
+            self: *Self,
+            a: std.mem.Allocator,
+            operation_id: []const u8,
+            task_id: state.TaskId,
+            program: wc.Program,
+        ) !task_types.Admission {
+            return switch (program) {
+                .retain => |request| Reuse.retain(self, a, operation_id, task_id, request),
+                .import => |request| Reuse.importProgram(self, a, operation_id, task_id, request),
+                else => error.InvalidState,
+            };
+        }
+        fn executeProgramFind(
+            self: *Self,
+            a: std.mem.Allocator,
+            request: wc.Find,
+            basis: ?workspace.ReadObservation,
+        ) !json.Value {
+            return Discovery.find(
+                self,
+                a,
+                request.scope.bytes,
+                request.query.bytes,
+                request.maximum,
+                request.page_bytes,
+                basis,
+            );
         }
         fn executeProgramAdopt(
             self: *Self,
@@ -434,6 +487,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     ),
                 };
             }
+            if (request.target == .retained) return .{ .observation = try Discovery.inspect(
+                self,
+                a,
+                request.target.retained,
+                request.page,
+                basis,
+            ) };
             if (request.target == .semantic_source) {
                 return .{ .observation = try workspaceSemanticSource(
                     self,
@@ -1299,6 +1359,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             defer a.free(bytes);
             var observation =
                 switch (receipt_value.workspace_kind orelse return error.CorruptState) {
+                    .retained, .imported => try Reuse.observation(self, a, admitted, bytes),
                     .controller => try admittedControllerObservation(
                         a,
                         task_id,

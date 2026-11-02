@@ -1311,7 +1311,7 @@ const BuildGraph = struct {
             .name = "protean-recovery-crash",
             .root_module = crash_module,
             .filters = &.{"process-crash-controller-only"},
-            .use_llvm = if (linuxX86(s.b.graph.host)) s.optimize != .debug else null,
+            .use_llvm = if (linuxX86(s.b.graph.host)) false else null,
         });
         crash_probe.step.dependOn(&s.native_guard.step);
         const crash_check = nodeCommand(s.b);

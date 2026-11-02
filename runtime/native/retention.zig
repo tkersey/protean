@@ -22,170 +22,122 @@ fn fixed(comptime size: usize, bytes: []const u8) ![size]u8 {
     if (bytes.len != size) return error.CorruptState;
     return bytes[0..size].*;
 }
-const Audit = struct {
-    a: std.mem.Allocator,
-    store: *storage.Store,
-    handlers: registry.Registry,
-    objects: std.AutoArrayHashMapUnmanaged(Digest, Object) = .empty,
-    edges: std.AutoHashMapUnmanaged(Edge, void) = .empty,
-    images: std.AutoHashMapUnmanaged(Digest, Digest) = .empty,
-    tasks: std.AutoHashMapUnmanaged(state.TaskId, struct {
-        revision: u64,
-        profile: Ref,
-        body: Ref,
-        image: Ref,
-        controller: ?Digest,
-    }) = .empty,
-    records: std.AutoArrayHashMapUnmanaged(Key, Ref) = .empty,
-    recovery_receipts: std.AutoHashMapUnmanaged(Key, void) = .empty,
-    statistics: Statistics = .{},
+fn Audit(comptime Source: type) type {
+    return struct {
+        const Self = @This();
+        a: std.mem.Allocator,
+        source: *Source,
+        handlers: registry.Registry,
+        objects: std.AutoArrayHashMapUnmanaged(Digest, Object) = .empty,
+        edges: std.AutoHashMapUnmanaged(Edge, void) = .empty,
+        images: std.AutoHashMapUnmanaged(Digest, Digest) = .empty,
+        tasks: std.AutoHashMapUnmanaged(state.TaskId, struct {
+            revision: u64,
+            profile: Ref,
+            body: Ref,
+            image: Ref,
+            controller: ?Digest,
+        }) = .empty,
+        records: std.AutoArrayHashMapUnmanaged(Key, Ref) = .empty,
+        recovery_receipts: std.AutoHashMapUnmanaged(Key, void) = .empty,
+        definitions: std.AutoArrayHashMapUnmanaged(Ref, void) = .empty,
+        statistics: Statistics = .{},
 
-    fn add(self: *Audit, ref: Ref) !void {
-        const found = try self.objects.getOrPut(self.a, ref.digest);
-        if (found.found_existing) {
-            if (found.value_ptr.length != ref.bytes) return error.CorruptState;
-        } else found.value_ptr.* = .{ .length = ref.bytes };
-    }
-    fn indexed(self: *Audit, bytes: []const u8) !Ref {
-        const ref = try self.store.objectReference(try fixed(32, bytes), null);
-        try self.add(ref);
-        return ref;
-    }
-    /// Typed bodies are read once and retained only for this pass. Large opaque
-    /// checkpoints/captures are verified in streaming form in finish().
-    fn body(self: *Audit, ref: Ref) ![]const u8 {
-        try self.add(ref);
-        if (self.objects.get(ref.digest).?.body) |bytes| return bytes;
-        const bytes = try self.store.object(self.a, ref, null);
-        self.objects.getPtr(ref.digest).?.body = bytes;
-        return bytes;
-    }
-    fn edge(self: *Audit, parent: Ref, child: Ref) !void {
-        try self.add(parent);
-        try self.add(child);
-        try self.edges.put(self.a, .{ .parent = parent.digest, .child = child.digest }, {});
-    }
-    fn imageIdentity(self: *Audit, ref: Ref) !Digest {
-        try self.add(ref);
-        if (self.images.get(ref.digest)) |identity| return identity;
-        // A saved request belongs to its task's canonical program, independently
-        // of the launching executable. Raw object hashes are not program IDs.
-        const bytes = try self.store.object(self.store.allocator, ref, null);
-        defer self.store.allocator.free(bytes);
-        var decoded = try data.program_image.decode(self.store.allocator, bytes);
-        defer decoded.deinit();
-        try self.images.put(self.a, ref.digest, decoded.identity);
-        return decoded.identity;
-    }
-    fn occurrenceImage(self: *Audit, saved: occurrence.Occurrence) !Digest {
-        var route = try self.record(.execution_route, saved.task, saved.id);
-        defer route.deinit();
-        if (!std.meta.eql(route.value.work, saved.work) or
-            !std.meta.eql(route.value.residual, saved.residual) or
-            !std.meta.eql(route.value.task, saved.task) or
-            !std.meta.eql(route.value.id, saved.id))
-        {
-            return error.CorruptState;
+        fn add(self: *Self, ref: Ref) !void {
+            const found = try self.objects.getOrPut(self.a, ref.digest);
+            if (found.found_existing) {
+                if (found.value_ptr.length != ref.bytes) return error.CorruptState;
+            } else found.value_ptr.* = .{ .length = ref.bytes };
         }
-        var image = self.tasks.get(saved.task).?.image;
-        if (saved.work) |id| {
-            var work = try self.record(.workspace_work, saved.task, id);
-            defer work.deinit();
-            var program = try self.record(
-                .workspace_program,
-                saved.task,
-                try @import("workspace_state.zig").custodyId(
-                    self.a,
-                    saved.task,
-                    work.value.program,
-                ),
-            );
-            defer program.deinit();
-            image = program.value.description.image;
-            if (!std.meta.eql(
-                route.value.delegation,
-                work.value.delegation,
-            )) return error.CorruptState;
-        } else if (route.value.controller) |id| {
-            var cursor = self.tasks.get(saved.task).?.controller;
-            var last_epoch: ?u64 = null;
-            image = found: {
-                while (cursor) |current| {
-                    var binding = try self.record(.controller_binding, saved.task, current);
-                    defer binding.deinit();
-                    if (last_epoch) |epoch| {
-                        if (binding.value.epoch >= epoch) return error.CorruptState;
-                    }
-                    if (std.meta.eql(current, id)) {
-                        var program = try self.record(
-                            .workspace_program,
-                            saved.task,
-                            try @import("workspace_state.zig").custodyId(
-                                self.a,
-                                saved.task,
-                                binding.value.program,
-                            ),
-                        );
-                        defer program.deinit();
-                        if (program.value.description.controller == null or !std.meta.eql(
-                            program.value.description.image,
-                            binding.value.image,
-                        ) or !std.meta.eql(
-                            binding.value.program_identity,
-                            route.value.program_identity,
-                        )) return error.CorruptState;
-                        break :found binding.value.image;
-                    }
-                    last_epoch = binding.value.epoch;
-                    cursor = binding.value.predecessor;
-                }
-                return error.CorruptState;
-            };
+        fn indexed(self: *Self, bytes: []const u8) !Ref {
+            const ref = try self.source.objectReference(try fixed(32, bytes), null);
+            try self.add(ref);
+            return ref;
         }
-        if (!std.meta.eql(image, route.value.image)) return error.CorruptState;
-        const identity = try self.imageIdentity(image);
-        if (!std.meta.eql(identity, route.value.program_identity)) return error.CorruptState;
-        return identity;
-    }
-    fn value(self: *Audit, comptime T: type, parent: Ref, input: T) !void {
-        var sink = struct {
-            audit: *Audit,
-            parent: Ref,
-            pub fn add(this: *@This(), child: Ref) !void {
-                try this.audit.edge(this.parent, child);
-            }
-            pub fn reply(this: *@This(), acquired: occurrence.Acquired) !void {
-                try this.add(try this.audit.store.objectReference(acquired.reply, null));
-            }
-            pub fn observerSource(this: *@This(), ref: state.Reference) !void {
-                try state.visitObserverSource(this.audit.a, this.audit.store, ref, this.audit);
-            }
-        }{ .audit = self, .parent = parent };
-        try state.visitReferences(T, input, &sink);
-    }
-    fn taskRoots(self: *Audit) !void {
-        var rows = try self.store.database.prepare(
-            "SELECT id,revision,terminal,body FROM tasks",
-            &.{},
-        );
-        defer rows.deinit();
-        while (try rows.step() == .row) {
-            const id = try fixed(16, try rows.bytes(0));
-            const ref = try self.indexed(try rows.bytes(3));
-            var decoded = try contracts.decodeOwned(
-                state.Task,
-                self.store.allocator,
-                try self.body(ref),
-            );
+        /// Typed bodies are read once and retained only for this pass. Large opaque
+        /// checkpoints/captures are verified in streaming form in finish().
+        fn body(self: *Self, ref: Ref) ![]const u8 {
+            try self.add(ref);
+            if (self.objects.get(ref.digest).?.body) |bytes| return bytes;
+            const bytes = try self.source.object(self.a, ref, null);
+            self.objects.getPtr(ref.digest).?.body = bytes;
+            return bytes;
+        }
+        fn edge(self: *Self, parent: Ref, child: Ref) !void {
+            try self.add(parent);
+            try self.add(child);
+            try self.edges.put(self.a, .{ .parent = parent.digest, .child = child.digest }, {});
+        }
+        pub fn imageIdentity(self: *Self, ref: Ref) !Digest {
+            try self.add(ref);
+            if (self.images.get(ref.digest)) |identity| return identity;
+            // A saved request belongs to its task's canonical program, independently
+            // of the launching executable. Raw object hashes are not program IDs.
+            const bytes = try self.source.object(self.source.allocator, ref, null);
+            defer self.source.allocator.free(bytes);
+            var decoded = try data.program_image.decode(self.source.allocator, bytes);
             defer decoded.deinit();
-            const task = decoded.value;
-            if (!same(&task.id, &id) or
-                task.revision != try rows.integer(1) or
-                @intFromBool(task.terminal()) != try rows.integer(2))
-            {
-                return error.CorruptState;
+            try self.images.put(self.a, ref.digest, decoded.identity);
+            return decoded.identity;
+        }
+        fn occurrenceImage(self: *Self, saved: occurrence.Occurrence) !Digest {
+            return @import("archived_routes.zig").resolve(
+                self,
+                self.tasks.get(saved.task).?,
+                saved,
+            );
+        }
+        fn value(self: *Self, comptime T: type, parent: Ref, input: T) !void {
+            var sink = struct {
+                audit: *Self,
+                parent: Ref,
+                pub fn add(this: *@This(), child: Ref) !void {
+                    try this.audit.edge(this.parent, child);
+                }
+                pub fn reply(this: *@This(), acquired: occurrence.Acquired) !void {
+                    try this.add(try this.audit.source.objectReference(acquired.reply, null));
+                }
+                pub fn observerSource(this: *@This(), ref: state.Reference) !void {
+                    try state.visitObserverSource(this.audit.a, this.audit.source, ref, this.audit);
+                }
+                pub fn reuseDefinition(this: *@This(), ref: state.Reference) !void {
+                    try state.visitReuseDefinition(
+                        this.audit.a,
+                        this.audit.source,
+                        ref,
+                        this.audit,
+                    );
+                }
+            }{ .audit = self, .parent = parent };
+            try state.visitReferences(T, input, &sink);
+        }
+        fn taskRoots(self: *Self) !void {
+            var rows = try self.source.database.prepare(
+                "SELECT id,revision,terminal,body FROM tasks",
+                &.{},
+            );
+            defer rows.deinit();
+            while (try rows.step() == .row) {
+                const id = try fixed(16, try rows.bytes(0));
+                const ref = try self.indexed(try rows.bytes(3));
+                var decoded = try contracts.decodeOwned(
+                    state.Task,
+                    self.source.allocator,
+                    try self.body(ref),
+                );
+                defer decoded.deinit();
+                const task = decoded.value;
+                if (!same(&task.id, &id) or
+                    task.revision != try rows.integer(1) or
+                    @intFromBool(task.terminal()) != try rows.integer(2))
+                {
+                    return error.CorruptState;
+                }
+                try self.taskValue(ref, task);
             }
-            try self.tasks.put(self.a, id, .{
+        }
+        fn taskValue(self: *Self, ref: Ref, task: state.Task) !void {
+            try self.tasks.put(self.a, task.id, .{
                 .revision = task.revision,
                 .profile = task.profile,
                 .body = ref,
@@ -194,26 +146,35 @@ const Audit = struct {
             });
             try self.value(state.Task, ref, task);
         }
-    }
-    fn recordRoots(self: *Audit) !void {
-        var rows = try self.store.database.prepare("SELECT kind,id,task,body FROM records", &.{});
-        defer rows.deinit();
-        while (try rows.step() == .row) {
-            const kind = std.meta.stringToEnum(
-                storage.RecordKind,
-                try rows.bytes(0),
-            ) orelse return error.CorruptState;
-            const id = try fixed(32, try rows.bytes(1));
-            const task = try fixed(16, try rows.bytes(2));
-            if (!self.tasks.contains(task)) return error.CorruptState;
-            const ref = try self.indexed(try rows.bytes(3));
-            try self.records.put(self.a, .{ .kind = kind, .task = task, .id = id }, ref);
+        fn recordRoots(self: *Self) !void {
+            var rows = try self.source.database.prepare(
+                "SELECT kind,id,task,body FROM records",
+                &.{},
+            );
+            defer rows.deinit();
+            while (try rows.step() == .row) {
+                const kind = std.meta.stringToEnum(
+                    storage.RecordKind,
+                    try rows.bytes(0),
+                ) orelse return error.CorruptState;
+                try self.recordValue(.{
+                    .kind = kind,
+                    .id = try fixed(32, try rows.bytes(1)),
+                    .task = try fixed(16, try rows.bytes(2)),
+                }, try self.indexed(try rows.bytes(3)));
+            }
+        }
+        fn recordValue(self: *Self, key: Key, ref: Ref) !void {
+            if (!self.tasks.contains(key.task)) return error.CorruptState;
+            const entry = try self.records.getOrPut(self.a, key);
+            if (entry.found_existing) return error.CorruptState;
+            entry.value_ptr.* = ref;
             inline for (@typeInfo(storage.RecordKind).@"enum".field_names) |name| {
-                if (kind == @field(storage.RecordKind, name)) {
+                if (key.kind == @field(storage.RecordKind, name)) {
                     const T = storage.Record(name);
                     var decoded = try contracts.decodeOwned(
                         T,
-                        self.store.allocator,
+                        self.source.allocator,
                         try self.body(ref),
                     );
                     defer decoded.deinit();
@@ -223,79 +184,80 @@ const Audit = struct {
                     else
                         item.task;
                     const bound_id = if (T == state.Capture) item.attempt else item.id;
-                    if (!same(&bound_task, &task) or
-                        !same(&bound_id, &id))
-                    {
+                    if (!same(&bound_task, &key.task) or !same(&bound_id, &key.id))
                         return error.CorruptState;
-                    }
                     try self.value(T, ref, item);
                     if (T == state.Reconciliation) try state.visitReconciliationHistory(
                         self.a,
-                        self.store,
+                        self.source,
                         item,
                         self,
                     );
                 }
             }
         }
-    }
-    fn otherRoots(self: *Audit) !void {
-        try self.eventRoots();
-        try self.receiptRoots();
-    }
-    fn eventRoots(self: *Audit) !void {
-        var rows = try self.store.database.prepare(
-            "SELECT task,seq,revision,body FROM events",
-            &.{},
-        );
-        defer rows.deinit();
-        while (try rows.step() == .row) {
-            const task = try fixed(16, try rows.bytes(0));
+        fn otherRoots(self: *Self) !void {
+            try self.eventRoots();
+            try self.receiptRoots();
+        }
+        fn eventRoots(self: *Self) !void {
+            var rows = try self.source.database.prepare(
+                "SELECT task,seq,revision,body FROM events",
+                &.{},
+            );
+            defer rows.deinit();
+            while (try rows.step() == .row) {
+                try self.eventValue(
+                    try fixed(16, try rows.bytes(0)),
+                    std.math.cast(u64, try rows.integer(1)) orelse return error.CorruptState,
+                    std.math.cast(u64, try rows.integer(2)) orelse return error.CorruptState,
+                    try self.indexed(try rows.bytes(3)),
+                );
+            }
+        }
+        fn eventValue(self: *Self, task: state.TaskId, seq: u64, revision: u64, ref: Ref) !void {
             const owner = self.tasks.get(task) orelse return error.CorruptState;
-            const ref = try self.indexed(try rows.bytes(3));
             var decoded = try contracts.decodeOwned(
                 state.Event,
-                self.store.allocator,
+                self.source.allocator,
                 try self.body(ref),
             );
             defer decoded.deinit();
             const event = decoded.value;
-            if (!same(&event.task, &task) or
-                event.seq != try rows.integer(1) or
-                event.revision != try rows.integer(
-                    2,
-                ) or event.revision > owner.revision) return error.CorruptState;
+            if (!same(&event.task, &task) or event.seq != seq or event.revision != revision or
+                event.revision > owner.revision) return error.CorruptState;
             try self.value(state.Event, ref, event);
-            try state.visitWorkspaceEvent(self.a, self.store, ref, event, self);
+            try state.visitWorkspaceEvent(self.a, self.source, ref, event, self);
         }
-    }
-    fn receiptRoots(self: *Audit) !void {
-        var rows = try self.store.database.prepare(
-            "SELECT task,request,receipt FROM operations",
-            &.{},
-        );
-        defer rows.deinit();
-        while (try rows.step() == .row) {
-            const task = try fixed(16, try rows.bytes(0));
+        fn receiptRoots(self: *Self) !void {
+            var rows = try self.source.database.prepare(
+                "SELECT task,request,receipt FROM operations",
+                &.{},
+            );
+            defer rows.deinit();
+            while (try rows.step() == .row) {
+                try self.receiptValue(
+                    try fixed(16, try rows.bytes(0)),
+                    try fixed(32, try rows.bytes(1)),
+                    try self.indexed(try rows.bytes(2)),
+                );
+            }
+        }
+        fn receiptValue(self: *Self, task: state.TaskId, request: Digest, ref: Ref) !void {
             const owner = self.tasks.get(task) orelse return error.CorruptState;
-            const request = try fixed(32, try rows.bytes(1));
-            const ref = try self.indexed(try rows.bytes(2));
             var decoded = try contracts.decodeOwned(
                 state.Receipt,
-                self.store.allocator,
+                self.source.allocator,
                 try self.body(ref),
             );
             defer decoded.deinit();
             const receipt = decoded.value;
-            if (!same(&receipt.task, &task) or !same(
-                &receipt.request_digest,
-                &request,
-            ) or receipt.revision > owner.revision) return error.CorruptState;
+            if (!same(&receipt.task, &task) or !same(&receipt.request_digest, &request) or
+                receipt.revision > owner.revision) return error.CorruptState;
             try self.value(state.Receipt, ref, receipt);
-            try state.visitWorkspaceReceipt(self.a, self.store, receipt, self);
-            if ((receipt.method == .reconcile) != (receipt.reconciliation != null)) {
+            try state.visitWorkspaceReceipt(self.a, self.source, receipt, self);
+            if ((receipt.method == .reconcile) != (receipt.reconciliation != null))
                 return error.CorruptState;
-            }
             if (receipt.reconciliation) |id| {
                 var recovery = try self.record(.reconciliation, task, id);
                 defer recovery.deinit();
@@ -313,470 +275,598 @@ const Audit = struct {
                 }, {});
             }
         }
-    }
-    pub fn typed(self: *Audit, comptime T: type, parent: Ref, input: T) !void {
-        try self.value(T, parent, input);
-    }
-    fn record(
-        self: *Audit,
-        comptime kind: storage.RecordKind,
-        task: state.TaskId,
-        id: Digest,
-    ) !contracts.Decoded(storage.Record(@tagName(kind))) {
-        const ref = self.records.get(.{
-            .kind = kind,
-            .task = task,
-            .id = id,
-        }) orelse return error.CorruptState;
-        return contracts.decodeOwned(
-            storage.Record(@tagName(kind)),
-            self.store.allocator,
-            try self.body(ref),
-        );
-    }
-    fn projections(self: *Audit) !void {
-        for (self.records.keys()) |key| {
-            if (key.kind == .capture) try self.captureProjection(key);
+        pub fn typed(self: *Self, comptime T: type, parent: Ref, input: T) !void {
+            if (T == @import("reuse_state.zig").Definition)
+                try self.definitions.put(self.a, parent, {});
+            try self.value(T, parent, input);
         }
-    }
-    fn captureProjection(self: *Audit, key: Key) !void {
-        var decoded = try self.record(.capture, key.task, key.id);
-        defer decoded.deinit();
-        const capture = decoded.value;
-        if (capture.reconciliation) |id| if (!self.records.contains(.{
-            .kind = .reconciliation,
-            .task = key.task,
-            .id = id,
-        })) return error.CorruptState;
-        var attempt = try self.record(.attempt, key.task, capture.attempt);
-        defer attempt.deinit();
-        var saved = try self.record(.occurrence, key.task, capture.occurrence);
-        defer saved.deinit();
-        const owner = self.tasks.get(key.task).?;
-        if (!same(
-            &attempt.value.occurrence,
-            &capture.occurrence,
-        ) or attempt.value.prepared == null or
-            !std.meta.eql(attempt.value.prepared.?, capture.request) or
-            !std.meta.eql(attempt.value.profile, owner.profile) or
-            !std.meta.eql(
-                attempt.value.request,
-                saved.value.request_object,
-            )) return error.CorruptState;
-        var request = try data.invocation.decode(
-            data.invocation.Request,
-            self.store.allocator,
-            try self.body(attempt.value.request),
-        );
-        defer request.deinit();
-        if (!same(
-            &request.value.request_identity,
-            &saved.value.request,
-        )) return error.CorruptState;
-        const entry = try self.handlers.resolve(
-            request.value,
-            try self.occurrenceImage(saved.value),
-        );
-        if (!same(
-            entry.declaration.identity,
-            attempt.value.capability.bytes,
-        ) or entry.declaration.inference != attempt.value.inference) return error.CorruptState;
-        if (attempt.value.operation == .workspace_build) {
-            if (entry.declaration.kind != .workspace or
-                attempt.value.inference or
-                saved.value.work != null or
-                (capture.disposition == .complete) != (capture.response != null))
-            {
-                return error.CorruptState;
+        fn catalogRoots(self: *Self) !void {
+            var rows = try self.source.database.prepare(
+                "SELECT scope,body FROM reuse_definitions",
+                &.{},
+            );
+            defer rows.deinit();
+            while (try rows.step() == .row) {
+                const ref = try self.indexed(try rows.bytes(1));
+                const T = @import("reuse_state.zig").Definition;
+                var decoded = try contracts.decodeOwned(
+                    T,
+                    self.source.allocator,
+                    try self.body(ref),
+                );
+                defer decoded.deinit();
+                if (!same(try rows.bytes(0), decoded.value.scope.bytes)) return error.CorruptState;
+                try self.typed(T, ref, decoded.value);
             }
-            if (capture.projection) |projection| if (projection.objects.items.len != 0 or
-                projection.output_tokens != null) return error.CorruptState;
-            return;
         }
-        const adapter = entry.declaration.capture orelse return error.CorruptState;
-        if ((capture.disposition == .complete) != (capture.response != null)) {
-            return error.CorruptState;
+        fn archiveRoots(self: *Self, archive: state.Archive) !state.TaskId {
+            self.tasks.clearRetainingCapacity();
+            self.records.clearRetainingCapacity();
+            self.recovery_receipts.clearRetainingCapacity();
+            var parent = try contracts.decodeOwned(
+                state.Task,
+                self.source.allocator,
+                try self.body(archive.task),
+            );
+            defer parent.deinit();
+            const task = parent.value.id;
+            try self.taskValue(archive.task, parent.value);
+            for (archive.records.items) |row| try self.recordValue(.{
+                .kind = std.meta.stringToEnum(storage.RecordKind, @tagName(row.kind)) orelse
+                    return error.CorruptState,
+                .task = task,
+                .id = row.id,
+            }, row.body);
+            for (archive.events.items) |row|
+                try self.eventValue(task, row.seq, row.revision, row.body);
+            for (archive.operations.items) |row| try self.receiptValue(task, row.request, row.body);
+            try self.projections();
+            return task;
         }
-        // Raw capture is durable before interpretation, including a response
-        // that the pure interpreter will reject. Its bytes remain opaque.
-        const projection = capture.projection orelse return;
-        if (capture.disposition != .complete or
-            capture.response == null)
-        {
-            return error.CorruptState;
-        }
-        try self.projectionDependencies(adapter, projection);
-    }
-    fn projectionDependencies(
-        self: *Audit,
-        adapter: registry.CaptureAdapter,
-        projection: @typeInfo(@FieldType(state.Capture, "projection")).optional.child,
-    ) !void {
-        const objects = try self.a.alloc([]const u8, projection.objects.items.len);
-        var parents: std.AutoHashMapUnmanaged(Digest, u64) = .empty;
-        for (objects, projection.objects.items) |*bytes, ref| {
-            bytes.* = try self.body(ref);
-            try parents.put(self.a, ref.digest, ref.bytes);
-        }
-        const edges = try adapter.dependencies(self.a, objects);
-        for (edges) |dependency| {
-            if ((parents.get(
-                dependency.parent.digest,
-            ) orelse return error.InvalidProjection) != dependency.parent.bytes) {
-                return error.InvalidProjection;
+        fn retainedOrigins(self: *Self, comptime check_recovery: bool) !void {
+            var index: usize = 0;
+            while (index < self.definitions.count()) : (index += 1) {
+                const ref = self.definitions.keys()[index];
+                const T = @import("reuse_state.zig").Definition;
+                var decoded = try contracts.decodeOwned(
+                    T,
+                    self.source.allocator,
+                    try self.body(ref),
+                );
+                defer decoded.deinit();
+                if (decoded.value.version != 1) return error.UnsupportedCapability;
+                try @import("reuse_state.zig").validateConstruction(self.a, decoded.value);
+                const task = try self.archiveRoots(decoded.value.origin);
+                if (!std.meta.eql(task, decoded.value.source_task)) return error.CorruptState;
+                if (check_recovery) try self.reconciliations();
             }
-            try self.edge(dependency.parent, dependency.child);
         }
-    }
-    fn reconciliations(self: *Audit) !void {
-        var pending_owners = std.AutoHashMap(Key, void).init(self.a);
-        defer pending_owners.deinit();
-        for (self.records.keys()) |key| {
-            if (key.kind == .reconciliation) try self.reconciliation(key, &pending_owners);
+        pub fn record(
+            self: *Self,
+            comptime kind: storage.RecordKind,
+            task: state.TaskId,
+            id: Digest,
+        ) !contracts.Decoded(storage.Record(@tagName(kind))) {
+            const ref = self.records.get(.{
+                .kind = kind,
+                .task = task,
+                .id = id,
+            }) orelse return error.CorruptState;
+            return contracts.decodeOwned(
+                storage.Record(@tagName(kind)),
+                self.source.allocator,
+                try self.body(ref),
+            );
         }
-    }
-    fn reconciliation(self: *Audit, key: Key, pending_owners: *std.AutoHashMap(Key, void)) !void {
-        if (!self.recovery_receipts.contains(key)) return error.CorruptState;
-        var decoded = try self.record(.reconciliation, key.task, key.id);
-        defer decoded.deinit();
-        const item = decoded.value;
-        const owner = self.tasks.get(key.task).?;
-        var task = try contracts.decodeOwned(
-            state.Task,
-            self.store.allocator,
-            try self.body(owner.body),
-        );
-        defer task.deinit();
-        try self.reconciliationOwner(key, item, owner, task.value);
-        var occurrence_value = try self.record(.occurrence, key.task, item.occurrence);
-        defer occurrence_value.deinit();
-        if (!std.meta.eql(
-            occurrence_value.value.request_object,
-            item.request,
-        )) return error.CorruptState;
-        var request = try data.invocation.decode(
-            data.invocation.Request,
-            self.store.allocator,
-            try self.body(item.request),
-        );
-        defer request.deinit();
-        if (!std.meta.eql(
-            request.value.request_identity,
-            occurrence_value.value.request,
-        )) return error.CorruptState;
-        const image = try self.occurrenceImage(occurrence_value.value);
-        const entry = try self.handlers.resolve(request.value, image);
-        if (!same(entry.declaration.identity, item.capability.bytes)) return error.CorruptState;
-        try recoveryMechanism(item, entry);
-        try self.reconciliationOutcome(
-            key,
-            item,
-            task.value,
-            occurrence_value.value,
-            entry,
-            pending_owners,
-        );
-        if (item.provenance == .authentic or item.provenance == .authoritative) {
-            try self.recoveryEvidence(key, item, task.value, request.value, entry, image);
+        fn projections(self: *Self) !void {
+            for (self.records.keys()) |key| {
+                if (key.kind == .capture) try self.captureProjection(key);
+            }
         }
-    }
-    fn reconciliationOwner(
-        self: *Audit,
-        key: Key,
-        item: state.Reconciliation,
-        owner: anytype,
-        task: state.Task,
-    ) !void {
-        if (item.admission_revision > owner.revision or !std.meta.eql(
-            item.profile,
-            owner.profile,
-        ) or
-            item.resources.items.len != task.resources.items.len) return error.CorruptState;
-        for (item.resources.items, task.resources.items) |actual, expected| if (!std.meta.eql(
-            actual,
-            expected,
-        )) return error.CorruptState;
-        if (!std.meta.eql(
-            self.records.get(.{
-                .kind = .attempt,
+        fn captureProjection(self: *Self, key: Key) !void {
+            var decoded = try self.record(.capture, key.task, key.id);
+            defer decoded.deinit();
+            const capture = decoded.value;
+            if (capture.reconciliation) |id| if (!self.records.contains(.{
+                .kind = .reconciliation,
                 .task = key.task,
-                .id = item.attempt,
-            }) orelse return error.CorruptState,
-            item.original_attempt,
-        )) return error.CorruptState;
-    }
-    fn recoveryMechanism(item: state.Reconciliation, entry: registry.Entry) !void {
-        if (item.provenance != .none or item.owner_epoch != null) {
-            const adapter = entry.declaration.recovery orelse return error.CorruptState;
+                .id = id,
+            })) return error.CorruptState;
+            var attempt = try self.record(.attempt, key.task, capture.attempt);
+            defer attempt.deinit();
+            var saved = try self.record(.occurrence, key.task, capture.occurrence);
+            defer saved.deinit();
+            const owner = self.tasks.get(key.task).?;
             if (!same(
-                adapter.identity,
-                item.mechanism.bytes,
-            ) or adapter.version != item.mechanism_version) return error.CorruptState;
-            if (item.selection == .lookup and adapter.lookup == null) return error.CorruptState;
-            if (item.selection == .rederive and
-                adapter.rederive == null)
+                &attempt.value.occurrence,
+                &capture.occurrence,
+            ) or attempt.value.prepared == null or
+                !std.meta.eql(attempt.value.prepared.?, capture.request) or
+                !std.meta.eql(attempt.value.profile, owner.profile) or
+                !std.meta.eql(
+                    attempt.value.request,
+                    saved.value.request_object,
+                )) return error.CorruptState;
+            var request = try data.invocation.decode(
+                data.invocation.Request,
+                self.source.allocator,
+                try self.body(attempt.value.request),
+            );
+            defer request.deinit();
+            if (!same(
+                &request.value.request_identity,
+                &saved.value.request,
+            )) return error.CorruptState;
+            const entry = try self.handlers.resolve(
+                request.value,
+                try self.occurrenceImage(saved.value),
+            );
+            if (!same(
+                entry.declaration.identity,
+                attempt.value.capability.bytes,
+            ) or entry.declaration.inference != attempt.value.inference) return error.CorruptState;
+            if (attempt.value.operation == .workspace_build) {
+                if (entry.declaration.kind != .workspace or
+                    attempt.value.inference or
+                    saved.value.work != null or
+                    (capture.disposition == .complete) != (capture.response != null))
+                {
+                    return error.CorruptState;
+                }
+                if (capture.projection) |projection| if (projection.objects.items.len != 0 or
+                    projection.output_tokens != null) return error.CorruptState;
+                return;
+            }
+            const adapter = entry.declaration.capture orelse return error.CorruptState;
+            if ((capture.disposition == .complete) != (capture.response != null)) {
+                return error.CorruptState;
+            }
+            // Raw capture is durable before interpretation, including a response
+            // that the pure interpreter will reject. Its bytes remain opaque.
+            const projection = capture.projection orelse return;
+            if (capture.disposition != .complete or
+                capture.response == null)
             {
                 return error.CorruptState;
             }
+            try self.projectionDependencies(adapter, projection);
         }
-    }
-    fn reconciliationOutcome(
-        self: *Audit,
-        key: Key,
-        item: state.Reconciliation,
-        task: state.Task,
-        saved: occurrence.Occurrence,
-        entry: registry.Entry,
-        pending_owners: *std.AutoHashMap(Key, void),
-    ) !void {
-        switch (item.outcome) {
-            .pending => try self.pendingReconciliation(key, item, task, saved, pending_owners),
-            .not_sent => {},
-            .unresolved => {},
-            .capture_admitted => |ref| try self.admittedCapture(key, item, saved, ref),
-            .reply_settled => |ref| try self.settledReply(key, item, saved, entry, ref),
+        fn projectionDependencies(
+            self: *Self,
+            adapter: registry.CaptureAdapter,
+            projection: @typeInfo(@FieldType(state.Capture, "projection")).optional.child,
+        ) !void {
+            const objects = try self.a.alloc([]const u8, projection.objects.items.len);
+            var parents: std.AutoHashMapUnmanaged(Digest, u64) = .empty;
+            for (objects, projection.objects.items) |*bytes, ref| {
+                bytes.* = try self.body(ref);
+                try parents.put(self.a, ref.digest, ref.bytes);
+            }
+            const edges = try adapter.dependencies(self.a, objects);
+            for (edges) |dependency| {
+                if ((parents.get(
+                    dependency.parent.digest,
+                ) orelse return error.InvalidProjection) != dependency.parent.bytes) {
+                    return error.InvalidProjection;
+                }
+                try self.edge(dependency.parent, dependency.child);
+            }
         }
-    }
-    fn pendingReconciliation(
-        self: *Audit,
-        key: Key,
-        item: state.Reconciliation,
-        task: state.Task,
-        saved: occurrence.Occurrence,
-        pending_owners: *std.AutoHashMap(Key, void),
-    ) !void {
-        if (saved.state != .unknown or !std.meta.eql(
-            saved.state.unknown.id,
-            item.attempt,
-        )) return error.CorruptState;
-        if (saved.residual) |id| {
-            var residual = try self.record(.controller_residual, key.task, id);
-            defer residual.deinit();
+        fn reconciliations(self: *Self) !void {
+            var pending_owners = std.AutoHashMap(Key, void).init(self.a);
+            defer pending_owners.deinit();
+            for (self.records.keys()) |key| {
+                if (key.kind == .reconciliation) try self.reconciliation(key, &pending_owners);
+            }
+        }
+        fn reconciliation(
+            self: *Self,
+            key: Key,
+            pending_owners: *std.AutoHashMap(Key, void),
+        ) !void {
+            if (!self.recovery_receipts.contains(key)) return error.CorruptState;
+            var decoded = try self.record(.reconciliation, key.task, key.id);
+            defer decoded.deinit();
+            const item = decoded.value;
+            const owner = self.tasks.get(key.task).?;
+            var task = try contracts.decodeOwned(
+                state.Task,
+                self.source.allocator,
+                try self.body(owner.body),
+            );
+            defer task.deinit();
+            try self.reconciliationOwner(key, item, owner, task.value);
+            var occurrence_value = try self.record(.occurrence, key.task, item.occurrence);
+            defer occurrence_value.deinit();
             if (!std.meta.eql(
-                residual.value.current_occurrence,
+                occurrence_value.value.request_object,
+                item.request,
+            )) return error.CorruptState;
+            var request = try data.invocation.decode(
+                data.invocation.Request,
+                self.source.allocator,
+                try self.body(item.request),
+            );
+            defer request.deinit();
+            if (!std.meta.eql(
+                request.value.request_identity,
+                occurrence_value.value.request,
+            )) return error.CorruptState;
+            const image = try self.occurrenceImage(occurrence_value.value);
+            const entry = try self.handlers.resolve(request.value, image);
+            if (!same(entry.declaration.identity, item.capability.bytes)) return error.CorruptState;
+            try recoveryMechanism(item, entry);
+            try self.reconciliationOutcome(
+                key,
+                item,
+                task.value,
+                occurrence_value.value,
+                entry,
+                pending_owners,
+            );
+            if (item.provenance == .authentic or item.provenance == .authoritative) {
+                try self.recoveryEvidence(key, item, task.value, request.value, entry, image);
+            }
+        }
+        fn reconciliationOwner(
+            self: *Self,
+            key: Key,
+            item: state.Reconciliation,
+            owner: anytype,
+            task: state.Task,
+        ) !void {
+            if (item.admission_revision > owner.revision or !std.meta.eql(
+                item.profile,
+                owner.profile,
+            ) or
+                item.resources.items.len != task.resources.items.len) return error.CorruptState;
+            for (item.resources.items, task.resources.items) |actual, expected| if (!std.meta.eql(
+                actual,
+                expected,
+            )) return error.CorruptState;
+            if (!std.meta.eql(
+                self.records.get(.{
+                    .kind = .attempt,
+                    .task = key.task,
+                    .id = item.attempt,
+                }) orelse return error.CorruptState,
+                item.original_attempt,
+            )) return error.CorruptState;
+        }
+        fn recoveryMechanism(item: state.Reconciliation, entry: registry.Entry) !void {
+            if (item.provenance != .none or item.owner_epoch != null) {
+                const adapter = entry.declaration.recovery orelse return error.CorruptState;
+                if (!same(
+                    adapter.identity,
+                    item.mechanism.bytes,
+                ) or adapter.version != item.mechanism_version) return error.CorruptState;
+                if (item.selection == .lookup and adapter.lookup == null) return error.CorruptState;
+                if (item.selection == .rederive and
+                    adapter.rederive == null)
+                {
+                    return error.CorruptState;
+                }
+            }
+        }
+        fn reconciliationOutcome(
+            self: *Self,
+            key: Key,
+            item: state.Reconciliation,
+            task: state.Task,
+            saved: occurrence.Occurrence,
+            entry: registry.Entry,
+            pending_owners: *std.AutoHashMap(Key, void),
+        ) !void {
+            switch (item.outcome) {
+                .pending => try self.pendingReconciliation(key, item, task, saved, pending_owners),
+                .not_sent => {},
+                .unresolved => {},
+                .capture_admitted => |ref| try self.admittedCapture(key, item, saved, ref),
+                .reply_settled => |ref| try self.settledReply(key, item, saved, entry, ref),
+            }
+        }
+        fn pendingReconciliation(
+            self: *Self,
+            key: Key,
+            item: state.Reconciliation,
+            task: state.Task,
+            saved: occurrence.Occurrence,
+            pending_owners: *std.AutoHashMap(Key, void),
+        ) !void {
+            if (saved.state != .unknown or !std.meta.eql(
+                saved.state.unknown.id,
+                item.attempt,
+            )) return error.CorruptState;
+            if (saved.residual) |id| {
+                var residual = try self.record(.controller_residual, key.task, id);
+                defer residual.deinit();
+                if (!std.meta.eql(
+                    residual.value.current_occurrence,
+                    item.occurrence,
+                )) return error.CorruptState;
+            } else if (task.current_occurrence == null or !std.meta.eql(
+                task.current_occurrence.?,
                 item.occurrence,
             )) return error.CorruptState;
-        } else if (task.current_occurrence == null or !std.meta.eql(
-            task.current_occurrence.?,
-            item.occurrence,
-        )) return error.CorruptState;
-        const owner_key: Key = .{
-            .kind = .occurrence,
-            .task = key.task,
-            .id = item.occurrence,
-        };
-        if ((try pending_owners.getOrPut(
-            owner_key,
-        )).found_existing) return error.CorruptState;
-    }
-    fn admittedCapture(
-        self: *Audit,
-        key: Key,
-        item: state.Reconciliation,
-        saved: occurrence.Occurrence,
-        ref: Ref,
-    ) !void {
-        const pending = saved.state;
-        if (pending != .captured or !std.meta.eql(
-            pending.captured.id,
-            item.attempt,
-        )) return error.CorruptState;
-        var capture = try self.record(.capture, key.task, item.attempt);
-        defer capture.deinit();
-        if (capture.value.reconciliation == null or !std.meta.eql(
-            capture.value.reconciliation.?,
-            key.id,
-        ) or capture.value.response == null or !std.meta.eql(
-            capture.value.response.?,
-            ref,
-        ) or capture.value.projection != null) return error.CorruptState;
-    }
-    fn settledReply(
-        self: *Audit,
-        key: Key,
-        item: state.Reconciliation,
-        saved: occurrence.Occurrence,
-        entry: registry.Entry,
-        ref: Ref,
-    ) !void {
-        const acquired = switch (saved.state) {
-            .settled_reply => |reply| reply,
-            .admitted => |admitted| if (admitted == .reply)
-                admitted.reply
-            else
-                return error.CorruptState,
-            else => return error.CorruptState,
-        };
-        if (!std.meta.eql(acquired.attempt, item.attempt) or !std.meta.eql(
-            acquired.reply,
-            ref.digest,
-        )) return error.CorruptState;
-        if (entry.declaration.capture != null) {
+            const owner_key: Key = .{
+                .kind = .occurrence,
+                .task = key.task,
+                .id = item.occurrence,
+            };
+            if ((try pending_owners.getOrPut(
+                owner_key,
+            )).found_existing) return error.CorruptState;
+        }
+        fn admittedCapture(
+            self: *Self,
+            key: Key,
+            item: state.Reconciliation,
+            saved: occurrence.Occurrence,
+            ref: Ref,
+        ) !void {
+            const pending = saved.state;
+            if (pending != .captured or !std.meta.eql(
+                pending.captured.id,
+                item.attempt,
+            )) return error.CorruptState;
             var capture = try self.record(.capture, key.task, item.attempt);
             defer capture.deinit();
             if (capture.value.reconciliation == null or !std.meta.eql(
                 capture.value.reconciliation.?,
                 key.id,
-            ) or capture.value.projection == null or !std.meta.eql(
-                capture.value.projection.?.reply,
+            ) or capture.value.response == null or !std.meta.eql(
+                capture.value.response.?,
                 ref,
-            ) or item.previous == null) return error.CorruptState;
+            ) or capture.value.projection != null) return error.CorruptState;
         }
-    }
-    fn recoveryEvidence(
-        self: *Audit,
-        key: Key,
-        item: state.Reconciliation,
-        task: state.Task,
-        request: data.invocation.Request,
-        entry: registry.Entry,
-        image: Digest,
-    ) !void {
-        const evidence = try self.body(item.evidence orelse return error.CorruptState);
-        const input = registry.RecoveryInput.fromReconciliation(
-            item,
-            request.request_identity,
-            entry.declaration.inference,
-        );
-        var binding: registry.ProjectionBinding = .{
-            .task = key.task,
-            .tenant = task.tenant.bytes,
-            .profile = try self.body(item.profile),
-            .application = try self.imageIdentity(task.image),
-            .execution = image,
-            .resources = item.resources.items,
-        };
-        var route = try self.record(.execution_route, key.task, item.occurrence);
-        defer route.deinit();
-        try self.recoveryRoute(key, item, route.value, &binding);
-        const finding = try self.store.project(
-            registry.RecoveryFinding,
-            self.a,
-            self.handlers,
-            binding,
-            struct {
-                handlers: registry.Registry,
-                input: registry.RecoveryInput,
-                evidence: []const u8,
-                pub fn run(
-                    this: @This(),
-                    ctx: registry.ProjectionContext,
-                ) !registry.RecoveryFinding {
-                    return this.handlers.verifyRecovery(ctx, this.input, this.evidence);
-                }
-            }{ .handlers = self.handlers, .input = input, .evidence = evidence },
-        );
-        try self.recoveryFinding(key, item, finding);
-    }
-    fn recoveryRoute(
-        self: *Audit,
-        key: Key,
-        item: state.Reconciliation,
-        route: storage.Record("execution_route"),
-        binding: *registry.ProjectionBinding,
-    ) !void {
-        if (route.work) |id| {
-            var work = try self.record(.workspace_work, key.task, id);
-            defer work.deinit();
-            if (work.value.trial) |trial_id| {
-                var trial = try self.record(.workspace_trial, key.task, trial_id);
-                defer trial.deinit();
-                binding.trial = .{ .work = id, .view = trial.value.view };
-            }
-        }
-        if (route.work == null and
-            route.residual == null) if (route.interaction) |id|
-        {
-            var interaction = try self.record(.controller_interaction, key.task, id);
-            defer interaction.deinit();
-            var controller = try self.record(
-                .controller_binding,
-                key.task,
-                interaction.value.controller,
-            );
-            defer controller.deinit();
-            if (!std.meta.eql(
-                route.controller,
-                controller.value.id,
-            ) or !std.meta.eql(
-                interaction.value.model,
-                item.occurrence,
-            )) return error.CorruptState;
-            var attempt = try self.record(.attempt, key.task, item.attempt);
-            defer attempt.deinit();
-            const context = attempt.value.controller_context orelse return error.CorruptState;
-            binding.controller = .{
-                .binding = controller.value.id,
-                .epoch = context.epoch,
-                .program = controller.value.program_identity,
-                .overlay = context.overlay,
+        fn settledReply(
+            self: *Self,
+            key: Key,
+            item: state.Reconciliation,
+            saved: occurrence.Occurrence,
+            entry: registry.Entry,
+            ref: Ref,
+        ) !void {
+            const acquired = switch (saved.state) {
+                .settled_reply => |reply| reply,
+                .admitted => |admitted| if (admitted == .reply)
+                    admitted.reply
+                else
+                    return error.CorruptState,
+                else => return error.CorruptState,
             };
-        };
-    }
-    fn recoveryFinding(
-        self: *Audit,
-        key: Key,
-        item: state.Reconciliation,
-        finding: registry.RecoveryFinding,
-    ) !void {
-        if (item.provenance == .authoritative) {
-            if (finding != .not_sent) return error.CorruptState;
-        } else {
-            if (finding != .capture) return error.CorruptState;
-            var captured = try self.record(.capture, key.task, item.attempt);
-            defer captured.deinit();
-            const ref = captured.value.response orelse return error.CorruptState;
-            if (ref.bytes != finding.capture.len or !std.meta.eql(
+            if (!std.meta.eql(acquired.attempt, item.attempt) or !std.meta.eql(
+                acquired.reply,
                 ref.digest,
-                storage.digest(finding.capture),
             )) return error.CorruptState;
-        }
-    }
-    fn finish(self: *Audit) !Statistics {
-        // Compare each derived edge, including both expected lengths. A missing
-        // edge cannot borrow authority from the mere existence of its child.
-        var edges = self.edges.keyIterator();
-        while (edges.next()) |dependency| {
-            var row = try self.store.database.prepare(
-                "SELECT parent_bytes,child_bytes FROM dependencies WHERE parent=? AND child=?",
-                &.{ .{
-                    .blob = &dependency.parent,
-                }, .{ .blob = &dependency.child } },
-            );
-            defer row.deinit();
-            if (try row.step() != .row or
-                try row.integer(0) != self.objects.get(dependency.parent).?.length or
-                try row.integer(1) != self.objects.get(dependency.child).?.length)
-            {
-                return error.CorruptState;
+            if (entry.declaration.capture != null) {
+                var capture = try self.record(.capture, key.task, item.attempt);
+                defer capture.deinit();
+                if (capture.value.reconciliation == null or !std.meta.eql(
+                    capture.value.reconciliation.?,
+                    key.id,
+                ) or capture.value.projection == null or !std.meta.eql(
+                    capture.value.projection.?.reply,
+                    ref,
+                ) or item.previous == null) return error.CorruptState;
             }
         }
-        // Iteration is flat: references are extracted by typed owners above,
-        // without trusting stored edges or recursively chasing a native stack.
-        for (self.objects.keys(), self.objects.values()) |id, object| {
-            if (object.body == null) try self.store.objectRange(.{
-                .digest = id,
-                .bytes = object.length,
-            }, 0, &.{});
-            self.statistics.objects += 1;
-            self.statistics.bytes = try std.math.add(u64, self.statistics.bytes, object.length);
+        fn recoveryEvidence(
+            self: *Self,
+            key: Key,
+            item: state.Reconciliation,
+            task: state.Task,
+            request: data.invocation.Request,
+            entry: registry.Entry,
+            image: Digest,
+        ) !void {
+            const evidence = try self.body(item.evidence orelse return error.CorruptState);
+            const input = registry.RecoveryInput.fromReconciliation(
+                item,
+                request.request_identity,
+                entry.declaration.inference,
+            );
+            var binding: registry.ProjectionBinding = .{
+                .task = key.task,
+                .tenant = task.tenant.bytes,
+                .profile = try self.body(item.profile),
+                .application = try self.imageIdentity(task.image),
+                .execution = image,
+                .resources = item.resources.items,
+            };
+            var route = try self.record(.execution_route, key.task, item.occurrence);
+            defer route.deinit();
+            try self.recoveryRoute(key, item, route.value, &binding);
+            const finding = try self.source.project(
+                registry.RecoveryFinding,
+                self.a,
+                self.handlers,
+                binding,
+                struct {
+                    handlers: registry.Registry,
+                    input: registry.RecoveryInput,
+                    evidence: []const u8,
+                    pub fn run(
+                        this: @This(),
+                        ctx: registry.ProjectionContext,
+                    ) !registry.RecoveryFinding {
+                        return this.handlers.verifyRecovery(ctx, this.input, this.evidence);
+                    }
+                }{ .handlers = self.handlers, .input = input, .evidence = evidence },
+            );
+            try self.recoveryFinding(key, item, finding);
         }
-        self.statistics.edges = self.edges.count();
-        return self.statistics;
-    }
-};
+        fn recoveryRoute(
+            self: *Self,
+            key: Key,
+            item: state.Reconciliation,
+            route: storage.Record("execution_route"),
+            binding: *registry.ProjectionBinding,
+        ) !void {
+            if (route.work) |id| {
+                var work = try self.record(.workspace_work, key.task, id);
+                defer work.deinit();
+                if (work.value.trial) |trial_id| {
+                    var trial = try self.record(.workspace_trial, key.task, trial_id);
+                    defer trial.deinit();
+                    binding.trial = .{ .work = id, .view = trial.value.view };
+                }
+            }
+            if (route.work == null and
+                route.residual == null) if (route.interaction) |id|
+            {
+                var interaction = try self.record(.controller_interaction, key.task, id);
+                defer interaction.deinit();
+                var controller = try self.record(
+                    .controller_binding,
+                    key.task,
+                    interaction.value.controller,
+                );
+                defer controller.deinit();
+                if (!std.meta.eql(
+                    route.controller,
+                    controller.value.id,
+                ) or !std.meta.eql(
+                    interaction.value.model,
+                    item.occurrence,
+                )) return error.CorruptState;
+                var attempt = try self.record(.attempt, key.task, item.attempt);
+                defer attempt.deinit();
+                const context = attempt.value.controller_context orelse return error.CorruptState;
+                binding.controller = .{
+                    .binding = controller.value.id,
+                    .epoch = context.epoch,
+                    .program = controller.value.program_identity,
+                    .overlay = context.overlay,
+                };
+            };
+        }
+        fn recoveryFinding(
+            self: *Self,
+            key: Key,
+            item: state.Reconciliation,
+            finding: registry.RecoveryFinding,
+        ) !void {
+            if (item.provenance == .authoritative) {
+                if (finding != .not_sent) return error.CorruptState;
+            } else {
+                if (finding != .capture) return error.CorruptState;
+                var captured = try self.record(.capture, key.task, item.attempt);
+                defer captured.deinit();
+                const ref = captured.value.response orelse return error.CorruptState;
+                if (ref.bytes != finding.capture.len or !std.meta.eql(
+                    ref.digest,
+                    storage.digest(finding.capture),
+                )) return error.CorruptState;
+            }
+        }
+        fn finish(self: *Self) !Statistics {
+            // Compare each derived edge, including both expected lengths. A missing
+            // edge cannot borrow authority from the mere existence of its child.
+            var edges = self.edges.keyIterator();
+            while (edges.next()) |dependency| {
+                var row = try self.source.database.prepare(
+                    "SELECT parent_bytes,child_bytes FROM dependencies WHERE parent=? AND child=?",
+                    &.{ .{
+                        .blob = &dependency.parent,
+                    }, .{ .blob = &dependency.child } },
+                );
+                defer row.deinit();
+                if (try row.step() != .row or
+                    try row.integer(0) != self.objects.get(dependency.parent).?.length or
+                    try row.integer(1) != self.objects.get(dependency.child).?.length)
+                {
+                    return error.CorruptState;
+                }
+            }
+            // Iteration is flat: references are extracted by typed owners above,
+            // without trusting stored edges or recursively chasing a native stack.
+            for (self.objects.keys(), self.objects.values()) |id, object| {
+                if (object.body == null) try self.source.objectRange(.{
+                    .digest = id,
+                    .bytes = object.length,
+                }, 0, &.{});
+                self.statistics.objects += 1;
+                self.statistics.bytes = try std.math.add(u64, self.statistics.bytes, object.length);
+            }
+            self.statistics.edges = self.edges.count();
+            return self.statistics;
+        }
+    };
+}
 
 /// Caller holds the Store transaction for a stable database view. No projection
 /// interpretation, provider acquisition, grants, or artifact disclosure occurs.
 pub fn verify(store: *storage.Store, handlers: registry.Registry) !Statistics {
+    return verifyScope(store, handlers, true);
+}
+
+pub fn verifyTasks(store: *storage.Store, handlers: registry.Registry) !Statistics {
+    return verifyScope(store, handlers, false);
+}
+
+fn verifyScope(store: *storage.Store, handlers: registry.Registry, catalog: bool) !Statistics {
     if (!store.transaction) return error.InvalidState;
     var arena = std.heap.ArenaAllocator.init(store.allocator);
     defer arena.deinit();
-    var audit: Audit = .{ .a = arena.allocator(), .store = store, .handlers = handlers };
+    var audit: Audit(storage.Store) = .{
+        .a = arena.allocator(),
+        .source = store,
+        .handlers = handlers,
+    };
     try audit.taskRoots();
     try audit.recordRoots();
     try audit.otherRoots();
     try audit.projections();
     try audit.reconciliations();
+    if (catalog) try audit.catalogRoots();
+    try audit.retainedOrigins(true);
     return audit.finish();
+}
+
+pub const Prepared = struct {
+    allocator: std.mem.Allocator,
+    dependencies: []registry.Dependency,
+
+    pub fn deinit(self: *Prepared) void {
+        self.allocator.free(self.dependencies);
+    }
+    pub fn retain(self: Prepared, store: *storage.Store) !void {
+        for (self.dependencies) |dependency|
+            try store.retainReference(dependency.parent, dependency.child);
+    }
+};
+
+pub fn prepareArchive(
+    a: std.mem.Allocator,
+    reader: *@import("archive.zig").Reader,
+    handlers: registry.Registry,
+) !Prepared {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var audit: Audit(@import("archive.zig").Reader) = .{
+        .a = arena.allocator(),
+        .source = reader,
+        .handlers = handlers,
+    };
+    var origins: @import("reuse_state.zig").Origins = .{ .a = arena.allocator() };
+    try origins.scan(reader, reader.manifest.value);
+    for (origins.references.keys()) |ref|
+        try state.visitReuseDefinition(arena.allocator(), reader, ref, &audit);
+    try audit.retainedOrigins(false);
+    for (audit.objects.keys(), audit.objects.values()) |id, object| {
+        const declared = try reader.objectReference(id, null);
+        if (declared.bytes != object.length) return error.InvalidArchive;
+    }
+    const dependencies = try a.alloc(registry.Dependency, audit.edges.count());
+    errdefer a.free(dependencies);
+    var edges = audit.edges.keyIterator();
+    for (dependencies) |*dependency| {
+        const edge = edges.next().?;
+        dependency.* = .{
+            .parent = .{ .digest = edge.parent, .bytes = audit.objects.get(edge.parent).?.length },
+            .child = .{ .digest = edge.child, .bytes = audit.objects.get(edge.child).?.length },
+        };
+    }
+    return .{ .allocator = a, .dependencies = dependencies };
 }

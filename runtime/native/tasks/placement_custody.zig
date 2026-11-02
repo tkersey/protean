@@ -411,7 +411,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 self,
                 snapshot_a,
                 parent,
-                manifest.records.items,
+                manifest,
                 .inspect,
             );
             try archive_api.retainAssets(snapshot_a, store(self), self.assets.manifest);

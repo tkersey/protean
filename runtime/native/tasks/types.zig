@@ -35,11 +35,13 @@ pub const Profile = struct {
     resources: []const []const u8 = &.{},
     placement: ?*const @import("../placement.zig").Configuration = null,
     semantic_construction: ?SemanticPolicy = null,
+    reuse: @import("../reuse_policy.zig").Policy = .{},
 
     pub fn validate(self: Profile) !void {
         _ = try name(self.id);
         _ = try name(self.authority.principal);
         if (self.authority.revoked) return error.Denied;
+        try self.reuse.validate();
     }
 
     pub fn resourceIdentity(
@@ -144,11 +146,20 @@ pub fn same(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
 }
 pub fn operation(comptime T: type, a: std.mem.Allocator, value: T) !state.Digest {
-    const bytes = try contracts.encodeOwned(T, a, value);
+    return operationPayload(T, a, value, &.{});
+}
+pub fn operationPayload(
+    comptime Header: type,
+    a: std.mem.Allocator,
+    header: Header,
+    payload: []const u8,
+) !state.Digest {
+    const bytes = try contracts.encodeOwned(Header, a, header);
     defer a.free(bytes);
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update("agent.native.operation.v1\x00");
     hash.update(bytes);
+    hash.update(payload);
     var result: state.Digest = undefined;
     hash.final(&result);
     return result;

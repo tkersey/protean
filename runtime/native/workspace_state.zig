@@ -477,6 +477,14 @@ pub const ControllerRealization = struct {
 };
 
 pub const PublicationCommand = union(enum) {
+    retain: struct {
+        request: contracts.workspace.Retain,
+        definition: state.Reference,
+    },
+    import: struct {
+        request: contracts.workspace.Import,
+        observation: state.Reference,
+    },
     realize_controller: ControllerRealization,
     stop_observing: contracts.workspace.Expected,
     residual: struct { execution: u64, control: u64, command: Command },
@@ -552,6 +560,20 @@ pub const ReadObservation = union(enum) {
         event_watermark: u64,
     },
     semantic_policy: struct { policy: ?SemanticPolicyObservation, event_watermark: u64 },
+    reuse: struct {
+        selection: union(enum) {
+            find: struct {
+                request: contracts.workspace.Find,
+                definitions: contracts.Vector(state.Reference, null),
+            },
+            inspect: struct {
+                locator: contracts.workspace.RetainedLocator,
+                page: contracts.workspace.Page,
+                definition: state.Reference,
+            },
+        },
+        event_watermark: u64,
+    },
 };
 
 /// The local operation owns these inputs; reply JSON is always a projection.

@@ -98,6 +98,15 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             value: state.Task,
             index: state.Archive,
         ) !void {
+            try validateTypedPayloads(self, a, value, index);
+            try validateHistoricalAdmissions(self, a, value, index);
+        }
+        pub fn validateHistoricalAdmissions(
+            self: *Self,
+            a: std.mem.Allocator,
+            value: state.Task,
+            index: state.Archive,
+        ) !void {
             // The operation index preserves original identity even when a repeated
             // answer also has aliases. Messages, receipts and inbox history are one
             // admitted relationship, not independently trustworthy rows.
@@ -120,6 +129,32 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             for (index.records.items) |row| try admission.message(row);
             if (value.next_message != admission.count + 1 or
                 admission.receipts.count() != admission.count) return error.InvalidArchive;
+        }
+        fn validateTypedPayloads(
+            self: *Self,
+            a: std.mem.Allocator,
+            value: state.Task,
+            index: state.Archive,
+        ) !void {
+            if (!same(value.application_id.bytes, Types.application_id) or
+                !same(value.input_schema_id.bytes, Types.input_schema_id) or
+                !same(value.message_schema_id.bytes, Types.message_schema_id))
+                return error.InvalidArchive;
+            const input_bytes = try store(self).object(a, value.input, null);
+            defer a.free(input_bytes);
+            var input = try contracts.decodeOwned(Types.Input, a, input_bytes);
+            defer input.deinit();
+            for (index.records.items) |row| {
+                if (row.kind != .message) continue;
+                var item = try Records.record(self, state.Message, a, "message", row.id, value.id);
+                defer item.deinit();
+                const bytes = try store(self).object(a, item.value.value, null);
+                defer a.free(bytes);
+                var payload = contracts.decodeOwned(Types.Message, a, bytes) catch |err| {
+                    return if (err == error.OutOfMemory) err else error.InvalidArchive;
+                };
+                defer payload.deinit();
+            }
         }
         const ArchiveAdmissions = archiveAdmissionsType();
         fn archiveAdmissionsType() type {
@@ -160,12 +195,20 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                             admission.value.input,
                             null,
                         );
-                        var input = try contracts.decodeOwned(Types.Input, temporary, input_bytes);
-                        defer input.deinit();
-                        const expected_digest = try submitDigest(
+                        const Header = struct {
+                            method: state.Method,
+                            application: state.Name,
+                            profile_digest: state.Digest,
+                        };
+                        const expected_digest = try task_types.operationPayload(
+                            Header,
                             temporary,
-                            admission.value.profile.digest,
-                            input.value,
+                            .{
+                                .method = .submit,
+                                .application = admission.value.application_id,
+                                .profile_digest = admission.value.profile.digest,
+                            },
+                            input_bytes,
                         );
                         if (!same(&expected_digest, &receipt_value.request_digest))
                             return error.InvalidArchive;
@@ -256,7 +299,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     );
                     defer decoded.deinit();
                     const item = decoded.value;
-                    if (!same(item.schema_id.bytes, Types.message_schema_id) or item.ordinal == 0 or
+                    if (!same(item.schema_id.bytes, admission.value.message_schema_id.bytes) or
+                        item.ordinal == 0 or
                         item.ordinal >= admission.value.next_message)
                         return error.InvalidArchive;
                     const ordinal = try admission.ordinals.getOrPut(item.ordinal);
@@ -264,17 +308,19 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     admission.count += 1;
                     const bytes =
                         try store(admission.service).object(temporary, item.value, null);
-                    var payload =
-                        contracts.decodeOwned(Types.Message, temporary, bytes) catch |err| {
-                            return if (err == error.OutOfMemory) err else error.InvalidArchive;
-                        };
-                    defer payload.deinit();
                     const receipt_digest =
                         admission.receipts.get(item.id) orelse return error.InvalidArchive;
-                    if (!same(
-                        &receipt_digest,
-                        &try messageDigest(temporary, admission.value.id, payload.value),
-                    )) return error.InvalidArchive;
+                    const Header = struct {
+                        method: state.Method,
+                        task: state.TaskId,
+                        schema: state.Name,
+                    };
+                    const expected = try task_types.operationPayload(Header, temporary, .{
+                        .method = .message,
+                        .task = admission.value.id,
+                        .schema = admission.value.message_schema_id,
+                    }, bytes);
+                    if (!same(&receipt_digest, &expected)) return error.InvalidArchive;
                     try admission.disposition(temporary, item);
                 }
                 fn disposition(
@@ -292,6 +338,37 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                             try admission.validateAcquired(temporary, item);
                         },
                     }
+                }
+                fn inboxReply(
+                    admission: *@This(),
+                    temporary: std.mem.Allocator,
+                    item: state.Message,
+                    saved: occurrence.Occurrence,
+                    bytes: []const u8,
+                ) !void {
+                    const expected: state.MessageDisposition = switch (saved.state) {
+                        .settled_reply => .acquired,
+                        .admitted => |admitted| if (admitted == .reply)
+                            .consumed
+                        else
+                            return error.InvalidArchive,
+                        else => return error.InvalidArchive,
+                    };
+                    if (item.disposition != expected) return error.InvalidArchive;
+                    var reader: data.wire.Reader = .{ .input = bytes };
+                    if (try reader.natural() != 1) return error.InvalidArchive;
+                    var id: state.Digest = undefined;
+                    const text = try reader.text();
+                    if (text.len != 64) return error.InvalidArchive;
+                    _ = std.fmt.hexToBytes(&id, text) catch return error.InvalidArchive;
+                    if (!same(&id, &item.id)) return error.InvalidArchive;
+                    const payload = try store(admission.service).object(
+                        temporary,
+                        item.value,
+                        null,
+                    );
+                    if (!same(reader.input[reader.position..], payload))
+                        return error.InvalidArchive;
                 }
                 fn validateAcquired(
                     admission: *@This(),
@@ -319,6 +396,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                             .reply) admitted.reply else return error.InvalidArchive,
                         else => return error.InvalidArchive,
                     };
+                    if (acquired.answer != null) return error.InvalidArchive;
                     const request_bytes = try store(admission.service).object(
                         temporary,
                         saved.value.request_object,
@@ -330,16 +408,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                         request_bytes,
                     );
                     defer request.deinit();
-                    const entry = try admission.service.handlers.resolve(
-                        request.value,
-                        try occurrenceImage(
-                            admission.service,
-                            temporary,
-                            admission.value,
-                            saved.value,
-                        ),
-                    );
-                    if (entry.declaration.kind != .inbox) return error.InvalidArchive;
+                    const routes = @import("../archived_routes.zig");
+                    var view: routes.StoreView = .{
+                        .a = temporary,
+                        .store = store(admission.service),
+                    };
+                    try view.validateRequest(admission.value, saved.value, request.value);
                     const bound = try store(admission.service).acquiredObject(
                         temporary,
                         acquired.reply,
@@ -348,14 +422,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     var reply =
                         try data.invocation.decode(data.invocation.Result, temporary, bound);
                     defer reply.deinit();
-                    const input_id = (try validateInboxReply(
-                        admission.service,
-                        temporary,
-                        admission.value.id,
-                        saved.value,
-                        reply.value.value,
-                    )) orelse return error.InvalidArchive;
-                    if (!same(&input_id, &item.id)) return error.InvalidArchive;
+                    try data.invocation.validateResult(temporary, request.value, reply.value);
+                    try admission.inboxReply(temporary, item, saved.value, reply.value.value);
                 }
             };
         }
