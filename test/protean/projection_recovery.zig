@@ -633,8 +633,22 @@ fn badPair(f: *Fixture, producer: Program) !BadPair {
 
 fn checkRepaired(f: *Fixture, program: Program, consumer: wc.Ref, produced: Produced) !Run {
     const run = try project(f, program, consumer, produced);
+    try requireRepaired(f, produced.source, run);
+    return run;
+}
+
+fn checkVariant(f: *Fixture, program: Program, consumer: wc.Ref, specimen: Case) !void {
+    const encoded = try f.json(wc.ProjectionInput(example.ScanEvidence), .{
+        .consumer = consumer,
+        .value = specimen.evidence,
+    });
+    const input = try f.materialize(program.input_schema, encoded, specimen.sources);
+    try requireRepaired(f, specimen, try f.run(program.program, input));
+}
+
+fn requireRepaired(f: *Fixture, specimen: Case, run: Run) !void {
     const result = try f.decode(wc.ProjectionResult(example.ScanOutcome), run.result);
-    const expected = try assess(f, produced.source);
+    const expected = try assess(f, specimen);
     try std.testing.expectEqualStrings(@tagName(expected), @tagName(result.value));
     if (result.value == .counterexample) {
         const witness = result.value.counterexample;
@@ -645,7 +659,6 @@ fn checkRepaired(f: *Fixture, program: Program, consumer: wc.Ref, produced: Prod
         );
         try std.testing.expect(witness.observed != witness.member);
     }
-    return run;
 }
 
 fn variants(f: *Fixture, original: Case) ![]const Case {
@@ -968,7 +981,7 @@ test "ordinary projection repair preserves lost coverage distinction through fir
         repaired_value.description.schema,
     ));
     for (try variants(&f, original.complete.source)) |specimen| {
-        _ = try checkRepaired(&f, repaired, consumer, try produce(&f, producer, specimen));
+        try checkVariant(&f, repaired, consumer, specimen);
         try requireSibling(&f, pending);
     }
     const selected = try commitSelection(&f, partial.result);

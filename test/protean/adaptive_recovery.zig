@@ -27,7 +27,7 @@ pub inline fn modelArguments(comptime T: type, a: std.mem.Allocator, value: T) !
         }
         return native.values.toJson(T, a, value);
     }
-    var result = try native.values.toJson(T, a, value);
+    var result = native.json.object();
     switch (@typeInfo(T)) {
         .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Child| {
             try native.json.put(
@@ -37,15 +37,18 @@ pub inline fn modelArguments(comptime T: type, a: std.mem.Allocator, value: T) !
                 try modelArguments(Child, a, @field(value, name)),
             );
         },
-        .@"union" => switch (value) {
-            inline else => |child| try native.json.put(
-                a,
-                &result,
-                "value",
-                try modelArguments(@TypeOf(child), a, child),
-            ),
+        .@"union" => {
+            try native.json.put(a, &result, "tag", native.json.string(@tagName(value)));
+            switch (value) {
+                inline else => |child| try native.json.put(
+                    a,
+                    &result,
+                    "value",
+                    try modelArguments(@TypeOf(child), a, child),
+                ),
+            }
         },
-        else => {},
+        else => return native.values.toJson(T, a, value),
     }
     return result;
 }
