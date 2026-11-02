@@ -146,12 +146,12 @@ and do not automatically become required again.
 
 ## Compilation, caching and artifacts
 
-The five authoring test roots, both native owner test roots, all three general
+The five authoring test roots, the native task-owner test root, all three general
 workspace groups, and the downstream package-surface test use Zig's native x86-64
-backend on Linux, retaining safe
-optimization and every selected test. macOS keeps its existing backend;
-the production native executable keeps LLVM. This reduces repeated LLVM test
-compilation but does not exercise those test bodies through LLVM on Linux.
+backend on Linux, retaining safe optimization and every selected test. The
+execution-heavy adaptive owner tests use LLVM on both platforms, as does the
+production native executable. The native-backend suites avoid repeated LLVM
+compilation but do not exercise LLVM-generated code on Linux.
 Compile-time rejection and independent execution checks remain selected.
 
 Exact compiled-artifact keys bind compiler identity, target, recipe and source

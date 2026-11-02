@@ -1205,7 +1205,8 @@ const BuildGraph = struct {
                 s.native_graph.testModuleGrouped(checks, suite, &adaptive_owner_groups, null)
             else
                 s.native_graph.testModule(checks, suite);
-            if (linuxX86(s.b.graph.host)) tests.use_llvm = false;
+            if (linuxX86(s.b.graph.host) and comptime std.mem.eql(u8, group[0], "tasks"))
+                tests.use_llvm = false;
             s.b.step(
                 "build-native-owner-" ++ group[0] ++ "-check",
                 "Build the retained native " ++ group[0] ++ " test executable",

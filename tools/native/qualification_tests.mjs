@@ -65,6 +65,8 @@ function client() {
   async function run(indices, names) {
     let passed = 0;
     for (const index of indices) {
+      const started = performance.now();
+      process.stderr.write(`Running Zig test ${names[index]}\n`);
       const request = Buffer.alloc(4);
       request.writeUInt32LE(index);
       await send(5, request);
@@ -73,6 +75,7 @@ function client() {
       assert.equal(result.length, 12);
       assert.equal(result.readUInt32LE(0), index);
       const flags = result.readBigUInt64LE(4);
+      process.stderr.write(`Finished Zig test ${names[index]}: ${Math.round(performance.now() - started)} ms, flags=${flags}\n`);
       if ((flags & ~4n) === 0n) passed += 1;
       else process.stderr.write(`Failed Zig test ${names[index]}: flags=${flags}\n`);
     }
