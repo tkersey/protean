@@ -8,6 +8,7 @@ const cleanup = @import("native_test_support.zig").cleanup;
 const t = @import("adaptive_types");
 const wc = contracts.workspace;
 const Fixture = recovery.Fixture;
+const Snapshots = native.testing.workspace_snapshots.Operations(t, native.tasks.Service(t));
 const Aggregate = struct { total: u64, missing: contracts.Vector(u64, null) };
 const Input = wc.ProjectionInput(Aggregate);
 const Result = wc.ProjectionResult(Aggregate);
@@ -375,11 +376,17 @@ fn preparationCutTamper(f: *Fixture) !void {
     attempt.value.preparation_cut = try std.math.add(u64, attempt.value.preparation_cut.?, 1);
     var facts = try f.service.prepareWorkspaceValidation(f.task);
     defer facts.deinit();
-    try f.service.validateWorkspaceRecordsPrepared(
+    const previous_facts = f.service.compiler_facts;
+    f.service.compiler_facts = &facts;
+    defer f.service.compiler_facts = previous_facts;
+    var parent = try f.service.task(f.permanent, f.task);
+    defer parent.deinit();
+    try Snapshots.validateWorkspaceArchive(
+        &f.service,
         f.permanent,
-        f.task,
+        parent.value,
         records,
-        &facts,
+        .inspect,
     );
     try f.namespace.store.begin();
     defer f.namespace.store.rollback();
@@ -404,7 +411,13 @@ fn preparationCutTamper(f: *Fixture) !void {
     try std.testing.expect(replaced);
     try std.testing.expectError(
         error.InvalidArchive,
-        f.service.validateWorkspaceRecordsPrepared(f.permanent, f.task, records, &facts),
+        Snapshots.validateWorkspaceArchive(
+            &f.service,
+            f.permanent,
+            parent.value,
+            records,
+            .inspect,
+        ),
     );
 }
 

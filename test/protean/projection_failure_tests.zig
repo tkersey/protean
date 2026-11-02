@@ -182,7 +182,7 @@ const MissingView = struct {
     var active: ?*MissingView = null;
 
     fixture: *Fixture,
-    original: @FieldType(native.registry.CaptureAdapter, "prepare"),
+    original: native.registry.CaptureAdapter,
     view: wc.Ref,
     record_id: ns.Digest,
     after: u64,
@@ -190,26 +190,48 @@ const MissingView = struct {
 
     fn prepare(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
         const self = active orelse return error.MissingFaultFixture;
+        const hidden = try self.hide(ctx, bytes);
+        defer if (hidden) self.restore();
+        return self.original.prepare(ctx, bytes);
+    }
+
+    fn interpret(
+        ctx: native.registry.ProjectionContext,
+        request: []const u8,
+        prepared: []const u8,
+        captured: []const u8,
+    ) !native.registry.Projection {
+        const self = active orelse return error.MissingFaultFixture;
+        const hidden = try self.hide(ctx, request);
+        defer if (hidden) self.restore();
+        return self.original.interpret(ctx, request, prepared, captured);
+    }
+
+    fn hide(self: *MissingView, ctx: native.registry.ProjectionContext, bytes: []const u8) !bool {
         var input = try contracts.decodeOwned(t.Preparation, ctx.allocator, bytes);
         defer input.deinit();
-        const selected = input.value.state.selected_view orelse return self.original(ctx, bytes);
-        const cut = ctx.consumer_cut orelse return self.original(ctx, bytes);
+        const selected = input.value.state.selected_view orelse return false;
+        const cut = ctx.consumer_cut orelse return false;
         if (cut.event_watermark <= self.after or
             !std.mem.eql(u8, selected.id.bytes, self.view.id.bytes))
-            return self.original(ctx, bytes);
+            return false;
         const store = &self.fixture.namespace.store;
         try std.testing.expect(store.projecting);
         try store.database.exec("SAVEPOINT projection_missing_view;");
-        defer cleanup("projection missing view rollback", store.database.exec(
-            "ROLLBACK TO projection_missing_view; RELEASE projection_missing_view;",
-        ));
+        errdefer self.restore();
         try store.database.run(
             "DELETE FROM records WHERE kind='workspace_view' AND id=? AND task=?",
             &.{ .{ .blob = &self.record_id }, .{ .blob = &self.fixture.task } },
         );
         try std.testing.expectEqual(1, try store.database.changes());
         self.observations += 1;
-        return self.original(ctx, bytes);
+        return true;
+    }
+
+    fn restore(self: *MissingView) void {
+        cleanup("projection missing view rollback", self.fixture.namespace.store.database.exec(
+            "ROLLBACK TO projection_missing_view; RELEASE projection_missing_view;",
+        ));
     }
 };
 
@@ -228,7 +250,7 @@ fn missingDependency(f: *Fixture, result: wc.Ref) !void {
     const entry = try preparationEntry(f);
     var fault: MissingView = .{
         .fixture = f,
-        .original = entry.declaration.capture.?.prepare,
+        .original = entry.declaration.capture.?,
         .view = try support.workspaceRef(f.permanent, .view, selected.digest),
         .record_id = try native.workspace.custodyId(f.permanent, f.task, selected.digest),
         .after = before.event_high,
@@ -236,7 +258,8 @@ fn missingDependency(f: *Fixture, result: wc.Ref) !void {
     MissingView.active = &fault;
     defer MissingView.active = null;
     entry.declaration.capture.?.prepare = MissingView.prepare;
-    defer entry.declaration.capture.?.prepare = fault.original;
+    entry.declaration.capture.?.interpret = MissingView.interpret;
+    defer entry.declaration.capture = fault.original;
     const calls = f.calls;
     _ = try f.perform(.{ .context = .{ .command = .{ .inspect = .{ .page = .{} } } } });
     try std.testing.expect(fault.observations != 0);

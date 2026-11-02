@@ -179,12 +179,15 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             var inspected = inspected: {
                 var arena = std.heap.ArenaAllocator.init(self.allocator);
                 defer arena.deinit();
-                const result = try archive_api.inspect(
+                const result = archive_api.inspect(
                     arena.allocator(),
                     store(self),
                     reader.manifest.value,
                     null,
-                );
+                ) catch |err| return switch (err) {
+                    error.MissingArtifact => error.InvalidArchive,
+                    else => err,
+                };
                 break :inspected .{ .task = result.task, .current = result.current };
             };
             defer inspected.task.deinit();
