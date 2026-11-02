@@ -8,7 +8,7 @@ const horos = @import("horos");
 const a = horos.authoring;
 
 pub const semantic_identity = "agent.model.invoke.v11";
-pub const adaptive_context_semantic_identity = "agent.model.context.responses.adaptive.v7";
+pub const adaptive_context_semantic_identity = "agent.model.context.responses.adaptive.v8";
 pub const adaptive_policy_semantic_identity = "agent.model.policy.adaptive.v2";
 pub fn isModelIdentity(identity: []const u8) bool {
     // Reserve the model namespace against raw leaf-effect relabeling. Only v11
@@ -41,7 +41,14 @@ pub const AdaptiveInferenceProfile = struct {
     response_bytes: ?u32,
     timeout_ms: ?u32,
 };
-pub const EpochReason = enum { initial, model_change, effort_change, eviction, view_change };
+pub const EpochReason = enum {
+    initial,
+    model_change,
+    effort_change,
+    eviction,
+    view_change,
+    projection_recovery,
+};
 pub const SkillResidency = enum { resident, transient };
 pub const SkillMaterialization = struct {
     resource: ArtifactReference,
@@ -573,6 +580,7 @@ fn AdaptiveTypes(comptime P: type) type {
             version: u32,
             request: AdaptiveRequest,
             body: contracts.Bytes(null),
+            selected_view: ?ArtifactReference = null,
         };
         pub const AdaptivePolicy = struct {
             schema: contracts.Text(128),

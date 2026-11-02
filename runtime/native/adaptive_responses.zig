@@ -387,18 +387,12 @@ pub fn Adapter(comptime P: type) type {
             );
             var reasoning = json.object();
             try json.put(a, &reasoning, "effort", json.string(selected.transport.effort.bytes));
-            try json.put(
-                a,
-                &reasoning,
-                "mode",
-                json.string(@tagName(selected.profile.reasoning_mode)),
-            );
-            try json.put(
-                a,
-                &reasoning,
-                "context",
-                json.string(@tagName(selected.profile.reasoning_context)),
-            );
+            try json.put(a, &reasoning, "mode", json.string(
+                @tagName(selected.profile.reasoning_mode),
+            ));
+            try json.put(a, &reasoning, "context", json.string(
+                @tagName(selected.profile.reasoning_context),
+            ));
             try json.put(a, &body, "reasoning", reasoning);
             try appendToolChoice(a, &body, request);
             inline for (.{
@@ -413,12 +407,8 @@ pub fn Adapter(comptime P: type) type {
                 try json.put(a, &cache, "mode", json.string("explicit"));
                 try json.put(a, &cache, "ttl", json.string("30m"));
                 if (selected.profile.cache_diagnostics) {
-                    if (projected.prior_response_id) |id| try json.put(
-                        a,
-                        &cache,
-                        "comparison_response_id",
-                        json.string(id),
-                    );
+                    if (projected.prior_response_id) |id|
+                        try json.put(a, &cache, "comparison_response_id", json.string(id));
                 }
                 try json.put(a, &body, "prompt_cache_options", cache);
             }
@@ -427,7 +417,15 @@ pub fn Adapter(comptime P: type) type {
                 .prepared = try contracts.encodeOwned(
                     Prepared,
                     a,
-                    .{ .version = 1, .request = request, .body = .{ .bytes = rendered } },
+                    .{
+                        .version = 1,
+                        .request = request,
+                        .body = .{ .bytes = rendered },
+                        .selected_view = if (projected.selected_view) |view| .{
+                            .digest = view.digest,
+                            .bytes = view.bytes,
+                        } else null,
+                    },
                 ),
                 .context = projected,
             };

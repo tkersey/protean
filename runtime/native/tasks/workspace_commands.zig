@@ -70,6 +70,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         const Access = @import("workspace_access.zig").Operations(Types, Self);
         const Builds = @import("workspace_builds.zig").Operations(Types, Self);
         const Contexts = @import("workspace_contexts.zig").Operations(Types, Self);
+        const Consumers = @import("workspace_consumers.zig").Operations(Types, Self);
         const Inspection = @import("workspace_inspection.zig").Operations(Types, Self);
         const Observations = @import("workspace_observations.zig").Operations(Types, Self);
         const Observers = @import("workspace_observers.zig").Operations(Types, Self);
@@ -369,6 +370,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .bindings => try describeWorkspaceBindings(a),
                 .runtimes => try describeWorkspaceRuntimes(a),
                 .examples => try construction.example(a),
+                .projection => try describeProjection(a),
                 .retention_query => try construction.runtimeQuery(a, true),
                 .divergence_query => try construction.runtimeQuery(a, false),
                 .hypothetical_reply => try construction.hypotheticalReply(a),
@@ -378,6 +380,29 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             };
             defer a.free(description);
             return .{ .observation = try wp.page(a, description, request.page) };
+        }
+
+        fn describeProjection(a: std.mem.Allocator) ![]u8 {
+            var result = json.object();
+            try json.put(a, &result, "contract", json.string(wc.identity));
+            const schema = try values.schemaBytes(wc.ProjectionProposal, a);
+            defer a.free(schema);
+            try json.put(a, &result, "proposal_schema", try wp.schema(a, schema));
+            const example = try construction.projectionExample(a);
+            defer a.free(example);
+            try json.put(a, &result, "ordinary_source_example", json.string(example));
+            try json.put(a, &result, "guidance", json.string(
+                "Projection is optional. Inspect the actual consumer, pass its observation " ++
+                    "reference as the first projector input field, and return that " ++
+                    "same reference " ++
+                    "in the canonical proposal beside a domain-typed payload. Computed blocks " ++
+                    "present that payload. Select the actual completed result; selection is not " ++
+                    "inference or task completion. Missing coverage is not absence. Expand " ++
+                    "retained evidence before reacquiring it; repair a representation when it " ++
+                    "loses a distinction. Stale or oversized projections require an ordinary " ++
+                    "context choice or new authored work. Admission does not certify adequacy.",
+            ));
+            return json.canonical(a, result);
         }
         fn executeProgramBuild(
             self: *Self,
@@ -831,6 +856,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .inspect => |request| return executeContextInspect(
                     self,
                     a,
+                    operation_id,
                     task_id,
                     basis,
                     request,
@@ -845,6 +871,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                         context,
                         authorized.snapshot,
                         authorized.input,
+                        authorized.consumer,
                     ),
                 },
             }
@@ -852,10 +879,26 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         fn executeContextInspect(
             self: *Self,
             a: std.mem.Allocator,
+            operation_id: []const u8,
             task_id: state.TaskId,
             basis: ?workspace.ReadObservation,
             request: @FieldType(wc.Context, "inspect"),
         ) !WorkspaceExecution {
+            if (request.consumer != null) {
+                const observed = basis orelse return error.InvalidConsumer;
+                if (observed != .consumer) return error.InvalidConsumer;
+                const reference: wc.Ref = .{
+                    .kind = .observation,
+                    .id = .{ .bytes = operation_id },
+                };
+                _ = try wp.identity(reference, .observation);
+                return .{ .observation = try Consumers.render(
+                    a,
+                    reference,
+                    observed.consumer,
+                    request.page,
+                ) };
+            }
             var output = try wp.Range.init(a, request.page);
             defer output.deinit(a);
             try output.append("[");
@@ -887,6 +930,16 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             basis: ?workspace.ReadObservation,
             request: @FieldType(wc.Context, "expand"),
         ) !WorkspaceExecution {
+            if (request.reference.kind == .observation) {
+                var saved = try Consumers.open(self, a, task_id, request.reference);
+                defer saved.deinit();
+                return .{ .observation = try Consumers.render(
+                    a,
+                    request.reference,
+                    saved.value.evidence.read.consumer,
+                    request.page,
+                ) };
+            }
             if (request.reference.kind == .port)
                 return expandWorkspacePort(self, a, task_id, request);
             if (request.reference.kind == .work)

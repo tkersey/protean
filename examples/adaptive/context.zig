@@ -500,7 +500,35 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
 fn prepare(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
     var input = try contracts.decodeOwned(t.Preparation, ctx.allocator, bytes);
     defer input.deinit();
-    const product = evaluate(ctx, input.value) catch |err| switch (err) {
+    const product = evaluate(ctx, input.value) catch |err|
+        try preparationRejection(input.value, err);
+    return contracts.encodeOwned(Product, ctx.allocator, product);
+}
+
+fn preparationRejection(input: t.Preparation, err: anyerror) !Product {
+    if (input.state.selected_view) |view| {
+        const code: ?t.ProjectionRejectionCode = switch (err) {
+            error.StaleConsumer => .stale,
+            error.ProjectionUnavailable,
+            error.MissingArtifact,
+            error.ArtifactUnavailable,
+            => .unavailable,
+            error.InvalidConsumer,
+            error.ConsumerMismatch,
+            error.InvalidProjection,
+            error.InvalidProjectionSchema,
+            error.InvalidSourceSlice,
+            error.InvalidReference,
+            => .invalid,
+            error.Capacity => .oversized,
+            else => null,
+        };
+        if (code) |reason| return .{
+            .result = .{ .projection_rejected = .{ .code = reason, .view = view } },
+            .receipt = null,
+        };
+    }
+    return switch (err) {
         error.Capacity => Product{ .result = .{ .rejected = .capacity }, .receipt = null },
         error.UnknownSkill, error.InvalidSkill => Product{
             .result = .{ .rejected = .unknown_skill },
@@ -520,7 +548,6 @@ fn prepare(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
         },
         else => return err,
     };
-    return contracts.encodeOwned(Product, ctx.allocator, product);
 }
 fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition {
     ctx.checkCancellation() catch |err| return .{ .definitely_not_sent = err };

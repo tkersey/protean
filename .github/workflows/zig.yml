@@ -246,7 +246,12 @@ jobs:
           elif [ "${{ matrix.lane }}" = owners ]; then
             run_compiled_tests native-owner-tasks 46
           elif [ "${{ matrix.lane }}" = owner-adaptive-control ]; then
-            run_compiled_tests native-owner-adaptive 9
+            log="$RUNNER_TEMP/native-owner-adaptive-tests.log"
+            /usr/bin/time -v node tools/native/qualification_tests.mjs \
+              "$RUNNER_TEMP/protean-qualification/verification/native-owner-adaptive" \
+              '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
+              2>&1 | tee "$log"
+            grep -Fxq '19/19 tests passed across 6 independent groups.' "$log"
           elif [ "${{ matrix.lane }}" = owner-support ]; then
             zig build check-native-owner-support -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = workspace ]; then

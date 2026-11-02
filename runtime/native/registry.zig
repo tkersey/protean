@@ -57,6 +57,22 @@ pub const ReadView = struct {
     pub fn historyRead(self: ReadView, bytes: usize) void {
         if (self.native_scope) |source| @import("store.zig").Store.recordHistoryRead(source, bytes);
     }
+
+    pub fn workspaceView(
+        self: ReadView,
+        a: std.mem.Allocator,
+        reference: contracts.workspace.Ref,
+    ) !?contracts.Decoded(@import("workspace_state.zig").View) {
+        return @import("store.zig").Store.readWorkspaceView(self.native_scope, a, reference);
+    }
+
+    pub fn requireConsumer(
+        self: ReadView,
+        a: std.mem.Allocator,
+        observed: @import("workspace_state.zig").ReplyObservation,
+    ) !void {
+        return @import("store.zig").Store.requireWorkspaceConsumer(self.native_scope, a, observed);
+    }
 };
 
 pub const ControllerProjection = struct {
@@ -75,6 +91,7 @@ pub const ProjectionBinding = struct {
     controller: ?ControllerProjection = null,
     trial: ?TrialProjection = null,
     execution: ?state.Digest = null,
+    current: bool = false,
 };
 
 /// Pure projection inputs: immutable objects and frozen task bindings, with no
@@ -89,6 +106,7 @@ pub const ProjectionContext = struct {
     controller: ?ControllerProjection = null,
     trial: ?TrialProjection = null,
     execution: ?state.Digest = null,
+    current: bool = false,
     objects: ReadView,
 
     pub fn object(self: ProjectionContext, ref: state.Reference, limit: usize) ![]u8 {

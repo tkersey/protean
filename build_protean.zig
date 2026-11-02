@@ -1,4 +1,12 @@
 const std = @import("std");
+const adaptive_owner_groups = [_][]const []const u8{
+    &.{ "adaptive_controls.", "adaptive_reports.", "adaptive_recovery." },
+    &.{"projection_recovery."},
+    &.{"projection_failure_tests."},
+    &.{ "projection owner authenticates", "projection receipts preserve" },
+    &.{ "projection required-current", "projection selection rechecks", "delegated projection" },
+    &.{"constructed successor rejects"},
+};
 const workspace_execution_groups = [_][]const []const u8{
     &.{"CTX-01"},
     &.{"WORK-C07"},
@@ -1157,6 +1165,10 @@ const BuildGraph = struct {
         adaptive_test_environment.addImport("protean_native", s.checked_environment);
         s.native_suite.addImport("adaptive_types", adaptive_test_types);
         s.native_suite.addImport("adaptive_environment", adaptive_test_environment);
+        const projection_example =
+            s.native_graph.module("examples/adaptive/projection_example.zig");
+        projection_example.addImport("protean_native", s.checked_environment);
+        s.native_suite.addImport("projection_example", projection_example);
         s.native_suite.addAnonymousImport(
             "adaptive_image",
             .{ .root_source_file = s.adaptive_image },
@@ -1189,7 +1201,10 @@ const BuildGraph = struct {
                 "check-native-owner-" ++ group[0],
                 "Qualify native " ++ group[0] ++ " contracts",
             );
-            const tests = s.native_graph.testModule(checks, suite);
+            const tests = if (comptime std.mem.eql(u8, group[0], "adaptive"))
+                s.native_graph.testModuleGrouped(checks, suite, &adaptive_owner_groups, null)
+            else
+                s.native_graph.testModule(checks, suite);
             if (linuxX86(s.b.graph.host)) tests.use_llvm = false;
             s.b.step(
                 "build-native-owner-" ++ group[0] ++ "-check",

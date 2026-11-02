@@ -276,6 +276,7 @@ pub const Store = struct {
             .controller = binding.controller,
             .trial = binding.trial,
             .execution = binding.execution,
+            .current = binding.current,
             .objects = .{
                 .source = &scope,
                 .read_object = ProjectionScope.read,
@@ -286,6 +287,136 @@ pub const Store = struct {
         // proposed descendant does not invalidate intact committed ancestors.
         try scope.finish();
         return result;
+    }
+
+    pub fn readWorkspaceView(
+        source: ?*anyopaque,
+        a: std.mem.Allocator,
+        reference: contracts.workspace.Ref,
+    ) !?contracts.Decoded(@import("workspace_state.zig").View) {
+        const scope = try projectionScope(source) orelse return null;
+        const w = @import("workspace_state.zig");
+        const id = try @import("workspace_projection.zig").identity(reference, .view);
+        const key = try w.custodyId(a, scope.binding.task, id);
+        const bytes = (try scope.store.recordBytes(
+            a,
+            "workspace_view",
+            key,
+            scope.binding.task,
+        )) orelse return error.ProjectionUnavailable;
+        defer a.free(bytes);
+        var view = try contracts.decodeOwned(w.View, a, bytes);
+        errdefer view.deinit();
+        const actual = try contracts.encodeOwned(w.ViewArtifact, a, view.value.description);
+        defer a.free(actual);
+        if (!std.meta.eql(view.value.id, key) or
+            !std.meta.eql(view.value.task, scope.binding.task) or
+            !std.meta.eql(view.value.artifact.digest, id) or
+            !std.meta.eql(digest(actual), id) or actual.len != view.value.artifact.bytes)
+            return error.InvalidProjection;
+        return view;
+    }
+
+    fn projectionScope(source: ?*anyopaque) !?*ProjectionScope {
+        const pointer = source orelse return null;
+        const scope: *ProjectionScope = @ptrCast(@alignCast(pointer));
+        if (!scope.store.projecting or scope.store.fenced or
+            scope.epoch != scope.store.integrity_epoch) return error.InvalidState;
+        return scope;
+    }
+
+    pub fn requireWorkspaceConsumer(
+        source: ?*anyopaque,
+        a: std.mem.Allocator,
+        saved: @import("workspace_state.zig").ReplyObservation,
+    ) !void {
+        const scope = try projectionScope(source) orelse return error.ProjectionUnavailable;
+        const w = @import("workspace_state.zig");
+        if (!std.meta.eql(saved.task, scope.binding.task) or saved.evidence != .read or
+            saved.evidence.read != .consumer) return error.InvalidConsumer;
+        const recorded = (try scope.store.recordBytes(
+            a,
+            "workspace_reply",
+            saved.id,
+            saved.task,
+        )) orelse return error.ProjectionUnavailable;
+        defer a.free(recorded);
+        const expected = try contracts.encodeOwned(w.ReplyObservation, a, saved);
+        defer a.free(expected);
+        if (!std.mem.eql(u8, recorded, expected)) return error.InvalidConsumer;
+        const observed = saved.evidence.read.consumer;
+        if (!std.meta.eql(observed.task, scope.binding.task) or
+            !std.mem.eql(u8, observed.tenant.bytes, scope.binding.tenant) or
+            !std.meta.eql(observed.policy.digest, digest(scope.binding.profile)))
+            return error.InvalidConsumer;
+        if (!scope.binding.current) return;
+        const task_bytes = try scope.store.taskBytes(a, saved.task);
+        defer a.free(task_bytes);
+        var parent = try contracts.decodeOwned(state.Task, a, task_bytes);
+        defer parent.deinit();
+        try observed.requireTask(parent.value);
+        if (observed.input_revision != try scope.store.userInputRevision(
+            a,
+            saved.task,
+            parent.value.event_high,
+        )) return error.StaleConsumer;
+        for (observed.selection.required_current.items) |requirement|
+            try requireCurrentWork(scope, a, saved.task, requirement, null);
+        if (observed.selection.target == .model) {
+            const target = observed.selection.target.model;
+            try requireCurrentWork(scope, a, saved.task, target.expected, target);
+        }
+    }
+
+    pub fn userInputRevision(self: *Store, a: std.mem.Allocator, task: state.TaskId, at: u64) !u64 {
+        var query = try self.database.prepare(
+            "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+                "WHERE e.task=? AND e.seq<=? ORDER BY e.seq DESC",
+            &.{ .{ .blob = &task }, .{
+                .integer = std.math.cast(i64, at) orelse return error.InvalidState,
+            } },
+        );
+        defer query.deinit();
+        while (try query.step() == .row) {
+            var event = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+            defer event.deinit();
+            if (event.value.kind == .message_queued or event.value.kind == .input_accepted)
+                return event.value.seq;
+        }
+        return 0;
+    }
+
+    fn requireCurrentWork(
+        scope: *ProjectionScope,
+        a: std.mem.Allocator,
+        task: state.TaskId,
+        expected: contracts.workspace.Expected,
+        target: ?@FieldType(contracts.workspace.ConsumerTarget, "model"),
+    ) !void {
+        const w = @import("workspace_state.zig");
+        const wp = @import("workspace_projection.zig");
+        const id = try wp.identity(expected.work, .work);
+        const bytes = (try scope.store.recordBytes(
+            a,
+            "workspace_work",
+            id,
+            task,
+        )) orelse return error.ProjectionUnavailable;
+        defer a.free(bytes);
+        var current = try contracts.decodeOwned(w.Work, a, bytes);
+        defer current.deinit();
+        const work = current.value;
+        if (!std.meta.eql(
+            work.task,
+            task,
+        ) or !std.meta.eql(work.id, id)) return error.StaleConsumer;
+        if (target == null and (work.execution_revision != expected.execution_revision or
+            work.control_revision != expected.control_revision)) return error.StaleConsumer;
+        if (target) |selected| {
+            const port = work.current_port orelse return error.StaleConsumer;
+            if (!std.meta.eql(port.digest, try wp.identity(selected.port, .port)) or
+                work.port_generation != selected.generation) return error.StaleConsumer;
+        }
     }
 
     const ProjectionScope = struct {

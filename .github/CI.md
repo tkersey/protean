@@ -32,7 +32,7 @@ TigerStyle and still cannot pass the terminal gate.
 | --- | --- |
 | `authoring` | Source inventory, `check-protean` and `check-native-https`: authoring, model/value contracts, construction, compile-time rejection, helper integrity, adaptive asset emission, formatting, wire checks and the independent HTTPS endpoint. |
 | `owners` | All 46 retained native task/response/model-custody owner tests, including their participant imports. |
-| `owner-adaptive-control` | All nine retained adaptive owner tests. |
+| `owner-adaptive-control` | All nineteen adaptive owner tests across six independent processes, including executable projection, repair/restart, boundary and resource checks. |
 | `owner-support` | Native unit/context and process-crash recovery checks. |
 | `workspace` | The 16 workspace execution and construction tests. |
 | `workspace-retention` | The three retained-work, wait and delegated-answer tests. |

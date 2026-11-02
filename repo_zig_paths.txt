@@ -4,6 +4,7 @@ build_protean.zig
 examples/adaptive/context.zig
 examples/adaptive/definition.zig
 examples/adaptive/environment.zig
+examples/adaptive/projection_example.zig
 examples/adaptive/report.zig
 examples/adaptive/tool_catalog.zig
 examples/adaptive/tool_resources.zig
@@ -11,6 +12,7 @@ examples/adaptive/tool_types.zig
 examples/adaptive/types.zig
 examples/adaptive/work.zig
 examples/adaptive/workspace.zig
+runtime/native/adaptive_consumer.zig
 runtime/native/adaptive_context.zig
 runtime/native/adaptive_history.zig
 runtime/native/adaptive_responses.zig
@@ -40,6 +42,7 @@ runtime/native/placement_journal.zig
 runtime/native/placement_stage.zig
 runtime/native/placement_transport.zig
 runtime/native/program_construction.zig
+runtime/native/projection_proposal.zig
 runtime/native/protocol.zig
 runtime/native/registry.zig
 runtime/native/repository.zig
@@ -84,6 +87,7 @@ runtime/native/tasks/workspace_access.zig
 runtime/native/tasks/workspace_admission.zig
 runtime/native/tasks/workspace_builds.zig
 runtime/native/tasks/workspace_commands.zig
+runtime/native/tasks/workspace_consumers.zig
 runtime/native/tasks/workspace_contexts.zig
 runtime/native/tasks/workspace_control.zig
 runtime/native/tasks/workspace_control_validation.zig
@@ -95,6 +99,7 @@ runtime/native/tasks/workspace_interaction.zig
 runtime/native/tasks/workspace_observations.zig
 runtime/native/tasks/workspace_observers.zig
 runtime/native/tasks/workspace_programs.zig
+runtime/native/tasks/workspace_projections.zig
 runtime/native/tasks/workspace_publication.zig
 runtime/native/tasks/workspace_realization.zig
 runtime/native/tasks/workspace_records.zig
@@ -112,6 +117,7 @@ runtime/native/workspace_build.zig
 runtime/native/workspace_driver.zig
 runtime/native/workspace_instrument.zig
 runtime/native/workspace_observers.zig
+runtime/native/workspace_presentation.zig
 runtime/native/workspace_projection.zig
 runtime/native/workspace_state.zig
 src/adaptive_controls.zig
@@ -174,6 +180,8 @@ test/protean/native_tasks.zig
 test/protean/native_test_support.zig
 test/protean/native_tests.zig
 test/protean/participant.zig
+test/protean/projection_failure_tests.zig
+test/protean/projection_recovery.zig
 test/protean/prompt_unknown_field.zig
 test/protean/recursive_participant.zig
 test/protean/runtime_mobility_peer.zig
@@ -181,6 +189,7 @@ test/protean/runtime_mobility_source.zig
 test/protean/skill_unknown_field.zig
 test/protean/values.zig
 test/protean/workspace_programs.zig
+test/protean/workspace_projection_tests.zig
 test/protean/workspace_runtime.zig
 test/protean/workspace_semantics.zig
 test/protean/workspace_sources.zig

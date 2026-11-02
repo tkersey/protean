@@ -558,6 +558,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 !std.meta.eql(saved.value.artifact.digest, id) or
                 !std.meta.eql(storage.digest(bytes), id) or bytes.len != saved.value.artifact.bytes)
                 return error.CorruptState;
+            if (saved.value.description.projection) |projection|
+                return workspaceProjectionObservation(self, a, task_id, id, projection, page);
             var result = json.object();
             try json.put(
                 a,
@@ -598,6 +600,56 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 &result,
                 "value_count",
                 try json.number(a, saved.value.description.values.items.len),
+            );
+            return result;
+        }
+
+        fn workspaceProjectionObservation(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            id: state.Digest,
+            projection: workspace.ProjectionSelection,
+            page: wc.Page,
+        ) !json.Value {
+            const value = try workspaceValueReference(
+                self,
+                a,
+                task_id,
+                try wp.reference(a, .value, projection.result.digest),
+            );
+            if (!std.meta.eql(value.artifact, projection.result)) return error.InvalidProjection;
+            const schema = try store(self).object(a, value.schema, null);
+            defer a.free(schema);
+            const bytes = try store(self).object(a, value.value, null);
+            defer a.free(bytes);
+            var decoded = try @import("../projection_proposal.zig").decodeResult(a, schema, bytes);
+            defer decoded.deinit();
+            var result = json.object();
+            try json.put(
+                a,
+                &result,
+                "view",
+                try values.toJson(wc.Ref, a, try wp.reference(a, .view, id)),
+            );
+            try json.put(
+                a,
+                &result,
+                "projection_result",
+                try values.toJson(wc.Ref, a, try wp.reference(a, .value, projection.result.digest)),
+            );
+            try json.put(
+                a,
+                &result,
+                "consumer",
+                try values.toJson(wc.Ref, a, decoded.header.consumer),
+            );
+            try json.put(a, &result, "coverage", json.string("selected_blocks_only"));
+            try json.put(
+                a,
+                &result,
+                "selection",
+                try @import("../dynamic_values.zig").page(a, schema, bytes, page),
             );
             return result;
         }

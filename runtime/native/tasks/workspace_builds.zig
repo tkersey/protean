@@ -230,7 +230,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             var basis: ?contracts.Decoded(workspace.ReadObservation) = null;
             defer if (basis) |*frozen| frozen.deinit();
             if (workspaceIsRead(command.command)) {
-                const bytes = workspaceReadBasis(self, a, initial, command.command) catch |err|
+                const bytes = workspaceReadBasis(
+                    self,
+                    a,
+                    initial,
+                    command.command,
+                    command,
+                ) catch |err|
                     return rejectWorkspace(self, a, initial, pending, .operation, err);
                 defer a.free(bytes);
                 basis = try contracts.decodeOwned(workspace.ReadObservation, a, bytes);
@@ -398,7 +404,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             const basis_bytes = if (frozen) |basis|
                 try contracts.encodeOwned(workspace.ReadObservation, a, basis)
             else
-                try workspaceReadBasis(self, a, parent, inspect);
+                try workspaceReadBasis(self, a, parent, inspect, null);
             defer a.free(basis_bytes);
             var basis = try contracts.decodeOwned(workspace.ReadObservation, a, basis_bytes);
             defer basis.deinit();

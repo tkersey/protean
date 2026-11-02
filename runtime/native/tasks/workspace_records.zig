@@ -2,6 +2,7 @@ const std = @import("std");
 const contracts = @import("protean_contracts");
 const data = @import("horos_data");
 const state = @import("../state.zig");
+const storage = @import("../store.zig");
 const occurrence = @import("../occurrence.zig");
 const workspace = @import("../workspace_state.zig");
 const wp = @import("../workspace_projection.zig");
@@ -383,6 +384,32 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             var record_value =
                 try record(self, workspace.View, frame, "workspace_view", row.id, task_id);
             defer record_value.deinit();
+            if (record_value.value.description.projection) |selected| {
+                const Projections = @import("workspace_projections.zig").Operations(Types, Self);
+                const bytes = try store(self).object(frame, selected.observation, null);
+                defer frame.free(bytes);
+                var observed = try contracts.decodeOwned(workspace.ReplyObservation, frame, bytes);
+                defer observed.deinit();
+                if (observed.value.evidence != .read or observed.value.evidence.read != .consumer)
+                    return error.InvalidArchive;
+                var rebuilt = try Projections.admit(
+                    self,
+                    frame,
+                    parent,
+                    try wp.reference(frame, .value, selected.result.digest),
+                    observed.value.evidence.read.consumer.selection.target,
+                    false,
+                );
+                defer rebuilt.deinit();
+                const actual = try contracts.encodeOwned(
+                    workspace.ViewArtifact,
+                    frame,
+                    rebuilt.view,
+                );
+                defer frame.free(actual);
+                if (!std.meta.eql(storage.digest(actual), record_value.value.artifact.digest))
+                    return error.InvalidArchive;
+            }
             _ = try workspaceViewObservation(
                 self,
                 frame,

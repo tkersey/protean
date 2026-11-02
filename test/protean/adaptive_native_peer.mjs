@@ -320,7 +320,7 @@ function* workspaceTrace(subject, scenario) {
   assert.match(inspected, new RegExp(`Observed 0 lines.*evidence ${subject.sourceIndex}`));
   yield ['inference_set', {profile_id: 'analysis', effort: 'high', expected_revision: 2, reason: 'Retain operative control state across research replacement.'}];
   yield workspaceCall('context', 'inspect', {page: {offset: 0, maximum: 4096}});
-  yield workspaceCall('context', 'select', {values: [subject.results[0]]});
+  yield workspaceCall('context', 'select', {tag: 'values', value: [subject.results[0]]});
   const retainedCalls = subject.body.input.filter(item => item.type === 'function_call');
   for (const [name, revision] of [['skill_set', 2], ['inference_set', 3]]) {
     const call = retainedCalls.findLast(item => item.name === name);
@@ -645,7 +645,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       client.closed.then(exit => console.error(JSON.stringify({runtime_fixture: scenario, process_exit: exit})));
     }
     const initialized = await client.initialize(versions);
-    assert.equal(initialized.server_info.version, '8.0.0');
+    assert.equal(initialized.server_info.version, '9.0.0');
     assert.equal(initialized.protocol_version, 'agent-host/2.1');
     assert.equal(Object.hasOwn(initialized.capabilities, 'task_reconciliation'), true);
     return client;
@@ -804,7 +804,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           assert.equal(call[3], toolNames.indexOf(expectedCall.name));
           const context = decodeValue(schemas.AdaptiveContext, archive.object(reply[1].value[0]));
           assert.equal(context.length, 13); assert.deepEqual(context[2], archive.task.id);
-          assert.equal(context[0], 'agent.model.context.responses.adaptive.v7'); assert.deepEqual(context[1], request[1]);
+          assert.equal(context[0], 'agent.model.context.responses.adaptive.v8'); assert.deepEqual(context[1], request[1]);
           assert.equal(context[3], archive.task.tenant); assert.equal(context[4], frozenProfile.adaptive.audience);
           assert.equal(context[6], request[2][2]);
           assert.deepEqual(context[5], request[2]); assert.deepEqual(context[7], plan); assert.equal(context[8], BigInt(index + 1));

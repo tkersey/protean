@@ -6,17 +6,17 @@ pub const tool_types = @import("tool_types.zig");
 pub const controls = protean.adaptive_controls;
 pub const model = protean.model_invocation;
 pub const application_id = "adaptive-agent";
-pub const application_version = "8.0.0";
+pub const application_version = "9.0.0";
 pub const input_schema_id = "adaptive-agent.input.v2";
 pub const output_schema_id = "adaptive-agent.output.v5";
 pub const failure_schema_id = "adaptive-agent.failure.v1";
 pub const message_schema_id = "adaptive-agent.message.v2";
 pub const answer_schema_id = "adaptive-agent.answer.v2";
 pub const bindings_identity = "agent.adaptive.bindings.v2";
-pub const prepare_identity = "agent.adaptive.context.prepare.v2";
+pub const prepare_identity = "agent.adaptive.context.prepare.v3";
 pub const work_identity = "agent.adaptive.snapshot.work.v2";
 pub const inspect_identity = "agent.adaptive.snapshot.guards.v2";
-pub const workspace_identity = "agent.adaptive.workspace.v2";
+pub const workspace_identity = "agent.adaptive.workspace.v3";
 pub const question_identity = "agent.adaptive.question.v2";
 pub const Path = contracts.Utf8;
 pub const Summary = contracts.Utf8;
@@ -136,9 +136,11 @@ pub const P = model.Profile(Action, .{
     .{
         .name = "context",
         .description = "Inspect and materialize authorized evidence, including a " ++
-            "revision-bound guest state view; choose a view for future " ++
-            "inference or expand an omitted source range. Views preserve " ++
-            "sources and coverage and do not advance the inspected work.",
+            "guest state or authentic consumer observation. Select ordinary " ++
+            "values or an actual completed pure projector result for future " ++
+            "inference, or expand an omitted source range. Projection is " ++
+            "optional. Views preserve origins and coverage without advancing " ++
+            "inspected work or proving that the task is complete.",
     },
     .{
         .name = "placement",
@@ -386,7 +388,16 @@ pub const Ready = struct {
     receipt: ?ReceiptReference,
     results: PendingResults,
 };
-pub const PreparationResult = union(enum) { ready: Ready, rejected: controls.Rejection };
+pub const ProjectionRejectionCode = enum { stale, unavailable, invalid, oversized };
+pub const ProjectionRejection = struct {
+    code: ProjectionRejectionCode,
+    view: contracts.workspace.Ref,
+};
+pub const PreparationResult = union(enum) {
+    ready: Ready,
+    rejected: controls.Rejection,
+    projection_rejected: ProjectionRejection,
+};
 pub const PreparationProduct = struct {
     result: PreparationResult,
     receipt: ?contracts.Bytes(null),
@@ -460,6 +471,7 @@ pub const support_types = .{
     .{ .name = "Bindings", .T = Bindings },
     .{ .name = "Preparation", .T = Preparation },
     .{ .name = "PreparationResult", .T = PreparationResult },
+    .{ .name = "ProjectionRejection", .T = ProjectionRejection },
     .{ .name = "PreparationProduct", .T = PreparationProduct },
     .{ .name = "PreparationCapture", .T = PreparationCapture },
     .{ .name = "ControlReceipt", .T = ControlReceipt },

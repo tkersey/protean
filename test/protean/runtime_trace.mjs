@@ -56,7 +56,7 @@ export function* runtimeTrace(subject, scenario) {
   }}, sources: []}));
   subject.view = view.value;
   assert.equal(subject.view.kind, 'value');
-  observed(yield call('context', 'select', {values: [subject.view]}));
+  observed(yield call('context', 'select', {tag: 'values', value: [subject.view]}));
   assert(subject.offered.has('read') && subject.offered.has('stop') && subject.offered.has('context'));
   yield ['read', {path: 'src/main.zig', start: 0, maximum: 4096}];
   yield ['stop', {reason: 'The runtime structure view does not establish the source claim. The investigation switched to source evidence without continuing the experiment.'}];

@@ -824,7 +824,15 @@ pub fn Projection(comptime P: type) type {
             try appendCurrent(a, request, selected, previous, &state);
             const core = try renderTools(ctx, request, frozen, selected, catalog, &state);
             if (selected.profile.explicit_cache) try markLatest(a, &state.history, state.new_start);
-            const input = try renderInput(ctx, request, state.history);
+            const maximum = selected.transport.request_bytes;
+            const presentation = try renderSelection(ctx, request, maximum, &state);
+            const input = try renderInput(
+                ctx,
+                request,
+                state.history,
+                state.origins.items,
+                presentation.text,
+            );
             const reasoning_skills = try exposedSkills(a, request, catalog, state.origins.items);
             return .{
                 .history_base = state.history_base,
@@ -836,7 +844,29 @@ pub fn Projection(comptime P: type) type {
                 .core_tools = core,
                 .prior_response_id = try priorResponseId(a, state.same_profile, previous),
                 .prior_request = if (previous) |saved| saved.value().source_request else null,
+                .selected_view = presentation.view,
             };
+        }
+
+        fn renderSelection(
+            ctx: registry.ProjectionContext,
+            request: P.AdaptiveRequest,
+            maximum: ?u32,
+            rendered: *const RenderState,
+        ) !@import("workspace_presentation.zig").Rendered {
+            const selection = request.plan.research orelse return .{};
+            return @import("workspace_presentation.zig").render(ctx, selection.view, .{
+                .controller = .{
+                    .protected_identity = try @import("adaptive_consumer.zig").Protection(P)
+                        .boundIdentity(
+                        ctx.allocator,
+                        request,
+                        rendered.history.array.items,
+                        rendered.origins.items,
+                    ),
+                    .model_profile = request.selection.profile_digest,
+                },
+            }, if (maximum) |limit| @as(u64, limit) else null);
         }
 
         fn priorResponseId(
@@ -887,7 +917,7 @@ pub fn Projection(comptime P: type) type {
                 request.plan.watermark,
             );
             if (!state.same_epoch) {
-                if (changed_view) try selectResearch(
+                if (changed_view and request.plan.research != null) try selectResearch(
                     a,
                     &state.history,
                     &state.origins,
@@ -926,23 +956,51 @@ pub fn Projection(comptime P: type) type {
                 old.plan.research,
                 request.plan.research,
             );
+            if (request.plan.reason == .projection_recovery and request.plan.research != null)
+                return error.InvalidContext;
             if (changed_view) {
-                const selection = request.plan.research orelse return error.InvalidContext;
-                if (same_epoch or
-                    request.plan.reason != .view_change or
-                    selection.selected_at != request.plan.watermark or
-                    selection.selected_at == 0 or
-                    selection.view.kind != .view or
-                    selection.view.id.bytes.len != 64)
-                    return error.InvalidContext;
-                var identity: [32]u8 = undefined;
-                _ = std.fmt.hexToBytes(
-                    &identity,
-                    selection.view.id.bytes,
-                ) catch return error.InvalidContext;
+                if (request.plan.research == null) {
+                    if (same_epoch or (request.plan.reason != .view_change and
+                        request.plan.reason != .projection_recovery))
+                        return error.InvalidContext;
+                } else try validateResearchTransition(request, same_epoch);
             } else if (!same_epoch and
                 request.plan.reason == .view_change)
                 return error.InvalidContext;
+            return validatePriorEpoch(
+                old,
+                request,
+                same_epoch,
+                same_profile,
+                removing,
+                changed_view,
+            );
+        }
+
+        fn validateResearchTransition(request: P.AdaptiveRequest, same_epoch: bool) !void {
+            const selection = request.plan.research orelse return error.InvalidContext;
+            if (same_epoch or
+                request.plan.reason != .view_change or
+                selection.selected_at != request.plan.watermark or
+                selection.selected_at == 0 or
+                selection.view.kind != .view or
+                selection.view.id.bytes.len != 64)
+                return error.InvalidContext;
+            var identity: [32]u8 = undefined;
+            _ = std.fmt.hexToBytes(
+                &identity,
+                selection.view.id.bytes,
+            ) catch return error.InvalidContext;
+        }
+
+        fn validatePriorEpoch(
+            old: P.AdaptiveContext,
+            request: P.AdaptiveRequest,
+            same_epoch: bool,
+            same_profile: bool,
+            removing: bool,
+            changed_view: bool,
+        ) !bool {
             if (same_epoch) {
                 if (removing or
                     request.plan.eviction_generation != old.plan.eviction_generation or
@@ -1096,10 +1154,28 @@ pub fn Projection(comptime P: type) type {
             ctx: registry.ProjectionContext,
             request: P.AdaptiveRequest,
             history: json.Value,
+            origins: []const P.ContextOrigin,
+            presentation: ?[]const u8,
         ) !json.Value {
             const a = ctx.allocator;
             var input = list(a);
-            try input.array.appendSlice(history.array.items);
+            var inserted = presentation == null;
+            var calls: usize = 0;
+            const selected_at = if (request.plan.research) |selection| selection.selected_at else 0;
+            for (history.array.items, origins) |item, origin| {
+                if (!inserted and calls == 0 and origin.watermark >= selected_at -| 1) {
+                    try input.array.append(try message(a, "user", presentation.?, false));
+                    inserted = true;
+                }
+                try input.array.append(item);
+                if (kind(item, "function_call")) calls = try std.math.add(usize, calls, 1);
+                if (kind(item, "function_call_output")) {
+                    if (calls == 0) return error.CallPairMismatch;
+                    calls -= 1;
+                }
+            }
+            if (calls != 0) return error.MissingCallResult;
+            if (!inserted) try input.array.append(try message(a, "user", presentation.?, false));
             for (request.plan.skills.items) |loaded| if (loaded.residency == .transient and
                 loaded.active)
             {
@@ -1329,6 +1405,7 @@ fn ProjectionTypes(comptime P: type) type {
             core_tools: json.Value,
             prior_response_id: ?[]const u8,
             prior_request: ?@FieldType(P.AdaptiveContext, "source_request"),
+            selected_view: ?registry.ObjectReference = null,
         };
         const RenderState = struct {
             history: json.Value,

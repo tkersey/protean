@@ -225,6 +225,32 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 }
 
                 fn select(ctx: @This(), selection: @FieldType(wc.Context, "select")) !void {
+                    if (selection == .projected) {
+                        const Projections = @import("workspace_projections.zig").Operations(
+                            Types,
+                            Self,
+                        );
+                        var admitted = try Projections.admit(
+                            ctx.self,
+                            ctx.a,
+                            ctx.parent,
+                            selection.projected,
+                            .{ .controller = .{} },
+                            false,
+                        );
+                        defer admitted.deinit();
+                        const bytes = try contracts.encodeOwned(
+                            workspace.ViewArtifact,
+                            ctx.a,
+                            admitted.view,
+                        );
+                        defer ctx.a.free(bytes);
+                        if (!std.meta.eql(
+                            storage.digest(bytes),
+                            ctx.identity,
+                        )) return error.InvalidArchive;
+                        return;
+                    }
                     const refs = try ctx.a.alloc(state.Reference, selection.values.items.len);
                     defer ctx.a.free(refs);
                     for (selection.values.items, refs) |ref, *out|

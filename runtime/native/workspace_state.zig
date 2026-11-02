@@ -527,18 +527,50 @@ pub const SemanticPolicyObservation = struct {
 
 /// Inputs to a read projection, captured before later work can replace them.
 /// Executable claims in each work are checked against its retained checkpoint.
+pub const ControllerObservation = struct {
+    binding: ?state.Digest,
+    epoch: u64,
+    execution_revision: u64,
+    runtime: ?state.Reference = null,
+    realization_revision: u64 = 0,
+    interaction: ?state.Digest = null,
+    residuals: contracts.Vector(state.Digest, null),
+    event_watermark: u64,
+};
+pub const ConsumerInterface = struct {
+    request: state.Reference,
+    protected_identity: state.Digest,
+    model_profile: state.Digest,
+};
+pub const ConsumerObservation = struct {
+    task: state.TaskId,
+    tenant: state.Name,
+    application: state.Reference,
+    policy: state.Reference,
+    input: state.Reference,
+    next_message: u64,
+    input_revision: u64,
+    controller: ControllerObservation,
+    interface: ConsumerInterface,
+    selection: contracts.workspace.ConsumerInspection,
+    model: ?ModelBinding,
+    target: ?WorkObservation,
+    required_current: contracts.Vector(WorkObservation, null),
+
+    pub fn requireTask(self: ConsumerObservation, parent: state.Task) !void {
+        if (!std.meta.eql(self.task, parent.id) or
+            !std.mem.eql(u8, self.tenant.bytes, parent.tenant.bytes) or
+            !std.meta.eql(self.application, parent.image) or
+            !std.meta.eql(self.policy, parent.profile) or
+            !std.meta.eql(self.input, parent.input) or
+            !std.meta.eql(self.controller.binding, parent.controller) or
+            self.controller.epoch != parent.controller_epoch or
+            self.next_message != parent.next_message) return error.StaleConsumer;
+    }
+};
 pub const ReadObservation = union(enum) {
     immutable,
-    controller: struct {
-        binding: ?state.Digest,
-        epoch: u64,
-        execution_revision: u64,
-        runtime: ?state.Reference = null,
-        realization_revision: u64 = 0,
-        interaction: ?state.Digest = null,
-        residuals: contracts.Vector(state.Digest, null),
-        event_watermark: u64,
-    },
+    controller: ControllerObservation,
     residual: struct { value: state.ControllerResidualObservation, event_watermark: u64 },
     works: struct {
         works: contracts.Vector(?WorkObservation, null),
@@ -552,6 +584,7 @@ pub const ReadObservation = union(enum) {
         event_watermark: u64,
     },
     semantic_policy: struct { policy: ?SemanticPolicyObservation, event_watermark: u64 },
+    consumer: ConsumerObservation,
 };
 
 /// The local operation owns these inputs; reply JSON is always a projection.
@@ -628,6 +661,7 @@ pub const Delegation = struct {
     model: ?ModelBinding = null,
     snapshot: ?state.Reference = null,
     inputs: contracts.Vector(state.Reference, null),
+    context: ?state.Reference = null,
 };
 pub const SnapshotRange = struct {
     snapshot: state.Reference,
@@ -646,6 +680,7 @@ pub const Authorized = struct {
     catalog: ?state.Reference = null,
     input: ?state.Reference = null,
     model: ?ModelBinding = null,
+    consumer: ?ConsumerInterface = null,
 };
 pub const ValueArtifact = struct {
     version: u32 = 1,
@@ -667,6 +702,15 @@ pub const ViewArtifact = struct {
     version: u32 = 1,
     values: contracts.Vector(state.Reference, null),
     coverage: enum { selected_values_only } = .selected_values_only,
+    projection: ?ProjectionSelection = null,
+};
+pub const ProjectionSelection = struct {
+    result: state.Reference,
+    work: state.Reference,
+    program: state.Reference,
+    input: state.Reference,
+    observation: state.Reference,
+    values: contracts.Vector(state.Reference, null),
 };
 pub const View = struct {
     id: state.Digest,

@@ -1,7 +1,7 @@
 //! Model actions select ordinary Horos programs and native workspace operations.
 //! Text fields carry canonical runtime-schema JSON; they are never native code.
 const c = @import("contracts.zig");
-pub const identity = "protean-workspace/5";
+pub const identity = "protean-workspace/6";
 pub const Ref = struct {
     kind: enum {
         program,
@@ -16,6 +16,7 @@ pub const Ref = struct {
         residual,
         candidate,
         controller,
+        observation,
     },
     id: c.Text(64),
 };
@@ -106,7 +107,8 @@ pub const Interpretation = union(enum) {
         profile_id: c.Text(64),
         effort: c.Text(16),
         subproblem: c.Utf8,
-        inputs: c.Vector(Ref, null),
+        inputs: c.Vector(Ref, null) = .{ .items = &.{} },
+        context: ?Selection = null,
     },
     snapshot: struct { port: Ref, generation: u64, path: c.Utf8, offset: u64, maximum: u64 },
 };
@@ -134,6 +136,7 @@ pub const Program = union(enum) {
             current_controller,
             semantic_candidates,
             source_derivations,
+            projection,
         },
         page: Page,
     },
@@ -206,10 +209,44 @@ pub const Work = union(enum) {
     unguard: struct { expected: Expected, guard_revision: u64 },
     request_cut: struct { expected: Expected, level: enum { guest_cut, outer_execution } },
 };
+pub const ConsumerTarget = union(enum) {
+    controller: struct {},
+    model: struct {
+        expected: Expected,
+        port: Ref,
+        generation: u64,
+        profile_id: c.Text(64),
+        effort: c.Text(16),
+    },
+};
+pub const ConsumerInspection = struct {
+    target: ConsumerTarget,
+    required_current: c.Vector(Expected, null) = .{ .items = &.{} },
+};
+pub const PresentationBlock = union(enum) {
+    value: Ref,
+    computed: struct {},
+    source: struct { value: Ref, offset: u64, length: u64 },
+    explanation: c.Utf8,
+};
+pub const ProjectionProposal = struct {
+    consumer: Ref,
+    blocks: c.Vector(PresentationBlock, null),
+};
+pub fn ProjectionInput(comptime T: type) type {
+    return struct { consumer: Ref, value: T };
+}
+pub fn ProjectionResult(comptime T: type) type {
+    return struct { proposal: ProjectionProposal, value: T };
+}
+pub const Selection = union(enum) {
+    values: c.Vector(Ref, null),
+    projected: Ref,
+};
 pub const Context = union(enum) {
-    inspect: struct { page: Page },
+    inspect: struct { page: Page, consumer: ?ConsumerInspection = null },
     materialize: struct { input: Materialization, sources: c.Vector(Ref, null) },
-    select: struct { values: c.Vector(Ref, null) },
+    select: Selection,
     expand: struct { reference: Ref, page: Page },
 };
 pub const PlacementSubject = union(enum) { controller: struct {}, work: Ref };

@@ -849,11 +849,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             adapter: registry.CaptureAdapter,
             payload: []const u8,
         ) ![]u8 {
+            var binding = try occurrenceProjectionBinding(self, a, value, pending);
+            binding.current = true;
             return store(self).project(
                 []u8,
                 a,
                 self.handlers,
-                try occurrenceProjectionBinding(self, a, value, pending),
+                binding,
                 struct {
                     adapter: registry.CaptureAdapter,
                     payload: []const u8,

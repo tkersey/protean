@@ -67,6 +67,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             @import("workspace_residual_validation.zig").Operations(Types, Self);
         const Snapshots = @import("workspace_snapshots.zig").Operations(Types, Self);
         const Waits = @import("workspace_waits.zig").Operations(Types, Self);
+        const Consumers = @import("workspace_consumers.zig").Operations(Types, Self);
         pub fn validateWorkspacePublications(
             self: *Self,
             a: std.mem.Allocator,
@@ -345,6 +346,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                                 .residual => |value| value.event_watermark,
                                 .works => |value| value.event_watermark,
                                 .wait => |value| value.event_watermark,
+                                .consumer => |value| value.controller.event_watermark,
                             };
                             if (event_value.seq == 0 or at != event_value.seq - 1)
                                 return error.InvalidArchive;
@@ -551,6 +553,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             allocator: std.mem.Allocator,
             parent: state.Task,
             command: wc.Command,
+            authority: ?workspace.Authorized,
         ) ![]u8 {
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
@@ -579,7 +582,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     else => return error.InvalidState,
                 },
                 .context => |c| switch (c) {
-                    .inspect => basis = .{ .scope = parent.event_high },
+                    .inspect => |request| basis = try contextReadBasis(
+                        self,
+                        a,
+                        parent,
+                        request.consumer,
+                        authority,
+                    ),
                     .expand => |r| if (r.reference.kind == .work) {
                         one[0] = r.reference;
                         refs = &one;
@@ -608,6 +617,25 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             }
             return contracts.encodeOwned(workspace.ReadObservation, allocator, basis);
         }
+        fn contextReadBasis(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            request: ?wc.ConsumerInspection,
+            authority: ?workspace.Authorized,
+        ) !workspace.ReadObservation {
+            const selection = request orelse return .{ .scope = parent.event_high };
+            const authorized = authority orelse return error.InvalidConsumer;
+            return .{ .consumer = try Consumers.observe(
+                self,
+                a,
+                parent,
+                selection,
+                authorized.consumer orelse return error.InvalidConsumer,
+                authorized.model,
+            ) };
+        }
+
         fn residualReadBasis(
             self: *Self,
             a: std.mem.Allocator,
@@ -725,10 +753,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             basis: workspace.ReadObservation,
             controller_read: ?state.ControllerReadCut,
         ) !void {
-            if (basis == .controller) {
+            if (basis == .controller or basis == .consumer) {
+                const observed =
+                    if (basis == .controller) basis.controller else basis.consumer.controller;
                 const cut = controller_read orelse return error.InvalidArchive;
-                if (cut.event_watermark != basis.controller.event_watermark or
-                    cut.execution_revision != basis.controller.execution_revision)
+                if (cut.event_watermark != observed.event_watermark or
+                    cut.execution_revision != observed.execution_revision)
                     return error.InvalidArchive;
             } else if (controller_read != null) return error.InvalidArchive;
         }
@@ -769,6 +799,14 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (std.meta.activeTag(basis) != expected) return error.InvalidArchive;
             switch (basis) {
                 .immutable => {},
+                .consumer => |observed| try Consumers.validateRead(
+                    self,
+                    a,
+                    parent,
+                    observed,
+                    records,
+                    checked,
+                ),
                 .semantic_policy => |observed| {
                     if (observed.event_watermark > parent.event_high) return error.InvalidArchive;
                 },
@@ -829,7 +867,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             )) return error.InvalidArchive;
             try validateResidualObservation(self, a, basis.residual.value);
         }
-        fn validateControllerReadObservation(
+        pub fn validateControllerReadObservation(
             self: *Self,
             a: std.mem.Allocator,
             parent: state.Task,
@@ -992,7 +1030,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     else => return error.InvalidArchive,
                 },
                 .context => |c| switch (c) {
-                    .inspect => expected.* = .scope,
+                    .inspect => |request| expected.* =
+                        if (request.consumer == null) .scope else .consumer,
                     .expand => |r| if (r.reference.kind == .work) {
                         one[0] = r.reference;
                         refs.* = one;
@@ -1168,6 +1207,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             checked: *Snapshots.SnapshotValidation,
         ) !wc.Reply {
             const command = authorized.command;
+            if (basis == .consumer) try Consumers.sameInterface(a, basis.consumer, authorized);
 
             const controller_read = try workspaceReplyReadCut(self, a, parent, pending, basis);
             try validateWorkspaceReadIn(
@@ -1206,6 +1246,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .residual => |observed| observed.event_watermark,
                 .works => |works| works.event_watermark,
                 .wait => |wait| wait.event_watermark,
+                .consumer => |observed| observed.controller.event_watermark,
             };
             if (watermark) |at| {
                 // The read's own journal position anchors its prefix;

@@ -13,8 +13,12 @@ const expectCleanup = @import("native_test_support.zig").cleanup;
 
 // Provider arguments use JSON integers; the client value codec deliberately
 // renders full-width integers as strings. Preserve that contract distinction.
-inline fn modelArguments(comptime T: type, a: std.mem.Allocator, value: T) !native.json.Value {
+pub inline fn modelArguments(comptime T: type, a: std.mem.Allocator, value: T) !native.json.Value {
     if (@typeInfo(T) == .int) return native.json.number(a, value);
+    if (@typeInfo(T) == .optional) return if (value) |child|
+        modelArguments(@TypeOf(child), a, child)
+    else
+        .null;
     if (@typeInfo(T) == .@"struct" and @hasDecl(T, "protean_value_kind")) {
         if (T.protean_value_kind == .vector) {
             var array: native.json.Value = .{ .array = .init(a) };
@@ -2370,7 +2374,7 @@ fn admitPublicRecovery(
     return status_params;
 }
 
-fn recoveryAssets(a: std.mem.Allocator, permanent: std.mem.Allocator) !native.discovery.Assets {
+pub fn recoveryAssets(a: std.mem.Allocator, permanent: std.mem.Allocator) !native.discovery.Assets {
     const image = @embedFile("adaptive_image");
     const image_identity = identity: {
         const admitted_image = try horos.data.program_image.Admitted.decode(a, image);
@@ -2380,7 +2384,7 @@ fn recoveryAssets(a: std.mem.Allocator, permanent: std.mem.Allocator) !native.di
     return imageAssets(permanent, image_identity);
 }
 
-fn recoveryProfile(
+pub fn recoveryProfile(
     a: std.mem.Allocator,
     configured: native.configuration.Admitted,
     handlers: native.Registry,
@@ -3896,7 +3900,7 @@ fn checkUnsettledPrivacy(
     }
 }
 
-fn workspaceRecoveryHandlers(a: std.mem.Allocator) !native.Registry {
+pub fn workspaceRecoveryHandlers(a: std.mem.Allocator) !native.Registry {
     var declarations = environment.handlers;
     for (&declarations) |*entry| if (entry.inference) {
         entry.capture.?.acquire = struct {
