@@ -1,4 +1,4 @@
-name: Native field prefix function attribution
+name: Native first-byte reader specialization
 on:
   workflow_dispatch:
 permissions:
@@ -24,6 +24,16 @@ jobs:
           mirror: https://zigmirror.com
           use-tool-cache: true
           use-cache: false
+      - name: Reuse measured prefix binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 41607199332 --repo "$GITHUB_REPOSITORY" \
+            --name native-adaptive-cpu-profile --dir "$RUNNER_TEMP/cache-only"
+          expected=38906d3199381f5da352cf828471a78c76cef6bcf7c1aa854d3dd84df4266f6f
+          actual=$(sha256sum "$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate" | cut -d ' ' -f 1)
+          test "$expected" = "$actual"
+          chmod 700 "$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate"
       - name: Prepare bounded diagnostic
         run: |
           mkdir -p "$RUNNER_TEMP/profile" .zig-cache/tmp
@@ -97,7 +107,7 @@ jobs:
             --prefix "$RUNNER_TEMP/compiled" 2>&1 | tee "$RUNNER_TEMP/profile/build.log"
           cp "$RUNNER_TEMP/compiled/verification/native-owner-adaptive" "$RUNNER_TEMP/profile/native-owner-adaptive"
           sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive" > "$RUNNER_TEMP/profile/binary-sha256.txt"
-      - name: Compile isolated function-attribution candidate
+      - name: Compile isolated first-byte candidate
         run: |
           mkdir -p "$RUNNER_TEMP/candidate"
           cp -a .protean-native/inputs/kosmos "$RUNNER_TEMP/candidate/kosmos"
@@ -130,26 +140,36 @@ jobs:
           command[runtime] = '-Mpackaged_runtime=' + wrapper;
           command.push('--test-no-exec', '-femit-bin=' + profile + '/native-owner-adaptive-candidate');
           writeFileSync(profile + '/candidate-command.json', JSON.stringify(command));
+          const result = spawnSync(command[0], command.slice(1), {stdio: 'inherit'});
+          if (result.error) throw result.error;
+          process.exit(result.status ?? 1);
           JS
-          node tools/native/diagnostic-function-counts.mjs
-          sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive-functions" > "$RUNNER_TEMP/profile/functions-binary-sha256.txt"
-      - name: Attribute current original repair work
+          sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive-candidate" > "$RUNNER_TEMP/profile/candidate-binary-sha256.txt"
+      - name: Compare identical original repair phases
         run: |
           umask 0022
           id > "$RUNNER_TEMP/profile/identity.txt"
-          profile_work=$(mktemp -d /tmp/protean-native-functions.XXXXXX)
-          mkdir -p "$profile_work/.zig-cache/tmp"
-          cd "$profile_work"
-          set +e
-          timeout --signal=INT --kill-after=10s 100s node \
-            "$GITHUB_WORKSPACE/tools/native/qualification_tests.mjs" \
-            "$RUNNER_TEMP/profile/native-owner-adaptive-functions" \
-            '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
-            '[1]' > "$RUNNER_TEMP/profile/functions-test.log" 2>&1
-          status=$?
-          echo "$status" > "$RUNNER_TEMP/profile/functions-status.txt"
-          cat "$RUNNER_TEMP/profile/functions-test.log"
-          test "$status" = 0 || test "$status" = 124
+          for variant in cached candidate; do
+            profile_seconds=120
+            if test "$variant" = candidate; then profile_seconds=120; fi
+            profile_work=$(mktemp -d /tmp/protean-native-frame.XXXXXX)
+            mkdir -p "$profile_work/.zig-cache/tmp"
+            binary="$RUNNER_TEMP/profile/native-owner-adaptive"
+            if test "$variant" = candidate; then binary="$binary-candidate"; fi
+            if test "$variant" = cached; then binary="$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate"; fi
+            (
+              cd "$profile_work"
+              set +e
+              timeout --signal=INT --kill-after=10s "${profile_seconds}s" node \
+                "$GITHUB_WORKSPACE/tools/native/qualification_tests.mjs" "$binary" \
+                '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
+                '[1]' > "$RUNNER_TEMP/profile/$variant-test.log" 2>&1
+              status=$?
+              echo "$status" > "$RUNNER_TEMP/profile/$variant-status.txt"
+              cat "$RUNNER_TEMP/profile/$variant-test.log"
+              test "$status" = 0 || test "$status" = 124
+            )
+          done
       - name: Retain diagnostic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

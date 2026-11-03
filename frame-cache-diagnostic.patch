@@ -2,43 +2,16 @@ diff --git a/src/interpreter_v2/activation_frames.zig b/src/interpreter_v2/activ
 index 2050fe5..2bdb535 100644
 --- a/src/interpreter_v2/activation_frames.zig
 +++ b/src/interpreter_v2/activation_frames.zig
-@@ -40,7 +40,7 @@ pub const Bound = union(enum) {
-     const Iterator = union(enum) {
-         bits: u64,
-         tree: sets.Iterator,
+@@ -43 +43 @@ pub const Bound = union(enum) {
 -        fn next(self: *Iterator) ?u64 {
 +        inline fn next(self: *Iterator) ?u64 {
-             return switch (self.*) {
-                 .bits => |*bits| blk: {
-                     if (bits.* == 0) break :blk null;
-@@ -68,6 +68,7 @@ pub const Frames = struct {
-     layouts: *const Layouts,
-     custody: custody.Custody,
-     entries: std.AutoHashMapUnmanaged(data.program.Id, Frame) = .empty,
+@@ -70,0 +71 @@ pub const Frames = struct {
 +    resolution: ?struct { id: data.program.Id, frame: *Frame } = null,
-     journal: ?Journal = null,
-     borrowed: ?data.program.Id = null,
-     // One pointer is the ordinary evaluator case. Additional simultaneous
-@@ -178,6 +179,7 @@ pub const Frames = struct {
-     /// Remove successors first; retained map capacity then suffices for every
-     /// entry frame. No allocation or full retained-frame traversal is needed.
-     pub fn rollback(self: *Frames, node_count: usize) void {
+@@ -180,0 +182 @@ pub const Frames = struct {
 +        self.resolution = null;
-         self.slots.before_mutation = null;
-         self.custody.nodes.before_mutation = null;
-         self.endMutableBorrows(); // Restoring map entries ends their borrows.
-@@ -229,6 +231,7 @@ pub const Frames = struct {
-         };
-     }
-     pub fn deinit(self: *Frames) void {
+@@ -231,0 +234 @@ pub const Frames = struct {
 +        self.resolution = null;
-         if (self.journal != null) self.commit();
-         self.endMutableBorrows();
-         self.entries.deinit(self.allocator);
-@@ -237,11 +240,17 @@ pub const Frames = struct {
-         self.* = undefined;
-     }
-     pub fn get(self: *Frames, id: data.program.Id) Error!Frame {
+@@ -240 +243,7 @@ pub const Frames = struct {
 -        return self.entries.get(id) orelse error.InvalidState;
 +        return (self.resolve(id) orelse return error.InvalidState).*;
 +    }
@@ -47,87 +20,41 @@ index 2050fe5..2bdb535 100644
 +        const frame = self.entries.getPtr(id) orelse return null;
 +        self.resolution = .{ .id = id, .frame = frame };
 +        return frame;
-     }
-     /// The borrow ends before any operation that changes the frame map.
-     pub fn getMutable(self: *Frames, id: data.program.Id) Error!*Frame {
+@@ -244 +253 @@ pub const Frames = struct {
 -        const frame = self.entries.getPtr(id) orelse return error.InvalidState;
 +        const frame = self.resolve(id) orelse return error.InvalidState;
-         // Protection may grow the journal or view tables, never this frame map.
-         try self.hold(id);
-         if (self.borrowed) |first| {
-@@ -317,6 +326,7 @@ pub const Frames = struct {
-     pub fn put(self: *Frames, id: data.program.Id, frame: Frame) Error!void {
-         if (self.entries.contains(id)) return error.InvalidState;
-         try self.hold(id);
+@@ -319,0 +329 @@ pub const Frames = struct {
 +        self.resolution = null;
-         try self.entries.put(self.allocator, id, frame);
-         try self.registerRoots(frame, id);
-         self.endMutableBorrows();
-@@ -329,10 +339,11 @@ pub const Frames = struct {
-         try self.hold(id);
-         self.endMutableBorrows();
-         try self.registerRoots(frame, id);
+@@ -332 +342 @@ pub const Frames = struct {
 -        self.entries.getPtr(id).?.* = frame;
 +        self.resolve(id).?.* = frame;
-     }
-     pub fn remove(self: *Frames, id: data.program.Id) Error!void {
-         const frame = self.entries.get(id) orelse return;
+@@ -335,0 +346 @@ pub const Frames = struct {
 +        self.resolution = null;
-         if (self.journal) |*journal| {
-             if (id < journal.node_count and !journal.contains(id) and
-                 try self.slots.canTransfer(frame.view) and
 diff --git a/src/interpreter_v2/activation_slots.zig b/src/interpreter_v2/activation_slots.zig
 index 46291fb..f5b08a9 100644
 --- a/src/interpreter_v2/activation_slots.zig
 +++ b/src/interpreter_v2/activation_slots.zig
-@@ -229,7 +229,7 @@ pub fn Slots(comptime Value: type) type {
-             return .{ .instance = self.instance, .index = index, .generation = result.generation };
-         }
- 
+@@ -232 +232 @@ pub fn Slots(comptime Value: type) type {
 -        fn lookupView(self: *Self, handle: Handle) error{InvalidHandle}!*View {
 +        inline fn lookupView(self: *Self, handle: Handle) error{InvalidHandle}!*View {
-             if (handle.instance != self.instance or handle.index >= self.views.items.len)
-                 return error.InvalidHandle;
-             const result = &self.views.items[handle.index];
-@@ -316,7 +316,7 @@ pub fn Slots(comptime Value: type) type {
-             self.drop(previous);
-         }
- 
+@@ -319 +319 @@ pub fn Slots(comptime Value: type) type {
 -        pub fn get(self: *Self, handle: Handle, slot: usize) ReadError!Value {
 +        pub inline fn get(self: *Self, handle: Handle, slot: usize) ReadError!Value {
-             const entry = try self.lookupView(handle);
-             if (slot >= entry.limit) return error.InvalidSlot;
-             const page = locate(entry.root, entry.depth, slot) orelse
-@@ -333,7 +333,7 @@ pub fn Slots(comptime Value: type) type {
-             store: *Self,
-             handle: Handle,
- 
+@@ -336 +336 @@ pub fn Slots(comptime Value: type) type {
 -            pub fn at(self: Reader, slot: usize) ReadError!Value {
 +            pub inline fn at(self: Reader, slot: usize) ReadError!Value {
-                 return self.store.get(self.handle, slot);
-             }
-         };
 diff --git a/src/interpreter_v2/store.zig b/src/interpreter_v2/store.zig
 index fcb0459..7b8fee4 100644
 --- a/src/interpreter_v2/store.zig
 +++ b/src/interpreter_v2/store.zig
-@@ -432,7 +432,7 @@ pub const Store = struct {
-         return reference;
-     }
- 
+@@ -435 +435 @@ pub const Store = struct {
 -    pub fn get(self: Store, reference: g.NodeRef) Error!g.Node {
 +    pub inline fn get(self: *const Store, reference: g.NodeRef) Error!g.Node {
-         if (reference.id >= self.nodes.items.len or
-             !self.alive.items[@intCast(reference.id)]) return error.InvalidReference;
-         return self.nodes.items[@intCast(reference.id)];
 diff --git a/src/semantic/aggregate.zig b/src/semantic/aggregate.zig
 index 1154214..4b8c523 100644
 --- a/src/semantic/aggregate.zig
 +++ b/src/semantic/aggregate.zig
-@@ -238,7 +238,92 @@ fn emitLoop(
-     try e.b.define(loop, try e.when(try e.binary(.less, index, count), more, try e.b.pure(
-         try e.tuple(output, &.{ input, prior }),
-     )));
+@@ -241 +241,86 @@ fn emitLoop(
 -    try emitSplit(m, e, v, fields, parts, split_result, d, table, output, loop);
 +    const encoded_loop = try emitEncodedSplitLoop(m, e, v, table, output);
 +    try emitSplit(m, e, v, fields, parts, split_result, d, table, output, loop, encoded_loop);
@@ -215,32 +142,17 @@ index 1154214..4b8c523 100644
 +            try e.b.reference(child), cursor, try e.b.reference(end),
 +        })),
 +    ));
- }
- 
- fn defineFromFields(
-@@ -407,10 +492,12 @@ fn emitLoopMore(
- 
- fn emitLoopProduct(
-     e: Author,
+@@ -409,0 +495 @@ fn emitLoopProduct(
 +    v: values.Definition,
-     parts: Id,
-     split_result: Id,
-     table: anytype,
-     loop: Id,
+@@ -413,0 +500 @@ fn emitLoopProduct(
 +    encoded_loop: Id,
-     machine: Id,
-     argument: Id,
-     shape: Id,
-@@ -419,21 +506,15 @@ fn emitLoopProduct(
- ) Error!Id {
-     return try e.b.bind(
-         result,
+@@ -422 +509,4 @@ fn emitLoopProduct(
 -        try e.call(
 +        try splitProductCall(
 +            e,
 +            v,
 +            table,
-             loop,
+@@ -424,13 +514,4 @@ fn emitLoopProduct(
 -            &.{
 -                machine,              argument, e.zero,
 -                try e.b.primitive(
@@ -258,13 +170,7 @@ index 1154214..4b8c523 100644
 +            machine,
 +            argument,
 +            try e.payload(shape, @backingInt(p.SchemaTag.product)),
-         ),
-         try e.b.bind(collected, try e.call(table.to_sequence, &.{
-             try e.field(try e.b.reference(result), 1),
-@@ -454,6 +535,37 @@ fn emitLoopProduct(
-     );
- }
- 
+@@ -456,0 +538,31 @@ fn emitLoopProduct(
 +fn splitProductCall(
 +    e: Author,
 +    v: values.Definition,
@@ -296,22 +202,10 @@ index 1154214..4b8c523 100644
 +    ), try e.b.constant(u64, @backingInt(g.ValueTag.blob))), encoded, structured);
 +}
 +
- fn emitLoopSum(
-     e: Author,
-     fields: Id,
-@@ -551,7 +663,7 @@ fn emitAccessors(
-             value,
-             index,
-             if (variant) .payload else .field,
+@@ -554 +666 @@ fn emitAccessors(
 -            try encodedRange(e, m, input, value, index, variant),
 +            try encodedChildRange(e, m, input, value, index, variant, true),
-         );
-         try b.define(entry, try e.when(try e.binary(.equal, try b.primitive(
-             e.integer,
-@@ -569,6 +681,18 @@ pub fn encodedRange(
-     value: Id,
-     index: Id,
-     comptime variant: bool,
+@@ -571,0 +684,12 @@ pub fn encodedRange(
 +) Error!Id {
 +    return encodedChildRange(e, m, input, value, index, variant, false);
 +}
@@ -324,13 +218,7 @@ index 1154214..4b8c523 100644
 +    index: Id,
 +    comptime variant: bool,
 +    comptime admitted: bool,
- ) Error!Id {
-     const b = e.b;
-     const v = try values.define(b, m);
-@@ -584,10 +708,21 @@ pub fn encodedRange(
-     const end = try b.variable(e.integer);
-     const child_schema = try b.variable(e.integer);
-     const decoded = try b.variable(try projection.schema(codecs.Read, b));
+@@ -586,0 +711,10 @@ pub fn encodedRange(
 +    const field_start: ?Id = if (variant) null else try fieldStart(
 +        e,
 +        m,
@@ -341,24 +229,11 @@ index 1154214..4b8c523 100644
 +        try b.reference(encoded),
 +        admitted,
 +    );
-     const read = try readChild(
-         e,
-         codec,
-         variant,
+@@ -590,0 +725 @@ pub fn encodedRange(
 +        admitted,
-         program,
-         types,
-         index,
-@@ -596,11 +731,138 @@ pub fn encodedRange(
-         end,
-         child_schema,
-         decoded,
+@@ -598,0 +734 @@ pub fn encodedRange(
 +        field_start,
-         try defineRead(e, m, start, end, child_schema),
-     );
-     return b.bind(encoded, try e.call(v.bytes, &.{ input, value }), read);
- }
- 
+@@ -603,0 +740,126 @@ pub fn encodedRange(
 +fn fieldStart(
 +    e: Author,
 +    m: machines.Definition,
@@ -485,50 +360,20 @@ index 1154214..4b8c523 100644
 +    return cache.finish(b, loop);
 +}
 +
- fn constructNode(
-     m: machines.Definition,
-     e: Author,
-@@ -662,6 +924,7 @@ fn emitSplit(
-     table: @import("table.zig").Definition,
-     output: Id,
-     loop: Id,
+@@ -664,0 +927 @@ fn emitSplit(
 +    encoded_loop: Id,
- ) Error!void {
-     const machine = try e.param(d.split, 0);
-     const argument = try e.param(d.split, 1);
-@@ -677,10 +940,12 @@ fn emitSplit(
-     const collected = try e.b.variable(fields);
-     const product = try emitLoopProduct(
-         e,
+@@ -679,0 +943 @@ fn emitSplit(
 +        v,
-         parts,
-         split_result,
-         table,
-         loop,
+@@ -683,0 +948 @@ fn emitSplit(
 +        encoded_loop,
-         machine,
-         argument,
-         shape,
-@@ -712,6 +977,7 @@ fn readChild(
-     e: Author,
-     codec: codecs.Definition,
-     comptime variant: bool,
+@@ -714,0 +980 @@ fn readChild(
 +    comptime admitted: bool,
-     program: Id,
-     types: Id,
-     index: Id,
-@@ -720,13 +986,24 @@ fn readChild(
-     end: Id,
-     child_schema: Id,
-     decoded: Id,
+@@ -722,0 +989 @@ fn readChild(
 +    field_start: ?Id,
-     next: Id,
- ) Error!Id {
-     const b = e.b;
-     var read = next;
+@@ -727 +994 @@ fn readChild(
 -    read = try b.bind(end, try e.call(codec.skip, &.{
 +    const scanned = try e.call(codec.skip, &.{
-         program, try b.reference(child_schema), bytes_value, try b.reference(start),
+@@ -729 +996,11 @@ fn readChild(
 -    }), read);
 +    });
 +    const boundary = if (!admitted) scanned else blk: {
@@ -541,13 +386,7 @@ index 1154214..4b8c523 100644
 +        ), length, scanned);
 +    };
 +    read = try b.bind(end, boundary, read);
-     if (variant) {
-         read = try b.bind(start, try b.pure(try e.field(try b.reference(decoded), 1)), read);
-         read = try b.bind(child_schema, try b.pure(try e.required(
-@@ -735,15 +1012,7 @@ fn readChild(
-         )), read);
-         read = try b.bind(decoded, try e.call(codec.read, &.{ bytes_value, e.zero }), read);
-     } else {
+@@ -738,9 +1015 @@ fn readChild(
 -        const prefix = try b.primitive(
 -            try projection.schema([]const Id, b),
 -            .sequence_take,
@@ -558,17 +397,39 @@ index 1154214..4b8c523 100644
 -            program, prefix, bytes_value, e.zero,
 -        }), read);
 +        read = try b.bind(start, field_start.?, read);
-         read = try b.bind(child_schema, try b.pure(try e.required(types, index)), read);
-     }
-     return read;
+diff --git a/src/semantic/codec.zig b/src/semantic/codec.zig
+index 48afbdb..1e168db 100644
+--- a/src/semantic/codec.zig
++++ b/src/semantic/codec.zig
+@@ -79,3 +79,20 @@ fn emitLoop(e: Author, bytes: Id, read: Id, d: Definition, optional_byte: Id, ba
+-    try e.b.define(d.read, try e.call(loop, &.{
+-        try e.param(d.read, 0), try e.param(d.read, 1), e.zero, e.one,
+-    }));
++    try emitRead(e, read, d.read, loop, optional_byte, base);
++}
++
++fn emitRead(e: Author, read: Id, entry: Id, loop: Id, optional_byte: Id, base: Id) Error!void {
++    const input = try e.param(entry, 0);
++    const position = try e.param(entry, 1);
++    const octet_variable = try e.b.variable(e.integer);
++    const octet = try e.b.reference(octet_variable);
++    const first = try e.convert(try e.payload(try e.b.primitive(
++        optional_byte,
++        .blob_byte,
++        &.{ input, position },
++        0,
++    ), 1), e.integer, false);
++    const next = try e.binary(.integer_add, position, e.one);
++    try e.b.define(entry, try e.b.bind(octet_variable, try e.b.pure(first), try e.when(
++        try e.binary(.less, octet, base),
++        try e.b.pure(try e.tuple(read, &.{ octet, next })),
++        try e.call(loop, &.{ input, next, try e.binary(.integer_rem, octet, base), base }),
++    )));
 diff --git a/src/semantic/projection_cache.zig b/src/semantic/projection_cache.zig
 index cd9ddb1..f45fd8d 100644
 --- a/src/semantic/projection_cache.zig
 +++ b/src/semantic/projection_cache.zig
-@@ -38,6 +38,31 @@ pub fn read(
-     index: Id,
-     kind: Kind,
-     miss: Id,
+@@ -40,0 +41,25 @@ pub fn read(
 +) Error!Id {
 +    return readProjected(e, m, input, value, index, kind, miss, false);
 +}
@@ -594,28 +455,12 @@ index cd9ddb1..f45fd8d 100644
 +    kind: Kind,
 +    miss: Id,
 +    comptime with_range: bool,
- ) Error!Id {
-     const d = try functions(e, m);
-     const found = try e.b.variable(d.optional);
-@@ -50,7 +75,7 @@ pub fn read(
-     const remember = try e.b.bind(computed, miss, try e.b.bind(updated, try e.call(
-         d.remember,
-         &.{ input, value, index, operation, range },
+@@ -53 +78 @@ pub fn read(
 -    ), try materialize(e, m, try e.b.reference(updated), value, range)));
 +    ), try materialize(e, m, try e.b.reference(updated), value, range, with_range)));
-     return e.b.bind(found, try e.call(d.lookup, &.{ input, value, index, operation }), try e.b.term(
-         .{ .match_sum = .{ .value = try e.b.reference(found), .cases = &.{
-             .{ .variable = absent, .body = remember },
-@@ -60,38 +85,89 @@ pub fn read(
-                 input,
-                 value,
-                 try e.b.reference(present),
+@@ -62,0 +88 @@ pub fn read(
 +                with_range,
-             ) },
-         } } },
-     ));
- }
- 
+@@ -68 +94,8 @@ pub fn read(
 -fn materialize(e: Author, m: machines.Definition, input: Id, value: Id, range: Id) Error!Id {
 +fn materialize(
 +    e: Author,
@@ -625,12 +470,7 @@ index cd9ddb1..f45fd8d 100644
 +    range: Id,
 +    comptime with_range: bool,
 +) Error!Id {
-     const v = try @import("values.zig").define(e.b, m);
-     const encoded = try e.b.variable(try e.b.schema(.bytes));
-     const literal = try e.tuple(try projection.schema(data.program.Literal, e.b), &.{
-         try e.field(range, 0),
-         try e.slice(try e.b.reference(encoded), try e.field(range, 1), try e.field(range, 2)),
-     });
+@@ -75,4 +108,11 @@ fn materialize(e: Author, m: machines.Definition, input: Id, value: Id, range: I
 -    return e.b.bind(encoded, try e.call(v.bytes, &.{ input, value }), try e.call(
 -        v.literal,
 -        &.{ input, literal },
@@ -646,9 +486,7 @@ index cd9ddb1..f45fd8d 100644
 +        })));
 +    }
 +    return e.b.bind(encoded, try e.call(v.bytes, &.{ input, value }), projected);
- }
- 
- pub fn lookup(e: Author, m: machines.Definition, input: Id, value: Id, index: Id) Error!Id {
+@@ -81,0 +122,15 @@ pub fn lookup(e: Author, m: machines.Definition, input: Id, value: Id, index: Id
 +    return lookupKind(e, m, input, value, index, .element);
 +}
 +
@@ -664,14 +502,10 @@ index cd9ddb1..f45fd8d 100644
 +    index: Id,
 +    comptime kind: Kind,
 +) Error!Id {
-     const d = try functions(e, m);
-     return e.call(d.lookup, &.{
+@@ -84 +139 @@ pub fn lookup(e: Author, m: machines.Definition, input: Id, value: Id, index: Id
 -        input, value, index, try e.b.constant(u64, @backingInt(Kind.element)),
 +        input, value, index, try e.b.constant(u64, @backingInt(kind)),
-     });
- }
- 
- pub fn predecessor(e: Author, m: machines.Definition, input: Id, value: Id, index: Id) Error!Id {
+@@ -88,0 +144,21 @@ pub fn predecessor(e: Author, m: machines.Definition, input: Id, value: Id, inde
 +    return predecessorKind(e, m, input, value, index, .element);
 +}
 +
@@ -693,7 +527,7 @@ index cd9ddb1..f45fd8d 100644
 +    index: Id,
 +    comptime kind: Kind,
 +) Error!Id {
-     const b = e.b;
+@@ -90,5 +166,5 @@ pub fn predecessor(e: Author, m: machines.Definition, input: Id, value: Id, inde
 -    const cache = try b.specialization(
 -        Id,
 -        "kosmos.semantic.projection-cache-predecessor/1",
@@ -704,47 +538,20 @@ index cd9ddb1..f45fd8d 100644
 +        else => "kosmos.semantic.projection-cache-predecessor/1/" ++ @tagName(kind),
 +    };
 +    const cache = try b.specialization(Id, key, m.schema);
-     if (cache.cached) |saved| return e.call(saved, &.{ input, value, index });
-     const point = try projection.schema(Predecessor, b);
-     const optional = try b.schema(.{ .sum = &.{ e.unit, point } });
-@@ -100,7 +176,7 @@ pub fn predecessor(e: Author, m: machines.Definition, input: Id, value: Id, inde
-     const search = try b.declare(&.{
-         m.cache.schema, e.integer, e.integer, e.integer, optional,
-     }, optional, &.{}, &.{});
+@@ -103 +179 @@ pub fn predecessor(e: Author, m: machines.Definition, input: Id, value: Id, inde
 -    try emitPredecessor(e, m, point, optional, search);
 +    try emitPredecessor(e, m, point, optional, search, kind);
-     const machine = try e.param(entry, 0);
-     const source_value = try e.param(entry, 1);
-     const absent = try e.variant(optional, 0, e.unit_value);
-@@ -119,6 +195,7 @@ fn emitPredecessor(
-     point: Id,
-     optional: Id,
-     search: Id,
+@@ -121,0 +198 @@ fn emitPredecessor(
 +    comptime kind: Kind,
- ) Error!void {
-     const b = e.b;
-     const tree = try e.param(search, 0);
-@@ -146,7 +223,7 @@ fn emitPredecessor(
-         ) },
-     } } });
-     choose = try e.when(try e.binary(.less, index, target), choose, keep);
+@@ -149 +226 @@ fn emitPredecessor(
 -    const keys = [_]Id{ source_blob, schema, try b.constant(u64, @backingInt(Kind.element)) };
 +    const keys = [_]Id{ source_blob, schema, try b.constant(u64, @backingInt(kind)) };
-     const fields = [_]usize{ 0, 1, 3 };
-     for (keys, fields) |key, field_index| choose = try e.when(
-         try e.binary(.equal, try e.field(entry, field_index), key),
 diff --git a/src/semantic_packaged.zig b/src/semantic_packaged.zig
-index 1483b7b..6df00da 100644
+index 1483b7b..ad1115f 100644
 --- a/src/semantic_packaged.zig
 +++ b/src/semantic_packaged.zig
-@@ -4,8 +4,8 @@
- const std = @import("std");
- pub const bytes = @embedFile("semantic-core.kar");
- pub const horos_package = "horos-8.0.0-flclaIItVgCRBCbUEysErcsQyVqsukGf2Q8X2is_wRuU";
+@@ -7,2 +7,2 @@ pub const horos_package = "horos-8.0.0-flclaIItVgCRBCbUEysErcsQyVqsukGf2Q8X2is_w
 -pub const source_sha256 = "08c48a517383d1f8addd8175dcf73e4542cb3b781fba74ba3ba5d3f8fbfe8f6a";
 -pub const artifact_sha256 = "be16c35ee37dadadb69cb76bbfdad5be1c772f78e270638554457c19f43113f0";
-+pub const source_sha256 = "caaa859c4333e0319b28853626f9923c753d66bcf1ee656cf40ef2c61329bc03";
-+pub const artifact_sha256 = "c9c9c2da37ab9aaf4736fa96340b36c94212de14c93aed8f81f6d9f2bb39a0c0";
- 
- pub fn check(selected_horos: []const u8) !void {
-     if (!std.mem.eql(u8, selected_horos, horos_package) or
++pub const source_sha256 = "515a920fc8a8aca5428781ccd5a8e2acb03a8fbf331b84780851c7cbe5fe7d7b";
++pub const artifact_sha256 = "b1c64c872504afa4afa7581083098c9d7babe633bd8a6e9aa1162859aac1718a";
