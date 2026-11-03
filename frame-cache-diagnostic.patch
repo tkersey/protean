@@ -120,3 +120,372 @@ index fcb0459..7b8fee4 100644
          if (reference.id >= self.nodes.items.len or
              !self.alive.items[@intCast(reference.id)]) return error.InvalidReference;
          return self.nodes.items[@intCast(reference.id)];
+diff --git a/src/semantic/aggregate.zig b/src/semantic/aggregate.zig
+index 1154214..af6eb2e 100644
+--- a/src/semantic/aggregate.zig
++++ b/src/semantic/aggregate.zig
+@@ -238,7 +238,92 @@ fn emitLoop(
+     try e.b.define(loop, try e.when(try e.binary(.less, index, count), more, try e.b.pure(
+         try e.tuple(output, &.{ input, prior }),
+     )));
+-    try emitSplit(m, e, v, fields, parts, split_result, d, table, output, loop);
++    const encoded_loop = try emitEncodedSplitLoop(m, e, v, table, output);
++    try emitSplit(m, e, v, fields, parts, split_result, d, table, output, loop, encoded_loop);
++}
++
++fn emitEncodedSplitLoop(
++    m: machines.Definition,
++    e: Author,
++    v: values.Definition,
++    table: @import("table.zig").Definition,
++    output: Id,
++) Error!Id {
++    const b = e.b;
++    const loop = try b.declare(&.{
++        m.schema,  v.value,   try projection.schema([]const Id, b), try b.schema(.bytes),
++        e.integer, e.integer, table.table,
++    }, output, &.{}, &.{});
++    const input = try e.param(loop, 0);
++    const value = try e.param(loop, 1);
++    const types = try e.param(loop, 2);
++    const bytes = try e.param(loop, 3);
++    const index = try e.param(loop, 4);
++    const cursor = try e.param(loop, 5);
++    const prior = try e.param(loop, 6);
++    const selected = try b.variable(try b.schema(.{ .product = &.{
++        m.schema, v.value, m.cache.range,
++    } }));
++    const appended = try b.variable(table.table);
++    const result = try b.reference(selected);
++    const range = try encodedSplitRange(e, m, input, types, bytes, index, cursor);
++    const read = try @import("projection_cache.zig").readWithRange(
++        e,
++        m,
++        input,
++        value,
++        index,
++        .field,
++        range,
++    );
++    const more = try b.bind(selected, read, try b.bind(appended, try e.call(table.append, &.{
++        prior, try e.field(result, 1),
++    }), try e.call(loop, &.{
++        try e.field(result, 0),
++        value,
++        types,
++        bytes,
++        try e.binary(.integer_add, index, e.one),
++        try e.field(try e.field(result, 2), 2),
++        try b.reference(appended),
++    })));
++    try b.define(loop, try e.when(try e.binary(.less, index, try b.primitive(
++        e.integer,
++        .sequence_length,
++        &.{types},
++        0,
++    )), more, try b.pure(try e.tuple(output, &.{ input, prior }))));
++    return loop;
++}
++
++fn encodedSplitRange(
++    e: Author,
++    m: machines.Definition,
++    input: Id,
++    types: Id,
++    bytes: Id,
++    index: Id,
++    cursor: Id,
++) Error!Id {
++    const codec = try codecs.define(e.b, m);
++    const child = try e.b.variable(e.integer);
++    const end = try e.b.variable(e.integer);
++    const count = try e.b.primitive(e.integer, .sequence_length, &.{types}, 0);
++    const scanned = try e.call(codec.skip, &.{
++        try m.field(e, input, .program), try e.b.reference(child), bytes, cursor,
++    });
++    const final = try e.b.pure(try e.b.primitive(e.integer, .blob_length, &.{bytes}, 0));
++    return e.b.bind(child, try e.b.pure(try e.required(types, index)), try e.b.bind(
++        end,
++        try e.when(
++            try e.binary(.equal, try e.binary(.integer_add, index, e.one), count),
++            final,
++            scanned,
++        ),
++        try e.b.pure(try e.tuple(m.cache.range, &.{
++            try e.b.reference(child), cursor, try e.b.reference(end),
++        })),
++    ));
+ }
+ 
+ fn defineFromFields(
+@@ -407,10 +492,12 @@ fn emitLoopMore(
+ 
+ fn emitLoopProduct(
+     e: Author,
++    v: values.Definition,
+     parts: Id,
+     split_result: Id,
+     table: anytype,
+     loop: Id,
++    encoded_loop: Id,
+     machine: Id,
+     argument: Id,
+     shape: Id,
+@@ -419,21 +506,15 @@ fn emitLoopProduct(
+ ) Error!Id {
+     return try e.b.bind(
+         result,
+-        try e.call(
++        try splitProductCall(
++            e,
++            v,
++            table,
+             loop,
+-            &.{
+-                machine,              argument, e.zero,
+-                try e.b.primitive(
+-                    e.integer,
+-                    .sequence_length,
+-                    &.{try e.payload(
+-                        shape,
+-                        @backingInt(p.SchemaTag.product),
+-                    )},
+-                    0,
+-                ),
+-                try table.empty(e.b),
+-            },
++            encoded_loop,
++            machine,
++            argument,
++            try e.payload(shape, @backingInt(p.SchemaTag.product)),
+         ),
+         try e.b.bind(collected, try e.call(table.to_sequence, &.{
+             try e.field(try e.b.reference(result), 1),
+@@ -454,6 +535,37 @@ fn emitLoopProduct(
+     );
+ }
+ 
++fn splitProductCall(
++    e: Author,
++    v: values.Definition,
++    table: @import("table.zig").Definition,
++    loop: Id,
++    encoded_loop: Id,
++    machine: Id,
++    argument: Id,
++    types: Id,
++) Error!Id {
++    const bytes = try e.b.variable(try e.b.schema(.bytes));
++    const encoded = try e.b.bind(
++        bytes,
++        try e.call(v.bytes, &.{ machine, argument }),
++        try e.call(encoded_loop, &.{
++            machine,              argument, types, try e.b.reference(bytes), e.zero, e.zero,
++            try table.empty(e.b),
++        }),
++    );
++    const structured = try e.call(loop, &.{
++        machine,                                                      argument,             e.zero,
++        try e.b.primitive(e.integer, .sequence_length, &.{types}, 0), try table.empty(e.b),
++    });
++    return e.when(try e.binary(.equal, try e.b.primitive(
++        e.integer,
++        .variant_tag,
++        &.{try e.field(argument, 1)},
++        0,
++    ), try e.b.constant(u64, @backingInt(g.ValueTag.blob))), encoded, structured);
++}
++
+ fn emitLoopSum(
+     e: Author,
+     fields: Id,
+@@ -551,7 +663,7 @@ fn emitAccessors(
+             value,
+             index,
+             if (variant) .payload else .field,
+-            try encodedRange(e, m, input, value, index, variant),
++            try encodedChildRange(e, m, input, value, index, variant, true),
+         );
+         try b.define(entry, try e.when(try e.binary(.equal, try b.primitive(
+             e.integer,
+@@ -569,6 +681,18 @@ pub fn encodedRange(
+     value: Id,
+     index: Id,
+     comptime variant: bool,
++) Error!Id {
++    return encodedChildRange(e, m, input, value, index, variant, false);
++}
++
++fn encodedChildRange(
++    e: Author,
++    m: machines.Definition,
++    input: Id,
++    value: Id,
++    index: Id,
++    comptime variant: bool,
++    comptime admitted: bool,
+ ) Error!Id {
+     const b = e.b;
+     const v = try values.define(b, m);
+@@ -588,6 +712,7 @@ pub fn encodedRange(
+         e,
+         codec,
+         variant,
++        admitted,
+         program,
+         types,
+         index,
+@@ -662,6 +787,7 @@ fn emitSplit(
+     table: @import("table.zig").Definition,
+     output: Id,
+     loop: Id,
++    encoded_loop: Id,
+ ) Error!void {
+     const machine = try e.param(d.split, 0);
+     const argument = try e.param(d.split, 1);
+@@ -677,10 +803,12 @@ fn emitSplit(
+     const collected = try e.b.variable(fields);
+     const product = try emitLoopProduct(
+         e,
++        v,
+         parts,
+         split_result,
+         table,
+         loop,
++        encoded_loop,
+         machine,
+         argument,
+         shape,
+@@ -712,6 +840,7 @@ fn readChild(
+     e: Author,
+     codec: codecs.Definition,
+     comptime variant: bool,
++    comptime admitted: bool,
+     program: Id,
+     types: Id,
+     index: Id,
+@@ -724,9 +853,19 @@ fn readChild(
+ ) Error!Id {
+     const b = e.b;
+     var read = next;
+-    read = try b.bind(end, try e.call(codec.skip, &.{
++    const scanned = try e.call(codec.skip, &.{
+         program, try b.reference(child_schema), bytes_value, try b.reference(start),
+-    }), read);
++    });
++    const boundary = if (!admitted) scanned else blk: {
++        const length = try b.pure(try b.primitive(e.integer, .blob_length, &.{bytes_value}, 0));
++        if (variant) break :blk length;
++        break :blk try e.when(try e.binary(
++            .equal,
++            try e.binary(.integer_add, index, e.one),
++            try b.primitive(e.integer, .sequence_length, &.{types}, 0),
++        ), length, scanned);
++    };
++    read = try b.bind(end, boundary, read);
+     if (variant) {
+         read = try b.bind(start, try b.pure(try e.field(try b.reference(decoded), 1)), read);
+         read = try b.bind(child_schema, try b.pure(try e.required(
+diff --git a/src/semantic/projection_cache.zig b/src/semantic/projection_cache.zig
+index cd9ddb1..5cab7da 100644
+--- a/src/semantic/projection_cache.zig
++++ b/src/semantic/projection_cache.zig
+@@ -38,6 +38,31 @@ pub fn read(
+     index: Id,
+     kind: Kind,
+     miss: Id,
++) Error!Id {
++    return readProjected(e, m, input, value, index, kind, miss, false);
++}
++
++pub fn readWithRange(
++    e: Author,
++    m: machines.Definition,
++    input: Id,
++    value: Id,
++    index: Id,
++    kind: Kind,
++    miss: Id,
++) Error!Id {
++    return readProjected(e, m, input, value, index, kind, miss, true);
++}
++
++fn readProjected(
++    e: Author,
++    m: machines.Definition,
++    input: Id,
++    value: Id,
++    index: Id,
++    kind: Kind,
++    miss: Id,
++    comptime with_range: bool,
+ ) Error!Id {
+     const d = try functions(e, m);
+     const found = try e.b.variable(d.optional);
+@@ -50,7 +75,7 @@ pub fn read(
+     const remember = try e.b.bind(computed, miss, try e.b.bind(updated, try e.call(
+         d.remember,
+         &.{ input, value, index, operation, range },
+-    ), try materialize(e, m, try e.b.reference(updated), value, range)));
++    ), try materialize(e, m, try e.b.reference(updated), value, range, with_range)));
+     return e.b.bind(found, try e.call(d.lookup, &.{ input, value, index, operation }), try e.b.term(
+         .{ .match_sum = .{ .value = try e.b.reference(found), .cases = &.{
+             .{ .variable = absent, .body = remember },
+@@ -60,22 +85,37 @@ pub fn read(
+                 input,
+                 value,
+                 try e.b.reference(present),
++                with_range,
+             ) },
+         } } },
+     ));
+ }
+ 
+-fn materialize(e: Author, m: machines.Definition, input: Id, value: Id, range: Id) Error!Id {
++fn materialize(
++    e: Author,
++    m: machines.Definition,
++    input: Id,
++    value: Id,
++    range: Id,
++    comptime with_range: bool,
++) Error!Id {
+     const v = try @import("values.zig").define(e.b, m);
+     const encoded = try e.b.variable(try e.b.schema(.bytes));
+     const literal = try e.tuple(try projection.schema(data.program.Literal, e.b), &.{
+         try e.field(range, 0),
+         try e.slice(try e.b.reference(encoded), try e.field(range, 1), try e.field(range, 2)),
+     });
+-    return e.b.bind(encoded, try e.call(v.bytes, &.{ input, value }), try e.call(
+-        v.literal,
+-        &.{ input, literal },
+-    ));
++    var projected = try e.call(v.literal, &.{ input, literal });
++    if (with_range) {
++        const selected = try e.b.variable(v.result);
++        const result = try e.b.schema(.{ .product = &.{ m.schema, v.value, m.cache.range } });
++        projected = try e.b.bind(selected, projected, try e.b.pure(try e.tuple(result, &.{
++            try e.field(try e.b.reference(selected), 0),
++            try e.field(try e.b.reference(selected), 1),
++            range,
++        })));
++    }
++    return e.b.bind(encoded, try e.call(v.bytes, &.{ input, value }), projected);
+ }
+ 
+ pub fn lookup(e: Author, m: machines.Definition, input: Id, value: Id, index: Id) Error!Id {
+diff --git a/src/semantic_packaged.zig b/src/semantic_packaged.zig
+index 1483b7b..277efb2 100644
+--- a/src/semantic_packaged.zig
++++ b/src/semantic_packaged.zig
+@@ -4,8 +4,8 @@
+ const std = @import("std");
+ pub const bytes = @embedFile("semantic-core.kar");
+ pub const horos_package = "horos-8.0.0-flclaIItVgCRBCbUEysErcsQyVqsukGf2Q8X2is_wRuU";
+-pub const source_sha256 = "08c48a517383d1f8addd8175dcf73e4542cb3b781fba74ba3ba5d3f8fbfe8f6a";
+-pub const artifact_sha256 = "be16c35ee37dadadb69cb76bbfdad5be1c772f78e270638554457c19f43113f0";
++pub const source_sha256 = "ec308e5c1750b1081d7cd3398094e5ebb6721bba12ed62ddbb8bcfc14d94e9cc";
++pub const artifact_sha256 = "ee040fe9bf1a0b8404763a9dc4a66b1e5f35afda20166924e9c1c7b81551009d";
+ 
+ pub fn check(selected_horos: []const u8) !void {
+     if (!std.mem.eql(u8, selected_horos, horos_package) or
