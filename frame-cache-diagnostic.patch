@@ -121,7 +121,7 @@ index fcb0459..7b8fee4 100644
              !self.alive.items[@intCast(reference.id)]) return error.InvalidReference;
          return self.nodes.items[@intCast(reference.id)];
 diff --git a/src/semantic/aggregate.zig b/src/semantic/aggregate.zig
-index 1154214..af6eb2e 100644
+index 1154214..4b8c523 100644
 --- a/src/semantic/aggregate.zig
 +++ b/src/semantic/aggregate.zig
 @@ -238,7 +238,92 @@ fn emitLoop(
@@ -327,7 +327,21 @@ index 1154214..af6eb2e 100644
  ) Error!Id {
      const b = e.b;
      const v = try values.define(b, m);
-@@ -588,6 +712,7 @@ pub fn encodedRange(
+@@ -584,10 +708,21 @@ pub fn encodedRange(
+     const end = try b.variable(e.integer);
+     const child_schema = try b.variable(e.integer);
+     const decoded = try b.variable(try projection.schema(codecs.Read, b));
++    const field_start: ?Id = if (variant) null else try fieldStart(
++        e,
++        m,
++        input,
++        value,
++        types,
++        index,
++        try b.reference(encoded),
++        admitted,
++    );
+     const read = try readChild(
          e,
          codec,
          variant,
@@ -335,7 +349,146 @@ index 1154214..af6eb2e 100644
          program,
          types,
          index,
-@@ -662,6 +787,7 @@ fn emitSplit(
+@@ -596,11 +731,138 @@ pub fn encodedRange(
+         end,
+         child_schema,
+         decoded,
++        field_start,
+         try defineRead(e, m, start, end, child_schema),
+     );
+     return b.bind(encoded, try e.call(v.bytes, &.{ input, value }), read);
+ }
+ 
++fn fieldStart(
++    e: Author,
++    m: machines.Definition,
++    input: Id,
++    value: Id,
++    types: Id,
++    index: Id,
++    bytes: Id,
++    comptime admitted: bool,
++) Error!Id {
++    const prefix = try e.b.primitive(
++        try projection.schema([]const Id, e.b),
++        .sequence_take,
++        &.{ types, index },
++        0,
++    );
++    const codec = try codecs.define(e.b, m);
++    const from_start = try e.call(codec.skip_fields, &.{
++        try m.field(e, input, .program), prefix, bytes, e.zero,
++    });
++    if (!admitted) return from_start;
++    return e.when(
++        try e.binary(.equal, index, e.zero),
++        from_start,
++        try cachedFieldStart(e, m, input, value, prefix, index, bytes, from_start),
++    );
++}
++
++fn cachedFieldStart(
++    e: Author,
++    m: machines.Definition,
++    input: Id,
++    value: Id,
++    prefix: Id,
++    index: Id,
++    bytes: Id,
++    fallback: Id,
++) Error!Id {
++    const b = e.b;
++    const optional = try b.schema(.{ .sum = &.{ e.unit, m.cache.range } });
++    const found = try b.variable(optional);
++    const absent = try b.variable(e.unit);
++    const present = try b.variable(m.cache.range);
++    const sparse = try sparseFieldStart(e, m, input, value, prefix, index, bytes, fallback);
++    return b.bind(found, try @import("projection_cache.zig").lookupField(
++        e,
++        m,
++        input,
++        value,
++        try e.binary(.integer_sub, index, e.one),
++    ), try b.term(.{ .match_sum = .{
++        .value = try b.reference(found),
++        .cases = &.{
++            .{ .variable = absent, .body = sparse },
++            .{ .variable = present, .body = try b.pure(try e.field(try b.reference(present), 2)) },
++        },
++    } }));
++}
++
++fn sparseFieldStart(
++    e: Author,
++    m: machines.Definition,
++    input: Id,
++    value: Id,
++    prefix: Id,
++    index: Id,
++    bytes: Id,
++    fallback: Id,
++) Error!Id {
++    const b = e.b;
++    const cache = @import("projection_cache.zig");
++    const point = try projection.schema(cache.Predecessor, b);
++    const optional = try b.schema(.{ .sum = &.{ e.unit, point } });
++    const found = try b.variable(optional);
++    const absent = try b.variable(e.unit);
++    const present = try b.variable(point);
++    const previous = try b.reference(present);
++    const scan = try e.call(try skipFieldSuffix(e, m), &.{
++        try m.field(e, input, .program),
++        prefix,
++        bytes,
++        try e.binary(.integer_add, try e.field(previous, 0), e.one),
++        try e.field(try e.field(previous, 1), 2),
++    });
++    return b.bind(
++        found,
++        try cache.fieldPredecessor(e, m, input, value, index),
++        try b.term(.{ .match_sum = .{
++            .value = try b.reference(found),
++            .cases = &.{
++                .{ .variable = absent, .body = fallback },
++                .{ .variable = present, .body = scan },
++            },
++        } }),
++    );
++}
++
++fn skipFieldSuffix(e: Author, m: machines.Definition) Error!Id {
++    const b = e.b;
++    const cache = try b.specialization(Id, "kosmos.semantic.aggregate-field-suffix/1", m.schema);
++    if (cache.cached) |saved| return saved;
++    const loop = try b.declare(&.{
++        m.program, try projection.schema([]const Id, b), try b.schema(.bytes),
++        e.integer, e.integer,
++    }, e.integer, &.{}, &.{});
++    const program = try e.param(loop, 0);
++    const types = try e.param(loop, 1);
++    const bytes = try e.param(loop, 2);
++    const index = try e.param(loop, 3);
++    const cursor = try e.param(loop, 4);
++    const next = try b.variable(e.integer);
++    const codec = try codecs.define(b, m);
++    const more = try b.bind(next, try e.call(codec.skip, &.{
++        program, try e.required(types, index), bytes, cursor,
++    }), try e.call(loop, &.{
++        program, types, bytes, try e.binary(.integer_add, index, e.one), try b.reference(next),
++    }));
++    try b.define(loop, try e.when(try e.binary(.less, index, try b.primitive(
++        e.integer,
++        .sequence_length,
++        &.{types},
++        0,
++    )), more, try b.pure(cursor)));
++    return cache.finish(b, loop);
++}
++
+ fn constructNode(
+     m: machines.Definition,
+     e: Author,
+@@ -662,6 +924,7 @@ fn emitSplit(
      table: @import("table.zig").Definition,
      output: Id,
      loop: Id,
@@ -343,7 +496,7 @@ index 1154214..af6eb2e 100644
  ) Error!void {
      const machine = try e.param(d.split, 0);
      const argument = try e.param(d.split, 1);
-@@ -677,10 +803,12 @@ fn emitSplit(
+@@ -677,10 +940,12 @@ fn emitSplit(
      const collected = try e.b.variable(fields);
      const product = try emitLoopProduct(
          e,
@@ -356,7 +509,7 @@ index 1154214..af6eb2e 100644
          machine,
          argument,
          shape,
-@@ -712,6 +840,7 @@ fn readChild(
+@@ -712,6 +977,7 @@ fn readChild(
      e: Author,
      codec: codecs.Definition,
      comptime variant: bool,
@@ -364,7 +517,12 @@ index 1154214..af6eb2e 100644
      program: Id,
      types: Id,
      index: Id,
-@@ -724,9 +853,19 @@ fn readChild(
+@@ -720,13 +986,24 @@ fn readChild(
+     end: Id,
+     child_schema: Id,
+     decoded: Id,
++    field_start: ?Id,
+     next: Id,
  ) Error!Id {
      const b = e.b;
      var read = next;
@@ -386,8 +544,25 @@ index 1154214..af6eb2e 100644
      if (variant) {
          read = try b.bind(start, try b.pure(try e.field(try b.reference(decoded), 1)), read);
          read = try b.bind(child_schema, try b.pure(try e.required(
+@@ -735,15 +1012,7 @@ fn readChild(
+         )), read);
+         read = try b.bind(decoded, try e.call(codec.read, &.{ bytes_value, e.zero }), read);
+     } else {
+-        const prefix = try b.primitive(
+-            try projection.schema([]const Id, b),
+-            .sequence_take,
+-            &.{ types, index },
+-            0,
+-        );
+-        read = try b.bind(start, try e.call(codec.skip_fields, &.{
+-            program, prefix, bytes_value, e.zero,
+-        }), read);
++        read = try b.bind(start, field_start.?, read);
+         read = try b.bind(child_schema, try b.pure(try e.required(types, index)), read);
+     }
+     return read;
 diff --git a/src/semantic/projection_cache.zig b/src/semantic/projection_cache.zig
-index cd9ddb1..5cab7da 100644
+index cd9ddb1..f45fd8d 100644
 --- a/src/semantic/projection_cache.zig
 +++ b/src/semantic/projection_cache.zig
 @@ -38,6 +38,31 @@ pub fn read(
@@ -431,7 +606,7 @@ index cd9ddb1..5cab7da 100644
      return e.b.bind(found, try e.call(d.lookup, &.{ input, value, index, operation }), try e.b.term(
          .{ .match_sum = .{ .value = try e.b.reference(found), .cases = &.{
              .{ .variable = absent, .body = remember },
-@@ -60,22 +85,37 @@ pub fn read(
+@@ -60,38 +85,89 @@ pub fn read(
                  input,
                  value,
                  try e.b.reference(present),
@@ -474,8 +649,92 @@ index cd9ddb1..5cab7da 100644
  }
  
  pub fn lookup(e: Author, m: machines.Definition, input: Id, value: Id, index: Id) Error!Id {
++    return lookupKind(e, m, input, value, index, .element);
++}
++
++pub fn lookupField(e: Author, m: machines.Definition, input: Id, value: Id, index: Id) Error!Id {
++    return lookupKind(e, m, input, value, index, .field);
++}
++
++fn lookupKind(
++    e: Author,
++    m: machines.Definition,
++    input: Id,
++    value: Id,
++    index: Id,
++    comptime kind: Kind,
++) Error!Id {
+     const d = try functions(e, m);
+     return e.call(d.lookup, &.{
+-        input, value, index, try e.b.constant(u64, @backingInt(Kind.element)),
++        input, value, index, try e.b.constant(u64, @backingInt(kind)),
+     });
+ }
+ 
+ pub fn predecessor(e: Author, m: machines.Definition, input: Id, value: Id, index: Id) Error!Id {
++    return predecessorKind(e, m, input, value, index, .element);
++}
++
++pub fn fieldPredecessor(
++    e: Author,
++    m: machines.Definition,
++    input: Id,
++    value: Id,
++    index: Id,
++) Error!Id {
++    return predecessorKind(e, m, input, value, index, .field);
++}
++
++fn predecessorKind(
++    e: Author,
++    m: machines.Definition,
++    input: Id,
++    value: Id,
++    index: Id,
++    comptime kind: Kind,
++) Error!Id {
+     const b = e.b;
+-    const cache = try b.specialization(
+-        Id,
+-        "kosmos.semantic.projection-cache-predecessor/1",
+-        m.schema,
+-    );
++    const key = switch (kind) {
++        .element => "kosmos.semantic.projection-cache-predecessor/1",
++        else => "kosmos.semantic.projection-cache-predecessor/1/" ++ @tagName(kind),
++    };
++    const cache = try b.specialization(Id, key, m.schema);
+     if (cache.cached) |saved| return e.call(saved, &.{ input, value, index });
+     const point = try projection.schema(Predecessor, b);
+     const optional = try b.schema(.{ .sum = &.{ e.unit, point } });
+@@ -100,7 +176,7 @@ pub fn predecessor(e: Author, m: machines.Definition, input: Id, value: Id, inde
+     const search = try b.declare(&.{
+         m.cache.schema, e.integer, e.integer, e.integer, optional,
+     }, optional, &.{}, &.{});
+-    try emitPredecessor(e, m, point, optional, search);
++    try emitPredecessor(e, m, point, optional, search, kind);
+     const machine = try e.param(entry, 0);
+     const source_value = try e.param(entry, 1);
+     const absent = try e.variant(optional, 0, e.unit_value);
+@@ -119,6 +195,7 @@ fn emitPredecessor(
+     point: Id,
+     optional: Id,
+     search: Id,
++    comptime kind: Kind,
+ ) Error!void {
+     const b = e.b;
+     const tree = try e.param(search, 0);
+@@ -146,7 +223,7 @@ fn emitPredecessor(
+         ) },
+     } } });
+     choose = try e.when(try e.binary(.less, index, target), choose, keep);
+-    const keys = [_]Id{ source_blob, schema, try b.constant(u64, @backingInt(Kind.element)) };
++    const keys = [_]Id{ source_blob, schema, try b.constant(u64, @backingInt(kind)) };
+     const fields = [_]usize{ 0, 1, 3 };
+     for (keys, fields) |key, field_index| choose = try e.when(
+         try e.binary(.equal, try e.field(entry, field_index), key),
 diff --git a/src/semantic_packaged.zig b/src/semantic_packaged.zig
-index 1483b7b..277efb2 100644
+index 1483b7b..6df00da 100644
 --- a/src/semantic_packaged.zig
 +++ b/src/semantic_packaged.zig
 @@ -4,8 +4,8 @@
@@ -484,8 +743,8 @@ index 1483b7b..277efb2 100644
  pub const horos_package = "horos-8.0.0-flclaIItVgCRBCbUEysErcsQyVqsukGf2Q8X2is_wRuU";
 -pub const source_sha256 = "08c48a517383d1f8addd8175dcf73e4542cb3b781fba74ba3ba5d3f8fbfe8f6a";
 -pub const artifact_sha256 = "be16c35ee37dadadb69cb76bbfdad5be1c772f78e270638554457c19f43113f0";
-+pub const source_sha256 = "ec308e5c1750b1081d7cd3398094e5ebb6721bba12ed62ddbb8bcfc14d94e9cc";
-+pub const artifact_sha256 = "ee040fe9bf1a0b8404763a9dc4a66b1e5f35afda20166924e9c1c7b81551009d";
++pub const source_sha256 = "caaa859c4333e0319b28853626f9923c753d66bcf1ee656cf40ef2c61329bc03";
++pub const artifact_sha256 = "c9c9c2da37ab9aaf4736fa96340b36c94212de14c93aed8f81f6d9f2bb39a0c0";
  
  pub fn check(selected_horos: []const u8) !void {
      if (!std.mem.eql(u8, selected_horos, horos_package) or

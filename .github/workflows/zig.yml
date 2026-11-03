@@ -1,4 +1,4 @@
-name: Native streamed product splitting
+name: Native authenticated field prefix reuse
 on:
   workflow_dispatch:
 permissions:
@@ -24,13 +24,13 @@ jobs:
           mirror: https://zigmirror.com
           use-tool-cache: true
           use-cache: false
-      - name: Reuse measured admitted-boundary binary
+      - name: Reuse measured streaming binary
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh run download 41601641960 --repo "$GITHUB_REPOSITORY" \
+          gh run download 41604442233 --repo "$GITHUB_REPOSITORY" \
             --name native-adaptive-cpu-profile --dir "$RUNNER_TEMP/cache-only"
-          expected=5a654d9188684d8cab7f89261902c440dbd656f8c55198c2510a7e7e952e3f1d
+          expected=e0503f80b8c3c77390e52096280fb1dd324891bc6755b257277ebb4ed69a472c
           actual=$(sha256sum "$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate" | cut -d ' ' -f 1)
           test "$expected" = "$actual"
           chmod 700 "$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate"
@@ -107,7 +107,7 @@ jobs:
             --prefix "$RUNNER_TEMP/compiled" 2>&1 | tee "$RUNNER_TEMP/profile/build.log"
           cp "$RUNNER_TEMP/compiled/verification/native-owner-adaptive" "$RUNNER_TEMP/profile/native-owner-adaptive"
           sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive" > "$RUNNER_TEMP/profile/binary-sha256.txt"
-      - name: Compile isolated streaming product candidate
+      - name: Compile isolated field-prefix candidate
         run: |
           mkdir -p "$RUNNER_TEMP/candidate"
           cp -a .protean-native/inputs/kosmos "$RUNNER_TEMP/candidate/kosmos"
@@ -150,6 +150,8 @@ jobs:
           umask 0022
           id > "$RUNNER_TEMP/profile/identity.txt"
           for variant in cached candidate; do
+            profile_seconds=90
+            if test "$variant" = candidate; then profile_seconds=180; fi
             profile_work=$(mktemp -d /tmp/protean-native-frame.XXXXXX)
             mkdir -p "$profile_work/.zig-cache/tmp"
             binary="$RUNNER_TEMP/profile/native-owner-adaptive"
@@ -158,7 +160,7 @@ jobs:
             (
               cd "$profile_work"
               set +e
-              timeout --signal=INT --kill-after=10s 120s node \
+              timeout --signal=INT --kill-after=10s "${profile_seconds}s" node \
                 "$GITHUB_WORKSPACE/tools/native/qualification_tests.mjs" "$binary" \
                 '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
                 '[1]' > "$RUNNER_TEMP/profile/$variant-test.log" 2>&1
