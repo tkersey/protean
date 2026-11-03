@@ -22,11 +22,12 @@ jobs:
           use-cache: false
       - name: Prepare bounded diagnostic
         run: |
+          mkdir -p "$RUNNER_TEMP/profile"
+          sudo apt-get update
           sudo apt-get install --yes --no-install-recommends linux-tools-generic
           perf_bin=$(find /usr/lib/linux-tools -type f -name perf | head -1)
           test -x "$perf_bin"
           echo "PERF_BIN=$perf_bin" >> "$GITHUB_ENV"
-          sudo sysctl kernel.perf_event_paranoid=1
           mkdir -p "$RUNNER_TEMP/profile"
           git rev-parse HEAD > "$RUNNER_TEMP/profile/head.txt"
           lscpu > "$RUNNER_TEMP/profile/cpu.txt"
@@ -55,10 +56,10 @@ jobs:
       - name: Sample existing repair test for two minutes
         run: |
           set +e
-          timeout --signal=INT --kill-after=10s 120s "$PERF_BIN" record \
+          sudo timeout --signal=INT --kill-after=10s 120s "$PERF_BIN" record \
             -e cpu-clock:u -F 49 --call-graph dwarf,8192 \
             -o "$RUNNER_TEMP/profile/perf.data" -- \
-            node tools/native/qualification_tests.mjs \
+            sudo -u "$(id -un)" -- "$(command -v node)" tools/native/qualification_tests.mjs \
             "$RUNNER_TEMP/compiled/verification/native-owner-adaptive" \
             '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
             '[1]' > "$RUNNER_TEMP/profile/test.log" 2>&1
