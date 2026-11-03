@@ -46,6 +46,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         const Programs = @import("workspace_programs.zig").Operations(Types, Self);
         const Replay = @import("workspace_replay.zig").Operations(Types, Self);
         const Snapshots = @import("workspace_snapshots.zig").Operations(Types, Self);
+        const Worker = @import("worker_execution.zig").Operations(Types, Self);
         pub fn archiveAccess(self: *Self) !void {
             try allowed(self);
             if (self.work != null) return error.UnsettledOccurrence;
@@ -595,13 +596,23 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .checked = checked,
                 .residual_occurrences = .init(a),
                 .images = .init(a),
+                .preparation_rejections = .init(a),
+                .rejection_attempts = .init(a),
             };
             defer proof.residual_occurrences.deinit();
             defer proof.images.deinit();
+            defer proof.preparation_rejections.deinit();
+            defer proof.rejection_attempts.deinit();
+            try proof.rejectedPreparations();
             try proof.residuals();
             for (records) |row| try proof.occurrenceRow(row);
+            if (proof.preparation_rejections.count() != 0) return error.InvalidArchive;
             try proof.questions();
         }
+        const RejectedPreparation = struct {
+            sequence: u64,
+            value: state.PreparationRejection,
+        };
         const OccurrenceProof = occurrenceProofType();
         fn occurrenceProofType() type {
             return struct {
@@ -612,6 +623,85 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 checked: *Snapshots.SnapshotValidation,
                 residual_occurrences: std.AutoHashMap(state.Digest, state.Digest),
                 images: std.AutoHashMap(state.Reference, state.Digest),
+                preparation_rejections: std.AutoHashMap(state.Digest, RejectedPreparation),
+                rejection_attempts: std.AutoHashMap(state.Digest, void),
+                fn rejectedPreparations(proof: *@This()) !void {
+                    var events = try store(proof.service).database.prepare(
+                        "SELECT e.seq,o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+                            "WHERE e.task=? ORDER BY e.seq",
+                        &.{.{ .blob = &proof.value.id }},
+                    );
+                    defer events.deinit();
+                    while (try events.step() == .row) {
+                        var arena = std.heap.ArenaAllocator.init(proof.service.allocator);
+                        defer arena.deinit();
+                        const temporary = arena.allocator();
+                        const event_value = try contracts.decodeOwned(
+                            state.Event,
+                            temporary,
+                            try events.bytes(1),
+                        );
+                        const event_item = event_value.value;
+                        if ((event_item.kind == .preparation_rejected) !=
+                            (event_item.preparation_rejection != null)) return error.InvalidArchive;
+                        const frozen = event_item.preparation_rejection orelse continue;
+                        const sequence = std.math.cast(u64, try events.integer(0)) orelse
+                            return error.InvalidArchive;
+                        try proof.rejectedPreparation(temporary, event_item, sequence, frozen);
+                    }
+                    for (proof.records) |row| try proof.rejectProviderEvidence(row);
+                }
+                fn rejectedPreparation(
+                    proof: *@This(),
+                    temporary: std.mem.Allocator,
+                    event_item: state.Event,
+                    sequence: u64,
+                    frozen: state.PreparationRejection,
+                ) !void {
+                    const saved = frozen.occurrence;
+                    if (sequence <= 1 or sequence != event_item.seq or
+                        sequence > proof.value.event_high or
+                        !std.meta.eql(event_item.task, proof.value.id) or
+                        !std.meta.eql(saved.task, proof.value.id) or
+                        saved.state != .settled_reply or saved.state.settled_reply.answer != null)
+                        return error.InvalidArchive;
+                    const expected = try std.fmt.allocPrint(
+                        temporary,
+                        "{{\"occurrence_id\":\"{s}\"}}",
+                        .{std.fmt.bytesToHex(saved.id, .lower)},
+                    );
+                    if (!same(event_item.data.bytes, expected)) return error.InvalidArchive;
+                    const found = try proof.preparation_rejections.getOrPut(saved.id);
+                    if (found.found_existing) return error.InvalidArchive;
+                    found.value_ptr.* = .{ .sequence = sequence, .value = frozen };
+                    if ((try proof.rejection_attempts.getOrPut(
+                        saved.state.settled_reply.attempt,
+                    )).found_existing) return error.InvalidArchive;
+                }
+                fn rejectProviderEvidence(proof: *@This(), row: state.ArchiveRecord) !void {
+                    if (proof.preparation_rejections.count() == 0) return;
+                    inline for (.{
+                        .{ .attempt, state.Attempt },
+                        .{ .capture, state.Capture },
+                    }) |kind| {
+                        if (row.kind == kind[0]) {
+                            if (proof.rejection_attempts.contains(row.id))
+                                return error.InvalidArchive;
+                            var saved = try Records.record(
+                                proof.service,
+                                kind[1],
+                                proof.a,
+                                @tagName(kind[0]),
+                                row.id,
+                                proof.value.id,
+                            );
+                            defer saved.deinit();
+                            if (kind[0] == .capture and
+                                proof.preparation_rejections.contains(saved.value.occurrence))
+                                return error.InvalidArchive;
+                        }
+                    }
+                }
                 fn residuals(proof: *@This()) !void {
                     for (proof.records) |row| if (row.kind == .controller_residual) {
                         var residual = try Records.record(
@@ -877,11 +967,83 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     };
                     const reply_value = try evidence.replyValue(entry, acquired);
                     switch (entry.declaration.kind) {
-                        .leaf => try evidence.leaf(entry, acquired),
+                        .leaf => {
+                            if (!try evidence.preparationRejected(entry, acquired, reply_value))
+                                try evidence.leaf(entry, acquired);
+                        },
                         .workspace => try evidence.workspaceEvidence(entry, acquired, reply_value),
                         .inbox => try evidence.inbox(acquired, reply_value),
                         .question => try evidence.questionEvidence(entry, acquired, reply_value),
                     }
+                }
+                fn preparationRejected(
+                    evidence: *@This(),
+                    entry: registry.Entry,
+                    acquired: ?occurrence.Acquired,
+                    reply_value: ?[]const u8,
+                ) !bool {
+                    const rejected = evidence.proof.preparation_rejections.fetchRemove(
+                        evidence.saved.id,
+                    ) orelse return false;
+                    const frozen = rejected.value.value;
+                    const saved = frozen.occurrence;
+                    const reply = acquired orelse return error.InvalidArchive;
+                    if (!std.meta.eql(reply, saved.state.settled_reply) or
+                        !std.meta.eql(saved.task, evidence.saved.task) or
+                        !std.meta.eql(saved.request, evidence.saved.request) or
+                        !std.meta.eql(saved.request_object, evidence.saved.request_object) or
+                        !std.meta.eql(saved.work, evidence.saved.work) or
+                        !std.meta.eql(saved.residual, evidence.saved.residual))
+                        return error.InvalidArchive;
+                    const adapter = entry.declaration.capture orelse return error.InvalidArchive;
+                    if (adapter.reject_preparation == null or !entry.declaration.inference)
+                        return error.InvalidArchive;
+                    const replayed = try evidence.replayPreparationRejection(entry, rejected.value);
+                    if (!same(reply_value orelse return error.InvalidArchive, replayed))
+                        return error.InvalidArchive;
+                    return true;
+                }
+                fn replayPreparationRejection(
+                    evidence: *@This(),
+                    entry: registry.Entry,
+                    rejected: RejectedPreparation,
+                ) ![]u8 {
+                    const self = evidence.proof.service;
+                    const a = evidence.temporary;
+                    var binding = try Worker.projectionBindingAt(
+                        self,
+                        a,
+                        evidence.proof.value,
+                        evidence.saved,
+                        rejected.value.controller_context,
+                    );
+                    binding = try Worker.withPreparationCut(
+                        self,
+                        a,
+                        evidence.proof.value,
+                        binding,
+                        rejected.sequence - 1,
+                    );
+                    const adapter = entry.declaration.capture orelse return error.InvalidArchive;
+                    const payload = try entry.payload(a, evidence.request.binding.payload);
+                    const prepared = store(self).project([]u8, a, self.handlers, binding, struct {
+                        adapter: registry.CaptureAdapter,
+                        payload: []const u8,
+                        pub fn run(this: @This(), context: registry.ProjectionContext) ![]u8 {
+                            return this.adapter.prepare(context, this.payload);
+                        }
+                    }{ .adapter = adapter, .payload = payload }) catch |err| {
+                        return try Worker.projectionRejection(
+                            self,
+                            a,
+                            binding,
+                            adapter,
+                            payload,
+                            err,
+                        ) orelse error.InvalidArchive;
+                    };
+                    a.free(prepared);
+                    return error.InvalidArchive;
                 }
                 fn delegation(evidence: *@This()) !void {
                     if (evidence.saved.work) |id| {

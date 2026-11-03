@@ -5,5 +5,6 @@ comptime {
     _ = @import("adaptive_recovery.zig");
     _ = @import("projection_recovery.zig");
     _ = @import("projection_failure_tests.zig");
+    _ = @import("projection_late_recovery.zig");
     _ = @import("workspace_projection_tests.zig");
 }

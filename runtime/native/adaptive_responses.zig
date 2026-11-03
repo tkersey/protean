@@ -301,6 +301,7 @@ pub fn Adapter(comptime P: type) type {
                 }.schema,
                 .capture = .{
                     .prepare = prepare,
+                    .reject_preparation = rejectPreparation,
                     .acquire = acquire,
                     .interpret = interpret,
                     .dependencies = dependencies,
@@ -359,6 +360,44 @@ pub fn Adapter(comptime P: type) type {
             defer catalog.deinit();
             const selected = try A.bind(ctx, policy, request.value, catalog.value);
             return (try project(ctx, request.value, policy, selected, catalog.value)).prepared;
+        }
+
+        pub fn projectionRejection(
+            err: anyerror,
+        ) ?@FieldType(@FieldType(P.Result, "preparation_rejected"), "code") {
+            return switch (err) {
+                error.StaleConsumer => .stale,
+                error.ProjectionUnavailable,
+                error.MissingArtifact,
+                error.ArtifactUnavailable,
+                => .unavailable,
+                error.InvalidConsumer,
+                error.ConsumerMismatch,
+                error.InvalidProjection,
+                error.InvalidProjectionSchema,
+                error.InvalidSourceSlice,
+                error.InvalidReference,
+                => .invalid,
+                error.Capacity => .oversized,
+                else => null,
+            };
+        }
+
+        pub fn rejectPreparation(
+            ctx: registry.ProjectionContext,
+            bytes: []const u8,
+            err: anyerror,
+        ) !?[]u8 {
+            const code = projectionRejection(err) orelse return null;
+            var request = try contracts.decodeOwned(P.AdaptiveRequest, ctx.allocator, bytes);
+            defer request.deinit();
+            const research = request.value.plan.research orelse return null;
+            return try contracts.encodeOwned(P.AdaptiveResult, ctx.allocator, .{
+                .result = .{ .preparation_rejected = .{ .code = code, .view = research.view } },
+                .replay = null,
+                .replay_status = .unsupported,
+                .usage = null,
+            });
         }
 
         const Projected = struct { prepared: []u8, context: Context.Rendered };

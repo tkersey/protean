@@ -990,19 +990,31 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                         return error.InvalidArchive;
                     continue;
                 };
-                if (!std.meta.eql(snapshot.work.id, id) or
-                    snapshot.work.event_watermark > watermark) return error.InvalidArchive;
-                try requireArchiveRecord(records, .workspace_work, id);
-                try validateWorkspaceWorkSnapshotIn(self, parent, snapshot, records, checked);
-                if (snapshot.work.event_watermark != try ResidualValidation.workspacePublicationAt(
-                    self,
-                    a,
-                    parent.id,
-                    id,
-                    watermark,
-                )) return error.InvalidArchive;
-                try validateHistoricalOccurrence(self, a, snapshot);
+                if (!std.meta.eql(snapshot.work.id, id)) return error.InvalidArchive;
+                try validateWorkReadAt(self, a, parent, snapshot, watermark, records, checked);
             }
+        }
+        pub fn validateWorkReadAt(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            snapshot: workspace.WorkObservation,
+            watermark: u64,
+            records: []const state.ArchiveRecord,
+            checked: *Snapshots.SnapshotValidation,
+        ) !void {
+            if (watermark > parent.event_high or snapshot.work.event_watermark > watermark)
+                return error.InvalidArchive;
+            try requireArchiveRecord(records, .workspace_work, snapshot.work.id);
+            try validateWorkspaceWorkSnapshotIn(self, parent, snapshot, records, checked);
+            if (snapshot.work.event_watermark != try ResidualValidation.workspacePublicationAt(
+                self,
+                a,
+                parent.id,
+                snapshot.work.id,
+                watermark,
+            )) return error.InvalidArchive;
+            try validateHistoricalOccurrence(self, a, snapshot);
         }
         fn workspaceReadSelection(
             command: wc.Command,
@@ -1207,7 +1219,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             checked: *Snapshots.SnapshotValidation,
         ) !wc.Reply {
             const command = authorized.command;
-            if (basis == .consumer) try Consumers.sameInterface(a, basis.consumer, authorized);
+            if (basis == .consumer)
+                try Consumers.validateRequestBinding(a, basis.consumer, authorized);
 
             const controller_read = try workspaceReplyReadCut(self, a, parent, pending, basis);
             try validateWorkspaceReadIn(

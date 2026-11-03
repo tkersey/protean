@@ -509,22 +509,7 @@ fn prepare(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
 
 fn preparationRejection(input: t.Preparation, err: anyerror) !Product {
     if (input.state.selected_view) |view| {
-        const code: ?t.ProjectionRejectionCode = switch (err) {
-            error.StaleConsumer => .stale,
-            error.ProjectionUnavailable,
-            error.MissingArtifact,
-            error.ArtifactUnavailable,
-            => .unavailable,
-            error.InvalidConsumer,
-            error.ConsumerMismatch,
-            error.InvalidProjection,
-            error.InvalidProjectionSchema,
-            error.InvalidSourceSlice,
-            error.InvalidReference,
-            => .invalid,
-            error.Capacity => .oversized,
-            else => null,
-        };
+        const code = Adapter.projectionRejection(err);
         if (code) |reason| return .{
             .result = .{ .projection_rejected = .{ .code = reason, .view = view } },
             .receipt = null,

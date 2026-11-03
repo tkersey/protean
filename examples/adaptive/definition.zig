@@ -604,10 +604,7 @@ fn Program(comptime controller: bool) type {
             state: anytype,
             rejection: anytype,
         ) !V(t.Output) {
-            return b.call(p.loop, .{
-                .bindings = bindings,
-                .state = try p.projectionRecoveryState(b, state, rejection),
-            });
+            return p.resumeTask(b, bindings, try p.projectionRecoveryState(b, state, rejection));
         }
         fn preparationQuestion(
             p: Self,
@@ -677,30 +674,7 @@ fn Program(comptime controller: bool) type {
             const projected = try active.caseOf(preparation, "projection_rejected");
             const interaction = ready.body();
             const turn = try p.modelTurn(interaction, ready.payload(), state, bindings);
-            const counted = turn.counted;
-            const observation = turn.observation;
-            const normalized = try interaction.field(observation, "normalized");
-            const diagnostic = if (controller) try interaction.field(
-                observation,
-                "diagnostic",
-            ) else {};
-            const rejected_control = if (controller) try interaction.caseOf(
-                diagnostic,
-                "some",
-            ) else {};
-            const unchanged = if (controller) try interaction.caseOf(diagnostic, "none") else {};
-            const work = if (controller) unchanged.body() else interaction;
-            const ordinary = try p.interpret(work, observation, normalized, bindings, counted);
-            const result = if (controller) try p.controlDiagnostic(
-                interaction,
-                diagnostic,
-                rejected_control,
-                unchanged,
-                normalized,
-                counted,
-                bindings,
-                ordinary,
-            ) else ordinary;
+            const result = try p.modelOutcome(interaction, turn, state, bindings);
             const prepared = try active.match(preparation, .{
                 .ready = try ready.ret(result),
                 .rejected = try rejected.ret(
@@ -719,6 +693,66 @@ fn Program(comptime controller: bool) type {
                 )),
             });
             try e.author.define(p.loop, try b.ret(prepared));
+        }
+        fn modelOutcome(
+            p: Self,
+            b: anytype,
+            turn: Turn,
+            previous: V(t.State),
+            bindings: anytype,
+        ) !V(t.Output) {
+            const normalized = try b.field(turn.observation, "normalized");
+            const result = try b.field(normalized, "result");
+            const rejected = try b.branch();
+            const acquired = try b.branch();
+            return b.conditional(
+                try b.equal(try b.variantTag(result), try b.constant(
+                    u64,
+                    @backingInt(std.meta.Tag(P.Result).preparation_rejected),
+                )),
+                try rejected.ret(try p.recoverProjection(
+                    rejected,
+                    bindings,
+                    previous,
+                    try rejected.variantPayload(result, "preparation_rejected", try p.e.failure()),
+                )),
+                try acquired.ret(try p.acquiredOutcome(acquired, turn, normalized, bindings)),
+            );
+        }
+        fn acquiredOutcome(
+            p: Self,
+            interaction: anytype,
+            turn: Turn,
+            normalized: anytype,
+            bindings: anytype,
+        ) !V(t.Output) {
+            const diagnostic = if (controller) try interaction.field(
+                turn.observation,
+                "diagnostic",
+            ) else {};
+            const rejected_control = if (controller) try interaction.caseOf(
+                diagnostic,
+                "some",
+            ) else {};
+            const unchanged = if (controller) try interaction.caseOf(diagnostic, "none") else {};
+            const work = if (controller) unchanged.body() else interaction;
+            const ordinary = try p.interpret(
+                work,
+                turn.observation,
+                normalized,
+                bindings,
+                turn.counted,
+            );
+            return if (controller) try p.controlDiagnostic(
+                interaction,
+                diagnostic,
+                rejected_control,
+                unchanged,
+                normalized,
+                turn.counted,
+                bindings,
+                ordinary,
+            ) else ordinary;
         }
         const Turn = struct {
             counted: V(t.State),

@@ -113,7 +113,7 @@ export function verifyCandidateMetrics(measuredBytes, application) {
     header.write('ABL_ERS3');
     header.writeBigUInt64LE(BigInt(payload.length), 12);
     const bound = store(Buffer.concat([header, payload]));
-    archive.manifest[6].push([5, id, record('attempt', [id, task, id, code, code, 'fixture.workspace', false, none, 1, none, none, none])],
+    archive.manifest[6].push([5, id, record('attempt', [id, task, id, code, code, 'fixture.workspace', false, none, 1, none, none, none, none])],
       [4, id, record('capture', [task, id, id, code, none, 0, some([bound, [], none]), none])]);
   }
   const captured = workspaceMetrics(archive, application);
@@ -776,7 +776,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         const identity = attempt[5], prepared = archive.object(capture[3]), rawBytes = archive.object(capture[4].value);
         const replyBytes = resultValue(archive.object(capture[6].value[0]));
         assert.equal(capture[5], 0); assert.equal(capture[6].tag, 1);
-        if (identity === 'agent.model.invoke.v11') {
+        if (identity === 'agent.model.invoke.v12') {
           const envelope = decodeValue(schemas.AdaptivePrepared, prepared);
           assert.equal(envelope.length, 3); assert.equal(envelope[0], 1);
           const request = envelope[1], plan = request[3], index = Number(plan[2]);
@@ -897,7 +897,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         if (kind !== 4) continue;
         const attemptRow = deniedArchive.manifest[6].find(([tag, candidate]) => tag === 5 && Buffer.from(candidate).equals(Buffer.from(id)));
         const attempt = decodeValue(deniedArchive.schemas.get('attempt'), deniedArchive.object(attemptRow[2]));
-        if (attempt[5] !== 'agent.model.invoke.v11') continue;
+        if (attempt[5] !== 'agent.model.invoke.v12') continue;
         const capture = decodeValue(deniedArchive.schemas.get('capture'), deniedArchive.object(ref));
         const request = decodeValue(schemas.AdaptivePrepared, deniedArchive.object(capture[3]))[1];
         if (request[3][2] !== 7n) continue;
@@ -988,7 +988,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           const application = JSON.parse(await readFile(applicationPath, 'utf8'));
           for (const disposition of ['not_sent', 'rearmed', 'cancelled', 'successor']) {
             const archive = readArchive(archiveBytes);
-            const attemptRow = archive.manifest[6].find(([kind, , ref]) => kind === 5 && decodeValue(archive.schemas.get('attempt'), archive.object(ref))[5] === 'agent.model.invoke.v11');
+            const attemptRow = archive.manifest[6].find(([kind, , ref]) => kind === 5 && decodeValue(archive.schemas.get('attempt'), archive.object(ref))[5] === 'agent.model.invoke.v12');
             const attempt = decodeValue(archive.schemas.get('attempt'), archive.object(attemptRow[2]));
             const occurrenceRow = archive.manifest[6].find(([kind, id]) => kind === 0 && Buffer.from(id).equals(Buffer.from(attempt[2])));
             const occurrence = decodeValue(archive.schemas.get('occurrence'), archive.object(occurrenceRow[2]));
@@ -1109,14 +1109,14 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         assert.equal(exported.object(savedProgram[3][5]).subarray(0, 8).toString(), 'ABL_BPI3');
 
         const attempts = exported.manifest[6].filter(([kind]) => kind === 5).map(([, , ref]) => decodeValue(exported.schemas.get('attempt'), exported.object(ref))[5]);
-        assert.equal(attempts.filter(identity => identity === 'agent.adaptive.workspace.v2').length, 4);
+        assert.equal(attempts.filter(identity => identity === 'agent.adaptive.workspace.v3').length, 4);
         assert.equal(attempts.filter(identity => identity === 'agent.adaptive.snapshot.guards.v2').length, 1, 'generated-evidence rejection never dispatches source inspection');
         let privateChecks = 0;
         for (const [kind, id, ref] of exported.manifest[6]) {
           if (kind !== 4) continue;
           const row = exported.manifest[6].find(([kind, candidate]) => kind === 5 && Buffer.from(candidate).equals(Buffer.from(id)));
           const attempt = decodeValue(exported.schemas.get('attempt'), exported.object(row[2]));
-          if (attempt[5] !== 'agent.model.invoke.v11') continue;
+          if (attempt[5] !== 'agent.model.invoke.v12') continue;
           const capture = decodeValue(exported.schemas.get('capture'), exported.object(ref));
           for (const privateRef of [capture[4].value, ...capture[6].value[1]]) {
             await assert.rejects(client.call('artifact.read', {task_id: task.task_id, artifact_id: Buffer.from(privateRef[0]).toString('hex'), offset: '0', length: '1'}), error => error.data?.kind === 'ArtifactUnavailable');
@@ -1332,7 +1332,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           [JSON.stringify({usage: {input_tokens: 3, output_tokens: 2}, output: [{type: 'function_call', name: 'report', arguments: '{"answer":42}'}]}), 3, 2, 0, 1],
         ]) {
           const archive = readArchive(measuredBytes);
-          const attemptRow = archive.manifest[6].find(([kind, , ref]) => kind === 5 && decodeValue(archive.schemas.get('attempt'), archive.object(ref))[5] === 'agent.model.invoke.v11');
+          const attemptRow = archive.manifest[6].find(([kind, , ref]) => kind === 5 && decodeValue(archive.schemas.get('attempt'), archive.object(ref))[5] === 'agent.model.invoke.v12');
           const attempt = decodeValue(archive.schemas.get('attempt'), archive.object(attemptRow[2]));
           const captureRow = archive.manifest[6].find(([kind, id]) => kind === 4 && Buffer.from(id).equals(Buffer.from(attempt[0])));
           const capture = decodeValue(archive.schemas.get('capture'), archive.object(captureRow[2]));

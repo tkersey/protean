@@ -186,6 +186,7 @@ pub fn opaqueProjection(_: std.mem.Allocator, _: []const []const u8) ![]Dependen
 pub const CaptureAdapter = struct {
     dependencies: DependencyDecoder,
     prepare: *const fn (ProjectionContext, []const u8) anyerror![]u8,
+    reject_preparation: ?*const fn (ProjectionContext, []const u8, anyerror) anyerror!?[]u8 = null,
     acquire: *const fn (Context, []const u8) anyerror!Acquisition,
     interpret: *const fn (
         ProjectionContext,

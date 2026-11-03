@@ -1,8 +1,8 @@
 # Canonical adaptive authoring in Protean
 
 Protean uses Horos's canonical shape-preserving authoring interface. The
-current adaptive application uses invocation v11, context v7, output v5, and
-native state format 20. Disposable examples are recreated; retired adaptive v5
+current adaptive application uses invocation v12, context v8, output v5, and
+native state format 21. Disposable examples are recreated; retired adaptive v5
 tasks and state-format 11 databases are not migrated. See
 [saved state and portability](native-single-binary.md#saved-state-and-portability).
 The core ABI 3, BPI3, and PST3 identities remain unchanged.

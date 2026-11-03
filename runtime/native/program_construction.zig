@@ -723,7 +723,7 @@ test "general source builds through actual checked lowering and rejects private 
     var image = try data.program_image.decode(a, compiled.image);
     defer image.deinit();
     _ = try builder.effect(.{
-        .identity = "agent.model.invoke.v11",
+        .identity = "agent.model.invoke.v12",
         .payload = module.failure,
         .result = module.failure,
         .external = false,

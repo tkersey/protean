@@ -2,7 +2,7 @@ const std = @import("std");
 const adaptive_owner_groups = [_][]const []const u8{
     &.{ "adaptive_controls.", "adaptive_reports.", "adaptive_recovery." },
     &.{"projection_recovery."},
-    &.{"projection_failure_tests."},
+    &.{ "projection_failure_tests.", "projection_late_recovery." },
     &.{ "projection owner authenticates", "projection receipts preserve" },
     &.{ "projection required-current", "projection selection rechecks", "delegated projection" },
     &.{"constructed successor rejects"},

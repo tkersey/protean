@@ -505,6 +505,7 @@ pub const EventType = enum {
     controller_requested,
     execution,
     preparation,
+    preparation_rejected,
 };
 pub const ControllerReadCut = struct {
     event_watermark: u64,
@@ -534,6 +535,12 @@ pub const Event = struct {
     controller_read: ?ControllerReadCut = null,
     root_publication: ?RootPublication = null,
     preparation_attempt: ?Reference = null,
+    preparation_rejection: ?PreparationRejection = null,
+};
+
+pub const PreparationRejection = struct {
+    occurrence: occurrence.Occurrence,
+    controller_context: ?ControllerContext,
 };
 
 pub const RootCut = struct {
@@ -586,6 +593,8 @@ pub const RootHistory = struct {
         if (event.seq != (std.math.add(u64, self.event_watermark, 1) catch
             return error.InvalidArchive)) return error.InvalidArchive;
         if ((event.kind == .preparation) != (event.preparation_attempt != null))
+            return error.InvalidArchive;
+        if ((event.kind == .preparation_rejected) != (event.preparation_rejection != null))
             return error.InvalidArchive;
         const advances = event.kind == .execution or event.kind == .controller;
         if (advances != (event.root_publication != null)) return error.InvalidArchive;

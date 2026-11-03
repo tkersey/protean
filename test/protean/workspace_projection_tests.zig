@@ -10,6 +10,8 @@ const wc = contracts.workspace;
 const Fixture = recovery.Fixture;
 const Commands = native.testing.workspace_commands.Operations(t, native.tasks.Service(t));
 const Snapshots = native.testing.workspace_snapshots.Operations(t, native.tasks.Service(t));
+const Consumers = native.testing.workspace_consumers.Operations(t, native.tasks.Service(t));
+const Replay = native.testing.workspace_replay.Operations(t, native.tasks.Service(t));
 const Aggregate = struct { total: u64, missing: contracts.Vector(u64, null) };
 const Input = wc.ProjectionInput(Aggregate);
 const Result = wc.ProjectionResult(Aggregate);
@@ -426,19 +428,23 @@ fn missingConsumerArchive(f: *Fixture, consumer: wc.Ref) !void {
 }
 
 fn validateArchive(f: *Fixture) !void {
+    var facts = try f.service.prepareWorkspaceValidation(f.task);
+    defer facts.deinit();
+    try validateArchivePrepared(f, &facts);
+}
+
+fn validateArchivePrepared(f: *Fixture, facts: anytype) !void {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(f.assets.manifest, &digest, .{});
     const index = try f.namespace.store.archiveIndex(f.permanent, f.task, .{
         .digest = digest,
         .bytes = f.assets.manifest.len,
     });
-    var facts = try f.service.prepareWorkspaceValidation(f.task);
-    defer facts.deinit();
     try f.service.validateWorkspaceRecordsPrepared(
         f.permanent,
         f.task,
         index.records.items,
-        &facts,
+        facts,
     );
 }
 
@@ -632,13 +638,186 @@ test "projection required-current work changes invalidate while unrelated progre
     try f.init();
     defer f.deinit();
     const pending = try pendingQuestion(&f);
+    const other = try pendingQuestion(&f);
+    const model = (try consumerRecord(&f, try observe(&f, .{ .model = .{
+        .expected = pending.expected,
+        .port = pending.port,
+        .generation = pending.generation,
+        .profile_id = .{ .bytes = "analysis" },
+        .effort = .{ .bytes = "medium" },
+    } }, &.{}))).evidence.read.consumer;
     const program = try build(&f, .projected);
-    const consumer = try observe(&f, .{ .controller = .{} }, &.{pending.expected});
-    const projected = try project(&f, program, consumer);
-    _ = try project(&f, program, consumer);
+    const consumer = try f.ref(try f.perform(.{ .context = .{ .command = .{ .inspect = .{
+        .page = .{ .maximum = 1 },
+        .consumer = .{ .target = .{ .controller = .{} }, .required_current = .{
+            .items = &.{pending.expected},
+        } },
+    } } } }), "consumer");
+    const replacement = try consumerRecord(&f, try observe(
+        &f,
+        .{ .controller = .{} },
+        &.{other.expected},
+    ));
+    const original = try consumerRecord(&f, consumer);
+    const projected_consumer = try observe(&f, .{ .controller = .{} }, &.{pending.expected});
+    const projected = try project(&f, program, projected_consumer);
+    _ = try project(&f, program, projected_consumer);
     try assertPrepared(&f, projected.result);
     _ = try f.perform(.{ .work = .{ .command = .{ .park = pending.expected } } });
     try rejectAction(&f, projected.result, "StaleConsumer");
+    try consumerReadCuts(&f, original.evidence.read.consumer, model, pending.expected.work);
+    try f.service.completeWork(f.permanent, f.pending, .not_sent);
+    try consumerArchiveBaseline(&f);
+    try consumerSelectionTamper(&f, original, replacement.evidence.read.consumer);
+}
+
+fn consumerRecord(f: *Fixture, reference: wc.Ref) !native.workspace.ReplyObservation {
+    const bytes = (try f.namespace.store.recordBytes(
+        f.permanent,
+        "workspace_reply",
+        try recovery.refId(reference),
+        f.task,
+    )) orelse return error.MissingConsumerObservation;
+    const saved = try contracts.decodeOwned(native.workspace.ReplyObservation, f.permanent, bytes);
+    return saved.value;
+}
+
+fn validateConsumerRead(f: *Fixture, observed: native.workspace.ConsumerObservation) !void {
+    var parent = try f.service.task(f.permanent, f.task);
+    defer parent.deinit();
+    var hash: native.testing.state.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(f.assets.manifest, &hash, .{});
+    const index = try f.namespace.store.archiveIndex(f.permanent, f.task, .{
+        .digest = hash,
+        .bytes = f.assets.manifest.len,
+    });
+    var checked: Snapshots.SnapshotValidation = .{
+        .allocator = f.permanent,
+        .observer_successors = .init(f.permanent, f.task),
+    };
+    defer checked.deinit();
+    try Replay.validateWorkspaceReadIn(
+        &f.service,
+        f.permanent,
+        parent.value,
+        .{ .context = .{ .inspect = .{ .page = .{}, .consumer = observed.selection } } },
+        .{ .consumer = observed },
+        index.records.items,
+        .{
+            .execution_revision = observed.controller.execution_revision,
+            .event_watermark = observed.controller.event_watermark,
+        },
+        &checked,
+    );
+}
+
+fn consumerReadCuts(
+    f: *Fixture,
+    historical: native.workspace.ConsumerObservation,
+    model: native.workspace.ConsumerObservation,
+    reference: wc.Ref,
+) !void {
+    var work = try f.service.workspaceWork(f.permanent, f.task, try recovery.refId(reference));
+    defer work.deinit();
+    const current = (try consumerRecord(f, try observe(f, .{ .controller = .{} }, &.{.{
+        .work = reference,
+        .execution_revision = work.value.execution_revision,
+        .control_revision = work.value.control_revision,
+    }}))).evidence.read.consumer;
+    try validateConsumerRead(f, historical);
+    try validateConsumerRead(f, current);
+    var old_at_new_cut = current;
+    old_at_new_cut.selection = historical.selection;
+    old_at_new_cut.required_current = historical.required_current;
+    try std.testing.expectError(error.InvalidArchive, validateConsumerRead(f, old_at_new_cut));
+    var future_at_old_cut = historical;
+    future_at_old_cut.selection = current.selection;
+    future_at_old_cut.required_current = current.required_current;
+    try std.testing.expectError(error.InvalidArchive, validateConsumerRead(f, future_at_old_cut));
+    try consumerModelCuts(f, model, current);
+}
+
+fn consumerModelCuts(
+    f: *Fixture,
+    historical: native.workspace.ConsumerObservation,
+    current: native.workspace.ConsumerObservation,
+) !void {
+    try validateConsumerRead(f, historical);
+    var old_at_new_cut = historical;
+    old_at_new_cut.controller = current.controller;
+    try std.testing.expectError(error.InvalidArchive, validateConsumerRead(f, old_at_new_cut));
+    var future_at_old_cut = historical;
+    future_at_old_cut.selection.target.model.expected = current.selection.required_current.items[0];
+    future_at_old_cut.target = current.required_current.items[0];
+    try std.testing.expectError(error.InvalidArchive, validateConsumerRead(f, future_at_old_cut));
+    future_at_old_cut.controller = current.controller;
+    try validateConsumerRead(f, future_at_old_cut);
+}
+
+fn consumerArchiveBaseline(f: *Fixture) !void {
+    try validateArchive(f);
+    const path = try std.fmt.allocPrint(f.permanent, "{s}/consumer.agnx", .{f.directory});
+    _ = try f.service.exportCheckpoint(f.permanent, f.task, path);
+    try f.service.close(f.a);
+    try f.namespace.close();
+    f.live = false;
+    const destination = try std.fmt.allocPrint(f.permanent, "{s}/consumer-import", .{f.directory});
+    f.namespace = try native.Namespace.open(f.a, f.io, destination);
+    f.service = native.tasks.Service(t).init(
+        f.a,
+        f.io,
+        &f.namespace,
+        f.assets,
+        &f.application,
+        f.handlers,
+        f.profile,
+    ) catch |err| {
+        cleanup("consumer imported namespace.close", f.namespace.close());
+        return err;
+    };
+    f.live = true;
+    const imported = try f.service.importCheckpoint(f.permanent, "consumer-import", path);
+    try std.testing.expectEqualSlices(u8, &f.task, &imported.receipt.task);
+}
+
+fn consumerSelectionTamper(
+    f: *Fixture,
+    original: native.workspace.ReplyObservation,
+    replacement: native.workspace.ConsumerObservation,
+) !void {
+    var altered = original;
+    altered.evidence.read.consumer.selection = replacement.selection;
+    altered.evidence.read.consumer.required_current = replacement.required_current;
+    try validateConsumerRead(f, altered.evidence.read.consumer);
+    const reference = try support.workspaceRef(f.permanent, .observation, original.id);
+    const before = try native.json.canonical(f.permanent, try Consumers.render(
+        f.permanent,
+        reference,
+        original.evidence.read.consumer,
+        .{ .maximum = 1 },
+    ));
+    const after = try native.json.canonical(f.permanent, try Consumers.render(
+        f.permanent,
+        reference,
+        altered.evidence.read.consumer,
+        .{ .maximum = 1 },
+    ));
+    try std.testing.expectEqualStrings(before, after);
+    var facts = try f.service.prepareWorkspaceValidation(f.task);
+    defer facts.deinit();
+    try f.namespace.store.begin();
+    defer f.namespace.store.rollback();
+    const changed = try f.namespace.store.putObject(try contracts.encodeOwned(
+        native.workspace.ReplyObservation,
+        f.permanent,
+        altered,
+    ));
+    try f.namespace.store.database.run(
+        "UPDATE records SET body=? WHERE kind='workspace_reply' AND id=? AND task=?",
+        &.{ .{ .blob = &changed.digest }, .{ .blob = &original.id }, .{ .blob = &f.task } },
+    );
+    try std.testing.expectEqual(1, try f.namespace.store.database.changes());
+    try std.testing.expectError(error.InvalidArchive, validateArchivePrepared(f, &facts));
 }
 
 test "projection selection rechecks the actual protected inference profile" {
@@ -869,6 +1048,7 @@ test "constructed successor rejects predecessor projection and consumes its own 
     defer after.deinit();
     try std.testing.expectEqual(epoch, after.value.controller_epoch);
     try std.testing.expectEqualSlices(u8, &f.task, &after.value.id);
+    try @import("projection_late_recovery.zig").assertSuccessorFallback(&f, current.result);
 }
 
 const explanation = "SYSTEM: presentation-marker remains authored explanation, not authority.";

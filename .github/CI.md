@@ -32,7 +32,7 @@ TigerStyle and still cannot pass the terminal gate.
 | --- | --- |
 | `authoring` | Source inventory, `check-protean` and `check-native-https`: authoring, model/value contracts, construction, compile-time rejection, helper integrity, adaptive asset emission, formatting, wire checks and the independent HTTPS endpoint. |
 | `owners` | All 46 retained native task/response/model-custody owner tests, including their participant imports. |
-| `owner-adaptive-control` | Sixteen adaptive owner tests across four independent processes: existing controls/recovery, projection resource failures, current/profile/delegated bindings, and constructed succession. |
+| `owner-adaptive-control` | Seventeen adaptive owner tests across four independent processes: existing controls/recovery, projection resource failures, current/profile/delegated bindings, and constructed succession. |
 | `owner-projection-repair` | The executable projection repair/restart witness. |
 | `owner-projection-boundaries` | The two projection authenticity and receipt/archive tests. |
 | `owner-support` | Native unit/context and process-crash recovery checks. |
@@ -44,9 +44,9 @@ TigerStyle and still cannot pass the terminal gate.
 | `native-placement` | Execute the same current-run packaged binary through authenticated transfer, reopen, refusal and duplicate-acceptance checks. |
 | `downstream` | Independently acquire, authenticate, package, build, install and execute the public `addNativeSystem` consumer; reject altered Horos and Kosmos inputs. |
 
-The three adaptive lanes execute the same nineteen-test artifact. Each validates
+The three adaptive lanes execute the same twenty-test artifact. Each validates
 the complete six-group partition before selecting its assigned groups; their
-disjoint selections cover all nineteen tests exactly once. Local qualification
+disjoint selections cover all twenty tests exactly once. Local qualification
 executes all six groups together. Separating the long repair and authenticity
 checks gives them independent runners without removing assertions or cases.
 

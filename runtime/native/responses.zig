@@ -195,7 +195,7 @@ test "nullable model arguments preserve nested absence" {
     try std.testing.expectEqual(@as(?u64, 42), try argument(?u64, a, number.value));
 }
 
-/// Provider output grammar shared by the sole v11 adapter and pure recovery.
+/// Provider output grammar shared by the sole v12 adapter and pure recovery.
 pub fn OutputNormalizer(comptime P: type) type {
     return struct {
         fn malformed(err: anyerror) error{OutOfMemory}!P.DecodedAnswer {
@@ -365,7 +365,7 @@ pub fn OutputNormalizer(comptime P: type) type {
         }
 
         /// Output grammar and exact argument codec. Policy and context admission
-        /// belong to the v11 adapter.
+        /// belong to the v12 adapter.
         pub fn normalize(
             a: std.mem.Allocator,
             invocation: P.Request,

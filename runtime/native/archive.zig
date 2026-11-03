@@ -402,6 +402,7 @@ fn admissionMethod(kind: state.EventType) ?state.Method {
         .workspace_progress,
         .workspace_read,
         .preparation,
+        .preparation_rejected,
         .controller,
         .execution,
         .input_required,
@@ -480,6 +481,7 @@ const EventFacts = struct {
             .workspace_progress,
             .workspace_read,
             .preparation,
+            .preparation_rejected,
             .accepted,
             .cancellation_requested,
             .resumed,
@@ -1242,7 +1244,7 @@ const Inspection = struct {
             .workspace,
             .workspace_progress,
             => {},
-            .reconciled, .workspace_read, .preparation => {
+            .reconciled, .workspace_read, .preparation, .preparation_rejected => {
                 const occurrence_id = try self.eventOccurrence(event);
                 const occurrence_ref = record(
                     self.archive,

@@ -1,5 +1,6 @@
 //! Candidate admission is ordinary checked control, shared by every responder.
 const horos = @import("horos");
+const std = @import("std");
 const a = horos.authoring;
 const native = horos.data.schema.native;
 const authoring = @import("authoring.zig");
@@ -12,6 +13,16 @@ fn Fn(comptime InputType: type, comptime OutputType: type) type {
     return a.Function(a.Signature(a.Shape(InputType).contract.product, a.Shape(OutputType)));
 }
 const Branch = a.Body(native.Fields(&.{}, &.{}));
+
+fn resultFailure(comptime P: type, comptime name: []const u8) Failure {
+    return switch (comptime std.meta.stringToEnum(std.meta.Tag(P.Result), name).?) {
+        .refusal => .refusal,
+        .transport_failure => .transport,
+        .provider_failure => .provider,
+        .unsupported_response, .preparation_rejected => .unsupported,
+        .output => unreachable,
+    };
+}
 
 pub const Failure = enum {
     refusal,
@@ -147,7 +158,7 @@ fn Generator(comptime P: type, comptime batch: bool) type {
                     )
                 else
                     try g.reject(
-                        ([_]Failure{ .refusal, .transport, .provider, .unsupported })[index - 1],
+                        resultFailure(P, name),
                     );
                 @field(cases, name) = try selected.ret(result);
             }
@@ -418,7 +429,6 @@ fn Generator(comptime P: type, comptime batch: bool) type {
 }
 
 test "typed model admission retains its signature with unrelated pending schemas" {
-    const std = @import("std");
     const P = @import("model_invocation.zig").Profile(union(enum) { choose: struct {
         value: u64,
     } }, .{

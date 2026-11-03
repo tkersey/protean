@@ -390,11 +390,8 @@ pub const Ready = struct {
     receipt: ?ReceiptReference,
     results: PendingResults,
 };
-pub const ProjectionRejectionCode = enum { stale, unavailable, invalid, oversized };
-pub const ProjectionRejection = struct {
-    code: ProjectionRejectionCode,
-    view: contracts.workspace.Ref,
-};
+pub const ProjectionRejectionCode = model.ProjectionRejectionCode;
+pub const ProjectionRejection = model.ProjectionRejection;
 pub const PreparationResult = union(enum) {
     ready: Ready,
     rejected: controls.Rejection,

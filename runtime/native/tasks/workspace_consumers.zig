@@ -227,35 +227,52 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (observed.required_current.items.len != expected.len) return error.InvalidArchive;
             for (observed.required_current.items, expected) |work, requirement| {
                 try expectWork(work.work, requirement);
-                try validateWork(self, a, parent, work, records, checked);
+                try Replay.validateWorkReadAt(
+                    self,
+                    a,
+                    parent,
+                    work,
+                    observed.controller.event_watermark,
+                    records,
+                    checked,
+                );
             }
             if (observed.selection.target == .model) {
                 const target = observed.target orelse return error.InvalidArchive;
                 try expectWork(target.work, observed.selection.target.model.expected);
                 try expectPort(self, a, target, observed.selection.target.model);
-                try validateWork(self, a, parent, target, records, checked);
+                try Replay.validateWorkReadAt(
+                    self,
+                    a,
+                    parent,
+                    target,
+                    observed.controller.event_watermark,
+                    records,
+                    checked,
+                );
                 if (observed.model == null) return error.InvalidArchive;
             } else if (observed.target != null or observed.model != null)
                 return error.InvalidArchive;
         }
 
-        fn validateWork(
-            self: *Self,
-            a: std.mem.Allocator,
-            parent: state.Task,
-            observed: workspace.WorkObservation,
-            records: []const state.ArchiveRecord,
-            checked: *Snapshots.SnapshotValidation,
-        ) !void {
-            try Snapshots.validateWorkspaceWorkSnapshotIn(self, parent, observed, records, checked);
-            try Replay.validateHistoricalOccurrence(self, a, observed);
-        }
-
-        pub fn sameInterface(
+        pub fn validateRequestBinding(
             a: std.mem.Allocator,
             observed: workspace.ConsumerObservation,
             authorized: workspace.Authorized,
         ) !void {
+            if (authorized.command != .context or authorized.command.context != .inspect)
+                return error.InvalidArchive;
+            const selection = authorized.command.context.inspect.consumer orelse
+                return error.InvalidArchive;
+            const wanted = try contracts.encodeOwned(wc.ConsumerInspection, a, selection);
+            defer a.free(wanted);
+            const retained = try contracts.encodeOwned(
+                wc.ConsumerInspection,
+                a,
+                observed.selection,
+            );
+            defer a.free(retained);
+            if (!std.mem.eql(u8, wanted, retained)) return error.InvalidArchive;
             const interface = authorized.consumer orelse return error.InvalidConsumer;
             if (!std.meta.eql(interface, observed.interface)) return error.InvalidArchive;
             const expected = try contracts.encodeOwned(

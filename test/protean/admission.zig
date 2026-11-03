@@ -165,17 +165,17 @@ test "model v3 concrete schema specializations share their semantic family" {
     var f = try Fixture.init();
     defer f.deinit();
     try f.definePureRoot();
-    _ = try f.effect("agent.model.invoke.v11", .model);
+    _ = try f.effect("agent.model.invoke.v12", .model);
     const text = try f.b.schema(.text);
     const specialized = try f.b.effect(.{
-        .identity = "agent.model.invoke.v11",
+        .identity = "agent.model.invoke.v12",
         .payload = text,
         .result = text,
     });
     try f.registry.classify(specialized, .model);
     try f.compile();
     const alias = try f.b.effect(.{
-        .identity = "agent.model.invoke.v11",
+        .identity = "agent.model.invoke.v12",
         .payload = f.unit,
         .result = f.unit,
     });
@@ -638,7 +638,7 @@ test "ordinary read without evidence authority permits local interpretation" {
 test "raw model requests require the checked emission owner" {
     var f = try Fixture.init();
     defer f.deinit();
-    const effect = try f.effect("agent.model.invoke.v11", .model);
+    const effect = try f.effect("agent.model.invoke.v12", .model);
     f.b.functions.items[@intCast(f.entry)].effects = &.{effect};
     try f.b.define(f.entry, try f.perform(effect));
     try f.horosCompile();

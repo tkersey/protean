@@ -150,7 +150,7 @@ export function workspaceMetrics(archive, application) {
   // positive non-invocation evidence. Rearming an occurrence is only permitted
   // from not_sent, so older uncaptured attempts are also known not to have run.
   for (const [id, attempt] of attempts) {
-    const role = attempt[5] === 'agent.model.invoke.v11' ? 'controller' : attempt[5] === 'protean.workspace.inference/1' ? 'delegated' : null;
+    const role = attempt[5] === 'agent.model.invoke.v12' ? 'controller' : attempt[5] === 'protean.workspace.inference/1' ? 'delegated' : null;
     if (!role) continue;
     const capture = captures.get(id);
     const occurrence = occurrences.get(Buffer.from(attempt[2]).toString('hex'));

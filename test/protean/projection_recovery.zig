@@ -800,7 +800,7 @@ fn variants(f: *Fixture, original: Case) ![]const Case {
     return cases;
 }
 
-fn sibling(f: *Fixture) !native.workspace.Work {
+pub fn sibling(f: *Fixture) !native.workspace.Work {
     var builder = horos.source.Builder.init(f.permanent);
     defer builder.deinit();
     const module = try @import("workspace_sources.zig").binaryQuestion(&builder);
@@ -825,7 +825,7 @@ fn sibling(f: *Fixture) !native.workspace.Work {
     return error.PendingSiblingDidNotArrive;
 }
 
-fn requireSibling(f: *Fixture, original: native.workspace.Work) !void {
+pub fn requireSibling(f: *Fixture, original: native.workspace.Work) !void {
     const current = try f.service.workspaceWork(f.permanent, f.task, original.id);
     try std.testing.expectEqual(original.task, current.value.task);
     try std.testing.expectEqual(original.execution_revision, current.value.execution_revision);
@@ -907,13 +907,12 @@ fn commitSelection(f: *Fixture, result: wc.Ref) !native.workspace.View {
     return error.ProjectionSelectionWasNotCommitted;
 }
 
-fn reopen(f: *Fixture) !void {
+pub fn reopen(f: *Fixture) !void {
     try f.service.close(f.permanent);
     try f.namespace.close();
     f.live = false;
     f.namespace = try native.Namespace.open(f.a, f.io, f.path);
-    errdefer cleanup("reopened namespace.close", f.namespace.close());
-    f.service = try native.tasks.Service(t).init(
+    f.service = native.tasks.Service(t).init(
         f.a,
         f.io,
         &f.namespace,
@@ -921,7 +920,10 @@ fn reopen(f: *Fixture) !void {
         &f.application,
         f.handlers,
         f.profile,
-    );
+    ) catch |err| {
+        cleanup("reopened namespace.close", f.namespace.close());
+        return err;
+    };
     f.live = true;
     const current = try f.service.task(f.permanent, f.task);
     _ = try f.service.resumeTask(

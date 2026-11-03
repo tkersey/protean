@@ -181,6 +181,7 @@ test/protean/native_test_support.zig
 test/protean/native_tests.zig
 test/protean/participant.zig
 test/protean/projection_failure_tests.zig
+test/protean/projection_late_recovery.zig
 test/protean/projection_recovery.zig
 test/protean/prompt_unknown_field.zig
 test/protean/recursive_participant.zig
