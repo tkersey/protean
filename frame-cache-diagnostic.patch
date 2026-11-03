@@ -50,3 +50,159 @@ index fcb0459..7b8fee4 100644
 @@ -435 +435 @@ pub const Store = struct {
 -    pub fn get(self: Store, reference: g.NodeRef) Error!g.Node {
 +    pub inline fn get(self: *const Store, reference: g.NodeRef) Error!g.Node {
+diff --git a/src/semantic/frames.zig b/src/semantic/frames.zig
+index 306b4a0..22b2f42 100644
+--- a/src/semantic/frames.zig
++++ b/src/semantic/frames.zig
+@@ -385,0 +386,3 @@ fn emitPrune(e: Author, d: Definition, retained_owners: Id) Error!void {
++    const ids = try projection.schema([]const Id, b);
++    const ordered = try emitOrderedIds(e, ids);
++    const retain_sequence = try emitSequenceRetain(e, d.slots, ids);
+@@ -399 +402 @@ fn emitPrune(e: Author, d: Definition, retained_owners: Id) Error!void {
+-    try b.define(d.prune, try b.bind(mask, try e.call(
++    const fallback = try b.bind(mask, try e.call(
+@@ -402 +405,134 @@ fn emitPrune(e: Author, d: Definition, retained_owners: Id) Error!void {
+-    ), try e.call(d.retain, &.{ try e.param(d.prune, 0), try b.reference(mask) })));
++    ), try e.call(d.retain, &.{ try e.param(d.prune, 0), try b.reference(mask) }));
++    const prune_frame = try e.param(d.prune, 0);
++    const direct_slots = try b.variable(d.slots.tree);
++    const direct_owners = try b.variable(try projection.schema([]const data.process_state.Owner, b));
++    const direct = try b.bind(direct_slots, try e.call(retain_sequence, &.{
++        try e.field(prune_frame, 2), try e.param(d.prune, 1),
++    }), try b.bind(direct_owners, try e.call(retained_owners, &.{
++        try e.field(prune_frame, 3), try b.reference(direct_slots),
++    }), try b.pure(try e.replace(
++        try e.replace(prune_frame, 2, try b.reference(direct_slots)),
++        3,
++        try b.reference(direct_owners),
++    ))));
++    const sorted = try b.variable(e.boolean);
++    try b.define(d.prune, try b.bind(sorted, try e.call(ordered, &.{
++        try e.param(d.prune, 1), e.zero, e.zero,
++    }), try e.when(try b.reference(sorted), direct, fallback)));
++}
++
++fn emitOrderedIds(e: Author, ids: Id) Error!Id {
++    const b = e.b;
++    const check = try b.declare(&.{ ids, e.integer, e.integer }, e.boolean, &.{}, &.{});
++    const values = try e.param(check, 0);
++    const index = try e.param(check, 1);
++    const previous = try e.param(check, 2);
++    const length = try b.primitive(e.integer, .sequence_length, &.{values}, 0);
++    const current = try e.required(values, index);
++    try b.define(check, try e.when(
++        try e.binary(.less, index, length),
++        try e.when(
++            try e.binary(.less, current, previous),
++            try b.pure(try b.constant(bool, false)),
++            try e.call(check, &.{ values, try e.binary(.integer_add, index, e.one), current }),
++        ),
++        try b.pure(try b.constant(bool, true)),
++    ));
++    return check;
++}
++
++fn emitSequenceLeaf(e: Author, slots: maps.Definition, ids: Id, result: Id) Error!Id {
++    const b = e.b;
++    const leaf = try b.declare(
++        &.{ slots.tree, ids, e.integer, e.integer },
++        result,
++        &.{},
++        &.{},
++    );
++    const input = try e.param(leaf, 0);
++    const values = try e.param(leaf, 1);
++    const index = try e.param(leaf, 2);
++    const key = try e.param(leaf, 3);
++    const length = try b.primitive(e.integer, .sequence_length, &.{values}, 0);
++    const current = try e.required(values, index);
++    const next = try e.binary(.integer_add, index, e.one);
++    const absent = try b.pure(try e.tuple(result, &.{ try slots.empty(e), index }));
++    const found = try e.when(
++        try e.binary(.equal, key, current),
++        try b.pure(try e.tuple(result, &.{ input, next })),
++        absent,
++    );
++    try b.define(leaf, try e.when(
++        try e.binary(.less, index, length),
++        try e.when(
++            try e.binary(.less, current, key),
++            try e.call(leaf, &.{ input, values, next, key }),
++            found,
++        ),
++        absent,
++    ));
++    return leaf;
++}
++
++fn emitSequenceRetain(e: Author, slots: maps.Definition, ids: Id) Error!Id {
++    const b = e.b;
++    const result = try b.schema(.{ .product = &.{ slots.tree, e.integer } });
++    const leaf = try emitSequenceLeaf(e, slots, ids, result);
++    const walk = try b.declare(&.{ slots.tree, ids, e.integer }, result, &.{}, &.{});
++    try emitSequenceWalk(e, slots, result, walk, leaf);
++    const retain = try b.declare(&.{ slots.tree, ids }, slots.tree, &.{}, &.{});
++    const pruned = try b.variable(result);
++    try b.define(retain, try b.bind(pruned, try e.call(walk, &.{
++        try e.param(retain, 0), try e.param(retain, 1), e.zero,
++    }), try b.pure(try e.field(try b.reference(pruned), 0))));
++    return retain;
++}
++
++fn emitSequenceWalk(e: Author, slots: maps.Definition, result: Id, walk: Id, leaf_at: Id) Error!void {
++    const b = e.b;
++    const input = try e.param(walk, 0);
++    const allowed = try e.param(walk, 1);
++    const index = try e.param(walk, 2);
++    const nil = try b.variable(e.unit);
++    const leaf = try b.variable(slots.entry);
++    const fork = try b.variable(slots.branch);
++    const node = try b.reference(fork);
++    const left_var = try b.variable(result);
++    const right_var = try b.variable(result);
++    const left_result = try b.reference(left_var);
++    const right_result = try b.reference(right_var);
++    const l = try e.field(left_result, 0);
++    const r = try e.field(right_result, 0);
++    const finish = try e.field(right_result, 1);
++    const retained = try b.bind(left_var, try e.call(walk, &.{
++        try e.field(node, 1), allowed, index,
++    }), try b.bind(right_var, try e.call(walk, &.{
++        try e.field(node, 2), allowed, try e.field(left_result, 1),
++    }), try e.when(
++        try isEmpty(e, l),
++        try b.pure(right_result),
++        try e.when(
++            try isEmpty(e, r),
++            try b.pure(try e.tuple(result, &.{ l, finish })),
++            try b.pure(try e.tuple(result, &.{
++                try e.variant(slots.tree, 2, try e.tuple(
++                    slots.branch,
++                    &.{ try e.field(node, 0), l, r },
++                )),
++                finish,
++            })),
++        ),
++    )));
++    const length = try b.primitive(e.integer, .sequence_length, &.{allowed}, 0);
++    const traverse = try b.term(.{ .match_sum = .{ .value = input, .cases = &.{
++        .{ .variable = nil, .body = try b.pure(try e.tuple(result, &.{ input, index })) },
++        .{ .variable = leaf, .body = try e.call(leaf_at, &.{
++            input, allowed, index, try e.field(try b.reference(leaf), 0),
++        }) },
++        .{ .variable = fork, .body = retained },
++    } } });
++    try b.define(walk, try e.when(
++        try e.binary(.less, index, length),
++        traverse,
++        try b.pure(try e.tuple(result, &.{ try slots.empty(e), index })),
++    ));
+diff --git a/src/semantic_packaged.zig b/src/semantic_packaged.zig
+index 1483b7b..f8e0dc1 100644
+--- a/src/semantic_packaged.zig
++++ b/src/semantic_packaged.zig
+@@ -7,2 +7,2 @@ pub const horos_package = "horos-8.0.0-flclaIItVgCRBCbUEysErcsQyVqsukGf2Q8X2is_w
+-pub const source_sha256 = "08c48a517383d1f8addd8175dcf73e4542cb3b781fba74ba3ba5d3f8fbfe8f6a";
+-pub const artifact_sha256 = "be16c35ee37dadadb69cb76bbfdad5be1c772f78e270638554457c19f43113f0";
++pub const source_sha256 = "62674d6f5c16e0f62457382aac65dd9dd4648b7b7b2d7c173f4c845725fc32db";
++pub const artifact_sha256 = "d2615dd578a0015f4c0a0583f5eabbf244b46e186334de76a94e06e61e58d09c";

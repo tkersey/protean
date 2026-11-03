@@ -1,4 +1,4 @@
-name: Native accessor and frame comparison
+name: Native ordered pruning comparison
 on:
   workflow_dispatch:
 permissions:
@@ -24,13 +24,13 @@ jobs:
           mirror: https://zigmirror.com
           use-tool-cache: true
           use-cache: false
-      - name: Reuse measured cache-only binary
+      - name: Reuse measured native accessor binary
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh run download 41592390963 --repo "$GITHUB_REPOSITORY" \
+          gh run download 41593694958 --repo "$GITHUB_REPOSITORY" \
             --name native-adaptive-cpu-profile --dir "$RUNNER_TEMP/cache-only"
-          expected=05e47a3ee3b27f64da16f6593bb44869569d045ba075542b596d6fe4cf2b4e38
+          expected=4df9cda34365a9a259b9572c70c36fe718b6da7547d2cdbf632b1d4feaea822c
           actual=$(sha256sum "$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate" | cut -d ' ' -f 1)
           test "$expected" = "$actual"
           chmod 700 "$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate"
@@ -107,12 +107,13 @@ jobs:
             --prefix "$RUNNER_TEMP/compiled" 2>&1 | tee "$RUNNER_TEMP/profile/build.log"
           cp "$RUNNER_TEMP/compiled/verification/native-owner-adaptive" "$RUNNER_TEMP/profile/native-owner-adaptive"
           sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive" > "$RUNNER_TEMP/profile/binary-sha256.txt"
-      - name: Compile isolated frame-cache candidate
+      - name: Compile isolated ordered pruning candidate
         run: |
           mkdir -p "$RUNNER_TEMP/candidate"
           cp -a .protean-native/inputs/kosmos "$RUNNER_TEMP/candidate/kosmos"
           git -C "$RUNNER_TEMP/candidate/kosmos" apply --unidiff-zero "$GITHUB_WORKSPACE/frame-cache-diagnostic.patch"
           cp frame-cache-diagnostic.patch "$RUNNER_TEMP/profile/"
+          cp semantic-core-diagnostic.kar "$RUNNER_TEMP/candidate/kosmos/src/semantic-core.kar"
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
           import {readFileSync, writeFileSync} from 'node:fs';
@@ -129,6 +130,12 @@ jobs:
           assert.equal(command.filter(arg => arg === selected).length, 1);
           command[command.indexOf(selected)] = '-Mkosmos=' + process.env.RUNNER_TEMP +
               '/candidate/kosmos/src/root.zig';
+          const runtime = command.findIndex(arg => arg.startsWith('-Mpackaged_runtime='));
+          assert(runtime >= 0);
+          writeFileSync(process.env.RUNNER_TEMP + '/candidate/kosmos/src/diagnostic_runtime.zig',
+              'pub const bytes = @embedFile("semantic-core.kar");\n');
+          command[runtime] = '-Mpackaged_runtime=' + process.env.RUNNER_TEMP +
+              '/candidate/kosmos/src/diagnostic_runtime.zig';
           command.push('--test-no-exec', '-femit-bin=' + profile + '/native-owner-adaptive-candidate');
           writeFileSync(profile + '/candidate-command.json', JSON.stringify(command));
           const result = spawnSync(command[0], command.slice(1), {stdio: 'inherit'});
@@ -140,7 +147,7 @@ jobs:
         run: |
           umask 0022
           id > "$RUNNER_TEMP/profile/identity.txt"
-          for variant in baseline cached candidate; do
+          for variant in cached candidate; do
             profile_work=$(mktemp -d /tmp/protean-native-frame.XXXXXX)
             mkdir -p "$profile_work/.zig-cache/tmp"
             binary="$RUNNER_TEMP/profile/native-owner-adaptive"
@@ -149,7 +156,7 @@ jobs:
             (
               cd "$profile_work"
               set +e
-              timeout --signal=INT --kill-after=10s 85s node \
+              timeout --signal=INT --kill-after=10s 110s node \
                 "$GITHUB_WORKSPACE/tools/native/qualification_tests.mjs" "$binary" \
                 '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
                 '[1]' > "$RUNNER_TEMP/profile/$variant-test.log" 2>&1
