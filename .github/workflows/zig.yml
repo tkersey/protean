@@ -1,8 +1,9 @@
-name: Native frame lookup comparison
+name: Native accessor and frame comparison
 on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 jobs:
   profile:
     runs-on: ubuntu-22.04
@@ -23,6 +24,16 @@ jobs:
           mirror: https://zigmirror.com
           use-tool-cache: true
           use-cache: false
+      - name: Reuse measured cache-only binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 41592390963 --repo "$GITHUB_REPOSITORY" \
+            --name native-adaptive-cpu-profile --dir "$RUNNER_TEMP/cache-only"
+          expected=05e47a3ee3b27f64da16f6593bb44869569d045ba075542b596d6fe4cf2b4e38
+          actual=$(sha256sum "$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate" | cut -d ' ' -f 1)
+          test "$expected" = "$actual"
+          chmod 700 "$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate"
       - name: Prepare bounded diagnostic
         run: |
           mkdir -p "$RUNNER_TEMP/profile" .zig-cache/tmp
@@ -100,7 +111,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/candidate"
           cp -a .protean-native/inputs/kosmos "$RUNNER_TEMP/candidate/kosmos"
-          git -C "$RUNNER_TEMP/candidate/kosmos" apply "$GITHUB_WORKSPACE/frame-cache-diagnostic.patch"
+          git -C "$RUNNER_TEMP/candidate/kosmos" apply --unidiff-zero "$GITHUB_WORKSPACE/frame-cache-diagnostic.patch"
           cp frame-cache-diagnostic.patch "$RUNNER_TEMP/profile/"
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
@@ -129,15 +140,16 @@ jobs:
         run: |
           umask 0022
           id > "$RUNNER_TEMP/profile/identity.txt"
-          for variant in baseline candidate; do
+          for variant in baseline cached candidate; do
             profile_work=$(mktemp -d /tmp/protean-native-frame.XXXXXX)
             mkdir -p "$profile_work/.zig-cache/tmp"
             binary="$RUNNER_TEMP/profile/native-owner-adaptive"
             if test "$variant" = candidate; then binary="$binary-candidate"; fi
+            if test "$variant" = cached; then binary="$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate"; fi
             (
               cd "$profile_work"
               set +e
-              timeout --signal=INT --kill-after=10s 110s node \
+              timeout --signal=INT --kill-after=10s 85s node \
                 "$GITHUB_WORKSPACE/tools/native/qualification_tests.mjs" "$binary" \
                 '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
                 '[1]' > "$RUNNER_TEMP/profile/$variant-test.log" 2>&1

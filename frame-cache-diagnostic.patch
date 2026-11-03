@@ -1,35 +1,17 @@
 diff --git a/src/interpreter_v2/activation_frames.zig b/src/interpreter_v2/activation_frames.zig
-index 2050fe5..2d9a7b5 100644
+index 2050fe5..2bdb535 100644
 --- a/src/interpreter_v2/activation_frames.zig
 +++ b/src/interpreter_v2/activation_frames.zig
-@@ -68,6 +68,7 @@ pub const Frames = struct {
-     layouts: *const Layouts,
-     custody: custody.Custody,
-     entries: std.AutoHashMapUnmanaged(data.program.Id, Frame) = .empty,
+@@ -43 +43 @@ pub const Bound = union(enum) {
+-        fn next(self: *Iterator) ?u64 {
++        inline fn next(self: *Iterator) ?u64 {
+@@ -70,0 +71 @@ pub const Frames = struct {
 +    resolution: ?struct { id: data.program.Id, frame: *Frame } = null,
-     journal: ?Journal = null,
-     borrowed: ?data.program.Id = null,
-     // One pointer is the ordinary evaluator case. Additional simultaneous
-@@ -178,6 +179,7 @@ pub const Frames = struct {
-     /// Remove successors first; retained map capacity then suffices for every
-     /// entry frame. No allocation or full retained-frame traversal is needed.
-     pub fn rollback(self: *Frames, node_count: usize) void {
+@@ -180,0 +182 @@ pub const Frames = struct {
 +        self.resolution = null;
-         self.slots.before_mutation = null;
-         self.custody.nodes.before_mutation = null;
-         self.endMutableBorrows(); // Restoring map entries ends their borrows.
-@@ -229,6 +231,7 @@ pub const Frames = struct {
-         };
-     }
-     pub fn deinit(self: *Frames) void {
+@@ -231,0 +234 @@ pub const Frames = struct {
 +        self.resolution = null;
-         if (self.journal != null) self.commit();
-         self.endMutableBorrows();
-         self.entries.deinit(self.allocator);
-@@ -237,11 +240,17 @@ pub const Frames = struct {
-         self.* = undefined;
-     }
-     pub fn get(self: *Frames, id: data.program.Id) Error!Frame {
+@@ -240 +243,7 @@ pub const Frames = struct {
 -        return self.entries.get(id) orelse error.InvalidState;
 +        return (self.resolve(id) orelse return error.InvalidState).*;
 +    }
@@ -38,32 +20,33 @@ index 2050fe5..2d9a7b5 100644
 +        const frame = self.entries.getPtr(id) orelse return null;
 +        self.resolution = .{ .id = id, .frame = frame };
 +        return frame;
-     }
-     /// The borrow ends before any operation that changes the frame map.
-     pub fn getMutable(self: *Frames, id: data.program.Id) Error!*Frame {
+@@ -244 +253 @@ pub const Frames = struct {
 -        const frame = self.entries.getPtr(id) orelse return error.InvalidState;
 +        const frame = self.resolve(id) orelse return error.InvalidState;
-         // Protection may grow the journal or view tables, never this frame map.
-         try self.hold(id);
-         if (self.borrowed) |first| {
-@@ -317,6 +326,7 @@ pub const Frames = struct {
-     pub fn put(self: *Frames, id: data.program.Id, frame: Frame) Error!void {
-         if (self.entries.contains(id)) return error.InvalidState;
-         try self.hold(id);
+@@ -319,0 +329 @@ pub const Frames = struct {
 +        self.resolution = null;
-         try self.entries.put(self.allocator, id, frame);
-         try self.registerRoots(frame, id);
-         self.endMutableBorrows();
-@@ -329,10 +339,11 @@ pub const Frames = struct {
-         try self.hold(id);
-         self.endMutableBorrows();
-         try self.registerRoots(frame, id);
+@@ -332 +342 @@ pub const Frames = struct {
 -        self.entries.getPtr(id).?.* = frame;
 +        self.resolve(id).?.* = frame;
-     }
-     pub fn remove(self: *Frames, id: data.program.Id) Error!void {
-         const frame = self.entries.get(id) orelse return;
+@@ -335,0 +346 @@ pub const Frames = struct {
 +        self.resolution = null;
-         if (self.journal) |*journal| {
-             if (id < journal.node_count and !journal.contains(id) and
-                 try self.slots.canTransfer(frame.view) and
+diff --git a/src/interpreter_v2/activation_slots.zig b/src/interpreter_v2/activation_slots.zig
+index 46291fb..f5b08a9 100644
+--- a/src/interpreter_v2/activation_slots.zig
++++ b/src/interpreter_v2/activation_slots.zig
+@@ -232 +232 @@ pub fn Slots(comptime Value: type) type {
+-        fn lookupView(self: *Self, handle: Handle) error{InvalidHandle}!*View {
++        inline fn lookupView(self: *Self, handle: Handle) error{InvalidHandle}!*View {
+@@ -319 +319 @@ pub fn Slots(comptime Value: type) type {
+-        pub fn get(self: *Self, handle: Handle, slot: usize) ReadError!Value {
++        pub inline fn get(self: *Self, handle: Handle, slot: usize) ReadError!Value {
+@@ -336 +336 @@ pub fn Slots(comptime Value: type) type {
+-            pub fn at(self: Reader, slot: usize) ReadError!Value {
++            pub inline fn at(self: Reader, slot: usize) ReadError!Value {
+diff --git a/src/interpreter_v2/store.zig b/src/interpreter_v2/store.zig
+index fcb0459..7b8fee4 100644
+--- a/src/interpreter_v2/store.zig
++++ b/src/interpreter_v2/store.zig
+@@ -435 +435 @@ pub const Store = struct {
+-    pub fn get(self: Store, reference: g.NodeRef) Error!g.Node {
++    pub inline fn get(self: *const Store, reference: g.NodeRef) Error!g.Node {
