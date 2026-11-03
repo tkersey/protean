@@ -45,8 +45,15 @@ jobs:
           const text = readFileSync(tests, 'utf8');
           const marker = 'test "ordinary projection repair preserves lost coverage distinction through first-use restart" {';
           assert.equal(text.split(marker).length, 2);
-          const failure = String.raw`    errdefer |err| std.debug.print("profile repair error: {s}\n", .{@errorName(err)});`;
-          writeFileSync(tests, text.replace(marker, marker + '\n' + failure));
+          const offset = text.indexOf(marker);
+          const tail = text.slice(offset);
+          const init = '    try f.init();';
+          assert(tail.includes(init));
+          const failure = String.raw`    f.init() catch |err| {
+                  std.debug.print("profile init error: {s}\n", .{@errorName(err)});
+                  return err;
+              };`;
+          writeFileSync(tests, text.slice(0, offset) + tail.replace(init, failure));
           JS
           git diff -- build_protean.zig test/protean/projection_recovery.zig > "$RUNNER_TEMP/profile/diagnostic-diff.patch"
       - name: Authenticate dependencies
