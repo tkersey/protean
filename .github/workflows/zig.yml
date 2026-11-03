@@ -1,4 +1,4 @@
-name: Native ordered pruning comparison
+name: Native block borrowing and function attribution
 on:
   workflow_dispatch:
 permissions:
@@ -107,13 +107,12 @@ jobs:
             --prefix "$RUNNER_TEMP/compiled" 2>&1 | tee "$RUNNER_TEMP/profile/build.log"
           cp "$RUNNER_TEMP/compiled/verification/native-owner-adaptive" "$RUNNER_TEMP/profile/native-owner-adaptive"
           sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive" > "$RUNNER_TEMP/profile/binary-sha256.txt"
-      - name: Compile isolated ordered pruning candidate
+      - name: Compile isolated block borrowing candidate
         run: |
           mkdir -p "$RUNNER_TEMP/candidate"
           cp -a .protean-native/inputs/kosmos "$RUNNER_TEMP/candidate/kosmos"
           git -C "$RUNNER_TEMP/candidate/kosmos" apply --unidiff-zero "$GITHUB_WORKSPACE/frame-cache-diagnostic.patch"
           cp frame-cache-diagnostic.patch "$RUNNER_TEMP/profile/"
-          cp semantic-core-diagnostic.kar "$RUNNER_TEMP/candidate/kosmos/src/semantic-core.kar"
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
           import {readFileSync, writeFileSync} from 'node:fs';
@@ -130,12 +129,6 @@ jobs:
           assert.equal(command.filter(arg => arg === selected).length, 1);
           command[command.indexOf(selected)] = '-Mkosmos=' + process.env.RUNNER_TEMP +
               '/candidate/kosmos/src/root.zig';
-          const runtime = command.findIndex(arg => arg.startsWith('-Mpackaged_runtime='));
-          assert(runtime >= 0);
-          writeFileSync(process.env.RUNNER_TEMP + '/candidate/kosmos/src/diagnostic_runtime.zig',
-              'pub const bytes = @embedFile("semantic-core.kar");\n');
-          command[runtime] = '-Mpackaged_runtime=' + process.env.RUNNER_TEMP +
-              '/candidate/kosmos/src/diagnostic_runtime.zig';
           command.push('--test-no-exec', '-femit-bin=' + profile + '/native-owner-adaptive-candidate');
           writeFileSync(profile + '/candidate-command.json', JSON.stringify(command));
           const result = spawnSync(command[0], command.slice(1), {stdio: 'inherit'});
@@ -156,7 +149,7 @@ jobs:
             (
               cd "$profile_work"
               set +e
-              timeout --signal=INT --kill-after=10s 110s node \
+              timeout --signal=INT --kill-after=10s 100s node \
                 "$GITHUB_WORKSPACE/tools/native/qualification_tests.mjs" "$binary" \
                 '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
                 '[1]' > "$RUNNER_TEMP/profile/$variant-test.log" 2>&1
@@ -166,6 +159,23 @@ jobs:
               test "$status" = 0 || test "$status" = 124
             )
           done
+      - name: Attribute physical base transitions
+        run: |
+          node tools/native/diagnostic-function-counts.mjs
+          umask 0022
+          profile_work=$(mktemp -d /tmp/protean-native-functions.XXXXXX)
+          mkdir -p "$profile_work/.zig-cache/tmp"
+          cd "$profile_work"
+          set +e
+          timeout --signal=INT --kill-after=10s 65s node \
+            "$GITHUB_WORKSPACE/tools/native/qualification_tests.mjs" \
+            "$RUNNER_TEMP/profile/native-owner-adaptive-functions" \
+            '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
+            '[1]' > "$RUNNER_TEMP/profile/functions-test.log" 2>&1
+          status=$?
+          echo "$status" > "$RUNNER_TEMP/profile/functions-status.txt"
+          cat "$RUNNER_TEMP/profile/functions-test.log"
+          test "$status" = 0 || test "$status" = 124
       - name: Retain diagnostic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
