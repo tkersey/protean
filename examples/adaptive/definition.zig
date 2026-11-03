@@ -266,6 +266,7 @@ const Application = struct {
         const loop = try c.function("adaptive repository investigation", .{
             .bindings = try e.context.schema(t.PolicyView),
             .state = try e.context.schema(t.State),
+            .source_available = try e.context.schema(bool),
         }, try e.context.schema(t.Output), .{
             ops.prepare,
             ops.work,
@@ -343,6 +344,13 @@ const Application = struct {
                     try resumed.body().call(program.loop, .{
                         .bindings = try resumed.body().field(carry, "bindings"),
                         .state = try resumed.body().field(carry, "state"),
+                        .source_available = try resumed.body().call(program.has_source, .{
+                            .evidence = try resumed.body().field(
+                                try resumed.body().field(carry, "state"),
+                                "evidence",
+                            ),
+                            .index = try resumed.body().constant(u64, 0),
+                        }),
                     }),
                 ),
             });
@@ -380,7 +388,12 @@ fn Program(comptime controller: bool) type {
         const Self = @This();
         e: Emit,
         ops: Ops(controller),
-        loop: F(struct { bindings: t.PolicyView, state: t.State }, t.Output),
+        loop: F(struct {
+            bindings: t.PolicyView,
+            state: t.State,
+            source_available: bool,
+        }, t.Output),
+        source_available: ?V(bool) = null,
         report: *const @import("report.zig").Function,
         source_at: F(struct { evidence: t.EvidenceList, index: u64 }, ?t.SourceEvidenceReference),
         has_source: F(struct { evidence: t.EvidenceList, index: u64 }, bool),
@@ -447,7 +460,11 @@ fn Program(comptime controller: bool) type {
                 .profiles = try root.field(frozen, "profiles"),
                 .catalog = try root.field(frozen, "catalog"),
             });
-            return root.call(p.loop, .{ .bindings = policy, .state = initial });
+            return root.call(p.loop, .{
+                .bindings = policy,
+                .state = initial,
+                .source_available = try root.constant(bool, false),
+            });
         }
 
         fn defineEvidence(p: Self) !void {
@@ -525,10 +542,7 @@ fn Program(comptime controller: bool) type {
             ] = try b.less(try b.constant(u64, 0), try b.sequenceLength(evidence));
             offered[
                 t.ordinal("inspect")
-            ] = try b.call(p.has_source, .{
-                .evidence = evidence,
-                .index = try b.constant(u64, 0),
-            });
+            ] = p.source_available.?;
             return b.sequenceValue(try p.e.context.schema([P.declaration_count]bool), &offered);
         }
         fn stopped(p: Self, b: anytype, state: anytype, reason: []const u8) !V(t.Output) {
@@ -607,6 +621,7 @@ fn Program(comptime controller: bool) type {
             return b.call(p.loop, .{
                 .bindings = bindings,
                 .state = try p.projectionRecoveryState(b, state, rejection),
+                .source_available = p.source_available.?,
             });
         }
         fn preparationQuestion(
@@ -651,13 +666,16 @@ fn Program(comptime controller: bool) type {
             return b.call(p.loop, .{
                 .bindings = bindings,
                 .state = try b.update(state, .{ .messages = messages }),
+                .source_available = p.source_available.?,
             });
         }
-        fn defineLoop(p: Self) !void {
+        fn defineLoop(initial: Self) !void {
+            var p = initial;
             const e = p.e;
             const b = try e.author.body(p.loop);
             const bindings = try b.parameter("bindings");
             const state = try b.parameter("state");
+            p.source_available = try b.parameter("source_available");
             const active = b;
             const preparation = try active.perform(
                 p.ops.prepare,
@@ -922,7 +940,11 @@ fn Program(comptime controller: bool) type {
                 .empty = try empty.ret(state),
                 .message = try message.ret(updated),
             });
-            return poll.call(p.loop, .{ .bindings = bindings, .state = successor });
+            return poll.call(p.loop, .{
+                .bindings = bindings,
+                .state = successor,
+                .source_available = p.source_available.?,
+            });
         }
         fn toolResult(
             p: Self,
@@ -949,6 +971,17 @@ fn Program(comptime controller: bool) type {
             });
             return p.resumeTask(b, bindings, successor);
         }
+        fn withSourceEvidence(p: Self, b: anytype, evidence: anytype) !Self {
+            const some = try b.caseOf(evidence, "some");
+            const none = try b.caseOf(evidence, "none");
+            var successor = p;
+            successor.source_available = try b.match(evidence, .{
+                .some = try some.ret(try some.body().constant(bool, true)),
+                .none = try none.ret(p.source_available.?),
+            });
+            return successor;
+        }
+
         fn workResult(
             p: Self,
             b: anytype,
@@ -993,7 +1026,7 @@ fn Program(comptime controller: bool) type {
                 ),
                 .none = try none.ret(state),
             });
-            return p.toolResult(
+            return (try p.withSourceEvidence(b, evidence)).toolResult(
                 b,
                 bindings,
                 updated,
