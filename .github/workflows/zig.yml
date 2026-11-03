@@ -53,7 +53,23 @@ jobs:
                   std.debug.print("profile init error: {s}\n", .{@errorName(err)});
                   return err;
               };`;
-          writeFileSync(tests, text.slice(0, offset) + tail.replace(init, failure));
+          let timed = text.slice(0, offset) + tail.replace(init, failure);
+          for (const [signature, label] of [
+              ['    pub fn attempt(self: *Fixture, action: t.Action) !native.json.Value {', 'model-action'],
+              ['    pub fn ownerRun(self: *Fixture, program: wc.Ref, input: wc.Ref) !Run {', 'owner-run'],
+              ['    pub fn init(self: *Fixture) !void {', 'fixture-init'],
+          ]) {
+              assert.equal(timed.split(signature).length, 2);
+              timed = timed.replace(signature, signature + String.raw`
+                  const phase_start = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
+                  std.debug.print("phase begin ${label} at={d}\n", .{phase_start});
+                  defer std.debug.print("phase end ${label} ms={d}\n", .{
+                      std.Io.Clock.awake.now(std.testing.io).toMilliseconds() - phase_start,
+                  });`);
+              if (label === 'model-action') timed = timed.replace(signature, signature + String.raw`
+                  std.debug.print("phase action={s} call={d}\n", .{@tagName(action), self.calls});`);
+          }
+          writeFileSync(tests, timed);
           const namespace = 'runtime/native/namespace.zig';
           let owner = readFileSync(namespace, 'utf8');
           owner = owner.replaceAll('return error.UnsafeStatePath;', 'return profileUnsafePath(@src().line);');
@@ -85,7 +101,7 @@ jobs:
             --prefix "$RUNNER_TEMP/compiled" 2>&1 | tee "$RUNNER_TEMP/profile/build.log"
           cp "$RUNNER_TEMP/compiled/verification/native-owner-adaptive" "$RUNNER_TEMP/profile/native-owner-adaptive"
           sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive" > "$RUNNER_TEMP/profile/binary-sha256.txt"
-      - name: Measure candidate repair test
+      - name: Trace original repair phases
         run: |
           umask 0022
           id > "$RUNNER_TEMP/profile/identity.txt"
@@ -96,7 +112,7 @@ jobs:
           namei -l "$profile_work/.zig-cache/tmp" >> "$RUNNER_TEMP/profile/identity.txt"
           cd "$profile_work"
           set +e
-          { sudo timeout --signal=INT --kill-after=10s 350s "$PERF_BIN" record \
+          { sudo timeout --signal=INT --kill-after=10s 120s "$PERF_BIN" record \
             -e cpu-clock:u -F 49 --call-graph dwarf,8192 \
             -o "$RUNNER_TEMP/profile/perf.data" -- \
             sudo -u "$(id -un)" -- /bin/sh -c 'id >&2; pwd >&2; umask >&2; umask 0022; exec "$@"' profile-workload \
@@ -118,7 +134,7 @@ jobs:
             --percent-limit 1 -i "$RUNNER_TEMP/profile/perf.data" \
             > "$RUNNER_TEMP/profile/children.txt" 2> "$RUNNER_TEMP/profile/children-errors.txt" || echo $? > "$RUNNER_TEMP/profile/children-status.txt"
           head -100 "$RUNNER_TEMP/profile/self.txt"
-          test "$status" = 0
+          test "$status" = 0 || test "$status" = 124
       - name: Retain diagnostic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
