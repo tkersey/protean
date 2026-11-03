@@ -1,9 +1,8 @@
-name: Native adaptive CPU profile
+name: Native frame lookup comparison
 on:
   workflow_dispatch:
 permissions:
   contents: read
-  actions: read
 jobs:
   profile:
     runs-on: ubuntu-22.04
@@ -18,63 +17,136 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: '26.9.0'
-      - name: Reuse exact native diagnostic binary
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.0'
+          mirror: https://zigmirror.com
+          use-tool-cache: true
+          use-cache: false
+      - name: Prepare bounded diagnostic
         run: |
-          mkdir -p "$RUNNER_TEMP/profile" "$RUNNER_TEMP/compiled/verification"
-          gh run download 41589866264 --repo "$GITHUB_REPOSITORY" \
-            --name native-adaptive-cpu-profile --dir "$RUNNER_TEMP/baseline"
-          expected=$(cut -d ' ' -f 1 "$RUNNER_TEMP/baseline/binary-sha256.txt")
-          actual=$(sha256sum "$RUNNER_TEMP/baseline/native-owner-adaptive" | cut -d ' ' -f 1)
-          test "$expected" = 6e12a255d626e776892accc7efe4f6b5f50c38cb9a824dc875b720f341b49571
-          test "$expected" = "$actual"
-          cp "$RUNNER_TEMP/baseline/native-owner-adaptive" "$RUNNER_TEMP/compiled/verification/"
-          chmod 700 "$RUNNER_TEMP/compiled/verification/native-owner-adaptive"
-          cp "$RUNNER_TEMP/baseline/"{head.txt,build.log,diagnostic-diff.patch,binary-sha256.txt} "$RUNNER_TEMP/profile/"
-          echo 41589866264 > "$RUNNER_TEMP/profile/binary-source-run.txt"
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends linux-tools-generic
-          perf_bin=$(find -L /usr/lib/linux-tools -type f -name perf | head -1)
-          test -x "$perf_bin"
-          echo "PERF_BIN=$perf_bin" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/profile" .zig-cache/tmp
+          git rev-parse HEAD > "$RUNNER_TEMP/profile/head.txt"
           lscpu > "$RUNNER_TEMP/profile/cpu.txt"
-      - name: Recover native caller attribution
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {readFileSync, writeFileSync} from 'node:fs';
+          const path = 'build_protean.zig';
+          const source = readFileSync(path, 'utf8');
+          const selected = 's.native_suite.strip = s.optimize != .debug;';
+          assert.equal(source.split(selected).length, 2);
+          writeFileSync(path, source.replace(selected, 's.native_suite.strip = false;'));
+          const tests = 'test/protean/projection_recovery.zig';
+          const text = readFileSync(tests, 'utf8');
+          const marker = 'test "ordinary projection repair preserves lost coverage distinction through first-use restart" {';
+          assert.equal(text.split(marker).length, 2);
+          const offset = text.indexOf(marker);
+          const tail = text.slice(offset);
+          const init = '    try f.init();';
+          assert(tail.includes(init));
+          const failure = String.raw`    f.init() catch |err| {
+                  std.debug.print("profile init error: {s}\n", .{@errorName(err)});
+                  return err;
+              };`;
+          let timed = text.slice(0, offset) + tail.replace(init, failure);
+          for (const [signature, label] of [
+              ['    pub fn attempt(self: *Fixture, action: t.Action) !native.json.Value {', 'model-action'],
+              ['    pub fn ownerRun(self: *Fixture, program: wc.Ref, input: wc.Ref) !Run {', 'owner-run'],
+              ['    pub fn init(self: *Fixture) !void {', 'fixture-init'],
+          ]) {
+              assert.equal(timed.split(signature).length, 2);
+              timed = timed.replace(signature, signature + String.raw`
+                  const phase_start = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
+                  std.debug.print("phase begin ${label} at={d}\n", .{phase_start});
+                  defer std.debug.print("phase end ${label} ms={d}\n", .{
+                      std.Io.Clock.awake.now(std.testing.io).toMilliseconds() - phase_start,
+                  });`);
+              if (label === 'model-action') timed = timed.replace(signature, signature + String.raw`
+                  std.debug.print("phase action={s} call={d}\n", .{ @tagName(action), self.calls });`);
+          }
+          writeFileSync(tests, timed);
+          const namespace = 'runtime/native/namespace.zig';
+          let owner = readFileSync(namespace, 'utf8');
+          owner = owner.replaceAll('return error.UnsafeStatePath;', 'return profileUnsafePath(@src().line);');
+          owner = owner.replace('else => error.UnsafeStatePath,', 'else => profileUnsafePath(@src().line),');
+          owner += String.raw`
+          fn profileUnsafePath(comptime line: u32) error{UnsafeStatePath} {
+              std.debug.print("profile namespace line={d} euid={d} errno={d}\n", .{
+                  line,
+                  c.geteuid(),
+                  @backingInt(std.c.errno(@as(c_int, -1))),
+              });
+              return error.UnsafeStatePath;
+          }
+          `;
+          writeFileSync(namespace, owner);
+          JS
+          git diff -- build_protean.zig test/protean/projection_recovery.zig runtime/native/namespace.zig > "$RUNNER_TEMP/profile/diagnostic-diff.patch"
+      - name: Authenticate dependencies
+        run: |
+          zig run tools/native/dependencies.zig -- setup \
+            conformance/protean/dependencies.lock.json \
+            conformance/protean/native-dependencies.lock.json \
+            .protean-native/inputs "$(command -v zig)"
+      - name: Build native backend in safe mode with symbols and tracing
+        run: |
+          set -o pipefail
+          /usr/bin/time -v zig build build-native-owner-adaptive-check \
+            -Doptimize=safe --summary all --verbose \
+            --prefix "$RUNNER_TEMP/compiled" 2>&1 | tee "$RUNNER_TEMP/profile/build.log"
+          cp "$RUNNER_TEMP/compiled/verification/native-owner-adaptive" "$RUNNER_TEMP/profile/native-owner-adaptive"
+          sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive" > "$RUNNER_TEMP/profile/binary-sha256.txt"
+      - name: Compile isolated frame-cache candidate
+        run: |
+          mkdir -p "$RUNNER_TEMP/candidate"
+          cp -a .protean-native/inputs/kosmos "$RUNNER_TEMP/candidate/kosmos"
+          git -C "$RUNNER_TEMP/candidate/kosmos" apply "$GITHUB_WORKSPACE/frame-cache-diagnostic.patch"
+          cp frame-cache-diagnostic.patch "$RUNNER_TEMP/profile/"
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {readFileSync, writeFileSync} from 'node:fs';
+          import {spawnSync} from 'node:child_process';
+          const profile = process.env.RUNNER_TEMP + '/profile';
+          const lines = readFileSync(profile + '/build.log', 'utf8').split('\n').filter(line =>
+              line.startsWith('info(verbose): ') && line.includes('zig test ') &&
+              line.includes('-Mroot=test/protean/native_adaptive_tests.zig'));
+          assert.equal(lines.length, 1);
+          const command = lines[0].slice('info(verbose): '.length).trim().split(/\s+/)
+              .filter(arg => arg !== '--listen=-');
+          assert(command.includes('-fno-llvm') && command.includes('-Osafe'));
+          const selected = '-Mkosmos=.protean-native/inputs/kosmos/src/root.zig';
+          assert.equal(command.filter(arg => arg === selected).length, 1);
+          command[command.indexOf(selected)] = '-Mkosmos=' + process.env.RUNNER_TEMP +
+              '/candidate/kosmos/src/root.zig';
+          command.push('--test-no-exec', '-femit-bin=' + profile + '/native-owner-adaptive-candidate');
+          writeFileSync(profile + '/candidate-command.json', JSON.stringify(command));
+          const result = spawnSync(command[0], command.slice(1), {stdio: 'inherit'});
+          if (result.error) throw result.error;
+          process.exit(result.status ?? 1);
+          JS
+          sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive-candidate" > "$RUNNER_TEMP/profile/candidate-binary-sha256.txt"
+      - name: Compare identical original repair phases
         run: |
           umask 0022
-          mkdir -p .zig-cache/tmp
           id > "$RUNNER_TEMP/profile/identity.txt"
-          umask >> "$RUNNER_TEMP/profile/identity.txt"
-          namei -l "$GITHUB_WORKSPACE/.zig-cache/tmp" >> "$RUNNER_TEMP/profile/identity.txt"
-          profile_work=$(mktemp -d /tmp/protean-native-profile.XXXXXX)
-          mkdir -p "$profile_work/.zig-cache/tmp"
-          namei -l "$profile_work/.zig-cache/tmp" >> "$RUNNER_TEMP/profile/identity.txt"
-          cd "$profile_work"
-          set +e
-          { sudo timeout --signal=INT --kill-after=10s 60s "$PERF_BIN" record \
-            -e cpu-clock:u -F 49 --call-graph fp \
-            -o "$RUNNER_TEMP/profile/perf.data" -- \
-            sudo -u "$(id -un)" -- /bin/sh -c 'id >&2; pwd >&2; umask >&2; umask 0022; exec "$@"' profile-workload \
-            "$(command -v node)" "$GITHUB_WORKSPACE/tools/native/qualification_tests.mjs" \
-            "$RUNNER_TEMP/compiled/verification/native-owner-adaptive" \
-            '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
-            '[1]'; } > "$RUNNER_TEMP/profile/test.log" 2>&1
-          status=$?
-          find "$profile_work" -maxdepth 4 -type d -printf '%m %u %p\n' >> "$RUNNER_TEMP/profile/identity.txt"
-          cat "$RUNNER_TEMP/profile/test.log"
-          set -e
-          echo "$status" > "$RUNNER_TEMP/profile/sample-status.txt"
-          test -s "$RUNNER_TEMP/profile/perf.data"
-          sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/profile/perf.data"
-          timeout 30s "$PERF_BIN" report --stdio --no-inline --no-call-graph \
-            --no-children --sort comm,dso,symbol \
-            --percent-limit 0.2 -i "$RUNNER_TEMP/profile/perf.data" \
-            > "$RUNNER_TEMP/profile/self.txt" 2> "$RUNNER_TEMP/profile/self-errors.txt" || echo $? > "$RUNNER_TEMP/profile/self-status.txt"
-          timeout 30s "$PERF_BIN" report --stdio --no-inline --children --sort comm,dso,symbol \
-            --percent-limit 1 -i "$RUNNER_TEMP/profile/perf.data" \
-            > "$RUNNER_TEMP/profile/children.txt" 2> "$RUNNER_TEMP/profile/children-errors.txt" || echo $? > "$RUNNER_TEMP/profile/children-status.txt"
-          head -100 "$RUNNER_TEMP/profile/self.txt"
-          test "$status" = 0 || test "$status" = 124
+          for variant in baseline candidate; do
+            profile_work=$(mktemp -d /tmp/protean-native-frame.XXXXXX)
+            mkdir -p "$profile_work/.zig-cache/tmp"
+            binary="$RUNNER_TEMP/profile/native-owner-adaptive"
+            if test "$variant" = candidate; then binary="$binary-candidate"; fi
+            (
+              cd "$profile_work"
+              set +e
+              timeout --signal=INT --kill-after=10s 110s node \
+                "$GITHUB_WORKSPACE/tools/native/qualification_tests.mjs" "$binary" \
+                '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
+                '[1]' > "$RUNNER_TEMP/profile/$variant-test.log" 2>&1
+              status=$?
+              echo "$status" > "$RUNNER_TEMP/profile/$variant-status.txt"
+              cat "$RUNNER_TEMP/profile/$variant-test.log"
+              test "$status" = 0 || test "$status" = 124
+            )
+          done
       - name: Retain diagnostic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
