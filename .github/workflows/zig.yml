@@ -7,6 +7,9 @@ jobs:
   profile:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
+    env:
+      ZIG_DEBUG_CMD: '1'
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache/global
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -22,7 +25,7 @@ jobs:
           use-cache: false
       - name: Prepare bounded diagnostic
         run: |
-          mkdir -p "$RUNNER_TEMP/profile"
+          mkdir -p "$RUNNER_TEMP/profile" .zig-cache/tmp
           git rev-parse HEAD > "$RUNNER_TEMP/profile/head.txt"
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends linux-tools-generic
@@ -38,8 +41,14 @@ jobs:
           const selected = 's.native_suite.strip = s.optimize != .debug;';
           assert.equal(source.split(selected).length, 2);
           writeFileSync(path, source.replace(selected, 's.native_suite.strip = false;'));
+          const tests = 'test/protean/projection_recovery.zig';
+          const text = readFileSync(tests, 'utf8');
+          const marker = 'test "ordinary projection repair preserves lost coverage distinction through first-use restart" {';
+          assert.equal(text.split(marker).length, 2);
+          const failure = String.raw`    errdefer |err| std.debug.print("profile repair error: {s}\n", .{@errorName(err)});`;
+          writeFileSync(tests, text.replace(marker, marker + '\n' + failure));
           JS
-          git diff -- build_protean.zig > "$RUNNER_TEMP/profile/diagnostic-diff.patch"
+          git diff -- build_protean.zig test/protean/projection_recovery.zig > "$RUNNER_TEMP/profile/diagnostic-diff.patch"
       - name: Authenticate dependencies
         run: |
           zig run tools/native/dependencies.zig -- setup \
@@ -54,6 +63,9 @@ jobs:
             --prefix "$RUNNER_TEMP/compiled" 2>&1 | tee "$RUNNER_TEMP/profile/build.log"
       - name: Sample existing repair test for two minutes
         run: |
+          id > "$RUNNER_TEMP/profile/identity.txt"
+          umask >> "$RUNNER_TEMP/profile/identity.txt"
+          namei -l .zig-cache/tmp >> "$RUNNER_TEMP/profile/identity.txt"
           set +e
           { sudo timeout --signal=INT --kill-after=10s 120s "$PERF_BIN" record \
             -e cpu-clock:u -F 49 --call-graph dwarf,8192 \
@@ -74,6 +86,7 @@ jobs:
             --percent-limit 1 -i "$RUNNER_TEMP/profile/perf.data" \
             > "$RUNNER_TEMP/profile/children.txt"
           head -100 "$RUNNER_TEMP/profile/self.txt"
+          test "$status" = 0 || test "$status" = 124
       - name: Retain diagnostic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
