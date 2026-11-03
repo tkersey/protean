@@ -666,6 +666,10 @@ fn Program(comptime controller: bool) type {
                     .offered = try p.offers(active, state),
                     .control = try e.context.literal(?t.ControlSubject, null),
                     .retained_calls = try e.context.literal(t.model.RetainedCalls, retained_calls),
+                    .request_mode = try e.context.literal(
+                        t.PreparationMode,
+                        .checked_responder_template,
+                    ),
                 }),
             );
             const ready = try active.caseOf(preparation, "ready");
@@ -1327,6 +1331,10 @@ fn Program(comptime controller: bool) type {
                         subject,
                     ),
                     .retained_calls = try e.context.literal(t.model.RetainedCalls, retained_calls),
+                    .request_mode = try e.context.literal(
+                        t.PreparationMode,
+                        .checked_responder_template,
+                    ),
                 }),
             );
             return p.controlPreparation(b, bindings, state, call_id, proposal, preparation);

@@ -377,16 +377,18 @@ pub const ControlSubject = struct {
     reason: contracts.Text(256),
     proposal: controls.Proposal,
 };
+pub const PreparationMode = enum { complete, checked_responder_template };
 pub const Preparation = struct {
     state: State,
     offered: [P.declaration_count]bool,
     control: ?ControlSubject,
     retained_calls: model.RetainedCalls = .{ .items = &.{} },
+    request_mode: PreparationMode = .complete,
 };
 pub const Ready = struct {
+    request: P.AdaptiveRequest,
     receipt: ?ReceiptReference,
     results: PendingResults,
-    request: P.AdaptiveRequest,
 };
 pub const ProjectionRejectionCode = enum { stale, unavailable, invalid, oversized };
 pub const ProjectionRejection = struct {

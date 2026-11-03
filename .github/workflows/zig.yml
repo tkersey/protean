@@ -1,4 +1,4 @@
-name: Native prepared request tail layout
+name: Native checked responder preparation
 on:
   workflow_dispatch:
 permissions:
@@ -24,16 +24,16 @@ jobs:
           mirror: https://zigmirror.com
           use-tool-cache: true
           use-cache: false
-      - name: Reuse measured prefix binary
+      - name: Reuse original dependency baseline
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh run download 41607199332 --repo "$GITHUB_REPOSITORY" \
             --name native-adaptive-cpu-profile --dir "$RUNNER_TEMP/cache-only"
-          expected=38906d3199381f5da352cf828471a78c76cef6bcf7c1aa854d3dd84df4266f6f
-          actual=$(sha256sum "$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate" | cut -d ' ' -f 1)
+          expected=9be7872016150e18eb5cb17acab4c3eab8a346c73d98a79c2fc15166153c0293
+          actual=$(sha256sum "$RUNNER_TEMP/cache-only/native-owner-adaptive" | cut -d ' ' -f 1)
           test "$expected" = "$actual"
-          chmod 700 "$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate"
+          chmod 700 "$RUNNER_TEMP/cache-only/native-owner-adaptive"
       - name: Prepare bounded diagnostic
         run: |
           mkdir -p "$RUNNER_TEMP/profile" .zig-cache/tmp
@@ -107,44 +107,6 @@ jobs:
             --prefix "$RUNNER_TEMP/compiled" 2>&1 | tee "$RUNNER_TEMP/profile/build.log"
           cp "$RUNNER_TEMP/compiled/verification/native-owner-adaptive" "$RUNNER_TEMP/profile/native-owner-adaptive"
           sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive" > "$RUNNER_TEMP/profile/binary-sha256.txt"
-      - name: Compile isolated request-tail candidate
-        run: |
-          mkdir -p "$RUNNER_TEMP/candidate"
-          cp -a .protean-native/inputs/kosmos "$RUNNER_TEMP/candidate/kosmos"
-          git -C "$RUNNER_TEMP/candidate/kosmos" apply --unidiff-zero "$GITHUB_WORKSPACE/frame-cache-diagnostic.patch"
-          cp frame-cache-diagnostic.patch "$RUNNER_TEMP/profile/"
-          cp semantic-core-diagnostic.kar "$RUNNER_TEMP/candidate/kosmos/src/semantic-core.kar"
-          node --input-type=module <<'JS'
-          import assert from 'node:assert/strict';
-          import {readFileSync, writeFileSync} from 'node:fs';
-          import {spawnSync} from 'node:child_process';
-          const profile = process.env.RUNNER_TEMP + '/profile';
-          const lines = readFileSync(profile + '/build.log', 'utf8').split('\n').filter(line =>
-              line.startsWith('info(verbose): ') && line.includes('zig test ') &&
-              line.includes('-Mroot=test/protean/native_adaptive_tests.zig'));
-          assert.equal(lines.length, 1);
-          const command = lines[0].slice('info(verbose): '.length).trim().split(/\s+/)
-              .filter(arg => arg !== '--listen=-');
-          assert(command.includes('-fno-llvm') && command.includes('-Osafe'));
-          const selected = '-Mkosmos=.protean-native/inputs/kosmos/src/root.zig';
-          assert.equal(command.filter(arg => arg === selected).length, 1);
-          command[command.indexOf(selected)] = '-Mkosmos=' + process.env.RUNNER_TEMP +
-              '/candidate/kosmos/src/root.zig';
-          const runtime = command.findIndex(arg => arg.startsWith('-Mpackaged_runtime='));
-          assert(runtime >= 0);
-          const wrapper = process.env.RUNNER_TEMP + '/candidate/runtime.zig';
-          writeFileSync(wrapper, 'pub const bytes = @embedFile("semantic-core.kar");\n');
-          const core = readFileSync('semantic-core-diagnostic.kar');
-          writeFileSync(process.env.RUNNER_TEMP + '/candidate/semantic-core.kar', core);
-          writeFileSync(profile + '/semantic-core-diagnostic.kar', core);
-          command[runtime] = '-Mpackaged_runtime=' + wrapper;
-          command.push('--test-no-exec', '-femit-bin=' + profile + '/native-owner-adaptive-candidate');
-          writeFileSync(profile + '/candidate-command.json', JSON.stringify(command));
-          const result = spawnSync(command[0], command.slice(1), {stdio: 'inherit'});
-          if (result.error) throw result.error;
-          process.exit(result.status ?? 1);
-          JS
-          sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive-candidate" > "$RUNNER_TEMP/profile/candidate-binary-sha256.txt"
       - name: Compare identical original repair phases
         run: |
           umask 0022
@@ -155,8 +117,7 @@ jobs:
             profile_work=$(mktemp -d /tmp/protean-native-frame.XXXXXX)
             mkdir -p "$profile_work/.zig-cache/tmp"
             binary="$RUNNER_TEMP/profile/native-owner-adaptive"
-            if test "$variant" = candidate; then binary="$binary-candidate"; fi
-            if test "$variant" = cached; then binary="$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate"; fi
+            if test "$variant" = cached; then binary="$RUNNER_TEMP/cache-only/native-owner-adaptive"; fi
             (
               cd "$profile_work"
               set +e
