@@ -1,4 +1,4 @@
-name: Native retained prefix boundaries
+name: Native prepared request tail layout
 on:
   workflow_dispatch:
 permissions:
@@ -107,7 +107,7 @@ jobs:
             --prefix "$RUNNER_TEMP/compiled" 2>&1 | tee "$RUNNER_TEMP/profile/build.log"
           cp "$RUNNER_TEMP/compiled/verification/native-owner-adaptive" "$RUNNER_TEMP/profile/native-owner-adaptive"
           sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive" > "$RUNNER_TEMP/profile/binary-sha256.txt"
-      - name: Compile isolated retained-prefix candidate
+      - name: Compile isolated request-tail candidate
         run: |
           mkdir -p "$RUNNER_TEMP/candidate"
           cp -a .protean-native/inputs/kosmos "$RUNNER_TEMP/candidate/kosmos"

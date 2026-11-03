@@ -384,9 +384,9 @@ pub const Preparation = struct {
     retained_calls: model.RetainedCalls = .{ .items = &.{} },
 };
 pub const Ready = struct {
-    request: P.AdaptiveRequest,
     receipt: ?ReceiptReference,
     results: PendingResults,
+    request: P.AdaptiveRequest,
 };
 pub const ProjectionRejectionCode = enum { stale, unavailable, invalid, oversized };
 pub const ProjectionRejection = struct {
