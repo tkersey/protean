@@ -3,6 +3,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 jobs:
   profile:
     runs-on: ubuntu-22.04
@@ -17,76 +18,31 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: '26.9.0'
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
-        with:
-          version: '0.17.0'
-          mirror: https://zigmirror.com
-          use-tool-cache: true
-          use-cache: false
-      - name: Prepare bounded diagnostic
+      - name: Reuse exact native diagnostic binary
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p "$RUNNER_TEMP/profile" .zig-cache/tmp
-          git rev-parse HEAD > "$RUNNER_TEMP/profile/head.txt"
+          mkdir -p "$RUNNER_TEMP/profile" "$RUNNER_TEMP/compiled/verification"
+          gh run download 41564112423 --repo "$GITHUB_REPOSITORY" \
+            --name native-adaptive-cpu-profile --dir "$RUNNER_TEMP/baseline"
+          expected=$(cut -d ' ' -f 1 "$RUNNER_TEMP/baseline/binary-sha256.txt")
+          actual=$(sha256sum "$RUNNER_TEMP/baseline/native-owner-adaptive" | cut -d ' ' -f 1)
+          test "$expected" = bb7efd59a3fecc33d7dc73a9753e4bcfc0826353ecc54fd088a95f8986ecab3b
+          test "$expected" = "$actual"
+          cp "$RUNNER_TEMP/baseline/native-owner-adaptive" "$RUNNER_TEMP/compiled/verification/"
+          chmod 700 "$RUNNER_TEMP/compiled/verification/native-owner-adaptive"
+          cp "$RUNNER_TEMP/baseline/"{head.txt,build.log,diagnostic-diff.patch,binary-sha256.txt} "$RUNNER_TEMP/profile/"
+          echo 41564112423 > "$RUNNER_TEMP/profile/binary-source-run.txt"
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends linux-tools-generic
           perf_bin=$(find -L /usr/lib/linux-tools -type f -name perf | head -1)
           test -x "$perf_bin"
           echo "PERF_BIN=$perf_bin" >> "$GITHUB_ENV"
           lscpu > "$RUNNER_TEMP/profile/cpu.txt"
-          node --input-type=module <<'JS'
-          import assert from 'node:assert/strict';
-          import {readFileSync, writeFileSync} from 'node:fs';
-          const path = 'build_protean.zig';
-          const source = readFileSync(path, 'utf8');
-          const selected = 's.native_suite.strip = s.optimize != .debug;';
-          assert.equal(source.split(selected).length, 2);
-          writeFileSync(path, source.replace(selected, 's.native_suite.strip = false;'));
-          const tests = 'test/protean/projection_recovery.zig';
-          const text = readFileSync(tests, 'utf8');
-          const marker = 'test "ordinary projection repair preserves lost coverage distinction through first-use restart" {';
-          assert.equal(text.split(marker).length, 2);
-          const offset = text.indexOf(marker);
-          const tail = text.slice(offset);
-          const init = '    try f.init();';
-          assert(tail.includes(init));
-          const failure = String.raw`    f.init() catch |err| {
-                  std.debug.print("profile init error: {s}\n", .{@errorName(err)});
-                  return err;
-              };`;
-          writeFileSync(tests, text.slice(0, offset) + tail.replace(init, failure));
-          const namespace = 'runtime/native/namespace.zig';
-          let owner = readFileSync(namespace, 'utf8');
-          owner = owner.replaceAll('return error.UnsafeStatePath;', 'return profileUnsafePath(@src().line);');
-          owner = owner.replace('else => error.UnsafeStatePath,', 'else => profileUnsafePath(@src().line),');
-          owner += String.raw`
-          fn profileUnsafePath(comptime line: u32) error{UnsafeStatePath} {
-              std.debug.print("profile namespace line={d} euid={d} errno={d}\n", .{
-                  line,
-                  c.geteuid(),
-                  @backingInt(std.c.errno(@as(c_int, -1))),
-              });
-              return error.UnsafeStatePath;
-          }
-          `;
-          writeFileSync(namespace, owner);
-          JS
-          git diff -- build_protean.zig test/protean/projection_recovery.zig runtime/native/namespace.zig > "$RUNNER_TEMP/profile/diagnostic-diff.patch"
-      - name: Authenticate dependencies
-        run: |
-          zig run tools/native/dependencies.zig -- setup \
-            conformance/protean/dependencies.lock.json \
-            conformance/protean/native-dependencies.lock.json \
-            .protean-native/inputs "$(command -v zig)"
-      - name: Build native backend in safe mode with symbols and tracing
-        run: |
-          set -o pipefail
-          /usr/bin/time -v zig build build-native-owner-adaptive-check \
-            -Doptimize=safe --summary all --verbose \
-            --prefix "$RUNNER_TEMP/compiled" 2>&1 | tee "$RUNNER_TEMP/profile/build.log"
-          cp "$RUNNER_TEMP/compiled/verification/native-owner-adaptive" "$RUNNER_TEMP/profile/native-owner-adaptive"
-          sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive" > "$RUNNER_TEMP/profile/binary-sha256.txt"
       - name: Sample existing repair test for two minutes
         run: |
+          umask 0022
+          mkdir -p .zig-cache/tmp
           id > "$RUNNER_TEMP/profile/identity.txt"
           umask >> "$RUNNER_TEMP/profile/identity.txt"
           namei -l "$GITHUB_WORKSPACE/.zig-cache/tmp" >> "$RUNNER_TEMP/profile/identity.txt"
@@ -109,12 +65,14 @@ jobs:
           { sudo timeout --signal=INT --kill-after=10s 120s "$PERF_BIN" record \
             -e cpu-clock:u -F 49 --call-graph dwarf,8192 \
             -o "$RUNNER_TEMP/profile/perf.data" -- \
-            sudo -u "$(id -un)" -- /bin/sh -c 'id >&2; pwd >&2; exec "$@"' profile-workload \
+            sudo -u "$(id -un)" -- /bin/sh -c 'id >&2; pwd >&2; umask >&2; umask 0022; exec "$@"' profile-workload \
             "$(command -v node)" "$GITHUB_WORKSPACE/tools/native/qualification_tests.mjs" \
             "$RUNNER_TEMP/compiled/verification/native-owner-adaptive" \
             '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
             '[1]'; } > "$RUNNER_TEMP/profile/test.log" 2>&1
           status=$?
+          find "$profile_work" -maxdepth 4 -type d -printf '%m %u %p\n' >> "$RUNNER_TEMP/profile/identity.txt"
+          cat "$RUNNER_TEMP/profile/test.log"
           set -e
           echo "$status" > "$RUNNER_TEMP/profile/sample-status.txt"
           test -s "$RUNNER_TEMP/profile/perf.data"
