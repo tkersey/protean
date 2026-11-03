@@ -23,12 +23,12 @@ jobs:
       - name: Prepare bounded diagnostic
         run: |
           mkdir -p "$RUNNER_TEMP/profile"
+          git rev-parse HEAD > "$RUNNER_TEMP/profile/head.txt"
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends linux-tools-generic
-          perf_bin=$(find /usr/lib/linux-tools -type f -name perf | head -1)
+          perf_bin=$(find -L /usr/lib/linux-tools -type f -name perf | head -1)
           test -x "$perf_bin"
           echo "PERF_BIN=$perf_bin" >> "$GITHUB_ENV"
-          git rev-parse HEAD > "$RUNNER_TEMP/profile/head.txt"
           lscpu > "$RUNNER_TEMP/profile/cpu.txt"
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
