@@ -872,6 +872,7 @@ fn delegatedCapture(f: *Fixture, pending: Pending, result: wc.Ref) !void {
         defer prepared.deinit();
         try std.testing.expect(prepared.value.selected_view != null);
         try assertRenderedAggregate(f, prepared.value.body.bytes, result);
+        try f.service.completeWork(f.permanent, step.work, .not_sent);
         return;
     }
     return error.ProjectedDelegationDidNotArrive;
@@ -937,14 +938,21 @@ test "delegated projection binds the actual port and reaches its protected model
     defer f.deinit();
     const pending = try pendingQuestion(&f);
     const program = try build(&f, .projected);
-    const target: wc.ConsumerTarget = .{ .model = .{
+    var target: wc.ConsumerTarget = .{ .model = .{
         .expected = pending.expected,
         .port = pending.port,
         .generation = pending.generation,
         .profile_id = .{ .bytes = "analysis" },
         .effort = .{ .bytes = "medium" },
     } };
+    target.model.expected.work.id.bytes = try std.ascii.allocUpperString(
+        f.permanent,
+        pending.expected.work.id.bytes,
+    );
+    target.model.port.id.bytes = try std.ascii.allocUpperString(f.permanent, pending.port.id.bytes);
     const consumer = try observe(&f, target, &.{});
+    const retained = (try consumerRecord(&f, consumer)).evidence.read.consumer;
+    try std.testing.expectEqualDeep(target, retained.selection.target);
     const projected = try project(&f, program, consumer);
     try rejectAction(&f, projected.result, "ConsumerMismatch");
     var stale = target;
@@ -959,6 +967,7 @@ test "delegated projection binds the actual port and reaches its protected model
         reply.object.get("observation").?.object.get("error").?.string,
     );
     try delegatedCapture(&f, pending, projected.result);
+    try consumerArchiveBaseline(&f);
 }
 
 fn successorConverter(a: std.mem.Allocator) ![]u8 {

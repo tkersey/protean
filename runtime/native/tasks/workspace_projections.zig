@@ -158,13 +158,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             var observed = try Consumers.open(self, a, parent.id, decoded.header.consumer);
             defer observed.deinit();
             const consumer = observed.value.evidence.read.consumer;
-            const expected_target = try contracts.encodeOwned(wc.ConsumerTarget, a, target);
-            const actual_target = try contracts.encodeOwned(
-                wc.ConsumerTarget,
-                a,
-                consumer.selection.target,
-            );
-            if (!std.mem.eql(u8, expected_target, actual_target)) return error.ConsumerMismatch;
+            try requireTarget(consumer.selection.target, target);
             if (current) try Consumers.applicable(self, a, parent, consumer);
             try validateTrial(work, consumer);
             try validateLineage(self, a, parent.id, value.artifact);
@@ -186,6 +180,28 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     .values = .{ .items = references },
                 },
             } };
+        }
+
+        fn requireTarget(observed: wc.ConsumerTarget, expected: wc.ConsumerTarget) !void {
+            switch (observed) {
+                .controller => if (expected != .controller) return error.ConsumerMismatch,
+                .model => |actual| {
+                    if (expected != .model) return error.ConsumerMismatch;
+                    const target = expected.model;
+                    if (!std.meta.eql(
+                        try wp.identity(actual.expected.work, .work),
+                        try wp.identity(target.expected.work, .work),
+                    ) or !std.meta.eql(
+                        try wp.identity(actual.port, .port),
+                        try wp.identity(target.port, .port),
+                    ) or actual.expected.execution_revision != target.expected.execution_revision or
+                        actual.expected.control_revision != target.expected.control_revision or
+                        actual.generation != target.generation or
+                        !std.mem.eql(u8, actual.profile_id.bytes, target.profile_id.bytes) or
+                        !std.mem.eql(u8, actual.effort.bytes, target.effort.bytes))
+                        return error.ConsumerMismatch;
+                },
+            }
         }
 
         fn consumerIdentity(

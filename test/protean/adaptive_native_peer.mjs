@@ -319,7 +319,7 @@ function* workspaceTrace(subject, scenario) {
   const inspected = yield ['inspect', {evidence_index: subject.sourceIndex}];
   assert.match(inspected, new RegExp(`Observed 0 lines.*evidence ${subject.sourceIndex}`));
   yield ['inference_set', {profile_id: 'analysis', effort: 'high', expected_revision: 2, reason: 'Retain operative control state across research replacement.'}];
-  yield workspaceCall('context', 'inspect', {page: {offset: 0, maximum: 4096}});
+  yield workspaceCall('context', 'inspect', {page: {offset: 0, maximum: 4096}, consumer: null});
   yield workspaceCall('context', 'select', {tag: 'values', value: [subject.results[0]]});
   const retainedCalls = subject.body.input.filter(item => item.type === 'function_call');
   for (const [name, revision] of [['skill_set', 2], ['inference_set', 3]]) {
@@ -778,7 +778,8 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         assert.equal(capture[5], 0); assert.equal(capture[6].tag, 1);
         if (identity === 'agent.model.invoke.v12') {
           const envelope = decodeValue(schemas.AdaptivePrepared, prepared);
-          assert.equal(envelope.length, 3); assert.equal(envelope[0], 1);
+          assert.equal(envelope.length, 4); assert.equal(envelope[0], 1);
+          assert.equal(envelope[3].tag, 0);
           const request = envelope[1], plan = request[3], index = Number(plan[2]);
           assert.equal(request.length, 7); assert.equal(plan.length, 8); assert(index >= 0 && index < 14 && !seen.has(index)); seen.add(index);
           assert.equal(Buffer.from(request[1]).toString('hex'), hash(frozenProfileBytes));
