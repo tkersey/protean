@@ -1,4 +1,4 @@
-name: Native admitted aggregate boundaries
+name: Native aggregate field attribution
 on:
   workflow_dispatch:
 permissions:
@@ -24,16 +24,6 @@ jobs:
           mirror: https://zigmirror.com
           use-tool-cache: true
           use-cache: false
-      - name: Reuse measured native accessor binary
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh run download 41593694958 --repo "$GITHUB_REPOSITORY" \
-            --name native-adaptive-cpu-profile --dir "$RUNNER_TEMP/cache-only"
-          expected=4df9cda34365a9a259b9572c70c36fe718b6da7547d2cdbf632b1d4feaea822c
-          actual=$(sha256sum "$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate" | cut -d ' ' -f 1)
-          test "$expected" = "$actual"
-          chmod 700 "$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate"
       - name: Prepare bounded diagnostic
         run: |
           mkdir -p "$RUNNER_TEMP/profile" .zig-cache/tmp
@@ -107,67 +97,27 @@ jobs:
             --prefix "$RUNNER_TEMP/compiled" 2>&1 | tee "$RUNNER_TEMP/profile/build.log"
           cp "$RUNNER_TEMP/compiled/verification/native-owner-adaptive" "$RUNNER_TEMP/profile/native-owner-adaptive"
           sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive" > "$RUNNER_TEMP/profile/binary-sha256.txt"
-      - name: Compile isolated admitted boundary candidate
+      - name: Attribute expensive aggregate field reads
         run: |
           mkdir -p "$RUNNER_TEMP/candidate"
           cp -a .protean-native/inputs/kosmos "$RUNNER_TEMP/candidate/kosmos"
           git -C "$RUNNER_TEMP/candidate/kosmos" apply --unidiff-zero "$GITHUB_WORKSPACE/frame-cache-diagnostic.patch"
           cp frame-cache-diagnostic.patch "$RUNNER_TEMP/profile/"
-          cp semantic-core-diagnostic.kar "$RUNNER_TEMP/candidate/kosmos/src/semantic-core.kar"
-          node --input-type=module <<'JS'
-          import assert from 'node:assert/strict';
-          import {readFileSync, writeFileSync} from 'node:fs';
-          import {spawnSync} from 'node:child_process';
-          const profile = process.env.RUNNER_TEMP + '/profile';
-          const lines = readFileSync(profile + '/build.log', 'utf8').split('\n').filter(line =>
-              line.startsWith('info(verbose): ') && line.includes('zig test ') &&
-              line.includes('-Mroot=test/protean/native_adaptive_tests.zig'));
-          assert.equal(lines.length, 1);
-          const command = lines[0].slice('info(verbose): '.length).trim().split(/\s+/)
-              .filter(arg => arg !== '--listen=-');
-          assert(command.includes('-fno-llvm') && command.includes('-Osafe'));
-          const selected = '-Mkosmos=.protean-native/inputs/kosmos/src/root.zig';
-          assert.equal(command.filter(arg => arg === selected).length, 1);
-          command[command.indexOf(selected)] = '-Mkosmos=' + process.env.RUNNER_TEMP +
-              '/candidate/kosmos/src/root.zig';
-          const runtime = command.findIndex(arg => arg.startsWith('-Mpackaged_runtime='));
-          assert(runtime >= 0);
-          const wrapper = process.env.RUNNER_TEMP + '/candidate/runtime.zig';
-          writeFileSync(wrapper, 'pub const bytes = @embedFile("semantic-core.kar");\n');
-          const core = readFileSync('semantic-core-diagnostic.kar');
-          writeFileSync(process.env.RUNNER_TEMP + '/candidate/semantic-core.kar', core);
-          writeFileSync(profile + '/semantic-core-diagnostic.kar', core);
-          command[runtime] = '-Mpackaged_runtime=' + wrapper;
-          command.push('--test-no-exec', '-femit-bin=' + profile + '/native-owner-adaptive-candidate');
-          writeFileSync(profile + '/candidate-command.json', JSON.stringify(command));
-          const result = spawnSync(command[0], command.slice(1), {stdio: 'inherit'});
-          if (result.error) throw result.error;
-          process.exit(result.status ?? 1);
-          JS
-          sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive-candidate" > "$RUNNER_TEMP/profile/candidate-binary-sha256.txt"
-      - name: Compare identical original repair phases
-        run: |
+          node tools/native/diagnostic-field-counts.mjs
           umask 0022
-          id > "$RUNNER_TEMP/profile/identity.txt"
-          for variant in cached candidate; do
-            profile_work=$(mktemp -d /tmp/protean-native-frame.XXXXXX)
-            mkdir -p "$profile_work/.zig-cache/tmp"
-            binary="$RUNNER_TEMP/profile/native-owner-adaptive"
-            if test "$variant" = candidate; then binary="$binary-candidate"; fi
-            if test "$variant" = cached; then binary="$RUNNER_TEMP/cache-only/native-owner-adaptive-candidate"; fi
-            (
-              cd "$profile_work"
-              set +e
-              timeout --signal=INT --kill-after=10s 110s node \
-                "$GITHUB_WORKSPACE/tools/native/qualification_tests.mjs" "$binary" \
-                '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
-                '[1]' > "$RUNNER_TEMP/profile/$variant-test.log" 2>&1
-              status=$?
-              echo "$status" > "$RUNNER_TEMP/profile/$variant-status.txt"
-              cat "$RUNNER_TEMP/profile/$variant-test.log"
-              test "$status" = 0 || test "$status" = 124
-            )
-          done
+          profile_work=$(mktemp -d /tmp/protean-native-fields.XXXXXX)
+          mkdir -p "$profile_work/.zig-cache/tmp"
+          cd "$profile_work"
+          set +e
+          timeout --signal=INT --kill-after=10s 85s node \
+            "$GITHUB_WORKSPACE/tools/native/qualification_tests.mjs" \
+            "$RUNNER_TEMP/profile/native-owner-adaptive-fields" \
+            '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
+            '[1]' > "$RUNNER_TEMP/profile/fields-test.log" 2>&1
+          status=$?
+          echo "$status" > "$RUNNER_TEMP/profile/fields-status.txt"
+          cat "$RUNNER_TEMP/profile/fields-test.log"
+          test "$status" = 0 || test "$status" = 124
       - name: Retain diagnostic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
