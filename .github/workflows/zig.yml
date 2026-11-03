@@ -67,7 +67,7 @@ jobs:
                       std.Io.Clock.awake.now(std.testing.io).toMilliseconds() - phase_start,
                   });`);
               if (label === 'model-action') timed = timed.replace(signature, signature + String.raw`
-                  std.debug.print("phase action={s} call={d}\n", .{@tagName(action), self.calls});`);
+                  std.debug.print("phase action={s} call={d}\n", .{ @tagName(action), self.calls });`);
           }
           writeFileSync(tests, timed);
           const namespace = 'runtime/native/namespace.zig';
