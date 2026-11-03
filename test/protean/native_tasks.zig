@@ -339,6 +339,7 @@ fn ArchiveFactEvent(comptime Reference: type) type {
             controller_requested,
             execution,
             preparation,
+            preparation_rejected,
         },
         data: protean.contracts.Bytes(48 * 1024),
         workspace_publications: protean.contracts.Vector(ArchiveWorkspacePublication, null),
@@ -353,6 +354,7 @@ fn ArchiveFactEvent(comptime Reference: type) type {
             after: struct { controller: ?[32]u8, checkpoint: [32]u8 },
         },
         preparation_attempt: ?Reference,
+        preparation_rejection: ?native.testing.state.PreparationRejection,
     };
 }
 
