@@ -51,7 +51,7 @@ index fcb0459..7b8fee4 100644
 -    pub fn get(self: Store, reference: g.NodeRef) Error!g.Node {
 +    pub inline fn get(self: *const Store, reference: g.NodeRef) Error!g.Node {
 diff --git a/src/semantic/aggregate.zig b/src/semantic/aggregate.zig
-index 1154214..4b8c523 100644
+index 1154214..fc1d182 100644
 --- a/src/semantic/aggregate.zig
 +++ b/src/semantic/aggregate.zig
 @@ -241 +241,86 @@ fn emitLoop(
@@ -202,10 +202,23 @@ index 1154214..4b8c523 100644
 +    ), try e.b.constant(u64, @backingInt(g.ValueTag.blob))), encoded, structured);
 +}
 +
-@@ -554 +666 @@ fn emitAccessors(
+@@ -547 +659,2 @@ fn emitAccessors(
+-        const read = try @import("projection_cache.zig").read(
++        const cache = @import("projection_cache.zig");
++        const read = if (variant) try cache.read(
+@@ -553,2 +666,9 @@ fn emitAccessors(
+-            if (variant) .payload else .field,
 -            try encodedRange(e, m, input, value, index, variant),
-+            try encodedChildRange(e, m, input, value, index, variant, true),
-@@ -571,0 +684,12 @@ pub fn encodedRange(
++            .payload,
++            try encodedChildRange(e, m, input, value, index, true, true),
++        ) else try cache.readPrepared(
++            e,
++            m,
++            input,
++            value,
++            index,
++            try preparedFieldRange(e, m, input, value, index),
+@@ -571,0 +692,12 @@ pub fn encodedRange(
 +) Error!Id {
 +    return encodedChildRange(e, m, input, value, index, variant, false);
 +}
@@ -218,31 +231,27 @@ index 1154214..4b8c523 100644
 +    index: Id,
 +    comptime variant: bool,
 +    comptime admitted: bool,
-@@ -586,0 +711,10 @@ pub fn encodedRange(
+@@ -586,0 +719,8 @@ pub fn encodedRange(
 +    const field_start: ?Id = if (variant) null else try fieldStart(
 +        e,
 +        m,
 +        input,
-+        value,
 +        types,
 +        index,
 +        try b.reference(encoded),
-+        admitted,
 +    );
-@@ -590,0 +725 @@ pub fn encodedRange(
+@@ -590,0 +731 @@ pub fn encodedRange(
 +        admitted,
-@@ -598,0 +734 @@ pub fn encodedRange(
+@@ -598,0 +740 @@ pub fn encodedRange(
 +        field_start,
-@@ -603,0 +740,126 @@ pub fn encodedRange(
+@@ -603,0 +746,192 @@ pub fn encodedRange(
 +fn fieldStart(
 +    e: Author,
 +    m: machines.Definition,
 +    input: Id,
-+    value: Id,
 +    types: Id,
 +    index: Id,
 +    bytes: Id,
-+    comptime admitted: bool,
 +) Error!Id {
 +    const prefix = try e.b.primitive(
 +        try projection.schema([]const Id, e.b),
@@ -251,57 +260,101 @@ index 1154214..4b8c523 100644
 +        0,
 +    );
 +    const codec = try codecs.define(e.b, m);
-+    const from_start = try e.call(codec.skip_fields, &.{
++    return e.call(codec.skip_fields, &.{
 +        try m.field(e, input, .program), prefix, bytes, e.zero,
 +    });
-+    if (!admitted) return from_start;
-+    return e.when(
-+        try e.binary(.equal, index, e.zero),
-+        from_start,
-+        try cachedFieldStart(e, m, input, value, prefix, index, bytes, from_start),
-+    );
 +}
 +
-+fn cachedFieldStart(
++fn preparedFieldRange(
 +    e: Author,
 +    m: machines.Definition,
 +    input: Id,
 +    value: Id,
-+    prefix: Id,
 +    index: Id,
-+    bytes: Id,
-+    fallback: Id,
 +) Error!Id {
 +    const b = e.b;
-+    const optional = try b.schema(.{ .sum = &.{ e.unit, m.cache.range } });
-+    const found = try b.variable(optional);
-+    const absent = try b.variable(e.unit);
-+    const present = try b.variable(m.cache.range);
-+    const sparse = try sparseFieldStart(e, m, input, value, prefix, index, bytes, fallback);
-+    return b.bind(found, try @import("projection_cache.zig").lookupField(
++    const v = try values.define(b, m);
++    const result = try b.schema(.{ .product = &.{ m.schema, m.cache.range } });
++    const program = try m.field(e, input, .program);
++    const shapes = try field(e, try access.code(e, program), data.activation.Program, "schemas");
++    const types = try e.payload(try e.required(shapes, try e.field(value, 0)), @backingInt(
++        p.SchemaTag.product,
++    ));
++    const child = try b.variable(e.integer);
++    const encoded = try b.variable(try b.schema(.bytes));
++    const bytes = try b.reference(encoded);
++    const range = try b.variable(m.cache.range);
++    const fallback = try b.bind(
++        range,
++        try encodedChildRange(e, m, input, value, index, false, true),
++        try b.pure(try e.tuple(result, &.{ input, try b.reference(range) })),
++    );
++    const prepared = try retainedFieldRange(
 +        e,
 +        m,
 +        input,
 +        value,
-+        try e.binary(.integer_sub, index, e.one),
-+    ), try b.term(.{ .match_sum = .{
-+        .value = try b.reference(found),
-+        .cases = &.{
-+            .{ .variable = absent, .body = sparse },
-+            .{ .variable = present, .body = try b.pure(try e.field(try b.reference(present), 2)) },
-+        },
-+    } }));
++        types,
++        index,
++        bytes,
++        try b.reference(child),
++        result,
++    );
++    const choose = try e.when(try e.binary(.less, try b.primitive(
++        e.integer,
++        .blob_length,
++        &.{bytes},
++        0,
++    ), try b.constant(u64, 4096)), fallback, prepared);
++    return b.bind(child, try b.pure(try e.required(types, index)), try b.bind(
++        encoded,
++        try e.call(v.bytes, &.{ input, value }),
++        choose,
++    ));
 +}
 +
-+fn sparseFieldStart(
++fn retainedFieldRange(
 +    e: Author,
 +    m: machines.Definition,
 +    input: Id,
 +    value: Id,
-+    prefix: Id,
++    types: Id,
 +    index: Id,
 +    bytes: Id,
-+    fallback: Id,
++    child: Id,
++    result: Id,
++) Error!Id {
++    const b = e.b;
++    const cursor = try b.schema(.{ .product = &.{ m.schema, e.integer } });
++    const prepared = try b.variable(cursor);
++    const machine = try e.field(try b.reference(prepared), 0);
++    const start = try e.field(try b.reference(prepared), 1);
++    const end = try b.variable(e.integer);
++    const codec = try codecs.define(b, m);
++    const scanned = try e.call(codec.skip, &.{
++        try m.field(e, machine, .program), child, bytes, start,
++    });
++    const boundary = try e.when(try e.binary(
++        .equal,
++        try e.binary(.integer_add, index, e.one),
++        try b.primitive(e.integer, .sequence_length, &.{types}, 0),
++    ), try b.pure(try b.primitive(e.integer, .blob_length, &.{bytes}, 0)), scanned);
++    const range = try e.tuple(m.cache.range, &.{ child, start, try b.reference(end) });
++    return b.bind(
++        prepared,
++        try prepareFieldPrefix(e, m, input, value, types, index, bytes),
++        try b.bind(end, boundary, try b.pure(try e.tuple(result, &.{ machine, range }))),
++    );
++}
++
++fn prepareFieldPrefix(
++    e: Author,
++    m: machines.Definition,
++    input: Id,
++    value: Id,
++    types: Id,
++    index: Id,
++    bytes: Id,
 +) Error!Id {
 +    const b = e.b;
 +    const cache = @import("projection_cache.zig");
@@ -311,69 +364,93 @@ index 1154214..4b8c523 100644
 +    const absent = try b.variable(e.unit);
 +    const present = try b.variable(point);
 +    const previous = try b.reference(present);
-+    const scan = try e.call(try skipFieldSuffix(e, m), &.{
-+        try m.field(e, input, .program),
-+        prefix,
++    const loop = try retainFieldPrefix(e, m);
++    const from_start = try e.call(loop, &.{ input, value, types, bytes, index, e.zero, e.zero });
++    const from_previous = try e.call(loop, &.{
++        input,
++        value,
++        types,
 +        bytes,
++        index,
 +        try e.binary(.integer_add, try e.field(previous, 0), e.one),
 +        try e.field(try e.field(previous, 1), 2),
 +    });
 +    return b.bind(
 +        found,
 +        try cache.fieldPredecessor(e, m, input, value, index),
-+        try b.term(.{ .match_sum = .{
-+            .value = try b.reference(found),
-+            .cases = &.{
-+                .{ .variable = absent, .body = fallback },
-+                .{ .variable = present, .body = scan },
-+            },
-+        } }),
++        try b.term(.{ .match_sum = .{ .value = try b.reference(found), .cases = &.{
++            .{ .variable = absent, .body = from_start },
++            .{ .variable = present, .body = from_previous },
++        } } }),
 +    );
 +}
 +
-+fn skipFieldSuffix(e: Author, m: machines.Definition) Error!Id {
++fn retainFieldPrefix(e: Author, m: machines.Definition) Error!Id {
 +    const b = e.b;
-+    const cache = try b.specialization(Id, "kosmos.semantic.aggregate-field-suffix/1", m.schema);
++    const cache = try b.specialization(Id, "kosmos.semantic.aggregate-field-prefix/1", m.schema);
 +    if (cache.cached) |saved| return saved;
++    const result = try b.schema(.{ .product = &.{ m.schema, e.integer } });
 +    const loop = try b.declare(&.{
-+        m.program, try projection.schema([]const Id, b), try b.schema(.bytes),
-+        e.integer, e.integer,
-+    }, e.integer, &.{}, &.{});
-+    const program = try e.param(loop, 0);
-+    const types = try e.param(loop, 1);
-+    const bytes = try e.param(loop, 2);
-+    const index = try e.param(loop, 3);
-+    const cursor = try e.param(loop, 4);
-+    const next = try b.variable(e.integer);
-+    const codec = try codecs.define(b, m);
-+    const more = try b.bind(next, try e.call(codec.skip, &.{
-+        program, try e.required(types, index), bytes, cursor,
-+    }), try e.call(loop, &.{
-+        program, types, bytes, try e.binary(.integer_add, index, e.one), try b.reference(next),
-+    }));
-+    try b.define(loop, try e.when(try e.binary(.less, index, try b.primitive(
++        m.schema,
++        try projection.schema(g.Value, b),
++        try projection.schema([]const Id, b),
++        try b.schema(.bytes),
 +        e.integer,
-+        .sequence_length,
-+        &.{types},
-+        0,
-+    )), more, try b.pure(cursor)));
++        e.integer,
++        e.integer,
++    }, result, &.{}, &.{});
++    const input = try e.param(loop, 0);
++    const value = try e.param(loop, 1);
++    const types = try e.param(loop, 2);
++    const bytes = try e.param(loop, 3);
++    const target = try e.param(loop, 4);
++    const index = try e.param(loop, 5);
++    const cursor = try e.param(loop, 6);
++    const child = try b.variable(e.integer);
++    const next = try b.variable(e.integer);
++    const updated = try b.variable(m.schema);
++    const codec = try codecs.define(b, m);
++    const range = try e.tuple(m.cache.range, &.{
++        try b.reference(child), cursor, try b.reference(next),
++    });
++    const retain = try e.when(
++        try e.binary(.less, cursor, try b.reference(next)),
++        try @import("projection_cache.zig").rememberField(e, m, input, value, index, range),
++        try b.pure(input),
++    );
++    const remember = try b.bind(updated, retain, try e.call(loop, &.{
++        try b.reference(updated),                 value,                 types, bytes, target,
++        try e.binary(.integer_add, index, e.one), try b.reference(next),
++    }));
++    const scan = try b.bind(child, try b.pure(try e.required(types, index)), try b.bind(
++        next,
++        try e.call(codec.skip, &.{
++            try m.field(e, input, .program), try b.reference(child), bytes, cursor,
++        }),
++        remember,
++    ));
++    try b.define(loop, try e.when(
++        try e.binary(.less, index, target),
++        scan,
++        try b.pure(try e.tuple(result, &.{ input, cursor })),
++    ));
 +    return cache.finish(b, loop);
 +}
 +
-@@ -664,0 +927 @@ fn emitSplit(
+@@ -664,0 +999 @@ fn emitSplit(
 +    encoded_loop: Id,
-@@ -679,0 +943 @@ fn emitSplit(
+@@ -679,0 +1015 @@ fn emitSplit(
 +        v,
-@@ -683,0 +948 @@ fn emitSplit(
+@@ -683,0 +1020 @@ fn emitSplit(
 +        encoded_loop,
-@@ -714,0 +980 @@ fn readChild(
+@@ -714,0 +1052 @@ fn readChild(
 +    comptime admitted: bool,
-@@ -722,0 +989 @@ fn readChild(
+@@ -722,0 +1061 @@ fn readChild(
 +    field_start: ?Id,
-@@ -727 +994 @@ fn readChild(
+@@ -727 +1066 @@ fn readChild(
 -    read = try b.bind(end, try e.call(codec.skip, &.{
 +    const scanned = try e.call(codec.skip, &.{
-@@ -729 +996,11 @@ fn readChild(
+@@ -729 +1068,11 @@ fn readChild(
 -    }), read);
 +    });
 +    const boundary = if (!admitted) scanned else blk: {
@@ -386,7 +463,7 @@ index 1154214..4b8c523 100644
 +        ), length, scanned);
 +    };
 +    read = try b.bind(end, boundary, read);
-@@ -738,9 +1015 @@ fn readChild(
+@@ -738,9 +1087 @@ fn readChild(
 -        const prefix = try b.primitive(
 -            try projection.schema([]const Id, b),
 -            .sequence_take,
@@ -397,41 +474,13 @@ index 1154214..4b8c523 100644
 -            program, prefix, bytes_value, e.zero,
 -        }), read);
 +        read = try b.bind(start, field_start.?, read);
-diff --git a/src/semantic/codec.zig b/src/semantic/codec.zig
-index 48afbdb..1e168db 100644
---- a/src/semantic/codec.zig
-+++ b/src/semantic/codec.zig
-@@ -79,3 +79,20 @@ fn emitLoop(e: Author, bytes: Id, read: Id, d: Definition, optional_byte: Id, ba
--    try e.b.define(d.read, try e.call(loop, &.{
--        try e.param(d.read, 0), try e.param(d.read, 1), e.zero, e.one,
--    }));
-+    try emitRead(e, read, d.read, loop, optional_byte, base);
-+}
-+
-+fn emitRead(e: Author, read: Id, entry: Id, loop: Id, optional_byte: Id, base: Id) Error!void {
-+    const input = try e.param(entry, 0);
-+    const position = try e.param(entry, 1);
-+    const octet_variable = try e.b.variable(e.integer);
-+    const octet = try e.b.reference(octet_variable);
-+    const first = try e.convert(try e.payload(try e.b.primitive(
-+        optional_byte,
-+        .blob_byte,
-+        &.{ input, position },
-+        0,
-+    ), 1), e.integer, false);
-+    const next = try e.binary(.integer_add, position, e.one);
-+    try e.b.define(entry, try e.b.bind(octet_variable, try e.b.pure(first), try e.when(
-+        try e.binary(.less, octet, base),
-+        try e.b.pure(try e.tuple(read, &.{ octet, next })),
-+        try e.call(loop, &.{ input, next, try e.binary(.integer_rem, octet, base), base }),
-+    )));
 diff --git a/src/semantic/projection_cache.zig b/src/semantic/projection_cache.zig
-index cd9ddb1..f45fd8d 100644
+index cd9ddb1..8df1165 100644
 --- a/src/semantic/projection_cache.zig
 +++ b/src/semantic/projection_cache.zig
-@@ -40,0 +41,25 @@ pub fn read(
+@@ -40,0 +41,51 @@ pub fn read(
 +) Error!Id {
-+    return readProjected(e, m, input, value, index, kind, miss, false);
++    return readProjected(e, m, input, value, index, kind, miss, false, false);
 +}
 +
 +pub fn readWithRange(
@@ -443,7 +492,32 @@ index cd9ddb1..f45fd8d 100644
 +    kind: Kind,
 +    miss: Id,
 +) Error!Id {
-+    return readProjected(e, m, input, value, index, kind, miss, true);
++    return readProjected(e, m, input, value, index, kind, miss, true, false);
++}
++
++pub fn readPrepared(
++    e: Author,
++    m: machines.Definition,
++    input: Id,
++    value: Id,
++    index: Id,
++    miss: Id,
++) Error!Id {
++    return readProjected(e, m, input, value, index, .field, miss, false, true);
++}
++
++pub fn rememberField(
++    e: Author,
++    m: machines.Definition,
++    input: Id,
++    value: Id,
++    index: Id,
++    range: Id,
++) Error!Id {
++    const d = try functions(e, m);
++    return e.call(d.remember, &.{
++        input, value, index, try e.b.constant(u64, @backingInt(Kind.field)), range,
++    });
 +}
 +
 +fn readProjected(
@@ -455,12 +529,26 @@ index cd9ddb1..f45fd8d 100644
 +    kind: Kind,
 +    miss: Id,
 +    comptime with_range: bool,
-@@ -53 +78 @@ pub fn read(
++    comptime prepared: bool,
+@@ -44 +95,4 @@ pub fn read(
+-    const computed = try e.b.variable(m.cache.range);
++    const computed = try e.b.variable(if (prepared)
++        try e.b.schema(.{ .product = &.{ m.schema, m.cache.range } })
++    else
++        m.cache.range);
+@@ -48 +102,3 @@ pub fn read(
+-    const range = try e.b.reference(computed);
++    const result = try e.b.reference(computed);
++    const range = if (prepared) try e.field(result, 1) else result;
++    const machine = if (prepared) try e.field(result, 0) else input;
+@@ -52,2 +108,2 @@ pub fn read(
+-        &.{ input, value, index, operation, range },
 -    ), try materialize(e, m, try e.b.reference(updated), value, range)));
++        &.{ machine, value, index, operation, range },
 +    ), try materialize(e, m, try e.b.reference(updated), value, range, with_range)));
-@@ -62,0 +88 @@ pub fn read(
+@@ -62,0 +119 @@ pub fn read(
 +                with_range,
-@@ -68 +94,8 @@ pub fn read(
+@@ -68 +125,8 @@ pub fn read(
 -fn materialize(e: Author, m: machines.Definition, input: Id, value: Id, range: Id) Error!Id {
 +fn materialize(
 +    e: Author,
@@ -470,7 +558,7 @@ index cd9ddb1..f45fd8d 100644
 +    range: Id,
 +    comptime with_range: bool,
 +) Error!Id {
-@@ -75,4 +108,11 @@ fn materialize(e: Author, m: machines.Definition, input: Id, value: Id, range: I
+@@ -75,4 +139,11 @@ fn materialize(e: Author, m: machines.Definition, input: Id, value: Id, range: I
 -    return e.b.bind(encoded, try e.call(v.bytes, &.{ input, value }), try e.call(
 -        v.literal,
 -        &.{ input, literal },
@@ -486,7 +574,7 @@ index cd9ddb1..f45fd8d 100644
 +        })));
 +    }
 +    return e.b.bind(encoded, try e.call(v.bytes, &.{ input, value }), projected);
-@@ -81,0 +122,15 @@ pub fn lookup(e: Author, m: machines.Definition, input: Id, value: Id, index: Id
+@@ -81,0 +153,15 @@ pub fn lookup(e: Author, m: machines.Definition, input: Id, value: Id, index: Id
 +    return lookupKind(e, m, input, value, index, .element);
 +}
 +
@@ -502,10 +590,10 @@ index cd9ddb1..f45fd8d 100644
 +    index: Id,
 +    comptime kind: Kind,
 +) Error!Id {
-@@ -84 +139 @@ pub fn lookup(e: Author, m: machines.Definition, input: Id, value: Id, index: Id
+@@ -84 +170 @@ pub fn lookup(e: Author, m: machines.Definition, input: Id, value: Id, index: Id
 -        input, value, index, try e.b.constant(u64, @backingInt(Kind.element)),
 +        input, value, index, try e.b.constant(u64, @backingInt(kind)),
-@@ -88,0 +144,21 @@ pub fn predecessor(e: Author, m: machines.Definition, input: Id, value: Id, inde
+@@ -88,0 +175,10 @@ pub fn predecessor(e: Author, m: machines.Definition, input: Id, value: Id, inde
 +    return predecessorKind(e, m, input, value, index, .element);
 +}
 +
@@ -516,7 +604,35 @@ index cd9ddb1..f45fd8d 100644
 +    value: Id,
 +    index: Id,
 +) Error!Id {
-+    return predecessorKind(e, m, input, value, index, .field);
+@@ -90,4 +186,23 @@ pub fn predecessor(e: Author, m: machines.Definition, input: Id, value: Id, inde
+-    const cache = try b.specialization(
+-        Id,
+-        "kosmos.semantic.projection-cache-predecessor/1",
+-        m.schema,
++    const point = try projection.schema(Predecessor, b);
++    const optional = try b.schema(.{ .sum = &.{ e.unit, point } });
++    const range_optional = try b.schema(.{ .sum = &.{ e.unit, m.cache.range } });
++    const found = try b.variable(range_optional);
++    const absent = try b.variable(e.unit);
++    const present = try b.variable(m.cache.range);
++    const previous = try e.binary(.integer_sub, index, e.one);
++    const nearest = try predecessorKind(e, m, input, value, index, .field);
++    const candidate = try b.pure(try e.variant(optional, 1, try e.tuple(point, &.{
++        previous, try b.reference(present),
++    })));
++    const adjacent = try b.bind(
++        found,
++        try lookupField(e, m, input, value, previous),
++        try b.term(.{ .match_sum = .{ .value = try b.reference(found), .cases = &.{
++            .{ .variable = absent, .body = nearest },
++            .{ .variable = present, .body = candidate },
++        } } }),
++    );
++    return e.when(
++        try e.binary(.equal, index, e.zero),
++        try b.pure(try e.variant(optional, 0, e.unit_value)),
++        adjacent,
+@@ -94,0 +210,16 @@ pub fn predecessor(e: Author, m: machines.Definition, input: Id, value: Id, inde
 +}
 +
 +fn predecessorKind(
@@ -527,31 +643,26 @@ index cd9ddb1..f45fd8d 100644
 +    index: Id,
 +    comptime kind: Kind,
 +) Error!Id {
-@@ -90,5 +166,5 @@ pub fn predecessor(e: Author, m: machines.Definition, input: Id, value: Id, inde
--    const cache = try b.specialization(
--        Id,
--        "kosmos.semantic.projection-cache-predecessor/1",
--        m.schema,
--    );
++    const b = e.b;
 +    const key = switch (kind) {
 +        .element => "kosmos.semantic.projection-cache-predecessor/1",
 +        else => "kosmos.semantic.projection-cache-predecessor/1/" ++ @tagName(kind),
 +    };
 +    const cache = try b.specialization(Id, key, m.schema);
-@@ -103 +179 @@ pub fn predecessor(e: Author, m: machines.Definition, input: Id, value: Id, inde
+@@ -103 +234 @@ pub fn predecessor(e: Author, m: machines.Definition, input: Id, value: Id, inde
 -    try emitPredecessor(e, m, point, optional, search);
 +    try emitPredecessor(e, m, point, optional, search, kind);
-@@ -121,0 +198 @@ fn emitPredecessor(
+@@ -121,0 +253 @@ fn emitPredecessor(
 +    comptime kind: Kind,
-@@ -149 +226 @@ fn emitPredecessor(
+@@ -149 +281 @@ fn emitPredecessor(
 -    const keys = [_]Id{ source_blob, schema, try b.constant(u64, @backingInt(Kind.element)) };
 +    const keys = [_]Id{ source_blob, schema, try b.constant(u64, @backingInt(kind)) };
 diff --git a/src/semantic_packaged.zig b/src/semantic_packaged.zig
-index 1483b7b..ad1115f 100644
+index 1483b7b..39bde42 100644
 --- a/src/semantic_packaged.zig
 +++ b/src/semantic_packaged.zig
 @@ -7,2 +7,2 @@ pub const horos_package = "horos-8.0.0-flclaIItVgCRBCbUEysErcsQyVqsukGf2Q8X2is_w
 -pub const source_sha256 = "08c48a517383d1f8addd8175dcf73e4542cb3b781fba74ba3ba5d3f8fbfe8f6a";
 -pub const artifact_sha256 = "be16c35ee37dadadb69cb76bbfdad5be1c772f78e270638554457c19f43113f0";
-+pub const source_sha256 = "515a920fc8a8aca5428781ccd5a8e2acb03a8fbf331b84780851c7cbe5fe7d7b";
-+pub const artifact_sha256 = "b1c64c872504afa4afa7581083098c9d7babe633bd8a6e9aa1162859aac1718a";
++pub const source_sha256 = "c86e57ac59502d8bdaa1c0c246f89fc883adb08ce75608563a3767372781ac3e";
++pub const artifact_sha256 = "936396952bcbca587aaebb99d910b213f031a24e122237629a83ad907cebccaf";
