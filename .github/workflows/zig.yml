@@ -54,8 +54,23 @@ jobs:
                   return err;
               };`;
           writeFileSync(tests, text.slice(0, offset) + tail.replace(init, failure));
+          const namespace = 'runtime/native/namespace.zig';
+          let owner = readFileSync(namespace, 'utf8');
+          owner = owner.replaceAll('return error.UnsafeStatePath;', 'return profileUnsafePath(@src().line);');
+          owner = owner.replace('else => error.UnsafeStatePath,', 'else => profileUnsafePath(@src().line),');
+          owner += String.raw`
+          fn profileUnsafePath(comptime line: u32) error{UnsafeStatePath} {
+              std.debug.print("profile namespace line={d} euid={d} errno={d}\n", .{
+                  line,
+                  c.geteuid(),
+                  @backingInt(std.c.errno(@as(c_int, -1))),
+              });
+              return error.UnsafeStatePath;
+          }
+          `;
+          writeFileSync(namespace, owner);
           JS
-          git diff -- build_protean.zig test/protean/projection_recovery.zig > "$RUNNER_TEMP/profile/diagnostic-diff.patch"
+          git diff -- build_protean.zig test/protean/projection_recovery.zig runtime/native/namespace.zig > "$RUNNER_TEMP/profile/diagnostic-diff.patch"
       - name: Authenticate dependencies
         run: |
           zig run tools/native/dependencies.zig -- setup \
@@ -68,6 +83,8 @@ jobs:
           /usr/bin/time -v zig build build-native-owner-adaptive-check \
             -Doptimize=safe --summary all --verbose \
             --prefix "$RUNNER_TEMP/compiled" 2>&1 | tee "$RUNNER_TEMP/profile/build.log"
+          cp "$RUNNER_TEMP/compiled/verification/native-owner-adaptive" "$RUNNER_TEMP/profile/native-owner-adaptive"
+          sha256sum "$RUNNER_TEMP/profile/native-owner-adaptive" > "$RUNNER_TEMP/profile/binary-sha256.txt"
       - name: Sample existing repair test for two minutes
         run: |
           id > "$RUNNER_TEMP/profile/identity.txt"
@@ -78,6 +95,17 @@ jobs:
           namei -l "$profile_work/.zig-cache/tmp" >> "$RUNNER_TEMP/profile/identity.txt"
           cd "$profile_work"
           set +e
+          timeout --signal=TERM --kill-after=5s 10s node \
+            "$GITHUB_WORKSPACE/tools/native/qualification_tests.mjs" \
+            "$RUNNER_TEMP/compiled/verification/native-owner-adaptive" \
+            '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
+            '[1]' > "$RUNNER_TEMP/profile/preflight.log" 2>&1
+          preflight=$?
+          echo "$preflight" > "$RUNNER_TEMP/profile/preflight-status.txt"
+          if [ "$preflight" != 0 ] && [ "$preflight" != 124 ]; then
+            cat "$RUNNER_TEMP/profile/preflight.log"
+            exit "$preflight"
+          fi
           { sudo timeout --signal=INT --kill-after=10s 120s "$PERF_BIN" record \
             -e cpu-clock:u -F 49 --call-graph dwarf,8192 \
             -o "$RUNNER_TEMP/profile/perf.data" -- \
