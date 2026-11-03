@@ -843,7 +843,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           captureRows.push({request, http: requests[index].body});
           providerProjections++;
         } else {
-          if (identity === 'agent.adaptive.context.prepare.v2') {
+          if (['agent.adaptive.context.prepare.v2', 'agent.adaptive.context.prepare.v3'].includes(identity)) {
             const observation = decodeValue(schemas.PreparationCapture, rawBytes);
             assert.equal(Buffer.from(observation[0]).toString('hex'), hash(prepared));
             assert.equal(observation.length, 1, 'preparation captures no quota-exhaustion policy');

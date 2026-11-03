@@ -490,10 +490,12 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
     const control = prepared_control.state;
     const selected = try profile(policy, control.selection.profile_id.bytes);
     const tools = try prepareTools(a, policy, catalog.value, control, input.offered);
-    const request = makeRequest(ctx, input, prepared_control, selected, policy, tools);
+    var request = makeRequest(ctx, input, prepared_control, selected, policy, tools);
     // Horos retains the computation and task facts. Continue its immutable
     // transcript; only the projection owner changes provider-visible material.
     _ = try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, request));
+    if (input.request_mode == .checked_responder_template)
+        request.invocation.tools = .{ .items = &.{} };
     return preparedProduct(a, request, pending, prepared_control);
 }
 

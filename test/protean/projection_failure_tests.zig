@@ -242,6 +242,156 @@ fn preparationEntry(f: *Fixture) !*native.registry.Entry {
     return error.PreparationHandlerMissing;
 }
 
+const PreparationModes = struct {
+    const Adapter = native.adaptive_responses.Adapter(t.P);
+    var active: ?*PreparationModes = null;
+
+    fixture: *Fixture,
+    capacity: bool,
+    original: native.registry.CaptureAdapter = undefined,
+    checked: bool = false,
+
+    fn install(self: *PreparationModes) !void {
+        const entry = try preparationEntry(self.fixture);
+        self.original = entry.declaration.capture.?;
+        active = self;
+        entry.declaration.capture.?.prepare = prepare;
+    }
+
+    fn restore(self: *PreparationModes) void {
+        for (@constCast(self.fixture.handlers.entries)) |*entry| {
+            if (std.mem.eql(u8, entry.declaration.identity, t.prepare_identity))
+                entry.declaration.capture = self.original;
+        }
+        active = null;
+    }
+
+    fn prepare(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
+        const self = active orelse return error.MissingPreparationModes;
+        if (!self.checked) {
+            var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+            defer arena.deinit();
+            var probe = ctx;
+            probe.allocator = arena.allocator();
+            try self.check(probe, bytes);
+            self.checked = true;
+        }
+        return self.original.prepare(ctx, bytes);
+    }
+
+    fn check(
+        self: *PreparationModes,
+        ctx: native.registry.ProjectionContext,
+        bytes: []const u8,
+    ) !void {
+        var input = try contracts.decodeOwned(t.Preparation, ctx.allocator, bytes);
+        defer input.deinit();
+        try std.testing.expectEqual(.checked_responder_template, input.value.request_mode);
+        const complete: t.Preparation = .{
+            .state = input.value.state,
+            .offered = input.value.offered,
+            .control = input.value.control,
+            .retained_calls = input.value.retained_calls,
+        };
+        try std.testing.expectEqual(.complete, complete.request_mode);
+        const full_input = try contracts.encodeOwned(t.Preparation, ctx.allocator, complete);
+        const full = try self.original.prepare(ctx, full_input);
+        const compact = try self.original.prepare(ctx, bytes);
+        var product = try contracts.decodeOwned(t.PreparationProduct, ctx.allocator, full);
+        defer product.deinit();
+        if (self.capacity) {
+            try std.testing.expect(product.value.result == .rejected);
+            try std.testing.expectEqual(.capacity, product.value.result.rejected);
+            try std.testing.expectEqualSlices(u8, full, compact);
+        } else {
+            try std.testing.expect(compact.len < full.len);
+            try checkReady(ctx, product.value, compact);
+        }
+        const full_capture = try self.replay(ctx, full_input, full);
+        const compact_capture = try self.replay(ctx, bytes, compact);
+        if (!self.capacity) {
+            try std.testing.expectError(error.InvalidCapture, self.original.interpret(
+                ctx,
+                bytes,
+                full,
+                full_capture,
+            ));
+            try std.testing.expectError(error.InvalidCapture, self.original.interpret(
+                ctx,
+                full_input,
+                compact,
+                compact_capture,
+            ));
+        }
+    }
+
+    fn checkReady(
+        ctx: native.registry.ProjectionContext,
+        full: t.PreparationProduct,
+        compact: []const u8,
+    ) !void {
+        try std.testing.expect(full.result == .ready);
+        try std.testing.expect(full.result.ready.request.invocation.tools.items.len != 0);
+        const request = try contracts.encodeOwned(
+            t.P.AdaptiveRequest,
+            ctx.allocator,
+            full.result.ready.request,
+        );
+        try std.testing.expectEqualSlices(
+            u8,
+            request,
+            try Adapter.offerGeneral(ctx, request, @splat(false)),
+        );
+        var expected = full;
+        expected.result.ready.request.invocation.tools = .{ .items = &.{} };
+        try std.testing.expectEqualSlices(
+            u8,
+            compact,
+            try contracts.encodeOwned(t.PreparationProduct, ctx.allocator, expected),
+        );
+        const template = try contracts.encodeOwned(
+            t.P.AdaptiveRequest,
+            ctx.allocator,
+            expected.result.ready.request,
+        );
+        try std.testing.expectError(
+            error.InvalidDeclaration,
+            Adapter.offerGeneral(ctx, template, @splat(false)),
+        );
+    }
+
+    fn replay(
+        self: *PreparationModes,
+        ctx: native.registry.ProjectionContext,
+        input: []const u8,
+        prepared: []const u8,
+    ) ![]const u8 {
+        const f = self.fixture;
+        const acquired = try self.original.acquire(.{
+            .allocator = ctx.allocator,
+            .io = f.io,
+            .authority = &f.profile.authority,
+            .task_id = &std.fmt.bytesToHex(f.task, .lower),
+            .profile = f.profile.bytes,
+            .environment = f.profile.environment,
+        }, prepared);
+        try std.testing.expect(acquired == .captured);
+        const projected = try self.original.interpret(ctx, input, prepared, acquired.captured);
+        var product = try contracts.decodeOwned(t.PreparationProduct, ctx.allocator, prepared);
+        defer product.deinit();
+        try std.testing.expectEqualSlices(
+            u8,
+            projected.reply,
+            try contracts.encodeOwned(t.PreparationResult, ctx.allocator, product.value.result),
+        );
+        if (product.value.receipt) |receipt| {
+            try std.testing.expectEqual(@as(usize, 1), projected.objects.len);
+            try std.testing.expectEqualSlices(u8, receipt.bytes, projected.objects[0]);
+        } else try std.testing.expectEqual(@as(usize, 0), projected.objects.len);
+        return acquired.captured;
+    }
+};
+
 fn missingDependency(f: *Fixture, result: wc.Ref) !void {
     _ = try f.perform(.{ .context = .{ .command = .{ .select = .{ .projected = result } } } });
     const selected = f.prepared.selected_view orelse return error.MissingProjectedRequest;
@@ -304,8 +454,13 @@ fn requireRetainedPrepared(f: *Fixture, original: []const u8) !void {
 
 test "projection publication preserves rollback and committed receipt under allocation failure" {
     var f: Fixture = undefined;
-    try f.init();
+    try f.initOptions(.{ .begin = false });
     defer f.deinit();
+    var modes: PreparationModes = .{ .fixture = &f, .capacity = false };
+    try modes.install();
+    defer modes.restore();
+    try f.next();
+    try std.testing.expect(modes.checked);
     const result = try completed(&f, 0);
     const original = try f.permanent.dupe(u8, f.pending.prepared.?);
     const command = try authorized(&f, result.result);
@@ -345,12 +500,16 @@ test "insufficient protected minimum parks without inference or fabricated compl
     var f: Fixture = undefined;
     try f.initOptions(.{ .request_bytes = 1, .begin = false });
     defer f.deinit();
+    var modes: PreparationModes = .{ .fixture = &f, .capacity = true };
+    try modes.install();
+    defer modes.restore();
     for (0..16384) |_| {
         var parent = try f.service.task(f.permanent, f.task);
         defer parent.deinit();
         try std.testing.expectEqual(@as(u64, 0), parent.value.inference_attempts);
         try std.testing.expect(!parent.value.terminal());
         if (try f.service.pendingQuestion(f.permanent, f.task)) |saved| {
+            try std.testing.expect(modes.checked);
             var question = saved;
             defer question.deinit();
             const prompt = try f.namespace.store.object(f.permanent, question.value.prompt, null);

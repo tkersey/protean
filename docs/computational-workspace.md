@@ -198,6 +198,14 @@ operations check their own current cut. Replay returns its historical receipt
 without selecting or dispatching again. `context.expand` exposes scoped proposal
 and provenance observations; private provider captures remain private.
 
+Native context preparation returns complete requests by default. The seed and
+stock successor explicitly request a checked-responder template: full rendering
+and budget validation happen before omitting the intermediate action declarations.
+The checked responder reconstructs those declarations from its compiled catalog
+before model admission. General controllers use complete requests; forwarding a
+compact template directly fails declaration binding. The captured preparation
+mode is replayed with the same immutable inputs.
+
 The seed and emitted successor expose projection preparation rejection and
 return once to ordinary context. If ordinary preparation also fails, they park
 with a recoverable question. Recovery preserves the task and its unfinished work;
