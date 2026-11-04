@@ -123,7 +123,9 @@ pub const Fixture = struct {
 
     pub fn next(self: *Fixture) !void {
         for (0..16384) |_| {
-            const step = try self.service.pump(self.permanent);
+            var scratch = std.heap.ArenaAllocator.init(self.a);
+            defer scratch.deinit();
+            const step = try self.service.pump(scratch.allocator());
             if (step != .work) continue;
             if (step.work.entry.declaration.inference) {
                 self.pending = step.work;
