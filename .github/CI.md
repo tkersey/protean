@@ -32,7 +32,7 @@ TigerStyle and still cannot pass the terminal gate.
 | --- | --- |
 | `authoring` | Source inventory, `check-protean` and `check-native-https`: authoring, model/value contracts, construction, compile-time rejection, helper integrity, adaptive asset emission, formatting, wire checks and the independent HTTPS endpoint. |
 | `owners` | All 46 retained native task/response/model-custody owner tests, including their participant imports. |
-| `owner-adaptive-control` | Nineteen adaptive owner tests across four independent processes: existing controls/recovery, projection resource failures, current/profile/delegated bindings, and constructed succession. |
+| `owner-adaptive-control` | Nineteen adaptive owner tests across five independent processes: existing controls/recovery, projection resource failures, current/profile/delegated bindings, constructed succession, and delegated-answer ancestry. |
 | `owner-projection-repair` | The executable projection repair/restart witness. |
 | `owner-projection-boundaries` | The two projection authenticity and receipt/archive tests. |
 | `owner-support` | Native unit/context and process-crash recovery checks. |
@@ -45,9 +45,9 @@ TigerStyle and still cannot pass the terminal gate.
 | `downstream` | Independently acquire, authenticate, package, build, install and execute the public `addNativeSystem` consumer; reject altered Horos and Kosmos inputs. |
 
 The three adaptive lanes execute the same twenty-two-test artifact. Each validates
-the complete six-group partition before selecting its assigned groups; their
+the complete seven-group partition before selecting its assigned groups; their
 disjoint selections cover all twenty-two tests exactly once. Local qualification
-executes all six groups together. Separating the long repair and authenticity
+executes all seven groups together. Separating the long repair and authenticity
 checks gives them independent runners without removing assertions or cases.
 
 The repair's original construction, comparison, selection and restart run through

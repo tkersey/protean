@@ -7,10 +7,10 @@ const adaptive_owner_groups = [_][]const []const u8{
     &.{
         "projection required-current",
         "projection selection rechecks",
-        "delegated projection",
-        "delegated ordinary",
+        "delegated projection binds",
     },
     &.{"constructed successor rejects"},
+    &.{ "delegated ordinary", "delegated projection answer" },
 };
 const workspace_execution_groups = [_][]const []const u8{
     &.{"CTX-01"},
