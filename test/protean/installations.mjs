@@ -19,7 +19,7 @@ const deadline = process.platform === 'linux' ? performance.now() + 540_000 : nu
 const zig = realpathSync(process.env.PROTEAN_ZIG_EXE ?? execFileSync('which', ['zig'], {encoding: 'utf8'}).trim());
 const description = execFileSync(zig, ['env'], {encoding: 'utf8'});
 const library = realpathSync(JSON.parse(description.match(/^\s*\.lib_dir = (".*"),$/m)?.[1] ?? 'null'));
-assert.equal(execFileSync(zig, ['version'], {encoding: 'utf8'}).trim(), '0.17.0');
+assert.equal(execFileSync(zig, ['version'], {encoding: 'utf8'}).trim(), '0.17.1');
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'Protean downstream ü ')));
 const cache = resolve(process.env.ZIG_GLOBAL_CACHE_DIR ?? join(scratch, 'global-cache'));
 const local = join(cache, 'downstream-local');

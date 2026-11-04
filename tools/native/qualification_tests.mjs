@@ -50,7 +50,7 @@ function client() {
     return next.value.body;
   }
   async function metadata() {
-    assert.equal((await receive(0)).toString(), '0.17.0');
+    assert.equal((await receive(0)).toString(), '0.17.1');
     await send(4);
     const body = await receive(3);
     const stringBytes = body.readUInt32LE(0), count = body.readUInt32LE(4);

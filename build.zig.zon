@@ -3,11 +3,11 @@
     .version = "9.0.0",
     .dependencies = .{
         .horos = .{
-            .url = "git+https://github.com/tkersey/horos#a541cbe0ebd142f35b4cecc0774aea983541f972",
-            .hash = "horos-8.0.0-flclaIItVgCRBCbUEysErcsQyVqsukGf2Q8X2is_wRuU",
+            .url = "git+https://github.com/tkersey/horos#fbbc83e6e5ad4c4f92081c811148ba9ee6b1e014",
+            .hash = "horos-8.0.0-flclaIItVgDcvEsGli63_QQ_OykDT6dVbRvtdijaJiyZ",
         },
     },
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig_version = "0.17.1",
     .paths = .{
         "LICENSE",                               "README.md",                                   "build.zig",        "build_protean.zig",        "build_native.zig",         "build.zig.zon",
         "src",                                   "runtime/native",                              "tools/native",     "tools/check_zig_paths.sh", "repo_zig_paths.txt",       "examples/adaptive",

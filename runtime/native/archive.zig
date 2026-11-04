@@ -1161,10 +1161,11 @@ const Inspection = struct {
             try self.store.object(self.a, occurrence_ref, null),
         );
         defer pending.deinit();
-        if (pending.value.residual == null) self.last_nonterminal_revision = @max(
-            self.last_nonterminal_revision,
-            receipt.revision,
-        );
+        if (pending.value.work == null and pending.value.residual == null)
+            self.last_nonterminal_revision = @max(
+                self.last_nonterminal_revision,
+                receipt.revision,
+            );
     }
     fn inspectEvents(self: *Inspection) !void {
         var root_history: state.RootHistory = .init(self.value);
@@ -1257,7 +1258,7 @@ const Inspection = struct {
                     try self.store.object(self.a, occurrence_ref, null),
                 );
                 defer pending.deinit();
-                if (pending.value.residual == null) {
+                if (pending.value.work == null and pending.value.residual == null) {
                     if (self.terminal != null) return error.InvalidArchive;
                     self.nonterminal_event = true;
                 }

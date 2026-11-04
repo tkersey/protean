@@ -43,7 +43,7 @@ jobs:
           persist-credentials: false
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
-          version: '0.17.0'
+          version: '0.17.1'
           mirror: https://zigmirror.com
           use-cache: false
           use-tool-cache: true
@@ -59,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'authoring' && '[{"lane":"authoring"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'downstream' && '[{"lane":"downstream"}]' || '[{"lane":"authoring"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control","adaptive_groups":"[0,2,4,5]","adaptive_tests":17,"adaptive_group_count":4},{"lane":"owner-projection-repair","compiled_profile":"owner-adaptive-control","adaptive_groups":"[1]","adaptive_tests":1,"adaptive_group_count":1},{"lane":"owner-projection-boundaries","compiled_profile":"owner-adaptive-control","adaptive_groups":"[3]","adaptive_tests":2,"adaptive_group_count":1},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"correspondence"},{"lane":"native","compiled_profile":"product"},{"lane":"native-placement","product_consumer":true},{"lane":"downstream"}]') }}
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'authoring' && '[{"lane":"authoring"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'downstream' && '[{"lane":"downstream"}]' || '[{"lane":"authoring"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control","adaptive_groups":"[0,2,4,5]","adaptive_tests":19,"adaptive_group_count":4},{"lane":"owner-projection-repair","compiled_profile":"owner-adaptive-control","adaptive_groups":"[1]","adaptive_tests":1,"adaptive_group_count":1},{"lane":"owner-projection-boundaries","compiled_profile":"owner-adaptive-control","adaptive_groups":"[3]","adaptive_tests":2,"adaptive_group_count":1},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"correspondence"},{"lane":"native","compiled_profile":"product"},{"lane":"native-placement","product_consumer":true},{"lane":"downstream"}]') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -75,7 +75,7 @@ jobs:
       - if: ${{ !matrix.product_consumer }}
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: '0.17.0'
+          version: '0.17.1'
           mirror: https://zigmirror.com
           use-tool-cache: true
           use-cache: false
@@ -125,11 +125,11 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .zig-cache-upload
-          key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
-            ${{ matrix.lane != 'authoring' && format('zig-adaptive-v3-{0}-{1}-0.17.0-{2}-', runner.os, runner.arch, matrix.lane) || '' }}
-            ${{ matrix.lane != 'authoring' && format('zig-adaptive-v3-{0}-{1}-0.17.0-', runner.os, runner.arch) || '' }}
+            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-
+            ${{ matrix.lane != 'authoring' && format('zig-adaptive-v3-{0}-{1}-0.17.1-{2}-', runner.os, runner.arch, matrix.lane) || '' }}
+            ${{ matrix.lane != 'authoring' && format('zig-adaptive-v3-{0}-{1}-0.17.1-', runner.os, runner.arch) || '' }}
       - name: Prepare compiler scratch and native isolation tools
         run: |
           if [ -d .zig-cache-upload ]; then
@@ -231,7 +231,7 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .zig-cache-upload
-          key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Run retained qualification
         run: |
           set -o pipefail
@@ -249,9 +249,9 @@ jobs:
             log="$RUNNER_TEMP/native-owner-adaptive-tests.log"
             /usr/bin/time -v node tools/native/qualification_tests.mjs \
               "$RUNNER_TEMP/protean-qualification/verification/native-owner-adaptive" \
-              '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests.","projection_late_recovery."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection"],["constructed successor rejects"]]' \
+              '[["adaptive_controls.","adaptive_reports.","adaptive_recovery."],["projection_recovery."],["projection_failure_tests.","projection_late_recovery."],["projection owner authenticates","projection receipts preserve"],["projection required-current","projection selection rechecks","delegated projection","delegated ordinary"],["constructed successor rejects"]]' \
               '${{ matrix.adaptive_groups }}' 2>&1 | tee "$log"
-            grep -Fxq '${{ matrix.adaptive_tests }}/${{ matrix.adaptive_tests }} tests passed across ${{ matrix.adaptive_group_count }} independent groups (20 tests in complete inventory).' "$log"
+            grep -Fxq '${{ matrix.adaptive_tests }}/${{ matrix.adaptive_tests }} tests passed across ${{ matrix.adaptive_group_count }} independent groups (22 tests in complete inventory).' "$log"
           elif [ "${{ matrix.lane }}" = owner-support ]; then
             zig build check-native-owner-support -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = workspace ]; then
@@ -368,7 +368,7 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .zig-cache-upload
-          key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
   native:
     name: native
     needs: [qualify, tiger-style]

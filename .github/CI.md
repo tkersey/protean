@@ -9,7 +9,7 @@ thirteen qualification lanes and TigerStyle to succeed. A failed warmup followed
 retry does not satisfy this requirement.
 
 Pull requests and main pushes run the same inventory on native Linux x86-64 with
-exact Zig 0.17.0 and safe optimization. Complete manual dispatches provide
+exact Zig 0.17.1 and safe optimization. Complete manual dispatches provide
 supplemental evidence; they do not replace the original automatic PR run.
 Selective `authoring`, `owners`, `downstream` and `retained-runtime` dispatches
 are diagnostic and cannot pass the terminal qualification gate. The retained-runtime
@@ -32,7 +32,7 @@ TigerStyle and still cannot pass the terminal gate.
 | --- | --- |
 | `authoring` | Source inventory, `check-protean` and `check-native-https`: authoring, model/value contracts, construction, compile-time rejection, helper integrity, adaptive asset emission, formatting, wire checks and the independent HTTPS endpoint. |
 | `owners` | All 46 retained native task/response/model-custody owner tests, including their participant imports. |
-| `owner-adaptive-control` | Seventeen adaptive owner tests across four independent processes: existing controls/recovery, projection resource failures, current/profile/delegated bindings, and constructed succession. |
+| `owner-adaptive-control` | Nineteen adaptive owner tests across four independent processes: existing controls/recovery, projection resource failures, current/profile/delegated bindings, and constructed succession. |
 | `owner-projection-repair` | The executable projection repair/restart witness. |
 | `owner-projection-boundaries` | The two projection authenticity and receipt/archive tests. |
 | `owner-support` | Native unit/context and process-crash recovery checks. |
@@ -44,9 +44,9 @@ TigerStyle and still cannot pass the terminal gate.
 | `native-placement` | Execute the same current-run packaged binary through authenticated transfer, reopen, refusal and duplicate-acceptance checks. |
 | `downstream` | Independently acquire, authenticate, package, build, install and execute the public `addNativeSystem` consumer; reject altered Horos and Kosmos inputs. |
 
-The three adaptive lanes execute the same twenty-test artifact. Each validates
+The three adaptive lanes execute the same twenty-two-test artifact. Each validates
 the complete six-group partition before selecting its assigned groups; their
-disjoint selections cover all twenty tests exactly once. Local qualification
+disjoint selections cover all twenty-two tests exactly once. Local qualification
 executes all six groups together. Separating the long repair and authenticity
 checks gives them independent runners without removing assertions or cases.
 

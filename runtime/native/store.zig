@@ -314,7 +314,86 @@ pub const Store = struct {
             !std.meta.eql(view.value.artifact.digest, id) or
             !std.meta.eql(digest(actual), id) or actual.len != view.value.artifact.bytes)
             return error.InvalidProjection;
+        if (scope.binding.consumer_cut) |cut|
+            try scope.store.requireViewAt(
+                a,
+                scope.binding.task,
+                view.value.artifact,
+                cut.event_watermark,
+            );
         return view;
+    }
+
+    fn requireViewAt(
+        self: *Store,
+        a: std.mem.Allocator,
+        task: state.TaskId,
+        view: state.Reference,
+        at: u64,
+    ) !void {
+        const w = @import("workspace_state.zig");
+        var query = try self.database.prepare(
+            "SELECT e.seq,o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+                "WHERE e.task=? AND e.seq<=? ORDER BY e.seq DESC",
+            &.{ .{ .blob = &task }, .{
+                .integer = std.math.cast(i64, at) orelse return error.InvalidState,
+            } },
+        );
+        defer query.deinit();
+        while (try query.step() == .row) {
+            var event = try contracts.decodeOwned(state.Event, a, try query.bytes(1));
+            defer event.deinit();
+            const sequence = std.math.cast(u64, try query.integer(0)) orelse
+                return error.CorruptState;
+            if (!std.meta.eql(event.value.task, task) or
+                event.value.seq != sequence) return error.CorruptState;
+            if (event.value.kind != .workspace) continue;
+            const command_ref = event.value.workspace_command orelse return error.CorruptState;
+            const bytes = try self.object(a, command_ref, null);
+            defer a.free(bytes);
+            var command = try contracts.decodeOwned(w.PublicationCommand, a, bytes);
+            defer command.deinit();
+            if (try self.publishesView(a, event.value, command.value, view)) return;
+        }
+        return error.ProjectionUnavailable;
+    }
+
+    fn publishesView(
+        self: *Store,
+        a: std.mem.Allocator,
+        event: state.Event,
+        command: @import("workspace_state.zig").PublicationCommand,
+        view: state.Reference,
+    ) !bool {
+        const w = @import("workspace_state.zig");
+        const wp = @import("workspace_projection.zig");
+        if (command == .context and command.context.command == .select) {
+            var data = try @import("json.zig").parse(a, event.data.bytes, .{});
+            defer data.deinit();
+            const id = try @import("json.zig").text(
+                @import("json.zig").get(data.value, "workspace_id") orelse
+                    return error.CorruptState,
+            );
+            return std.meta.eql(view.digest, try wp.identity(.{
+                .kind = .view,
+                .id = .{ .bytes = id },
+            }, .view));
+        }
+        if (command != .delegate) return false;
+        for (event.workspace_publications.items) |publication| {
+            var observed = try self.publicationObservation(a, event.task, publication, event.seq);
+            defer observed.deinit();
+            const ref = observed.value.work.delegation orelse continue;
+            const bytes = try self.object(a, ref, null);
+            defer a.free(bytes);
+            var delegation = try contracts.decodeOwned(w.Delegation, a, bytes);
+            defer delegation.deinit();
+            if (!std.meta.eql(delegation.value.task, event.task) or
+                !std.meta.eql(delegation.value.instrument, observed.value.work.id))
+                return error.CorruptState;
+            if (std.meta.eql(delegation.value.context, @as(?state.Reference, view))) return true;
+        }
+        return false;
     }
 
     fn projectionScope(source: ?*anyopaque) !?*ProjectionScope {

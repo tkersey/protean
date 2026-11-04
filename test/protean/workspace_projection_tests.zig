@@ -838,7 +838,12 @@ test "projection selection rechecks the actual protected inference profile" {
     try rejectAction(&f, projected.result, "StaleConsumer");
 }
 
-fn delegatedCapture(f: *Fixture, pending: Pending, result: wc.Ref) !void {
+fn delegatedCapture(
+    f: *Fixture,
+    pending: Pending,
+    selection: ?wc.Selection,
+    inputs: []const wc.Ref,
+) !wc.Ref {
     try f.send(.{ .work = .{ .command = .{ .delegate = .{
         .expected = pending.expected,
         .policy = .{ .stop = .terminal, .continuation = .owner_scheduled },
@@ -848,7 +853,8 @@ fn delegatedCapture(f: *Fixture, pending: Pending, result: wc.Ref) !void {
             .profile_id = .{ .bytes = "analysis" },
             .effort = .{ .bytes = "medium" },
             .subproblem = .{ .bytes = "Return true after inspecting the missing-input aggregate." },
-            .context = .{ .projected = result },
+            .context = selection,
+            .inputs = .{ .items = inputs },
         } },
     } } } });
     for (0..16384) |_| {
@@ -870,12 +876,51 @@ fn delegatedCapture(f: *Fixture, pending: Pending, result: wc.Ref) !void {
             step.work.prepared.?,
         );
         defer prepared.deinit();
-        try std.testing.expect(prepared.value.selected_view != null);
-        try assertRenderedAggregate(f, prepared.value.body.bytes, result);
-        try f.service.completeWork(f.permanent, step.work, .not_sent);
-        return;
+        try std.testing.expectEqual(selection != null, prepared.value.selected_view != null);
+        if (selection) |selected| if (selected == .projected)
+            try assertRenderedAggregate(f, prepared.value.body.bytes, selected.projected);
+        try settleDelegatedAnswer(f, step.work);
+        var child = try f.service.workspaceWork(f.permanent, f.task, step.work.subject_work.?);
+        defer child.deinit();
+        const answer = child.value.answer_value orelse return error.MissingDelegatedAnswer;
+        return support.workspaceRef(f.permanent, .value, answer.digest);
     }
     return error.ProjectedDelegationDidNotArrive;
+}
+
+fn settleDelegatedAnswer(f: *Fixture, work: native.tasks.Work) !void {
+    const body = try std.json.Stringify.valueAlloc(f.permanent, .{
+        .status = "completed",
+        .@"error" = @as(?u8, null),
+        .usage = .{ .input_tokens = 7, .output_tokens = 3, .total_tokens = 10 },
+        .output = .{.{
+            .type = "function_call",
+            .status = "completed",
+            .call_id = "delegated-projection-answer",
+            .name = "answer",
+            .arguments = "{\"json_value\":\"true\"}",
+        }},
+    }, .{});
+    const raw = try contracts.encodeOwned(native.responses.Raw, f.permanent, .{
+        .status = 200,
+        .identity_encoding = true,
+        .request_id = null,
+        .body = .{ .bytes = body },
+    });
+    try f.service.acquire(f.permanent, work, raw);
+    try f.next();
+    try f.service.completeWork(f.permanent, f.pending, .not_sent);
+}
+
+fn assertAnswerSources(f: *Fixture, answer: wc.Ref, sources: []const wc.Ref) !void {
+    const value = try f.value(answer);
+    try std.testing.expectEqual(.judgment, value.derivation.kind);
+    try std.testing.expectEqual(sources.len, value.derivation.sources.items.len);
+    for (sources, value.derivation.sources.items) |source_ref, actual| {
+        const expected = try f.value(source_ref);
+        try std.testing.expectEqualDeep(expected.artifact, actual);
+    }
+    try std.testing.expect(try f.decode(bool, answer));
 }
 
 fn waitForDelegation(f: *Fixture, pending: Pending) !void {
@@ -966,8 +1011,84 @@ test "delegated projection binds the actual port and reaches its protected model
         "StaleConsumer",
         reply.object.get("observation").?.object.get("error").?.string,
     );
-    try delegatedCapture(&f, pending, projected.result);
+    const answer = try delegatedCapture(&f, pending, .{ .projected = projected.result }, &.{});
+    try assertAnswerSources(&f, answer, &.{projected.result});
+    const computed = try f.value(projected.result);
+    try std.testing.expectEqual(.computation, computed.derivation.kind);
+    try std.testing.expect(computed.derivation.sources.items.len != 0);
     try consumerArchiveBaseline(&f);
+    try assertAnswerSources(&f, answer, &.{projected.result});
+}
+
+fn delegationEvidence(f: *Fixture) !wc.Ref {
+    return f.ref(try f.perform(.{ .context = .{ .command = .{ .materialize = .{
+        .input = .{ .snapshot = .{
+            .path = .{ .bytes = "domain.json" },
+            .offset = 0,
+            .maximum = 4096,
+        } },
+        .sources = .{ .items = &.{} },
+    } } } }), "value");
+}
+
+test "delegated ordinary selection and legacy inputs preserve answer ancestry multiplicity" {
+    for ([_]bool{ false, true }) |legacy| {
+        var f: Fixture = undefined;
+        try f.init();
+        defer f.deinit();
+        const pending = try pendingQuestion(&f);
+        const evidence = try delegationEvidence(&f);
+        const sources = [_]wc.Ref{ evidence, evidence };
+        const answer = try delegatedCapture(
+            &f,
+            pending,
+            if (legacy) null else .{ .values = .{ .items = &sources } },
+            if (legacy) &sources else &.{},
+        );
+        try assertAnswerSources(&f, answer, &sources);
+        try consumerArchiveBaseline(&f);
+        try assertAnswerSources(&f, answer, &sources);
+        try std.testing.expectEqual(.acquisition, (try f.value(evidence)).derivation.kind);
+    }
+}
+
+test "delegated projection answer preserves repeated presentation and computation ancestry" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const pending = try pendingQuestion(&f);
+    const evidence = try delegationEvidence(&f);
+    const program = try build(&f, .presented);
+    const consumer = try observe(&f, .{ .model = .{
+        .expected = pending.expected,
+        .port = pending.port,
+        .generation = pending.generation,
+        .profile_id = .{ .bytes = "analysis" },
+        .effort = .{ .bytes = "medium" },
+    } }, &.{});
+    const projected = try projectBlocks(&f, program, consumer, &.{
+        .{ .value = evidence },
+        .{ .computed = .{} },
+        .{ .value = evidence },
+    }, &.{evidence});
+    const answer = try delegatedCapture(&f, pending, .{ .projected = projected.result }, &.{});
+    const sources = [_]wc.Ref{ projected.result, evidence, evidence };
+    try assertAnswerSources(&f, answer, &sources);
+    try consumerArchiveBaseline(&f);
+    try assertAnswerSources(&f, answer, &sources);
+    const computed = try f.value(projected.result);
+    try std.testing.expectEqual(.computation, computed.derivation.kind);
+    const input = try support.workspaceRef(
+        f.permanent,
+        .value,
+        computed.derivation.sources.items[0].digest,
+    );
+    const origin = try f.value(input);
+    try std.testing.expectEqual(.judgment, origin.derivation.kind);
+    try std.testing.expectEqualDeep(
+        (try f.value(evidence)).artifact,
+        origin.derivation.sources.items[0],
+    );
 }
 
 fn successorConverter(a: std.mem.Allocator) ![]u8 {

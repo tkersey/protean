@@ -207,6 +207,35 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             );
             return ref;
         }
+        pub fn delegatedAnswerSources(
+            self: *Self,
+            a: std.mem.Allocator,
+            delegation: workspace.Delegation,
+        ) ![]state.Reference {
+            const context = delegation.context orelse
+                return a.dupe(state.Reference, delegation.inputs.items);
+            const key = try workspaceContentCustody(a, delegation.task, context.digest);
+            var saved = try record(self, workspace.View, a, "workspace_view", key, delegation.task);
+            defer saved.deinit();
+            if (!std.meta.eql(saved.value.id, key) or
+                !std.meta.eql(saved.value.task, delegation.task) or
+                !std.meta.eql(saved.value.artifact, context) or
+                saved.value.description.version != 1) return error.CorruptState;
+            const encoded =
+                try contracts.encodeOwned(workspace.ViewArtifact, a, saved.value.description);
+            defer a.free(encoded);
+            const retained = try store(self).object(a, context, null);
+            defer a.free(retained);
+            if (!same(encoded, retained)) return error.CorruptState;
+            const view = saved.value.description;
+            const projection = view.projection orelse
+                return a.dupe(state.Reference, view.values.items);
+            const count = try std.math.add(usize, projection.values.items.len, 1);
+            const sources = try a.alloc(state.Reference, count);
+            sources[0] = projection.result;
+            @memcpy(sources[1..], projection.values.items);
+            return sources;
+        }
         fn materializeSemanticContext(
             self: *Self,
             a: std.mem.Allocator,

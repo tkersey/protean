@@ -18,7 +18,7 @@ interpret a recipe or run a second application policy loop.
 
 ## Build and run
 
-Use Zig **0.17.0**, `tar`, and `unzip`. Approved source archives and SQLite are
+Use Zig **0.17.1**, `tar`, and `unzip`. Approved source archives and SQLite are
 acquired and authenticated by a Zig bootstrap; Node and Python are not needed.
 From this checkout:
 

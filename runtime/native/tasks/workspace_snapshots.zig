@@ -743,6 +743,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     .digest = storage.digest(output.answer.bytes),
                     .bytes = output.answer.bytes.len,
                 })) return error.InvalidArchive;
+            const sources = try Contexts.delegatedAnswerSources(self, a, delegation.value);
+            defer a.free(sources);
             const expected: workspace.Derivation = switch (delegation.value.selection) {
                 .snapshot => |selected| .{
                     .kind = .acquisition,
@@ -761,7 +763,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     defer capture_value.deinit();
                     break :blk .{
                         .kind = .judgment,
-                        .sources = delegation.value.inputs,
+                        .sources = .{ .items = sources },
                         .work = child.id,
                         .delegation = delegation_ref,
                         .capture = capture_value.value.response orelse return error.InvalidArchive,

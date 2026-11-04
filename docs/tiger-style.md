@@ -82,7 +82,7 @@ Keep build inputs tracked so cached builds observe changed source.
 
 `tools/tiger-style.sh` acquires the immutable skills-zig auditor used by Horos
 and runs its self-tests. It is a development dependency outside the runtime
-package dependency graph. Git, Bash and exact Zig 0.17.0 are required.
+package dependency graph. Git, Bash and exact Zig 0.17.1 are required.
 
 From a clean committed checkout, run:
 

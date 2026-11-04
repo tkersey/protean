@@ -186,6 +186,11 @@ or an empty selection does not establish absence over the original domain.
 Admission establishes structural permission to use a presentation, not its truth
 or adequacy for the task.
 
+Delegated model answers retain judgment provenance from the context actually
+selected: ordinary values, or the projector result and its selected values.
+The projector result retains its computation inputs. Ordered and repeated
+sources remain visible through answer inspection and archive recovery.
+
 Preparation rechecks the consumer and renders the selected data together with
 protected user/policy material, skills, action declarations and the causal suffix.
 The final serialized request is budget checked. Each immutable preparation links
@@ -193,7 +198,9 @@ to its selected view, which retains the actual result, work, program, input and
 consumer observation. View publication and request preparation remain distinct
 events. Each preparation retains its event cut and exact attempt; response
 interpretation and archive validation reconstruct the applicability decision at
-that cut. Missing preparation evidence makes an archive inadmissible. Fresh
+that cut, including whether a selection or delegation had published the view.
+Publishing the same view later cannot change an earlier unavailable-context
+rejection. Missing preparation evidence makes an archive inadmissible. Fresh
 operations check their own current cut. Replay returns its historical receipt
 without selecting or dispatching again. `context.expand` exposes scoped proposal
 and provenance observations; private provider captures remain private.

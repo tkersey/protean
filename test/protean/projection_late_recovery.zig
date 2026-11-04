@@ -199,7 +199,11 @@ fn rejectForgedDiagnostic(f: *Fixture, rejected: Rejected) !void {
     try std.testing.expectError(error.InvalidArchive, validateArchive(f));
 }
 
-fn importRejected(f: *Fixture) !void {
+fn importRejected(f: *Fixture, historical: ?struct {
+    missing: HistoricalPreparation,
+    available: HistoricalPreparation,
+    prepared: []const u8,
+}) !void {
     const archive = try std.fmt.allocPrint(f.permanent, "{s}/late.agnx", .{f.directory});
     _ = try f.service.exportCheckpoint(f.permanent, f.task, archive);
     try f.service.close(f.a);
@@ -229,6 +233,10 @@ fn importRejected(f: *Fixture) !void {
         f.task,
         copied.revision,
     ));
+    if (historical) |request| {
+        try std.testing.expectError(error.ProjectionUnavailable, request.missing.prepare(f));
+        try std.testing.expectEqualSlices(u8, request.prepared, try request.available.prepare(f));
+    }
     try recovery.reopen(f);
 }
 
@@ -333,7 +341,97 @@ pub fn assertSuccessorFallback(f: *Fixture, selected: wc.Ref) !void {
     try requirePriorState(f, rejected);
 }
 
+const HistoricalPreparation = struct {
+    binding: native.registry.ProjectionBinding,
+    adapter: native.registry.CaptureAdapter,
+    payload: []const u8,
+
+    pub fn run(self: @This(), context: native.registry.ProjectionContext) ![]u8 {
+        return self.adapter.prepare(context, self.payload);
+    }
+
+    fn prepare(self: @This(), f: *Fixture) ![]u8 {
+        return f.namespace.store.project([]u8, f.permanent, f.handlers, self.binding, self);
+    }
+};
+
+fn historicalPreparation(f: *Fixture, view: wc.Ref) !HistoricalPreparation {
+    const task = (try f.service.task(f.permanent, f.task)).value;
+    var request = f.prepared.request;
+    request.plan.epoch += 1;
+    request.plan.reason = .view_change;
+    request.plan.research = .{ .view = view, .selected_at = request.plan.watermark };
+    return .{
+        .adapter = f.pending.entry.declaration.capture.?,
+        .payload = try contracts.encodeOwned(t.P.AdaptiveRequest, f.permanent, request),
+        .binding = .{
+            .task = f.task,
+            .tenant = f.profile.authority.tenant,
+            .profile = f.profile.bytes,
+            .application = f.application.image_identity,
+            .resources = task.resources.items,
+            .controller = f.pending.controller_projection,
+            .consumer_cut = .{
+                .event_watermark = task.event_high,
+                .controller = task.controller,
+                .controller_epoch = task.controller_epoch,
+                .next_message = task.next_message,
+            },
+        },
+    };
+}
+
+fn publishEmptyView(f: *Fixture, operation: []const u8, expected: wc.Ref) !void {
+    const published = try f.service.workspaceCommand(f.permanent, operation, f.task, .{
+        .context = .{ .select = .{ .values = .{ .items = &.{} } } },
+    });
+    try std.testing.expectEqual(.observed, published.disposition);
+    const observed = try native.json.parse(f.permanent, published.observation_json.bytes, .{});
+    const actual = try f.ref(observed.value, "view");
+    try std.testing.expectEqualDeep(try recovery.refId(expected), try recovery.refId(actual));
+}
+
+fn requireHistoricalAvailability() !void {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    _ = try f.consumer();
+    const bytes = try contracts.encodeOwned(native.workspace.ViewArtifact, f.permanent, .{
+        .values = .{ .items = &.{} },
+    });
+    var digest: ns.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    const view = try @import("workspace_test_support.zig").workspaceRef(
+        f.permanent,
+        .view,
+        digest,
+    );
+    const missing = try historicalPreparation(&f, view);
+    try std.testing.expectError(error.ProjectionUnavailable, missing.prepare(&f));
+    try publishEmptyView(&f, "historical-view-first", view);
+    try std.testing.expectError(error.ProjectionUnavailable, missing.prepare(&f));
+    var available = missing;
+    available.binding.consumer_cut.?.event_watermark =
+        (try f.service.task(f.permanent, f.task)).value.event_high;
+    const prepared = try available.prepare(&f);
+    try publishEmptyView(&f, "historical-view-duplicate", view);
+    try std.testing.expectEqualSlices(u8, prepared, try available.prepare(&f));
+    try std.testing.expectError(error.ProjectionUnavailable, missing.prepare(&f));
+    try f.service.completeWork(f.permanent, f.pending, .not_sent);
+    try importRejected(&f, .{
+        .missing = missing,
+        .available = available,
+        .prepared = prepared,
+    });
+    try std.testing.expectError(error.ProjectionUnavailable, missing.prepare(&f));
+    try std.testing.expectEqualSlices(u8, prepared, try available.prepare(&f));
+}
+
 test "late projected preparation rejection survives archive and recovers without dispatch charge" {
+    requireHistoricalAvailability() catch |err| {
+        std.debug.print("historical view availability: {s}\n", .{@errorName(err)});
+        return err;
+    };
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -344,7 +442,7 @@ test "late projected preparation rejection survives archive and recovers without
     try recovery.requireSibling(&f, sibling);
     try validateArchive(&f);
     try rejectForgedDiagnostic(&f, rejected);
-    try importRejected(&f);
+    try importRejected(&f, null);
     try f.next();
     try requireFallback(&f, rejected);
     try requirePriorState(&f, rejected);

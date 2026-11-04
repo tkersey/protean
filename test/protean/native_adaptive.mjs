@@ -52,7 +52,7 @@ try {
     assert.equal(unsupported.stderr, 'protean: unsupported state format; use a fresh state directory for this release\n');
   }
 
-  assert.equal(manifest.compiler.version, '0.17.0');
+  assert.equal(manifest.compiler.version, '0.17.1');
   assert.equal(manifest.artifact_sha256, createHash('sha256').update(readFileSync(app.executable)).digest('hex'));
   assert.equal(manifest.program_sha256, application.program_sha256);
   assert.equal(manifest.application_assets_sha256, createHash('sha256').update(readFileSync(process.argv[3])).digest('hex'));

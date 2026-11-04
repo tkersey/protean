@@ -39,7 +39,7 @@ pub fn ownerManifest(
         .program_identity = @as([]const u8, &identity_hex),
         .application_assets_sha256 = @as([]const u8, &assets_hex),
         .dependencies = .{ .world = "unit-kosmos", .boundary = "unit-horos" },
-        .compiler = .{ .version = "0.17.0" },
+        .compiler = .{ .version = "0.17.1" },
     }, .{});
 }
 

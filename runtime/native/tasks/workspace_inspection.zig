@@ -263,10 +263,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (delegation.value.selection != .model or !std.meta.eql(
                 delegation.value.instrument,
                 work.value.id,
-            ) or !std.meta.eql(delegation.value.task, task_id) or
-                origin.sources.items.len != delegation.value.inputs.items.len)
+            ) or !std.meta.eql(delegation.value.task, task_id))
                 return error.InvalidArchive;
-            for (origin.sources.items, delegation.value.inputs.items) |left, right|
+            const Contexts = @import("workspace_contexts.zig").Operations(Types, Self);
+            const sources = try Contexts.delegatedAnswerSources(self, a, delegation.value);
+            defer a.free(sources);
+            if (origin.sources.items.len != sources.len) return error.InvalidArchive;
+            for (origin.sources.items, sources) |left, right|
                 if (!std.meta.eql(left, right)) return error.InvalidArchive;
             try validateDelegatedAnswer(self, a, work.value, delegation.value, value);
             try validateDelegatedCapture(self, a, task_id, work.value, origin);

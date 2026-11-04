@@ -4,7 +4,12 @@ const adaptive_owner_groups = [_][]const []const u8{
     &.{"projection_recovery."},
     &.{ "projection_failure_tests.", "projection_late_recovery." },
     &.{ "projection owner authenticates", "projection receipts preserve" },
-    &.{ "projection required-current", "projection selection rechecks", "delegated projection" },
+    &.{
+        "projection required-current",
+        "projection selection rechecks",
+        "delegated projection",
+        "delegated ordinary",
+    },
     &.{"constructed successor rejects"},
 };
 const workspace_execution_groups = [_][]const []const u8{
@@ -127,8 +132,8 @@ const Graph = struct {
 
 pub fn build(b: *std.Build) void {
     comptime {
-        if (!std.mem.eql(u8, @import("builtin").zig_version_string, "0.17.0"))
-            @compileError("Zig 0.17.0 is required");
+        if (!std.mem.eql(u8, @import("builtin").zig_version_string, "0.17.1"))
+            @compileError("Zig 0.17.1 is required");
     }
     var graph: BuildGraph = .{ .b = b };
     graph.configure();
