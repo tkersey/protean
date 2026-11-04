@@ -918,7 +918,10 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                         try store(ctx.self).object(ctx.a, selected, null),
                     );
                     defer view.deinit();
-                    const Projections = @import("workspace_projections.zig").Operations(Types, Self);
+                    const Projections = @import("workspace_projections.zig").Operations(
+                        Types,
+                        Self,
+                    );
                     try Projections.published(
                         ctx.self,
                         ctx.a,
