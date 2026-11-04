@@ -112,6 +112,32 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             return .{ .arena = arena, .view = prepared.view, .consumer = prepared.consumer };
         }
 
+        pub fn published(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            view: workspace.ViewArtifact,
+            event: u64,
+        ) !void {
+            const selected = view.projection orelse return;
+            if (event == 0 or event > parent.event_high) return error.InvalidArchive;
+            var observed = try contracts.decodeOwned(
+                workspace.ReplyObservation,
+                a,
+                try store(self).object(a, selected.observation, null),
+            );
+            defer observed.deinit();
+            if (observed.value.evidence != .read or observed.value.evidence.read != .consumer)
+                return error.InvalidArchive;
+            try Consumers.applicableAt(
+                self,
+                a,
+                parent,
+                observed.value.evidence.read.consumer,
+                event - 1,
+            );
+        }
+
         fn projectionWork(
             self: *Self,
             a: std.mem.Allocator,

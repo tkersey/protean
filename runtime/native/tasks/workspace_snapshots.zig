@@ -682,6 +682,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     false,
                 );
                 defer admitted.deinit();
+                try admitted.requireModel(a, value.model);
                 const bytes = try contracts.encodeOwned(workspace.ViewArtifact, a, admitted.view);
                 defer a.free(bytes);
                 if (!std.meta.eql(value.context.?, state.Reference{

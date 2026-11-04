@@ -199,6 +199,10 @@ consumer observation. View publication and request preparation remain distinct
 events. Each preparation retains its event cut and exact attempt; response
 interpretation and archive validation reconstruct the applicability decision at
 that cut, including whether a selection or delegation had published the view.
+Archive admission also checks applicability immediately before every selection
+or delegation publication. An earlier valid selection cannot authorize later
+republication after an amendment or required-current change. Later changes do
+not invalidate a selection that was valid at its own publication cut.
 Publishing the same view later cannot change an earlier unavailable-context
 rejection. Missing preparation evidence makes an archive inadmissible. Fresh
 operations check their own current cut. Replay returns its historical receipt

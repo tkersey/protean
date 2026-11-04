@@ -12,6 +12,7 @@ const Commands = native.testing.workspace_commands.Operations(t, native.tasks.Se
 const Snapshots = native.testing.workspace_snapshots.Operations(t, native.tasks.Service(t));
 const Consumers = native.testing.workspace_consumers.Operations(t, native.tasks.Service(t));
 const Replay = native.testing.workspace_replay.Operations(t, native.tasks.Service(t));
+const Publication = native.testing.workspace_publication.Operations(t, native.tasks.Service(t));
 const Aggregate = struct { total: u64, missing: contracts.Vector(u64, null) };
 const Input = wc.ProjectionInput(Aggregate);
 const Result = wc.ProjectionResult(Aggregate);
@@ -315,6 +316,7 @@ fn unpublishedRetainedWork(f: *Fixture, retained: native.workspace.Work, revisio
 
 fn archiveProjection(
     f: *Fixture,
+    result: wc.Ref,
     projected: wc.Ref,
     prepared: []const u8,
     realized: RealizedProjector,
@@ -322,6 +324,7 @@ fn archiveProjection(
     try f.service.completeWork(f.permanent, f.pending, .not_sent);
     const path = try std.fmt.allocPrint(f.permanent, "{s}/projection.agnx", .{f.directory});
     _ = try f.service.exportCheckpoint(f.permanent, f.task, path);
+    try staleSelectionArchive(f, result, projected);
     try f.service.close(f.a);
     try f.namespace.close();
     f.live = false;
@@ -448,6 +451,104 @@ fn validateArchivePrepared(f: *Fixture, facts: anytype) !void {
     );
 }
 
+fn republishSelection(f: *Fixture, result: wc.Ref, selected: wc.Ref, id: []const u8) !void {
+    var parent = try f.service.task(f.permanent, f.task);
+    defer parent.deinit();
+    const key = try native.workspace.custodyId(f.permanent, f.task, try recovery.refId(selected));
+    const bytes = (try f.namespace.store.recordBytes(
+        f.permanent,
+        "workspace_view",
+        key,
+        f.task,
+    )) orelse return error.MissingProjectedView;
+    var view = try contracts.decodeOwned(native.workspace.View, f.permanent, bytes);
+    defer view.deinit();
+    const command: wc.Context = .{ .select = .{ .projected = result } };
+    const request = try contracts.encodeOwned(native.workspace.ContextRequest, f.permanent, .{
+        .task = f.task,
+        .command = command,
+        .snapshot = null,
+        .input = null,
+    });
+    var digest: native.testing.state.Digest = undefined;
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update("agent.native.operation.v1\x00");
+    hash.update(request);
+    hash.final(&digest);
+    try f.namespace.store.begin();
+    defer f.namespace.store.rollback();
+    _ = try Publication.workspaceCommit(
+        &f.service,
+        f.permanent,
+        parent.value,
+        id,
+        digest,
+        view.value.artifact.digest,
+        .view,
+        view.value.artifact,
+        .{ .context = .{ .command = command, .snapshot = null, .input = null } },
+    );
+}
+
+fn staleSelectionArchive(f: *Fixture, result: wc.Ref, selected: wc.Ref) !void {
+    try validateArchive(f);
+    try republishSelection(f, result, selected, "forged-stale-selection");
+    try std.testing.expectError(error.StaleConsumer, validateArchive(f));
+    const path = try std.fmt.allocPrint(f.permanent, "{s}/stale-selection.agnx", .{f.directory});
+    _ = try native.testing.archive.write(
+        f.a,
+        f.io,
+        &f.namespace.store,
+        f.task,
+        f.assets.manifest,
+        path,
+        f.namespace.directory,
+    );
+    try rejectSelectionImport(f, path);
+}
+
+fn rejectSelectionImport(f: *Fixture, path: []const u8) !void {
+    try f.service.close(f.a);
+    f.live = false;
+    cleanup("stale selection source namespace.close", f.namespace.close());
+    try rejectSelectionImportClosed(f, path);
+    f.namespace = try native.Namespace.open(f.a, f.io, f.path);
+    f.service = native.tasks.Service(t).init(
+        f.a,
+        f.io,
+        &f.namespace,
+        f.assets,
+        &f.application,
+        f.handlers,
+        f.profile,
+    ) catch |err| {
+        cleanup("stale selection reopened namespace.close", f.namespace.close());
+        return err;
+    };
+    f.live = true;
+}
+
+fn rejectSelectionImportClosed(f: *Fixture, path: []const u8) !void {
+    const destination = try std.fmt.allocPrint(f.permanent, "{s}/stale-import", .{f.directory});
+    var namespace = try native.Namespace.open(f.a, f.io, destination);
+    defer cleanup("stale selection namespace.close", namespace.close());
+    var service = try native.tasks.Service(t).init(
+        f.a,
+        f.io,
+        &namespace,
+        f.assets,
+        &f.application,
+        f.handlers,
+        f.profile,
+    );
+    defer cleanup("stale selection service.close", service.close(f.a));
+    try std.testing.expectError(
+        error.StaleConsumer,
+        service.importCheckpoint(f.permanent, "stale-selection-import", path),
+    );
+    try std.testing.expectError(error.UnknownTask, service.task(f.permanent, f.task));
+}
+
 fn resumeInference(f: *Fixture) !void {
     var parent = try f.service.task(f.permanent, f.task);
     defer parent.deinit();
@@ -541,6 +642,7 @@ test "projection receipts preserve exact requests and reject substituted archive
     const original_prepared = try f.permanent.dupe(u8, f.pending.prepared.?);
     const operation = try selectionOperation(&f, projected);
     try receiptReplay(&f, valid.result, projected, operation);
+    try republishSelection(&f, valid.result, projected, "current-selection-repeat");
     const realized = try realizeProjector(&f, valid);
     try f.service.completeWork(f.permanent, f.pending, .not_sent);
     try missingConsumerArchive(&f, consumer);
@@ -568,7 +670,7 @@ test "projection receipts preserve exact requests and reject substituted archive
     try rejected(try select(&f, "fresh-stale-selection", valid.result));
     try amendmentRecovery(&f);
     try assertForeignTask(&f, valid.result);
-    try archiveProjection(&f, projected, original_prepared, realized);
+    try archiveProjection(&f, valid.result, projected, original_prepared, realized);
 }
 
 const Pending = struct { expected: wc.Expected, port: wc.Ref, generation: u64 };
@@ -663,12 +765,18 @@ test "projection required-current work changes invalidate while unrelated progre
     const projected = try project(&f, program, projected_consumer);
     _ = try project(&f, program, projected_consumer);
     try assertPrepared(&f, projected.result);
+    const selected = try support.workspaceRef(
+        f.permanent,
+        .view,
+        f.prepared.selected_view.?.digest,
+    );
     _ = try f.perform(.{ .work = .{ .command = .{ .park = pending.expected } } });
     try rejectAction(&f, projected.result, "StaleConsumer");
     try consumerReadCuts(&f, original.evidence.read.consumer, model, pending.expected.work);
     try f.service.completeWork(f.permanent, f.pending, .not_sent);
     try consumerArchiveBaseline(&f);
     try consumerSelectionTamper(&f, original, replacement.evidence.read.consumer);
+    try staleSelectionArchive(&f, projected.result, selected);
 }
 
 fn consumerRecord(f: *Fixture, reference: wc.Ref) !native.workspace.ReplyObservation {
@@ -763,6 +871,7 @@ fn consumerArchiveBaseline(f: *Fixture) !void {
     f.live = false;
     const destination = try std.fmt.allocPrint(f.permanent, "{s}/consumer-import", .{f.directory});
     f.namespace = try native.Namespace.open(f.a, f.io, destination);
+    f.path = destination;
     f.service = native.tasks.Service(t).init(
         f.a,
         f.io,

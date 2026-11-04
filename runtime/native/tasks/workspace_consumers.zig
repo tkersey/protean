@@ -190,6 +190,23 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             }
         }
 
+        pub fn applicableAt(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            observed: workspace.ConsumerObservation,
+            at: u64,
+        ) !void {
+            const Control = @import("controller_state.zig").Operations(Types, Self);
+            if (at > parent.event_high) return error.InvalidArchive;
+            var historical = parent;
+            historical.controller = try Control.controllerAt(self, a, parent, at);
+            historical.controller_epoch = try Control.controllerEpochAt(self, a, parent, at);
+            historical.next_message = try Controller.controllerNextMessageAt(self, a, parent, at);
+            historical.event_high = at;
+            try store(self).requireConsumerAt(a, historical, observed, .publication);
+        }
+
         pub fn validateRead(
             self: *Self,
             a: std.mem.Allocator,

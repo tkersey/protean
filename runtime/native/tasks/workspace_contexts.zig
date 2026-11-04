@@ -71,7 +71,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .snapshot = snapshot,
                 .input = input,
             });
-            if (try replay(self, a, operation_id, request)) |prior| return prior;
+            if (try replay(self, a, operation_id, request)) |prior|
+                return replayContext(self, a, parent.value, command, consumer, prior);
             try requireCustody(self, a, task_id, null);
             if (workspaceParentStopped(self, parent.value)) return error.InvalidState;
             var compiler_facts: Compiler.CompilerFacts = .{ .allocator = self.allocator };
@@ -120,6 +121,30 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .{ .context = .{ .command = command, .snapshot = snapshot, .input = input } },
             );
         }
+        fn replayContext(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            command: wc.Context,
+            consumer: ?workspace.ConsumerInterface,
+            prior: Admission,
+        ) !Admission {
+            if (self.workspace_replay == null or command != .select or
+                command.select != .projected) return prior;
+            if (prior.receipt.workspace_kind != .view) return error.InvalidArchive;
+            var admitted = try Projections.restore(
+                self,
+                a,
+                parent,
+                command.select.projected,
+                .{ .controller = .{} },
+                prior.receipt.workspace_observation orelse return error.InvalidArchive,
+            );
+            defer admitted.deinit();
+            try admitted.requireController(consumer);
+            return prior;
+        }
+
         fn prepareSelectedContext(
             self: *Self,
             a: std.mem.Allocator,

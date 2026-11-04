@@ -433,24 +433,40 @@ pub const Store = struct {
         defer a.free(task_bytes);
         var parent = try contracts.decodeOwned(state.Task, a, task_bytes);
         defer parent.deinit();
-        if (cut.event_watermark > parent.value.event_high or
-            observed.controller.event_watermark > cut.event_watermark)
-            return error.StaleConsumer;
+        if (cut.event_watermark > parent.value.event_high) return error.StaleConsumer;
         parent.value.controller = cut.controller;
         parent.value.controller_epoch = cut.controller_epoch;
         parent.value.next_message = cut.next_message;
         parent.value.event_high = cut.event_watermark;
-        try observed.requireTask(parent.value);
-        if (observed.input_revision != try scope.store.userInputRevision(
+        try scope.store.requireConsumerAt(a, parent.value, observed, .preparation);
+    }
+
+    pub fn requireConsumerAt(
+        self: *Store,
+        a: std.mem.Allocator,
+        parent: state.Task,
+        observed: @import("workspace_state.zig").ConsumerObservation,
+        phase: enum { publication, preparation },
+    ) !void {
+        if (observed.controller.event_watermark > parent.event_high) return error.StaleConsumer;
+        try observed.requireTask(parent);
+        if (observed.input_revision != try self.userInputRevision(
             a,
-            saved.task,
-            parent.value.event_high,
+            parent.id,
+            parent.event_high,
         )) return error.StaleConsumer;
         for (observed.selection.required_current.items) |requirement|
-            try requireWorkAt(scope, a, saved.task, requirement, null, cut.event_watermark);
+            try self.requireWorkAt(a, parent.id, requirement, null, parent.event_high, true);
         if (observed.selection.target == .model) {
             const target = observed.selection.target.model;
-            try requireWorkAt(scope, a, saved.task, target.expected, target, cut.event_watermark);
+            try self.requireWorkAt(
+                a,
+                parent.id,
+                target.expected,
+                target,
+                parent.event_high,
+                phase == .publication,
+            );
         }
     }
 
@@ -473,21 +489,22 @@ pub const Store = struct {
     }
 
     fn requireWorkAt(
-        scope: *ProjectionScope,
+        self: *Store,
         a: std.mem.Allocator,
         task: state.TaskId,
         expected: contracts.workspace.Expected,
         target: ?@FieldType(contracts.workspace.ConsumerTarget, "model"),
         at: u64,
+        revisions: bool,
     ) !void {
         const wp = @import("workspace_projection.zig");
         const id = try wp.identity(expected.work, .work);
-        var observed = try scope.store.workObservationAt(a, task, id, at);
+        var observed = try self.workObservationAt(a, task, id, at);
         defer observed.deinit();
         const work = observed.value.work;
-        if (target == null and (work.execution_revision != expected.execution_revision or
+        if (revisions and (work.execution_revision != expected.execution_revision or
             work.control_revision != expected.control_revision)) return error.StaleConsumer;
-        if (target) |selected| try scope.store.requireObservedPort(a, observed.value, selected);
+        if (target) |selected| try self.requireObservedPort(a, observed.value, selected);
     }
 
     fn workObservationAt(
