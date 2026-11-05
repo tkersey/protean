@@ -1209,7 +1209,7 @@ const BuildGraph = struct {
             const tests = if (comptime std.mem.eql(u8, group[0], "adaptive"))
                 s.native_graph.testModuleGrouped(checks, suite, &adaptive_owner_groups, null)
             else
-                s.native_graph.testModule(checks, suite);
+                s.native_graph.testModuleGrouped(checks, suite, &.{&.{".test"}}, null);
             if (linuxX86(s.b.graph.host)) tests.use_llvm = false;
             s.b.step(
                 "build-native-owner-" ++ group[0] ++ "-check",

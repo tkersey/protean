@@ -129,6 +129,12 @@ repository**, including setup, compilation and retries. Terminate commands and
 descendants at that deadline and report unfinished verification as incomplete.
 This local allowance is separate from the original-trigger CI budget.
 
+Local task-owner qualification uses the existing protocol runner in one process,
+checking every test and its failure, skip, and leak status. The full workspace
+test artifact may compile concurrently from the start of that same shared window
+with `build-workspace-general-check`; the aggregate consumes the identical cached
+artifact and still executes every workspace test.
+
 The supported product platforms remain macOS arm64 and Linux x86-64 musl.
 Native macOS verification supplements the required Linux workflow; emulation or
 cross-compilation does not replace the native platform checks.
