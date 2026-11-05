@@ -121,6 +121,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         ) !void {
             const selected = view.projection orelse return;
             if (event == 0 or event > parent.event_high) return error.InvalidArchive;
+            var work = try contracts.decodeOwned(
+                workspace.Work,
+                a,
+                try store(self).object(a, selected.work, null),
+            );
+            defer work.deinit();
+            if (work.value.event_watermark >= event) return error.InvalidArchive;
             var observed = try contracts.decodeOwned(
                 workspace.ReplyObservation,
                 a,

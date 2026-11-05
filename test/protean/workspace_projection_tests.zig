@@ -23,6 +23,7 @@ const Presentation = struct {
 const PresentedInput = wc.ProjectionInput(Presentation);
 const Mode = enum { projected, wrong_schema, impure, presented };
 const aggregate: Aggregate = .{ .total = 73, .missing = .{ .items = &.{ 5, 11 } } };
+const earlier_selection = "before-projector-completion";
 
 fn source(a: std.mem.Allocator, mode: Mode) ![]u8 {
     var b = horos.source.Builder.init(a);
@@ -324,6 +325,7 @@ fn archiveProjection(
     try f.service.completeWork(f.permanent, f.pending, .not_sent);
     const path = try std.fmt.allocPrint(f.permanent, "{s}/projection.agnx", .{f.directory});
     _ = try f.service.exportCheckpoint(f.permanent, f.task, path);
+    try futureSelectionArchive(f, result, projected);
     try staleSelectionArchive(f, result, projected);
     try f.service.close(f.a);
     try f.namespace.close();
@@ -504,14 +506,14 @@ fn staleSelectionArchive(f: *Fixture, result: wc.Ref, selected: wc.Ref) !void {
         path,
         f.namespace.directory,
     );
-    try rejectSelectionImport(f, path);
+    try rejectSelectionImport(f, path, error.StaleConsumer);
 }
 
-fn rejectSelectionImport(f: *Fixture, path: []const u8) !void {
+fn rejectSelectionImport(f: *Fixture, path: []const u8, expected: anyerror) !void {
     try f.service.close(f.a);
     f.live = false;
     cleanup("stale selection source namespace.close", f.namespace.close());
-    try rejectSelectionImportClosed(f, path);
+    try rejectSelectionImportClosed(f, path, expected);
     f.namespace = try native.Namespace.open(f.a, f.io, f.path);
     f.service = native.tasks.Service(t).init(
         f.a,
@@ -528,7 +530,7 @@ fn rejectSelectionImport(f: *Fixture, path: []const u8) !void {
     f.live = true;
 }
 
-fn rejectSelectionImportClosed(f: *Fixture, path: []const u8) !void {
+fn rejectSelectionImportClosed(f: *Fixture, path: []const u8, expected: anyerror) !void {
     const destination = try std.fmt.allocPrint(f.permanent, "{s}/stale-import", .{f.directory});
     var namespace = try native.Namespace.open(f.a, f.io, destination);
     defer cleanup("stale selection namespace.close", namespace.close());
@@ -543,10 +545,145 @@ fn rejectSelectionImportClosed(f: *Fixture, path: []const u8) !void {
     );
     defer cleanup("stale selection service.close", service.close(f.a));
     try std.testing.expectError(
-        error.StaleConsumer,
+        expected,
         service.importCheckpoint(f.permanent, "stale-selection-import", path),
     );
     try std.testing.expectError(error.UnknownTask, service.task(f.permanent, f.task));
+}
+
+fn futureSelectionArchive(f: *Fixture, result: wc.Ref, selected: wc.Ref) !void {
+    const path = try std.fmt.allocPrint(f.permanent, "{s}/future-selection.agnx", .{f.directory});
+    var facts = try f.service.prepareWorkspaceValidation(f.task);
+    defer facts.deinit();
+    try validateArchivePrepared(f, &facts);
+    try f.namespace.store.begin();
+    defer if (f.live) f.namespace.store.rollback();
+    try replaceEarlierSelection(f, result, selected);
+    const validation_error: ?anyerror = if (validateArchivePrepared(f, &facts))
+        null
+    else |err|
+        err;
+    _ = try native.testing.archive.write(
+        f.a,
+        f.io,
+        &f.namespace.store,
+        f.task,
+        f.assets.manifest,
+        path,
+        f.namespace.directory,
+    );
+    f.namespace.store.rollback();
+    try validateArchivePrepared(f, &facts);
+    if (validation_error == null)
+        std.debug.print("future projector selection passed archive record validation\n", .{});
+    try rejectSelectionImport(f, path, error.InvalidArchive);
+    try std.testing.expectEqual(@as(?anyerror, error.InvalidArchive), validation_error);
+}
+
+fn replaceEarlierSelection(f: *Fixture, result: wc.Ref, selected: wc.Ref) !void {
+    const State = native.testing.state;
+    var operations = try f.namespace.store.database.prepare(
+        "SELECT p.id,o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?",
+        &.{.{ .blob = &f.task }},
+    );
+    defer operations.deinit();
+    while (try operations.step() == .row) {
+        var receipt = (try contracts.decodeOwned(
+            State.Receipt,
+            f.permanent,
+            try operations.bytes(1),
+        )).value;
+        if (!std.mem.eql(u8, receipt.client_operation_id.bytes, earlier_selection))
+            continue;
+        try std.testing.expectEqual(.view, receipt.workspace_kind.?);
+        receipt.workspace = try recovery.refId(selected);
+        receipt.workspace_observation = try f.namespace.store.objectReference(
+            receipt.workspace.?,
+            null,
+        );
+        const command: wc.Context = .{ .select = .{ .projected = result } };
+        const prior_request = receipt.request_digest;
+        const payload = try contracts.encodeOwned(native.workspace.ContextRequest, f.permanent, .{
+            .task = f.task,
+            .command = command,
+            .snapshot = null,
+            .input = null,
+        });
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update("agent.native.operation.v1\x00");
+        hash.update(payload);
+        hash.final(&receipt.request_digest);
+        try std.testing.expect(!std.meta.eql(prior_request, receipt.request_digest));
+        try replaceEarlierSelectionEvent(f, receipt, command);
+        const rewritten = try f.namespace.store.putObject(
+            try contracts.encodeOwned(State.Receipt, f.permanent, receipt),
+        );
+        try f.namespace.store.database.run(
+            "UPDATE operations SET request=?,receipt=? WHERE id=?",
+            &.{
+                .{ .blob = &receipt.request_digest },
+                .{ .blob = &rewritten.digest },
+                .{ .text = try operations.bytes(0) },
+            },
+        );
+        try std.testing.expectEqual(1, try f.namespace.store.database.changes());
+        return;
+    }
+    return error.EarlierSelectionMissing;
+}
+
+fn replaceEarlierSelectionEvent(
+    f: *Fixture,
+    receipt: native.testing.state.Receipt,
+    command: wc.Context,
+) !void {
+    const State = native.testing.state;
+    var events = try f.namespace.store.database.prepare(
+        "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+            "WHERE e.task=? AND e.revision=?",
+        &.{ .{ .blob = &f.task }, .{ .integer = @intCast(receipt.revision) } },
+    );
+    defer events.deinit();
+    try std.testing.expect(try events.step() == .row);
+    var event = (try contracts.decodeOwned(State.Event, f.permanent, try events.bytes(0))).value;
+    const view = try contracts.decodeOwned(
+        native.workspace.ViewArtifact,
+        f.permanent,
+        try f.namespace.store.object(f.permanent, receipt.workspace_observation.?, null),
+    );
+    const projection = view.value.projection.?;
+    const producer = try contracts.decodeOwned(
+        native.workspace.Work,
+        f.permanent,
+        try f.namespace.store.object(f.permanent, projection.work, null),
+    );
+    const observed = try contracts.decodeOwned(
+        native.workspace.ReplyObservation,
+        f.permanent,
+        try f.namespace.store.object(f.permanent, projection.observation, null),
+    );
+    const consumer_cut = observed.value.evidence.read.consumer.controller.event_watermark;
+    try std.testing.expect(event.seq > consumer_cut);
+    try std.testing.expect(event.seq <= producer.value.event_watermark);
+    try std.testing.expectEqual(.completed, producer.value.outcome_kind);
+    try std.testing.expectEqual(@as(usize, 0), event.workspace_publications.items.len);
+    event.workspace_command = try f.namespace.store.putObject(try contracts.encodeOwned(
+        native.workspace.PublicationCommand,
+        f.permanent,
+        .{ .context = .{ .command = command, .snapshot = null, .input = null } },
+    ));
+    event.data.bytes = try std.fmt.allocPrint(f.permanent, "{{\"workspace_id\":\"{s}\"}}", .{
+        std.fmt.bytesToHex(receipt.workspace.?, .lower),
+    });
+    const rewritten = try f.namespace.store.putObject(
+        try contracts.encodeOwned(State.Event, f.permanent, event),
+    );
+    try f.namespace.store.database.run("UPDATE events SET body=? WHERE task=? AND seq=?", &.{
+        .{ .blob = &rewritten.digest },
+        .{ .blob = &f.task },
+        .{ .integer = @intCast(event.seq) },
+    });
+    try std.testing.expectEqual(1, try f.namespace.store.database.changes());
 }
 
 fn resumeInference(f: *Fixture) !void {
@@ -632,6 +769,10 @@ test "projection receipts preserve exact requests and reject substituted archive
     defer f.deinit();
     const program = try build(&f, .projected);
     const consumer = try f.consumer();
+    const earlier = try f.service.workspaceCommand(f.permanent, earlier_selection, f.task, .{
+        .context = .{ .select = .{ .values = .{ .items = &.{} } } },
+    });
+    try std.testing.expectEqual(.observed, earlier.disposition);
     const valid = try project(&f, program, consumer);
     try assertPrepared(&f, valid.result);
     const projected = try support.workspaceRef(

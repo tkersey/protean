@@ -203,6 +203,8 @@ Archive admission also checks applicability immediately before every selection
 or delegation publication. An earlier valid selection cannot authorize later
 republication after an amendment or required-current change. Later changes do
 not invalidate a selection that was valid at its own publication cut.
+The retained completed projector snapshot must precede the selection or delegation
+publication. Completion later in the journal cannot validate an earlier selection.
 Publishing the same view later cannot change an earlier unavailable-context
 rejection. Missing preparation evidence makes an archive inadmissible. Fresh
 operations check their own current cut. Replay returns its historical receipt
