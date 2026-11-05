@@ -29,6 +29,11 @@ integrity epoch; generic readers validate on each projection. Every outstanding
 call requires its original result before continuing. Missing context rejects
 rather than triggering fresh inference.
 
+An explicitly selected workspace view must resolve through the task store before
+request preparation succeeds. A generic object reader cannot establish workspace
+custody; selecting a view through it returns an unavailable preparation rejection.
+Requests without a selected workspace view retain generic-reader support.
+
 Supported replay items are text messages, completed function calls/results,
 assistant messages with supported phase values, and reasoning items containing
 opaque encrypted continuation data. Unknown material fields, hosted tools,

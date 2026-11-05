@@ -45,7 +45,8 @@ fn renderIn(
     target: Target,
     maximum: ?u64,
 ) !Rendered {
-    var view = (try ctx.objects.workspaceView(ctx.allocator, reference)) orelse return .{};
+    var view = (try ctx.objects.workspaceView(ctx.allocator, reference)) orelse
+        return error.ProjectionUnavailable;
     defer view.deinit();
     var remaining = maximum;
     var text: std.ArrayList(u8) = .empty;

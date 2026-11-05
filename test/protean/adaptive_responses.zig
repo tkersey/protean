@@ -32,10 +32,14 @@ fn TestProfile(comptime control_answer: bool) type {
 const Ref = model.ArtifactReference;
 const Objects = struct {
     items: std.ArrayList([]const u8) = .empty,
+    ns: ?*native.Namespace = null,
+    view: contracts.workspace.Ref = undefined,
+    selected_artifact: Ref = undefined,
     denied: ?[32]u8 = null,
     reads: usize = 0,
     read_bytes: usize = 0,
     fn add(self: *Objects, a: std.mem.Allocator, bytes: []const u8) !Ref {
+        if (self.ns) |ns| _ = try ns.store.putObject(bytes);
         try self.items.append(a, bytes);
         return .{ .digest = digest(bytes), .bytes = bytes.len };
     }
@@ -82,6 +86,41 @@ fn Fixture(comptime P: type) type {
     return struct {
         const Adapter = native.adaptive_responses.Adapter(P);
         const Admission = native.adaptive_responses.Admission(P);
+        fn unavailableSelection(scenario: *Preservation) !void {
+            const a = scenario.a;
+            var request = scenario.request;
+            request.plan.epoch += 1;
+            request.plan.reason = .view_change;
+            request.plan.research = .{
+                .view = .{ .kind = .view, .id = .{
+                    .bytes = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                } },
+                .selected_at = request.plan.watermark,
+            };
+            const payload = try contracts.encodeOwned(P.AdaptiveRequest, a, request);
+            try std.testing.expectError(error.ProjectionUnavailable, Adapter.prepare(
+                scenario.ctx,
+                payload,
+            ));
+            const rejected = (try Adapter.rejectPreparation(
+                scenario.ctx,
+                payload,
+                error.ProjectionUnavailable,
+            )) orelse return error.MissingPreparationRejection;
+            var reply = try contracts.decodeOwned(P.AdaptiveResult, a, rejected);
+            defer reply.deinit();
+            try std.testing.expectEqual(
+                .preparation_rejected,
+                std.meta.activeTag(reply.value.result),
+            );
+            try std.testing.expectEqual(.unavailable, reply.value.result.preparation_rejected.code);
+            try std.testing.expectEqualDeep(
+                request.plan.research.?.view,
+                reply.value.result.preparation_rejected.view,
+            );
+            try std.testing.expect(reply.value.replay == null and reply.value.usage == null);
+            try std.testing.expectEqual(.unsupported, reply.value.replay_status);
+        }
         fn expectDependency(
             edges: []const native.registry.Dependency,
             bytes: []const u8,
@@ -144,7 +183,8 @@ fn Fixture(comptime P: type) type {
         ) !P.AdaptiveResult {
             const a = ctx.allocator;
             const encoded = try contracts.encodeOwned(P.AdaptiveRequest, a, request);
-            const prepared = try Adapter.prepare(ctx, encoded);
+            const owner = if (request.plan.research != null) objects.ns else null;
+            const prepared = try prepare(owner, ctx, encoded);
             _ = try objects.add(a, prepared);
             const raw = try contracts.encodeOwned(
                 native.responses.Raw,
@@ -154,7 +194,7 @@ fn Fixture(comptime P: type) type {
                 } },
             );
             _ = try objects.add(a, raw);
-            const projection = try Adapter.interpret(ctx, encoded, prepared, raw);
+            const projection = try interpret(owner, ctx, encoded, prepared, raw);
             try checkDependencies(a, projection);
             for (projection.objects) |object| _ = try objects.add(a, object);
             const decoded = try contracts.decodeOwned(P.AdaptiveResult, a, projection.reply);
@@ -239,16 +279,15 @@ fn Fixture(comptime P: type) type {
             request.plan.epoch += 1;
             request.plan.reason = .view_change;
             request.plan.research = .{
-                .view = .{ .kind = .view, .id = .{
-                    .bytes = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-                } },
+                .view = objects.view,
                 .selected_at = request.plan.watermark,
             };
             const selected = try native.json.canonical(
                 a,
                 try http(
                     a,
-                    try Adapter.prepare(
+                    try prepare(
+                        objects.ns,
                         ctx,
                         try contracts.encodeOwned(P.AdaptiveRequest, a, request),
                     ),
@@ -266,10 +305,14 @@ fn Fixture(comptime P: type) type {
             unpaired.results.items = &.{};
             try std.testing.expectError(
                 error.MissingCallResult,
-                Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, unpaired)),
+                prepare(objects.ns, ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, unpaired)),
             );
             try advance(ctx, objects, &request, "after-rejected-view", "CURRENT-REASONING");
-            _ = try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, request));
+            _ = try prepare(
+                objects.ns,
+                ctx,
+                try contracts.encodeOwned(P.AdaptiveRequest, a, request),
+            );
         }
 
         const skill_body = "UNIQUE-SKILL-PAYLOAD: inspect state-transition preservation.";
@@ -288,6 +331,19 @@ fn Fixture(comptime P: type) type {
             scenario.loaded = try a.create([1]model.SkillMaterialization);
             try scenario.checkCorpus();
             try scenario.loadSkill();
+            try unavailableSelection(&scenario);
+            var temporary = std.testing.tmpDir(.{});
+            defer temporary.cleanup();
+            var path_buffer: [4096]u8 = undefined;
+            const path_length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+            const path = try std.fmt.allocPrint(a, "{s}/selected", .{
+                path_buffer[0..path_length],
+            });
+            var ns = try native.Namespace.open(std.testing.allocator, std.testing.io, path);
+            defer @import("native_test_support.zig").cleanup("selected view close", ns.close());
+            try ns.store.begin();
+            defer ns.store.rollback();
+            try scenario.storeSelection(&ns);
             if (clarification_only) return scenario.clarification();
             try rejectedHistory(scenario.ctx, &objects, scenario.request);
             try scenario.views();
@@ -1558,6 +1614,81 @@ fn PreservationFixture(comptime P: type) type {
         request: P.AdaptiveRequest = undefined,
         loaded: *[1]model.SkillMaterialization = undefined,
         loaded_bytes: []const u8 = undefined,
+        const selected_text = "NATIVE-SELECTED-VIEW-EVIDENCE";
+        fn storeSelection(self: *Preservation, ns: *native.Namespace) !void {
+            for (self.objects.items.items) |bytes| _ = try ns.store.putObject(bytes);
+            const profile = try ns.store.putObject(self.profile_bytes);
+            var task = std.mem.zeroes(native.testing.state.Task);
+            task.id = self.ctx.task;
+            task.revision = 1;
+            task.profile = profile;
+            task.image = profile;
+            task.input = profile;
+            task.checkpoint = profile;
+            task.outcome = profile;
+            try ns.store.putTask(task, null);
+            const schema = try ns.store.putObject(try native.values.schemaBytes(
+                contracts.Utf8,
+                self.a,
+            ));
+            const value = try ns.store.putObject(try contracts.encodeOwned(
+                contracts.Utf8,
+                self.a,
+                .{ .bytes = selected_text },
+            ));
+            const provenance = try ns.store.putObject(try contracts.encodeOwned(
+                native.workspace.Derivation,
+                self.a,
+                .{ .kind = .hypothesis, .sources = .{ .items = &.{} } },
+            ));
+            const artifact = try ns.store.putObject(try contracts.encodeOwned(
+                native.workspace.ValueArtifact,
+                self.a,
+                .{ .schema = schema, .value = value, .provenance = provenance },
+            ));
+            self.objects.ns = ns;
+            try self.storeView(.{ .values = .{ .items = &.{artifact} } });
+        }
+        fn storeView(self: *Preservation, description: native.workspace.ViewArtifact) !void {
+            const ns = self.objects.ns.?;
+            const artifact = try ns.store.putObject(try contracts.encodeOwned(
+                native.workspace.ViewArtifact,
+                self.a,
+                description,
+            ));
+            const key = try native.workspace.custodyId(self.a, self.ctx.task, artifact.digest);
+            const view: native.workspace.View = .{
+                .id = key,
+                .task = self.ctx.task,
+                .artifact = artifact,
+                .description = description,
+            };
+            try ns.store.createRecord(
+                native.workspace.View,
+                "workspace_view",
+                key,
+                self.ctx.task,
+                view,
+            );
+            self.objects.selected_artifact = .{
+                .digest = artifact.digest,
+                .bytes = artifact.bytes,
+            };
+            self.objects.view = .{ .kind = .view, .id = .{
+                .bytes = try self.a.dupe(u8, &std.fmt.bytesToHex(artifact.digest, .lower)),
+            } };
+        }
+        fn expectSelected(self: *Preservation, prepared: []const u8) !void {
+            var decoded = try contracts.decodeOwned(Adapter.Prepared, self.a, prepared);
+            defer decoded.deinit();
+            try std.testing.expectEqualDeep(
+                self.objects.selected_artifact,
+                decoded.value.selected_view.?,
+            );
+            try std.testing.expect(
+                std.mem.indexOf(u8, decoded.value.body.bytes, selected_text) != null,
+            );
+        }
         fn createCatalog(self: *Preservation) !Ref {
             self.skill = try self.objects.add(self.a, skill_body);
             // The exercised skill lies beyond the former catalog/bitmask boundary.
@@ -1934,24 +2065,19 @@ fn PreservationFixture(comptime P: type) type {
             self.request.plan.epoch += 1;
             self.request.plan.reason = .view_change;
             self.request.plan.research = .{
-                .view = .{ .kind = .view, .id = .{
-                    .bytes = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-                } },
+                .view = self.objects.view,
                 .selected_at = self.request.plan.watermark,
             };
             if (!P.retained_control_calls[1]) self.request.plan.research.?.retained_calls = .{
                 .items = &.{.{ .bytes = "inspect" }},
             };
-            const selected = try native.json.canonical(
-                self.a,
-                try http(
-                    self.a,
-                    try Adapter.prepare(
-                        self.ctx,
-                        try contracts.encodeOwned(P.AdaptiveRequest, self.a, self.request),
-                    ),
-                ),
+            const prepared = try Base.prepare(
+                self.objects.ns,
+                self.ctx,
+                try contracts.encodeOwned(P.AdaptiveRequest, self.a, self.request),
             );
+            try self.expectSelected(prepared);
+            const selected = try native.json.canonical(self.a, try http(self.a, prepared));
             try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, selected, "call-2"));
             try std.testing.expect(
                 std.mem.indexOf(u8, selected, "HUMAN-CLARIFICATION") != null,
@@ -1968,9 +2094,7 @@ fn PreservationFixture(comptime P: type) type {
             viewing.plan.epoch += 1;
             viewing.plan.reason = .view_change;
             viewing.plan.research = .{
-                .view = .{ .kind = .view, .id = .{
-                    .bytes = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-                } },
+                .view = self.objects.view,
                 .selected_at = viewing.plan.watermark,
             };
             viewing.results.items = &.{.{ .call_id = .{ .bytes = "call-2" }, .output = .{
@@ -1983,15 +2107,18 @@ fn PreservationFixture(comptime P: type) type {
             try self.checkView(viewing);
             try self.clearView(viewing);
             try self.changeView(viewing);
+            try self.emptyView(viewing);
         }
         fn clearView(self: *Preservation, initial: P.AdaptiveRequest) !void {
             var viewing = initial;
             try advance(self.ctx, self.objects, &viewing, "clear-view-pair", "OPAQUE-CLEARED-VIEW");
             viewing.invocation.messages.items = &.{};
-            const unchanged = try Adapter.prepare(
+            const unchanged = try Base.prepare(
+                self.objects.ns,
                 self.ctx,
                 try contracts.encodeOwned(P.AdaptiveRequest, self.a, viewing),
             );
+            try self.expectSelected(unchanged);
             const original = try native.json.canonical(self.a, try http(self.a, unchanged));
             try std.testing.expect(std.mem.indexOf(u8, original, "OPAQUE-CLEARED-VIEW") != null);
             inline for (.{ .projection_recovery, .view_change }) |reason| {
@@ -1999,7 +2126,8 @@ fn PreservationFixture(comptime P: type) type {
                 cleared.plan.epoch += 1;
                 cleared.plan.reason = reason;
                 cleared.plan.research = null;
-                const prepared = try Adapter.prepare(
+                const prepared = try Base.prepare(
+                    self.objects.ns,
                     self.ctx,
                     try contracts.encodeOwned(P.AdaptiveRequest, self.a, cleared),
                 );
@@ -2028,10 +2156,43 @@ fn PreservationFixture(comptime P: type) type {
                     body.object.get("tool_choice").?.object.get("tools").?.array.items.len,
                 );
             }
-            try std.testing.expectEqualSlices(u8, unchanged, try Adapter.prepare(
+            try std.testing.expectEqualSlices(u8, unchanged, try Base.prepare(
+                self.objects.ns,
                 self.ctx,
                 try contracts.encodeOwned(P.AdaptiveRequest, self.a, viewing),
             ));
+        }
+        fn emptyView(self: *Preservation, initial: P.AdaptiveRequest) !void {
+            const previous = self.objects.view;
+            const previous_artifact = self.objects.selected_artifact;
+            defer {
+                self.objects.view = previous;
+                self.objects.selected_artifact = previous_artifact;
+            }
+            try self.storeView(.{ .values = .{ .items = &.{} } });
+            var request = initial;
+            request.plan.research.?.view = self.objects.view;
+            const prepared = try Base.prepare(
+                self.objects.ns,
+                self.ctx,
+                try contracts.encodeOwned(P.AdaptiveRequest, self.a, request),
+            );
+            var decoded = try contracts.decodeOwned(Adapter.Prepared, self.a, prepared);
+            defer decoded.deinit();
+            try std.testing.expectEqualDeep(
+                self.objects.selected_artifact,
+                decoded.value.selected_view.?,
+            );
+            const body = try http(self.a, prepared);
+            for (body.object.get("input").?.array.items) |item| {
+                const content = item.object.get("content") orelse continue;
+                if (content != .array) continue;
+                for (content.array.items) |block| {
+                    const text = block.object.get("text") orelse continue;
+                    if (std.mem.eql(u8, text.string, "{\"selected_context_data\":[]}")) return;
+                }
+            }
+            return error.MissingEmptySelection;
         }
         fn changeView(self: *Preservation, initial: P.AdaptiveRequest) !void {
             var viewing = initial;
@@ -2052,16 +2213,13 @@ fn PreservationFixture(comptime P: type) type {
                 .effective_effort = .medium,
                 .control_revision = 2,
             };
-            const changed_view = try native.json.canonical(
-                self.a,
-                try http(
-                    self.a,
-                    try Adapter.prepare(
-                        self.ctx,
-                        try contracts.encodeOwned(P.AdaptiveRequest, self.a, viewing),
-                    ),
-                ),
+            const prepared = try Base.prepare(
+                self.objects.ns,
+                self.ctx,
+                try contracts.encodeOwned(P.AdaptiveRequest, self.a, viewing),
             );
+            try self.expectSelected(prepared);
+            const changed_view = try native.json.canonical(self.a, try http(self.a, prepared));
             try std.testing.expect(std.mem.indexOf(u8, changed_view, "SELECTED-VIEW") != null);
             try std.testing.expect(
                 std.mem.indexOf(u8, changed_view, "LATEST-USER-AMENDMENT") != null,
@@ -2091,10 +2249,12 @@ fn PreservationFixture(comptime P: type) type {
         }
 
         fn checkView(self: *Preservation, viewing: P.AdaptiveRequest) !void {
-            const view_prepared = try Adapter.prepare(
+            const view_prepared = try Base.prepare(
+                self.objects.ns,
                 self.ctx,
                 try contracts.encodeOwned(P.AdaptiveRequest, self.a, viewing),
             );
+            try self.expectSelected(view_prepared);
             const view_http = try http(self.a, view_prepared);
             const view_text = try native.json.canonical(self.a, view_http);
             try std.testing.expect(std.mem.indexOf(u8, view_text, "call-1") == null);
@@ -2126,7 +2286,8 @@ fn PreservationFixture(comptime P: type) type {
             bad_view.plan.epoch = self.request.plan.epoch;
             try std.testing.expectError(
                 error.InvalidContext,
-                Adapter.prepare(
+                Base.prepare(
+                    self.objects.ns,
                     self.ctx,
                     try contracts.encodeOwned(P.AdaptiveRequest, self.a, bad_view),
                 ),
@@ -2135,7 +2296,8 @@ fn PreservationFixture(comptime P: type) type {
             bad_view.plan.research.?.selected_at -= 1;
             try std.testing.expectError(
                 error.InvalidContext,
-                Adapter.prepare(
+                Base.prepare(
+                    self.objects.ns,
                     self.ctx,
                     try contracts.encodeOwned(P.AdaptiveRequest, self.a, bad_view),
                 ),
