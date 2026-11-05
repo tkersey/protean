@@ -427,6 +427,162 @@ fn requireHistoricalAvailability() !void {
     try std.testing.expectEqualSlices(u8, prepared, try available.prepare(&f));
 }
 
+const ProjectedLookup = struct {
+    const Evidence = struct { attempt: ns.Digest, request: ns.Reference, prepared: ?ns.Reference };
+    request: []const u8,
+    payload: []const u8,
+    prepared: []const u8,
+    calls: std.atomic.Value(u32) = .init(0),
+
+    fn acquire(
+        ctx: native.Context,
+        input: native.registry.RecoveryInput,
+        request: []const u8,
+        prepared: ?[]const u8,
+    ) ![]u8 {
+        const self: *ProjectedLookup = @ptrCast(@alignCast(ctx.environment.?));
+        try std.testing.expect(input.inference);
+        try std.testing.expectEqualSlices(u8, self.payload, request);
+        try std.testing.expectEqualSlices(u8, self.prepared, prepared.?);
+        try std.testing.expectEqual(@as(u32, 0), self.calls.fetchAdd(1, .acq_rel));
+        return contracts.encodeOwned(Evidence, ctx.allocator, .{
+            .attempt = input.attempt,
+            .request = input.request,
+            .prepared = input.prepared,
+        });
+    }
+
+    fn verify(
+        ctx: native.registry.ProjectionContext,
+        input: native.registry.RecoveryInput,
+        bytes: []const u8,
+    ) !native.registry.RecoveryFinding {
+        var decoded = try contracts.decodeOwned(Evidence, ctx.allocator, bytes);
+        defer decoded.deinit();
+        try std.testing.expectEqualDeep(Evidence{
+            .attempt = input.attempt,
+            .request = input.request,
+            .prepared = input.prepared,
+        }, decoded.value);
+        return .not_sent;
+    }
+};
+
+fn lookupProjectedUnknown(f: *Fixture) !void {
+    for (@constCast(f.handlers.entries)) |*entry| if (entry.declaration.inference) {
+        entry.declaration.recovery = .{
+            .identity = "projection.lookup.v1",
+            .version = 1,
+            .lookup = .{ .acquire = ProjectedLookup.acquire, .verify = ProjectedLookup.verify },
+        };
+    };
+    const selected = try proposal(f);
+    _ = try f.perform(.{ .context = .{ .command = .{ .select = .{ .projected = selected } } } });
+    try std.testing.expect(f.prepared.selected_view != null);
+    const original = f.pending;
+    const request = (try horos.data.invocation.decode(
+        horos.data.invocation.Request,
+        f.permanent,
+        original.request,
+    )).value;
+    var lookup: ProjectedLookup = .{
+        .request = try f.permanent.dupe(u8, original.request),
+        .payload = try original.entry.payload(f.permanent, request.binding.payload),
+        .prepared = try f.permanent.dupe(u8, original.prepared.?),
+    };
+    try f.service.unknown(f.permanent, original);
+    _ = try f.service.message(f.permanent, "lookup-projection-amendment", f.task, .{
+        .message = .{ .bytes = amendment },
+    });
+    const before = (try f.service.task(f.permanent, f.task)).value;
+    const admitted = try f.service.reconcile(
+        f.permanent,
+        "projected-lookup",
+        f.task,
+        before.revision,
+        original.occurrence,
+        original.attempt,
+        .lookup,
+    );
+    try runProjectedLookup(f, &lookup);
+    const settled = (try f.service.reconciliation(
+        f.permanent,
+        f.task,
+        admitted.receipt.reconciliation.?,
+    )).value;
+    try std.testing.expectEqual(.not_sent, std.meta.activeTag(settled.outcome));
+    try std.testing.expectEqual(.authoritative, settled.provenance);
+    const replay = try f.service.reconcile(
+        f.permanent,
+        "projected-lookup",
+        f.task,
+        before.revision,
+        original.occurrence,
+        original.attempt,
+        .lookup,
+    );
+    try std.testing.expect(replay.replayed);
+    try std.testing.expectEqual(@as(u32, 1), lookup.calls.load(.acquire));
+    try std.testing.expectEqualSlices(
+        u8,
+        lookup.request,
+        try f.namespace.store.object(f.permanent, settled.request, null),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        lookup.prepared,
+        try f.namespace.store.object(f.permanent, settled.prepared.?, null),
+    );
+    try retryProjectedNotSent(f, before);
+}
+
+fn runProjectedLookup(f: *Fixture, lookup: *ProjectedLookup) !void {
+    const work = (try f.service.pump(f.permanent)).work;
+    try std.testing.expect(work.recovery != null);
+    try std.testing.expectEqualSlices(u8, lookup.request, work.request);
+    try std.testing.expectEqualSlices(u8, lookup.prepared, work.prepared.?);
+    const worker = try native.testing.Worker.init(f.a, f.io);
+    defer cleanup("projected lookup worker.deinit", worker.deinit(f.a));
+    try worker.start(work, f.profile.authority, lookup);
+    while (!worker.finished()) try f.io.sleep(.fromMilliseconds(1), .awake);
+    try worker.join();
+    defer cleanup("projected lookup worker.release", worker.release());
+    try std.testing.expect(worker.result.? == .acquired);
+    try f.service.completeWork(f.permanent, work, worker.result.?);
+}
+
+fn retryProjectedNotSent(f: *Fixture, before: ns.Task) !void {
+    const settled = (try f.service.task(f.permanent, f.task)).value;
+    try std.testing.expectEqual(before.inference_attempts, settled.inference_attempts);
+    try std.testing.expectEqual(before.inference_request_bytes, settled.inference_request_bytes);
+    try std.testing.expect(try f.service.pump(f.permanent) != .work);
+    _ = try f.service.resumeTask(f.permanent, "projected-lookup-retry", f.task, settled.revision);
+    for (0..4096) |_| {
+        try std.testing.expect(try f.service.pump(f.permanent) != .work);
+        const task = (try f.service.task(f.permanent, f.task)).value;
+        try std.testing.expectEqual(before.inference_attempts, task.inference_attempts);
+        const event = try lastEvent(f, task.event_high);
+        if (event.kind != .preparation_rejected) continue;
+        const acquired = event.preparation_rejection.?.occurrence.state.settled_reply;
+        const bound = (try horos.data.invocation.decode(
+            horos.data.invocation.Result,
+            f.permanent,
+            try replyBytes(f, acquired.reply),
+        )).value;
+        const result = (try contracts.decodeOwned(
+            t.P.AdaptiveResult,
+            f.permanent,
+            bound.value,
+        )).value;
+        try std.testing.expectEqual(.stale, result.result.preparation_rejected.code);
+        try f.next();
+        try std.testing.expect(f.prepared.selected_view == null);
+        try std.testing.expectEqual(.projection_recovery, f.prepared.request.plan.reason);
+        return;
+    }
+    return error.ProjectedRetryDidNotReject;
+}
+
 test "late projected preparation rejection survives archive and recovers without dispatch charge" {
     requireHistoricalAvailability() catch |err| {
         std.debug.print("historical view availability: {s}\n", .{@errorName(err)});
@@ -435,6 +591,10 @@ test "late projected preparation rejection survives archive and recovers without
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
+    lookupProjectedUnknown(&f) catch |err| {
+        std.debug.print("projected unknown lookup: {s}\n", .{@errorName(err)});
+        return err;
+    };
     const sibling = try recovery.sibling(&f);
     const selected = try proposal(&f);
     const rejected = try rejectAfterReady(&f, selected);

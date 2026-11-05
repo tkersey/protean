@@ -388,13 +388,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             const adapter = entry.declaration.capture orelse return failure;
             if (!entry.declaration.inference or adapter.reject_preparation == null)
                 return blockPreparation(self, a, initial, pending, failure);
-            const binding = try withPreparationCut(
-                self,
-                temporary,
-                initial,
-                try occurrenceProjectionBinding(self, temporary, initial, pending),
-                initial.event_high,
-            );
+            const binding = try occurrenceProjectionBinding(self, temporary, initial, pending);
             if (try projectionRejection(
                 self,
                 temporary,
@@ -853,13 +847,14 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 );
                 return withPreparationCut(self, a, value, binding, attempt.value.preparation_cut);
             }
-            return projectionBindingAt(
+            const binding = try projectionBindingAt(
                 self,
                 a,
                 value,
                 pending,
                 try currentControllerContext(self, a, value, pending),
             );
+            return withPreparationCut(self, a, value, binding, value.event_high);
         }
         pub fn withPreparationCut(
             self: *Self,
@@ -1041,13 +1036,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             adapter: registry.CaptureAdapter,
             payload: []const u8,
         ) ![]u8 {
-            const binding = try withPreparationCut(
-                self,
-                a,
-                value,
-                try occurrenceProjectionBinding(self, a, value, pending),
-                value.event_high,
-            );
+            const binding = try occurrenceProjectionBinding(self, a, value, pending);
             return store(self).project(
                 []u8,
                 a,

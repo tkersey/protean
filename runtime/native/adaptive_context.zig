@@ -593,11 +593,6 @@ pub fn Projection(comptime P: type) type {
             };
         }
 
-        /// Retain ordinary history and complete exchanges. Ownership metadata
-        /// identifies injected bodies; equal text in acquired evidence is not
-        /// an injection. Only opaque output that could have seen an evicted
-        /// skill is excluded. A profile switch excludes all old opaque output
-        /// and effort updates, without relabeling either for the new profile.
         fn revise(
             ctx: registry.ProjectionContext,
             history: *json.Value,
@@ -606,6 +601,7 @@ pub fn Projection(comptime P: type) type {
             request: P.AdaptiveRequest,
             catalog: P.AdaptiveCatalog,
             explicit_cache: bool,
+            changed_view: bool,
         ) !void {
             const a = ctx.allocator;
             const changed_profile = !equal(
@@ -635,6 +631,7 @@ pub fn Projection(comptime P: type) type {
                     catalog,
                     removed_skills,
                     changed_profile,
+                    changed_view,
                 );
                 if (kind(item, "additional_tools")) {
                     try reviseTools(a, &item, request, &changed, &retain);
@@ -661,6 +658,7 @@ pub fn Projection(comptime P: type) type {
             catalog: P.AdaptiveCatalog,
             removed_skills: []const bool,
             changed_profile: bool,
+            changed_view: bool,
         ) !bool {
             var retain = true;
             if (origin.resident_skill) |index| {
@@ -687,7 +685,7 @@ pub fn Projection(comptime P: type) type {
                 ];
             }
             if (kind(item, "reasoning") and
-                (changed_profile or
+                (changed_view or changed_profile or
                     removed_reasoning_skill or
                     removed_definition)) retain = false;
             if (kind(item, "configuration_update") and changed_profile) retain = false;
@@ -719,9 +717,6 @@ pub fn Projection(comptime P: type) type {
             }
         }
 
-        /// Remove completed research exchanges as pairs. Current policy, all
-        /// user messages, skill bodies and declarations remain independently
-        /// owned. Opaque reasoning is invalid after its evidence prefix changes.
         fn selectResearch(
             a: std.mem.Allocator,
             history: *json.Value,
@@ -760,8 +755,6 @@ pub fn Projection(comptime P: type) type {
                         try json.text(try field(item, "call_id")),
                     ) orelse return error.CallPairMismatch;
                     retain = pair.value;
-                } else if (kind(item, "reasoning")) {
-                    retain = false;
                 } else if (json.get(item, "role")) |role| {
                     if (equal(
                         try json.text(role),
@@ -932,6 +925,7 @@ pub fn Projection(comptime P: type) type {
                     request,
                     catalog,
                     selected.profile.explicit_cache,
+                    changed_view,
                 );
                 state.new_start = 0;
                 while (state.new_start < state.origins.items.len and

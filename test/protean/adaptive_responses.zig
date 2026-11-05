@@ -1981,7 +1981,57 @@ fn PreservationFixture(comptime P: type) type {
                 .bytes = "LATEST-USER-AMENDMENT: include the rare exception.",
             } }};
             try self.checkView(viewing);
+            try self.clearView(viewing);
             try self.changeView(viewing);
+        }
+        fn clearView(self: *Preservation, initial: P.AdaptiveRequest) !void {
+            var viewing = initial;
+            try advance(self.ctx, self.objects, &viewing, "clear-view-pair", "OPAQUE-CLEARED-VIEW");
+            viewing.invocation.messages.items = &.{};
+            const unchanged = try Adapter.prepare(
+                self.ctx,
+                try contracts.encodeOwned(P.AdaptiveRequest, self.a, viewing),
+            );
+            const original = try native.json.canonical(self.a, try http(self.a, unchanged));
+            try std.testing.expect(std.mem.indexOf(u8, original, "OPAQUE-CLEARED-VIEW") != null);
+            inline for (.{ .projection_recovery, .view_change }) |reason| {
+                var cleared = viewing;
+                cleared.plan.epoch += 1;
+                cleared.plan.reason = reason;
+                cleared.plan.research = null;
+                const prepared = try Adapter.prepare(
+                    self.ctx,
+                    try contracts.encodeOwned(P.AdaptiveRequest, self.a, cleared),
+                );
+                const body = try http(self.a, prepared);
+                const text = try native.json.canonical(self.a, body);
+                if (std.mem.indexOf(u8, text, "OPAQUE-CLEARED-VIEW") != null) {
+                    std.debug.print("{s} retained reasoning from cleared view\n", .{
+                        @tagName(reason),
+                    });
+                    return error.StaleOpaqueReasoningRetained;
+                }
+                for ([_][]const u8{
+                    "Use actual evidence and approved tools.",
+                    "Inspect the snapshot.",
+                    "LATEST-USER-AMENDMENT",
+                    skill_body,
+                    "Observation retained.",
+                }) |protected| try std.testing.expect(std.mem.indexOf(u8, text, protected) != null);
+                try std.testing.expectEqual(
+                    @as(usize, 2),
+                    std.mem.count(u8, text, "clear-view-pair"),
+                );
+                try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "call-2"));
+                try std.testing.expectEqual(
+                    @as(usize, 2),
+                    body.object.get("tool_choice").?.object.get("tools").?.array.items.len,
+                );
+            }
+            try std.testing.expectEqualSlices(u8, unchanged, try Adapter.prepare(
+                self.ctx,
+                try contracts.encodeOwned(P.AdaptiveRequest, self.a, viewing),
+            ));
         }
         fn changeView(self: *Preservation, initial: P.AdaptiveRequest) !void {
             var viewing = initial;

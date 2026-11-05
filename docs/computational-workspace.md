@@ -211,6 +211,12 @@ operations check their own current cut. Replay returns its historical receipt
 without selecting or dispatching again. `context.expand` exposes scoped proposal
 and provenance observations; private provider captures remain private.
 
+Receipt lookup reconstructs the original preparation at its recorded cut while
+retaining current recovery-authority checks. A confirmed not-sent request must be
+rearmed before retry; that fresh preparation checks the current consumer again.
+Replacing or clearing a selection invalidates prior opaque reasoning while
+preserving protected material and complete call/result pairs.
+
 Native context preparation returns complete requests by default. The seed and
 stock successor explicitly request a checked-responder template: full rendering
 and budget validation happen before omitting the intermediate action declarations.
