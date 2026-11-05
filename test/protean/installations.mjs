@@ -19,7 +19,7 @@ const deadline = process.platform === 'linux' ? performance.now() + 540_000 : nu
 const zig = realpathSync(process.env.PROTEAN_ZIG_EXE ?? execFileSync('which', ['zig'], {encoding: 'utf8'}).trim());
 const description = execFileSync(zig, ['env'], {encoding: 'utf8'});
 const library = realpathSync(JSON.parse(description.match(/^\s*\.lib_dir = (".*"),$/m)?.[1] ?? 'null'));
-assert.equal(execFileSync(zig, ['version'], {encoding: 'utf8'}).trim(), '0.17.0');
+assert.equal(execFileSync(zig, ['version'], {encoding: 'utf8'}).trim(), '0.17.1');
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'Protean downstream ü ')));
 const cache = resolve(process.env.ZIG_GLOBAL_CACHE_DIR ?? join(scratch, 'global-cache'));
 const local = join(cache, 'downstream-local');
@@ -59,6 +59,10 @@ function run(executable, args, cwd = scratch, {failure = false, diagnostic, time
   console.error(`downstream ${operation}: started`);
   const result = spawnSync(command[0], command.slice(1), {cwd, env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout});
   console.error(`downstream ${operation}: ${Math.round(performance.now() - started)} ms, status ${result.status}, signal ${result.signal}`);
+  if (result.error || result.signal) {
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+  }
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.signal, null, result.stderr);
   if (failure) {
@@ -91,7 +95,7 @@ try {
     const target = join(exportRoot, file); mkdirSync(dirname(target), {recursive: true}); copyFileSync(join(root, file), target);
   }
   const packageHash = run(zig, ['fetch', exportRoot]);
-  assert.match(packageHash, /^protean-8\.0\.0-[A-Za-z0-9_-]+$/);
+  assert.match(packageHash, /^protean-9\.0\.0-[A-Za-z0-9_-]+$/);
   const packageDir = join(scratch, 'package'); mkdirSync(packageDir);
   run('/usr/bin/tar', ['-xzf', join(cache, 'p', `${packageHash}.tar.gz`), '-C', packageDir]);
   const source = join(packageDir, 'source');

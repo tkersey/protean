@@ -4,6 +4,7 @@ pub const values = @import("values.zig");
 pub const dynamic_values = @import("dynamic_values.zig");
 pub const source_records = @import("source_records.zig");
 pub const program_construction = @import("program_construction.zig");
+pub const projection_proposal = @import("projection_proposal.zig");
 pub const protocol = @import("protocol.zig");
 pub const registry = @import("registry.zig");
 pub const Context = registry.Context;
@@ -18,6 +19,7 @@ pub const inbox = @import("inbox.zig");
 pub const https = @import("https.zig");
 pub const responses = @import("responses.zig");
 pub const adaptive_responses = @import("adaptive_responses.zig");
+pub const adaptive_consumer = @import("adaptive_consumer.zig");
 pub const repository = @import("repository.zig");
 pub const tool_construction = @import("tool_construction.zig");
 pub const configuration = @import("configuration.zig");
@@ -33,6 +35,8 @@ test {
     _ = json;
     _ = values;
     _ = dynamic_values;
+    _ = projection_proposal;
+    _ = adaptive_consumer;
     _ = protocol;
     _ = https;
     _ = repository;
@@ -55,6 +59,12 @@ test {
 
 // Private history internals are exposed only to the repository's test graph.
 pub const testing = if (@import("builtin").is_test) struct {
+    pub const archive = @import("archive.zig");
+    pub const workspace_publication = @import("tasks/workspace_publication.zig");
+    pub const workspace_consumers = @import("tasks/workspace_consumers.zig");
+    pub const workspace_replay = @import("tasks/workspace_replay.zig");
+    pub const workspace_commands = @import("tasks/workspace_commands.zig");
+    pub const workspace_snapshots = @import("tasks/workspace_snapshots.zig");
     pub const adaptive_history = @import("adaptive_history.zig");
     pub const state = @import("state.zig");
     pub const occurrence = @import("occurrence.zig");

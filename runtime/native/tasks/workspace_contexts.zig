@@ -51,6 +51,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         const Replay = @import("workspace_replay.zig").Operations(Types, Self);
         const Snapshots = @import("workspace_snapshots.zig").Operations(Types, Self);
         const Sources = @import("workspace_sources.zig").Operations(Types, Self);
+        const Projections = @import("workspace_projections.zig").Operations(Types, Self);
         pub fn workspaceContextMutation(
             self: *Self,
             a: std.mem.Allocator,
@@ -59,6 +60,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             command: wc.Context,
             snapshot: ?state.Reference,
             input: ?state.Reference,
+            consumer: ?workspace.ConsumerInterface,
         ) !Admission {
             var parent = try self.task(a, task_id);
             defer parent.deinit();
@@ -69,7 +71,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .snapshot = snapshot,
                 .input = input,
             });
-            if (try replay(self, a, operation_id, request)) |prior| return prior;
+            if (try replay(self, a, operation_id, request)) |prior|
+                return replayContext(self, a, parent.value, command, consumer, prior);
             try requireCustody(self, a, task_id, null);
             if (workspaceParentStopped(self, parent.value)) return error.InvalidState;
             var compiler_facts: Compiler.CompilerFacts = .{ .allocator = self.allocator };
@@ -78,6 +81,9 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (self.compiler_facts == null) self.compiler_facts = &compiler_facts;
             defer self.compiler_facts = prior_compiler_facts;
             try prepareWorkspaceContext(self, a, task_id, command);
+            var projection = try prepareSelectedContext(self, a, parent.value, command);
+            defer if (projection) |*prepared| prepared.deinit();
+            if (projection) |prepared| try prepared.requireController(consumer);
             var semantic = try prepareContextSemanticValue(self, a, parent.value, command);
             defer if (semantic) |*prepared| prepared.deinit(a);
             try store(self).begin();
@@ -97,8 +103,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                         ),
                         .value,
                     },
-                    .select => |selection| .{
-                        try selectWorkspaceContext(self, a, task_id, selection),
+                    .select => .{
+                        try publishWorkspaceView(self, a, task_id, projection.?.view),
                         .view,
                     },
                     else => return error.InvalidState,
@@ -115,6 +121,47 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .{ .context = .{ .command = command, .snapshot = snapshot, .input = input } },
             );
         }
+        fn replayContext(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            command: wc.Context,
+            consumer: ?workspace.ConsumerInterface,
+            prior: Admission,
+        ) !Admission {
+            if (self.workspace_replay == null or command != .select or
+                command.select != .projected) return prior;
+            if (prior.receipt.workspace_kind != .view) return error.InvalidArchive;
+            var admitted = try Projections.restore(
+                self,
+                a,
+                parent,
+                command.select.projected,
+                .{ .controller = .{} },
+                prior.receipt.workspace_observation orelse return error.InvalidArchive,
+            );
+            defer admitted.deinit();
+            try admitted.requireController(consumer);
+            return prior;
+        }
+
+        fn prepareSelectedContext(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            command: wc.Context,
+        ) !?Projections.Admitted {
+            if (command != .select) return null;
+            return try Projections.select(
+                self,
+                a,
+                parent,
+                command.select,
+                .{ .controller = .{} },
+                true,
+            );
+        }
+
         fn prepareContextSemanticValue(
             self: *Self,
             a: std.mem.Allocator,
@@ -156,18 +203,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             }
             return materializeDerivedContext(self, a, task_id, materialize);
         }
-        fn selectWorkspaceContext(
+        pub fn publishWorkspaceView(
             self: *Self,
             a: std.mem.Allocator,
             task_id: state.TaskId,
-            selection: @FieldType(wc.Context, "select"),
+            view: workspace.ViewArtifact,
         ) !state.Reference {
-            const references = try a.alloc(state.Reference, selection.values.items.len);
-            defer a.free(references);
-            for (selection.values.items, references) |ref, *out|
-                out.* =
-                    (try workspaceValueReference(self, a, task_id, ref)).artifact;
-            const view: workspace.ViewArtifact = .{ .values = .{ .items = references } };
             const bytes = try contracts.encodeOwned(workspace.ViewArtifact, a, view);
             defer a.free(bytes);
             const ref = try store(self).putObject(bytes);
@@ -190,6 +231,35 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .{ .id = key, .task = task_id, .artifact = ref, .description = view },
             );
             return ref;
+        }
+        pub fn delegatedAnswerSources(
+            self: *Self,
+            a: std.mem.Allocator,
+            delegation: workspace.Delegation,
+        ) ![]state.Reference {
+            const context = delegation.context orelse
+                return a.dupe(state.Reference, delegation.inputs.items);
+            const key = try workspaceContentCustody(a, delegation.task, context.digest);
+            var saved = try record(self, workspace.View, a, "workspace_view", key, delegation.task);
+            defer saved.deinit();
+            if (!std.meta.eql(saved.value.id, key) or
+                !std.meta.eql(saved.value.task, delegation.task) or
+                !std.meta.eql(saved.value.artifact, context) or
+                saved.value.description.version != 1) return error.CorruptState;
+            const encoded =
+                try contracts.encodeOwned(workspace.ViewArtifact, a, saved.value.description);
+            defer a.free(encoded);
+            const retained = try store(self).object(a, context, null);
+            defer a.free(retained);
+            if (!same(encoded, retained)) return error.CorruptState;
+            const view = saved.value.description;
+            const projection = view.projection orelse
+                return a.dupe(state.Reference, view.values.items);
+            const count = try std.math.add(usize, projection.values.items.len, 1);
+            const sources = try a.alloc(state.Reference, count);
+            sources[0] = projection.result;
+            @memcpy(sources[1..], projection.values.items);
+            return sources;
         }
         fn materializeSemanticContext(
             self: *Self,
@@ -374,9 +444,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     },
                     .snapshot, .authorized_input, .semantic_source => {},
                 },
-                .select => |selection| for (selection.values.items) |ref| {
-                    _ = try workspaceValueReference(self, a, task_id, ref);
-                },
+                .select => {},
                 else => return error.InvalidState,
             }
         }
@@ -393,7 +461,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 } },
                 .page = .{},
             } } };
-            const basis_bytes = try workspaceReadBasis(self, a, parent, request);
+            const basis_bytes = try workspaceReadBasis(self, a, parent, request, null);
             defer a.free(basis_bytes);
             var basis = try contracts.decodeOwned(workspace.ReadObservation, a, basis_bytes);
             errdefer basis.deinit();

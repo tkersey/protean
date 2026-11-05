@@ -7,7 +7,7 @@ Responses I/O, and generated pure tools are native environmental capabilities.
 
 ## Native acquisition and construction
 
-Use Zig 0.17.0. `tools/native/dependencies.zig` imports only the standard library,
+Use Zig 0.17.1. `tools/native/dependencies.zig` imports only the standard library,
 so it can authenticate sources before any dependency code is executed:
 
 ```sh
@@ -314,8 +314,8 @@ during archive admission and cold retention audit.
 
 ## Saved state and portability
 
-Application 5 starts in a new namespace with state format 13, adaptive invocation
-v11, context v7, and output v5. Existing tasks keep their original namespace,
+Application 9.0.0 starts in a new namespace with state format 21, adaptive invocation
+v12, context v8, and output v5. Existing tasks keep their original namespace,
 image, and exact executable. They are continued by that executable; this feature
 does not migrate or transplant their continuations. Do not delete old state as
 part of an update.
@@ -367,7 +367,7 @@ exclusive custody, credentials, or authority over ambiguous effects.
 ## Verification boundaries
 
 Linux qualification runs on native Ubuntu x86-64 GitHub Actions runners with
-Zig 0.17.0. Use native macOS checks for local feedback on Apple silicon; do not
+Zig 0.17.1. Use native macOS checks for local feedback on Apple silicon; do not
 reproduce required Linux CI through Rosetta, QEMU, or an emulated local container.
 Cross-compilation and local emulation do not substitute for the Linux CI result.
 Preserve execution tracing, user/mount/PID isolation, every required assertion,

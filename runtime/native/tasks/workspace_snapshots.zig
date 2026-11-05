@@ -649,8 +649,47 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     const source = try workspaceValueReference(self, a, parent.id, ref);
                     if (!std.meta.eql(source.artifact, expected)) return error.InvalidArchive;
                 }
+                try validateDelegatedContext(self, a, parent, value, selection);
             } else if (value.model != null or value.inputs.items.len != 0 or value.snapshot == null)
                 return error.InvalidArchive;
+        }
+
+        fn validateDelegatedContext(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            value: workspace.Delegation,
+            selection: @FieldType(wc.Work, "delegate"),
+        ) !void {
+            const context = selection.interpretation.model.context;
+            if ((context == null) != (value.context == null)) return error.InvalidArchive;
+            if (context) |selected| {
+                if (value.inputs.items.len != 0) return error.InvalidArchive;
+                const Projections = @import("workspace_projections.zig").Operations(Types, Self);
+                var admitted = if (selected == .projected) try Projections.restore(
+                    self,
+                    a,
+                    parent,
+                    selected.projected,
+                    Projections.delegatedTarget(selection),
+                    value.context.?,
+                ) else try Projections.select(
+                    self,
+                    a,
+                    parent,
+                    selected,
+                    Projections.delegatedTarget(selection),
+                    false,
+                );
+                defer admitted.deinit();
+                try admitted.requireModel(a, value.model);
+                const bytes = try contracts.encodeOwned(workspace.ViewArtifact, a, admitted.view);
+                defer a.free(bytes);
+                if (!std.meta.eql(value.context.?, state.Reference{
+                    .digest = storage.digest(bytes),
+                    .bytes = bytes.len,
+                })) return error.InvalidArchive;
+            }
         }
         pub fn validateCapsuleOperation(
             self: *Self,
@@ -705,6 +744,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     .digest = storage.digest(output.answer.bytes),
                     .bytes = output.answer.bytes.len,
                 })) return error.InvalidArchive;
+            const sources = try Contexts.delegatedAnswerSources(self, a, delegation.value);
+            defer a.free(sources);
             const expected: workspace.Derivation = switch (delegation.value.selection) {
                 .snapshot => |selected| .{
                     .kind = .acquisition,
@@ -723,7 +764,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     defer capture_value.deinit();
                     break :blk .{
                         .kind = .judgment,
-                        .sources = delegation.value.inputs,
+                        .sources = .{ .items = sources },
                         .work = child.id,
                         .delegation = delegation_ref,
                         .capture = capture_value.value.response orelse return error.InvalidArchive,
@@ -1031,7 +1072,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 checked,
             );
         }
-        fn validateSnapshotExecution(
+        pub fn validateSnapshotExecution(
             self: *Self,
             a: std.mem.Allocator,
             parent: state.Task,

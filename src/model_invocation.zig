@@ -7,11 +7,11 @@ const models = @import("model.zig");
 const horos = @import("horos");
 const a = horos.authoring;
 
-pub const semantic_identity = "agent.model.invoke.v11";
-pub const adaptive_context_semantic_identity = "agent.model.context.responses.adaptive.v7";
+pub const semantic_identity = "agent.model.invoke.v12";
+pub const adaptive_context_semantic_identity = "agent.model.context.responses.adaptive.v8";
 pub const adaptive_policy_semantic_identity = "agent.model.policy.adaptive.v2";
 pub fn isModelIdentity(identity: []const u8) bool {
-    // Reserve the model namespace against raw leaf-effect relabeling. Only v11
+    // Reserve the model namespace against raw leaf-effect relabeling. Only v12
     // has a producer and reader; reservation does not provide legacy decoding.
     return std.mem.startsWith(u8, identity, "agent.model.invoke.");
 }
@@ -41,7 +41,14 @@ pub const AdaptiveInferenceProfile = struct {
     response_bytes: ?u32,
     timeout_ms: ?u32,
 };
-pub const EpochReason = enum { initial, model_change, effort_change, eviction, view_change };
+pub const EpochReason = enum {
+    initial,
+    model_change,
+    effort_change,
+    eviction,
+    view_change,
+    projection_recovery,
+};
 pub const SkillResidency = enum { resident, transient };
 pub const SkillMaterialization = struct {
     resource: ArtifactReference,
@@ -99,6 +106,11 @@ pub const AdaptiveUsage = struct {
 pub const CapturedResponse = contracts.CapturedResponse;
 pub const ArtifactReference = struct { digest: [32]u8, bytes: u64 };
 pub const ReplayStatus = enum { complete, unsupported, capacity };
+pub const ProjectionRejectionCode = enum { stale, unavailable, invalid, oversized };
+pub const ProjectionRejection = struct {
+    code: ProjectionRejectionCode,
+    view: contracts.workspace.Ref,
+};
 pub const protocol_identity = "agent.model.protocol.openai-responses-v2";
 pub const MessageRole = enum { system, developer, user, assistant };
 pub const TruncationPolicy = enum { disabled };
@@ -501,7 +513,7 @@ fn RequestTypes(comptime P: type) type {
             argument_codec: P.ArgumentCodec,
         };
         pub const Tools = contracts.Vector(ToolDeclaration, P.declaration_count);
-        /// Invocation settings nested inside the sole v11 request contract.
+        /// Invocation settings nested inside the sole v12 request contract.
         pub const Request = struct {
             protocol: P.ProtocolIdentity,
             model: P.ModelId,
@@ -545,6 +557,7 @@ fn ResponseTypes(comptime P: type) type {
             transport_failure: TransportFailure,
             provider_failure: struct { kind: ProviderFailureKind, http_status: u16 },
             unsupported_response: UnsupportedResponse,
+            preparation_rejected: ProjectionRejection,
         };
 
         pub const ToolResult = struct { call_id: P.CallId, output: P.ResultText };
@@ -553,7 +566,7 @@ fn ResponseTypes(comptime P: type) type {
 
 fn AdaptiveTypes(comptime P: type) type {
     return struct {
-        /// v11 independently represents definition residency and call authority.
+        /// v12 independently represents definition residency and call authority.
         /// The checked responder replaces invocation.tools from materialized,
         /// and replaces offered from its separately captured argument. All
         /// definitions still come from this compiled answer catalog.
@@ -573,6 +586,7 @@ fn AdaptiveTypes(comptime P: type) type {
             version: u32,
             request: AdaptiveRequest,
             body: contracts.Bytes(null),
+            selected_view: ?ArtifactReference = null,
         };
         pub const AdaptivePolicy = struct {
             schema: contracts.Text(128),

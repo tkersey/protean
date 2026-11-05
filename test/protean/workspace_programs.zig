@@ -13135,6 +13135,354 @@ fn reconstructionTrials(
     _ = try service.resumeTask(a, "after-trials", task, current.value.revision);
 }
 
+fn capturedCleanupController(b: *source.Builder) !source.Module {
+    const original = try Reconstruction.controller(b, false, false);
+    const body = b.functions.items[@intCast(original.entry)];
+    const input = b.variables.items[@intCast(body.parameters[0])];
+    const unit = original.failure;
+    const deliberate: Id = 0;
+    const operation = b.effects.items[deliberate];
+    const Payload = struct { proposal: Reconstruction.Proposal, carry: Reconstruction.Direct };
+    const payload = try b.literal(.{
+        .schema = operation.payload,
+        .bytes = try contracts.encodeOwned(Payload, b.allocator(), .{
+            .proposal = .{
+                .position = 0,
+                .value = 2,
+                .total = 2,
+                .covered = 1,
+                .indexed = false,
+                .instruction_cut = 1,
+            },
+            .carry = .{
+                .records = .{ .items = &.{2} },
+                .position = 1,
+                .total = 2,
+                .covered = 1,
+                .instruction_cut = 1,
+                .revisit = false,
+            },
+        }),
+    });
+    const info = try @import("horos").source.library.cleanup.exitInfo(b, unit);
+    const cleanup = try b.declare(&.{info}, unit, &.{deliberate}, &.{});
+    try b.define(cleanup, try b.bind(
+        try b.variable(operation.result),
+        try b.term(.{ .perform = .{ .effect = deliberate, .payload = payload } }),
+        try b.pure(try b.constant(void, {})),
+    ));
+    const body_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{input},
+        .result = body.result,
+        .effects = &.{deliberate},
+    } } });
+    const cleanup_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{info},
+        .result = unit,
+        .effects = &.{deliberate},
+    } } });
+    const entry = try b.declare(&.{input}, body.result, &.{deliberate}, &.{});
+    try b.define(entry, try b.term(.{ .protect = .{
+        .body = try b.lambda(original.entry, body_type),
+        .cleanup = try b.lambda(cleanup, cleanup_type),
+        .arguments = &.{try b.reference(b.parameter(entry, 0))},
+    } }));
+    return b.module(entry, unit);
+}
+
+fn reconstructionPostterminalCleanup(owner: anytype) !void {
+    const service = owner.service;
+    const a = owner.scratch.*;
+    errdefer if (owner.service_open.*) if (service.work) |pending_work|
+        support.expectCleanup(service.notSent(a, pending_work));
+    const task = (try service.submit(a, "cleanup-trial-parent", .{ .items = &.{} })).receipt.task;
+    try service.park(a);
+    const work = try startCapturedCleanupTrial(service, a, task);
+    try parkCapturedCleanupTrial(service, a, task, work);
+    var paused = try service.task(a, task);
+    defer paused.deinit();
+    _ = try service.resumeTask(a, "cleanup-trial-parent-resume", task, paused.value.revision);
+    for (0..128) |_| {
+        var parent = try service.task(a, task);
+        defer parent.deinit();
+        if (parent.value.terminal()) {
+            try std.testing.expectEqual(.completed, parent.value.outcome_kind);
+            try completeCapturedCleanupTrial(service, a, parent.value, work);
+            try roundtripCapturedCleanupTrial(owner, parent.value);
+            return;
+        }
+        const step = try service.pump(a);
+        if (step == .work) {
+            try std.testing.expectEqualDeep(task, step.work.task);
+            try std.testing.expect(!step.work.cleanup and !step.work.entry.declaration.inference);
+            try std.testing.expect(step.work.subject_work == null);
+            try std.testing.expect(step.work.subject_residual == null);
+            try std.testing.expectEqualStrings(
+                "fixture.reconstruction.cleanup",
+                step.work.entry.declaration.identity,
+            );
+            try service.acquire(a, step.work, &.{});
+        }
+    }
+    return error.CleanupTrialParentDidNotComplete;
+}
+
+fn startCapturedCleanupTrial(service: anytype, a: std.mem.Allocator, task: [16]u8) ![32]u8 {
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const document = try native.source_records.encode(a, try capturedCleanupController(&builder));
+    const built = try service.workspaceCommand(a, "captured-cleanup-build", task, .{
+        .program = .{ .build = .{
+            .source = .{ .json_text = .{ .bytes = document } },
+            .source_kind = .source_records,
+            .exposures = .{ .items = &.{} },
+            .role = .controller,
+        } },
+    });
+    if (built.disposition != .observed) std.debug.print("cleanup trial build: {s}\n", .{
+        built.observation_json.bytes,
+    });
+    try std.testing.expectEqual(.observed, built.disposition);
+    const input = try reconstructionValue(
+        Reconstruction.Types.ControllerInput,
+        service,
+        a,
+        task,
+        "captured-cleanup-input",
+        .{ .anchor = .{ .task = task }, .private = .{ .initial = .{ .items = &.{2} } } },
+    );
+    const started = try service.workspaceCommand(a, "captured-cleanup-start", task, .{
+        .work = .{ .start = .{
+            .program = built.program.?,
+            .input = .{ .reference = input },
+            .policy = .{ .continuation = .owner_scheduled, .stop = .terminal },
+            .trial = .{ .synthetic = .{ .responses = .{ .items = &.{} }, .live_inference = true } },
+        } },
+    });
+    try std.testing.expectEqual(.observed, started.disposition);
+    var observed = try native.json.parse(a, started.observation_json.bytes, .{});
+    defer observed.deinit();
+    return nativeIdentity(try native.values.fromJson(
+        contracts.workspace.Ref,
+        a,
+        observed.value.object.get("work").?,
+    ));
+}
+
+fn parkCapturedCleanupTrial(
+    service: anytype,
+    a: std.mem.Allocator,
+    task: [16]u8,
+    id: [32]u8,
+) !void {
+    for (0..128) |step| {
+        var work = try service.workspaceWork(a, task, id);
+        defer work.deinit();
+        try std.testing.expect(!work.value.terminal());
+        if (work.value.current_occurrence) |occurrence_id| {
+            var pending = try contracts.decodeOwned(
+                native.testing.occurrence.Occurrence,
+                a,
+                (try service.namespace.store.recordBytes(a, "occurrence", occurrence_id, task)).?,
+            );
+            defer pending.deinit();
+            var request = try data.invocation.decode(
+                data.invocation.Request,
+                a,
+                try service.namespace.store.object(a, pending.value.request_object, null),
+            );
+            defer request.deinit();
+            if (std.mem.eql(
+                u8,
+                request.value.binding.semantic_identity,
+                contracts.controller.effect_prefix ++ "deliberate",
+            )) {
+                try std.testing.expectEqual(.ready, std.meta.activeTag(pending.value.state));
+                _ = try service.workspaceControl(
+                    a,
+                    "park-captured-cleanup",
+                    task,
+                    id,
+                    work.value.execution_revision,
+                    work.value.control_revision,
+                    .park,
+                );
+                return;
+            }
+        }
+        if (work.value.schedule == .parked) {
+            _ = try service.workspaceControl(
+                a,
+                try std.fmt.allocPrint(a, "advance-captured-cleanup-{d}", .{step}),
+                task,
+                id,
+                work.value.execution_revision,
+                work.value.control_revision,
+                .advance,
+            );
+        } else try std.testing.expect(try service.pump(a) != .work);
+    }
+    return error.CleanupTrialDidNotRequest;
+}
+
+fn completeCapturedCleanupTrial(
+    service: anytype,
+    a: std.mem.Allocator,
+    parent: native.testing.state.Task,
+    id: [32]u8,
+) !void {
+    _ = try service.requestCancel(a, "cancel-captured-cleanup", parent.id, "Dispose trial");
+    var captured = false;
+    for (0..128) |_| {
+        var child = try service.workspaceWork(a, parent.id, id);
+        defer child.deinit();
+        if (child.value.terminal()) {
+            try std.testing.expect(captured and child.value.cancellation_applied);
+            try std.testing.expectEqual(.cancelled, child.value.outcome_kind);
+            try service.validateWorkspace(a, parent.id);
+            return;
+        }
+        const step = try service.pump(a);
+        if (step != .work) continue;
+        try std.testing.expect(step.work.cleanup);
+        try std.testing.expectEqualDeep(id, step.work.subject_work.?);
+        try std.testing.expect(step.work.subject_residual == null);
+        try expectPostterminalCleanupPreparation(service, a, parent, step.work);
+        try std.testing.expectError(
+            error.UnsettledOccurrence,
+            service.validateWorkspace(a, parent.id),
+        );
+        try service.acquire(a, step.work, try contracts.encodeOwned(
+            Reconstruction.Response,
+            a,
+            .{ .next = {} },
+        ));
+        captured = true;
+    }
+    return error.CapturedCleanupTrialDidNotComplete;
+}
+
+fn expectPostterminalCleanupPreparation(
+    service: anytype,
+    a: std.mem.Allocator,
+    parent: native.testing.state.Task,
+    work: native.tasks.Work,
+) !void {
+    var pending = try contracts.decodeOwned(
+        native.testing.occurrence.Occurrence,
+        a,
+        (try service.namespace.store.recordBytes(a, "occurrence", work.occurrence, parent.id)).?,
+    );
+    defer pending.deinit();
+    try std.testing.expectEqualDeep(work.subject_work.?, pending.value.work.?);
+    try std.testing.expect(pending.value.residual == null);
+    var query = try service.namespace.store.database.prepare(
+        "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+            "WHERE e.task=? ORDER BY e.seq",
+        &.{.{ .blob = &parent.id }},
+    );
+    defer query.deinit();
+    var found = false;
+    while (try query.step() == .row) {
+        var event = try contracts.decodeOwned(native.testing.state.Event, a, try query.bytes(0));
+        defer event.deinit();
+        if (event.value.kind != .preparation or event.value.revision <= parent.revision) continue;
+        var payload = try native.json.parse(a, event.value.data.bytes, .{});
+        defer payload.deinit();
+        try std.testing.expectEqualStrings(
+            &std.fmt.bytesToHex(work.occurrence, .lower),
+            payload.value.object.get("occurrence_id").?.string,
+        );
+        found = true;
+    }
+    try std.testing.expect(found);
+}
+
+fn roundtripCapturedCleanupTrial(
+    owner: anytype,
+    parent: native.testing.state.Task,
+) !void {
+    const service = owner.service;
+    const a = owner.scratch.*;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var path_buffer: [4096]u8 = undefined;
+    const length = try temp.dir.realPath(service.io, &path_buffer);
+    const archive = try std.fmt.allocPrint(a, "{s}/cleanup.par", .{path_buffer[0..length]});
+    _ = try service.exportCheckpoint(a, parent.id, archive);
+    const configuration = .{
+        .allocator = service.allocator,
+        .io = service.io,
+        .assets = service.assets,
+        .application = service.application,
+        .handlers = service.handlers,
+        .profile = service.profile,
+    };
+    const namespace_owner = owner.namespace_owner.*;
+    try service.close(configuration.allocator);
+    owner.service_open.* = false;
+    try namespace_owner.namespace.close();
+    namespace_owner.namespace_open.* = false;
+    try importCapturedCleanupTrial(
+        configuration,
+        a,
+        parent,
+        archive,
+        try std.fmt.allocPrint(a, "{s}/imported", .{path_buffer[0..length]}),
+    );
+    namespace_owner.namespace.* = try native.Namespace.open(
+        configuration.allocator,
+        configuration.io,
+        namespace_owner.path.*,
+    );
+    namespace_owner.namespace_open.* = true;
+    service.* = try native.tasks.Service(Reconstruction.Types).init(
+        configuration.allocator,
+        configuration.io,
+        namespace_owner.namespace,
+        configuration.assets,
+        configuration.application,
+        configuration.handlers,
+        configuration.profile,
+    );
+    owner.service_open.* = true;
+    try service.validateWorkspace(a, parent.id);
+}
+
+fn importCapturedCleanupTrial(
+    configuration: anytype,
+    a: std.mem.Allocator,
+    parent: native.testing.state.Task,
+    archive: []const u8,
+    path: []const u8,
+) !void {
+    var destination = try native.Namespace.open(
+        configuration.allocator,
+        configuration.io,
+        path,
+    );
+    defer support.expectCleanup(destination.close());
+    var imported = try native.tasks.Service(Reconstruction.Types).init(
+        configuration.allocator,
+        configuration.io,
+        &destination,
+        configuration.assets,
+        configuration.application,
+        configuration.handlers,
+        configuration.profile,
+    );
+    defer support.expectCleanup(imported.close(configuration.allocator));
+    const receipt = try imported.importCheckpoint(a, "import-captured-cleanup", archive);
+    try std.testing.expectEqualDeep(parent.id, receipt.receipt.task);
+    try imported.validateWorkspace(a, parent.id);
+    try std.testing.expect(try imported.associatedWorkDisposed(a, parent.id));
+    var retained = try imported.task(a, parent.id);
+    defer retained.deinit();
+    try std.testing.expectEqual(.completed, retained.value.outcome_kind);
+    try std.testing.expectEqualDeep(parent.result, retained.value.result);
+    try std.testing.expectEqualDeep(parent.outcome, retained.value.outcome);
+}
+
 const ReconstructionTrialDrive = struct {
     bounded_trial_pump: bool = false,
     cleanup_admitted: bool = false,
@@ -19609,6 +19957,11 @@ fn reconstructionProgramsOwner(task_owner: anytype) !void {
     const service_owner = task_owner.service_owner.*;
 
     service_owner.stage.*.* = "build";
+    if (service_owner.process.* == null and service_owner.scenario.* == .round_trip)
+        reconstructionPostterminalCleanup(service_owner) catch |err| {
+            std.debug.print("postterminal cleanup: {s}\n", .{@errorName(err)});
+            return err;
+        };
     var programs: [3]contracts.workspace.Ref = undefined;
     var indexed_source: []const u8 = undefined;
     try reconstructionPrograms(

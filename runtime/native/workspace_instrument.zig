@@ -95,6 +95,7 @@ pub const Prepared = struct {
     schema: c.Bytes(null),
     body: c.Bytes(null),
     model: ?workspace.ModelBinding = null,
+    selected_view: ?state.Reference = null,
 };
 const AnswerAction = union(enum) { answer: struct { json_value: c.Utf8 } };
 const P = protean.model_invocation.Profile(AnswerAction, .{.{
@@ -212,6 +213,7 @@ fn prepareModel(ctx: registry.ProjectionContext, payload: []const u8) ![]u8 {
         .schema = .{ .bytes = schema },
         .body = .{ .bytes = rendered },
         .model = binding,
+        .selected_view = delegation.context,
     });
 }
 
@@ -221,6 +223,25 @@ fn modelInputs(
     remaining: *?u64,
 ) !json.Value {
     const a = ctx.allocator;
+    if (delegation.context) |view| {
+        const selected = delegation.selection.model;
+        const wp = @import("workspace_projection.zig");
+        const rendered = try @import("workspace_presentation.zig").render(ctx, try wp.reference(
+            a,
+            .view,
+            view.digest,
+        ), .{ .model = .{
+            .work = delegation.work,
+            .port = try wp.identity(selected.port, .port),
+            .generation = selected.generation,
+            .model_profile = delegation.model.?.profile_digest,
+        } }, remaining.*);
+        if (rendered.view == null or !std.meta.eql(rendered.view.?, view))
+            return error.InvalidProjection;
+        const text = rendered.text orelse return error.ProjectionUnavailable;
+        if (remaining.*) |maximum| remaining.* = maximum - text.len;
+        return (try json.parseAsset(a, text, text.len)).value;
+    }
     var inputs: json.Value = .{ .array = .init(a) };
     for (delegation.inputs.items) |ref| {
         var artifact = try c.decodeOwned(

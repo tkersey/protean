@@ -112,7 +112,7 @@ try {
   assert.equal(await digest(updated.previous), oldHash);
   assert.notEqual(await digest(updated.current), oldHash);
   const newDescription = await launch(join(prefix, 'bin', 'protean'), join(root, 'new-state'));
-  assert.equal(newDescription.application.application_version, '8.0.0');
+  assert.equal(newDescription.application.application_version, '9.0.0');
   assert.equal(provider.requests.length, 1);
   await client.close(); client = null;
   const reopenedDescription = await launch(updated.previous, state, accepted.task_id);

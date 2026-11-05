@@ -490,17 +490,32 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
     const control = prepared_control.state;
     const selected = try profile(policy, control.selection.profile_id.bytes);
     const tools = try prepareTools(a, policy, catalog.value, control, input.offered);
-    const request = makeRequest(ctx, input, prepared_control, selected, policy, tools);
+    var request = makeRequest(ctx, input, prepared_control, selected, policy, tools);
     // Horos retains the computation and task facts. Continue its immutable
     // transcript; only the projection owner changes provider-visible material.
     _ = try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, request));
+    if (input.request_mode == .checked_responder_template)
+        request.invocation.tools = .{ .items = &.{} };
     return preparedProduct(a, request, pending, prepared_control);
 }
 
 fn prepare(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
     var input = try contracts.decodeOwned(t.Preparation, ctx.allocator, bytes);
     defer input.deinit();
-    const product = evaluate(ctx, input.value) catch |err| switch (err) {
+    const product = evaluate(ctx, input.value) catch |err|
+        try preparationRejection(input.value, err);
+    return contracts.encodeOwned(Product, ctx.allocator, product);
+}
+
+fn preparationRejection(input: t.Preparation, err: anyerror) !Product {
+    if (input.state.selected_view) |view| {
+        const code = Adapter.projectionRejection(err);
+        if (code) |reason| return .{
+            .result = .{ .projection_rejected = .{ .code = reason, .view = view } },
+            .receipt = null,
+        };
+    }
+    return switch (err) {
         error.Capacity => Product{ .result = .{ .rejected = .capacity }, .receipt = null },
         error.UnknownSkill, error.InvalidSkill => Product{
             .result = .{ .rejected = .unknown_skill },
@@ -520,7 +535,6 @@ fn prepare(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
         },
         else => return err,
     };
-    return contracts.encodeOwned(Product, ctx.allocator, product);
 }
 fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition {
     ctx.checkCancellation() catch |err| return .{ .definitely_not_sent = err };

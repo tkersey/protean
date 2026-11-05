@@ -21,7 +21,7 @@ them with this consumer's task, evidence, question, inbox and completion logic;
 [`types.zig`](types.zig) supplies its actions and ordinary schemas. Model choice,
 skills, offers, epochs and next actions stay in that authored program.
 The native adapter realizes its explicit requests; it has no transcript-driven
-policy loop. See the [v11 API contract](../../docs/model-invocation-v11.md).
+policy loop. See the [v12 API contract](../../docs/model-invocation-v12.md).
 
 From the Protean repository after the [native setup](../../docs/native-single-binary.md):
 
@@ -336,7 +336,7 @@ The output retains every acquired evidence entry in its original order, tagged
 `source` or `workspace`, plus constructed program references in `programs`.
 Claims may share evidence; a claim cannot repeat an index. These checks establish
 membership and structural support, not the truth of model-written statements.
-Application 8.0.0 uses context v7 and native state format 20 in a **new namespace**.
+Application 9.0.0 uses context v8 and native state format 21 in a **new namespace**.
 Keep an existing task's namespace, original image, and exact executable together;
 continue it with that executable. Do not point the new binary at its old namespace
 or transplant the old continuation. Building this repository does not update an
@@ -373,8 +373,8 @@ current model call's offered set is checked independently from materialized
 definitions, and work dispatch binds to that captured call. Queued user messages
 are consumed through the authored inbox only after the current call settles.
 
-The current adaptive contracts are `agent.model.invoke.v11`,
-`agent.model.context.responses.adaptive.v7` and `agent.model.policy.adaptive.v2`.
+The current adaptive contracts are `agent.model.invoke.v12`,
+`agent.model.context.responses.adaptive.v8` and `agent.model.policy.adaptive.v2`.
 Start new tasks in fresh state under these contracts; retain old tasks with their original runtime.
 Raw provider captures and opaque reasoning remain private.
 Absent usage remains unavailable. Explicit cache markers and unchanged request

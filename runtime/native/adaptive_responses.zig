@@ -301,6 +301,7 @@ pub fn Adapter(comptime P: type) type {
                 }.schema,
                 .capture = .{
                     .prepare = prepare,
+                    .reject_preparation = rejectPreparation,
                     .acquire = acquire,
                     .interpret = interpret,
                     .dependencies = dependencies,
@@ -361,6 +362,44 @@ pub fn Adapter(comptime P: type) type {
             return (try project(ctx, request.value, policy, selected, catalog.value)).prepared;
         }
 
+        pub fn projectionRejection(
+            err: anyerror,
+        ) ?@FieldType(@FieldType(P.Result, "preparation_rejected"), "code") {
+            return switch (err) {
+                error.StaleConsumer => .stale,
+                error.ProjectionUnavailable,
+                error.MissingArtifact,
+                error.ArtifactUnavailable,
+                => .unavailable,
+                error.InvalidConsumer,
+                error.ConsumerMismatch,
+                error.InvalidProjection,
+                error.InvalidProjectionSchema,
+                error.InvalidSourceSlice,
+                error.InvalidReference,
+                => .invalid,
+                error.Capacity => .oversized,
+                else => null,
+            };
+        }
+
+        pub fn rejectPreparation(
+            ctx: registry.ProjectionContext,
+            bytes: []const u8,
+            err: anyerror,
+        ) !?[]u8 {
+            const code = projectionRejection(err) orelse return null;
+            var request = try contracts.decodeOwned(P.AdaptiveRequest, ctx.allocator, bytes);
+            defer request.deinit();
+            const research = request.value.plan.research orelse return null;
+            return try contracts.encodeOwned(P.AdaptiveResult, ctx.allocator, .{
+                .result = .{ .preparation_rejected = .{ .code = code, .view = research.view } },
+                .replay = null,
+                .replay_status = .unsupported,
+                .usage = null,
+            });
+        }
+
         const Projected = struct { prepared: []u8, context: Context.Rendered };
         // Both consumers share one projection. The caller keeps decoded request
         // and catalog owners alive until it has consumed this borrowed view.
@@ -387,18 +426,12 @@ pub fn Adapter(comptime P: type) type {
             );
             var reasoning = json.object();
             try json.put(a, &reasoning, "effort", json.string(selected.transport.effort.bytes));
-            try json.put(
-                a,
-                &reasoning,
-                "mode",
-                json.string(@tagName(selected.profile.reasoning_mode)),
-            );
-            try json.put(
-                a,
-                &reasoning,
-                "context",
-                json.string(@tagName(selected.profile.reasoning_context)),
-            );
+            try json.put(a, &reasoning, "mode", json.string(
+                @tagName(selected.profile.reasoning_mode),
+            ));
+            try json.put(a, &reasoning, "context", json.string(
+                @tagName(selected.profile.reasoning_context),
+            ));
             try json.put(a, &body, "reasoning", reasoning);
             try appendToolChoice(a, &body, request);
             inline for (.{
@@ -413,12 +446,8 @@ pub fn Adapter(comptime P: type) type {
                 try json.put(a, &cache, "mode", json.string("explicit"));
                 try json.put(a, &cache, "ttl", json.string("30m"));
                 if (selected.profile.cache_diagnostics) {
-                    if (projected.prior_response_id) |id| try json.put(
-                        a,
-                        &cache,
-                        "comparison_response_id",
-                        json.string(id),
-                    );
+                    if (projected.prior_response_id) |id|
+                        try json.put(a, &cache, "comparison_response_id", json.string(id));
                 }
                 try json.put(a, &body, "prompt_cache_options", cache);
             }
@@ -427,7 +456,15 @@ pub fn Adapter(comptime P: type) type {
                 .prepared = try contracts.encodeOwned(
                     Prepared,
                     a,
-                    .{ .version = 1, .request = request, .body = .{ .bytes = rendered } },
+                    .{
+                        .version = 1,
+                        .request = request,
+                        .body = .{ .bytes = rendered },
+                        .selected_view = if (projected.selected_view) |view| .{
+                            .digest = view.digest,
+                            .bytes = view.bytes,
+                        } else null,
+                    },
                 ),
                 .context = projected,
             };

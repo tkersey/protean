@@ -5,11 +5,11 @@ seconds of its original automatic trigger**. The budget includes runner queueing
 setup, acquisition, compilation, every selected test, packaging, artifact and
 cache transfers, TigerStyle, and the final identity comparison. The terminal `native` gate
 measures from the run's `created_at`, rejects `run_attempt != 1`, and requires all
-eleven qualification lanes and TigerStyle to succeed. A failed warmup followed by a successful
+thirteen qualification lanes and TigerStyle to succeed. A failed warmup followed by a successful
 retry does not satisfy this requirement.
 
 Pull requests and main pushes run the same inventory on native Linux x86-64 with
-exact Zig 0.17.0 and safe optimization. Complete manual dispatches provide
+exact Zig 0.17.1 and safe optimization. Complete manual dispatches provide
 supplemental evidence; they do not replace the original automatic PR run.
 Selective `authoring`, `owners`, `downstream` and `retained-runtime` dispatches
 are diagnostic and cannot pass the terminal qualification gate. The retained-runtime
@@ -32,7 +32,9 @@ TigerStyle and still cannot pass the terminal gate.
 | --- | --- |
 | `authoring` | Source inventory, `check-protean` and `check-native-https`: authoring, model/value contracts, construction, compile-time rejection, helper integrity, adaptive asset emission, formatting, wire checks and the independent HTTPS endpoint. |
 | `owners` | All 46 retained native task/response/model-custody owner tests, including their participant imports. |
-| `owner-adaptive-control` | All nine retained adaptive owner tests. |
+| `owner-adaptive-control` | Nineteen adaptive owner tests across five independent processes: existing controls/recovery, projection resource failures, current/profile/delegated bindings, constructed succession, and delegated-answer ancestry. |
+| `owner-projection-repair` | The executable projection repair/restart witness. |
+| `owner-projection-boundaries` | The two projection authenticity and receipt/archive tests. |
 | `owner-support` | Native unit/context and process-crash recovery checks. |
 | `workspace` | The 16 workspace execution and construction tests. |
 | `workspace-retention` | The three retained-work, wait and delegated-answer tests. |
@@ -41,6 +43,19 @@ TigerStyle and still cannot pass the terminal gate.
 | `native` | Build and package the adaptive product; verify its manifest and protocol/state rejection through the isolated native deployment. |
 | `native-placement` | Execute the same current-run packaged binary through authenticated transfer, reopen, refusal and duplicate-acceptance checks. |
 | `downstream` | Independently acquire, authenticate, package, build, install and execute the public `addNativeSystem` consumer; reject altered Horos and Kosmos inputs. |
+
+The three adaptive lanes execute the same twenty-two-test artifact. Each validates
+the complete seven-group partition before selecting its assigned groups; their
+disjoint selections cover all twenty-two tests exactly once. Local qualification
+executes all seven groups together. Separating the long repair and authenticity
+checks gives them independent runners without removing assertions or cases.
+
+The repair's original construction, comparison, selection and restart run through
+the adaptive controller. Generated scan variations and repeated boundary-test
+projector setup use the same native workspace command and execution owners
+directly. They retain every program execution, input, independent assessment and
+rejection case while avoiding repeated model turns for setup. Actual request
+capture still checks seed, constructed successor and delegated consumers.
 
 The native lane publishes its completed product before deployment checks so
 placement can proceed concurrently. The placement consumer authenticates the
@@ -114,6 +129,12 @@ repository**, including setup, compilation and retries. Terminate commands and
 descendants at that deadline and report unfinished verification as incomplete.
 This local allowance is separate from the original-trigger CI budget.
 
+Local task-owner qualification uses the existing protocol runner in one process,
+checking every test and its failure, skip, and leak status. The full workspace
+test artifact may compile concurrently from the start of that same shared window
+with `build-workspace-general-check`; the aggregate consumes the identical cached
+artifact and still executes every workspace test.
+
 The supported product platforms remain macOS arm64 and Linux x86-64 musl.
 Native macOS verification supplements the required Linux workflow; emulation or
 cross-compilation does not replace the native platform checks.
@@ -138,11 +159,11 @@ and do not automatically become required again.
 
 ## Compilation, caching and artifacts
 
-The five authoring test roots, both native owner test roots, and all three general
-workspace groups use Zig's native x86-64 backend on Linux, retaining safe
-optimization and every selected test. macOS keeps its existing backend;
-the production native executable keeps LLVM. This reduces repeated LLVM test
-compilation but does not exercise those test bodies through LLVM on Linux.
+The five authoring test roots, the native task and adaptive owner test roots, all three general
+workspace groups, and the downstream package-surface test use Zig's native x86-64
+backend on Linux, retaining safe optimization and every selected test. The
+production native executable uses LLVM. The native-backend suites avoid repeated LLVM
+compilation but do not exercise LLVM-generated code on Linux.
 Compile-time rejection and independent execution checks remain selected.
 
 Exact compiled-artifact keys bind compiler identity, target, recipe and source

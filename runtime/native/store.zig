@@ -276,6 +276,7 @@ pub const Store = struct {
             .controller = binding.controller,
             .trial = binding.trial,
             .execution = binding.execution,
+            .consumer_cut = binding.consumer_cut,
             .objects = .{
                 .source = &scope,
                 .read_object = ProjectionScope.read,
@@ -286,6 +287,304 @@ pub const Store = struct {
         // proposed descendant does not invalidate intact committed ancestors.
         try scope.finish();
         return result;
+    }
+
+    pub fn readWorkspaceView(
+        source: ?*anyopaque,
+        a: std.mem.Allocator,
+        reference: contracts.workspace.Ref,
+    ) !?contracts.Decoded(@import("workspace_state.zig").View) {
+        const scope = try projectionScope(source) orelse return null;
+        const w = @import("workspace_state.zig");
+        const id = try @import("workspace_projection.zig").identity(reference, .view);
+        const key = try w.custodyId(a, scope.binding.task, id);
+        const bytes = (try scope.store.recordBytes(
+            a,
+            "workspace_view",
+            key,
+            scope.binding.task,
+        )) orelse return error.ProjectionUnavailable;
+        defer a.free(bytes);
+        var view = try contracts.decodeOwned(w.View, a, bytes);
+        errdefer view.deinit();
+        const actual = try contracts.encodeOwned(w.ViewArtifact, a, view.value.description);
+        defer a.free(actual);
+        if (!std.meta.eql(view.value.id, key) or
+            !std.meta.eql(view.value.task, scope.binding.task) or
+            !std.meta.eql(view.value.artifact.digest, id) or
+            !std.meta.eql(digest(actual), id) or actual.len != view.value.artifact.bytes)
+            return error.InvalidProjection;
+        if (scope.binding.consumer_cut) |cut|
+            try scope.store.requireViewAt(
+                a,
+                scope.binding.task,
+                view.value.artifact,
+                cut.event_watermark,
+            );
+        return view;
+    }
+
+    fn requireViewAt(
+        self: *Store,
+        a: std.mem.Allocator,
+        task: state.TaskId,
+        view: state.Reference,
+        at: u64,
+    ) !void {
+        const w = @import("workspace_state.zig");
+        var query = try self.database.prepare(
+            "SELECT e.seq,o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+                "WHERE e.task=? AND e.seq<=? ORDER BY e.seq DESC",
+            &.{ .{ .blob = &task }, .{
+                .integer = std.math.cast(i64, at) orelse return error.InvalidState,
+            } },
+        );
+        defer query.deinit();
+        while (try query.step() == .row) {
+            var event = try contracts.decodeOwned(state.Event, a, try query.bytes(1));
+            defer event.deinit();
+            const sequence = std.math.cast(u64, try query.integer(0)) orelse
+                return error.CorruptState;
+            if (!std.meta.eql(event.value.task, task) or
+                event.value.seq != sequence) return error.CorruptState;
+            if (event.value.kind != .workspace) continue;
+            const command_ref = event.value.workspace_command orelse return error.CorruptState;
+            const bytes = try self.object(a, command_ref, null);
+            defer a.free(bytes);
+            var command = try contracts.decodeOwned(w.PublicationCommand, a, bytes);
+            defer command.deinit();
+            if (try self.publishesView(a, event.value, command.value, view)) return;
+        }
+        return error.ProjectionUnavailable;
+    }
+
+    fn publishesView(
+        self: *Store,
+        a: std.mem.Allocator,
+        event: state.Event,
+        command: @import("workspace_state.zig").PublicationCommand,
+        view: state.Reference,
+    ) !bool {
+        const w = @import("workspace_state.zig");
+        const wp = @import("workspace_projection.zig");
+        if (command == .context and command.context.command == .select) {
+            var data = try @import("json.zig").parse(a, event.data.bytes, .{});
+            defer data.deinit();
+            const id = try @import("json.zig").text(
+                @import("json.zig").get(data.value, "workspace_id") orelse
+                    return error.CorruptState,
+            );
+            return std.meta.eql(view.digest, try wp.identity(.{
+                .kind = .view,
+                .id = .{ .bytes = id },
+            }, .view));
+        }
+        if (command != .delegate) return false;
+        for (event.workspace_publications.items) |publication| {
+            var observed = try self.publicationObservation(a, event.task, publication, event.seq);
+            defer observed.deinit();
+            const ref = observed.value.work.delegation orelse continue;
+            const bytes = try self.object(a, ref, null);
+            defer a.free(bytes);
+            var delegation = try contracts.decodeOwned(w.Delegation, a, bytes);
+            defer delegation.deinit();
+            if (!std.meta.eql(delegation.value.task, event.task) or
+                !std.meta.eql(delegation.value.instrument, observed.value.work.id))
+                return error.CorruptState;
+            if (std.meta.eql(delegation.value.context, @as(?state.Reference, view))) return true;
+        }
+        return false;
+    }
+
+    fn projectionScope(source: ?*anyopaque) !?*ProjectionScope {
+        const pointer = source orelse return null;
+        const scope: *ProjectionScope = @ptrCast(@alignCast(pointer));
+        if (!scope.store.projecting or scope.store.fenced or
+            scope.epoch != scope.store.integrity_epoch) return error.InvalidState;
+        return scope;
+    }
+
+    pub fn requireWorkspaceConsumer(
+        source: ?*anyopaque,
+        a: std.mem.Allocator,
+        saved: @import("workspace_state.zig").ReplyObservation,
+    ) !void {
+        const scope = try projectionScope(source) orelse return error.ProjectionUnavailable;
+        const w = @import("workspace_state.zig");
+        if (!std.meta.eql(saved.task, scope.binding.task) or saved.evidence != .read or
+            saved.evidence.read != .consumer) return error.InvalidConsumer;
+        const recorded = (try scope.store.recordBytes(
+            a,
+            "workspace_reply",
+            saved.id,
+            saved.task,
+        )) orelse return error.ProjectionUnavailable;
+        defer a.free(recorded);
+        const expected = try contracts.encodeOwned(w.ReplyObservation, a, saved);
+        defer a.free(expected);
+        if (!std.mem.eql(u8, recorded, expected)) return error.InvalidConsumer;
+        const observed = saved.evidence.read.consumer;
+        if (!std.meta.eql(observed.task, scope.binding.task) or
+            !std.mem.eql(u8, observed.tenant.bytes, scope.binding.tenant) or
+            !std.meta.eql(observed.policy.digest, digest(scope.binding.profile)))
+            return error.InvalidConsumer;
+        const cut = scope.binding.consumer_cut orelse return;
+        const task_bytes = try scope.store.taskBytes(a, saved.task);
+        defer a.free(task_bytes);
+        var parent = try contracts.decodeOwned(state.Task, a, task_bytes);
+        defer parent.deinit();
+        if (cut.event_watermark > parent.value.event_high) return error.StaleConsumer;
+        parent.value.controller = cut.controller;
+        parent.value.controller_epoch = cut.controller_epoch;
+        parent.value.next_message = cut.next_message;
+        parent.value.event_high = cut.event_watermark;
+        try scope.store.requireConsumerAt(a, parent.value, observed, .preparation);
+    }
+
+    pub fn requireConsumerAt(
+        self: *Store,
+        a: std.mem.Allocator,
+        parent: state.Task,
+        observed: @import("workspace_state.zig").ConsumerObservation,
+        phase: enum { publication, preparation },
+    ) !void {
+        if (observed.controller.event_watermark > parent.event_high) return error.StaleConsumer;
+        try observed.requireTask(parent);
+        if (observed.input_revision != try self.userInputRevision(
+            a,
+            parent.id,
+            parent.event_high,
+        )) return error.StaleConsumer;
+        for (observed.selection.required_current.items) |requirement|
+            try self.requireWorkAt(a, parent.id, requirement, null, parent.event_high, true);
+        if (observed.selection.target == .model) {
+            const target = observed.selection.target.model;
+            try self.requireWorkAt(
+                a,
+                parent.id,
+                target.expected,
+                target,
+                parent.event_high,
+                phase == .publication,
+            );
+        }
+    }
+
+    pub fn userInputRevision(self: *Store, a: std.mem.Allocator, task: state.TaskId, at: u64) !u64 {
+        var query = try self.database.prepare(
+            "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+                "WHERE e.task=? AND e.seq<=? ORDER BY e.seq DESC",
+            &.{ .{ .blob = &task }, .{
+                .integer = std.math.cast(i64, at) orelse return error.InvalidState,
+            } },
+        );
+        defer query.deinit();
+        while (try query.step() == .row) {
+            var event = try contracts.decodeOwned(state.Event, a, try query.bytes(0));
+            defer event.deinit();
+            if (event.value.kind == .message_queued or event.value.kind == .input_accepted)
+                return event.value.seq;
+        }
+        return 0;
+    }
+
+    fn requireWorkAt(
+        self: *Store,
+        a: std.mem.Allocator,
+        task: state.TaskId,
+        expected: contracts.workspace.Expected,
+        target: ?@FieldType(contracts.workspace.ConsumerTarget, "model"),
+        at: u64,
+        revisions: bool,
+    ) !void {
+        const wp = @import("workspace_projection.zig");
+        const id = try wp.identity(expected.work, .work);
+        var observed = try self.workObservationAt(a, task, id, at);
+        defer observed.deinit();
+        const work = observed.value.work;
+        if (revisions and (work.execution_revision != expected.execution_revision or
+            work.control_revision != expected.control_revision)) return error.StaleConsumer;
+        if (target) |selected| try self.requireObservedPort(a, observed.value, selected);
+    }
+
+    fn workObservationAt(
+        self: *Store,
+        a: std.mem.Allocator,
+        task: state.TaskId,
+        work: state.Digest,
+        at: u64,
+    ) !contracts.Decoded(@import("workspace_state.zig").WorkObservation) {
+        var query = try self.database.prepare(
+            "SELECT e.seq,o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+                "WHERE e.task=? AND e.seq<=? ORDER BY e.seq DESC",
+            &.{ .{ .blob = &task }, .{
+                .integer = std.math.cast(i64, at) orelse return error.InvalidState,
+            } },
+        );
+        defer query.deinit();
+        while (try query.step() == .row) {
+            var event = try contracts.decodeOwned(state.Event, a, try query.bytes(1));
+            defer event.deinit();
+            const sequence = std.math.cast(u64, try query.integer(0)) orelse
+                return error.CorruptState;
+            if (!std.meta.eql(event.value.task, task) or
+                event.value.seq != sequence) return error.CorruptState;
+            for (event.value.workspace_publications.items) |publication| {
+                if (!std.meta.eql(publication.work, work)) continue;
+                return self.publicationObservation(a, task, publication, event.value.seq);
+            }
+        }
+        return error.ProjectionUnavailable;
+    }
+
+    fn publicationObservation(
+        self: *Store,
+        a: std.mem.Allocator,
+        task: state.TaskId,
+        publication: state.WorkPublication,
+        event: u64,
+    ) !contracts.Decoded(@import("workspace_state.zig").WorkObservation) {
+        const w = @import("workspace_state.zig");
+        const bytes = try self.acquiredObject(a, publication.observation, null);
+        defer a.free(bytes);
+        var observed = try contracts.decodeOwned(w.WorkObservation, a, bytes);
+        errdefer observed.deinit();
+        const work = observed.value.work;
+        if (!std.meta.eql(work.task, task) or !std.meta.eql(work.id, publication.work) or
+            work.execution_revision != publication.execution_revision or
+            work.control_revision != publication.control_revision or
+            work.event_watermark > event)
+            return error.CorruptState;
+        return observed;
+    }
+
+    fn requireObservedPort(
+        self: *Store,
+        a: std.mem.Allocator,
+        observed: @import("workspace_state.zig").WorkObservation,
+        selected: @FieldType(contracts.workspace.ConsumerTarget, "model"),
+    ) !void {
+        const w = @import("workspace_state.zig");
+        const wp = @import("workspace_projection.zig");
+        const work = observed.work;
+        const reference = work.current_port orelse return error.StaleConsumer;
+        const pending = observed.occurrence orelse return error.StaleConsumer;
+        const bytes = try self.object(a, reference, null);
+        defer a.free(bytes);
+        var port = try contracts.decodeOwned(w.Port, a, bytes);
+        defer port.deinit();
+        if (!std.meta.eql(port.value.id, try wp.identity(selected.port, .port)) or
+            !std.meta.eql(port.value.work, work.id) or
+            !std.meta.eql(port.value.task, work.task) or
+            port.value.generation != selected.generation or
+            work.port_generation != selected.generation or
+            !std.meta.eql(work.current_occurrence, @as(?state.Digest, port.value.occurrence)) or
+            !std.meta.eql(pending.id, port.value.occurrence) or
+            !std.meta.eql(pending.task, work.task) or
+            !std.meta.eql(pending.work, @as(?state.Digest, work.id)) or
+            !std.meta.eql(pending.request, port.value.request_identity) or
+            !std.meta.eql(pending.request_object, port.value.request) or pending.state != .ready)
+            return error.StaleConsumer;
     }
 
     const ProjectionScope = struct {

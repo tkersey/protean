@@ -463,6 +463,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 parent.id,
             );
             defer capture_value.deinit();
+            const sources = try Contexts.delegatedAnswerSources(self, a, delegation);
+            defer a.free(sources);
             return try workspacePublishValue(
                 self,
                 a,
@@ -471,7 +473,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 try store(self).putObject(answer),
                 .{
                     .kind = .judgment,
-                    .sources = delegation.inputs,
+                    .sources = .{ .items = sources },
                     .work = child.id,
                     .delegation = delegation_ref,
                     .capture = capture_value.value.response orelse return error.CorruptState,

@@ -401,6 +401,8 @@ fn admissionMethod(kind: state.EventType) ?state.Method {
         .controller_requested => .adopt,
         .workspace_progress,
         .workspace_read,
+        .preparation,
+        .preparation_rejected,
         .controller,
         .execution,
         .input_required,
@@ -478,6 +480,8 @@ const EventFacts = struct {
             .workspace => try self.workspace(),
             .workspace_progress,
             .workspace_read,
+            .preparation,
+            .preparation_rejected,
             .accepted,
             .cancellation_requested,
             .resumed,
@@ -1157,10 +1161,11 @@ const Inspection = struct {
             try self.store.object(self.a, occurrence_ref, null),
         );
         defer pending.deinit();
-        if (pending.value.residual == null) self.last_nonterminal_revision = @max(
-            self.last_nonterminal_revision,
-            receipt.revision,
-        );
+        if (pending.value.work == null and pending.value.residual == null)
+            self.last_nonterminal_revision = @max(
+                self.last_nonterminal_revision,
+                receipt.revision,
+            );
     }
     fn inspectEvents(self: *Inspection) !void {
         var root_history: state.RootHistory = .init(self.value);
@@ -1240,7 +1245,7 @@ const Inspection = struct {
             .workspace,
             .workspace_progress,
             => {},
-            .reconciled, .workspace_read => {
+            .reconciled, .workspace_read, .preparation, .preparation_rejected => {
                 const occurrence_id = try self.eventOccurrence(event);
                 const occurrence_ref = record(
                     self.archive,
@@ -1253,7 +1258,7 @@ const Inspection = struct {
                     try self.store.object(self.a, occurrence_ref, null),
                 );
                 defer pending.deinit();
-                if (pending.value.residual == null) {
+                if (pending.value.work == null and pending.value.residual == null) {
                     if (self.terminal != null) return error.InvalidArchive;
                     self.nonterminal_event = true;
                 }

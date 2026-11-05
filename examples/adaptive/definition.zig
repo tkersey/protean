@@ -539,6 +539,117 @@ fn Program(comptime controller: bool) type {
                 try p.e.context.literal(t.Summary, .{ .bytes = reason }),
             );
         }
+        fn projectionDiagnostic(p: Self, b: anytype, rejection: anytype) !V(P.MessageText) {
+            const e = p.e;
+            const code = try b.field(rejection, "code");
+            var text = try e.context.literal(P.MessageText, .{
+                .bytes = "Projection preparation rejected. Selected view: ",
+            });
+            inline for ([_]t.ProjectionRejectionCode{
+                .stale, .unavailable, .invalid, .oversized,
+            }) |kind| {
+                text = try b.select(
+                    try b.equal(try b.enumTag(code), try b.enumTag(
+                        try e.context.literal(t.ProjectionRejectionCode, kind),
+                    )),
+                    try e.context.literal(P.MessageText, .{
+                        .bytes = "Projection preparation rejected: " ++ @tagName(kind) ++
+                            ". Selected view: ",
+                    }),
+                    text,
+                );
+            }
+            return b.blobConcat(
+                try e.context.schema(P.MessageText),
+                text,
+                try b.field(try b.field(rejection, "view"), "id"),
+                try e.failure(),
+            );
+        }
+        fn projectionRecoveryState(
+            p: Self,
+            b: anytype,
+            state: anytype,
+            rejection: anytype,
+        ) !V(t.State) {
+            const e = p.e;
+            const previous_control = try b.field(state, "control");
+            const replay = try b.field(state, "replay");
+            const present = try b.caseOf(replay, "some");
+            const absent = try b.caseOf(replay, "none");
+            const previous_epoch = try b.match(replay, .{
+                .some = try present.ret(try present.body().field(present.payload(), "epoch")),
+                .none = try absent.ret(try absent.body().field(previous_control, "epoch")),
+            });
+            const next_control = try b.update(previous_control, .{
+                .epoch = try b.checkedAdd(previous_epoch, try b.constant(u64, 1), try e.failure()),
+                .epoch_reason = try e.context.literal(t.model.EpochReason, .projection_recovery),
+            });
+            const messages = try b.append(try b.field(state, "messages"), try e.message(
+                b,
+                .assistant,
+                try p.projectionDiagnostic(b, rejection),
+            ), .{});
+            return b.update(state, .{
+                .control = next_control,
+                .selected_view = try e.context.literal(?protean.contracts.workspace.Ref, null),
+                .selected_view_at = try b.constant(u64, 0),
+                .messages = messages,
+            });
+        }
+        fn recoverProjection(
+            p: Self,
+            b: anytype,
+            bindings: anytype,
+            state: anytype,
+            rejection: anytype,
+        ) !V(t.Output) {
+            return p.resumeTask(b, bindings, try p.projectionRecoveryState(b, state, rejection));
+        }
+        fn preparationQuestion(
+            p: Self,
+            b: anytype,
+            bindings: anytype,
+            state: anytype,
+            rejection: anytype,
+        ) !V(t.Output) {
+            const e = p.e;
+            const capacity = try b.equal(try b.enumTag(rejection), try b.enumTag(
+                try e.context.literal(t.controls.Rejection, .capacity),
+            ));
+            const prompt = try b.select(
+                capacity,
+                try e.context.literal(t.Summary, .{
+                    .bytes = "The ordinary protected context exceeds the admitted " ++
+                        "request budget. " ++
+                        "The task and pending work remain open. Provide a capacity change or " ++
+                        "new direction before another attempt.",
+                }),
+                try e.context.literal(t.Summary, .{
+                    .bytes = "The ordinary context cannot be prepared under the current policy. " ++
+                        "The task and pending work remain open. Provide corrected configuration " ++
+                        "or new direction before another attempt.",
+                }),
+            );
+            const answer = try b.perform(p.ops.ask, try b.product(
+                try e.context.schema(t.Question),
+                .{ .prompt = prompt },
+            ));
+            const diagnosed = try b.append(try b.field(state, "messages"), try e.message(
+                b,
+                .assistant,
+                try e.widen(b, P.MessageText, prompt),
+            ), .{});
+            const messages = try b.append(diagnosed, try e.message(
+                b,
+                .user,
+                try e.widen(b, P.MessageText, try b.field(answer, "message")),
+            ), .{});
+            return b.call(p.loop, .{
+                .bindings = bindings,
+                .state = try b.update(state, .{ .messages = messages }),
+            });
+        }
         fn defineLoop(p: Self) !void {
             const e = p.e;
             const b = try e.author.body(p.loop);
@@ -552,17 +663,71 @@ fn Program(comptime controller: bool) type {
                     .offered = try p.offers(active, state),
                     .control = try e.context.literal(?t.ControlSubject, null),
                     .retained_calls = try e.context.literal(t.model.RetainedCalls, retained_calls),
+                    .request_mode = try e.context.literal(
+                        t.PreparationMode,
+                        .checked_responder_template,
+                    ),
                 }),
             );
             const ready = try active.caseOf(preparation, "ready");
             const rejected = try active.caseOf(preparation, "rejected");
+            const projected = try active.caseOf(preparation, "projection_rejected");
             const interaction = ready.body();
             const turn = try p.modelTurn(interaction, ready.payload(), state, bindings);
-            const counted = turn.counted;
-            const observation = turn.observation;
-            const normalized = try interaction.field(observation, "normalized");
+            const result = try p.modelOutcome(interaction, turn, state, bindings);
+            const prepared = try active.match(preparation, .{
+                .ready = try ready.ret(result),
+                .rejected = try rejected.ret(
+                    try p.preparationQuestion(
+                        rejected.body(),
+                        bindings,
+                        state,
+                        rejected.payload(),
+                    ),
+                ),
+                .projection_rejected = try projected.ret(try p.recoverProjection(
+                    projected.body(),
+                    bindings,
+                    state,
+                    projected.payload(),
+                )),
+            });
+            try e.author.define(p.loop, try b.ret(prepared));
+        }
+        fn modelOutcome(
+            p: Self,
+            b: anytype,
+            turn: Turn,
+            previous: V(t.State),
+            bindings: anytype,
+        ) !V(t.Output) {
+            const normalized = try b.field(turn.observation, "normalized");
+            const result = try b.field(normalized, "result");
+            const rejected = try b.branch();
+            const acquired = try b.branch();
+            return b.conditional(
+                try b.equal(try b.variantTag(result), try b.constant(
+                    u64,
+                    @backingInt(std.meta.Tag(P.Result).preparation_rejected),
+                )),
+                try rejected.ret(try p.recoverProjection(
+                    rejected,
+                    bindings,
+                    previous,
+                    try rejected.variantPayload(result, "preparation_rejected", try p.e.failure()),
+                )),
+                try acquired.ret(try p.acquiredOutcome(acquired, turn, normalized, bindings)),
+            );
+        }
+        fn acquiredOutcome(
+            p: Self,
+            interaction: anytype,
+            turn: Turn,
+            normalized: anytype,
+            bindings: anytype,
+        ) !V(t.Output) {
             const diagnostic = if (controller) try interaction.field(
-                observation,
+                turn.observation,
                 "diagnostic",
             ) else {};
             const rejected_control = if (controller) try interaction.caseOf(
@@ -571,29 +736,23 @@ fn Program(comptime controller: bool) type {
             ) else {};
             const unchanged = if (controller) try interaction.caseOf(diagnostic, "none") else {};
             const work = if (controller) unchanged.body() else interaction;
-            const ordinary = try p.interpret(work, observation, normalized, bindings, counted);
-            const result = if (controller) try p.controlDiagnostic(
+            const ordinary = try p.interpret(
+                work,
+                turn.observation,
+                normalized,
+                bindings,
+                turn.counted,
+            );
+            return if (controller) try p.controlDiagnostic(
                 interaction,
                 diagnostic,
                 rejected_control,
                 unchanged,
                 normalized,
-                counted,
+                turn.counted,
                 bindings,
                 ordinary,
             ) else ordinary;
-            const prepared = try active.match(preparation, .{
-                .ready = try ready.ret(result),
-                .rejected = try rejected.ret(
-                    try p.stopped(
-                        rejected.body(),
-                        state,
-                        "The next context cannot be prepared within " ++
-                            "the admitted policy and capacity.",
-                    ),
-                ),
-            });
-            try e.author.define(p.loop, try b.ret(prepared));
         }
         const Turn = struct {
             counted: V(t.State),
@@ -791,9 +950,11 @@ fn Program(comptime controller: bool) type {
                 "message",
             );
             const updated = try arrived.update(state, .{
-                .messages = try arrived.sequenceValue(try e.context.schema(P.Messages), &.{
+                .messages = try arrived.append(
+                    try arrived.field(state, "messages"),
                     try e.message(arrived, .user, try e.widen(arrived, P.MessageText, text)),
-                }),
+                    .{},
+                ),
             });
             const successor = try poll.match(inbox, .{
                 .empty = try empty.ret(state),
@@ -1204,10 +1365,27 @@ fn Program(comptime controller: bool) type {
                         subject,
                     ),
                     .retained_calls = try e.context.literal(t.model.RetainedCalls, retained_calls),
+                    .request_mode = try e.context.literal(
+                        t.PreparationMode,
+                        .checked_responder_template,
+                    ),
                 }),
             );
+            return p.controlPreparation(b, bindings, state, call_id, proposal, preparation);
+        }
+        fn controlPreparation(
+            p: Self,
+            b: anytype,
+            bindings: anytype,
+            state: anytype,
+            call_id: anytype,
+            proposal: anytype,
+            preparation: anytype,
+        ) !V(t.Output) {
+            const e = p.e;
             const ready = try b.caseOf(preparation, "ready");
             const rejected = try b.caseOf(preparation, "rejected");
+            const projected = try b.caseOf(preparation, "projection_rejected");
             const accepted = ready.body();
             const receipt = try accepted.variantPayload(
                 try accepted.field(ready.payload(), "receipt"),
@@ -1229,9 +1407,21 @@ fn Program(comptime controller: bool) type {
                 call_id,
                 rejected.payload(),
             );
+            const projected_state = try p.rejectedControlState(
+                projected.body(),
+                state,
+                call_id,
+                try e.context.literal(t.controls.Rejection, .invalid_operation),
+            );
             return b.match(preparation, .{
                 .ready = try ready.ret(try p.resumeTask(accepted, bindings, committed)),
                 .rejected = try rejected.ret(try p.resumeTask(failed, bindings, unchanged)),
+                .projection_rejected = try projected.ret(try p.recoverProjection(
+                    projected.body(),
+                    bindings,
+                    projected_state,
+                    projected.payload(),
+                )),
             });
         }
         fn controlProposal(

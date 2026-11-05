@@ -32,7 +32,7 @@ if (operation === 'key') {
         (file.startsWith('tools/native/') && file.endsWith('.zig')) ||
         ((profile === 'product' || profile.startsWith('owner')) && file.startsWith('examples/adaptive/'))) files.add(file);
   }
-  const modules = new Set(['std', 'builtin', 'root', 'protean', 'contracts', 'protean_contracts', 'horos', 'horos_data', 'kosmos', 'protean_native', 'adaptive_report', 'adaptive_types', 'adaptive_environment', 'native_asset_writer', 'native_c', 'native_options', 'hash_abi', 'environment', 'application_types', 'definition', 'construction', 'packaged_runtime', '_native_dependency_admission', '_protean_dependency_admission']);
+  const modules = new Set(['std', 'builtin', 'root', 'protean', 'contracts', 'protean_contracts', 'horos', 'horos_data', 'kosmos', 'protean_native', 'adaptive_report', 'adaptive_types', 'adaptive_environment', 'projection_example', 'native_asset_writer', 'native_c', 'native_options', 'hash_abi', 'environment', 'application_types', 'definition', 'construction', 'packaged_runtime', '_native_dependency_admission', '_protean_dependency_admission']);
   const generated = new Set(['adaptive_image', 'adaptive_application', 'native_image', 'native_application', 'native_manifest']);
   const pending = [...files].filter(file => file.endsWith('.zig') && file.includes('/')), visited = new Set();
   if (testRoot) pending.push(`test/protean/${testRoot}`);
@@ -45,7 +45,7 @@ if (operation === 'key') {
     files.add(file);
     if (!file.endsWith('.zig')) continue;
     const source = readFileSync(file, 'utf8');
-    const calls = [...source.matchAll(/@(import|embedFile)\s*\(\s*"([^"\\]*)"\s*\)/g)];
+    const calls = [...source.matchAll(/@(import|embedFile)\s*\(\s*"([^"\\]*)"\s*,?\s*\)/g)];
     if (calls.length !== [...source.matchAll(/@(import|embedFile)\b/g)].length) conservative = true;
     for (const [, kind, name] of calls) {
       const relative = posix.normalize(posix.join(dirname(file), name));

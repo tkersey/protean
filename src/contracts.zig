@@ -103,6 +103,21 @@ pub fn decodeOwned(
     return decode(T, allocator, bytes, false);
 }
 
+pub fn decodePrefixOwned(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    consumed: *usize,
+) Error!Decoded(T) {
+    @setEvalBranchQuota(100_000);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    var input: wire.Reader = .{ .input = bytes };
+    const value = try read(T, arena.allocator(), &input, false);
+    consumed.* = input.position;
+    return .{ .arena = arena, .value = value };
+}
+
 /// Uses the same value admission as decodeOwned, borrowing only byte/text
 /// payloads. The immutable input must outlive the decoded value and its views.
 pub fn decodeBorrowed(

@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 
-const [executable, encodedGroups] = process.argv.slice(2);
+const [executable, encodedGroups, encodedSelection] = process.argv.slice(2);
 const groups = JSON.parse(encodedGroups);
 assert(groups.length > 0 && groups.every(group => group.length > 0 && group.every(filter => typeof filter === 'string' && filter.length > 0)));
+const selectedGroups = encodedSelection === undefined ? groups.map((_, index) => index) : JSON.parse(encodedSelection);
+assert(Array.isArray(selectedGroups) && selectedGroups.length > 0);
+assert(selectedGroups.every(index => Number.isInteger(index) && index >= 0 && index < groups.length));
+assert.equal(new Set(selectedGroups).size, selectedGroups.length, 'duplicate selected group');
 
 async function* frames(stream) {
   let pending = Buffer.alloc(0);
@@ -46,7 +50,7 @@ function client() {
     return next.value.body;
   }
   async function metadata() {
-    assert.equal((await receive(0)).toString(), '0.17.0');
+    assert.equal((await receive(0)).toString(), '0.17.1');
     await send(4);
     const body = await receive(3);
     const stringBytes = body.readUInt32LE(0), count = body.readUInt32LE(4);
@@ -61,6 +65,8 @@ function client() {
   async function run(indices, names) {
     let passed = 0;
     for (const index of indices) {
+      const started = performance.now();
+      process.stderr.write(`Running Zig test ${names[index]}\n`);
       const request = Buffer.alloc(4);
       request.writeUInt32LE(index);
       await send(5, request);
@@ -69,6 +75,7 @@ function client() {
       assert.equal(result.length, 12);
       assert.equal(result.readUInt32LE(0), index);
       const flags = result.readBigUInt64LE(4);
+      process.stderr.write(`Finished Zig test ${names[index]}: ${Math.round(performance.now() - started)} ms, flags=${flags}\n`);
       if ((flags & ~4n) === 0n) passed += 1;
       else process.stderr.write(`Failed Zig test ${names[index]}: flags=${flags}\n`);
     }
@@ -80,7 +87,7 @@ function client() {
   return {child, closed, metadata, run};
 }
 
-const clients = groups.map(() => client());
+const clients = selectedGroups.map(() => client());
 const stop = () => { for (const {child} of clients) if (child.exitCode === null) child.kill(); };
 for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => {
   stop();
@@ -97,11 +104,13 @@ try {
     partitions[selected[0]].push(index);
   }
   assert(partitions.every(indices => indices.length > 0), 'empty Zig test group');
-  const results = await Promise.allSettled(clients.map((value, group) => value.run(partitions[group], names)));
+  const selectedCount = selectedGroups.reduce((sum, group) => sum + partitions[group].length, 0);
+  const results = await Promise.allSettled(clients.map((value, index) => value.run(partitions[selectedGroups[index]], names)));
   for (const result of results) if (result.status === 'rejected') process.stderr.write(`${result.reason}\n`);
   const passed = results.reduce((sum, result) => sum + (result.status === 'fulfilled' ? result.value : 0), 0);
-  process.stdout.write(`${passed}/${names.length} tests passed across ${groups.length} independent groups.\n`);
-  assert(results.every(result => result.status === 'fulfilled') && passed === names.length, 'incomplete Zig test qualification');
+  const inventory = encodedSelection === undefined ? '' : ` (${names.length} tests in complete inventory)`;
+  process.stdout.write(`${passed}/${selectedCount} tests passed across ${clients.length} independent groups${inventory}.\n`);
+  assert(results.every(result => result.status === 'fulfilled') && passed === selectedCount, 'incomplete Zig test qualification');
 } finally {
   stop();
   await Promise.all(clients.map(value => value.closed));

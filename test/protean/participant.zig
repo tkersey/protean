@@ -179,7 +179,7 @@ test "compiled participant uses the actual checked model responder through norma
     defer compiled.deinit();
     try std.testing.expectEqual(1, compiled.program.effects.len);
     try std.testing.expectEqualStrings(
-        "agent.model.invoke.v11",
+        "agent.model.invoke.v12",
         compiled.program.effects[0].identity,
     );
     const image = try a.alloc(u8, try data.program_image.encodedLength(compiled.program));
@@ -239,7 +239,7 @@ test "participant admission owns the exact component bytes before caller mutatio
     defer compiled.deinit();
     try std.testing.expectEqual(@as(u8, 0xff), bytes[0]);
     try std.testing.expectEqualStrings(
-        "agent.model.invoke.v11",
+        "agent.model.invoke.v12",
         compiled.program.effects[0].identity,
     );
 }

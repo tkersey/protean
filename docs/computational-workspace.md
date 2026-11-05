@@ -150,6 +150,97 @@ preserving their order and multiplicity without retaining the full expanded JSON
 It still loads and validates the stored provenance metadata; paging is not a
 constant-memory guarantee for all retained state.
 
+## Executable consumer presentations
+
+Projection is optional. `context.select` accepts either
+`{"tag":"values","value":[value_reference]}` or
+`{"tag":"projected","value":completed_result_reference}`. Both use the
+existing view owner and request renderer. Selecting a view performs no inference,
+answers no port, and adopts no controller.
+
+Use `context.inspect.consumer` with `target.controller` or an authorized exact
+`target.model` to obtain an owner observation. The observation binds the task,
+controller epoch or pending work/port generation, instruction revision, protected
+interface and model profile. Optional `required_current` work revisions are
+checked explicitly. Ordinary progress does not invalidate historical inputs;
+changes to the bound consumer or required-current subjects do. An observation
+reference grants no additional access, and copying its fields into authored data
+does not create an authentic observation.
+
+`program.describe` with `projection` exposes the envelope schemas and a minimal
+ordinary-source example. Build that source using `program.build`, materialize
+`ProjectionInput(T)` with the observed consumer and actual typed data, and execute
+it using the ordinary work operations. The result is `ProjectionResult(U)`:
+the canonical `ProjectionProposal` followed by an independently typed payload.
+The proposal returns the same consumer reference supplied in its actual input.
+Its ordered blocks select authorized values or acquired UTF-8 source slices,
+render the exact computed payload, or provide attributed explanation text.
+Explanation text cannot assign provider roles or protected instructions.
+
+Selection verifies completed execution, checked purity, the input/result
+relationship, consumer authenticity and reference custody. Computed content
+retains the provenance of its actual input and work; transformation does not
+turn hypotheses or judgments into acquisition. Use `context.materialize.sources`
+to retain the evidence supplied to authored computations. A partial source slice
+or an empty selection does not establish absence over the original domain.
+Admission establishes structural permission to use a presentation, not its truth
+or adequacy for the task.
+
+Delegated model answers retain judgment provenance from the context actually
+selected: ordinary values, or the projector result and its selected values.
+The projector result retains its computation inputs. Ordered and repeated
+sources remain visible through answer inspection and archive recovery.
+
+Preparation rechecks the consumer and renders the selected data together with
+protected user/policy material, skills, action declarations and the causal suffix.
+The final serialized request is budget checked. Each immutable preparation links
+to its selected view, which retains the actual result, work, program, input and
+consumer observation. View publication and request preparation remain distinct
+events. Each preparation retains its event cut and exact attempt; response
+interpretation and archive validation reconstruct the applicability decision at
+that cut, including whether a selection or delegation had published the view.
+Archive admission also checks applicability immediately before every selection
+or delegation publication. An earlier valid selection cannot authorize later
+republication after an amendment or required-current change. Later changes do
+not invalidate a selection that was valid at its own publication cut.
+The retained completed projector snapshot must precede the selection or delegation
+publication. Completion later in the journal cannot validate an earlier selection.
+Publishing the same view later cannot change an earlier unavailable-context
+rejection. Missing preparation evidence makes an archive inadmissible. Fresh
+operations check their own current cut. Replay returns its historical receipt
+without selecting or dispatching again. `context.expand` exposes scoped proposal
+and provenance observations; private provider captures remain private.
+
+Receipt lookup reconstructs the original preparation at its recorded cut while
+retaining current recovery-authority checks. A confirmed not-sent request must be
+rearmed before retry; that fresh preparation checks the current consumer again.
+Replacing or clearing a selection invalidates prior opaque reasoning while
+preserving protected material and complete call/result pairs.
+
+Native context preparation returns complete requests by default. The seed and
+stock successor explicitly request a checked-responder template: full rendering
+and budget validation happen before omitting the intermediate action declarations.
+The checked responder reconstructs those declarations from its compiled catalog
+before model admission. General controllers use complete requests; forwarding a
+compact template directly fails declaration binding. The captured preparation
+mode is replayed with the same immutable inputs.
+
+The seed and emitted successor expose projection preparation rejection and
+return once to ordinary context. If ordinary preparation also fails, they park
+with a recoverable question. Recovery preserves the task and its unfinished work;
+it cannot discard protected material to fit a budget. The controller may acquire
+missing information, expand existing evidence, choose another representation,
+use ordinary selection, or report an incomplete result. No compulsory refinement
+cycle is imposed.
+
+`examples/adaptive/projection_example.zig` supplies ordinary producer, inadequate
+projector, comparison and repaired-projector sources for a finite scan. Its
+domain-specific outcome distinguishes a supported counterexample, exhausted
+declared domain, and incomplete coverage. Exhaustion requires successful coverage
+of every distinct member of the known domain at the same identity and revision;
+duplicate visits cannot fill a missing member. These are authored computations,
+not native semantic certification or evidence of live-model efficacy.
+
 ## Semantic source, observations and construction
 
 These operations compose through the same program, work and context owners.
@@ -634,8 +725,8 @@ families and suite-specific comparison arms, records actual costs, and leaves
 quality adjudication explicit. No live model efficacy or token-saving percentage
 is claimed.
 
-Application 8.0.0 uses `protean-workspace/5`, context v7, output v5 and native
-state format 20. Older namespaces require their compatible executable. The
+Application 9.0.0 uses `protean-workspace/6`, context v8, output v5 and native
+state format 21. Older namespaces require their compatible executable. The
 [dependency lock](../conformance/protean/dependencies.lock.json) binds the local
 Horos 8.0.0 and Kosmos 9.1.0 source archives and their exact commits. The
 [implementation report](semantic-construction-report.md) points to current tuple

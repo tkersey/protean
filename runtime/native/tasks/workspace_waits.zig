@@ -223,7 +223,10 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     json.string(try a.dupe(u8, &std.fmt.bytesToHex(pending.id, .lower))),
                 );
                 const cut: ?state.ControllerReadCut =
-                    if (evidence.read == .controller) .from(fresh) else null;
+                    if (evidence.read == .controller or evidence.read == .consumer)
+                        .from(fresh)
+                    else
+                        null;
                 try validateControllerReadCut(evidence.read, cut);
                 try subjectPublicationEvent(
                     self,

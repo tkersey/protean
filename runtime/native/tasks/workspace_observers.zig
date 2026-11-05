@@ -1030,7 +1030,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     .input = .{ .guest_view = selection.source },
                     .sources = .{ .items = &.{} },
                 },
-            }, null, null);
+            }, null, null, null);
             const view_ref = try wp.reference(a, .value, view.receipt.workspace.?);
             const disclosed = try workspaceValueReference(self, a, task_id, view_ref);
             const custody =

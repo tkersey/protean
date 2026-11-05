@@ -1,6 +1,6 @@
-# Adaptive Responses contract (v11)
+# Adaptive Responses contract (v12)
 
-`agent.model.invoke.v11` binds inference selection and context projection to the
+`agent.model.invoke.v12` binds inference selection and context projection to the
 existing model/responder owner. It is the sole invocation contract. Old
 invocation producers, replay readers, and disposable examples are replaced;
 there is no invocation migration or compatibility adapter.
@@ -40,9 +40,9 @@ polish is deferred, not a blocker on the reusable API or reference integration.
 | `eviction_generation` | Authored exclusion fence. Every newly selected lineage must respect it. |
 | `AdaptiveContextReference` | Content reference plus schema, policy, inference selection, task, tenant, audience, epoch, watermark, and eviction bindings. |
 
-The additional identities are `agent.model.context.responses.adaptive.v7` and
-`agent.model.policy.adaptive.v2`. Every model effect uses the same v11
-request/result envelope and the v6 context reference.
+The additional identities are `agent.model.context.responses.adaptive.v8` and
+`agent.model.policy.adaptive.v2`. Every model effect uses the same v12
+request/result envelope and the v8 context reference.
 
 ## Requests and checked actions
 
@@ -156,7 +156,21 @@ The native grammar is checked against independent declarative fixtures,
 including exact failure classifications, full-width integer arguments, Unicode,
 opaque fields and ordered replay. The removed JS adaptive implementation is
 superseded by scope change; no differential execution or dual-backend gate is
-required. Old example stores and archives are replaced with fresh v6 state.
+required. New tasks use the current application namespace. Existing installations retain
+their matching runtime; old event and invocation schemas are not reinterpreted.
+
+Before dispatch, a projected request can return `preparation_rejected` with
+its selected view and a stale, unavailable, invalid, or oversized diagnostic.
+This appended result variant has no provider capture, replay reference, usage,
+or physical attempt charge. The native owner settles it atomically with the
+original occurrence and a preparation-rejection event. Archive admission
+reconstructs the rejection at that event's original cut; it cannot authenticate
+it from the diagnostic alone.
+
+The reference controller preserves its prior messages, pending results, replay,
+and model-call count, reads current user input, and prepares a new ordinary
+request. The rejected occurrence stays immutable. Other controllers must handle
+this variant or preserve a recoverable diagnostic under their protected contract.
 
 ## Bounds and observations
 

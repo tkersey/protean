@@ -1,7 +1,7 @@
 //! Build/environmental API. No target program executes while generating assets.
 const std = @import("std");
 /// One packaging constant supplies both the namespace reader and manifest.
-pub const state_format: u32 = 20;
+pub const state_format: u32 = 21;
 pub const sqlite_flags: []const []const u8 = &.{
     "-std=c99",
     "-DSQLITE_THREADSAFE=1",

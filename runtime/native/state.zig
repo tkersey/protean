@@ -504,6 +504,8 @@ pub const EventType = enum {
     controller,
     controller_requested,
     execution,
+    preparation,
+    preparation_rejected,
 };
 pub const ControllerReadCut = struct {
     event_watermark: u64,
@@ -532,6 +534,13 @@ pub const Event = struct {
     residual_publications: contracts.Vector(ResidualPublication, null) = .{ .items = &.{} },
     controller_read: ?ControllerReadCut = null,
     root_publication: ?RootPublication = null,
+    preparation_attempt: ?Reference = null,
+    preparation_rejection: ?PreparationRejection = null,
+};
+
+pub const PreparationRejection = struct {
+    occurrence: occurrence.Occurrence,
+    controller_context: ?ControllerContext,
 };
 
 pub const RootCut = struct {
@@ -583,6 +592,10 @@ pub const RootHistory = struct {
     pub fn observe(self: *RootHistory, event: Event) !void {
         if (event.seq != (std.math.add(u64, self.event_watermark, 1) catch
             return error.InvalidArchive)) return error.InvalidArchive;
+        if ((event.kind == .preparation) != (event.preparation_attempt != null))
+            return error.InvalidArchive;
+        if ((event.kind == .preparation_rejected) != (event.preparation_rejection != null))
+            return error.InvalidArchive;
         const advances = event.kind == .execution or event.kind == .controller;
         if (advances != (event.root_publication != null)) return error.InvalidArchive;
         if (event.controller_read) |read| {
@@ -682,6 +695,7 @@ pub const Attempt = struct {
     controller_context: ?ControllerContext = null,
     controller_read: ?ControllerReadCut = null,
     dispatch_checkpoint: ?Reference = null,
+    preparation_cut: ?u64 = null,
 };
 pub const Capture = struct {
     task: TaskId,

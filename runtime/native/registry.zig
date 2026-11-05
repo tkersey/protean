@@ -57,6 +57,22 @@ pub const ReadView = struct {
     pub fn historyRead(self: ReadView, bytes: usize) void {
         if (self.native_scope) |source| @import("store.zig").Store.recordHistoryRead(source, bytes);
     }
+
+    pub fn workspaceView(
+        self: ReadView,
+        a: std.mem.Allocator,
+        reference: contracts.workspace.Ref,
+    ) !?contracts.Decoded(@import("workspace_state.zig").View) {
+        return @import("store.zig").Store.readWorkspaceView(self.native_scope, a, reference);
+    }
+
+    pub fn requireConsumer(
+        self: ReadView,
+        a: std.mem.Allocator,
+        observed: @import("workspace_state.zig").ReplyObservation,
+    ) !void {
+        return @import("store.zig").Store.requireWorkspaceConsumer(self.native_scope, a, observed);
+    }
 };
 
 pub const ControllerProjection = struct {
@@ -66,6 +82,13 @@ pub const ControllerProjection = struct {
     overlay: state.Reference,
 };
 pub const TrialProjection = struct { work: state.Digest, view: state.Reference };
+pub const ConsumerCut = struct {
+    event_watermark: u64,
+    controller: ?state.Digest,
+    controller_epoch: u64,
+    next_message: u64,
+};
+
 pub const ProjectionBinding = struct {
     task: state.TaskId,
     tenant: []const u8,
@@ -75,6 +98,7 @@ pub const ProjectionBinding = struct {
     controller: ?ControllerProjection = null,
     trial: ?TrialProjection = null,
     execution: ?state.Digest = null,
+    consumer_cut: ?ConsumerCut = null,
 };
 
 /// Pure projection inputs: immutable objects and frozen task bindings, with no
@@ -89,6 +113,7 @@ pub const ProjectionContext = struct {
     controller: ?ControllerProjection = null,
     trial: ?TrialProjection = null,
     execution: ?state.Digest = null,
+    consumer_cut: ?ConsumerCut = null,
     objects: ReadView,
 
     pub fn object(self: ProjectionContext, ref: state.Reference, limit: usize) ![]u8 {
@@ -161,6 +186,7 @@ pub fn opaqueProjection(_: std.mem.Allocator, _: []const []const u8) ![]Dependen
 pub const CaptureAdapter = struct {
     dependencies: DependencyDecoder,
     prepare: *const fn (ProjectionContext, []const u8) anyerror![]u8,
+    reject_preparation: ?*const fn (ProjectionContext, []const u8, anyerror) anyerror!?[]u8 = null,
     acquire: *const fn (Context, []const u8) anyerror!Acquisition,
     interpret: *const fn (
         ProjectionContext,

@@ -212,6 +212,7 @@ test "observed model result preserves normalized provenance and typed recovery d
     var compiled = try horos.program.compile(allocator, module);
     defer compiled.deinit();
     const value: Input = .{ .request = template(&.{}, single), .offered = .{ true, false } };
+    try expectTemplateRequest(compiled.program, value);
     var parked = try start(compiled.program, value);
     defer parked.deinit();
     try expectRequest(parked, value);
@@ -249,6 +250,30 @@ test "observed model result preserves normalized provenance and typed recovery d
         try std.testing.expectEqual(case.rejection, rejected.value.interpretation.rejected);
         try expectNormalized(case.reply, rejected.value.normalized.result);
     }
+}
+
+fn expectTemplateRequest(program: data.activation.Program, compact: Input) !void {
+    var full = compact;
+    full.request.invocation.tools = P.allDeclarations();
+    var complete = try start(program, full);
+    defer complete.deinit();
+    var template_only = try start(program, compact);
+    defer template_only.deinit();
+    try expectRequest(complete, full);
+    try expectRequest(template_only, compact);
+    var left = try data.invocation.decode(
+        data.invocation.Request,
+        allocator,
+        complete.record.requested.request,
+    );
+    defer left.deinit();
+    var right = try data.invocation.decode(
+        data.invocation.Request,
+        allocator,
+        template_only.record.requested.request,
+    );
+    defer right.deinit();
+    try std.testing.expectEqualSlices(u8, left.value.binding.payload, right.value.binding.payload);
 }
 
 fn expectNormalized(expected: P.Result, actual: P.Result) !void {

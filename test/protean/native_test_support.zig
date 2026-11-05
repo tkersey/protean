@@ -33,13 +33,13 @@ pub fn ownerManifest(
         .native_host_contract = "unit-native-contract",
         .protocol = "agent-host/2.1",
         .client_mapping = "agent-client-values/1.1",
-        .state_format = "agent-native-state/20",
+        .state_format = "agent-native-state/21",
         .optimize = "safe",
         .program_sha256 = @as([]const u8, &image_hex),
         .program_identity = @as([]const u8, &identity_hex),
         .application_assets_sha256 = @as([]const u8, &assets_hex),
         .dependencies = .{ .world = "unit-kosmos", .boundary = "unit-horos" },
-        .compiler = .{ .version = "0.17.0" },
+        .compiler = .{ .version = "0.17.1" },
     }, .{});
 }
 

@@ -83,7 +83,7 @@ pub fn ModelObservation(comptime P: type, comptime batch: bool) type {
 }
 
 /// Declare a shared `(P.AdaptiveRequest, [P.declaration_count]bool) -> Interpretation`
-/// computation. The request carries v11 selection and context; its nested `tools`
+/// computation. The request carries v12 selection and context; its nested `tools`
 /// field is replaced with the closed catalog filtered by materialized definitions.
 /// Other fields are preserved; incompatible normalization bounds take `failure`
 /// before external I/O. Selection and the very same offered value

@@ -1,4 +1,17 @@
 const std = @import("std");
+const adaptive_owner_groups = [_][]const []const u8{
+    &.{ "adaptive_controls.", "adaptive_reports.", "adaptive_recovery." },
+    &.{"projection_recovery."},
+    &.{ "projection_failure_tests.", "projection_late_recovery." },
+    &.{ "projection owner authenticates", "projection receipts preserve" },
+    &.{
+        "projection required-current",
+        "projection selection rechecks",
+        "delegated projection binds",
+    },
+    &.{"constructed successor rejects"},
+    &.{ "delegated ordinary", "delegated projection answer" },
+};
 const workspace_execution_groups = [_][]const []const u8{
     &.{"CTX-01"},
     &.{"WORK-C07"},
@@ -119,8 +132,8 @@ const Graph = struct {
 
 pub fn build(b: *std.Build) void {
     comptime {
-        if (!std.mem.eql(u8, @import("builtin").zig_version_string, "0.17.0"))
-            @compileError("Zig 0.17.0 is required");
+        if (!std.mem.eql(u8, @import("builtin").zig_version_string, "0.17.1"))
+            @compileError("Zig 0.17.1 is required");
     }
     var graph: BuildGraph = .{ .b = b };
     graph.configure();
@@ -947,7 +960,8 @@ const BuildGraph = struct {
     }
 
     fn workspaceSemantics(s: *BuildGraph) void {
-        const workspace_semantics_run = s.b.addSystemCommand(&.{"node"});
+        const workspace_semantics_run = nativeCheckCommand(s.b);
+        workspace_semantics_run.addArg("node");
         workspace_semantics_run.addFileArg2(s.b.path("test/protean/workspace_semantics.mjs"), .{});
         workspace_semantics_run.addArtifactArg(s.workspace_peer);
         workspace_semantics_run.addFileArg2((s.source orelse s.b.dependency("horos", .{
@@ -969,7 +983,6 @@ const BuildGraph = struct {
             "Kosmos kernel for generated workspace native/WASM comparison",
         )) |wasm|
             workspace_semantics_run.addFileArg2(wasm, .{ .make_absolute = true });
-        workspace_semantics_run.has_side_effects = true;
         const workspace_semantics = s.b.step(
             "check-workspace-semantics",
             "Compare newly generated workspace programs with the independent source oracle",
@@ -1157,6 +1170,10 @@ const BuildGraph = struct {
         adaptive_test_environment.addImport("protean_native", s.checked_environment);
         s.native_suite.addImport("adaptive_types", adaptive_test_types);
         s.native_suite.addImport("adaptive_environment", adaptive_test_environment);
+        const projection_example =
+            s.native_graph.module("examples/adaptive/projection_example.zig");
+        projection_example.addImport("protean_native", s.checked_environment);
+        s.native_suite.addImport("projection_example", projection_example);
         s.native_suite.addAnonymousImport(
             "adaptive_image",
             .{ .root_source_file = s.adaptive_image },
@@ -1189,7 +1206,10 @@ const BuildGraph = struct {
                 "check-native-owner-" ++ group[0],
                 "Qualify native " ++ group[0] ++ " contracts",
             );
-            const tests = s.native_graph.testModule(checks, suite);
+            const tests = if (comptime std.mem.eql(u8, group[0], "adaptive"))
+                s.native_graph.testModuleGrouped(checks, suite, &adaptive_owner_groups, null)
+            else
+                s.native_graph.testModuleGrouped(checks, suite, &.{&.{".test"}}, null);
             if (linuxX86(s.b.graph.host)) tests.use_llvm = false;
             s.b.step(
                 "build-native-owner-" ++ group[0] ++ "-check",
@@ -1290,10 +1310,9 @@ const BuildGraph = struct {
             .use_llvm = if (linuxX86(s.b.graph.host)) s.optimize != .debug else null,
         });
         crash_probe.step.dependOn(&s.native_guard.step);
-        const crash_check = nodeCommand(s.b);
+        const crash_check = nativeCheckCommand(s.b);
         crash_check.addArgs(&.{ "node", "test/protean/native_recovery_crash.mjs" });
         crash_check.addFileArg2(crash_probe.getEmittedBin(), .{ .make_absolute = true });
-        crash_check.has_side_effects = true;
         s.b.step(
             "check-native-recovery-crash",
             "Kill and reopen native occurrence/recovery owners at durable boundaries",
@@ -1317,14 +1336,13 @@ const BuildGraph = struct {
     }
 
     fn pureChecks(s: *BuildGraph) void {
-        const pure = nodeCommand(s.b);
+        const pure = nativeCheckCommand(s.b);
         pure.addArgs(&.{
             "node",
             "--test",
             "test/protean/values.test.mjs",
             "test/protean/qualification_tests.test.mjs",
         });
-        pure.has_side_effects = true;
         s.check.dependOn(&pure.step);
         s.aggregate.dependOn(s.check);
         s.b.step("check-authoring-core", "Check retained authoring contracts").dependOn(s.check);

@@ -10,9 +10,9 @@ comptime {
     if (!std.mem.eql(
         u8,
         @import("builtin").zig_version_string,
-        "0.17.0",
+        "0.17.1",
     )) @compileError(
-        "Zig 0.17.0 is required",
+        "Zig 0.17.1 is required",
     );
 }
 
@@ -652,7 +652,7 @@ fn setup(c: Context, args: []const []const u8) !void {
         } else return error.UnexpectedArgument;
     }
     const lock = try lockAt(c, args[0]);
-    try equal(std.mem.trim(u8, try command(c, &.{ args[3], "version" }, 1024), "\r\n "), "0.17.0");
+    try equal(std.mem.trim(u8, try command(c, &.{ args[3], "version" }, 1024), "\r\n "), "0.17.1");
     try Dir.cwd().createDirPath(c.io, args[2]);
     const horos = try sourceAt(c, args[2], "horos", try field(lock, "boundary"), offline);
     if (!authoring_only) {

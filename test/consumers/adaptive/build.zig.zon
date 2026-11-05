@@ -1,7 +1,7 @@
 .{
     .name = .protean_adaptive_consumer,
     .version = "1.0.0",
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig_version = "0.17.1",
     .fingerprint = 0x6504cc5493b78865,
     .dependencies = .{ .protean = .{ .path = "../../.." } },
     .paths = .{ "build.zig", "build.zig.zon" },

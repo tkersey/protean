@@ -477,7 +477,7 @@ fn checkUsage(
         try std.testing.expect(result.replay == null and projection.objects.len == 0);
     }
     if (case.object.get("usage_partial")) |expected| {
-        // v11 retains independently valid counters when another is malformed.
+        // v12 retains independently valid counters when another is malformed.
         // Its existing adaptive corpus independently specifies partial usage.
         const observed = try native.values.toJson(@TypeOf(result.usage), a, result.usage);
         try std.testing.expectEqualStrings(

@@ -51,6 +51,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         const Tasks = @import("task_queries.zig").Operations(Types, Self);
         const Access = @import("workspace_access.zig").Operations(Types, Self);
         const Contexts = @import("workspace_contexts.zig").Operations(Types, Self);
+        const Projections = @import("workspace_projections.zig").Operations(Types, Self);
         const Execution = @import("workspace_execution.zig").Operations(Types, Self);
         const Inspection = @import("workspace_inspection.zig").Operations(Types, Self);
         const Observers = @import("workspace_observers.zig").Operations(Types, Self);
@@ -392,14 +393,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 parent,
                 authorized.snapshot orelse return error.Denied,
             );
-            var inputs: std.ArrayList(state.Reference) = .empty;
-            defer inputs.deinit(a);
-            if (selection.interpretation ==
-                .model) for (selection.interpretation.model.inputs.items) |ref|
-            {
-                const value = try workspaceValueReference(self, a, task_id, ref);
-                try inputs.append(a, value.artifact);
-            };
+            const inputs = try prepareDelegatedInputs(self, a, task_id, selection);
+            defer a.free(inputs);
+            var context = try prepareDelegatedContext(self, a, parent, selection);
+            defer if (context) |*selected| selected.deinit();
+            if (context) |selected| try selected.requireModel(a, authorized.model);
+            const view: ?workspace.ViewArtifact = if (context) |selected| selected.view else null;
+            const context_ref = try delegatedViewReference(a, view);
             var built = try instrument.build(a, kind);
             defer built.deinit();
             try store(self).begin();
@@ -422,7 +422,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .selection = selection.interpretation,
                 .model = authorized.model,
                 .snapshot = if (kind == .snapshot) authorized.snapshot else null,
-                .inputs = .{ .items = inputs.items },
+                .inputs = .{ .items = inputs },
+                .context = context_ref,
             };
             return startDelegatedInstrument(
                 self,
@@ -433,6 +434,54 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 record_value,
                 request,
                 selection,
+                view,
+            );
+        }
+
+        fn delegatedViewReference(
+            a: std.mem.Allocator,
+            view: ?workspace.ViewArtifact,
+        ) !?state.Reference {
+            const selected = view orelse return null;
+            const bytes = try contracts.encodeOwned(workspace.ViewArtifact, a, selected);
+            defer a.free(bytes);
+            return .{ .digest = storage.digest(bytes), .bytes = bytes.len };
+        }
+
+        fn prepareDelegatedInputs(
+            self: *Self,
+            a: std.mem.Allocator,
+            task_id: state.TaskId,
+            selection: @FieldType(contracts.workspace.Work, "delegate"),
+        ) ![]state.Reference {
+            const refs = if (selection.interpretation == .model)
+                selection.interpretation.model.inputs.items
+            else
+                &.{};
+            const inputs = try a.alloc(state.Reference, refs.len);
+            errdefer a.free(inputs);
+            for (refs, inputs) |ref, *out|
+                out.* = (try workspaceValueReference(self, a, task_id, ref)).artifact;
+            return inputs;
+        }
+
+        fn prepareDelegatedContext(
+            self: *Self,
+            a: std.mem.Allocator,
+            parent: state.Task,
+            selection: @FieldType(contracts.workspace.Work, "delegate"),
+        ) !?Projections.Admitted {
+            if (selection.interpretation != .model) return null;
+            const model = selection.interpretation.model;
+            const context = model.context orelse return null;
+            if (model.inputs.items.len != 0) return error.InvalidDelegation;
+            return try Projections.select(
+                self,
+                a,
+                parent,
+                context,
+                Projections.delegatedTarget(selection),
+                true,
             );
         }
         fn publishWorkspaceCommitEvent(
@@ -516,6 +565,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             record_value: workspace.Delegation,
             request: state.Digest,
             selection: anytype,
+            view: ?workspace.ViewArtifact,
         ) !Admission {
             const record_bytes = try contracts.encodeOwned(workspace.Delegation, a, record_value);
             defer a.free(record_bytes);
@@ -535,6 +585,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 null,
                 .{
                     .record = record_value,
+                    .view = view,
                     .request = request,
                     .policy = selection.policy,
                     .command = selection,

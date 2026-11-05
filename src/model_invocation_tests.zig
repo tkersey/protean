@@ -151,7 +151,7 @@ test "model effect is ordinary and a typed question requires no executable tool"
     try std.testing.expectEqualStrings("answer", Question.allDeclarations().items[0].name.bytes);
 }
 
-test "v11 is the sole model effect and retains current context bindings" {
+test "v12 is the sole model effect and retains current context bindings" {
     const reference: invocation.AdaptiveContextReference = .{
         .object = .{ .digest = @splat(1), .bytes = 1024 * 1024 },
         .schema = .{ .bytes = invocation.adaptive_context_semantic_identity },
@@ -188,7 +188,7 @@ test "v11 is the sole model effect and retains current context bindings" {
     const operation = try Fixture.declare(context);
     const effect = try horos.authoring.interop.operationId(context.author, operation);
     try std.testing.expectEqualStrings(
-        "agent.model.invoke.v11",
+        "agent.model.invoke.v12",
         builder.effects.items[@intCast(effect)].identity,
     );
     try std.testing.expectEqual(

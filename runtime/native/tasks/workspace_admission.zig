@@ -225,6 +225,29 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 }
 
                 fn select(ctx: @This(), selection: @FieldType(wc.Context, "select")) !void {
+                    if (selection == .projected) {
+                        const Projections = @import("workspace_projections.zig").Operations(
+                            Types,
+                            Self,
+                        );
+                        var admitted = try Projections.restore(
+                            ctx.self,
+                            ctx.a,
+                            ctx.parent,
+                            selection.projected,
+                            .{ .controller = .{} },
+                            try store(ctx.self).objectReference(ctx.identity, null),
+                        );
+                        defer admitted.deinit();
+                        try Projections.published(
+                            ctx.self,
+                            ctx.a,
+                            ctx.parent,
+                            admitted.view,
+                            ctx.event_seq,
+                        );
+                        return;
+                    }
                     const refs = try ctx.a.alloc(state.Reference, selection.values.items.len);
                     defer ctx.a.free(refs);
                     for (selection.values.items, refs) |ref, *out|
@@ -867,6 +890,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                         ctx.admission.work,
                     );
                     defer child.deinit();
+                    try ctx.delegatedContextPublication(child.value);
                     try validateWorkspaceInitialInput(
                         ctx.self,
                         ctx.a,
@@ -877,6 +901,34 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                         .task = ctx.parent.id,
                         .command = selection,
                     });
+                }
+
+                fn delegatedContextPublication(ctx: @This(), child: workspace.Work) !void {
+                    const ref = child.delegation orelse return error.InvalidArchive;
+                    var delegation = try contracts.decodeOwned(
+                        workspace.Delegation,
+                        ctx.a,
+                        try store(ctx.self).object(ctx.a, ref, null),
+                    );
+                    defer delegation.deinit();
+                    const selected = delegation.value.context orelse return;
+                    var view = try contracts.decodeOwned(
+                        workspace.ViewArtifact,
+                        ctx.a,
+                        try store(ctx.self).object(ctx.a, selected, null),
+                    );
+                    defer view.deinit();
+                    const Projections = @import("workspace_projections.zig").Operations(
+                        Types,
+                        Self,
+                    );
+                    try Projections.published(
+                        ctx.self,
+                        ctx.a,
+                        ctx.parent,
+                        view.value,
+                        ctx.event_value.seq,
+                    );
                 }
             };
         }

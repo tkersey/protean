@@ -154,6 +154,13 @@ test "actual Kosmos rejects forged declaration association variants and offer cu
             P.InterpretationFailure.provider,
         },
         .{ P.Result{ .unsupported_response = .invalid_utf8 }, P.InterpretationFailure.unsupported },
+        .{
+            P.Result{ .preparation_rejected = .{
+                .code = .stale,
+                .view = .{ .kind = .view, .id = .{ .bytes = "retained-view" } },
+            } },
+            P.InterpretationFailure.unsupported,
+        },
     }) |case| {
         var failed = input(&.{});
         failed.result = case[0];

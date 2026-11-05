@@ -127,6 +127,33 @@ pub fn example(a: std.mem.Allocator) ![]u8 {
     return records.encode(a, try horos.source.examples.lexical(&builder));
 }
 
+pub fn projectionExample(a: std.mem.Allocator) ![]u8 {
+    const wc = contracts.workspace;
+    var builder = horos.source.Builder.init(a);
+    defer builder.deinit();
+    const input = try contracts.schema(wc.ProjectionInput(u64), &builder);
+    const output = try contracts.schema(wc.ProjectionResult(u64), &builder);
+    const envelope = try contracts.schema(wc.ProjectionProposal, &builder);
+    const reference_schema = try contracts.schema(wc.Ref, &builder);
+    const number = try builder.scalar(u64);
+    const unit = try builder.scalar(void);
+    const entry = try builder.declare(&.{input}, output, &.{}, &.{});
+    const argument = try builder.reference(builder.parameter(entry, 0));
+    const consumer = try builder.primitive(reference_schema, .field, &.{argument}, 0);
+    const value = try builder.primitive(number, .field, &.{argument}, 1);
+    const Blocks = contracts.Vector(wc.PresentationBlock, null);
+    const blocks = try builder.literal(.{
+        .schema = try contracts.schema(Blocks, &builder),
+        .bytes = try contracts.encodeOwned(Blocks, builder.allocator(), .{
+            .items = &.{.{ .computed = .{} }},
+        }),
+    });
+    const proposal_value = try builder.primitive(envelope, .product, &.{ consumer, blocks }, 0);
+    const result = try builder.primitive(output, .product, &.{ proposal_value, value }, 0);
+    try builder.define(entry, try builder.pure(result));
+    return records.encode(a, builder.module(entry, unit));
+}
+
 pub fn runtimeQuery(a: std.mem.Allocator, retention: bool) ![]u8 {
     var builder = horos.source.Builder.init(a);
     defer builder.deinit();
@@ -363,6 +390,43 @@ pub fn buildDerived(
         diagnostic.code = err;
         return err;
     };
+}
+
+pub fn requirePure(
+    a: std.mem.Allocator,
+    kind: @FieldType(@import("workspace_state.zig").ProgramArtifact, "source_kind"),
+    source: []const u8,
+    image: []const u8,
+) !void {
+    switch (kind) {
+        .source_records => {
+            var document = try records.decode(a, source);
+            defer document.deinit();
+            try requirePureModule(a, document.module);
+        },
+        .source_derivation => {
+            var document = try records.decodeRecord(records.DerivationDocument, a, source);
+            defer document.deinit();
+            try requirePureModule(a, document.value.candidate);
+        },
+        .component_recipe => {
+            var decoded = try data.program_image.decode(a, image);
+            defer decoded.deinit();
+            const program = decoded.program;
+            if (program.functions[@intCast(program.roots.entry)].effects.len != 0)
+                return error.ImpureProjection;
+            for (program.effects) |effect| if (effect.external) return error.ImpureProjection;
+        },
+        .instrument_model, .instrument_snapshot => return error.ImpureProjection,
+    }
+}
+
+fn requirePureModule(a: std.mem.Allocator, module: horos.source.Module) !void {
+    var selected = try horos.source.slice.extract(a, module, .{
+        .entry = module.entry,
+        .require_pure = true,
+    });
+    selected.deinit();
 }
 
 fn derivedBody(
@@ -659,7 +723,7 @@ test "general source builds through actual checked lowering and rejects private 
     var image = try data.program_image.decode(a, compiled.image);
     defer image.deinit();
     _ = try builder.effect(.{
-        .identity = "agent.model.invoke.v11",
+        .identity = "agent.model.invoke.v12",
         .payload = module.failure,
         .result = module.failure,
         .external = false,

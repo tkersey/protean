@@ -18,7 +18,7 @@ interpret a recipe or run a second application policy loop.
 
 ## Build and run
 
-Use Zig **0.17.0**, `tar`, and `unzip`. Approved source archives and SQLite are
+Use Zig **0.17.1**, `tar`, and `unzip`. Approved source archives and SQLite are
 acquired and authenticated by a Zig bootstrap; Node and Python are not needed.
 From this checkout:
 
@@ -65,7 +65,7 @@ builds the adaptive application through that public API.
 
 [Architecture](docs/architecture.md) ·
 [Trust boundaries](docs/security_model.md) ·
-[Adaptive model contracts](docs/model-invocation-v11.md) ·
+[Adaptive model contracts](docs/model-invocation-v12.md) ·
 [Native Responses](docs/native-responses.md) ·
 [Computational workspace and placement](docs/computational-workspace.md)
 

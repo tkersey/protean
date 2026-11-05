@@ -24,13 +24,26 @@ fn authorize(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
     const snapshot = try authorizeSnapshot(ctx, command);
     const model = try authorizeModel(ctx, command);
     const input = try authorizeInput(ctx, command);
+    const consumer = if (needsConsumer(command))
+        try native.adaptive_consumer.Protection(t.P).observe(ctx, request.value.context)
+    else
+        null;
     return contracts.encodeOwned(native.workspace.Authorized, ctx.allocator, .{
         .command = command,
         .snapshot = snapshot,
         .catalog = catalog,
         .input = input,
         .model = model,
+        .consumer = consumer,
     });
+}
+fn needsConsumer(command: Command) bool {
+    if (command != .context) return false;
+    return switch (command.context) {
+        .inspect => |request| request.consumer != null,
+        .select => |selection| selection == .projected,
+        else => false,
+    };
 }
 pub fn declaration() native.Declaration {
     return .{
@@ -129,9 +142,7 @@ fn authorizeModel(
     command: Command,
 ) !?native.workspace.ModelBinding {
     var model: ?native.workspace.ModelBinding = null;
-    const delegated = command == .work and command.work == .delegate;
-    if (delegated and command.work.delegate.interpretation == .model) {
-        const selection = command.work.delegate.interpretation.model;
+    if (modelSelection(command)) |selection| {
         const A = native.adaptive_responses.Admission(t.P);
         const policy = try A.policy(ctx.allocator, ctx.profile);
         for (policy.profiles.items) |profile| {
@@ -163,6 +174,24 @@ fn authorizeModel(
         if (model == null) return error.UnknownInferenceProfile;
     }
     return model;
+}
+
+const ModelSelection = struct { profile_id: contracts.Text(64), effort: contracts.Text(16) };
+
+fn modelSelection(command: Command) ?ModelSelection {
+    if (command == .work and command.work == .delegate and
+        command.work.delegate.interpretation == .model)
+    {
+        const selection = command.work.delegate.interpretation.model;
+        return .{ .profile_id = selection.profile_id, .effort = selection.effort };
+    }
+    if (command == .context and command.context == .inspect) {
+        if (command.context.inspect.consumer) |consumer| if (consumer.target == .model) {
+            const selection = consumer.target.model;
+            return .{ .profile_id = selection.profile_id, .effort = selection.effort };
+        };
+    }
+    return null;
 }
 
 fn authorizeInput(

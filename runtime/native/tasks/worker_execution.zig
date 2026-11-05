@@ -348,18 +348,16 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                         pending,
                         adapter,
                         try entry.payload(preparation.allocator(), request.binding.payload),
-                    ) catch |err|
-                        return blockedOccurrence(
-                            self,
-                            a,
-                            initial,
-                            pending,
-                            switch (err) {
-                                error.Capacity, error.OutOfMemory => .capacity,
-                                error.MissingArtifact, error.CorruptObject => .missing_artifact,
-                                else => .incompatible_profile,
-                            },
-                        )
+                    ) catch |err| return rejectPreparation(
+                        self,
+                        a,
+                        initial,
+                        pending,
+                        dispatched,
+                        entry,
+                        request,
+                        err,
+                    )
                 else
                     null;
             return dispatchAcquisition(
@@ -373,6 +371,132 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .environment,
                 null,
             );
+        }
+        fn rejectPreparation(
+            self: *Self,
+            a: std.mem.Allocator,
+            initial: state.Task,
+            pending: Occurrence,
+            dispatched: Occurrence,
+            entry: registry.Entry,
+            request: data.invocation.Request,
+            failure: anyerror,
+        ) !Step {
+            var arena = std.heap.ArenaAllocator.init(a);
+            defer arena.deinit();
+            const temporary = arena.allocator();
+            const adapter = entry.declaration.capture orelse return failure;
+            if (!entry.declaration.inference or adapter.reject_preparation == null)
+                return blockPreparation(self, a, initial, pending, failure);
+            const binding = try occurrenceProjectionBinding(self, temporary, initial, pending);
+            if (try projectionRejection(
+                self,
+                temporary,
+                binding,
+                adapter,
+                try entry.payload(temporary, request.binding.payload),
+                failure,
+            )) |reply| {
+                var schema = try data.schema.decode(temporary, entry.resume_schema);
+                defer schema.deinit();
+                try data.schema.validateValue(temporary, schema.descriptor, reply);
+                return publishPreparationRejection(self, a, initial, dispatched, reply);
+            }
+            return blockPreparation(self, a, initial, pending, failure);
+        }
+        fn blockPreparation(
+            self: *Self,
+            a: std.mem.Allocator,
+            initial: state.Task,
+            pending: Occurrence,
+            failure: anyerror,
+        ) !Step {
+            return blockedOccurrence(self, a, initial, pending, switch (failure) {
+                error.Capacity, error.OutOfMemory => .capacity,
+                error.MissingArtifact, error.CorruptObject => .missing_artifact,
+                else => .incompatible_profile,
+            });
+        }
+        pub fn projectionRejection(
+            self: *Self,
+            a: std.mem.Allocator,
+            binding: registry.ProjectionBinding,
+            adapter: registry.CaptureAdapter,
+            payload: []const u8,
+            failure: anyerror,
+        ) !?[]u8 {
+            const reject = adapter.reject_preparation orelse return null;
+            return store(self).project(?[]u8, a, self.handlers, binding, struct {
+                reject: *const fn (registry.ProjectionContext, []const u8, anyerror) anyerror!?[]u8,
+                payload: []const u8,
+                failure: anyerror,
+                pub fn run(this: @This(), context: registry.ProjectionContext) !?[]u8 {
+                    return this.reject(context, this.payload, this.failure);
+                }
+            }{ .reject = reject, .payload = payload, .failure = failure });
+        }
+        fn publishPreparationRejection(
+            self: *Self,
+            a: std.mem.Allocator,
+            initial: state.Task,
+            dispatched: Occurrence,
+            payload: []const u8,
+        ) !Step {
+            const bound = try data.invocation.encodeOwned(data.invocation.Result, a, .{
+                .request_identity = dispatched.request,
+                .value = payload,
+            });
+            defer a.free(bound);
+            const acquired = try occurrence.acquired(dispatched, .{
+                .id = dispatched.id,
+                .task = dispatched.task,
+                .work = dispatched.work,
+                .residual = dispatched.residual,
+                .request = dispatched.request,
+            }, dispatched.state.dispatching.id, storage.digest(bound));
+            const frozen: state.PreparationRejection = .{
+                .occurrence = acquired,
+                .controller_context = try currentControllerContext(self, a, initial, acquired),
+            };
+            var value = initial;
+            value.revision = try std.math.add(u64, value.revision, 1);
+            if (acquired.work == null and acquired.residual == null) value.schedule = .active;
+            try store(self).begin();
+            defer store(self).rollback();
+            _ = try store(self).putObject(bound);
+            try store(self).putRecord(Occurrence, "occurrence", acquired.id, value.id, acquired);
+            try preparationRejectionEvent(self, a, &value, frozen);
+            try effectSchedule(self, a, &value, acquired, .queued, null);
+            try persistOccurrence(
+                self,
+                a,
+                value,
+                initial.revision,
+                "effect.preparation-rejected",
+                acquired,
+                true,
+            );
+            return .progressed;
+        }
+        fn preparationRejectionEvent(
+            self: *Self,
+            a: std.mem.Allocator,
+            value: *state.Task,
+            frozen: state.PreparationRejection,
+        ) !void {
+            const payload = try std.fmt.allocPrint(a, "{{\"occurrence_id\":\"{s}\"}}", .{
+                std.fmt.bytesToHex(frozen.occurrence.id, .lower),
+            });
+            defer a.free(payload);
+            value.event_high = try std.math.add(u64, value.event_high, 1);
+            try store(self).putEvent(.{
+                .task = value.id,
+                .seq = value.event_high,
+                .revision = value.revision,
+                .kind = .preparation_rejected,
+                .data = .{ .bytes = payload },
+                .preparation_rejection = frozen,
+            });
         }
         fn dispatchAdmitted(
             self: *Self,
@@ -619,7 +743,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 false;
             try store(self).begin();
             defer store(self).rollback();
-            try store(self).createRecord(state.Attempt, "attempt", attempt, value.id, .{
+            const local_attempt: state.Attempt = .{
                 .id = attempt,
                 .task = value.id,
                 .occurrence = pending.id,
@@ -632,14 +756,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .controller_context = controller_context,
                 .controller_read = controller_read,
                 .dispatch_checkpoint = if (reads_mutable) initial.checkpoint else null,
-            });
-            try store(self).putRecord(
-                Occurrence,
-                "occurrence",
-                pending.id,
-                value.id,
-                pending,
-            );
+                .preparation_cut = if (operation_kind == .environment and prepared != null)
+                    initial.event_high
+                else
+                    null,
+            };
+            try publishPreparation(self, a, value, local_attempt);
+            try store(self).putRecord(Occurrence, "occurrence", pending.id, value.id, pending);
             if (reads_mutable) try acquisitionReadEvent(
                 self,
                 a,
@@ -659,6 +782,36 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .residual = pending.residual,
             });
             return .{ .work = work };
+        }
+        fn publishPreparation(
+            self: *Self,
+            a: std.mem.Allocator,
+            value: *state.Task,
+            attempt: state.Attempt,
+        ) !void {
+            try store(self).createRecord(state.Attempt, "attempt", attempt.id, value.id, attempt);
+            const cut = attempt.preparation_cut orelse return;
+            if (cut != value.event_high) return error.CorruptState;
+            const body = try encodeOwned(state.Attempt, a, attempt);
+            defer a.free(body);
+            const payload = try std.fmt.allocPrint(
+                a,
+                "{{\"attempt_id\":\"{s}\",\"occurrence_id\":\"{s}\"}}",
+                .{
+                    std.fmt.bytesToHex(attempt.id, .lower),
+                    std.fmt.bytesToHex(attempt.occurrence, .lower),
+                },
+            );
+            defer a.free(payload);
+            value.event_high = try std.math.add(u64, cut, 1);
+            try store(self).putEvent(.{
+                .task = value.id,
+                .seq = value.event_high,
+                .revision = value.revision,
+                .kind = .preparation,
+                .data = .{ .bytes = payload },
+                .preparation_attempt = try store(self).putObject(body),
+            });
         }
         pub fn projectionBinding(self: *Self, value: state.Task) registry.ProjectionBinding {
             return .{
@@ -685,21 +838,55 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 var attempt = try record(self, state.Attempt, a, "attempt", id, value.id);
                 defer attempt.deinit();
                 if (!std.meta.eql(attempt.value.occurrence, pending.id)) return error.CorruptState;
-                return projectionBindingAt(
+                const binding = try projectionBindingAt(
                     self,
                     a,
                     value,
                     pending,
                     attempt.value.controller_context,
                 );
+                return withPreparationCut(self, a, value, binding, attempt.value.preparation_cut);
             }
-            return projectionBindingAt(
+            const binding = try projectionBindingAt(
                 self,
                 a,
                 value,
                 pending,
                 try currentControllerContext(self, a, value, pending),
             );
+            return withPreparationCut(self, a, value, binding, value.event_high);
+        }
+        pub fn withPreparationCut(
+            self: *Self,
+            a: std.mem.Allocator,
+            value: state.Task,
+            original: registry.ProjectionBinding,
+            cut: ?u64,
+        ) !registry.ProjectionBinding {
+            const watermark = cut orelse return original;
+            if (watermark == 0 or watermark > value.event_high) return error.InvalidPreparedRequest;
+            var binding = original;
+            if (watermark == value.event_high) {
+                binding.consumer_cut = .{
+                    .event_watermark = watermark,
+                    .controller = value.controller,
+                    .controller_epoch = value.controller_epoch,
+                    .next_message = value.next_message,
+                };
+                return binding;
+            }
+            binding.consumer_cut = .{
+                .event_watermark = watermark,
+                .controller = try controllerAt(self, a, value, watermark),
+                .controller_epoch = try controllerEpochAt(self, a, value, watermark),
+                .next_message = try controller_context_ops.controllerNextMessageAt(
+                    self,
+                    a,
+                    value,
+                    watermark,
+                ),
+            };
+            return binding;
         }
         fn currentControllerContext(
             self: *Self,
@@ -849,11 +1036,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             adapter: registry.CaptureAdapter,
             payload: []const u8,
         ) ![]u8 {
+            const binding = try occurrenceProjectionBinding(self, a, value, pending);
             return store(self).project(
                 []u8,
                 a,
                 self.handlers,
-                try occurrenceProjectionBinding(self, a, value, pending),
+                binding,
                 struct {
                     adapter: registry.CaptureAdapter,
                     payload: []const u8,
