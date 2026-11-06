@@ -203,6 +203,18 @@ test "ChatGPT shared decoder selects frozen framing and preserves existing JSON 
         error.InvalidResponseMediaType,
         responses.decode(a, plan, wrong_media),
     );
+    var absent_media = raw(.sse, 200, completed_sse);
+    absent_media.media_type = null;
+    try std.testing.expect((try responses.decode(a, plan, absent_media)).unsupported == null);
+    try std.testing.expectError(
+        error.InvalidResponseFormat,
+        responses.decode(a, .{}, absent_media),
+    );
+    absent_media.identity_encoding = false;
+    try std.testing.expectError(
+        error.UnsupportedResponseEncoding,
+        responses.decode(a, plan, absent_media),
+    );
     var old_capture = raw(.json, 200, completed_json);
     old_capture.version = 1;
     try std.testing.expectError(error.InvalidResponseFormat, responses.decode(a, .{}, old_capture));

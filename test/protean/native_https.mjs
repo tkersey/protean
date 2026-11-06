@@ -29,7 +29,11 @@ const terminals = new Map([
 
 async function streamFixture(path, response) {
   response.setHeader('content-type', 'text/event-stream');
-  if (terminals.has(path)) {
+  if (path === '/sse-no-media') {
+    response.removeHeader('content-type');
+    heldResponses.set(path, response);
+    response.write(completed + 'unvalidated-tail'.repeat(200));
+  } else if (terminals.has(path)) {
     heldResponses.set(path, response);
     response.write(terminals.get(path));
   } else if (path === '/sse-fragmented') {
@@ -140,6 +144,8 @@ try {
   assert.equal(heldResponses.get('/sse-fragmented').writableEnded, false);
   assert.equal(await run('/sse-tail', {stream: true}), capturedStream(completed));
   assert.equal(heldResponses.get('/sse-tail').writableEnded, false);
+  assert.equal(await run('/sse-no-media', {stream: true}), capturedStream(completed, {media: 'absent'}));
+  assert.equal(heldResponses.get('/sse-no-media').writableEnded, false);
   assert.equal(await run('/sse-eof', {stream: true}), 'unknown MissingTerminalResponse\n');
   assert.equal(await run('/sse-progress-held', {stream: true}), 'unknown Timeout\n');
   assert.equal(await run('/sse-large', {stream: true}), 'unknown ResponseCapacity\n');

@@ -75,6 +75,11 @@ this integration. Request/response byte limits and inference deadlines retain
 their independent meanings; null remains unbounded. A byte cap is not a token cap.
 
 Protean retains raw terminal SSE captures before interpreting any tool proposals.
+The frozen ChatGPT route accepts a missing response media type because the live
+service can omit it; a present media type must identify an event stream. Finalized
+output items supply the ordered replay record. The terminal response may omit
+those items, but any items it lists must agree with their finalized counterparts.
+Conflicting identities, ordering, metadata, and unsupported outputs remain errors.
 Capture-only restoration works without the helper, credentials, networking, or
 a fresh inference grant:
 

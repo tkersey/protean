@@ -62,8 +62,7 @@ pub fn decode(
     var body: json.Value = undefined;
     var failure: ?contracts.ProviderFailureKind = null;
     if (raw.format == .sse) {
-        const media = raw.media_type orelse return error.InvalidResponseMediaType;
-        if (!@import("responses_sse.zig").eventStream(media.bytes))
+        if (raw.media_type) |media| if (!@import("responses_sse.zig").eventStream(media.bytes))
             return error.InvalidResponseMediaType;
         const decoded = try @import("responses_sse.zig").decode(a, raw.body.bytes);
         body = decoded.response;

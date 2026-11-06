@@ -126,7 +126,8 @@ const Exchange = struct {
         var metadata = try self.readMetadata(response);
         metadata.identity_encoding = identity_encoding;
         const streamed = self.config.format == .sse and metadata.status >= 200 and
-            metadata.status < 300 and identity_encoding and sse.eventStream(metadata.media_type);
+            metadata.status < 300 and identity_encoding and
+            (metadata.media_type == null or sse.eventStream(metadata.media_type));
         if (response.head.content_length) |length| {
             if (!streamed and self.config.response_limit != null and
                 length > self.config.response_limit.?)

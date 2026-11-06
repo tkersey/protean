@@ -180,27 +180,54 @@ const State = struct {
 
     fn reconcile(self: *State, response: *json.Value) !void {
         const output = try field(response.*, "output");
-        if (output != .array or output.array.items.len != self.items.items.len)
+        if (output != .array or output.array.items.len > self.items.items.len)
             return error.OutputMismatch;
         var ordered: json.Value = .{ .array = .init(self.a) };
-        for (output.array.items, 0..) |projection, index| {
+        for (0..self.items.items.len) |index| {
             var finalized: ?json.Value = null;
             for (self.items.items) |entry| if (entry.index == index) {
                 finalized = entry.item;
                 break;
             };
-            var item = finalized orelse return error.OutputMismatch;
-            if (projection != .object) return error.OutputMismatch;
-            if (!equal(try text(item, "type"), try text(projection, "type")))
-                return error.OutputMismatch;
-            try mergeProjection(self.a, &item, projection);
-            try finalizedItem(item);
-            for (ordered.array.items) |previous| try distinctItems(previous, item);
-            try ordered.array.append(item);
+            try ordered.array.append(finalized orelse return error.OutputMismatch);
         }
+        var next: usize = 0;
+        for (output.array.items, 0..) |projection, ordinal| {
+            if (projection != .object) return error.OutputMismatch;
+            const index = if (output.array.items.len == ordered.array.items.len)
+                ordinal
+            else
+                try projectionIndex(ordered.array.items, projection);
+            if (index < next) return error.OutputMismatch;
+            next = index + 1;
+            const item = &ordered.array.items[index];
+            if (!equal(try text(item.*, "type"), try text(projection, "type")))
+                return error.OutputMismatch;
+            try mergeProjection(self.a, item, projection);
+            try finalizedItem(item.*);
+        }
+        for (ordered.array.items, 0..) |item, index|
+            for (ordered.array.items[0..index]) |previous| try distinctItems(previous, item);
         try json.put(self.a, response, "output", ordered);
     }
 };
+
+fn projectionIndex(items: []const json.Value, projection: json.Value) !usize {
+    var found: ?usize = null;
+    for (items, 0..) |item, index| {
+        var matches = false;
+        inline for (.{ "id", "call_id" }) |key| if (json.get(projection, key)) |identity| {
+            const expected = try json.text(identity);
+            if (json.get(item, key)) |actual|
+                matches = matches or equal(expected, try json.text(actual));
+        };
+        if (matches) {
+            if (found != null) return error.OutputMismatch;
+            found = index;
+        }
+    }
+    return found orelse error.OutputMismatch;
+}
 
 fn finalizedItem(item: json.Value) !void {
     const kind = try text(item, "type");
@@ -486,4 +513,80 @@ test "SSE repeated matching event labels preserve one meaning without sequence n
     const decoded = try decode(arena.allocator(), bytes);
     try std.testing.expectEqual(Terminal.error_event, decoded.terminal);
     try std.testing.expectEqualStrings("fixture", try text(decoded.response, "code"));
+}
+
+const finalized_subset =
+    \\data: {"type":"response.output_item.done","output_index":2,"item":{"type":"reasoning","id":"r2","summary":[],"encrypted_content":"last"}}
+    \\
+    \\data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"r0","summary":[],"encrypted_content":"first"}}
+    \\
+    \\data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","status":"completed","id":"f1","call_id":"c1","name":"answer","arguments":"{}"}}
+    \\
+    \\
+;
+
+fn subsetStream(a: std.mem.Allocator, output: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        a,
+        "{s}data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"r\"," ++
+            "\"status\":\"completed\",\"output\":{s}}}}}\n\n",
+        .{ finalized_subset, output },
+    );
+}
+
+test "SSE finalized output survives empty and identified sparse terminal rosters" {
+    for ([_][]const u8{
+        "[]",
+        "[{\"type\":\"function_call\",\"id\":\"f1\"}]",
+        "[{\"type\":\"function_call\",\"call_id\":\"c1\"}]",
+        "[{\"type\":\"reasoning\",\"id\":\"r2\"}]",
+        "[{\"type\":\"reasoning\",\"id\":\"r0\"},{\"type\":\"reasoning\",\"id\":\"r2\"}]",
+        "[{\"type\":\"reasoning\"},{\"type\":\"function_call\"},{\"type\":\"reasoning\"}]",
+    }) |roster| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const result = try decode(a, try subsetStream(a, roster));
+        const output = try field(result.response, "output");
+        try std.testing.expectEqual(@as(usize, 3), output.array.items.len);
+        try std.testing.expectEqualStrings(
+            "first",
+            try text(output.array.items[0], "encrypted_content"),
+        );
+        try std.testing.expectEqualStrings("{}", try text(output.array.items[1], "arguments"));
+        try std.testing.expectEqualStrings(
+            "last",
+            try text(output.array.items[2], "encrypted_content"),
+        );
+    }
+}
+
+test "SSE sparse terminal rosters reject unknown ambiguous conflicting and reordered items" {
+    for ([_][]const u8{
+        "[{\"type\":\"reasoning\",\"id\":\"unknown\"}]",
+        "[{\"type\":\"reasoning\"}]",
+        "[{\"type\":\"function_call\",\"id\":\"f1\",\"call_id\":\"other\"}]",
+        "[{\"type\":\"function_call\",\"id\":\"r0\",\"call_id\":\"c1\"}]",
+        "[{\"type\":\"function_call\",\"id\":\"f1\",\"arguments\":\"different\"}]",
+        "[{\"type\":\"reasoning\",\"id\":\"r2\"},{\"type\":\"reasoning\",\"id\":\"r0\"}]",
+        "[{\"type\":\"reasoning\",\"id\":\"r0\"},{\"type\":\"reasoning\",\"id\":\"r0\"}]",
+    }) |roster| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        try std.testing.expectError(error.OutputMismatch, decode(a, try subsetStream(a, roster)));
+    }
+}
+
+test "SSE empty terminal output still requires contiguous finalized indices" {
+    const stream =
+        \\data: {"type":"response.output_item.done","output_index":1,"item":{"type":"reasoning","id":"r1","summary":[],"encrypted_content":"complete"}}
+        \\
+        \\data: {"type":"response.completed","response":{"id":"r","status":"completed","output":[]}}
+        \\
+        \\
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.OutputMismatch, decode(arena.allocator(), stream));
 }
