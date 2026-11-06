@@ -71,7 +71,7 @@
       "body": "{\"status\":\"incomplete\",\"error\":null,\"output\":[]}",
       "result": "provider_failure",
       "replay": "unsupported",
-      "result_wire": "03020000000000"
+      "result_wire": "0302000000000000000000"
     },
     {
       "name": "mixed refusal",
@@ -133,7 +133,7 @@
         "output_tokens": 9,
         "cached_input_tokens": 3
       },
-      "result_wire": "03010000000000"
+      "result_wire": "0301000000000000000000"
     },
     {
       "name": "incomplete with usage",
@@ -145,7 +145,7 @@
         "output_tokens": 9,
         "cached_input_tokens": 3
       },
-      "result_wire": "03020000000000"
+      "result_wire": "0302000000000000000000"
     },
     {
       "name": "unsupported output with usage",
@@ -172,7 +172,7 @@
         "cache_write_tokens": null,
         "reasoning_tokens": null
       },
-      "result_wire": "03020000000000"
+      "result_wire": "0302000000000000000000"
     },
     {
       "name": "failed without usage",
@@ -180,8 +180,8 @@
       "result": "provider_failure",
       "replay": "unsupported",
       "usage_absent": true,
-      "result_wire": "03010000000000"
+      "result_wire": "0301000000000000000000"
     }
   ],
-  "wire_provenance": "Fixed ordinary result bytes from the previously checked v3/native intersection. The three nonintersecting cases keep their independently specified native assertions."
+  "wire_provenance": "Fixed ordinary result bytes from the previously checked v3/native intersection. The three nonintersecting cases keep their independently specified native assertions. Provider-failure encodings append v13's neutral four-byte recovery discriminant."
 }

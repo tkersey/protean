@@ -520,11 +520,10 @@ pub fn acquireSettings(
     ) or !ctx.authority.inference or ctx.authority.revoked or !ctx.authority.disclosure) return .{
         .definitely_not_sent = error.Denied,
     };
-    const frozen = route.read(ctx.allocator, ctx.profile) catch |err|
+    route.validate(config.contract) catch |err|
         return .{ .definitely_not_sent = err };
-    if (!std.meta.eql(frozen, config.contract))
-        return .{ .definitely_not_sent = error.CredentialBindingMismatch };
-    if (frozen.route == .chatgpt_plan_sse and !equal(config.endpoint.bytes, route.endpoint))
+    if (config.contract.route == .chatgpt_plan_sse and
+        !equal(config.endpoint.bytes, route.endpoint))
         return .{ .definitely_not_sent = error.InvalidInferenceDestination };
     var lease = acquireCredential(ctx, environment, config) catch |err|
         return .{ .definitely_not_sent = err };
@@ -582,12 +581,20 @@ fn checkCredentialInput(
     rendered: []const u8,
     token: []const u8,
 ) !void {
-    for ([_][]const u8{ ctx.profile, rendered }) |bytes| {
-        var parsed = try json.parseAsset(ctx.allocator, bytes, bytes.len);
+    if (std.mem.indexOf(u8, ctx.profile, token) != null) return error.UnsafeCredentialFile;
+    var profile = json.parseAsset(ctx.allocator, ctx.profile, ctx.profile.len) catch |err|
+        switch (err) {
+            error.OutOfMemory => return err,
+            else => null,
+        };
+    if (profile) |*parsed| {
         defer parsed.deinit();
         if (try containsCredential(ctx.allocator, parsed.value, token))
             return error.UnsafeCredentialFile;
     }
+    var body = try json.parseAsset(ctx.allocator, rendered, rendered.len);
+    defer body.deinit();
+    if (try containsCredential(ctx.allocator, body.value, token)) return error.UnsafeCredentialFile;
     for (env.resources) |bytes| if (std.mem.indexOf(u8, bytes, token) != null)
         return error.UnsafeCredentialFile;
 }

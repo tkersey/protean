@@ -170,8 +170,7 @@ fn prepareModel(ctx: registry.ProjectionContext, payload: []const u8) ![]u8 {
         delegation.snapshot != null)
         return error.InvalidDelegation;
     const binding = delegation.model.?;
-    if (!std.meta.eql(binding.settings.contract, try wire.read(a, ctx.profile)))
-        return error.CredentialBindingMismatch;
+    try wire.validate(binding.settings.contract);
     var remaining: ?u64 = if (binding.settings.request_bytes) |maximum| maximum else null;
     const schema = try portSchema(ctx, delegation);
     var content = json.object();
@@ -391,7 +390,7 @@ pub fn acquire(ctx: registry.Context, bytes: []const u8) !registry.Acquisition {
 
 fn interpret(
     ctx: registry.ProjectionContext,
-    payload: []const u8,
+    _: []const u8,
     rendered: []const u8,
     response: []const u8,
 ) !registry.Projection {
@@ -404,15 +403,21 @@ fn interpret(
     }
     var raw = try c.decodeOwned(responses.Raw, a, response);
     defer raw.deinit();
-    if (!std.mem.eql(u8, try prepareModel(ctx, payload), rendered))
+    const contract = prepared.value.model.?.settings.contract;
+    const plan = contract.route == .chatgpt_plan_sse;
+    if (!plan and (raw.value.status < 200 or raw.value.status >= 300 or
+        !raw.value.identity_encoding))
         return error.InvalidCapture;
-    const decoded = try responses.decode(a, prepared.value.model.?.settings.contract, raw.value);
+    const decoded = try responses.decode(a, contract, raw.value);
+    if (!plan and (decoded.failure != null or decoded.unsupported == .status))
+        return error.InvalidCapture;
     if (decoded.failure != null) return .{ .reply = try c.encodeOwned(Output, a, .{
         .unavailable = .{ .bytes = "The provider rejected the delegated inference. " ++
             "Repair the selected source and submit a fresh checked delegation." },
     }) };
-    if (decoded.unsupported != null) return unavailableAnswer(a);
+    if (plan and decoded.unsupported != null) return unavailableAnswer(a);
     const output = json.get(decoded.body, "output").?;
+    if (output != .array) return error.InvalidCapture;
     var invocation = try P.templateValue(Model, .{ .items = &.{} }, .{
         .minimum_calls = 1,
         .maximum_calls = 1,
@@ -423,9 +428,9 @@ fn interpret(
         a,
         invocation,
         output,
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return unavailableAnswer(a),
+    ) catch |err| {
+        if (err == error.OutOfMemory or !plan) return err;
+        return unavailableAnswer(a);
     };
     const result = try typedAnswer(a, prepared.value.schema.bytes, normalized);
     var output_tokens: ?u64 = null;

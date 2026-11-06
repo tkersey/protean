@@ -112,7 +112,7 @@ test "API acquisition rereads rotated keys and detects decoded credential inputs
         .io = io,
         .authority = &authority,
         .task_id = "fixture",
-        .profile = "{}",
+        .profile = "opaque embedding profile",
         .environment = &env,
     };
     var config = settings(.{});
@@ -138,6 +138,10 @@ test "API acquisition rereads rotated keys and detects decoded credential inputs
     for (0..40) |_| nested_bytes = try std.fmt.allocPrint(a, "[{s}]", .{nested_bytes});
     const nested = try responses.acquireSettings(ctx, config, nested_bytes);
     try std.testing.expectEqual(error.UnsafeCredentialFile, nested.definitely_not_sent);
+    try notSent(ctx, config, error.InvalidConfiguration);
+    var leaked_profile = ctx;
+    leaked_profile.profile = "{\"input\":\"synthetic-\\u0073econd\"}";
+    try notSent(leaked_profile, config, error.UnsafeCredentialFile);
 }
 
 fn raw(format: contracts.ResponseFormat, status: u16, body: []const u8) responses.Raw {
