@@ -1652,7 +1652,7 @@ fn presentationBoundary(f: *Fixture, computed: wc.Ref) !void {
     try rejectSourceSlices(f, program, consumer, &sources, text.bytes.len);
 }
 
-const PlanAnswer = enum { answer, failure, unoffered, unsupported };
+const PlanAnswer = enum { answer, failure, incomplete_failure, incomplete, unoffered, unsupported };
 
 fn assertPlanAnswerOffer(f: *Fixture, work: native.tasks.Work) !void {
     var prepared = try contracts.decodeOwned(
@@ -1687,9 +1687,12 @@ fn planAnswerCapture(f: *Fixture, mode: PlanAnswer) ![]u8 {
         else
             "{\"json_value\":\"true\"}",
     }, .{});
-    const terminal = if (mode == .failure)
+    const terminal = if (mode == .failure or mode == .incomplete_failure)
         "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"delegated-r\"," ++
             "\"status\":\"failed\",\"error\":{\"code\":\"subscription_sharing_invalid_user\"}}}\n\n"
+    else if (mode == .incomplete)
+        "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"delegated-r\"," ++
+            "\"status\":\"incomplete\",\"error\":null}}\n\n"
     else
         try std.fmt.allocPrint(
             f.permanent,
@@ -1699,8 +1702,14 @@ fn planAnswerCapture(f: *Fixture, mode: PlanAnswer) ![]u8 {
         );
     const events = try std.fmt.allocPrint(
         f.permanent,
-        "data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s}}}\n\n{s}",
-        .{ item, terminal },
+        "data: {{\"type\":\"response.output_item.done\",\"output_index\":0," ++
+            "\"item\":{s}}}\n\n{s}{s}",
+        .{ item, if (mode == .incomplete or mode == .incomplete_failure)
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1," ++
+                "\"item\":{\"type\":\"message\",\"id\":\"m\",\"status\":\"incomplete\"," ++
+                "\"role\":\"assistant\",\"content\":[]}}\n\n"
+        else
+            "", terminal },
     );
     return contracts.encodeOwned(native.responses.Raw, f.permanent, .{
         .status = 200,
@@ -1761,7 +1770,9 @@ test "delegated projection binds ChatGPT SSE answer only to its intended port" {
 }
 
 test "delegated projection binds ChatGPT failure and unoffered calls to unavailable instruments" {
-    for ([_]PlanAnswer{ .failure, .unoffered, .unsupported }) |mode| {
+    for ([_]PlanAnswer{
+        .failure, .incomplete_failure, .incomplete, .unoffered, .unsupported,
+    }) |mode| {
         var f: Fixture = undefined;
         try f.initOptions(.{ .chatgpt_plan = true });
         defer f.deinit();

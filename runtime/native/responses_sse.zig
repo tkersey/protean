@@ -154,7 +154,7 @@ const State = struct {
     fn finalize(self: *State, value: json.Value) !void {
         const index = try integer(try field(value, "output_index"));
         const item = try field(value, "item");
-        try finalizedItem(item);
+        try stagedItem(item);
         for (self.items.items) |previous| {
             if (previous.index == index) return error.DuplicateOutputIndex;
             try distinctItems(previous.item, item);
@@ -179,6 +179,7 @@ const State = struct {
     }
 
     fn reconcile(self: *State, response: *json.Value) !void {
+        for (self.items.items) |entry| try finalizedItem(entry.item);
         const output = try field(response.*, "output");
         if (output != .array or output.array.items.len > self.items.items.len)
             return error.OutputMismatch;
@@ -230,13 +231,18 @@ fn projectionIndex(items: []const json.Value, projection: json.Value) !usize {
 }
 
 fn finalizedItem(item: json.Value) !void {
+    try stagedItem(item);
     const kind = try text(item, "type");
-    if (!equal(kind, "reasoning") and !equal(kind, "function_call") and
-        !equal(kind, "message")) return error.UnsupportedResponse;
     if (json.get(item, "status")) |status| {
         if (status != .string or !equal(status.string, "completed"))
             return error.UnfinalizedOutput;
     } else if (!equal(kind, "reasoning")) return error.UnfinalizedOutput;
+}
+
+fn stagedItem(item: json.Value) !void {
+    const kind = try text(item, "type");
+    if (!equal(kind, "reasoning") and !equal(kind, "function_call") and
+        !equal(kind, "message")) return error.UnsupportedResponse;
     inline for (.{ "id", "call_id" }) |key| if (json.get(item, key)) |id| {
         if (id != .string or id.string.len == 0) return error.InvalidResponse;
     };
@@ -589,4 +595,55 @@ test "SSE empty terminal output still requires contiguous finalized indices" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectError(error.OutputMismatch, decode(arena.allocator(), stream));
+}
+
+const incomplete_message =
+    "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{" ++
+    "\"type\":\"message\",\"id\":\"msg_1\",\"status\":\"incomplete\",\"role\":" ++
+    "\"assistant\",\"content\":[]}}\n\n";
+
+test "SSE failed terminals retain incomplete items without completing them" {
+    for ([_][]const u8{ "incomplete", "failed" }) |status| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const stream = try std.fmt.allocPrint(
+            arena.allocator(),
+            "{s}data: {{\"type\":\"response.{s}\",\"response\":{{\"id\":\"r\"," ++
+                "\"status\":\"{s}\",\"output\":[],\"usage\":{{\"output_tokens\":7}}}}}}\n\n",
+            .{ incomplete_message, status, status },
+        );
+        const result = try decode(arena.allocator(), stream);
+        try std.testing.expectEqualStrings(status, @tagName(result.terminal));
+        try std.testing.expectEqual(@as(u64, 7), try integer(
+            try field(try field(result.response, "usage"), "output_tokens"),
+        ));
+        const output = try field(result.response, "output");
+        try std.testing.expectEqual(@as(usize, 0), output.array.items.len);
+    }
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try decode(arena.allocator(), incomplete_message ++
+        "data: {\"type\":\"error\",\"code\":\"fixture_error\"}\n\n");
+    try std.testing.expectEqual(Terminal.error_event, result.terminal);
+    try std.testing.expectEqualStrings("fixture_error", try text(result.response, "code"));
+}
+
+test "SSE successful terminals require completion of every staged item" {
+    const reasoning = "data: {\"type\":\"response.output_item.done\",\"output_index\":1," ++
+        "\"item\":{\"type\":\"reasoning\",\"id\":\"rs_2\",\"encrypted_content\":\"opaque\"}}\n\n";
+    for ([_][]const u8{
+        "[]",
+        "[{\"type\":\"reasoning\",\"id\":\"rs_2\"}]",
+        "[{\"type\":\"message\",\"id\":\"msg_1\"},{\"type\":\"reasoning\",\"id\":\"rs_2\"}]",
+    }) |output| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const stream = try std.fmt.allocPrint(
+            arena.allocator(),
+            "{s}{s}data: {{\"type\":\"response.completed\",\"response\":{{" ++
+                "\"id\":\"r\",\"status\":\"completed\",\"output\":{s}}}}}\n\n",
+            .{ incomplete_message, reasoning, output },
+        );
+        try std.testing.expectError(error.UnfinalizedOutput, decode(arena.allocator(), stream));
+    }
 }

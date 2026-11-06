@@ -824,9 +824,13 @@ pub fn Adapter(comptime P: type) type {
             input: Interpretation,
             raw: responses.Raw,
         ) !registry.Projection {
-            if (raw.status >= 200 and raw.status < 300 and
-                !std.unicode.utf8ValidateSlice(raw.body.bytes))
-                return unsupported(ctx, .invalid_utf8, null);
+            if (raw.status >= 200 and raw.status < 300) {
+                if (!raw.identity_encoding) return unsupported(ctx, .unsupported_output_item, null);
+                if (!std.unicode.utf8ValidateSlice(raw.body.bytes))
+                    return unsupported(ctx, .invalid_utf8, null);
+                if (contracts.exceeds(raw.body.bytes.len, input.selected.transport.response_bytes))
+                    return unsupported(ctx, .normalization_limit, null);
+            }
             const decoded = responses.decode(
                 ctx.allocator,
                 input.selected.transport.contract,

@@ -4248,3 +4248,68 @@ test "adaptive API provider rejection remains terminal without recovery question
     try std.testing.expectEqual(@as(u64, 0), output.work_calls);
     try std.testing.expect((try f.service.pendingQuestion(f.permanent, f.task)) == null);
 }
+
+test "adaptive failed streams retain usage and publish no incomplete output" {
+    for ([_][]const u8{ "failed", "incomplete" }) |status| {
+        var f: ProviderFixture = undefined;
+        try f.initOptions(.{ .chatgpt_plan = true });
+        defer f.deinit();
+        const body = try std.fmt.allocPrint(
+            f.permanent,
+            "data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{{" ++
+                "\"type\":\"message\",\"id\":\"m\",\"status\":\"incomplete\",\"role\":" ++
+                "\"assistant\",\"content\":[]}}}}\n\ndata: {{\"type\":\"response.{s}\"," ++
+                "\"response\":{{\"id\":\"r\",\"status\":\"{s}\",\"error\":null," ++
+                "\"output\":[],\"usage\":{{\"output_tokens\":7}}}}}}\n\n",
+            .{ status, status },
+        );
+        const raw = try protean.contracts.encodeOwned(native.responses.Raw, f.permanent, .{
+            .status = 200,
+            .identity_encoding = true,
+            .request_id = null,
+            .body = .{ .bytes = body },
+            .format = .sse,
+            .media_type = .{ .bytes = "text/event-stream" },
+        });
+        const failed = f.pending;
+        try f.service.acquire(f.permanent, failed, raw);
+        const output = try providerOutput(&f);
+        try std.testing.expect(output.result == .no_result);
+        try std.testing.expectEqual(@as(u64, 1), output.model_calls);
+        try std.testing.expectEqual(@as(u64, 0), output.work_calls);
+        try expectFailedStreamProjection(&f, failed, if (std.mem.eql(u8, status, "failed"))
+            .response_failed
+        else
+            .response_incomplete);
+    }
+}
+
+fn expectFailedStreamProjection(
+    f: *ProviderFixture,
+    failed: native.tasks.Work,
+    kind: protean.contracts.ProviderFailureKind,
+) !void {
+    const saved = (try protean.contracts.decodeOwned(
+        native.testing.state.Capture,
+        f.permanent,
+        (try f.namespace.store.recordBytes(f.permanent, "capture", failed.attempt, f.task)).?,
+    )).value;
+    try std.testing.expect(saved.response != null);
+    var bound = try protocol.decode(
+        protocol.Result,
+        f.permanent,
+        try f.namespace.store.object(f.permanent, saved.projection.?.reply, null),
+    );
+    defer bound.deinit();
+    var reply = try protean.contracts.decodeOwned(
+        t.P.AdaptiveResult,
+        f.permanent,
+        bound.value.value,
+    );
+    defer reply.deinit();
+    try std.testing.expectEqual(kind, reply.value.result.provider_failure.kind);
+    try std.testing.expect(reply.value.replay == null);
+    try std.testing.expectEqual(.unsupported, reply.value.replay_status);
+    try std.testing.expectEqual(@as(?u64, 7), reply.value.usage.?.output_tokens);
+    try std.testing.expect(reply.value.usage.?.input_tokens == null);
+}

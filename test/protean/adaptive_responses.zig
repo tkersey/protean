@@ -181,6 +181,20 @@ fn Fixture(comptime P: type) type {
             request: P.AdaptiveRequest,
             call: []const u8,
         ) !P.AdaptiveResult {
+            return captureResponse(ctx, objects, request, .{
+                .status = 200,
+                .identity_encoding = true,
+                .request_id = null,
+                .body = .{ .bytes = call },
+            });
+        }
+
+        fn captureResponse(
+            ctx: native.registry.ProjectionContext,
+            objects: *Objects,
+            request: P.AdaptiveRequest,
+            response: native.responses.Raw,
+        ) !P.AdaptiveResult {
             const a = ctx.allocator;
             const encoded = try contracts.encodeOwned(P.AdaptiveRequest, a, request);
             const owner = if (request.plan.research != null) objects.ns else null;
@@ -189,9 +203,7 @@ fn Fixture(comptime P: type) type {
             const raw = try contracts.encodeOwned(
                 native.responses.Raw,
                 a,
-                .{ .status = 200, .identity_encoding = true, .request_id = null, .body = .{
-                    .bytes = call,
-                } },
+                response,
             );
             _ = try objects.add(a, raw);
             const projection = try interpret(owner, ctx, encoded, prepared, raw);
@@ -2655,4 +2667,53 @@ fn PreservationFixture(comptime P: type) type {
             );
         }
     };
+}
+
+test "retained captures preserve frozen response limits and failure precedence" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var objects: Objects = .{};
+    const F = Fixture(CurrentProfile);
+    var fixture: F.Scaling = .{
+        .a = a,
+        .objects = &objects,
+        .ns = null,
+        .path = "",
+        .directory = std.Io.Dir.cwd(),
+    };
+    try fixture.initialize();
+    const body = try a.alloc(u8, 4097);
+    @memset(body, ' ');
+    const complete = "{\"status\":\"completed\",\"error\":null,\"output\":[]}";
+    @memcpy(body[0..complete.len], complete);
+    const accepted = try F.capture(fixture.ctx, &objects, fixture.request, body[0..4096]);
+    try std.testing.expectEqual(.complete, accepted.replay_status);
+    var raw: native.responses.Raw = .{
+        .status = 200,
+        .identity_encoding = true,
+        .request_id = null,
+        .body = .{ .bytes = body },
+    };
+    const rejected = try F.captureResponse(fixture.ctx, &objects, fixture.request, raw);
+    try std.testing.expect(rejected.result == .unsupported_response);
+    try std.testing.expectEqual(.normalization_limit, rejected.result.unsupported_response);
+    try std.testing.expectEqual(.capacity, rejected.replay_status);
+    try std.testing.expect(rejected.replay == null and rejected.usage == null);
+    body[0] = '!';
+    const malformed_large = try F.captureResponse(fixture.ctx, &objects, fixture.request, raw);
+    try std.testing.expectEqual(.normalization_limit, malformed_large.result.unsupported_response);
+    const malformed = try F.capture(fixture.ctx, &objects, fixture.request, body[0..4096]);
+    try std.testing.expectEqual(.malformed_json, malformed.result.unsupported_response);
+    body[0] = 0xff;
+    const invalid = try F.captureResponse(fixture.ctx, &objects, fixture.request, raw);
+    try std.testing.expectEqual(.invalid_utf8, invalid.result.unsupported_response);
+    raw.identity_encoding = false;
+    const encoded = try F.captureResponse(fixture.ctx, &objects, fixture.request, raw);
+    try std.testing.expectEqual(.unsupported_output_item, encoded.result.unsupported_response);
+    raw.status = 429;
+    const failed = try F.captureResponse(fixture.ctx, &objects, fixture.request, raw);
+    try std.testing.expectEqual(.http_status, failed.result.provider_failure.kind);
+    try std.testing.expectEqual(@as(u16, 429), failed.result.provider_failure.http_status);
+    try std.testing.expect(failed.replay == null and failed.usage == null);
 }
