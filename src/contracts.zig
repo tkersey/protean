@@ -12,11 +12,34 @@ pub const controller = @import("controller_contracts.zig");
 pub const tool_construction = @import("tool_construction_contracts.zig");
 
 /// Immutable HTTP capture retained separately from model result projections.
+pub const ResponseFormat = enum { json, sse };
+pub const ResponsesRoute = enum { api_key_json, chatgpt_plan_sse };
+pub const ProviderRecovery = enum { none, authentication, usage_limit, transient };
+pub const ProviderFailureKind = enum {
+    http_status,
+    response_failed,
+    response_incomplete,
+    stream_error,
+};
+pub const ProviderFailure = struct {
+    kind: ProviderFailureKind,
+    http_status: u16,
+    recovery: ProviderRecovery = .none,
+};
+pub const ResponsesContract = struct {
+    version: u32 = 1,
+    route: ResponsesRoute = .api_key_json,
+    binding: ?[32]u8 = null,
+};
 pub const CapturedResponse = struct {
     status: u16,
     identity_encoding: bool,
     request_id: ?Utf8,
     body: Bytes(null),
+    format: ResponseFormat = .json,
+    media_type: ?Utf8 = null,
+    content_encoding: ?Utf8 = null,
+    version: u32 = 2,
 };
 
 /// Frozen read-only repository bytes; validation and capture belong to each

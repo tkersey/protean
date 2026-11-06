@@ -1,7 +1,7 @@
 //! Versioned agent-host admission. This layer cannot drive Kosmos or dispatch a tool.
 const std = @import("std");
 const json = @import("json.zig");
-pub const version = "agent-host/2.1";
+pub const version = "agent-host/2.2";
 /// Validate the offer list completely, then accept only the current contract.
 pub fn accepts(versions: json.Value) !bool {
     if (versions != .array or
@@ -24,13 +24,13 @@ test "initialization accepts only 2.1 and validates the entire offer list" {
     const a = arena.allocator();
     const offers = [_][]const u8{
         "[\"agent-host/2.0\"]",
-        "[\"agent-host/2.0\",\"agent-host/2.1\"]",
-        "[\"agent-host/2.1\"]",
+        "[\"agent-host/2.0\",\"agent-host/2.2\"]",
+        "[\"agent-host/2.2\"]",
         "[\"agent-host/9.0\"]",
     };
     for (offers, [_]bool{ false, true, true, false }) |bytes, expected|
         try std.testing.expectEqual(expected, try accepts((try json.parse(a, bytes, .{})).value));
-    for ([_][]const u8{ "[]", "null", "[\"agent-host/2.1\",17]" }) |bytes|
+    for ([_][]const u8{ "[]", "null", "[\"agent-host/2.2\",17]" }) |bytes|
         try std.testing.expectError(
             error.InvalidParams,
             accepts((try json.parse(a, bytes, .{})).value),

@@ -31,9 +31,9 @@ pub fn ownerManifest(
     return std.json.Stringify.valueAlloc(a, .{
         .format = "agent-native-build/v2",
         .native_host_contract = "unit-native-contract",
-        .protocol = "agent-host/2.1",
+        .protocol = "agent-host/2.2",
         .client_mapping = "agent-client-values/1.1",
-        .state_format = "agent-native-state/21",
+        .state_format = "agent-native-state/22",
         .optimize = "safe",
         .program_sha256 = @as([]const u8, &image_hex),
         .program_identity = @as([]const u8, &identity_hex),

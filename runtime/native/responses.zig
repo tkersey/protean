@@ -6,6 +6,8 @@ const registry = @import("registry.zig");
 const json = @import("json.zig");
 const https = @import("https.zig");
 const storage = @import("store.zig");
+pub const route = @import("responses_contract.zig");
+const siwc = @import("siwc.zig");
 
 pub const Settings = struct {
     endpoint: contracts.Text(2048),
@@ -16,13 +18,107 @@ pub const Settings = struct {
     request_bytes: ?u32,
     response_bytes: ?u32,
     timeout_ms: ?u32,
+    contract: contracts.ResponsesContract = .{},
+};
+pub const Source = union(enum) {
+    unavailable,
+    api_key_file: []const u8,
+    controlled_test: []const u8,
+    chatgpt_plan: struct { selection: *siwc.Selection, binding: [32]u8 },
 };
 pub const Environment = struct {
-    token: []const u8,
+    source: Source = .unavailable,
     approved_endpoint: []const u8,
     trust_root: ?[]const u8 = null,
+    resources: []const []const u8 = &.{},
 };
 pub const Raw = contracts.CapturedResponse;
+pub const DecodedResponse = struct {
+    body: json.Value,
+    failure: ?contracts.ProviderFailure = null,
+    unsupported: ?enum { status, output } = null,
+};
+
+pub fn decode(
+    a: std.mem.Allocator,
+    contract: contracts.ResponsesContract,
+    raw: Raw,
+) !DecodedResponse {
+    try route.validate(contract);
+    if (raw.version != 2) return error.InvalidResponseFormat;
+    if (raw.format != route.format(contract.route)) return error.InvalidResponseFormat;
+    if (raw.status < 200 or raw.status >= 300) {
+        const body = parseBody(a, raw.body.bytes) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => .null,
+        };
+        return .{ .body = body, .failure = .{
+            .kind = .http_status,
+            .http_status = raw.status,
+            .recovery = recovery(contract.route, raw.status, body),
+        } };
+    }
+    if (!raw.identity_encoding) return error.UnsupportedResponseEncoding;
+    var body: json.Value = undefined;
+    var failure: ?contracts.ProviderFailureKind = null;
+    if (raw.format == .sse) {
+        const media = raw.media_type orelse return error.InvalidResponseMediaType;
+        if (!@import("responses_sse.zig").eventStream(media.bytes))
+            return error.InvalidResponseMediaType;
+        const decoded = try @import("responses_sse.zig").decode(a, raw.body.bytes);
+        body = decoded.response;
+        failure = switch (decoded.terminal) {
+            .completed => null,
+            .failed => .response_failed,
+            .incomplete => .response_incomplete,
+            .error_event => .stream_error,
+        };
+    } else {
+        body = try parseBody(a, raw.body.bytes);
+        if (is(body, "status", "failed")) failure = .response_failed;
+        if (is(body, "status", "incomplete")) failure = .response_incomplete;
+    }
+    if (failure) |kind| return .{ .body = body, .failure = .{
+        .kind = kind,
+        .http_status = 0,
+        .recovery = recovery(contract.route, raw.status, body),
+    } };
+    if (!is(body, "status", "completed") or
+        (json.get(body, "error") orelse return .{ .body = body, .unsupported = .status }) != .null)
+        return .{ .body = body, .unsupported = .status };
+    const output = json.get(body, "output") orelse
+        return .{ .body = body, .unsupported = .status };
+    if (output != .array) return .{ .body = body, .unsupported = .output };
+    for (output.array.items) |item| _ = replayItem(a, item) catch
+        return .{ .body = body, .unsupported = .output };
+    return .{ .body = body };
+}
+
+fn parseBody(a: std.mem.Allocator, bytes: []const u8) !json.Value {
+    return (try json.parse(a, bytes, .{
+        .bytes = bytes.len,
+        .tokens = bytes.len,
+        .members = bytes.len,
+    })).value;
+}
+
+fn recovery(
+    selected: contracts.ResponsesRoute,
+    status: u16,
+    body: json.Value,
+) contracts.ProviderRecovery {
+    if (selected == .api_key_json) return .none;
+    const object = json.get(body, "error") orelse body;
+    const code = text(object, "code") catch "";
+    if (equal(code, "subscription_sharing_usage_limit_exceeded")) return .usage_limit;
+    if (equal(code, "subscription_sharing_usage_unavailable")) return .transient;
+    if (equal(code, "subscription_sharing_invalid_user")) return .authentication;
+    if (code.len != 0) return .none;
+    if (status == 401) return .authentication;
+    if (status == 429 or status == 500 or status == 502 or status == 503 or status == 504)
+        return .transient;
+    return .none;
+}
 
 fn equal(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
@@ -195,7 +291,7 @@ test "nullable model arguments preserve nested absence" {
     try std.testing.expectEqual(@as(?u64, 42), try argument(?u64, a, number.value));
 }
 
-/// Provider output grammar shared by the sole v12 adapter and pure recovery.
+/// Provider output grammar shared by the sole v13 adapter and pure recovery.
 pub fn OutputNormalizer(comptime P: type) type {
     return struct {
         fn malformed(err: anyerror) error{OutOfMemory}!P.DecodedAnswer {
@@ -365,7 +461,7 @@ pub fn OutputNormalizer(comptime P: type) type {
         }
 
         /// Output grammar and exact argument codec. Policy and context admission
-        /// belong to the v12 adapter.
+        /// belong to the v13 adapter.
         pub fn normalize(
             a: std.mem.Allocator,
             invocation: P.Request,
@@ -424,34 +520,107 @@ pub fn acquireSettings(
     ) or !ctx.authority.inference or ctx.authority.revoked or !ctx.authority.disclosure) return .{
         .definitely_not_sent = error.Denied,
     };
-    return switch (https.post(
-        ctx.allocator,
-        ctx.io,
-        .{
-            .endpoint = config.endpoint.bytes,
-            .token = environment.token,
-            .trust_root = environment.trust_root,
-            .request_limit = config.request_bytes,
-            .response_limit = config.response_bytes,
-            .timeout_ms = config.timeout_ms,
+    const frozen = route.read(ctx.allocator, ctx.profile) catch |err|
+        return .{ .definitely_not_sent = err };
+    if (!std.meta.eql(frozen, config.contract))
+        return .{ .definitely_not_sent = error.CredentialBindingMismatch };
+    if (frozen.route == .chatgpt_plan_sse and !equal(config.endpoint.bytes, route.endpoint))
+        return .{ .definitely_not_sent = error.InvalidInferenceDestination };
+    var lease = acquireCredential(ctx, environment, config) catch |err|
+        return .{ .definitely_not_sent = err };
+    defer lease.deinit();
+    checkCredentialInput(ctx, environment, rendered, lease.token) catch |err|
+        return .{ .definitely_not_sent = err };
+    ctx.checkCancellation() catch |err| return .{ .definitely_not_sent = err };
+    if (!ctx.authority.inference or ctx.authority.revoked or !ctx.authority.disclosure)
+        return .{ .definitely_not_sent = error.Denied };
+    if (environment.source == .chatgpt_plan and
+        !lease.valid(environment.source.chatgpt_plan.selection.nowSeconds()))
+        return .{ .definitely_not_sent = error.ExpiredSiwcCredential };
+    return captureHttp(ctx, config, environment.trust_root, rendered, lease.token);
+}
+
+fn acquireCredential(ctx: registry.Context, env: *const Environment, config: Settings) !siwc.Lease {
+    const a = ctx.allocator;
+    return switch (env.source) {
+        .unavailable => error.MissingCredential,
+        .controlled_test => |token| if (config.contract.route == .api_key_json)
+            .{ .allocator = a, .token = try a.dupe(u8, token), .expires_at = std.math.maxInt(i64) }
+        else
+            error.CredentialBindingMismatch,
+        .api_key_file => |path| blk: {
+            if (config.contract.route != .api_key_json) return error.CredentialBindingMismatch;
+            const bytes = try @import("configuration.zig").readFile(a, ctx.io, path, null, true);
+            defer {
+                std.crypto.secureZero(u8, bytes);
+                a.free(bytes);
+            }
+            const token = std.mem.trim(u8, bytes, "\r\n");
+            if (token.len == 0) return error.InvalidCredential;
+            for (token) |byte| if (byte <= 0x20 or byte >= 0x7f) return error.InvalidCredential;
+            break :blk .{
+                .allocator = a,
+                .token = try a.dupe(u8, token),
+                .expires_at = std.math.maxInt(i64),
+            };
         },
-        rendered,
-    )) {
+        .chatgpt_plan => |selected| blk: {
+            if (config.contract.route != .chatgpt_plan_sse or config.contract.binding == null or
+                !equal(&selected.binding, &config.contract.binding.?))
+                return error.CredentialBindingMismatch;
+            var catalog = try selected.selection.models(a, ctx.cancellation);
+            defer catalog.deinit();
+            if (!catalog.contains(config.model.bytes)) return error.ChatGPTModelUnavailable;
+            break :blk try selected.selection.credential(a, selected.binding, ctx.cancellation);
+        },
+    };
+}
+
+fn checkCredentialInput(
+    ctx: registry.Context,
+    env: *const Environment,
+    rendered: []const u8,
+    token: []const u8,
+) !void {
+    for ([_][]const u8{ ctx.profile, rendered }) |bytes| {
+        var parsed = try json.parseAsset(ctx.allocator, bytes, bytes.len);
+        defer parsed.deinit();
+        if (try containsCredential(ctx.allocator, parsed.value, token))
+            return error.UnsafeCredentialFile;
+    }
+    for (env.resources) |bytes| if (std.mem.indexOf(u8, bytes, token) != null)
+        return error.UnsafeCredentialFile;
+}
+
+fn captureHttp(
+    ctx: registry.Context,
+    config: Settings,
+    trust_root: ?[]const u8,
+    rendered: []const u8,
+    token: []const u8,
+) !registry.Acquisition {
+    return switch (https.post(ctx.allocator, ctx.io, .{
+        .endpoint = config.endpoint.bytes,
+        .token = token,
+        .trust_root = trust_root,
+        .request_limit = config.request_bytes,
+        .response_limit = config.response_bytes,
+        .timeout_ms = config.timeout_ms,
+        .format = @fromBackingInt(@intCast(@backingInt(route.format(config.contract.route)))),
+    }, rendered)) {
         .definitely_not_sent => |err| .{ .definitely_not_sent = err },
         .unknown => |err| .{ .unknown = err },
-        .captured => |raw| .{
-            .captured = try contracts.encodeOwned(
-                Raw,
-                ctx.allocator,
-                .{
-                    .status = raw.status,
-                    .identity_encoding = raw.identity_encoding,
-                    .request_id = if (raw.request_id) |id| .{
-                        .bytes = id,
-                    } else null,
-                    .body = .{ .bytes = raw.body },
-                },
-            ),
+        .captured => |raw| blk: {
+            defer raw.deinit(ctx.allocator);
+            break :blk .{ .captured = try contracts.encodeOwned(Raw, ctx.allocator, .{
+                .status = raw.status,
+                .identity_encoding = raw.identity_encoding,
+                .request_id = if (raw.request_id) |id| .{ .bytes = id } else null,
+                .body = .{ .bytes = raw.body },
+                .format = @fromBackingInt(@intCast(@backingInt(raw.format))),
+                .media_type = if (raw.media_type) |value| .{ .bytes = value } else null,
+                .content_encoding = if (raw.content_encoding) |value| .{ .bytes = value } else null,
+            }) };
         },
     };
 }
@@ -549,4 +718,44 @@ fn replayMessage(item: json.Value) !void {
             _ = try text(part, "refusal");
         } else return error.UnsupportedResponse;
     }
+}
+
+pub fn containsCredential(
+    allocator: std.mem.Allocator,
+    value: json.Value,
+    token: []const u8,
+) !bool {
+    const Frame = struct {
+        values: []const json.Value,
+        keys: ?[]const []const u8 = null,
+        index: usize = 0,
+    };
+    var stack: std.ArrayList(Frame) = .empty;
+    defer stack.deinit(allocator);
+    const root = [_]json.Value{value};
+    try stack.append(allocator, .{ .values = &root });
+    while (stack.items.len != 0) {
+        const frame = &stack.items[stack.items.len - 1];
+        if (frame.index == frame.values.len) {
+            _ = stack.pop();
+            continue;
+        }
+        const child = frame.values[frame.index];
+        if (frame.keys) |keys| {
+            if (std.mem.indexOf(u8, keys[frame.index], token) != null) return true;
+        }
+        frame.index += 1;
+        switch (child) {
+            .string => |bytes| if (std.mem.indexOf(u8, bytes, token) != null) {
+                return true;
+            },
+            .array => |items| try stack.append(allocator, .{ .values = items.items }),
+            .object => |fields| try stack.append(allocator, .{
+                .values = fields.values(),
+                .keys = fields.keys(),
+            }),
+            else => {},
+        }
+    }
+    return false;
 }

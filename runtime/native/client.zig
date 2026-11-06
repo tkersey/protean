@@ -64,6 +64,15 @@ fn inlineValue(a: std.mem.Allocator, value: json.Value) !void {
 
 pub const Subscription = struct { id: [16]u8, task: state.TaskId, after: u64 };
 
+fn repairHint(blocker: ?state.Blocker) ?[]const u8 {
+    return switch (blocker orelse return null) {
+        .chatgpt_sign_in_required => "Sign in using siwc login --app protean --account LABEL.",
+        .chatgpt_plan_usage_disabled => "Identity is retained but plan inference is disabled. " ++
+            "Enable it using siwc login --app protean --account LABEL --enable-plan.",
+        else => null,
+    };
+}
+
 pub fn Client(comptime Types: type) type {
     return struct {
         const Self = @This();
@@ -138,6 +147,8 @@ pub fn Client(comptime Types: type) type {
                 "blocker",
                 if (task.blocker) |blocker| json.string(@tagName(blocker)) else .null,
             );
+            if (repairHint(task.blocker)) |hint|
+                try json.put(a, &result, "repair_hint", json.string(hint));
             try json.put(
                 a,
                 &result,

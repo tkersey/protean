@@ -90,6 +90,14 @@ const Collector = struct {
     io: std.Io,
     files: std.ArrayList(File) = .empty,
     excluded: u64 = 0,
+    protected_roots: ?@import("protected_roots.zig").Roots = null,
+
+    fn protected(self: *Collector, fd: c_int) !bool {
+        const roots = self.protected_roots orelse return false;
+        if (!try roots.containsFd(self.allocator, fd)) return false;
+        self.excluded = try std.math.add(u64, self.excluded, 1);
+        return true;
+    }
 
     fn walk(self: *Collector, root: std.Io.Dir) !void {
         // Iterators reset their buffer pointer on next(), so moving this stack
@@ -142,6 +150,10 @@ const Collector = struct {
                         .follow_symlinks = false,
                     });
                     errdefer child.close(self.io);
+                    if (try self.protected(child.handle)) {
+                        child.close(self.io);
+                        continue;
+                    }
                     try stack.append(self.allocator, .{
                         .directory = child,
                         .prefix = path,
@@ -173,8 +185,10 @@ const Collector = struct {
         if (fd < 0) return error.SnapshotIo;
         const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
         defer file.close(self.io);
+        if (try self.protected(fd)) return;
         const before = try file.stat(self.io);
         if (before.kind != .file) return error.UnsupportedSnapshotEntry;
+        if (before.nlink != 1) return error.HardLinkedModelInput;
         var buffer: [4096]u8 = undefined;
         var reader = file.reader(self.io, &buffer);
         const bytes = try self.payload_allocator.alloc(
@@ -216,6 +230,16 @@ pub fn captureWithScratch(
     io: std.Io,
     root: []const u8,
 ) ![]u8 {
+    return captureProtected(a, scratch, io, root, null);
+}
+
+pub fn captureProtected(
+    a: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    io: std.Io,
+    root: []const u8,
+    protected_roots: ?@import("protected_roots.zig").Roots,
+) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(scratch);
     defer arena.deinit();
     const directory = try std.Io.Dir.cwd().openDir(io, root, .{
@@ -227,9 +251,10 @@ pub fn captureWithScratch(
         .allocator = arena.allocator(),
         .payload_allocator = scratch,
         .io = io,
+        .protected_roots = protected_roots,
     };
     defer for (collector.files.items) |file| scratch.free(file.contents.bytes);
-    try collector.walk(directory);
+    if (!try collector.protected(directory.handle)) try collector.walk(directory);
     std.mem.sort(File, collector.files.items, {}, struct {
         fn less(_: void, left: File, right: File) bool {
             return std.mem.lessThan(u8, left.path.bytes, right.path.bytes);

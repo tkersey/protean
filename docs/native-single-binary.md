@@ -1,6 +1,6 @@
 # Native Protean
 
-`protean` is the supported application. Its human CLI and `agent-host/2.1`
+`protean` is the supported application. Its human CLI and `agent-host/2.2`
 stdio interface use one native task owner and one authored Horos program.
 Kosmos evaluates the program and its saved continuation. Read-only snapshot work,
 Responses I/O, and generated pure tools are native environmental capabilities.
@@ -227,7 +227,7 @@ fails and fences the namespace. Switching tasks transfers the committed receipt
 without serializing the state again. Receipts convey only local native custody;
 durable copies remain ordinary data under the namespace owner.
 
-`agent-host/2.1` retains bounded transport windows: framed RPC, output
+`agent-host/2.2` retains bounded transport windows: framed RPC, output
 backpressure, and artifact/event pages. These do
 not accumulate into task-lifetime allowances. Parked tasks and archive records
 have no application count cap. Status reports `pending_message_count` and a
@@ -246,7 +246,7 @@ they do not limit retained task count or remove durable recovery records.
 
 ### Explicit recovery
 
-Initialization requires an offer containing `agent-host/2.1`; clients offering
+Initialization requires an offer containing `agent-host/2.2`; clients offering
 only older versions are rejected with the supported version. Discovery publishes
 one method set and one immutable protocol schema, including `task.reconcile`,
 recovery availability, and reconciliation events. The client JSON mapping is

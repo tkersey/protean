@@ -1094,6 +1094,29 @@ fn delegatedCapture(
     selection: ?wc.Selection,
     inputs: []const wc.Ref,
 ) !wc.Ref {
+    const work = try dispatchDelegation(f, pending, selection, inputs);
+    var prepared = try contracts.decodeOwned(
+        native.workspace_instrument.Prepared,
+        f.permanent,
+        work.prepared.?,
+    );
+    defer prepared.deinit();
+    try std.testing.expectEqual(selection != null, prepared.value.selected_view != null);
+    if (selection) |selected| if (selected == .projected)
+        try assertRenderedAggregate(f, prepared.value.body.bytes, selected.projected);
+    try settleDelegatedAnswer(f, work);
+    var child = try f.service.workspaceWork(f.permanent, f.task, work.subject_work.?);
+    defer child.deinit();
+    const answer = child.value.answer_value orelse return error.MissingDelegatedAnswer;
+    return support.workspaceRef(f.permanent, .value, answer.digest);
+}
+
+fn dispatchDelegation(
+    f: *Fixture,
+    pending: Pending,
+    selection: ?wc.Selection,
+    inputs: []const wc.Ref,
+) !native.tasks.Work {
     try f.send(.{ .work = .{ .command = .{ .delegate = .{
         .expected = pending.expected,
         .policy = .{ .stop = .terminal, .continuation = .owner_scheduled },
@@ -1120,20 +1143,7 @@ fn delegatedCapture(
             continue;
         }
         try assertDelegationBinding(f, pending, step.work);
-        var prepared = try contracts.decodeOwned(
-            native.workspace_instrument.Prepared,
-            f.permanent,
-            step.work.prepared.?,
-        );
-        defer prepared.deinit();
-        try std.testing.expectEqual(selection != null, prepared.value.selected_view != null);
-        if (selection) |selected| if (selected == .projected)
-            try assertRenderedAggregate(f, prepared.value.body.bytes, selected.projected);
-        try settleDelegatedAnswer(f, step.work);
-        var child = try f.service.workspaceWork(f.permanent, f.task, step.work.subject_work.?);
-        defer child.deinit();
-        const answer = child.value.answer_value orelse return error.MissingDelegatedAnswer;
-        return support.workspaceRef(f.permanent, .value, answer.digest);
+        return step.work;
     }
     return error.ProjectedDelegationDidNotArrive;
 }
@@ -1640,4 +1650,196 @@ fn presentationBoundary(f: *Fixture, computed: wc.Ref) !void {
     try assertPrepared(f, projected.result);
     try assertPresentation(f, &sources, slice);
     try rejectSourceSlices(f, program, consumer, &sources, text.bytes.len);
+}
+
+const PlanAnswer = enum { answer, failure, unoffered, unsupported };
+
+fn assertPlanAnswerOffer(f: *Fixture, work: native.tasks.Work) !void {
+    var prepared = try contracts.decodeOwned(
+        native.workspace_instrument.Prepared,
+        f.permanent,
+        work.prepared.?,
+    );
+    defer prepared.deinit();
+    try std.testing.expectEqual(.chatgpt_plan_sse, prepared.value.model.?.settings.contract.route);
+    const document = try native.json.parse(f.permanent, prepared.value.body.bytes, .{});
+    const body = document.value;
+    try std.testing.expect(body.object.get("stream").?.bool);
+    try std.testing.expect(!body.object.get("parallel_tool_calls").?.bool);
+    try std.testing.expect(body.object.get("tools") == null);
+    try std.testing.expectEqualStrings("required", body.object.get("tool_choice").?.string);
+    const prefix = body.object.get("input").?.array.items[0];
+    try std.testing.expectEqualStrings("additional_tools", prefix.object.get("type").?.string);
+    const tools = prefix.object.get("tools").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), tools.len);
+    try std.testing.expectEqualStrings("answer", tools[0].object.get("name").?.string);
+}
+
+fn planAnswerCapture(f: *Fixture, mode: PlanAnswer) ![]u8 {
+    const item = try std.json.Stringify.valueAlloc(f.permanent, .{
+        .type = "function_call",
+        .status = "completed",
+        .id = "answer-item",
+        .call_id = "delegated-sse-answer",
+        .name = if (mode == .unoffered) "inference_set" else "answer",
+        .arguments = if (mode == .unsupported)
+            @as(?[]const u8, null)
+        else
+            "{\"json_value\":\"true\"}",
+    }, .{});
+    const terminal = if (mode == .failure)
+        "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"delegated-r\"," ++
+            "\"status\":\"failed\",\"error\":{\"code\":\"subscription_sharing_invalid_user\"}}}\n\n"
+    else
+        try std.fmt.allocPrint(
+            f.permanent,
+            "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"delegated-r\"," ++
+                "\"status\":\"completed\",\"error\":null,\"output\":[{s}]}}}}\n\n",
+            .{item},
+        );
+    const events = try std.fmt.allocPrint(
+        f.permanent,
+        "data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s}}}\n\n{s}",
+        .{ item, terminal },
+    );
+    return contracts.encodeOwned(native.responses.Raw, f.permanent, .{
+        .status = 200,
+        .identity_encoding = true,
+        .request_id = .{ .bytes = "delegated-fixture" },
+        .format = .sse,
+        .media_type = .{ .bytes = "text/event-stream" },
+        .body = .{ .bytes = events },
+    });
+}
+
+fn settlePlanAnswer(f: *Fixture, work: native.tasks.Work, mode: PlanAnswer) !native.workspace.Work {
+    try assertPlanAnswerOffer(f, work);
+    try f.service.acquire(f.permanent, work, try planAnswerCapture(f, mode));
+    for (0..512) |_| {
+        const child = try f.service.workspaceWork(f.permanent, f.task, work.subject_work.?);
+        if (child.value.outcome_kind == .completed) return child.value;
+        const step = try f.service.pump(f.permanent);
+        if (step == .work) {
+            if (step.work.entry.declaration.inference) {
+                try std.testing.expect(step.work.subject_work == null);
+                f.pending = step.work;
+                try f.service.completeWork(f.permanent, step.work, .not_sent);
+            } else try f.complete(step.work);
+        }
+    }
+    return error.DelegatedSseCompletionMissing;
+}
+
+test "delegated projection binds ChatGPT SSE answer only to its intended port" {
+    var f: Fixture = undefined;
+    try f.initOptions(.{ .chatgpt_plan = true });
+    defer f.deinit();
+    const pending = try pendingQuestion(&f);
+    const sibling = try recovery.sibling(&f);
+    const work = try dispatchDelegation(&f, pending, null, &.{});
+    const child = try settlePlanAnswer(&f, work, .answer);
+    const answer = child.answer_value orelse return error.MissingDelegatedAnswer;
+    const reference = try support.workspaceRef(f.permanent, .value, answer.digest);
+    try std.testing.expect(try f.decode(bool, reference));
+    try f.next();
+    try f.service.completeWork(f.permanent, f.pending, .not_sent);
+    var target = try f.service.workspaceWork(
+        f.permanent,
+        f.task,
+        try recovery.refId(pending.expected.work),
+    );
+    defer target.deinit();
+    try std.testing.expectEqual(.completed, target.value.outcome_kind);
+    try std.testing.expect(target.value.current_port == null);
+    const result = target.value.result_value orelse return error.MissingDelegatedResult;
+    try std.testing.expect(try f.decode(
+        bool,
+        try support.workspaceRef(f.permanent, .value, result.digest),
+    ));
+    try recovery.requireSibling(&f, sibling);
+    try f.service.validateWorkspace(f.permanent, f.task);
+}
+
+test "delegated projection binds ChatGPT failure and unoffered calls to unavailable instruments" {
+    for ([_]PlanAnswer{ .failure, .unoffered, .unsupported }) |mode| {
+        var f: Fixture = undefined;
+        try f.initOptions(.{ .chatgpt_plan = true });
+        defer f.deinit();
+        const pending = try pendingQuestion(&f);
+        const sibling = try recovery.sibling(&f);
+        var before = try f.service.workspaceWork(
+            f.permanent,
+            f.task,
+            try recovery.refId(pending.expected.work),
+        );
+        defer before.deinit();
+        const work = try dispatchDelegation(&f, pending, null, &.{});
+        const child = try settlePlanAnswer(&f, work, mode);
+        try std.testing.expect(child.answer_value == null);
+        try std.testing.expect(child.current_occurrence == null);
+        const result = child.result_value orelse return error.MissingUnavailableResult;
+        const unavailable = try f.decode(
+            native.workspace_instrument.Output,
+            try support.workspaceRef(f.permanent, .value, result.digest),
+        );
+        try std.testing.expect(unavailable == .unavailable);
+        try std.testing.expect(unavailable.unavailable.bytes.len != 0);
+        try assertPlanUnavailableTarget(&f, before.value, child);
+        try recovery.requireSibling(&f, sibling);
+        try f.service.validateWorkspace(f.permanent, f.task);
+    }
+}
+
+fn assertPlanUnavailableTarget(
+    f: *Fixture,
+    original: native.workspace.Work,
+    child: native.workspace.Work,
+) !void {
+    for (0..32) |_| {
+        const step = try f.service.pump(f.permanent);
+        if (step == .work) {
+            try std.testing.expect(step.work.subject_work == null);
+            f.pending = step.work;
+            try f.service.completeWork(f.permanent, step.work, .not_sent);
+            break;
+        }
+        if (step == .idle) break;
+    }
+    var target = try f.service.workspaceWork(f.permanent, f.task, original.id);
+    defer target.deinit();
+    try std.testing.expectEqual(.requested, target.value.outcome_kind);
+    try std.testing.expectEqual(.parked, target.value.schedule);
+    try std.testing.expectEqualDeep(original.current_port, target.value.current_port);
+    try std.testing.expectEqualDeep(original.checkpoint, target.value.checkpoint);
+    const unchanged = try f.service.workspaceWork(f.permanent, f.task, child.id);
+    try std.testing.expectEqual(.completed, unchanged.value.outcome_kind);
+    try std.testing.expect(unchanged.value.answer_value == null);
+}
+
+test "projection selection rechecks ChatGPT SSE inference and skill control provenance" {
+    var f: Fixture = undefined;
+    try f.initOptions(.{ .chatgpt_plan = true });
+    defer f.deinit();
+    const before = f.prepared.request.selection;
+    const inference = try f.attempt(.{ .inference_set = .{
+        .profile_id = before.profile_id,
+        .effort = .medium,
+        .expected_revision = before.control_revision,
+        .reason = .{ .bytes = "Retain the admitted inference selection." },
+    } });
+    try std.testing.expectEqualStrings("unchanged", inference.object.get("disposition").?.string);
+    try std.testing.expectEqualDeep(before, f.prepared.request.selection);
+    const skill = try f.attempt(.{ .skill_set = .{
+        .operation = .load,
+        .skill_id = .{ .bytes = "not-in-approved-catalog" },
+        .version = .{ .bytes = "1" },
+        .residency = .resident,
+        .expected_revision = before.control_revision,
+        .reason = .{ .bytes = "Reject an unavailable skill through checked provenance." },
+    } });
+    try std.testing.expectEqualStrings("rejected", skill.object.get("disposition").?.string);
+    try std.testing.expectEqualStrings("unknown_skill", skill.object.get("rejection").?.string);
+    try std.testing.expectEqualDeep(before, f.prepared.request.selection);
+    try std.testing.expect(f.prepared.request.invocation.response_policy.stream);
+    try std.testing.expectEqual(@as(usize, 0), f.prepared.request.plan.skills.items.len);
 }

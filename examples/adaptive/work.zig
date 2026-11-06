@@ -110,15 +110,16 @@ pub fn admitAction(
     );
     var raw = try contracts.decodeOwned(native.responses.Raw, ctx.allocator, captured);
     defer raw.deinit();
-    const response = (try native.json.parse(ctx.allocator, raw.value.body.bytes, .{
-        .bytes = raw.value.body.bytes.len,
-        .tokens = raw.value.body.bytes.len,
-        .members = raw.value.body.bytes.len,
-    })).value;
+    const response = try native.responses.decode(
+        ctx.allocator,
+        try native.responses_contract.read(ctx.allocator, ctx.profile),
+        raw.value,
+    );
+    if (response.failure != null or response.unsupported != null) return error.InvalidCapture;
     const normalized = try native.responses.OutputNormalizer(P).normalize(
         ctx.allocator,
         prepared.value.request.invocation,
-        native.json.get(response, "output") orelse return error.InvalidCapture,
+        native.json.get(response.body, "output").?,
     );
     if (normalized != .output) return error.InvalidCapture;
     var found = false;

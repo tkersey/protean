@@ -23,8 +23,13 @@ pub const State = struct {
     tools: ?t.ToolPolicy,
     initial: t.controls.State,
     provider: native.responses.Environment,
+    selection: ?*native.siwc.Selection = null,
     offline: bool,
 };
+pub fn release(value: *anyopaque) void {
+    const owner: *State = @ptrCast(@alignCast(value));
+    if (owner.selection) |selection| selection.deinit();
+}
 pub const handlers = [_]native.Declaration{
     native.registry.controllerImport(
         .task_view,
@@ -244,45 +249,6 @@ fn resourceBytes(resources: []const []const u8, ref: t.model.ArtifactReference) 
 fn hex(a: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     return a.dupe(u8, &std.fmt.bytesToHex(digest(bytes), .lower));
 }
-fn containsCredential(
-    allocator: std.mem.Allocator,
-    value: native.json.Value,
-    token: []const u8,
-) !bool {
-    const Frame = struct {
-        values: []const native.json.Value,
-        keys: ?[]const []const u8 = null,
-        index: usize = 0,
-    };
-    var stack: std.ArrayList(Frame) = .empty;
-    defer stack.deinit(allocator);
-    const root = [_]native.json.Value{value};
-    try stack.append(allocator, .{ .values = &root });
-    while (stack.items.len != 0) {
-        const frame = &stack.items[stack.items.len - 1];
-        if (frame.index == frame.values.len) {
-            _ = stack.pop();
-            continue;
-        }
-        const child = frame.values[frame.index];
-        if (frame.keys) |keys| {
-            if (std.mem.indexOf(u8, keys[frame.index], token) != null) return true;
-        }
-        frame.index += 1;
-        switch (child) {
-            .string => |text| if (std.mem.indexOf(u8, text, token) != null) {
-                return true;
-            },
-            .array => |items| try stack.append(allocator, .{ .values = items.items }),
-            .object => |fields| try stack.append(allocator, .{
-                .values = fields.values(),
-                .keys = fields.keys(),
-            }),
-            else => {},
-        }
-    }
-    return false;
-}
 pub fn taskInput(a: std.mem.Allocator, text: []const u8) !t.Input {
     if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidParams;
     return .{ .task = .{ .bytes = try a.dupe(u8, text) } };
@@ -335,10 +301,13 @@ pub fn configure(
         .assets = assets,
     };
     try admission.validateOptions();
+    errdefer if (admission.selection) |selection| selection.deinit();
+    try admission.protectInputs();
     try admission.loadConfiguration();
     try admission.profile();
     try admission.validateIdentity();
     try admission.validatePolicy();
+    try admission.authentication();
     try admission.validateResources();
     try admission.validateToolCatalog();
     try admission.validateToolInputs();
@@ -357,7 +326,10 @@ const ConfigurationAdmission = struct {
     profile_bytes: []const u8 = undefined,
     snapshot: []const u8 = undefined,
     catalog_bytes: []const u8 = undefined,
-    token: []const u8 = undefined,
+    source: native.responses.Source = .unavailable,
+    selection: ?*native.siwc.Selection = null,
+    contract: contracts.ResponsesContract = .{},
+    protected_roots: ?native.configuration.ProtectedRoots = null,
     config: ?Config = null,
     tool_config: ?t.ToolConfiguration = null,
     semantic_config: ?t.SemanticConfiguration = null,
@@ -388,6 +360,19 @@ const ConfigurationAdmission = struct {
     }
 
     fn validateOptions(s: *ConfigurationAdmission) !void {
+        const chatgpt = s.options.chatgpt_account != null;
+        if (chatgpt and s.options.credential_path != null)
+            return error.ConflictingCredentialSources;
+        if ((s.options.offline or s.options.test_provider) and chatgpt)
+            return error.InvalidConfiguration;
+        if (s.options.chatgpt_account) |label| if (!native.siwc.validLabel(label))
+            return error.InvalidChatGPTAccount;
+        if (s.frozen == null and !chatgpt and s.options.siwc_bin != null)
+            return error.MissingChatGPTSelection;
+        if (s.frozen == null and s.options.require_source and !s.options.test_provider and
+            !s.options.offline and !chatgpt and s.options.credential_path == null)
+            return error.MissingCredentialSource;
+        if (chatgpt) s.contract.route = .chatgpt_plan_sse;
         if (s.options.test_provider and
             (s.options.offline or s.options.credential_path != null or
                 s.options.trust_root_path == null)) return error.InvalidConfiguration;
@@ -398,9 +383,27 @@ const ConfigurationAdmission = struct {
         s.mode = if (s.options.offline) "offline" else live_mode;
     }
 
+    fn protectInputs(s: *ConfigurationAdmission) !void {
+        if (s.options.offline or (s.frozen != null and s.options.config_path == null)) return;
+        s.protected_roots = s.options.protected_roots orelse
+            try native.configuration.ProtectedRoots.init(
+                s.a,
+                s.io,
+                s.options.home,
+                s.options.siwc_auth_dir,
+            );
+    }
+
     fn loadConfiguration(s: *ConfigurationAdmission) !void {
         if (s.options.config_path) |path| {
-            const bytes = try native.configuration.readFile(s.a, s.io, path, null, false);
+            const bytes = try native.configuration.readProtectedFile(
+                s.a,
+                s.io,
+                path,
+                null,
+                false,
+                s.protected_roots,
+            );
             var parsed = try native.json.parse(s.a, bytes, .{
                 .bytes = bytes.len,
                 .tokens = bytes.len,
@@ -443,11 +446,12 @@ const ConfigurationAdmission = struct {
 
     fn captureSnapshot(s: *ConfigurationAdmission) !void {
         if (!s.options.offline and s.config == null) return error.MissingConfiguration;
-        s.snapshot = if (s.config) |value| try native.repository.captureWithScratch(
+        s.snapshot = if (s.config) |value| try native.repository.captureProtected(
             s.a,
             s.options.scratch_allocator orelse s.a,
             s.io,
             value.snapshot_root.bytes,
+            s.protected_roots,
         ) else blk: {
             const contents = "pub fn main() void {\n    // The offline fixture has no " ++
                 "external effects.\n}\n";
@@ -465,12 +469,13 @@ const ConfigurationAdmission = struct {
     fn loadSkills(s: *ConfigurationAdmission) !void {
         if (s.config) |value| {
             for (value.skills.items) |skill| {
-                const body = try native.configuration.readFile(
+                const body = try native.configuration.readProtectedFile(
                     s.a,
                     s.io,
                     skill.markdown.bytes,
                     null,
                     false,
+                    s.protected_roots,
                 );
                 if (!std.unicode.utf8ValidateSlice(body)) return error.InvalidSkill;
                 try s.resources.append(s.a, body);
@@ -597,6 +602,9 @@ const ConfigurationAdmission = struct {
 
     fn profileIdentity(s: *ConfigurationAdmission) !void {
         s.root = native.json.object();
+        try native.json.put(s.a, &s.root, "schema", native.json.string(
+            "adaptive-agent.native-profile.v2",
+        ));
         try native.json.put(s.a, &s.root, "mode", native.json.string(s.mode));
         try native.json.put(s.a, &s.root, "application", native.json.string(t.application_id));
         try native.json.put(
@@ -669,6 +677,9 @@ const ConfigurationAdmission = struct {
             .tokens = s.profile_bytes.len,
             .members = s.profile_bytes.len,
         })).value;
+        if (!std.mem.eql(u8, try native.json.text(native.json.get(s.root, "schema") orelse
+            return error.IncompatibleProfile), "adaptive-agent.native-profile.v2"))
+            return error.IncompatibleProfile;
         if (!std.mem.eql(
             u8,
             try native.json.text(
@@ -781,13 +792,48 @@ const ConfigurationAdmission = struct {
         if (!supported) return error.UnsupportedEffort;
     }
 
+    fn authentication(s: *ConfigurationAdmission) !void {
+        if (s.frozen != null) {
+            s.contract = try native.responses_contract.read(s.a, s.profile_bytes);
+            if ((s.options.chatgpt_account != null and s.contract.route != .chatgpt_plan_sse) or
+                (s.options.credential_path != null and s.contract.route != .api_key_json))
+                return error.CredentialBindingMismatch;
+        }
+        for (s.policy.profiles.items) |entry|
+            try native.responses_contract.admitProfile(s.contract.route, entry);
+        if (s.options.chatgpt_account) |account| {
+            s.selection = try native.siwc.Selection.init(s.a, s.io, .{
+                .account = account,
+                .executable = s.options.siwc_bin,
+                .auth_dir = s.options.siwc_auth_dir,
+                .home = s.options.home,
+                .path = s.options.path,
+            });
+            if (s.frozen == null and !s.options.validating) {
+                const status = try s.selection.?.status(null);
+                s.contract.binding = status.binding orelse return error.ChatGPTRegistrationRequired;
+            }
+            if (s.contract.binding) |binding| s.source = .{ .chatgpt_plan = .{
+                .selection = s.selection.?,
+                .binding = binding,
+            } };
+        }
+        if (!s.options.validating) try native.responses_contract.validate(s.contract);
+        if (s.frozen == null) {
+            try native.json.put(s.a, &s.root, "responses", try native.values.toJson(
+                contracts.ResponsesContract,
+                s.a,
+                s.contract,
+            ));
+            s.profile_bytes = try native.json.canonical(s.a, s.root);
+        }
+    }
+
     fn credentials(s: *ConfigurationAdmission) !void {
-        s.token = if (s.options.test_provider) "qualification-only" else "";
-        if (s.options.credential_path) |path| s.token = std.mem.trim(
-            u8,
-            try native.configuration.readFile(s.a, s.io, path, null, true),
-            "\r\n",
-        );
+        if (s.options.test_provider) s.source = .{ .controlled_test = "qualification-only" };
+        if (s.options.credential_path) |path| s.source = .{
+            .api_key_file = try s.a.dupe(u8, path),
+        };
         s.trust_root = if (s.options.trust_root_path) |path| try native.configuration.readFile(
             s.a,
             s.io,
@@ -795,16 +841,21 @@ const ConfigurationAdmission = struct {
             null,
             false,
         ) else null;
-        // Frozen bodies as well as the snapshot must not embed the transport secret.
-        if (s.options.credential_path != null) {
-            if (s.token.len == 0) return error.InvalidCredential;
-            for (s.token) |byte| if (byte <= 0x20 or byte >= 0x7f) return error.InvalidCredential;
-            if (try containsCredential(s.a, s.root, s.token)) return error.UnsafeCredentialFile;
-            for (s.resources.items) |resource| if (std.mem.indexOf(
-                u8,
-                resource,
-                s.token,
-            ) != null) return error.UnsafeCredentialFile;
+        if (s.frozen != null) return;
+        if (s.options.credential_path) |path| {
+            const scratch = s.options.scratch_allocator orelse s.a;
+            const bytes = try native.configuration.readFile(scratch, s.io, path, null, true);
+            defer {
+                std.crypto.secureZero(u8, bytes);
+                scratch.free(bytes);
+            }
+            const token = std.mem.trim(u8, bytes, "\r\n");
+            if (token.len == 0) return error.InvalidCredential;
+            for (token) |byte| if (byte <= 0x20 or byte >= 0x7f) return error.InvalidCredential;
+            if (try native.responses.containsCredential(s.a, s.root, token))
+                return error.UnsafeCredentialFile;
+            for (s.resources.items) |resource| if (std.mem.indexOf(u8, resource, token) != null)
+                return error.UnsafeCredentialFile;
         }
     }
 
@@ -832,10 +883,12 @@ const ConfigurationAdmission = struct {
                 },
             },
             .provider = .{
-                .token = s.token,
+                .source = s.source,
+                .resources = s.resources.items,
                 .approved_endpoint = s.policy.endpoint.bytes,
                 .trust_root = s.trust_root,
             },
+            .selection = s.selection,
             .offline = s.options.offline,
         };
         // Fail admission before dispatch if catalog metadata cannot fit core input.

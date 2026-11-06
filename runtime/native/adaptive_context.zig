@@ -152,7 +152,7 @@ pub fn Projection(comptime P: type) type {
             defer source.deinit();
             const request = source.value.request;
             const frozen = try Admission.policy(ctx.allocator, ctx.profile);
-            if (source.value.version != 1 or !equal(&request.policy, &value.policy) or
+            if (source.value.version != 2 or !equal(&request.policy, &value.policy) or
                 !same(request.plan.catalog, frozen.catalog) or
                 !try encodedEqual(ctx.allocator, @TypeOf(value.plan), value.plan, request.plan) or
                 !try encodedEqual(
@@ -164,7 +164,12 @@ pub fn Projection(comptime P: type) type {
                 request.invocation.parameters.reasoning == null or
                 request.invocation.parameters.reasoning.?.effort != value.top_effort)
                 return error.InvalidContext;
-            _ = try Admission.select(ctx.allocator, frozen, request);
+            _ = try Admission.selectContract(
+                ctx.allocator,
+                frozen,
+                request,
+                try @import("responses_contract.zig").read(ctx.allocator, ctx.profile),
+            );
             return decoded;
         }
         fn validationKey(

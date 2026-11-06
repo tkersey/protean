@@ -79,7 +79,7 @@ fn performWork(
     const result = slot.result orelse .not_sent;
     try service.completeWork(frame, work, result);
     if (result == .unknown or
-        result == .not_sent)
+        result == .not_sent or result == .not_sent_with_reason)
     {
         return slot.failure orelse error.DemoDidNotComplete;
     }

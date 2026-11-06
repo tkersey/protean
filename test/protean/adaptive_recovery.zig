@@ -789,6 +789,7 @@ fn generatedToolConfiguration(
     return environment.configure(a, io, .{
         .offline = false,
         .test_provider = true,
+        .home = path,
         .config_path = try std.fmt.allocPrint(a, "{s}/config.json", .{path}),
         .trust_root_path = try std.fmt.allocPrint(a, "{s}/unused-trust-root", .{path}),
     }, null, assets);
@@ -4006,4 +4007,244 @@ fn submitWorkspaceRecovery(
             },
         },
     )).receipt.task;
+}
+
+const ProviderFixture = @import("projection_recovery.zig").Fixture;
+
+fn providerQuestion(f: *ProviderFixture) !native.testing.state.Question {
+    for (0..16384) |_| {
+        var scratch = std.heap.ArenaAllocator.init(f.a);
+        defer scratch.deinit();
+        const step = try f.service.pump(scratch.allocator());
+        if (step == .work) return error.UnexpectedWorkDuringProviderRecovery;
+        if (step == .waiting) {
+            const question = (try f.service.pendingQuestion(f.permanent, f.task)) orelse
+                return error.MissingProviderRecoveryQuestion;
+            return question.value;
+        }
+    }
+    return error.MissingProviderRecoveryQuestion;
+}
+
+fn providerAnswer(
+    f: *ProviderFixture,
+    question: native.testing.state.Question,
+    answer: []const u8,
+    operation: []const u8,
+) !void {
+    _ = try f.service.respond(
+        f.permanent,
+        operation,
+        f.task,
+        question.id,
+        question.revision,
+        question.request_digest,
+        question.answer_schema_id.bytes,
+        try native.values.toJson(t.Answer, f.permanent, .{
+            .message = .{ .bytes = answer },
+        }),
+    );
+}
+
+fn providerFailure(f: *ProviderFixture, code: []const u8) !native.tasks.Work {
+    const body = try std.fmt.allocPrint(
+        f.permanent,
+        "event: error\ndata: {{\"type\":\"error\",\"code\":\"{s}\"}}\n\n",
+        .{code},
+    );
+    const raw = try protean.contracts.encodeOwned(native.responses.Raw, f.permanent, .{
+        .status = 200,
+        .identity_encoding = true,
+        .request_id = null,
+        .body = .{ .bytes = body },
+        .format = .sse,
+        .media_type = .{ .bytes = "text/event-stream" },
+    });
+    const failed = f.pending;
+    try f.service.acquire(f.permanent, failed, raw);
+    f.calls += 1;
+    return failed;
+}
+
+fn providerOutput(f: *ProviderFixture) !t.Output {
+    for (0..16384) |_| {
+        var scratch = std.heap.ArenaAllocator.init(f.a);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        var task = try f.service.task(a, f.task);
+        defer task.deinit();
+        if (task.value.terminal()) {
+            try std.testing.expectEqual(.completed, task.value.outcome_kind);
+            return (try protean.contracts.decodeOwned(
+                t.Output,
+                f.permanent,
+                try f.namespace.store.object(f.permanent, task.value.result.?, null),
+            )).value;
+        }
+        const step = try f.service.pump(a);
+        if (step == .work or step == .waiting) return error.UnexpectedProviderContinuation;
+    }
+    return error.MissingProviderOutcome;
+}
+
+fn providerRetryRetains(
+    f: *ProviderFixture,
+    expected: t.P.AdaptivePrepared,
+    carry: t.ControllerCarry,
+    failed: native.tasks.Work,
+    model_calls: u64,
+) !void {
+    try f.next();
+    try std.testing.expect(!std.mem.eql(u8, &failed.occurrence, &f.pending.occurrence));
+    try std.testing.expect(!std.mem.eql(u8, &failed.attempt, &f.pending.attempt));
+    try std.testing.expectEqualDeep(
+        expected.request.invocation.messages,
+        f.prepared.request.invocation.messages,
+    );
+    try std.testing.expectEqualDeep(expected.request.results, f.prepared.request.results);
+    try std.testing.expectEqualDeep(expected.request.plan.prior, f.prepared.request.plan.prior);
+    const next = try invalidOutputCarry(&f.service, f.permanent, f.task);
+    try std.testing.expectEqual(model_calls, next.state.model_calls);
+    try std.testing.expectEqual(carry.state.work_calls, next.state.work_calls);
+    try std.testing.expectEqualDeep(carry.state.messages, next.state.messages);
+    try std.testing.expectEqualDeep(carry.state.results, next.state.results);
+    try std.testing.expectEqualDeep(carry.state.replay, next.state.replay);
+    var task = try f.service.task(f.permanent, f.task);
+    defer task.deinit();
+    try std.testing.expectEqual(model_calls, task.value.inference_attempts);
+}
+
+fn providerNonretry(f: *ProviderFixture, first: native.testing.state.Question) !void {
+    const before = (try f.service.task(f.permanent, f.task)).value.inference_attempts;
+    try providerAnswer(f, first, "later", "provider-later");
+    const repeated = try providerQuestion(f);
+    try std.testing.expect(!std.mem.eql(u8, &first.id, &repeated.id));
+    _ = try f.service.message(f.permanent, "provider-message-not-answer", f.task, .{
+        .message = .{ .bytes = "retry" },
+    });
+    var pending = (try f.service.pendingQuestion(f.permanent, f.task)) orelse
+        return error.MissingProviderRecoveryQuestion;
+    defer pending.deinit();
+    try std.testing.expectEqualDeep(repeated.id, pending.value.id);
+    try std.testing.expectEqual(
+        before,
+        (try f.service.task(f.permanent, f.task)).value.inference_attempts,
+    );
+    try providerAnswer(f, pending.value, "retry", "provider-retry-0");
+}
+
+fn providerReopenWithoutHelper(f: *ProviderFixture, failed: native.tasks.Work) !void {
+    const saved = (try protean.contracts.decodeOwned(
+        native.testing.state.Capture,
+        f.permanent,
+        (try f.namespace.store.recordBytes(f.permanent, "capture", failed.attempt, f.task)).?,
+    )).value;
+    try std.testing.expect(saved.response != null);
+    try std.testing.expect(saved.projection == null);
+    const restored = try environment.configure(f.permanent, f.io, .{ .offline = false }, .{
+        .profile_id = f.profile.id,
+        .profile = f.profile.bytes,
+        .resources = f.profile.resources,
+    }, f.assets);
+    try std.testing.expectEqualStrings(f.profile.bytes, restored.bytes);
+    const original = f.profile.environment.?;
+    defer environment.release(original);
+    f.profile.environment = restored.environment;
+    try f.temporary.dir.deleteFile(f.io, "siwc");
+    try @import("projection_recovery.zig").reopen(f);
+}
+
+fn providerClassification(
+    f: *ProviderFixture,
+    failed: native.tasks.Work,
+    question: native.testing.state.Question,
+    index: usize,
+) !void {
+    const saved = (try protean.contracts.decodeOwned(
+        native.testing.state.Capture,
+        f.permanent,
+        (try f.namespace.store.recordBytes(f.permanent, "capture", failed.attempt, f.task)).?,
+    )).value;
+    try std.testing.expect(saved.response != null);
+    var bound = try protocol.decode(
+        protocol.Result,
+        f.permanent,
+        try f.namespace.store.object(f.permanent, saved.projection.?.reply, null),
+    );
+    defer bound.deinit();
+    const reply = (try protean.contracts.decodeOwned(
+        t.P.AdaptiveResult,
+        f.permanent,
+        bound.value.value,
+    )).value;
+    const expected = [_]protean.contracts.ProviderRecovery{
+        .authentication, .usage_limit, .transient,
+    };
+    try std.testing.expectEqual(.stream_error, reply.result.provider_failure.kind);
+    try std.testing.expectEqual(expected[index], reply.result.provider_failure.recovery);
+    const prompt = (try native.json.parse(
+        f.permanent,
+        try f.namespace.store.object(f.permanent, question.prompt, null),
+        .{},
+    )).value.object.get("prompt").?.string;
+    const phrases = [_][]const u8{ "authentication", "usage limit", "temporary provider" };
+    try std.testing.expect(std.mem.indexOf(u8, prompt, phrases[index]) != null);
+}
+
+test "adaptive ChatGPT provider recovery retains context carry and explicit retry accounting" {
+    var f: ProviderFixture = undefined;
+    try f.initOptions(.{ .chatgpt_plan = true, .reconstruct = true });
+    defer f.deinit();
+    try f.send(.{ .list = .{ .prefix = .{ .bytes = "" }, .after = .{ .bytes = "" } } });
+    try f.next();
+    const retained = f.prepared;
+    try std.testing.expectEqual(@as(usize, 1), retained.request.results.items.len);
+    try std.testing.expect(retained.request.invocation.messages.items.len != 0);
+    try std.testing.expect(retained.request.plan.prior != null);
+    const carry = try invalidOutputCarry(&f.service, f.permanent, f.task);
+    const codes = [_][]const u8{
+        "subscription_sharing_invalid_user",
+        "subscription_sharing_usage_limit_exceeded",
+        "subscription_sharing_usage_unavailable",
+    };
+    for (codes, 0..) |code, index| {
+        const failed = try providerFailure(&f, code);
+        if (index == 0) try providerReopenWithoutHelper(&f, failed);
+        const question = try providerQuestion(&f);
+        try providerClassification(&f, failed, question, index);
+        if (index == 0) {
+            try providerNonretry(&f, question);
+        } else {
+            try providerAnswer(
+                &f,
+                question,
+                "retry",
+                try std.fmt.allocPrint(f.permanent, "provider-retry-{d}", .{index}),
+            );
+        }
+        try providerRetryRetains(&f, retained, carry, failed, @intCast(index + 3));
+    }
+    try f.send(.{ .stop = .{ .reason = .{ .bytes = "Recovery witnessed." } } });
+    const output = try providerOutput(&f);
+    try std.testing.expect(output.result == .no_result);
+    try std.testing.expectEqual(@as(u64, 5), output.model_calls);
+    try std.testing.expectEqual(@as(u64, 1), output.work_calls);
+}
+
+test "adaptive API provider rejection remains terminal without recovery questions" {
+    var f: ProviderFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const raw = try protean.contracts.encodeOwned(native.responses.Raw, f.permanent, .{
+        .status = 401,
+        .identity_encoding = true,
+        .request_id = null,
+        .body = .{ .bytes = "{\"error\":{\"code\":\"subscription_sharing_invalid_user\"}}" },
+    });
+    try f.service.acquire(f.permanent, f.pending, raw);
+    const output = try providerOutput(&f);
+    try std.testing.expect(output.result == .no_result);
+    try std.testing.expectEqual(@as(u64, 1), output.model_calls);
+    try std.testing.expectEqual(@as(u64, 0), output.work_calls);
+    try std.testing.expect((try f.service.pendingQuestion(f.permanent, f.task)) == null);
 }

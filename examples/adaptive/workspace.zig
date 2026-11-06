@@ -145,6 +145,7 @@ fn authorizeModel(
     if (modelSelection(command)) |selection| {
         const A = native.adaptive_responses.Admission(t.P);
         const policy = try A.policy(ctx.allocator, ctx.profile);
+        const contract = try native.responses_contract.read(ctx.allocator, ctx.profile);
         for (policy.profiles.items) |profile| {
             if (!std.mem.eql(u8, profile.id.bytes, selection.profile_id.bytes)) continue;
             var supported = false;
@@ -154,10 +155,12 @@ fn authorizeModel(
                 selection.effort.bytes,
             );
             if (!supported) return error.UnsupportedEffort;
+            try native.responses_contract.admitProfile(contract.route, profile);
             model = .{ .profile_id = profile.id, .profile_digest = try A.profileDigest(
                 ctx.allocator,
                 profile,
             ), .settings = .{
+                .contract = contract,
                 .endpoint = policy.endpoint,
                 .audience = policy.audience,
                 .model = profile.model,

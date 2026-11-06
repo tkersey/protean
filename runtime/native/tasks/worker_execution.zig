@@ -1413,6 +1413,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             switch (result) {
                 .acquired => |bytes| return acquire(self, a, work, bytes),
                 .not_sent => return notSent(self, a, work),
+                .not_sent_with_reason => |reason| return notSentBlocked(
+                    self,
+                    a,
+                    work,
+                    std.meta.stringToEnum(state.Blocker, @tagName(reason)).?,
+                ),
                 .unknown => return unknown(self, a, work),
                 .rederived => |finding| {
                     try currentWork(self, work);
@@ -1575,6 +1581,30 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             try retire(self, a);
         }
         pub fn notSent(self: *Self, a: std.mem.Allocator, work: Work) !void {
+            return notSentBlocked(self, a, work, .unavailable_environment);
+        }
+
+        fn notSentEvent(
+            self: *Self,
+            a: std.mem.Allocator,
+            value: *state.Task,
+            work: Work,
+            blocker: state.Blocker,
+        ) !void {
+            if (work.subject_work != null or work.subject_residual != null) return;
+            try event(self, value, .blocked, try std.fmt.allocPrint(
+                a,
+                "{{\"delivery\":\"definitely_not_sent\",\"reason\":\"{s}\"}}",
+                .{@tagName(blocker)},
+            ));
+        }
+
+        fn notSentBlocked(
+            self: *Self,
+            a: std.mem.Allocator,
+            work: Work,
+            blocker: state.Blocker,
+        ) !void {
             try currentWork(self, work);
             try requireCustody(self, a, work.task, work.subject_work);
             if (work.recovery != null) return completeRecoveryWork(self, a, work, null);
@@ -1603,31 +1633,20 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             const cancelling = subject.cancelling and !subject.cleanup;
             if (cancelling) try self.runnable.ensureUnusedCapacity(self.allocator, 1);
             if (work.subject_work == null and work.subject_residual == null) {
-                value.blocker = if (cancelling) null else .unavailable_environment;
+                value.blocker = if (cancelling) null else blocker;
                 value.schedule = if (cancelling) .queued else .parked;
             }
             try store(self).begin();
             defer store(self).rollback();
-            try store(self).putRecord(
-                Occurrence,
-                "occurrence",
-                work.occurrence,
-                work.task,
-                next,
-            );
-            if (work.subject_work == null and work.subject_residual == null) try event(
-                self,
-                &value,
-                .blocked,
-                "{\"delivery\":\"definitely_not_sent\"}",
-            );
+            try store(self).putRecord(Occurrence, "occurrence", work.occurrence, work.task, next);
+            try notSentEvent(self, a, &value, work, blocker);
             try effectSchedule(
                 self,
                 a,
                 &value,
                 saved.value,
                 if (cancelling) .queued else .parked,
-                if (cancelling) null else .unavailable_environment,
+                if (cancelling) null else blocker,
             );
             try persistOccurrence(
                 self,

@@ -1,4 +1,19 @@
+#define _DARWIN_C_SOURCE
 #include "native_c.h"
+#include <string.h>
+
+int protean_native_fd_path(int fd, char *out, size_t capacity) {
+#ifdef __APPLE__
+    if (capacity < 1024 || fcntl(fd, F_GETPATH, out) != 0) return -1;
+    return (int)strlen(out);
+#else
+    char path[64];
+    if (snprintf(path, sizeof(path), "/proc/self/fd/%d", fd) < 0) return -1;
+    ssize_t length = readlink(path, out, capacity);
+    if (length < 0 || (size_t)length >= capacity) return -1;
+    return (int)length;
+#endif
+}
 
 int protean_native_fstat(int fd, struct protean_native_stat *out) {
     struct stat value;

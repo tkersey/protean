@@ -634,19 +634,19 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
   await writeFile(configPath, JSON.stringify(configuration(config)));
   const invoke = async (...args) => {
     const timeout = suite === 'runtime' && process.platform === 'darwin' ? undefined : 30000;
-    const result = await execute(app.command, [...args, '--test-provider', '--trust-root', trust, ...placementArgs], {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout, maxBuffer: 4 * 1024 * 1024});
+    const result = await execute(app.command, [...args, '--test-provider', '--trust-root', trust, ...placementArgs], {cwd: app.data, env: {PATH: '/nonexistent', HOME: app.data}, encoding: 'utf8', timeout, maxBuffer: 4 * 1024 * 1024});
     assert.equal(result.status, 0, result.error ?? `${result.stderr}\n${result.stdout}`); return JSON.parse(result.stdout);
   };
   let client;
-  const launch = async (extra, selectedState = state, versions = ['agent-host/2.1']) => {
-    client = new ProteanClient(app.command, ['--state-dir', selectedState, '--authorize-inference', '--test-provider', '--trust-root', trust, ...placementArgs, ...extra], {cwd: app.data, env: {PATH: '/nonexistent'}});
+  const launch = async (extra, selectedState = state, versions = ['agent-host/2.2']) => {
+    client = new ProteanClient(app.command, ['--state-dir', selectedState, '--authorize-inference', '--test-provider', '--trust-root', trust, ...placementArgs, ...extra], {cwd: app.data, env: {PATH: '/nonexistent', HOME: app.data}});
     if (suite === 'runtime') {
       client.child.stderr.on('data', bytes => process.stderr.write(bytes));
       client.closed.then(exit => console.error(JSON.stringify({runtime_fixture: scenario, process_exit: exit})));
     }
     const initialized = await client.initialize(versions);
     assert.equal(initialized.server_info.version, '9.0.0');
-    assert.equal(initialized.protocol_version, 'agent-host/2.1');
+    assert.equal(initialized.protocol_version, 'agent-host/2.2');
     assert.equal(Object.hasOwn(initialized.capabilities, 'task_reconciliation'), true);
     return client;
   };
@@ -669,14 +669,14 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       const retiredConfig = join(app.data, 'retired-quota-contract.json');
       await writeFile(retiredConfig, JSON.stringify({...configuration(config), schema: 'adaptive-agent.configuration.v2'}));
       const retired = await execute(app.command, ['validate', '--config', retiredConfig, '--test-provider', '--trust-root', trust],
-        {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 10000});
+        {cwd: app.data, env: {PATH: '/nonexistent', HOME: app.data}, encoding: 'utf8', timeout: 10000});
       assert.equal(retired.status, 64, 'old finite contracts require their original build');
       for (const [field, value] of [['id', 'review/guards'], ['version', '1.0.0+local']]) {
         const invalid = structuredClone(config), path = join(app.data, `invalid-skill-${field}.json`);
         invalid.skills[0][field] = value;
         await writeFile(path, JSON.stringify(configuration(invalid)));
         const rejected = await execute(app.command, ['validate', '--config', path, '--test-provider', '--trust-root', trust],
-          {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 10000});
+          {cwd: app.data, env: {PATH: '/nonexistent', HOME: app.data}, encoding: 'utf8', timeout: 10000});
         assert.equal(rejected.status, 64, `${field}: ${rejected.error ?? rejected.stdout}`);
         assert.equal(requests.length, 0, 'invalid catalog admission cannot dispatch inference');
       }
@@ -684,7 +684,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       await writeFile(credential, 'qualification-only\n', {mode: 0o600});
       await writeFile(leakedConfig, JSON.stringify(configuration({...config, endpoint: 'https://api.openai.com/v1/responses', workspace: 'qualification-only'})));
       const leaked = await execute(app.command, ['validate', '--config', leakedConfig, '--credential-file', credential],
-        {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 10000});
+        {cwd: app.data, env: {PATH: '/nonexistent', HOME: app.data}, encoding: 'utf8', timeout: 10000});
       assert.equal(leaked.status, 64); assert(!`${leaked.stdout}${leaked.stderr}`.includes('qualification-only'));
       assert.equal(requests.length, 0, 'credential validation cannot dispatch inference');
       await launch(['--config', configPath]);
@@ -723,7 +723,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       const changedConfig = join(app.data, 'changed-adaptive.json');
       await writeFile(changedConfig, JSON.stringify(configuration({...config, initial_effort: 'high'})));
       const refused = await execute(app.command, ['resume', '--state-dir', state, '--task-id', accepted.task_id, '--config', changedConfig, '--test-provider', '--trust-root', trust],
-        {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 10000});
+        {cwd: app.data, env: {PATH: '/nonexistent', HOME: app.data}, encoding: 'utf8', timeout: 10000});
       assert.equal(refused.status, 64); assert.equal(requests.length, 13);
       const revokedConfig = join(app.data, 'revoked-semantic-policy.json');
       await writeFile(revokedConfig, JSON.stringify({...configuration(config),
@@ -776,9 +776,9 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         const identity = attempt[5], prepared = archive.object(capture[3]), rawBytes = archive.object(capture[4].value);
         const replyBytes = resultValue(archive.object(capture[6].value[0]));
         assert.equal(capture[5], 0); assert.equal(capture[6].tag, 1);
-        if (identity === 'agent.model.invoke.v12') {
+        if (identity === 'agent.model.invoke.v13') {
           const envelope = decodeValue(schemas.AdaptivePrepared, prepared);
-          assert.equal(envelope.length, 4); assert.equal(envelope[0], 1);
+          assert.equal(envelope.length, 4); assert.equal(envelope[0], 2);
           assert.equal(envelope[3].tag, 0);
           const request = envelope[1], plan = request[3], index = Number(plan[2]);
           assert.equal(request.length, 7); assert.equal(plan.length, 8); assert(index >= 0 && index < 14 && !seen.has(index)); seen.add(index);
@@ -805,7 +805,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           assert.equal(call[3], toolNames.indexOf(expectedCall.name));
           const context = decodeValue(schemas.AdaptiveContext, archive.object(reply[1].value[0]));
           assert.equal(context.length, 13); assert.deepEqual(context[2], archive.task.id);
-          assert.equal(context[0], 'agent.model.context.responses.adaptive.v8'); assert.deepEqual(context[1], request[1]);
+          assert.equal(context[0], 'agent.model.context.responses.adaptive.v9'); assert.deepEqual(context[1], request[1]);
           assert.equal(context[3], archive.task.tenant); assert.equal(context[4], frozenProfile.adaptive.audience);
           assert.equal(context[6], request[2][2]);
           assert.deepEqual(context[5], request[2]); assert.deepEqual(context[7], plan); assert.equal(context[8], BigInt(index + 1));
@@ -844,7 +844,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           captureRows.push({request, http: requests[index].body});
           providerProjections++;
         } else {
-          if (['agent.adaptive.context.prepare.v2', 'agent.adaptive.context.prepare.v3'].includes(identity)) {
+          if (['agent.adaptive.context.prepare.v2', 'agent.adaptive.context.prepare.v4'].includes(identity)) {
             const observation = decodeValue(schemas.PreparationCapture, rawBytes);
             assert.equal(Buffer.from(observation[0]).toString('hex'), hash(prepared));
             assert.equal(observation.length, 1, 'preparation captures no quota-exhaustion policy');
@@ -873,7 +873,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       ]) {
         const path = join(app.data, `${name}.bundle`); await writeFile(path, bytes, {mode: 0o600});
         const rejected = await execute(app.command, ['import-checkpoint', '--state-dir', join(app.data, `${name}-state`), '--input', path, '--operation-id', name,
-          '--test-provider', '--trust-root', trust], {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024});
+          '--test-provider', '--trust-root', trust], {cwd: app.data, env: {PATH: '/nonexistent', HOME: app.data}, encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024});
         assert.equal(rejected.status, 64, name);
       }
       assert.equal(requests.length, 14, 'recovery, import and pure projection replay perform no inference');
@@ -898,7 +898,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         if (kind !== 4) continue;
         const attemptRow = deniedArchive.manifest[6].find(([tag, candidate]) => tag === 5 && Buffer.from(candidate).equals(Buffer.from(id)));
         const attempt = decodeValue(deniedArchive.schemas.get('attempt'), deniedArchive.object(attemptRow[2]));
-        if (attempt[5] !== 'agent.model.invoke.v12') continue;
+        if (attempt[5] !== 'agent.model.invoke.v13') continue;
         const capture = decodeValue(deniedArchive.schemas.get('capture'), deniedArchive.object(ref));
         const request = decodeValue(schemas.AdaptivePrepared, deniedArchive.object(capture[3]))[1];
         if (request[3][2] !== 7n) continue;
@@ -936,7 +936,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         }
         client = null;
         const milliseconds = performance.now() - stopStarted;
-        await launch(['--config', configPath], selectedState, ['agent-host/2.1']);
+        await launch(['--config', configPath], selectedState, ['agent-host/2.2']);
         const unknown = await client.call('task.status', {task_id: task.task_id});
         assert.equal(unknown.status, 'unknown'); assert.notEqual(unknown.cancellation, null);
         assert.equal((await client.call('task.submit', submission)).task_id, task.task_id);
@@ -956,7 +956,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
         assert(methods.some(method => method.name === 'task.reconcile'));
         assert(methods.some(method => method.name === 'task.adopt'));
         const schemas = description.protocol_schema ?? JSON.parse((await artifact(null, description.protocol_schema_ref)).toString('utf8'));
-        assert.equal(schemas.$defs['initialize.result'].properties.protocol_version.const, 'agent-host/2.1');
+        assert.equal(schemas.$defs['initialize.result'].properties.protocol_version.const, 'agent-host/2.2');
         assert.equal(schemas.$defs['task.reconcile.params'].additionalProperties, false);
         assert.deepEqual(schemas.$defs['task.reconcile.params'].properties.recovery.required, ['mechanism']);
         const recovery = {client_operation_id: 'recover-provider-once', task_id: task.task_id, expected_revision: unknown.revision,
@@ -989,7 +989,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           const application = JSON.parse(await readFile(applicationPath, 'utf8'));
           for (const disposition of ['not_sent', 'rearmed', 'cancelled', 'successor']) {
             const archive = readArchive(archiveBytes);
-            const attemptRow = archive.manifest[6].find(([kind, , ref]) => kind === 5 && decodeValue(archive.schemas.get('attempt'), archive.object(ref))[5] === 'agent.model.invoke.v12');
+            const attemptRow = archive.manifest[6].find(([kind, , ref]) => kind === 5 && decodeValue(archive.schemas.get('attempt'), archive.object(ref))[5] === 'agent.model.invoke.v13');
             const attempt = decodeValue(archive.schemas.get('attempt'), archive.object(attemptRow[2]));
             const occurrenceRow = archive.manifest[6].find(([kind, id]) => kind === 0 && Buffer.from(id).equals(Buffer.from(attempt[2])));
             const occurrence = decodeValue(archive.schemas.get('occurrence'), archive.object(occurrenceRow[2]));
@@ -1117,7 +1117,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           if (kind !== 4) continue;
           const row = exported.manifest[6].find(([kind, candidate]) => kind === 5 && Buffer.from(candidate).equals(Buffer.from(id)));
           const attempt = decodeValue(exported.schemas.get('attempt'), exported.object(row[2]));
-          if (attempt[5] !== 'agent.model.invoke.v12') continue;
+          if (attempt[5] !== 'agent.model.invoke.v13') continue;
           const capture = decodeValue(exported.schemas.get('capture'), exported.object(ref));
           for (const privateRef of [capture[4].value, ...capture[6].value[1]]) {
             await assert.rejects(client.call('artifact.read', {task_id: task.task_id, artifact_id: Buffer.from(privateRef[0]).toString('hex'), offset: '0', length: '1'}), error => error.data?.kind === 'ArtifactUnavailable');
@@ -1333,7 +1333,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
           [JSON.stringify({usage: {input_tokens: 3, output_tokens: 2}, output: [{type: 'function_call', name: 'report', arguments: '{"answer":42}'}]}), 3, 2, 0, 1],
         ]) {
           const archive = readArchive(measuredBytes);
-          const attemptRow = archive.manifest[6].find(([kind, , ref]) => kind === 5 && decodeValue(archive.schemas.get('attempt'), archive.object(ref))[5] === 'agent.model.invoke.v12');
+          const attemptRow = archive.manifest[6].find(([kind, , ref]) => kind === 5 && decodeValue(archive.schemas.get('attempt'), archive.object(ref))[5] === 'agent.model.invoke.v13');
           const attempt = decodeValue(archive.schemas.get('attempt'), archive.object(attemptRow[2]));
           const captureRow = archive.manifest[6].find(([kind, id]) => kind === 4 && Buffer.from(id).equals(Buffer.from(attempt[0])));
           const capture = decodeValue(archive.schemas.get('capture'), archive.object(captureRow[2]));

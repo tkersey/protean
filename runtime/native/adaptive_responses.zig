@@ -9,6 +9,7 @@ const json = @import("json.zig");
 const responses = @import("responses.zig");
 const https = @import("https.zig");
 const storage = @import("store.zig");
+const wire = @import("responses_contract.zig");
 
 fn equal(left: []const u8, right: []const u8) bool {
     return std.mem.eql(u8, left, right);
@@ -102,6 +103,16 @@ pub fn Admission(comptime P: type) type {
         }
 
         pub fn select(a: std.mem.Allocator, frozen: Policy, request: P.AdaptiveRequest) !Selected {
+            return selectContract(a, frozen, request, .{});
+        }
+
+        pub fn selectContract(
+            a: std.mem.Allocator,
+            frozen: Policy,
+            request: P.AdaptiveRequest,
+            contract: contracts.ResponsesContract,
+        ) !Selected {
+            try wire.validate(contract);
             var selected: ?Profile = null;
             for (frozen.profiles.items) |entry| if (equal(
                 entry.id.bytes,
@@ -110,6 +121,7 @@ pub fn Admission(comptime P: type) type {
                 selected = entry;
             };
             const entry = selected orelse return error.UnknownInferenceProfile;
+            try wire.admitProfile(contract.route, entry);
             const selected_digest = try profileDigest(a, entry);
             if (!equal(
                 &request.selection.profile_digest,
@@ -134,7 +146,7 @@ pub fn Admission(comptime P: type) type {
                 invocation.parameters.temperature != null or
                 !equal(invocation.protocol.bytes, "agent.model.protocol.openai-responses-v2") or
                 invocation.response_policy.store or
-                invocation.response_policy.stream or
+                invocation.response_policy.stream != (contract.route == .chatgpt_plan_sse) or
                 invocation.response_policy.background or
                 invocation.selection.parallel_calls or
                 invocation.selection.maximum_calls > 1 or
@@ -144,6 +156,7 @@ pub fn Admission(comptime P: type) type {
                 P.normalizationLimits(),
             )) return error.IncompatibleProfile;
             return .{ .profile = entry, .transport = .{
+                .contract = contract,
                 .endpoint = frozen.endpoint,
                 .audience = frozen.audience,
                 .model = entry.model,
@@ -199,7 +212,12 @@ pub fn Admission(comptime P: type) type {
                 request.plan.catalog,
                 frozen.catalog,
             )) return error.IncompatibleProfile;
-            const selected = try select(ctx.allocator, frozen, request);
+            const selected = try selectContract(
+                ctx.allocator,
+                frozen,
+                request,
+                try wire.read(ctx.allocator, ctx.profile),
+            );
             var materialized = frozen.core_tools;
             var permitted = frozen.core_tools;
             for (request.plan.skills.items, 0..) |loaded, index| {
@@ -414,33 +432,17 @@ pub fn Adapter(comptime P: type) type {
             const a = ctx.allocator;
             try appendController(ctx, &projected);
             try appendTrial(ctx, &projected);
-            var body = json.object();
-            try json.put(a, &body, "model", json.string(selected.transport.model.bytes));
-            try json.put(a, &body, "input", projected.input);
-            try json.put(a, &body, "tools", projected.core_tools);
-            if (selected.transport.max_output_tokens) |maximum| try json.put(
-                a,
-                &body,
-                "max_output_tokens",
-                try json.number(a, maximum),
-            );
-            var reasoning = json.object();
-            try json.put(a, &reasoning, "effort", json.string(selected.transport.effort.bytes));
-            try json.put(a, &reasoning, "mode", json.string(
-                @tagName(selected.profile.reasoning_mode),
-            ));
-            try json.put(a, &reasoning, "context", json.string(
-                @tagName(selected.profile.reasoning_context),
-            ));
-            try json.put(a, &body, "reasoning", reasoning);
+            var body = try wire.envelope(a, .{
+                .route = selected.transport.contract.route,
+                .model = selected.transport.model.bytes,
+                .effort = selected.transport.effort.bytes,
+                .reasoning_mode = @tagName(selected.profile.reasoning_mode),
+                .reasoning_context = @tagName(selected.profile.reasoning_context),
+                .max_output_tokens = selected.transport.max_output_tokens,
+                .input = projected.input,
+                .tools = projected.core_tools,
+            });
             try appendToolChoice(a, &body, request);
-            inline for (.{
-                "parallel_tool_calls",
-                "store",
-                "stream",
-                "background",
-            }) |key| try json.put(a, &body, key, .{ .bool = false });
-            try json.put(a, &body, "truncation", json.string("disabled"));
             if (selected.profile.explicit_cache) {
                 var cache = json.object();
                 try json.put(a, &cache, "mode", json.string("explicit"));
@@ -457,7 +459,7 @@ pub fn Adapter(comptime P: type) type {
                     Prepared,
                     a,
                     .{
-                        .version = 1,
+                        .version = 2,
                         .request = request,
                         .body = .{ .bytes = rendered },
                         .selected_view = if (projected.selected_view) |view| .{
@@ -588,7 +590,7 @@ pub fn Adapter(comptime P: type) type {
                 bytes,
             ) catch |err| return .{ .definitely_not_sent = err };
             defer prepared.deinit();
-            if (prepared.value.version != 1 or !equal(
+            if (prepared.value.version != 2 or !equal(
                 &prepared.value.request.policy,
                 &storage.digest(ctx.profile),
             )) return .{ .definitely_not_sent = error.IncompatibleProfile };
@@ -598,10 +600,13 @@ pub fn Adapter(comptime P: type) type {
             ) catch |err| return .{
                 .definitely_not_sent = err,
             };
-            const selected = A.select(
+            const contract = wire.read(ctx.allocator, ctx.profile) catch |err|
+                return .{ .definitely_not_sent = err };
+            const selected = A.selectContract(
                 ctx.allocator,
                 policy,
                 prepared.value.request,
+                contract,
             ) catch |err| return .{ .definitely_not_sent = err };
             // Selection is re-admitted under the frozen catalog at acquisition,
             // rather than reading the newest mutable launch configuration.
@@ -624,16 +629,26 @@ pub fn Adapter(comptime P: type) type {
             const reasoning = json.get(body, "reasoning") orelse
                 return error.InvalidPreparedRequest;
             const maximum = json.get(body, "max_output_tokens");
+            const plan = selected.transport.contract.route == .chatgpt_plan_sse;
             if (!jsonTextEquals(body, "model", selected.transport.model.bytes) or
-                !jsonTextEquals(reasoning, "effort", selected.transport.effort.bytes) or
-                !jsonTextEquals(reasoning, "mode", @tagName(selected.profile.reasoning_mode)) or
-                !jsonTextEquals(
-                    reasoning,
-                    "context",
-                    @tagName(selected.profile.reasoning_context),
-                ) or
-                !jsonTextEquals(body, "truncation", "disabled"))
+                !jsonTextEquals(reasoning, "effort", selected.transport.effort.bytes))
                 return error.InvalidPreparedRequest;
+            if (plan) {
+                inline for (.{ "mode", "context" }) |key|
+                    if (json.get(reasoning, key) != null) return error.InvalidPreparedRequest;
+                inline for (.{ "tools", "truncation", "background", "previous_response_id" }) |key|
+                    if (json.get(body, key) != null) return error.InvalidPreparedRequest;
+            } else if (!jsonTextEquals(
+                reasoning,
+                "mode",
+                @tagName(selected.profile.reasoning_mode),
+            ) or !jsonTextEquals(
+                reasoning,
+                "context",
+                @tagName(selected.profile.reasoning_context),
+            ) or !jsonTextEquals(body, "truncation", "disabled")) {
+                return error.InvalidPreparedRequest;
+            }
             if (selected.transport.max_output_tokens) |expected| {
                 const actual = maximum orelse return error.InvalidPreparedRequest;
                 if (actual != .number_string) return error.InvalidPreparedRequest;
@@ -651,10 +666,17 @@ pub fn Adapter(comptime P: type) type {
             ) catch return error.InvalidPreparedRequest;
             if (effective != request.selection.effective_effort)
                 return error.InvalidPreparedRequest;
-            inline for (.{ "parallel_tool_calls", "store", "stream", "background" }) |key| {
+            inline for (.{ "parallel_tool_calls", "store" }) |key| {
                 const flag = json.get(body, key) orelse
                     return error.InvalidPreparedRequest;
                 if (flag != .bool or flag.bool) return error.InvalidPreparedRequest;
+            }
+            const stream = json.get(body, "stream") orelse return error.InvalidPreparedRequest;
+            if (stream != .bool or stream.bool != plan) return error.InvalidPreparedRequest;
+            if (!plan) {
+                const background = json.get(body, "background") orelse
+                    return error.InvalidPreparedRequest;
+                if (background != .bool or background.bool) return error.InvalidPreparedRequest;
             }
         }
 
@@ -802,32 +824,35 @@ pub fn Adapter(comptime P: type) type {
             input: Interpretation,
             raw: responses.Raw,
         ) !registry.Projection {
-            if (raw.status < 200 or raw.status >= 300) return encode(ctx, .{
-                .result = .{ .provider_failure = .{
-                    .kind = .http_status,
-                    .http_status = raw.status,
-                } },
+            if (raw.status >= 200 and raw.status < 300 and
+                !std.unicode.utf8ValidateSlice(raw.body.bytes))
+                return unsupported(ctx, .invalid_utf8, null);
+            const decoded = responses.decode(
+                ctx.allocator,
+                input.selected.transport.contract,
+                raw,
+            ) catch |err| return unsupported(ctx, switch (err) {
+                error.OutOfMemory => return err,
+                error.Capacity => .normalization_limit,
+                error.UnsupportedResponseEncoding,
+                error.InvalidResponseFormat,
+                error.InvalidResponseMediaType,
+                error.UnsupportedResponse,
+                => .unsupported_output_item,
+                else => .malformed_json,
+            }, null);
+            if (decoded.failure) |failure| return encode(ctx, .{
+                .result = .{ .provider_failure = failure },
                 .replay = null,
                 .replay_status = .unsupported,
-                .usage = null,
+                .usage = if (failure.kind == .http_status) null else usage(decoded.body).value,
             }, &.{});
-            if (!raw.identity_encoding) return unsupported(
+            if (decoded.unsupported) |reason| return unsupported(
                 ctx,
-                .unsupported_output_item,
-                null,
+                if (reason == .status) .unsupported_status else .unsupported_output_item,
+                usage(decoded.body).value,
             );
-            if (!std.unicode.utf8ValidateSlice(raw.body.bytes))
-                return unsupported(ctx, .invalid_utf8, null);
-            const parsed = json.parse(ctx.allocator, raw.body.bytes, .{
-                .bytes = input.selected.transport.response_bytes orelse raw.body.bytes.len,
-                .tokens = raw.body.bytes.len,
-                .members = raw.body.bytes.len,
-            }) catch |err| return unsupported(
-                ctx,
-                if (err == error.Capacity) .normalization_limit else .malformed_json,
-                null,
-            );
-            return interpretBody(ctx, input, parsed.value);
+            return interpretBody(ctx, input, decoded.body);
         }
 
         fn interpretBody(
@@ -836,31 +861,7 @@ pub fn Adapter(comptime P: type) type {
             body: json.Value,
         ) !registry.Projection {
             const observed = usage(body);
-            if (jsonTextEquals(body, "status", "failed") or
-                jsonTextEquals(body, "status", "incomplete"))
-                return encode(ctx, .{
-                    .result = .{ .provider_failure = .{
-                        .kind = if (jsonTextEquals(
-                            body,
-                            "status",
-                            "failed",
-                        )) .response_failed else .response_incomplete,
-                        .http_status = 0,
-                    } },
-                    .replay = null,
-                    .replay_status = .unsupported,
-                    .usage = observed.value,
-                }, &.{});
-            if (!jsonTextEquals(body, "status", "completed") or
-                (json.get(body, "error") orelse
-                    return unsupported(
-                        ctx,
-                        .unsupported_status,
-                        observed.value,
-                    )) != .null) return unsupported(ctx, .unsupported_status, observed.value);
-            const output = json.get(body, "output") orelse
-                return unsupported(ctx, .unsupported_status, observed.value);
-            if (output != .array) return unsupported(ctx, .unsupported_output_item, observed.value);
+            const output = json.get(body, "output").?;
             if (contracts.exceeds(
                 output.array.items.len,
                 P.representation.maximum_output_items,
