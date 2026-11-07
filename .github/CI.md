@@ -34,7 +34,7 @@ TigerStyle and still cannot pass the terminal gate.
 | `owners` | All 46 retained native task/response/model-custody owner tests, including their participant imports. |
 | `owner-adaptive-control` | Nineteen adaptive owner tests across four independent processes: controls/recovery, projection resource failures, constructed succession, and delegated-answer ancestry. |
 | `owner-projection-repair` | The executable projection repair/restart witness. |
-| `owner-projection-boundaries` | Eight tests across two independent processes: projection authenticity, receipt/archive checks, current/profile/delegated bindings, and ChatGPT SSE controls and delegation. |
+| `owner-projection-boundaries` | Eight tests across three independent processes: projection authenticity, receipt/archive checks, current/profile/delegated bindings, and ChatGPT SSE controls and delegation. |
 | `owner-support` | Native unit/context and process-crash recovery checks. |
 | `workspace` | The 16 workspace execution and construction tests. |
 | `workspace-retention` | The three retained-work, wait and delegated-answer tests. |
@@ -45,12 +45,13 @@ TigerStyle and still cannot pass the terminal gate.
 | `downstream` | Independently acquire, authenticate, package, build, install and execute the public `addNativeSystem` consumer; reject altered Horos and Kosmos inputs. |
 
 The three adaptive lanes execute the same twenty-eight-test artifact. Each validates
-the complete seven-group partition before selecting its assigned groups; their
+the complete eight-group CI partition before selecting its assigned groups; their
 disjoint selections cover all twenty-eight tests exactly once. Local qualification
-executes all seven groups together. The long repair runs alone; the boundary lane
-pairs authenticity and receipt checks
-with current/profile/delegated bindings. This distributes the existing groups
-without changing their test order, assertions, fixtures, or process isolation.
+retains its seven-group partition and executes every test. The long repair runs
+alone. The boundary lane runs authenticity/receipt checks, current/profile/port
+bindings, and ChatGPT delegation/control checks in three independent processes.
+Splitting the serial boundary chain preserves every test's operations, assertions,
+fixtures, cleanup, and process isolation.
 
 The repair's original construction, comparison, selection and restart run through
 the adaptive controller. Generated scan variations and repeated boundary-test
