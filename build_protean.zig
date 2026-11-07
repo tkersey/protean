@@ -611,7 +611,7 @@ const BuildGraph = struct {
             const root = s.g.module("test/protean/recursive_client_values.zig");
             root.addImport("values", s.g.module("runtime/native/values.zig"));
             const rejected = s.b.addTest(.{ .root_module = root, .filters = &.{filter} });
-            rejected.expect_errors = .{ .contains = "dependency loop detected" };
+            rejected.expect_errors = .{ .contains = "dependency loop with length 2" };
             rejected.step.dependOn(s.g.gate);
             s.check.dependOn(&rejected.step);
         }
