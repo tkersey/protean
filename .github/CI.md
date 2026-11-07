@@ -32,9 +32,9 @@ TigerStyle and still cannot pass the terminal gate.
 | --- | --- |
 | `authoring` | Source inventory, `check-protean` and `check-native-https`: authoring, model/value contracts, construction, compile-time rejection, helper integrity, adaptive asset emission, formatting, wire checks and the independent HTTPS endpoint. |
 | `owners` | All 46 retained native task/response/model-custody owner tests, including their participant imports. |
-| `owner-adaptive-control` | Twenty-five adaptive owner tests across five independent processes: controls/recovery, ChatGPT SSE replay and delegation, projection resource failures, current/profile/delegated bindings, constructed succession, and delegated-answer ancestry. |
+| `owner-adaptive-control` | Nineteen adaptive owner tests across four independent processes: controls/recovery, projection resource failures, constructed succession, and delegated-answer ancestry. |
 | `owner-projection-repair` | The executable projection repair/restart witness. |
-| `owner-projection-boundaries` | The two projection authenticity and receipt/archive tests. |
+| `owner-projection-boundaries` | Eight tests across two independent processes: projection authenticity, receipt/archive checks, current/profile/delegated bindings, and ChatGPT SSE controls and delegation. |
 | `owner-support` | Native unit/context and process-crash recovery checks. |
 | `workspace` | The 16 workspace execution and construction tests. |
 | `workspace-retention` | The three retained-work, wait and delegated-answer tests. |
@@ -47,8 +47,10 @@ TigerStyle and still cannot pass the terminal gate.
 The three adaptive lanes execute the same twenty-eight-test artifact. Each validates
 the complete seven-group partition before selecting its assigned groups; their
 disjoint selections cover all twenty-eight tests exactly once. Local qualification
-executes all seven groups together. Separating the long repair and authenticity
-checks gives them independent runners without removing assertions or cases.
+executes all seven groups together. The long repair runs alone; the boundary lane
+pairs authenticity and receipt checks
+with current/profile/delegated bindings. This distributes the existing groups
+without changing their test order, assertions, fixtures, or process isolation.
 
 The repair's original construction, comparison, selection and restart run through
 the adaptive controller. Generated scan variations and repeated boundary-test
