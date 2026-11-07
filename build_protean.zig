@@ -1074,7 +1074,10 @@ const BuildGraph = struct {
             .use_llvm = if (linuxX86(s.native_target)) true else null,
         });
         const install = s.b.addInstallArtifact(executable, .{});
-        const driver = s.b.step("recurrence-driver", "Build the private recurrence evaluation driver");
+        const driver = s.b.step(
+            "recurrence-driver",
+            "Build the private recurrence evaluation driver",
+        );
         driver.dependOn(&install.step);
         driver.dependOn(s.adaptive_image_step);
         const check = nativeCheckCommand(s.b);
@@ -1086,7 +1089,9 @@ const BuildGraph = struct {
         s.native_owner_support.dependOn(&check.step);
         const recurrence = nativeCheckCommand(s.b);
         recurrence.addArgs(&.{
-            "node",                                      "--test", "test/protean/recurrence.test.mjs",
+            "node",
+            "--test",
+            "test/protean/recurrence.test.mjs",
             "test/protean/recurrence_delivery.test.mjs",
         });
         s.native_owner_support.dependOn(&recurrence.step);
