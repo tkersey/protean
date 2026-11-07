@@ -114,7 +114,7 @@ pub inline fn toJson(
     };
 }
 
-inline fn optionalFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
+fn optionalFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
     const info = @typeInfo(T).optional;
     if (value == .null) return null;
     if (comptime schemas.taggedOptional(T)) {
@@ -135,7 +135,7 @@ inline fn optionalFromJson(comptime T: type, a: std.mem.Allocator, value: json.V
     return @as(T, try fromJson(info.child, a, value));
 }
 
-inline fn arrayFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
+fn arrayFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
     const info = @typeInfo(T).array;
     if (value != .array or value.array.items.len != info.len) return error.InvalidParams;
     var result: T = undefined;
@@ -147,7 +147,7 @@ inline fn arrayFromJson(comptime T: type, a: std.mem.Allocator, value: json.Valu
     return result;
 }
 
-inline fn structFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
+fn structFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
     const info = @typeInfo(T).@"struct";
     if (value != .object or
         value.object.count() != info.field_names.len)
@@ -163,7 +163,7 @@ inline fn structFromJson(comptime T: type, a: std.mem.Allocator, value: json.Val
     return result;
 }
 
-inline fn unionFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
+fn unionFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
     const info = @typeInfo(T).@"union";
     if (value != .object or value.object.count() != 2) return error.InvalidParams;
     const tag = try json.text(value.object.get("tag") orelse return error.InvalidParams);
@@ -175,7 +175,7 @@ inline fn unionFromJson(comptime T: type, a: std.mem.Allocator, value: json.Valu
     return error.InvalidParams;
 }
 
-inline fn optionalToJson(
+fn optionalToJson(
     comptime T: type,
     a: std.mem.Allocator,
     value: T,
@@ -192,7 +192,7 @@ inline fn optionalToJson(
     return projected;
 }
 
-inline fn arrayToJson(
+fn arrayToJson(
     comptime T: type,
     a: std.mem.Allocator,
     value: T,
@@ -203,7 +203,7 @@ inline fn arrayToJson(
     return .{ .array = array };
 }
 
-inline fn structToJson(
+fn structToJson(
     comptime T: type,
     a: std.mem.Allocator,
     value: T,
@@ -219,7 +219,7 @@ inline fn structToJson(
     return result;
 }
 
-inline fn unionToJson(
+fn unionToJson(
     comptime T: type,
     a: std.mem.Allocator,
     value: T,

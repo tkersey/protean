@@ -63,6 +63,7 @@ function run(executable, args, cwd = scratch, {failure = false, diagnostic, time
     if (result.stdout) process.stdout.write(result.stdout);
     if (result.stderr) process.stderr.write(result.stderr);
   }
+  if (executable === zig && args[0] === 'build' && result.status === 0) process.stderr.write(result.stderr);
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.signal, null, result.stderr);
   if (failure) {
