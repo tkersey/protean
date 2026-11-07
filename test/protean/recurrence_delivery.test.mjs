@@ -15,11 +15,12 @@ const plan = {questions: {'Please send the next request.': {kind: 'wait'},
   'What is a component identity?': {kind: 'fact', text: 'Use exact string identities.'}},
   queued_reminder: 'Consume queued inputs.'};
 const question = {question_id: 'q1', question_revision: '3', request_digest: 'digest',
-  answer_schema_id: 'adaptive-agent.answer.v2', prompt: {question: 'Please send the next request.'}};
+  answer_schema_id: 'adaptive-agent.answer.v2', prompt: {prompt: 'Please send the next request.'}};
 
 test('waiting preserves schedule and uses exactly one channel per packet', () => {
   const delivery = new RecurrenceDelivery({id: 'attempt'}, {packets}, plan);
   assert.equal(delivery.next('task', {question}, 99), null);
+  assert.equal(delivery.unresolved, null);
   const response = delivery.next('task', {question}, 100);
   assert.equal(response.method, 'task.respond');
   assert.equal(response.params.answer.value.message, 'next facts');
@@ -58,11 +59,14 @@ test('reopen replays exact unacknowledged response including its original questi
 
 test('only predeclared facts answer substantive questions', () => {
   const delivery = new RecurrenceDelivery({id: 'attempt'}, {packets}, plan);
-  const fact = {...question, prompt: {question: 'What is a component identity?'}};
+  const fact = {...question, prompt: {prompt: 'What is a component identity?'}};
   assert.equal(delivery.next('task', {question: fact}, 1).params.answer.value.message, 'Use exact string identities.');
   const other = new RecurrenceDelivery({id: 'attempt'}, {packets}, plan);
-  assert.equal(other.next('task', {question: {...question, prompt: {question: 'Which requests are blocked?'}}}, 1), null);
+  assert.equal(other.next('task', {question: {...question, prompt: {prompt: 'Which requests are blocked?'}}}, 1), null);
   assert.match(other.unresolved.reason, /No predeclared/);
+  const inherited = new RecurrenceDelivery({id: 'attempt'}, {packets}, plan);
+  assert.equal(inherited.next('task', {question: {...question, prompt: {prompt: '__proto__'}}}, 100), null);
+  assert.match(inherited.unresolved.reason, /No predeclared/);
 });
 
 test('preparation freezes six pairs and isolates all later bytes from snapshots and catalogs', async () => {

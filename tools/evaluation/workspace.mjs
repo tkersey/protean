@@ -454,8 +454,9 @@ export class RecurrenceDelivery {
     const due = this.corpus.packets.find(packet => !delivered.has(packet.id) && packet.offset_ms <= elapsed);
     const question = status.question;
     if (question) {
-      const text = question.value?.question ?? question.question?.question ?? question.prompt?.question ?? question.prompt;
-      const known = this.plan.questions[text];
+      const text = question.prompt?.prompt;
+      const known = typeof text === 'string' && Object.hasOwn(this.plan.questions, text)
+        ? this.plan.questions[text] : undefined;
       const queued = this.operations.some(operation => operation.method === 'task.message' &&
         operation.acknowledged && !consumedPacketIds.includes(operation.packet_id));
       if (!queued && !known) { this.unresolved = {question, reason: 'No predeclared factual response.'}; return null; }
