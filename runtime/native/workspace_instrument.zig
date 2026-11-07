@@ -411,11 +411,28 @@ fn interpret(
     const decoded = try responses.decode(a, contract, raw.value);
     if (!plan and (decoded.failure != null or decoded.unsupported == .status))
         return error.InvalidCapture;
-    if (decoded.failure != null) return .{ .reply = try c.encodeOwned(Output, a, .{
+    const result = try interpretedAnswer(a, prepared.value.schema.bytes, plan, decoded);
+    var output_tokens: ?u64 = null;
+    if (json.get(decoded.body, "usage")) |usage| if (json.get(usage, "output_tokens")) |tokens| {
+        if (tokens == .number_string) output_tokens = json.numberInteger(
+            u64,
+            tokens.number_string,
+        ) catch null;
+    };
+    return .{ .reply = try c.encodeOwned(Output, a, result), .output_tokens = output_tokens };
+}
+
+fn interpretedAnswer(
+    a: std.mem.Allocator,
+    schema: []const u8,
+    plan: bool,
+    decoded: responses.DecodedResponse,
+) !Output {
+    if (decoded.failure != null) return .{
         .unavailable = .{ .bytes = "The provider rejected the delegated inference. " ++
             "Repair the selected source and submit a fresh checked delegation." },
-    }) };
-    if (plan and decoded.unsupported != null) return unavailableAnswer(a);
+    };
+    if (plan and decoded.unsupported != null) return unavailableAnswer();
     const output = json.get(decoded.body, "output").?;
     if (output != .array) return error.InvalidCapture;
     var invocation = try P.templateValue(Model, .{ .items = &.{} }, .{
@@ -430,27 +447,17 @@ fn interpret(
         output,
     ) catch |err| {
         if (err == error.OutOfMemory or !plan) return err;
-        return unavailableAnswer(a);
+        return unavailableAnswer();
     };
-    const result = try typedAnswer(a, prepared.value.schema.bytes, normalized);
-    var output_tokens: ?u64 = null;
-    if (json.get(decoded.body, "usage")) |usage| if (json.get(usage, "output_tokens")) |tokens| {
-        if (tokens == .number_string) output_tokens = json.numberInteger(
-            u64,
-            tokens.number_string,
-        ) catch null;
-    };
-    return .{ .reply = try c.encodeOwned(Output, a, result), .output_tokens = output_tokens };
+    return typedAnswer(a, schema, normalized);
 }
 
-fn unavailableAnswer(a: std.mem.Allocator) !registry.Projection {
-    return .{ .reply = try c.encodeOwned(Output, a, .{
-        .unavailable = .{ .bytes = "No valid typed answer was returned." },
-    }) };
+fn unavailableAnswer() Output {
+    return .{ .unavailable = .{ .bytes = "No valid typed answer was returned." } };
 }
 
 fn typedAnswer(a: std.mem.Allocator, schema: []const u8, normalized: anytype) !Output {
-    var result: Output = .{ .unavailable = .{ .bytes = "No valid typed answer was returned." } };
+    var result = unavailableAnswer();
     if (normalized == .output) for (normalized.output.items.items) |item| {
         if (item != .function_call or item.function_call.decoded_action != .decoded) continue;
         const text = item.function_call.decoded_action.decoded.answer.json_value.bytes;

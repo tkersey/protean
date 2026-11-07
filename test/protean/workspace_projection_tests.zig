@@ -1675,7 +1675,7 @@ fn assertPlanAnswerOffer(f: *Fixture, work: native.tasks.Work) !void {
     try std.testing.expectEqualStrings("answer", tools[0].object.get("name").?.string);
 }
 
-fn planAnswerCapture(f: *Fixture, mode: PlanAnswer) ![]u8 {
+fn planAnswerCapture(f: *Fixture, mode: PlanAnswer, output_tokens: ?u64) ![]u8 {
     const item = try std.json.Stringify.valueAlloc(f.permanent, .{
         .type = "function_call",
         .status = "completed",
@@ -1687,18 +1687,33 @@ fn planAnswerCapture(f: *Fixture, mode: PlanAnswer) ![]u8 {
         else
             "{\"json_value\":\"true\"}",
     }, .{});
+    const usage = if (output_tokens) |tokens| try std.fmt.allocPrint(
+        f.permanent,
+        ",\"usage\":{{\"output_tokens\":{d}}}",
+        .{tokens},
+    ) else "";
     const terminal = if (mode == .failure or mode == .incomplete_failure)
-        "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"delegated-r\"," ++
-            "\"status\":\"failed\",\"error\":{\"code\":\"subscription_sharing_invalid_user\"}}}\n\n"
+        try std.fmt.allocPrint(
+            f.permanent,
+            "data: {{\"type\":\"response.failed\",\"response\":{{\"id\":\"delegated-r\"," ++
+                "\"status\":\"failed\",\"error\":{{" ++
+                "\"code\":\"subscription_sharing_invalid_user\"}}" ++
+                "{s}}}}}\n\n",
+            .{usage},
+        )
     else if (mode == .incomplete)
-        "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"delegated-r\"," ++
-            "\"status\":\"incomplete\",\"error\":null}}\n\n"
+        try std.fmt.allocPrint(
+            f.permanent,
+            "data: {{\"type\":\"response.incomplete\",\"response\":{{\"id\":\"delegated-r\"," ++
+                "\"status\":\"incomplete\",\"error\":null{s}}}}}\n\n",
+            .{usage},
+        )
     else
         try std.fmt.allocPrint(
             f.permanent,
             "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"delegated-r\"," ++
-                "\"status\":\"completed\",\"error\":null,\"output\":[{s}]}}}}\n\n",
-            .{item},
+                "\"status\":\"completed\",\"error\":null,\"output\":[{s}]{s}}}}}\n\n",
+            .{ item, usage },
         );
     const events = try std.fmt.allocPrint(
         f.permanent,
@@ -1723,10 +1738,22 @@ fn planAnswerCapture(f: *Fixture, mode: PlanAnswer) ![]u8 {
 
 fn settlePlanAnswer(f: *Fixture, work: native.tasks.Work, mode: PlanAnswer) !native.workspace.Work {
     try assertPlanAnswerOffer(f, work);
-    try f.service.acquire(f.permanent, work, try planAnswerCapture(f, mode));
+    const prepared = try f.permanent.dupe(u8, work.prepared.?);
+    var before = try f.service.task(f.permanent, f.task);
+    defer before.deinit();
+    try f.service.acquire(f.permanent, work, try planAnswerCapture(f, mode, 7));
     for (0..512) |_| {
         const child = try f.service.workspaceWork(f.permanent, f.task, work.subject_work.?);
-        if (child.value.outcome_kind == .completed) return child.value;
+        if (child.value.outcome_kind == .completed) {
+            var after = try f.service.task(f.permanent, f.task);
+            defer after.deinit();
+            try std.testing.expectEqual(
+                before.value.inference_output_tokens + 7,
+                after.value.inference_output_tokens,
+            );
+            try assertPlanAnswerAccounting(f, prepared, mode);
+            return child.value;
+        }
         const step = try f.service.pump(f.permanent);
         if (step == .work) {
             if (step.work.entry.declaration.inference) {
@@ -1737,6 +1764,37 @@ fn settlePlanAnswer(f: *Fixture, work: native.tasks.Work, mode: PlanAnswer) !nat
         }
     }
     return error.DelegatedSseCompletionMissing;
+}
+
+fn assertPlanAnswerAccounting(f: *Fixture, prepared: []const u8, mode: PlanAnswer) !void {
+    const reader = struct {
+        fn read(
+            _: *anyopaque,
+            _: std.mem.Allocator,
+            _: native.registry.ObjectReference,
+            _: usize,
+        ) ![]u8 {
+            return error.UnexpectedProjectionRead;
+        }
+    };
+    const adapter = native.workspace_instrument.declaration(.model).capture.?;
+    for ([_]?u64{ null, 0, 7 }) |tokens| {
+        const projection = try adapter.interpret(.{
+            .allocator = f.permanent,
+            .task = f.task,
+            .tenant = "fixture",
+            .profile = "fixture",
+            .objects = .validating(f, reader.read),
+        }, &.{}, prepared, try planAnswerCapture(f, mode, tokens));
+        try std.testing.expectEqual(tokens, projection.output_tokens);
+        var output = try contracts.decodeOwned(
+            native.workspace_instrument.Output,
+            f.permanent,
+            projection.reply,
+        );
+        defer output.deinit();
+        try std.testing.expectEqual(mode == .answer, output.value == .answer);
+    }
 }
 
 test "delegated projection binds ChatGPT SSE answer only to its intended port" {
