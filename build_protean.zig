@@ -607,6 +607,14 @@ const BuildGraph = struct {
             rejected.step.dependOn(s.g.gate);
             s.check.dependOn(&rejected.step);
         }
+        for ([_][]const u8{ "decode recursive", "encode recursive" }) |filter| {
+            const root = s.g.module("test/protean/recursive_client_values.zig");
+            root.addImport("values", s.g.module("runtime/native/values.zig"));
+            const rejected = s.b.addTest(.{ .root_module = root, .filters = &.{filter} });
+            rejected.expect_errors = .{ .contains = "dependency loop with length 2" };
+            rejected.step.dependOn(s.g.gate);
+            s.check.dependOn(&rejected.step);
+        }
         const helper_tests = s.b.addTest(.{ .root_module = s.host_tool.root_module });
         const helper_tests_run = s.b.addRunArtifact(helper_tests);
         helper_tests_run.has_side_effects = true;

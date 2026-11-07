@@ -24,6 +24,7 @@ pub const Error = error{InvalidParams} || std.mem.Allocator.Error;
 
 pub inline fn fromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
     @setEvalBranchQuota(100_000);
+    _ = comptime FiniteProjection(T).checked;
     if (comptime schemas.isText(T)) {
         const text = try json.text(value);
         if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidParams;
@@ -84,6 +85,7 @@ pub inline fn toJson(
     value: T,
 ) std.mem.Allocator.Error!json.Value {
     @setEvalBranchQuota(100_000);
+    _ = comptime FiniteProjection(T).checked;
     if (comptime schemas.isText(T)) return json.string(try a.dupe(u8, value.bytes));
     if (comptime contracts.native.wrapped(T)) {
         if (T.protean_value_kind == .bytes) {
@@ -114,7 +116,31 @@ pub inline fn toJson(
     };
 }
 
-inline fn optionalFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
+fn FiniteProjection(comptime T: type) type {
+    return struct {
+        const checked: void = checkFiniteProjection(T);
+    };
+}
+
+fn checkFiniteProjection(comptime T: type) void {
+    if (contracts.native.wrapped(T)) {
+        if (T.protean_value_kind == .vector)
+            _ = FiniteProjection(T.Child).checked;
+        return;
+    }
+    switch (@typeInfo(T)) {
+        .optional => |info| _ = FiniteProjection(info.child).checked,
+        .array => |info| if (info.len != 0) {
+            _ = FiniteProjection(info.child).checked;
+        },
+        inline .@"struct", .@"union" => |info| {
+            for (info.field_types) |Child| _ = FiniteProjection(Child).checked;
+        },
+        else => {},
+    }
+}
+
+fn optionalFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
     const info = @typeInfo(T).optional;
     if (value == .null) return null;
     if (comptime schemas.taggedOptional(T)) {
@@ -135,7 +161,7 @@ inline fn optionalFromJson(comptime T: type, a: std.mem.Allocator, value: json.V
     return @as(T, try fromJson(info.child, a, value));
 }
 
-inline fn arrayFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
+fn arrayFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
     const info = @typeInfo(T).array;
     if (value != .array or value.array.items.len != info.len) return error.InvalidParams;
     var result: T = undefined;
@@ -147,7 +173,7 @@ inline fn arrayFromJson(comptime T: type, a: std.mem.Allocator, value: json.Valu
     return result;
 }
 
-inline fn structFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
+fn structFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
     const info = @typeInfo(T).@"struct";
     if (value != .object or
         value.object.count() != info.field_names.len)
@@ -163,7 +189,7 @@ inline fn structFromJson(comptime T: type, a: std.mem.Allocator, value: json.Val
     return result;
 }
 
-inline fn unionFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
+fn unionFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
     const info = @typeInfo(T).@"union";
     if (value != .object or value.object.count() != 2) return error.InvalidParams;
     const tag = try json.text(value.object.get("tag") orelse return error.InvalidParams);
@@ -175,7 +201,7 @@ inline fn unionFromJson(comptime T: type, a: std.mem.Allocator, value: json.Valu
     return error.InvalidParams;
 }
 
-inline fn optionalToJson(
+fn optionalToJson(
     comptime T: type,
     a: std.mem.Allocator,
     value: T,
@@ -192,7 +218,7 @@ inline fn optionalToJson(
     return projected;
 }
 
-inline fn arrayToJson(
+fn arrayToJson(
     comptime T: type,
     a: std.mem.Allocator,
     value: T,
@@ -203,7 +229,7 @@ inline fn arrayToJson(
     return .{ .array = array };
 }
 
-inline fn structToJson(
+fn structToJson(
     comptime T: type,
     a: std.mem.Allocator,
     value: T,
@@ -219,7 +245,7 @@ inline fn structToJson(
     return result;
 }
 
-inline fn unionToJson(
+fn unionToJson(
     comptime T: type,
     a: std.mem.Allocator,
     value: T,

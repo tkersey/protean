@@ -191,6 +191,7 @@ test/protean/projection_failure_tests.zig
 test/protean/projection_late_recovery.zig
 test/protean/projection_recovery.zig
 test/protean/prompt_unknown_field.zig
+test/protean/recursive_client_values.zig
 test/protean/recursive_participant.zig
 test/protean/runtime_mobility_peer.zig
 test/protean/runtime_mobility_source.zig
