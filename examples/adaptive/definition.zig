@@ -26,6 +26,7 @@ fn F(comptime Input: type, comptime Output: type) type {
     return *const a.Function(a.Signature(a.Shape(Input).contract.product, a.Shape(Output)));
 }
 const Inbox = protean.inbox.Profile(t.Message);
+const ProviderRetry = struct { bindings: t.PolicyView, state: t.State, prompt: t.Summary };
 pub const capabilities = .{
     .{
         .identity = t.bindings_identity,
@@ -204,6 +205,7 @@ const Application = struct {
         const program = try declareProgram(controller, e, ops);
         try program.defineEvidence();
         try program.defineLoop();
+        try program.defineProviderRecovery();
         const entry = try defineEntry(controller, program);
         if (controller) importController(context);
         return c.module(entry, try e.context.schema(t.Failure));
@@ -279,6 +281,7 @@ const Application = struct {
             .e = e,
             .ops = ops,
             .loop = loop,
+            .provider_recovery = try declareProviderRecovery(e, ops),
             .report = try @import("report.zig").define(context),
             .source_at = try c.function("source evidence at global index", .{
                 .evidence = try e.context.schema(t.EvidenceList),
@@ -310,6 +313,21 @@ const Application = struct {
                 try context.literal(t.Failure, .capacity),
             ),
         };
+    }
+    fn declareProviderRecovery(e: Emit, ops: anytype) !F(ProviderRetry, t.Output) {
+        return e.author.function("explicit provider recovery", .{
+            .bindings = try e.context.schema(t.PolicyView),
+            .state = try e.context.schema(t.State),
+            .prompt = try e.context.schema(t.Summary),
+        }, try e.context.schema(t.Output), .{
+            ops.prepare,
+            ops.work,
+            ops.ask,
+            ops.inspect,
+            ops.workspace,
+            ops.inbox,
+            ops.model,
+        });
     }
     fn defineEntry(comptime controller: bool, program: Program(controller)) !F(
         struct { input: if (controller) t.ControllerInput else t.Input },
@@ -381,6 +399,7 @@ fn Program(comptime controller: bool) type {
         e: Emit,
         ops: Ops(controller),
         loop: F(struct { bindings: t.PolicyView, state: t.State }, t.Output),
+        provider_recovery: F(ProviderRetry, t.Output),
         report: *const @import("report.zig").Function,
         source_at: F(struct { evidence: t.EvidenceList, index: u64 }, ?t.SourceEvidenceReference),
         has_source: F(struct { evidence: t.EvidenceList, index: u64 }, bool),
@@ -742,6 +761,7 @@ fn Program(comptime controller: bool) type {
                 normalized,
                 bindings,
                 turn.counted,
+                turn.retry,
             );
             return if (controller) try p.controlDiagnostic(
                 interaction,
@@ -756,6 +776,7 @@ fn Program(comptime controller: bool) type {
         }
         const Turn = struct {
             counted: V(t.State),
+            retry: V(t.State),
             observation: V(protean.responders.ModelObservation(P, false)),
         };
         fn modelTurn(
@@ -767,12 +788,14 @@ fn Program(comptime controller: bool) type {
         ) !Turn {
             const e = p.e;
             const request = try interaction.field(prepared, "request");
-            const counted = try interaction.update(state, .{
+            const retry = try interaction.update(state, .{
                 .model_calls = try interaction.checkedAdd(
                     try interaction.field(state, "model_calls"),
                     try interaction.constant(u64, 1),
                     try e.failure(),
                 ),
+            });
+            const counted = try interaction.update(retry, .{
                 .messages = try e.context.literal(P.Messages, .{ .items = &.{} }),
                 .results = try e.context.literal(t.PendingResults, .{ .items = &.{} }),
             });
@@ -784,10 +807,7 @@ fn Program(comptime controller: bool) type {
                         t.ControllerCarry,
                     ), .{
                         .bindings = bindings,
-                        .state = try interaction.update(counted, .{
-                            .messages = try interaction.field(state, "messages"),
-                            .results = try interaction.field(state, "results"),
-                        }),
+                        .state = retry,
                     }),
                 })
             else
@@ -795,7 +815,7 @@ fn Program(comptime controller: bool) type {
                     .request = request,
                     .offered = try interaction.field(request, "offered"),
                 });
-            return .{ .counted = counted, .observation = observation };
+            return .{ .counted = counted, .retry = retry, .observation = observation };
         }
         fn interpret(
             p: Self,
@@ -804,6 +824,7 @@ fn Program(comptime controller: bool) type {
             normalized: anytype,
             bindings: anytype,
             counted: V(t.State),
+            retry: V(t.State),
         ) !V(
             t.Output,
         ) {
@@ -850,7 +871,7 @@ fn Program(comptime controller: bool) type {
                 );
             }
             const refusal = refused.body();
-            const unavailable = try p.refusedResult(refusal, normalized, counted);
+            const unavailable = try p.refusedResult(refusal, normalized, counted, retry, bindings);
             return work.match(interpretation, .{
                 .accepted = try accepted.ret(try chosen.match(action, cases)),
                 .rejected = try refused.ret(unavailable),
@@ -861,6 +882,8 @@ fn Program(comptime controller: bool) type {
             refusal: anytype,
             normalized: anytype,
             counted: V(t.State),
+            retry: V(t.State),
+            bindings: anytype,
         ) !V(
             t.Output,
         ) {
@@ -877,6 +900,16 @@ fn Program(comptime controller: bool) type {
             var failure_cases: FailureCases = undefined;
             inline for (@typeInfo(P.Result).@"union".field_names) |name| {
                 const selected = try refusal.caseOf(failed_result, name);
+                if (comptime std.mem.eql(u8, name, "provider_failure")) {
+                    @field(failure_cases, name) = try selected.ret(try p.providerRefusal(
+                        selected.body(),
+                        selected.payload(),
+                        counted,
+                        retry,
+                        bindings,
+                    ));
+                    continue;
+                }
                 const text = if (comptime std.mem.eql(u8, name, "refusal")) try e.widen(
                     selected.body(),
                     t.Summary,
@@ -895,6 +928,92 @@ fn Program(comptime controller: bool) type {
                 );
             }
             return refusal.match(failed_result, failure_cases);
+        }
+        fn defineProviderRecovery(p: Self) !void {
+            const e = p.e;
+            const b = try e.author.body(p.provider_recovery);
+            const bindings = try b.parameter("bindings");
+            const state = try b.parameter("state");
+            const prompt = try b.parameter("prompt");
+            const answer = try b.perform(p.ops.ask, try b.product(
+                try e.context.schema(t.Question),
+                .{ .prompt = prompt },
+            ));
+            const retry = try b.equal(try b.blobCompare(
+                try b.field(answer, "message"),
+                try e.context.literal(t.Summary, .{ .bytes = "retry" }),
+            ), try b.constant(i8, 0));
+            const resumed = try b.branch();
+            const waiting = try b.branch();
+            const output = try b.conditional(
+                retry,
+                try resumed.ret(try resumed.call(p.loop, .{
+                    .bindings = bindings,
+                    .state = state,
+                })),
+                try waiting.ret(try waiting.call(p.provider_recovery, .{
+                    .bindings = bindings,
+                    .state = state,
+                    .prompt = prompt,
+                })),
+            );
+            try e.author.define(p.provider_recovery, try b.ret(output));
+        }
+        fn providerPrompt(p: Self, b: anytype, recovery: anytype) !V(t.Summary) {
+            const Recovery = protean.contracts.ProviderRecovery;
+            const e = p.e;
+            var prompt = try e.context.literal(t.Summary, .{
+                .bytes = "ChatGPT reported a temporary provider failure. After repair, " ++
+                    "respond exactly 'retry' to attempt the retained request again.",
+            });
+            inline for (.{
+                .{ Recovery.authentication, "Repair ChatGPT authentication with siwc, " },
+                .{ Recovery.usage_limit, "Wait for or repair the ChatGPT usage limit, " },
+            }) |entry| {
+                prompt = try b.select(
+                    try b.equal(try b.enumTag(recovery), try b.enumTag(
+                        try e.context.literal(Recovery, entry[0]),
+                    )),
+                    try e.context.literal(t.Summary, .{
+                        .bytes = entry[1] ++ "then respond exactly 'retry' to attempt the " ++
+                            "retained request again.",
+                    }),
+                    prompt,
+                );
+            }
+            return prompt;
+        }
+        fn providerRefusal(
+            p: Self,
+            b: anytype,
+            failure: anytype,
+            counted: V(t.State),
+            retry: V(t.State),
+            bindings: anytype,
+        ) !V(t.Output) {
+            const e = p.e;
+            const recovery = try b.field(failure, "recovery");
+            const terminal = try b.branch();
+            const recoverable = try b.branch();
+            return b.conditional(
+                try b.equal(try b.enumTag(recovery), try b.enumTag(
+                    try e.context.literal(protean.contracts.ProviderRecovery, .none),
+                )),
+                try terminal.ret(try e.finish(
+                    terminal,
+                    counted,
+                    .no_result,
+                    try e.context.literal(t.Summary, .{
+                        .bytes = "The response did not contain one admissible " ++
+                            "action with complete replay.",
+                    }),
+                )),
+                try recoverable.ret(try recoverable.call(p.provider_recovery, .{
+                    .bindings = bindings,
+                    .state = retry,
+                    .prompt = try p.providerPrompt(recoverable, recovery),
+                })),
+            );
         }
         fn controlDiagnostic(
             p: Self,

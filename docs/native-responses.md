@@ -1,13 +1,13 @@
 # Native Responses core
 
 `protean_native.adaptive_responses.Adapter(Profile)` implements the sole
-`agent.model.invoke.v12` contract. `Profile` is
+`agent.model.invoke.v13` contract. `Profile` is
 `protean.model_invocation.Profile`; `declare` and `defineModelObserved` construct
 the checked model boundary. Native code renders requests and returns proposed
 values; the authored responder retains call selection and authorization.
 
 The frozen task profile contains the approved adaptive policy, inference
-profiles, and skill catalog described in the [v12 contract](model-invocation-v12.md).
+profiles, and skill catalog described in the [v13 contract](model-invocation-v13.md).
 The request binds its policy digest, selected profile, materialized definitions,
 offered calls, and context plan. Credential bytes are supplied separately through
 `responses.Environment`, together with the explicitly approved endpoint; they

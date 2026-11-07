@@ -1022,6 +1022,18 @@ fn expectCapabilityDescription(a: std.mem.Allocator, app: Application, count: us
     try std.testing.expect(capability_schema.object.get("items") != null);
 }
 
+fn expectSnapshotRepairSchema(schema: json.Value) !void {
+    const snapshot = schema.object.get("$defs").?.object.get("snapshot").?;
+    try std.testing.expect(!snapshot.object.get("additionalProperties").?.bool);
+    const properties = snapshot.object.get("properties").?;
+    const hint = properties.object.get("repair_hint") orelse return error.MissingRepairHint;
+    try std.testing.expectEqualStrings("string", hint.object.get("type").?.string);
+    try std.testing.expectEqualStrings("1", hint.object.get("minLength").?.number_string);
+    try std.testing.expectEqualStrings("256", hint.object.get("maxLength").?.number_string);
+    for (snapshot.object.get("required").?.array.items) |required|
+        try std.testing.expect(!std.mem.eql(u8, "repair_hint", required.string));
+}
+
 test "discovery preserves admitted capability counts in inline and referenced metadata" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1046,6 +1058,7 @@ test "discovery preserves admitted capability counts in inline and referenced me
         defer handlers.deinit();
         const metadata = try capabilityMetadata(a, handlers);
         const protocol_schema = try @import("schemas.zig").document(a, metadata, .{});
+        try expectSnapshotRepairSchema(protocol_schema);
         const artifacts = [2]?Artifact{
             try Artifact.freeze(a, metadata, "application"),
             try Artifact.freeze(a, protocol_schema, "protocol"),

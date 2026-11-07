@@ -14,9 +14,10 @@ const dynamic = @import("dynamic_values.zig");
 const values = @import("values.zig");
 const storage = @import("store.zig");
 const responses = @import("responses.zig");
+const wire = @import("responses_contract.zig");
 
 pub const identity = "protean-workspace-instrument/1";
-pub const model_identity = "protean.workspace.inference/1";
+pub const model_identity = "protean.workspace.inference/2";
 pub const snapshot_identity = "protean.workspace.snapshot/1";
 pub const Kind = enum { model, snapshot };
 pub const Input = struct { delegation: state.Reference };
@@ -169,6 +170,7 @@ fn prepareModel(ctx: registry.ProjectionContext, payload: []const u8) ![]u8 {
         delegation.snapshot != null)
         return error.InvalidDelegation;
     const binding = delegation.model.?;
+    try wire.validate(binding.settings.contract);
     var remaining: ?u64 = if (binding.settings.request_bytes) |maximum| maximum else null;
     const schema = try portSchema(ctx, delegation);
     var content = json.object();
@@ -282,8 +284,6 @@ fn modelBody(
     binding: workspace.ModelBinding,
     content: json.Value,
 ) ![]u8 {
-    var body = json.object();
-    try json.put(a, &body, "model", json.string(binding.settings.model.bytes));
     var messages: json.Value = .{ .array = .init(a) };
     for ([_]struct { role: []const u8, text: []const u8 }{
         .{
@@ -304,7 +304,6 @@ fn modelBody(
         try json.put(a, &item, "content", json.string(message.text));
         try messages.array.append(item);
     }
-    try json.put(a, &body, "input", messages);
     var tools: json.Value = .{ .array = .init(a) };
     const answer = P.allDeclarations().items[0];
     var tool = json.object();
@@ -319,26 +318,17 @@ fn modelBody(
     );
     try json.put(a, &tool, "strict", .{ .bool = true });
     try tools.array.append(tool);
-    try json.put(a, &body, "tools", tools);
+    var body = try wire.envelope(a, .{
+        .route = binding.settings.contract.route,
+        .model = binding.settings.model.bytes,
+        .effort = binding.settings.effort.bytes,
+        .reasoning_mode = binding.reasoning_mode.bytes,
+        .reasoning_context = binding.reasoning_context.bytes,
+        .max_output_tokens = binding.settings.max_output_tokens,
+        .input = messages,
+        .tools = tools,
+    });
     try json.put(a, &body, "tool_choice", json.string("required"));
-    var reasoning = json.object();
-    try json.put(a, &reasoning, "effort", json.string(binding.settings.effort.bytes));
-    try json.put(a, &reasoning, "mode", json.string(binding.reasoning_mode.bytes));
-    try json.put(a, &reasoning, "context", json.string(binding.reasoning_context.bytes));
-    try json.put(a, &body, "reasoning", reasoning);
-    if (binding.settings.max_output_tokens) |maximum| try json.put(
-        a,
-        &body,
-        "max_output_tokens",
-        try json.number(a, maximum),
-    );
-    inline for (.{
-        "parallel_tool_calls",
-        "store",
-        "stream",
-        "background",
-    }) |field| try json.put(a, &body, field, .{ .bool = false });
-    try json.put(a, &body, "truncation", json.string("disabled"));
     return json.canonicalOptional(a, body, binding.settings.request_bytes);
 }
 
@@ -413,34 +403,17 @@ fn interpret(
     }
     var raw = try c.decodeOwned(responses.Raw, a, response);
     defer raw.deinit();
-    if (raw.value.status < 200 or
-        raw.value.status >= 300 or
-        !raw.value.identity_encoding)
+    const contract = prepared.value.model.?.settings.contract;
+    const plan = contract.route == .chatgpt_plan_sse;
+    if (!plan and (raw.value.status < 200 or raw.value.status >= 300 or
+        !raw.value.identity_encoding))
         return error.InvalidCapture;
-    var parsed = try json.parse(a, raw.value.body.bytes, .{
-        .bytes = raw.value.body.bytes.len,
-        .tokens = raw.value.body.bytes.len,
-        .members = raw.value.body.bytes.len,
-    });
-    defer parsed.deinit();
-    const status = json.get(parsed.value, "status") orelse return error.InvalidCapture;
-    if (status != .string or !std.mem.eql(u8, status.string, "completed") or
-        (json.get(
-            parsed.value,
-            "error",
-        ) orelse return error.InvalidCapture) != .null) return error.InvalidCapture;
-    const output = json.get(parsed.value, "output") orelse return error.InvalidCapture;
-    if (output != .array) return error.InvalidCapture;
-    var invocation = try P.templateValue(Model, .{ .items = &.{} }, .{
-        .minimum_calls = 1,
-        .maximum_calls = 1,
-        .parallel_calls = false,
-    });
-    invocation.tools = P.allDeclarations();
-    const normalized = try responses.OutputNormalizer(P).normalize(a, invocation, output);
-    const result = try typedAnswer(a, prepared.value.schema.bytes, normalized);
+    const decoded = try responses.decode(a, contract, raw.value);
+    if (!plan and (decoded.failure != null or decoded.unsupported == .status))
+        return error.InvalidCapture;
+    const result = try interpretedAnswer(a, prepared.value.schema.bytes, plan, decoded);
     var output_tokens: ?u64 = null;
-    if (json.get(parsed.value, "usage")) |usage| if (json.get(usage, "output_tokens")) |tokens| {
+    if (json.get(decoded.body, "usage")) |usage| if (json.get(usage, "output_tokens")) |tokens| {
         if (tokens == .number_string) output_tokens = json.numberInteger(
             u64,
             tokens.number_string,
@@ -449,8 +422,42 @@ fn interpret(
     return .{ .reply = try c.encodeOwned(Output, a, result), .output_tokens = output_tokens };
 }
 
+fn interpretedAnswer(
+    a: std.mem.Allocator,
+    schema: []const u8,
+    plan: bool,
+    decoded: responses.DecodedResponse,
+) !Output {
+    if (decoded.failure != null) return .{
+        .unavailable = .{ .bytes = "The provider rejected the delegated inference. " ++
+            "Repair the selected source and submit a fresh checked delegation." },
+    };
+    if (plan and decoded.unsupported != null) return unavailableAnswer();
+    const output = json.get(decoded.body, "output").?;
+    if (output != .array) return error.InvalidCapture;
+    var invocation = try P.templateValue(Model, .{ .items = &.{} }, .{
+        .minimum_calls = 1,
+        .maximum_calls = 1,
+        .parallel_calls = false,
+    });
+    invocation.tools = P.allDeclarations();
+    const normalized = responses.OutputNormalizer(P).normalize(
+        a,
+        invocation,
+        output,
+    ) catch |err| {
+        if (err == error.OutOfMemory or !plan) return err;
+        return unavailableAnswer();
+    };
+    return typedAnswer(a, schema, normalized);
+}
+
+fn unavailableAnswer() Output {
+    return .{ .unavailable = .{ .bytes = "No valid typed answer was returned." } };
+}
+
 fn typedAnswer(a: std.mem.Allocator, schema: []const u8, normalized: anytype) !Output {
-    var result: Output = .{ .unavailable = .{ .bytes = "No valid typed answer was returned." } };
+    var result = unavailableAnswer();
     if (normalized == .output) for (normalized.output.items.items) |item| {
         if (item != .function_call or item.function_call.decoded_action != .decoded) continue;
         const text = item.function_call.decoded_action.decoded.answer.json_value.bytes;

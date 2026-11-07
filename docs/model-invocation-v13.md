@@ -1,6 +1,6 @@
-# Adaptive Responses contract (v12)
+# Adaptive Responses contract (v13)
 
-`agent.model.invoke.v12` binds inference selection and context projection to the
+`agent.model.invoke.v13` binds inference selection and context projection to the
 existing model/responder owner. It is the sole invocation contract. Old
 invocation producers, replay readers, and disposable examples are replaced;
 there is no invocation migration or compatibility adapter.
@@ -40,8 +40,8 @@ polish is deferred, not a blocker on the reusable API or reference integration.
 | `eviction_generation` | Authored exclusion fence. Every newly selected lineage must respect it. |
 | `AdaptiveContextReference` | Content reference plus schema, policy, inference selection, task, tenant, audience, epoch, watermark, and eviction bindings. |
 
-The additional identities are `agent.model.context.responses.adaptive.v8` and
-`agent.model.policy.adaptive.v2`. Every model effect uses the same v12
+The additional identities are `agent.model.context.responses.adaptive.v9` and
+`agent.model.policy.adaptive.v2`. Every model effect uses the same v13
 request/result envelope and the v8 context reference.
 
 ## Requests and checked actions

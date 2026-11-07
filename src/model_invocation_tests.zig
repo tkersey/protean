@@ -188,7 +188,7 @@ test "v12 is the sole model effect and retains current context bindings" {
     const operation = try Fixture.declare(context);
     const effect = try horos.authoring.interop.operationId(context.author, operation);
     try std.testing.expectEqualStrings(
-        "agent.model.invoke.v12",
+        "agent.model.invoke.v13",
         builder.effects.items[@intCast(effect)].identity,
     );
     try std.testing.expectEqual(

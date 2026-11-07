@@ -171,11 +171,10 @@ fn admitControlCall(
     );
     var raw = try contracts.decodeOwned(native.responses.Raw, ctx.allocator, capture);
     defer raw.deinit();
-    const response = (try native.json.parse(ctx.allocator, raw.value.body.bytes, .{
-        .bytes = raw.value.body.bytes.len,
-        .tokens = raw.value.body.bytes.len,
-        .members = raw.value.body.bytes.len,
-    })).value;
+    const contract = try native.responses_contract.read(ctx.allocator, ctx.profile);
+    const decoded = try native.responses.decode(ctx.allocator, contract, raw.value);
+    if (decoded.failure != null or decoded.unsupported != null) return error.InvalidCapture;
+    const response = decoded.body;
     const output = native.json.get(response, "output") orelse return error.InvalidCapture;
     const normalized = try native.responses.OutputNormalizer(P).normalize(
         ctx.allocator,
@@ -386,7 +385,8 @@ fn makeRequest(
     selected: A.Profile,
     policy: P.AdaptivePolicy,
     tools: PreparedTools,
-) P.AdaptiveRequest {
+) !P.AdaptiveRequest {
+    const contract = try native.responses_contract.read(ctx.allocator, ctx.profile);
     const control = prepared_control.state;
     const messages = input.state.messages;
     return .{
@@ -422,7 +422,7 @@ fn makeRequest(
             .selection = .{ .minimum_calls = 1, .maximum_calls = 1, .parallel_calls = false },
             .response_policy = .{
                 .store = false,
-                .stream = false,
+                .stream = contract.route == .chatgpt_plan_sse,
                 .background = false,
                 .truncation = .disabled,
             },
@@ -490,7 +490,7 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
     const control = prepared_control.state;
     const selected = try profile(policy, control.selection.profile_id.bytes);
     const tools = try prepareTools(a, policy, catalog.value, control, input.offered);
-    var request = makeRequest(ctx, input, prepared_control, selected, policy, tools);
+    var request = try makeRequest(ctx, input, prepared_control, selected, policy, tools);
     // Horos retains the computation and task facts. Continue its immutable
     // transcript; only the projection owner changes provider-visible material.
     _ = try Adapter.prepare(ctx, try contracts.encodeOwned(P.AdaptiveRequest, a, request));

@@ -1,6 +1,8 @@
 //! A single cancellable HTTPS POST. No redirects, retries, proxy discovery, or
 //! provider interpretation. The caller persists captured bytes before decoding.
 const std = @import("std");
+const sse = @import("responses_sse.zig");
+pub const Format = sse.Format;
 
 pub const Config = struct {
     endpoint: []const u8,
@@ -11,6 +13,7 @@ pub const Config = struct {
     request_limit: ?u32 = null,
     response_limit: ?u32 = null,
     timeout_ms: ?u32 = null,
+    format: Format = .json,
 
     pub fn validate(self: Config) !std.Uri {
         if (self.endpoint.len == 0 or self.token.len == 0 or
@@ -39,11 +42,16 @@ pub const Config = struct {
 pub const Capture = struct {
     status: u16,
     identity_encoding: bool,
+    format: Format = .json,
+    media_type: ?[]const u8 = null,
+    content_encoding: ?[]const u8 = null,
     request_id: ?[]const u8,
     body: []const u8,
 
     pub fn deinit(self: Capture, a: std.mem.Allocator) void {
         if (self.request_id) |id| a.free(id);
+        if (self.media_type) |value| a.free(value);
+        if (self.content_encoding) |value| a.free(value);
         a.free(self.body);
     }
 };
@@ -84,17 +92,24 @@ const Exchange = struct {
             client.now = now;
         }
         const authorization = try std.fmt.allocPrint(self.a, "Bearer {s}", .{self.config.token});
-        defer self.a.free(authorization);
+        defer {
+            std.crypto.secureZero(u8, authorization);
+            self.a.free(authorization);
+        }
         var request = try client.request(.POST, self.uri, .{
             .redirect_behavior = .unhandled,
             .keep_alive = false,
+            .extra_headers = if (self.config.format == .sse)
+                &.{.{ .name = "accept", .value = "text/event-stream" }}
+            else
+                &.{},
             .headers = .{
                 .authorization = .{ .override = authorization },
                 .content_type = .{ .override = "application/json" },
                 .accept_encoding = .{ .override = "identity" },
             },
         });
-        defer request.deinit();
+        defer releaseRequest(&request);
         request.transfer_encoding = .{ .content_length = self.body.len };
         // From this point, even a partial write may have dispatched inference.
         self.sent = true;
@@ -103,19 +118,25 @@ const Exchange = struct {
         try body.end();
         try request.connection.?.flush();
         var response = try request.receiveHead(&.{});
+        return self.collect(&response);
+    }
+
+    fn collect(self: *Exchange, response: *std.http.Client.Response) !Capture {
         const identity_encoding = response.head.content_encoding == .identity;
+        var metadata = try self.readMetadata(response);
+        metadata.identity_encoding = identity_encoding;
+        const streamed = self.config.format == .sse and metadata.status >= 200 and
+            metadata.status < 300 and identity_encoding and
+            (metadata.media_type == null or sse.eventStream(metadata.media_type));
         if (response.head.content_length) |length| {
-            if (self.config.response_limit != null and length > self.config.response_limit.?)
+            if (!streamed and self.config.response_limit != null and
+                length > self.config.response_limit.?)
                 return error.ResponseCapacity;
         }
-        var request_id: ?[]const u8 = null;
-        var headers = response.head.iterateHeaders();
-        while (headers.next()) |header| {
-            if (!std.ascii.eqlIgnoreCase(header.name, "x-request-id")) continue;
-            if (request_id != null) return error.InvalidResponseIdentifier;
-            request_id = try self.a.dupe(u8, header.value);
+        if (streamed) {
+            metadata.body = try self.readStream(response.reader(&.{}));
+            return metadata;
         }
-        const status: u16 = @intCast(@backingInt(response.head.status));
         const expected_length = if (response.head.transfer_encoding == .none)
             response.head.content_length
         else
@@ -131,17 +152,98 @@ const Exchange = struct {
         // The standard fixed-length reader propagates transport EOF unchanged;
         // allocRemaining accepts EOF even when declared body bytes are missing.
         if (expected_length) |length| if (bytes.len != length) return error.TruncatedResponse;
-        return .{
-            .status = status,
-            .identity_encoding = identity_encoding,
-            .request_id = request_id,
-            .body = bytes,
+        metadata.body = bytes;
+        return metadata;
+    }
+
+    fn readMetadata(self: *Exchange, response: *std.http.Client.Response) !Capture {
+        var capture: Capture = .{
+            .status = @intCast(@backingInt(response.head.status)),
+            .identity_encoding = true,
+            .format = self.config.format,
+            .request_id = null,
+            .body = &.{},
         };
+        var headers = response.head.iterateHeaders();
+        while (headers.next()) |header| {
+            inline for (.{
+                .{ "x-request-id", "request_id" },
+                .{ "content-type", "media_type" },
+                .{ "content-encoding", "content_encoding" },
+            }) |mapping| if (std.ascii.eqlIgnoreCase(header.name, mapping[0])) {
+                if (@field(capture, mapping[1]) != null) return error.DuplicateResponseHeader;
+                @field(capture, mapping[1]) = try self.a.dupe(u8, header.value);
+            };
+        }
+        return capture;
+    }
+
+    fn readStream(self: *Exchange, reader: *std.Io.Reader) ![]const u8 {
+        var bytes: std.ArrayList(u8) = .empty;
+        var framer: sse.Framer = .{};
+        var buffer: [4096]u8 = undefined;
+        var eof = false;
+        while (!eof) {
+            var vectors = [_][]u8{&buffer};
+            const buffered = reader.buffered();
+            const count = if (buffered.len != 0) blk: {
+                const count = @min(buffered.len, buffer.len);
+                @memcpy(buffer[0..count], buffered[0..count]);
+                reader.toss(count);
+                break :blk count;
+            } else reader.readVec(&vectors) catch |err| switch (err) {
+                error.EndOfStream => blk: {
+                    eof = true;
+                    break :blk 0;
+                },
+                else => return err,
+            };
+            try bytes.appendSlice(self.a, buffer[0..count]);
+            while (framer.next(bytes.items, eof)) |frame| {
+                if (!try sse.terminalFrame(self.a, frame)) continue;
+                return self.finishStream(&bytes, framer.offset);
+            }
+            var final_carriage_return = framer;
+            if (final_carriage_return.next(bytes.items, true)) |frame| {
+                if (try sse.terminalFrame(self.a, frame))
+                    return self.finishStream(&bytes, final_carriage_return.offset);
+            }
+            if (self.config.response_limit) |limit| if (bytes.items.len > limit)
+                return error.ResponseCapacity;
+        }
+        return error.MissingTerminalResponse;
+    }
+
+    fn finishStream(self: *Exchange, bytes: *std.ArrayList(u8), boundary: usize) ![]const u8 {
+        if (self.config.response_limit) |limit| if (boundary > limit) return error.ResponseCapacity;
+        bytes.shrinkRetainingCapacity(boundary);
+        return bytes.toOwnedSlice(self.a);
     }
 };
 
+fn releaseRequest(request: *std.http.Client.Request) void {
+    if (request.connection) |connection| {
+        connection.closing = true;
+        std.crypto.secureZero(u8, connection.writer().buffer);
+        std.crypto.secureZero(u8, connection.stream_writer.interface.buffer);
+    }
+    request.deinit();
+}
+
 fn deadline(io: std.Io, milliseconds: u32) std.Io.Cancelable!void {
     try io.sleep(.fromMilliseconds(milliseconds), .awake);
+}
+
+fn copyCapture(a: std.mem.Allocator, capture: Capture) !Capture {
+    var result = capture;
+    result.body = try a.dupe(u8, capture.body);
+    errdefer a.free(result.body);
+    result.request_id = if (capture.request_id) |value| try a.dupe(u8, value) else null;
+    errdefer if (result.request_id) |value| a.free(value);
+    result.media_type = if (capture.media_type) |value| try a.dupe(u8, value) else null;
+    errdefer if (result.media_type) |value| a.free(value);
+    result.content_encoding = if (capture.content_encoding) |value| try a.dupe(u8, value) else null;
+    return result;
 }
 
 pub fn post(a: std.mem.Allocator, io: std.Io, config: Config, body: []const u8) Outcome {
@@ -176,17 +278,7 @@ pub fn post(a: std.mem.Allocator, io: std.Io, config: Config, body: []const u8) 
     // A complete response wins even when cancellation or the timer became
     // ready concurrently. It must not be downgraded to unknown delivery.
     if (exchange.capture) |capture| {
-        const bytes = a.dupe(u8, capture.body) catch |err| return .{ .unknown = err };
-        const id = if (capture.request_id) |value| a.dupe(u8, value) catch |err| {
-            a.free(bytes);
-            return .{ .unknown = err };
-        } else null;
-        return .{ .captured = .{
-            .status = capture.status,
-            .identity_encoding = capture.identity_encoding,
-            .request_id = id,
-            .body = bytes,
-        } };
+        return .{ .captured = copyCapture(a, capture) catch |err| return .{ .unknown = err } };
     }
     const failure = if (first == null)
         error.Canceled
@@ -217,4 +309,62 @@ test "HTTPS rejects plaintext, authority confusion and header injection before d
         .endpoint = "https://example.test/v1/responses",
         .token = "fixture",
     }).validate();
+}
+
+test "HTTPS SSE reader stops at terminal before trailing bytes and enforces captured byte cap" {
+    const terminal = "event: error\ndata: {\"type\":\"error\"}\n\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var exchange: Exchange = .{
+        .a = arena.allocator(),
+        .io = std.testing.io,
+        .config = .{ .endpoint = "https://example.test/", .token = "fixture", .format = .sse },
+        .uri = try std.Uri.parse("https://example.test/"),
+        .body = "{}",
+    };
+    var reader = std.Io.Reader.fixed(terminal ++ "unread trailing bytes");
+    exchange.config.response_limit = terminal.len;
+    try std.testing.expectEqualStrings(terminal, try exchange.readStream(&reader));
+    reader = .failing;
+    reader.buffer = @constCast(terminal);
+    reader.end = terminal.len;
+    try std.testing.expectEqualStrings(terminal, try exchange.readStream(&reader));
+    const carriage_terminal = "event: error\rdata: {\"type\":\"error\"}\r\r";
+    reader = .failing;
+    reader.buffer = @constCast(carriage_terminal);
+    reader.end = carriage_terminal.len;
+    try std.testing.expectEqualStrings(carriage_terminal, try exchange.readStream(&reader));
+    reader = .fixed(terminal);
+    exchange.config.response_limit = terminal.len - 1;
+    try std.testing.expectError(error.ResponseCapacity, exchange.readStream(&reader));
+    reader = .fixed("data: [DONE]\n\n");
+    try std.testing.expectError(error.MissingTerminalResponse, exchange.readStream(&reader));
+}
+
+fn captureAllocationProbe(a: std.mem.Allocator) !void {
+    const capture = try copyCapture(a, .{
+        .status = 200,
+        .identity_encoding = true,
+        .format = .sse,
+        .media_type = "text/event-stream",
+        .content_encoding = "identity",
+        .request_id = "request-fixture",
+        .body = "event: error\ndata: {\"type\":\"error\"}\n\n",
+    });
+    defer capture.deinit(a);
+    try std.testing.expectEqualStrings("text/event-stream", capture.media_type.?);
+}
+
+test "HTTPS capture transfer cleans up every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, captureAllocationProbe, .{});
+}
+
+test "HTTPS invalid configuration remains unsent without network access" {
+    const outcome = post(
+        std.testing.allocator,
+        std.testing.io,
+        .{ .endpoint = "http://example.test/", .token = "fixture" },
+        "{}",
+    );
+    try std.testing.expect(outcome == .definitely_not_sent);
 }

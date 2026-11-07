@@ -464,13 +464,14 @@ fn snapshotSchema(ctx: SchemaContext) !json.Value {
         .{ "earliest_available_seq", count },
         .{ "high_water_seq", count },
         .{ "blocker", try nullable(a, try enumSchema(state.Blocker, a)) },
+        .{ "repair_hint", try text(a, 1, 256) },
         .{ "cancellation", try nullable(a, try text(a, 0, 256)) },
         .{ "pending_messages", try array(a, message, limits.pending_message_page) },
         .{ "pending_message_count", count },
         .{ "pending_messages_truncated", boolean },
         .{ "message_history", try constant(a, "task.events") },
         .{ "question", try nullable(a, question) },
-    }, &.{});
+    }, &.{"repair_hint"});
     const availability = try shape(
         a,
         &.{ .{ "occurrence_id", digest }, .{ "attempt_id", digest }, .{

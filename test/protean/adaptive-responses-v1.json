@@ -154,7 +154,8 @@
       },
       "failure": {
         "kind": "response_failed",
-        "http_status": 0
+        "http_status": 0,
+        "recovery": "none"
       }
     },
     {

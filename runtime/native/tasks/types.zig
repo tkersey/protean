@@ -110,6 +110,7 @@ pub const WorkResult = union(enum) {
     acquired: []const u8,
     rederived: registry.RederivationFinding,
     not_sent,
+    not_sent_with_reason: registry.EnvironmentFailure,
     unknown,
     failure: anyerror,
 };

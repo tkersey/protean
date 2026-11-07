@@ -65,8 +65,9 @@ builds the adaptive application through that public API.
 
 [Architecture](docs/architecture.md) ·
 [Trust boundaries](docs/security_model.md) ·
-[Adaptive model contracts](docs/model-invocation-v12.md) ·
+[Adaptive model contracts](docs/model-invocation-v13.md) ·
 [Native Responses](docs/native-responses.md) ·
+[ChatGPT through siwc](docs/chatgpt-siwc.md) ·
 [Computational workspace and placement](docs/computational-workspace.md)
 
 ## Qualification

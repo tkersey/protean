@@ -151,8 +151,8 @@ try {
   const executionStarted = performance.now();
   let installedExecution;
   try {
-    const initialized = await request('initialize', {protocol_versions: ['agent-host/2.1'], client_info: {name: 'installed-witness', version: '1'}});
-    assert.equal(initialized.protocol_version, 'agent-host/2.1');
+    const initialized = await request('initialize', {protocol_versions: ['agent-host/2.2'], client_info: {name: 'installed-witness', version: '1'}});
+    assert.equal(initialized.protocol_version, 'agent-host/2.2');
     const description = await request('describe');
     const task = await request('task.submit', {client_operation_id: 'installed-start', application_id: 'adaptive-agent', profile_id: description.profile.id,
       input: {schema_id: 'adaptive-agent.input.v2', value: {task: 'Exercise the independently installed application.'}}});

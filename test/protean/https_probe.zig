@@ -6,7 +6,12 @@ pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
     _ = args.next();
     if (args.next()) |mode| {
-        if (!std.mem.eql(u8, mode, "https")) return error.InvalidArguments;
+        const format: native.https.Format = if (std.mem.eql(u8, mode, "https"))
+            .json
+        else if (std.mem.eql(u8, mode, "https-sse"))
+            .sse
+        else
+            return error.InvalidArguments;
         const endpoint = args.next() orelse return error.InvalidArguments;
         const root_path = args.next() orelse return error.InvalidArguments;
         const timeout_ms = try std.fmt.parseInt(
@@ -32,27 +37,38 @@ pub fn main(init: std.process.Init) !void {
                 .trust_root = root,
                 .response_limit = 1024,
                 .timeout_ms = timeout_ms,
+                .format = format,
             },
             body,
         );
-        var buffer: [4096]u8 = undefined;
-        var out = std.Io.File.stdout().writer(init.io, &buffer);
-        switch (result) {
-            .captured => |capture| {
-                defer capture.deinit(init.gpa);
-                try out.interface.print("captured {d} {s}\n", .{
-                    capture.status,
-                    capture.request_id orelse "absent",
-                });
-                try out.interface.writeAll(capture.body);
-            },
-            .definitely_not_sent => |err| try out.interface.print("not-sent {s}\n", .{
-                @errorName(err),
-            }),
-            .unknown => |err| try out.interface.print("unknown {s}\n", .{@errorName(err)}),
-        }
-        try out.interface.flush();
+        try printOutcome(init.gpa, init.io, result);
         return;
     }
     return error.ExpectedProbeMode;
+}
+
+fn printOutcome(a: std.mem.Allocator, io: std.Io, result: native.https.Outcome) !void {
+    var buffer: [4096]u8 = undefined;
+    var out = std.Io.File.stdout().writer(io, &buffer);
+    switch (result) {
+        .captured => |capture| {
+            defer capture.deinit(a);
+            try out.interface.print("captured {d} {s}\n", .{
+                capture.status,
+                capture.request_id orelse "absent",
+            });
+            if (capture.format == .sse) try out.interface.print(
+                "format sse media {s} encoding {s} identity {any}\n",
+                .{
+                    capture.media_type orelse "absent",
+                    capture.content_encoding orelse "absent",
+                    capture.identity_encoding,
+                },
+            );
+            try out.interface.writeAll(capture.body);
+        },
+        .definitely_not_sent => |err| try out.interface.print("not-sent {s}\n", .{@errorName(err)}),
+        .unknown => |err| try out.interface.print("unknown {s}\n", .{@errorName(err)}),
+    }
+    try out.interface.flush();
 }

@@ -105,6 +105,23 @@ async function bytesUnder(path) {
   }
   return bytes;
 }
+function capturedUsage(raw) {
+  const bytes = new TextDecoder('utf-8', {fatal: true}).decode(raw[3]);
+  if (raw[7] !== 2) return null;
+  if (raw[4] === 0) return JSON.parse(bytes)?.usage;
+  if (raw[4] !== 1 || raw[0] < 200 || raw[0] >= 300 || !raw[1]) return null;
+  const frames = bytes.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n\n');
+  for (const frame of frames.slice(0, -1)) {
+    const data = frame.split('\n').filter(line => line === 'data' || line.startsWith('data:'))
+      .map(line => line.slice(5).replace(/^ /, '')).join('\n');
+    if (!data) continue;
+    const event = JSON.parse(data);
+    if (['response.completed', 'response.failed', 'response.incomplete'].includes(event.type)) return event.response?.usage;
+    if (event.type === 'error') return null;
+  }
+  return null;
+}
+
 export function workspaceMetrics(archive, application) {
   const captured = contract(application, 'CapturedResponse');
   const replySchema = contract(application, 'WorkspaceReply');
@@ -150,7 +167,7 @@ export function workspaceMetrics(archive, application) {
   // positive non-invocation evidence. Rearming an occurrence is only permitted
   // from not_sent, so older uncaptured attempts are also known not to have run.
   for (const [id, attempt] of attempts) {
-    const role = attempt[5] === 'agent.model.invoke.v12' ? 'controller' : attempt[5] === 'protean.workspace.inference/1' ? 'delegated' : null;
+    const role = attempt[5] === 'agent.model.invoke.v13' ? 'controller' : attempt[5] === 'protean.workspace.inference/2' ? 'delegated' : null;
     if (!role) continue;
     const capture = captures.get(id);
     const occurrence = occurrences.get(Buffer.from(attempt[2]).toString('hex'));
@@ -173,9 +190,8 @@ export function workspaceMetrics(archive, application) {
     const raw = decodeValue(captured, archive.object(capture[4].value));
     // Capture precedes response interpretation: HTTP errors and malformed
     // provider output still incurred a call, but supply no usable usage.
-    let response;
-    try { response = JSON.parse(Buffer.from(raw[3]).toString()); } catch { response = null; }
-    const usage = response?.usage;
+    let usage;
+    try { usage = capturedUsage(raw); } catch { usage = null; }
     const known = value => Number.isSafeInteger(value) && value >= 0;
     if (!known(usage?.input_tokens) || !known(usage?.output_tokens)) count.missing_usage++;
     if (known(usage?.input_tokens)) count.input_tokens += usage.input_tokens;

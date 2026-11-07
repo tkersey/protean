@@ -3,6 +3,7 @@
 const std = @import("std");
 const c = @import("native_c");
 const json = @import("json.zig");
+pub const ProtectedRoots = @import("protected_roots.zig").Roots;
 pub const SemanticPolicy = struct {
     roots: []const [32]u8,
     checkers: []const []const u8,
@@ -16,6 +17,14 @@ pub const Options = struct {
     config_path: ?[]const u8 = null,
     credential_path: ?[]const u8 = null,
     trust_root_path: ?[]const u8 = null,
+    chatgpt_account: ?[]const u8 = null,
+    siwc_bin: ?[]const u8 = null,
+    siwc_auth_dir: ?[]const u8 = null,
+    home: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+    protected_roots: ?ProtectedRoots = null,
+    validating: bool = false,
+    require_source: bool = false,
 };
 pub const Admitted = struct {
     id: []const u8,
@@ -93,11 +102,24 @@ pub fn readFile(
     maximum: ?usize,
     secret: bool,
 ) ![]u8 {
+    return readProtectedFile(a, io, path, maximum, secret, null);
+}
+
+pub fn readProtectedFile(
+    a: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    maximum: ?usize,
+    secret: bool,
+    roots: ?ProtectedRoots,
+) ![]u8 {
     if (path.len == 0 or std.mem.indexOfScalar(
         u8,
         path,
         0,
     ) != null) return error.InvalidConfiguration;
+    if (roots) |protected| if (try protected.contains(a, path))
+        return error.ProtectedAuthenticationInput;
     const name = try a.dupeSentinel(u8, path, 0);
     defer a.free(name);
     const fd = c.open(
@@ -107,6 +129,8 @@ pub fn readFile(
     if (fd < 0) return error.ConfigurationUnavailable;
     const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
     defer file.close(io);
+    if (roots) |protected| if (try protected.containsFd(a, fd))
+        return error.ProtectedAuthenticationInput;
     var info: c.struct_protean_native_stat = undefined;
     if (c.protean_native_fstat(
         fd,
@@ -114,6 +138,7 @@ pub fn readFile(
     ) != 0 or
         info.st_mode & c.S_IFMT != c.S_IFREG or
         info.st_size < 0) return error.InvalidConfiguration;
+    if (roots != null and info.st_nlink != 1) return error.HardLinkedModelInput;
     if (secret and
         (info.st_uid != c.geteuid() or
             info.st_mode & 0o077 != 0))

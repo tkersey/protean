@@ -321,6 +321,41 @@ pub const Authority = struct {
     revoked: bool = false,
     disclosure: bool = true,
 };
+pub const EnvironmentFailure = enum {
+    helper_unavailable,
+    credential_unavailable,
+    credential_binding_mismatch,
+    model_unavailable,
+    unsupported_inference_capability,
+    chatgpt_sign_in_required,
+    chatgpt_plan_usage_disabled,
+};
+
+pub fn environmentFailure(err: anyerror) ?EnvironmentFailure {
+    return switch (err) {
+        error.SiwcExecutableUnavailable, error.UnsupportedSiwcVersion => .helper_unavailable,
+        error.MissingCredential,
+        error.InvalidCredential,
+        error.InvalidSiwcProtocol,
+        error.SiwcCommandFailed,
+        error.SiwcTimeout,
+        error.SiwcOutputLimit,
+        error.SiwcProcessUnavailable,
+        error.SiwcCredentialExpired,
+        error.ExpiredSiwcCredential,
+        error.InvalidSiwcCredential,
+        => .credential_unavailable,
+        error.CredentialBindingMismatch, error.SiwcBindingMismatch => .credential_binding_mismatch,
+        error.ChatGPTModelUnavailable => .model_unavailable,
+        error.ChatGPTSignInRequired => .chatgpt_sign_in_required,
+        error.ChatGPTPlanUsageDisabled => .chatgpt_plan_usage_disabled,
+        error.UnsupportedChatGPTCapability,
+        error.InvalidInferenceDestination,
+        => .unsupported_inference_capability,
+        else => null,
+    };
+}
+
 pub const Context = struct {
     allocator: std.mem.Allocator,
     io: std.Io,

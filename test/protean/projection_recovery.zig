@@ -17,6 +17,7 @@ pub const Options = struct {
     request_bytes: ?u32 = null,
     begin: bool = true,
     reconstruct: bool = false,
+    chatgpt_plan: bool = false,
 };
 
 pub const Fixture = struct {
@@ -67,6 +68,7 @@ pub const Fixture = struct {
         );
         errdefer self.application.deinit();
         const configured = try configure(self, options);
+        errdefer if (configured.environment) |owner| environment.release(owner);
         const grants = try self.permanent.alloc(native.registry.Grant, self.handlers.entries.len);
         self.profile = try recovery.recoveryProfile(
             self.a,
@@ -114,6 +116,7 @@ pub const Fixture = struct {
             cleanup("projection service.close", self.service.close(self.a));
             cleanup("projection namespace.close", self.namespace.close());
         }
+        if (self.profile.environment) |owner| environment.release(owner);
         self.application.deinit();
         self.handlers.deinit();
         self.temporary.cleanup();
@@ -198,14 +201,25 @@ pub const Fixture = struct {
                 .arguments = arguments,
             }},
         }, .{});
-        const raw = try contracts.encodeOwned(native.responses.Raw, self.permanent, .{
+        const raw = try self.responseCapture(body);
+        self.calls += 1;
+        try self.service.acquire(self.permanent, self.pending, raw);
+    }
+
+    fn responseCapture(self: *Fixture, body: []const u8) ![]const u8 {
+        const plan = self.prepared.request.invocation.response_policy.stream;
+        const captured_body = if (plan)
+            try planResponse(self.permanent, body, self.calls)
+        else
+            body;
+        return contracts.encodeOwned(native.responses.Raw, self.permanent, .{
             .status = 200,
             .identity_encoding = true,
             .request_id = null,
-            .body = .{ .bytes = body },
+            .body = .{ .bytes = captured_body },
+            .format = if (plan) .sse else .json,
+            .media_type = if (plan) .{ .bytes = "text/event-stream" } else null,
         });
-        self.calls += 1;
-        try self.service.acquire(self.permanent, self.pending, raw);
     }
 
     pub fn attempt(self: *Fixture, action: t.Action) !native.json.Value {
@@ -444,6 +458,15 @@ fn configure(f: *Fixture, options: Options) !native.configuration.Admitted {
         .sub_path = try std.fmt.allocPrint(a, "snapshot/{s}", .{file.path}),
         .data = file.bytes,
     });
+    if (options.chatgpt_plan) for (profiles) |*profile| {
+        profile.max_output_tokens = null;
+        profile.reasoning_mode = .standard;
+        profile.reasoning_context = .auto;
+        profile.additional_tools = true;
+        profile.explicit_cache = false;
+        profile.cache_diagnostics = false;
+        profile.effort_update = false;
+    };
     const config: t.ConfigurationV3 = .{
         .schema = .{ .bytes = "adaptive-agent.configuration.v3" },
         .adaptive = .{
@@ -453,7 +476,10 @@ fn configure(f: *Fixture, options: Options) !native.configuration.Admitted {
                 "{s}/snapshot",
                 .{f.directory},
             ) },
-            .endpoint = .{ .bytes = "https://127.0.0.1:1/v1/responses" },
+            .endpoint = .{ .bytes = if (options.chatgpt_plan)
+                "https://api.openai.com/v1/responses"
+            else
+                "https://127.0.0.1:1/v1/responses" },
             .audience = .{ .bytes = "projection-repair" },
             .profiles = .{ .items = profiles },
             .initial_profile = .{ .bytes = "analysis" },
@@ -476,9 +502,16 @@ fn configure(f: *Fixture, options: Options) !native.configuration.Admitted {
     try f.temporary.dir.writeFile(f.io, .{ .sub_path = "trust", .data = "unused transport" });
     return environment.configure(a, f.io, .{
         .offline = false,
-        .test_provider = true,
+        .test_provider = !options.chatgpt_plan,
+        .chatgpt_account = if (options.chatgpt_plan) "personal" else null,
+        .siwc_bin = if (options.chatgpt_plan) try planHelper(f) else null,
+        .home = f.directory,
         .config_path = config_path,
-        .trust_root_path = try std.fmt.allocPrint(a, "{s}/trust", .{f.directory}),
+        .trust_root_path = if (options.chatgpt_plan) null else try std.fmt.allocPrint(
+            a,
+            "{s}/trust",
+            .{f.directory},
+        ),
     }, null, f.assets);
 }
 
@@ -1113,4 +1146,50 @@ fn computedText(a: std.mem.Allocator, text: []const u8) !?native.json.Value {
         if (std.mem.eql(u8, kind.string, "computed")) return block;
     }
     return null;
+}
+
+fn planHelper(f: *Fixture) ![]const u8 {
+    const script =
+        \\#!/bin/sh
+        \\case "$1" in
+        \\ --version) printf '0.1.3\n' ;;
+        \\ status) printf '%s\n' '{"app":"protean","account":"personal","client_id":"fixture-client","subject":"fixture-subject","email":null,"phase":"ready","expires_at":null}' ;;
+        \\ *) exit 2 ;;
+        \\esac
+    ;
+    try f.temporary.dir.writeFile(f.io, .{
+        .sub_path = "siwc",
+        .data = script,
+        .flags = .{ .permissions = .fromMode(0o700) },
+    });
+    return f.temporary.dir.realPathFileAlloc(f.io, "siwc", f.permanent);
+}
+
+fn planResponse(a: std.mem.Allocator, body: []const u8, index: u64) ![]const u8 {
+    var parsed = try native.json.parse(a, body, .{});
+    defer parsed.deinit();
+    var response = parsed.value;
+    try native.json.put(a, &response, "id", native.json.string(try std.fmt.allocPrint(
+        a,
+        "fixture-response-{d}",
+        .{index},
+    )));
+    var events: std.Io.Writer.Allocating = .init(a);
+    defer events.deinit();
+    for (response.object.get("output").?.array.items, 0..) |item, output_index| {
+        var event = native.json.object();
+        try native.json.put(a, &event, "type", native.json.string("response.output_item.done"));
+        try native.json.put(a, &event, "output_index", try native.json.number(a, output_index));
+        try native.json.put(a, &event, "item", item);
+        try events.writer.print("event: response.output_item.done\ndata: {s}\n\n", .{
+            try native.json.canonical(a, event),
+        });
+    }
+    var terminal = native.json.object();
+    try native.json.put(a, &terminal, "type", native.json.string("response.completed"));
+    try native.json.put(a, &terminal, "response", response);
+    try events.writer.print("event: response.completed\ndata: {s}\n\n", .{
+        try native.json.canonical(a, terminal),
+    });
+    return events.toOwnedSlice();
 }

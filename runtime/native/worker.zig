@@ -188,7 +188,10 @@ pub const Worker = struct {
                 !self.invoked and
                 err != error.Canceled)
                 break :blk .{ .failure = err };
-            break :blk if (self.invoked) .unknown else .not_sent;
+            if (self.invoked) break :blk .unknown;
+            if (registry.environmentFailure(err)) |reason|
+                break :blk .{ .not_sent_with_reason = reason };
+            break :blk .not_sent;
         };
     }
     fn cancelJoin(self: *Worker) void {

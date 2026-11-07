@@ -133,6 +133,13 @@ pub const Blocker = enum {
     unavailable_environment,
     waiting_workspace,
     observation_blocked,
+    helper_unavailable,
+    credential_unavailable,
+    credential_binding_mismatch,
+    model_unavailable,
+    unsupported_inference_capability,
+    chatgpt_sign_in_required,
+    chatgpt_plan_usage_disabled,
 };
 
 /// Physical controller progress is independent of the last published guest cut.

@@ -4,7 +4,7 @@ import {spawnSync, execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {join} from 'node:path';
 import {deployment} from './native_deployment.mjs';
-import {readFileSync} from 'node:fs';
+import {readFileSync, writeFileSync, mkdirSync, existsSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {ProteanClient} from '../support/stdio-client.mts';
@@ -21,23 +21,71 @@ let passed = false;
 try {
   const invoke = (...args) => {
     const timeout = 30_000;
-    const result = spawnSync(app.command, args, {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout, maxBuffer: 4 * 1024 * 1024});
+    const result = spawnSync(app.command, args, {cwd: app.data, env: {PATH: '/nonexistent', HOME: app.data}, encoding: 'utf8', timeout, maxBuffer: 4 * 1024 * 1024});
     assert.equal(result.status, 0, `${args[0]}: ${result.error ?? result.stderr}\n${result.stdout}`);
     return JSON.parse(result.stdout);
   };
   const manifest = invoke('describe-build');
+  if (group === 'smoke' || group === 'all') {
+    const home = join(app.data, 'host home'), snapshot = join(app.data, 'source snapshot');
+    mkdirSync(home); mkdirSync(snapshot);
+    writeFileSync(join(snapshot, 'entry.zig'), 'pub fn main() void {}\n');
+    const config = JSON.parse(readFileSync(new URL('../../examples/adaptive/adaptive.chatgpt.example.json', import.meta.url)));
+    config.adaptive.snapshot_root = snapshot;
+    config.adaptive.skills = [];
+    const configPath = join(app.data, 'plan.json'), absent = join(app.data, 'absent');
+    writeFileSync(configPath, JSON.stringify(config));
+    const probe = (...args) => spawnSync(app.command, args, {cwd: app.data, env: {PATH: '/nonexistent', HOME: home}, encoding: 'utf8', timeout: 10000});
+    for (const args of [[], ['--chatgpt-account', 'personal', '--siwc-bin', absent], ['--siwc-auth-dir', absent]]) {
+      const result = probe('validate', '--config', configPath, ...args);
+      assert.equal(result.status, 0, result.stderr);
+    }
+    assert(!existsSync(join(home, '.config')), 'validation does not create a default store');
+    assert(!existsSync(absent), 'validation does not create a selected store');
+    const key = join(home, 'api-key'), leakedConfig = join(app.data, 'leaked-key.json');
+    writeFileSync(key, 'synthetic-validation-secret\n', {mode: 0o600});
+    const leaked = structuredClone(config);
+    leaked.adaptive.workspace = 'synthetic-validation-secret';
+    writeFileSync(leakedConfig, JSON.stringify(leaked));
+    const leak = probe('validate', '--config', leakedConfig, '--credential-file', key);
+    assert.notEqual(leak.status, 0);
+    assert.match(leak.stderr, /UnsafeCredentialFile/);
+    assert(!`${leak.stdout}${leak.stderr}`.includes('synthetic-validation-secret'));
+    const base = ['run', '--config', absent, '--state-dir', join(app.data, 'source admission'), '--task', 'fixture', '--authorize-inference'];
+    const conflict = probe(...base, '--credential-file', absent, '--chatgpt-account', 'personal', '--siwc-bin', absent);
+    assert.notEqual(conflict.status, 0);
+    assert.match(conflict.stderr, /mutually exclusive/);
+    const missing = probe(...base);
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /select --credential-file/);
+    const override = probe(...base, '--siwc-bin', absent);
+    assert.notEqual(override.status, 0);
+    assert.match(override.stderr, /requires --chatgpt-account/);
+    for (const selector of [['--chatgpt-account', 'personal'], ['--credential-file', absent]]) {
+      const result = probe(...base, '--offline', ...selector);
+      assert.notEqual(result.status, 0);
+      assert.equal(result.stdout, '');
+    }
+    const protectedRoot = join(home, '.config', 'siwc');
+    mkdirSync(protectedRoot, {recursive: true});
+    const protectedConfig = join(protectedRoot, 'input.json');
+    writeFileSync(protectedConfig, JSON.stringify(config));
+    const rejected = probe('validate', '--config', protectedConfig);
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /protected authentication directory/);
+  }
   assert.equal(manifest.format, 'agent-native-build/v2');
   assert.equal(manifest.application_id, 'adaptive-agent');
-  assert.equal(manifest.protocol, 'agent-host/2.1');
+  assert.equal(manifest.protocol, 'agent-host/2.2');
   assert.equal(manifest.client_mapping, 'agent-client-values/1.1');
   assert.equal(application.client_mapping, 'agent-client-values/1.1');
   if (group !== 'workspace') {
     const retiredState = join(app.data, 'retired client');
-    const retired = new ProteanClient(app.command, ['--offline', '--state-dir', retiredState], {cwd: app.data, env: {PATH: '/nonexistent'}});
+    const retired = new ProteanClient(app.command, ['--offline', '--state-dir', retiredState], {cwd: app.data, env: {PATH: '/nonexistent', HOME: app.data}});
     try {
       await assert.rejects(retired.initialize(['agent-host/2.0']), error => {
         assert.equal(error.data?.kind, 'ProtocolState');
-        assert.deepEqual(error.data.supported_versions, ['agent-host/2.1']);
+        assert.deepEqual(error.data.supported_versions, ['agent-host/2.2']);
         return true;
       });
     } finally { await retired.close(); }
@@ -46,7 +94,7 @@ try {
     const retiredDb = new DatabaseSync(join(retiredState, 'state.sqlite'));
     try { retiredDb.exec('PRAGMA ignore_check_constraints=ON; UPDATE meta SET format=11;'); }
     finally { retiredDb.close(); }
-    const unsupported = spawnSync(app.command, ['status', '--offline', '--state-dir', retiredState], {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', timeout: 30_000});
+    const unsupported = spawnSync(app.command, ['status', '--offline', '--state-dir', retiredState], {cwd: app.data, env: {PATH: '/nonexistent', HOME: app.data}, encoding: 'utf8', timeout: 30_000});
     assert.equal(unsupported.status, 74, unsupported.error ?? unsupported.stderr);
     assert.equal(unsupported.stdout, '');
     assert.equal(unsupported.stderr, 'protean: unsupported state format; use a fresh state directory for this release\n');
@@ -62,7 +110,7 @@ try {
   assert(!JSON.stringify(manifest).includes(process.cwd()));
   const demo = async () => {
     const {stdout} = await promisify(execFile)(app.command, ['demo', '--offline', '--state-dir', join(app.data, 'adaptive state')],
-      {cwd: app.data, env: {PATH: '/nonexistent'}, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024});
+      {cwd: app.data, env: {PATH: '/nonexistent', HOME: app.data}, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024});
     const result = JSON.parse(stdout);
     assert.equal(result.mode, 'offline-demo');
     assert.equal(result.output.result.tag, 'report');

@@ -632,8 +632,20 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                                 !ctx.actual.cancellation_applied;
                             ctx.expected.schedule = if (cancelling and
                                 before.control.schedule != .parked) .queued else .parked;
-                            ctx.expected.blocker =
-                                if (cancelling) null else .unavailable_environment;
+                            if (!cancelling) switch (ctx.actual.blocker orelse
+                                return error.InvalidArchive) {
+                                .unavailable_environment,
+                                .helper_unavailable,
+                                .credential_unavailable,
+                                .credential_binding_mismatch,
+                                .model_unavailable,
+                                .unsupported_inference_capability,
+                                .chatgpt_sign_in_required,
+                                .chatgpt_plan_usage_disabled,
+                                => {},
+                                else => return error.InvalidArchive,
+                            };
+                            ctx.expected.blocker = if (cancelling) null else ctx.actual.blocker;
                         },
                         else => return error.InvalidArchive,
                     }

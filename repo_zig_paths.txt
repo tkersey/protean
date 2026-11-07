@@ -17,6 +17,7 @@ runtime/native/adaptive_context.zig
 runtime/native/adaptive_history.zig
 runtime/native/adaptive_responses.zig
 runtime/native/archive.zig
+runtime/native/chatgpt_tests.zig
 runtime/native/client.zig
 runtime/native/configuration.zig
 runtime/native/controller_construction.zig
@@ -43,13 +44,19 @@ runtime/native/placement_stage.zig
 runtime/native/placement_transport.zig
 runtime/native/program_construction.zig
 runtime/native/projection_proposal.zig
+runtime/native/protected_roots.zig
 runtime/native/protocol.zig
 runtime/native/registry.zig
 runtime/native/repository.zig
 runtime/native/responses.zig
+runtime/native/responses_contract.zig
+runtime/native/responses_sse.zig
 runtime/native/retention.zig
 runtime/native/root.zig
 runtime/native/schemas.zig
+runtime/native/siwc.zig
+runtime/native/siwc_process.zig
+runtime/native/siwc_protocol.zig
 runtime/native/source_preflight.zig
 runtime/native/source_records.zig
 runtime/native/sqlite.zig

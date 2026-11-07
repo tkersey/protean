@@ -21,7 +21,7 @@ them with this consumer's task, evidence, question, inbox and completion logic;
 [`types.zig`](types.zig) supplies its actions and ordinary schemas. Model choice,
 skills, offers, epochs and next actions stay in that authored program.
 The native adapter realizes its explicit requests; it has no transcript-driven
-policy loop. See the [v12 API contract](../../docs/model-invocation-v12.md).
+policy loop. See the [v13 API contract](../../docs/model-invocation-v13.md).
 
 From the Protean repository after the [native setup](../../docs/native-single-binary.md):
 
@@ -88,7 +88,7 @@ part of task resources or prepared provider requests.
 
 For an interactive continuing task, launch `serve --transport stdio` with those
 same configuration, authorization, credential and state flags. The
-`agent-host/2.1` interface and CLI share the same image and task owner. Questions
+`agent-host/2.2` interface and CLI share the same image and task owner. Questions
 require the returned identity/revision/digest; queued `task.message` follow-ups
 use a distinct interface. Stable operation IDs support lost-ack retries. Unknown
 external delivery never authorizes another provider attempt.
@@ -373,8 +373,8 @@ current model call's offered set is checked independently from materialized
 definitions, and work dispatch binds to that captured call. Queued user messages
 are consumed through the authored inbox only after the current call settles.
 
-The current adaptive contracts are `agent.model.invoke.v12`,
-`agent.model.context.responses.adaptive.v8` and `agent.model.policy.adaptive.v2`.
+The current adaptive contracts are `agent.model.invoke.v13`,
+`agent.model.context.responses.adaptive.v9` and `agent.model.policy.adaptive.v2`.
 Start new tasks in fresh state under these contracts; retain old tasks with their original runtime.
 Raw provider captures and opaque reasoning remain private.
 Absent usage remains unavailable. Explicit cache markers and unchanged request
@@ -412,3 +412,7 @@ handoff starts the successor; it does not return into the old controller. Failed
 preparation returns an ordinary diagnostic. Replacement and trials are optional.
 See [controller contracts and continuity](../../docs/computational-workspace.md#reconstructing-the-active-controller)
 for schemas, cleanup, provenance and historical-resume boundaries.
+
+For ChatGPT plan billing, use [adaptive.chatgpt.example.json](adaptive.chatgpt.example.json)
+and the [siwc operator guide](../../docs/chatgpt-siwc.md). Select the account
+explicitly with `--chatgpt-account`; keep `--authorize-inference`.

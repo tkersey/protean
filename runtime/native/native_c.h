@@ -22,6 +22,7 @@ struct protean_native_stat {
     int64_t st_size;
 };
 int protean_native_fstat(int fd, struct protean_native_stat *out);
+int protean_native_fd_path(int fd, char *out, size_t capacity);
 typedef void (*protean_native_signal_handler)(int);
 int protean_native_signals_begin(protean_native_signal_handler handler);
 void protean_native_signals_end(void);

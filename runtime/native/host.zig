@@ -19,10 +19,42 @@ pub fn reportFailure(err: anyerror) u8 {
     if (flags < 0 or c.fcntl(c.STDERR_FILENO, c.F_SETFL, flags | c.O_NONBLOCK) < 0) return 74;
     defer _ = c.fcntl(c.STDERR_FILENO, c.F_SETFL, flags);
     var buffer: [192]u8 = undefined;
-    const message = if (err == error.UnsupportedStateFormat)
-        "protean: unsupported state format; use a fresh state directory for this release\n"
-    else
-        std.fmt.bufPrint(&buffer, "protean: {s}\n", .{@errorName(err)}) catch return 74;
+    const message = switch (err) {
+        error.UnsupportedStateFormat => "protean: unsupported state format; " ++
+            "use a fresh state directory for this release\n",
+        error.MissingCredentialSource => "protean: select --credential-file FILE " ++
+            "or --chatgpt-account LABEL\n",
+        error.ConflictingCredentialSources => "protean: --credential-file and " ++
+            "--chatgpt-account are mutually exclusive\n",
+        error.MissingChatGPTSelection => "protean: --siwc-bin requires " ++
+            "--chatgpt-account LABEL for a new live task\n",
+        error.SiwcExecutableUnavailable,
+        error.UnsupportedSiwcVersion,
+        => "protean: install siwc; " ++
+            "brew install tkersey/tap/siwc; " ++
+            "or select --siwc-bin ABSOLUTE_PATH\n",
+        error.SiwcCommandFailed,
+        error.SiwcProcessUnavailable,
+        error.SiwcTimeout,
+        error.SiwcOutputLimit,
+        error.InvalidSiwcProtocol,
+        => "protean: siwc credentials are unavailable; inspect " ++
+            "siwc status --app protean --account LABEL --json " ++
+            "and repair the selected registration\n",
+        error.ChatGPTRegistrationRequired => "protean: sign in with " ++
+            "siwc login --app protean --account LABEL; " ++
+            "use --new-account LABEL only for a new registration\n",
+        error.UnsupportedChatGPTCapability => "protean: ChatGPT requires " ++
+            "null max_output_tokens, standard/auto reasoning, " ++
+            "additional_tools, and no explicit cache, cache diagnostics, or effort updates\n",
+        error.CredentialBindingMismatch => "protean: credentials do not match " ++
+            "this task's frozen billing identity\n",
+        error.ProtectedAuthenticationInput => "protean: model input is inside a " ++
+            "protected authentication directory\n",
+        error.HardLinkedModelInput => "protean: model input files must have one hard link; " ++
+            "copy the selected file to a distinct regular file\n",
+        else => std.fmt.bufPrint(&buffer, "protean: {s}\n", .{@errorName(err)}) catch return 74,
+    };
     _ = c.write(c.STDERR_FILENO, message.ptr, message.len);
     return 74;
 }
@@ -394,7 +426,10 @@ pub fn run(
         try printManifest(Types, Environment, init, assets);
         return 0;
     }
-    var options = LaunchOptions.parse(Environment, command, &args) catch return 64;
+    var options = LaunchOptions.parse(Environment, command, &args) catch |err| {
+        _ = reportFailure(err);
+        return 64;
+    };
     return runApplication(Types, Environment, init, assets, &options);
 }
 fn runApplication(
@@ -430,6 +465,9 @@ fn runApplication(
         artifact_identity.sha256,
     );
     var profile = initial.profile;
+    defer if (comptime @hasDecl(Environment, "release")) {
+        if (profile.environment) |owner| Environment.release(owner);
+    };
     var service: ?tasks.Service(Types) = null;
     defer if (service) |*owner| owner.close(a) catch |err| {
         _ = reportFailure(err);
@@ -518,6 +556,13 @@ fn Launch(comptime Types: type, comptime Environment: type) type {
                             .test_provider = self.options.test_provider,
                             .config_path = self.options.config_path,
                             .credential_path = self.options.credential_path,
+                            .chatgpt_account = self.options.chatgpt_account,
+                            .siwc_bin = self.options.siwc_bin,
+                            .siwc_auth_dir = self.options.siwc_auth_dir,
+                            .home = self.init.environ_map.get("HOME"),
+                            .path = self.init.environ_map.get("PATH"),
+                            .validating = self.options.validating,
+                            .require_source = self.options.authorize_inference,
                             .trust_root_path = self.options.trust_root_path,
                         },
                         frozen,
@@ -526,6 +571,9 @@ fn Launch(comptime Types: type, comptime Environment: type) type {
                         _ = reportFailure(err);
                         return 64;
                     };
+                    if (frozen == null and !self.options.validating and
+                        !self.options.offline and !self.options.test_provider)
+                        try self.showBillingSource();
                     if (frozen) |saved| {
                         if (!std.mem.eql(u8, saved.profile, admitted.bytes) or
                             !std.mem.eql(u8, saved.profile_id, admitted.id)) return 64;
@@ -543,6 +591,18 @@ fn Launch(comptime Types: type, comptime Environment: type) type {
                 }
             }
             return null;
+        }
+        fn showBillingSource(self: *@This()) !void {
+            const message = if (self.options.chatgpt_account) |account|
+                try std.fmt.allocPrint(
+                    self.a,
+                    "Billing source: ChatGPT plan; account: {s}\n",
+                    .{account},
+                )
+            else
+                try self.a.dupe(u8, "Billing source: OpenAI API key\n");
+            defer self.a.free(message);
+            try std.Io.File.stderr().writeStreamingAll(self.init.io, message);
         }
         fn frozenInputs(self: *@This()) !?tasks.FrozenInputs {
             var frozen: ?tasks.FrozenInputs = null;
@@ -1819,7 +1879,13 @@ fn printHelp(comptime Environment: type, io: std.Io) !void {
                 "s loopback HTTPS with a built-in non-secret token; it requires --trust" ++
                 "-root and rejects --credential-file.\nStatus/result read saved task da" ++
                 "ta without loading execution configuration.\nOffline mode uses embedde" ++
-                "d deterministic fixtures and requires --offline.\n\n",
+                "d deterministic fixtures and requires --offline.\n" ++
+                "ChatGPT: replace --credential-file FILE with --chatgpt-account LABEL.\n" ++
+                "--siwc-bin ABSOLUTE_PATH selects the helper; --siwc-auth-dir ABSOLUTE_PATH " ++
+                "selects its store and protects that root in every file-ingestion mode.\n" ++
+                "validate --config FILE --chatgpt-account LABEL is offline " ++
+                "structural validation.\n" ++
+                "Resume can interpret retained captures without any credential selector.\n\n",
         );
     }
     try std.Io.File.stdout().writeStreamingAll(
@@ -1892,6 +1958,9 @@ const LaunchOptions = struct {
     state_path: ?[]const u8 = null,
     config_path: ?[]const u8 = null,
     credential_path: ?[]const u8 = null,
+    chatgpt_account: ?[]const u8 = null,
+    siwc_bin: ?[]const u8 = null,
+    siwc_auth_dir: ?[]const u8 = null,
     placement_path: ?[]const u8 = null,
     trust_root_path: ?[]const u8 = null,
     profile_task: ?[]const u8 = null,
@@ -1949,6 +2018,15 @@ const LaunchOptions = struct {
             self.profile_task = args.next() orelse return error.InvalidArguments;
         } else if (std.mem.eql(u8, arg, "--authorize-inference") and !self.authorize_inference) {
             self.authorize_inference = true;
+        } else try self.consumeAuthentication(arg, args);
+    }
+    fn consumeAuthentication(self: *LaunchOptions, arg: []const u8, args: anytype) !void {
+        if (std.mem.eql(u8, arg, "--chatgpt-account") and self.chatgpt_account == null) {
+            self.chatgpt_account = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(u8, arg, "--siwc-bin") and self.siwc_bin == null) {
+            self.siwc_bin = args.next() orelse return error.InvalidArguments;
+        } else if (std.mem.eql(u8, arg, "--siwc-auth-dir") and self.siwc_auth_dir == null) {
+            self.siwc_auth_dir = args.next() orelse return error.InvalidArguments;
         } else try self.consumeTask(arg, args);
     }
     fn consumeTask(self: *LaunchOptions, arg: []const u8, args: anytype) !void {
@@ -2037,7 +2115,26 @@ const LaunchOptions = struct {
             self.human_options.checkpoint_output = args.next() orelse return error.InvalidArguments;
         } else return error.InvalidArguments;
     }
+    fn validateAuthentication(self: LaunchOptions) !void {
+        if (self.chatgpt_account != null and self.credential_path != null)
+            return error.ConflictingCredentialSources;
+        if ((self.offline or self.test_provider) and
+            (self.chatgpt_account != null or self.credential_path != null or self.siwc_bin != null))
+            return error.InvalidArguments;
+        if (self.chatgpt_account) |account| if (!@import("siwc.zig").validLabel(account))
+            return error.InvalidChatGPTAccount;
+        const new_task = self.human == .run or (self.serving and self.profile_task == null);
+        if (new_task and self.siwc_bin != null and self.chatgpt_account == null)
+            return error.MissingChatGPTSelection;
+        if (new_task and self.authorize_inference and !self.test_provider and !self.offline and
+            self.chatgpt_account == null and self.credential_path == null)
+            return error.MissingCredentialSource;
+        for ([_]?[]const u8{ self.siwc_bin, self.siwc_auth_dir }) |value|
+            if (value) |path| if (!std.fs.path.isAbsolute(path) or
+                std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidArguments;
+    }
     fn validate(self: LaunchOptions, comptime Environment: type) !void {
+        try self.validateAuthentication();
         if ((self.serving and
             !self.stdio) or
             (!self.serving and
