@@ -35,7 +35,7 @@ TigerStyle and still cannot pass the terminal gate.
 | `owner-adaptive-control` | Nineteen adaptive owner tests across four independent processes: controls/recovery, projection resource failures, constructed succession, and delegated-answer ancestry. |
 | `owner-projection-repair` | The executable projection repair/restart witness. |
 | `owner-projection-boundaries` | Eight tests across three independent processes: projection authenticity, receipt/archive checks, current/profile/delegated bindings, and ChatGPT SSE controls and delegation. |
-| `owner-support` | Native unit/context and process-crash recovery checks. |
+| `owner-support` | Native unit/context and process-crash recovery checks, recurrence corpus/delivery grading, and the evaluation driver's sealed capture/SIGKILL/reopen witness. |
 | `workspace` | The 16 workspace execution and construction tests. |
 | `workspace-retention` | The three retained-work, wait and delegated-answer tests. |
 | `workspace-history` | The three history, cancellation-read and allocation-failure tests. |
