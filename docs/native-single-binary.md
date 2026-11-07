@@ -21,8 +21,8 @@ zig build protean -Doptimize=safe \
   -Dsqlite-source=.protean-native/inputs/sqlite
 ```
 
-The stable source tuple is [Horos 5.0.0](https://github.com/tkersey/horos/releases/tag/v5.0.0),
-[Kosmos 8.0.0](https://github.com/tkersey/kosmos/releases/tag/v8.0.0), and SQLite 3.53.4.
+The stable source tuple is [Horos 8.0.1](https://github.com/tkersey/horos/releases/tag/v8.0.1),
+[Kosmos 9.2.0](https://github.com/tkersey/kosmos/releases/tag/v9.2.0), and SQLite 3.53.4.
 The [source lock](../conformance/protean/dependencies.lock.json) records the
 exact immutable commits, authenticated GitHub archives, and complete
 source/package inventories under `agent-native-source-lock/v2`. Kosmos owns
@@ -314,8 +314,8 @@ during archive admission and cold retention audit.
 
 ## Saved state and portability
 
-Application 9.0.0 starts in a new namespace with state format 21, adaptive invocation
-v12, context v8, and output v5. Existing tasks keep their original namespace,
+Application 9.0.0 starts in a new namespace with state format 22, adaptive invocation
+v13, context v8, and output v5. Existing tasks keep their original namespace,
 image, and exact executable. They are continued by that executable; this feature
 does not migrate or transplant their continuations. Do not delete old state as
 part of an update.

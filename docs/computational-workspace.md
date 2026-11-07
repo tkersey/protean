@@ -726,11 +726,11 @@ quality adjudication explicit. No live model efficacy or token-saving percentage
 is claimed.
 
 Application 9.0.0 uses `protean-workspace/6`, context v8, output v5 and native
-state format 21. Older namespaces require their compatible executable. The
-[dependency lock](../conformance/protean/dependencies.lock.json) binds the local
-Horos 8.0.0 and Kosmos 9.1.0 source archives and their exact commits. The
-[implementation report](semantic-construction-report.md) points to current tuple
-qualification, including remote archive transport. `describe-build` records
+state format 22. Older namespaces require their compatible executable. The
+[dependency lock](../conformance/protean/dependencies.lock.json) binds the published
+Horos 8.0.1 and Kosmos 9.2.0 source archives and their exact commits. The
+[implementation report](semantic-construction-report.md) records the original
+construction qualification, including remote archive transport. `describe-build` records
 the exact compiler, image, package and executable hashes for each platform.
 The [retaining installer](native-single-binary.md#saved-state-and-portability)
 ships with qualification archives. It never migrates old continuations or edits
