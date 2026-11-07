@@ -38,6 +38,12 @@ const Options = struct {
                     result.configuration.config_path = value;
                 } else if (std.mem.eql(u8, arg, "--credential-file")) {
                     result.configuration.credential_path = value;
+                } else if (std.mem.eql(u8, arg, "--chatgpt-account")) {
+                    result.configuration.chatgpt_account = value;
+                } else if (std.mem.eql(u8, arg, "--siwc-bin")) {
+                    result.configuration.siwc_bin = value;
+                } else if (std.mem.eql(u8, arg, "--siwc-auth-dir")) {
+                    result.configuration.siwc_auth_dir = value;
                 } else if (std.mem.eql(u8, arg, "--profile-task")) {
                     result.profile_task = try native.client.identifier(16, Json.string(value));
                 } else return error.InvalidArguments;

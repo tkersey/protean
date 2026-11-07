@@ -64,7 +64,7 @@ the controller to consume them without duplicating their facts through the answe
 Operation IDs, chosen channels and complete RPC arguments are retained outside the
 driver before sending; a lost acknowledgment retains the identical replay operation.
 
-Start only with separately authorized inference and its selected credential path:
+Start only with separately authorized inference and its selected source:
 
 ```sh
 node tools/evaluation/workspace.mjs run \
@@ -74,6 +74,12 @@ node tools/evaluation/workspace.mjs run \
   --application zig-out/protean/adaptive/application.json \
   --authorize-inference --credential-file /private/credential-file
 ```
+
+For ChatGPT plan inference, prepare with the ChatGPT configuration example and
+replace `--credential-file` with `--chatgpt-account personal`. Optional
+`--siwc-bin` and `--siwc-auth-dir` selections are forwarded unchanged on restart.
+The two credential routes are mutually exclusive. SIWC uses the existing native
+adapter; unknown plan or deployment charges remain unknown.
 
 Each attempt gets a fresh namespace and is never overwritten or automatically
 retried. Failures remain in the inclusive result. Restart during the declared cut

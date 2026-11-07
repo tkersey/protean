@@ -4,7 +4,7 @@ import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {RecurrenceDelivery, RecurrenceTrace, prepareRecurrence, validateRecurrencePlan,
-  recurrenceCost, adjudicateRecurrence, armViolations} from '../../tools/evaluation/workspace.mjs';
+  recurrenceCost, adjudicateRecurrence, armViolations, inferenceArguments} from '../../tools/evaluation/workspace.mjs';
 
 const packets = [
   {id: 'initial', offset_ms: 0, bytes: 'initial'},
@@ -208,4 +208,14 @@ test('recurrence permits projections and observations while preserving the packa
     {name: 'work', arguments: {command: {tag: 'realize_controller'}}},
     {name: 'program', arguments: {command: {tag: 'specialize'}}}];
   assert.deepEqual(armViolations('recurrence', forbidden), forbidden);
+});
+
+test('inference source selection preserves SIWC and excludes mixed billing', () => {
+  assert.deepEqual(inferenceArguments({chatgptAccount: 'personal'}),
+    ['--authorize-inference', '--chatgpt-account', 'personal']);
+  assert.deepEqual(inferenceArguments({credential: '/private/key'}),
+    ['--authorize-inference', '--credential-file', '/private/key']);
+  assert.throws(() => inferenceArguments({}));
+  assert.throws(() => inferenceArguments({credential: '/private/key', chatgptAccount: 'personal'}));
+  assert.throws(() => inferenceArguments({credential: '/private/key', siwcBin: '/bin/siwc'}));
 });

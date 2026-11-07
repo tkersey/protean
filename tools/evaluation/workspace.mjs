@@ -35,7 +35,7 @@ const semanticArms = {
 const option = (args, name, fallback) => { const i = args.indexOf(name); return i < 0 ? fallback : args[i + 1]; };
 const [mode, ...args] = process.argv.slice(2);
 if (import.meta.main && !['prepare', 'run'].includes(mode)) {
-  console.log('prepare --config CONFIG --out DIRECTORY [--suite workspace|runtime|reconstruction|semantic|recurrence] [--repetitions 1] [--seconds 600]\nrecurrence preparation also requires --binary BINARY --driver DRIVER --application APPLICATION_JSON [--cost-model JSON]\nrun --plan DIRECTORY --binary BINARY --application APPLICATION_JSON [--driver DRIVER] --authorize-inference --credential-file PRIVATE_FILE');
+  console.log('prepare --config CONFIG --out DIRECTORY [--suite workspace|runtime|reconstruction|semantic|recurrence] [--repetitions 1] [--seconds 600]\nrecurrence preparation also requires --binary BINARY --driver DRIVER --application APPLICATION_JSON [--cost-model JSON]\nrun --plan DIRECTORY --binary BINARY --application APPLICATION_JSON [--driver DRIVER] --authorize-inference (--credential-file PRIVATE_FILE | --chatgpt-account ACCOUNT)');
   process.exit(mode === '--help' || !mode ? 0 : 2);
 }
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -964,7 +964,16 @@ async function readOutcome(client, taskId, result) {
   return result;
 }
 
-export async function evaluateRecurrence({subject, plan, output, driver, credential, application,
+export function inferenceArguments({credential, chatgptAccount, siwcBin, siwcAuthDir}) {
+  assert(Boolean(credential) !== Boolean(chatgptAccount), 'Select one inference source: --credential-file or --chatgpt-account.');
+  assert(chatgptAccount || !siwcBin, '--siwc-bin requires --chatgpt-account.');
+  return ['--authorize-inference',
+    ...(credential ? ['--credential-file', resolve(credential)] : ['--chatgpt-account', chatgptAccount]),
+    ...(siwcBin ? ['--siwc-bin', resolve(siwcBin)] : []),
+    ...(siwcAuthDir ? ['--siwc-auth-dir', resolve(siwcAuthDir)] : [])];
+}
+
+export async function evaluateRecurrence({subject, plan, output, driver, credential, chatgptAccount, siwcBin, siwcAuthDir, application,
   build, offline = false}, {Client = RecurrenceDriver, now = () => performance.now(), wait = pause} = {}) {
   const started = now();
   output = await realpath(output);
@@ -979,7 +988,7 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
     elapsed_ms: elapsed(), operations: delivery.operations, trace: trace.summary(), errors}));
   const launch = () => {
     const options = ['--state-dir', state,
-      ...(offline ? ['--offline'] : ['--config', subject.config, '--authorize-inference', '--credential-file', resolve(credential)]),
+      ...(offline ? ['--offline'] : ['--config', subject.config, ...inferenceArguments({credential, chatgptAccount, siwcBin, siwcAuthDir})]),
       ...(task ? ['--profile-task', task.task_id] : [])];
     client = new Client(driver, options);
     clearTimeout(watchdog);
@@ -1123,7 +1132,7 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
   if (task) {
     try {
       client = new Client(driver, ['--state-dir', state,
-        ...(offline ? ['--offline'] : ['--config', subject.config, '--authorize-inference', '--credential-file', resolve(credential)]),
+        ...(offline ? ['--offline'] : ['--config', subject.config, ...inferenceArguments({credential, chatgptAccount, siwcBin, siwcAuthDir})]),
         '--profile-task', task.task_id]);
       const exportTimer = setTimeout(() => client.child.kill('SIGKILL'), 30000);
       try {
@@ -1171,7 +1180,8 @@ async function runRecurrence(directory, options) {
     const output = join(directory, subject.id);
     await mkdir(output);
     const report = await evaluateRecurrence({subject, plan, output, driver: options.driver,
-      credential: options.credential, application, build});
+      credential: options.credential, chatgptAccount: options.chatgptAccount,
+      siwcBin: options.siwcBin, siwcAuthDir: options.siwcAuthDir, application, build});
     reports.push(report);
     await writeFile(join(directory, 'results.json'), json({plan_sha256: hash(json(plan)), reports,
       comparison: compareCampaign(plan, reports)}));
@@ -1242,13 +1252,16 @@ if (mode === 'prepare' && option(args, '--suite') === 'recurrence') {
   console.log(json({plan: join(directory,'plan.json'), cases: plan.cases.length, live_calls: 0, efficacy: 'unmeasured'}));
 } else {
   assert(args.includes('--authorize-inference'), 'Live evaluation requires explicit --authorize-inference. prepare makes no provider calls.');
-  const credential = option(args, '--credential-file'); assert(credential, 'Provide the separately authorized credential file.');
+  const credential = option(args, '--credential-file'), chatgptAccount = option(args, '--chatgpt-account'),
+    siwcBin = option(args, '--siwc-bin'), siwcAuthDir = option(args, '--siwc-auth-dir');
+  inferenceArguments({credential, chatgptAccount, siwcBin, siwcAuthDir});
   const directory = resolve(option(args,'--plan','')), binary = resolve(option(args,'--binary','')), application = JSON.parse(await readFile(resolve(option(args,'--application','')),'utf8'));
   const plan = JSON.parse(await readFile(join(directory,'plan.json'),'utf8'));
   if (plan.format === 'protean-recurrence-evaluation/1') {
     console.log(json(await runRecurrence(directory, {binary, driver: resolve(option(args, '--driver', '')),
-      applicationPath: resolve(option(args, '--application', '')), credential})));
+      applicationPath: resolve(option(args, '--application', '')), credential, chatgptAccount, siwcBin, siwcAuthDir})));
   } else {
+  assert(credential, 'This suite requires --credential-file; ChatGPT plan inference is supported by recurrence.');
   assert.equal(plan.format,'protean-workspace-evaluation/1');
   const build = command(binary,['describe-build']); assert.equal(build.application_assets_sha256, hash(await readFile(resolve(option(args,'--application','')))));
   const reports = [];
