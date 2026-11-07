@@ -24,6 +24,7 @@ pub const Error = error{InvalidParams} || std.mem.Allocator.Error;
 
 pub inline fn fromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
     @setEvalBranchQuota(100_000);
+    _ = comptime FiniteProjection(T).checked;
     if (comptime schemas.isText(T)) {
         const text = try json.text(value);
         if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidParams;
@@ -84,6 +85,7 @@ pub inline fn toJson(
     value: T,
 ) std.mem.Allocator.Error!json.Value {
     @setEvalBranchQuota(100_000);
+    _ = comptime FiniteProjection(T).checked;
     if (comptime schemas.isText(T)) return json.string(try a.dupe(u8, value.bytes));
     if (comptime contracts.native.wrapped(T)) {
         if (T.protean_value_kind == .bytes) {
@@ -112,6 +114,30 @@ pub inline fn toJson(
         .@"union" => try unionToJson(T, a, value),
         else => @compileError("unsupported native client contract: " ++ @typeName(T)),
     };
+}
+
+fn FiniteProjection(comptime T: type) type {
+    return struct {
+        const checked: void = checkFiniteProjection(T);
+    };
+}
+
+fn checkFiniteProjection(comptime T: type) void {
+    if (contracts.native.wrapped(T)) {
+        if (T.protean_value_kind == .vector)
+            _ = FiniteProjection(T.Child).checked;
+        return;
+    }
+    switch (@typeInfo(T)) {
+        .optional => |info| _ = FiniteProjection(info.child).checked,
+        .array => |info| if (info.len != 0) {
+            _ = FiniteProjection(info.child).checked;
+        },
+        inline .@"struct", .@"union" => |info| {
+            for (info.field_types) |Child| _ = FiniteProjection(Child).checked;
+        },
+        else => {},
+    }
 }
 
 fn optionalFromJson(comptime T: type, a: std.mem.Allocator, value: json.Value) Error!T {
