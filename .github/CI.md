@@ -35,11 +35,11 @@ TigerStyle and still cannot pass the terminal gate.
 | `owner-adaptive-control` | Nineteen adaptive owner tests across four independent processes: controls/recovery, projection resource failures, constructed succession, and delegated-answer ancestry. |
 | `owner-projection-repair` | The executable projection repair/restart witness. |
 | `owner-projection-boundaries` | Eight tests across three independent processes: projection authenticity, receipt/archive checks, current/profile/delegated bindings, and ChatGPT SSE controls and delegation. |
-| `owner-support` | Native unit/context and process-crash recovery checks, recurrence corpus/delivery grading, and the evaluation driver's sealed capture/SIGKILL/reopen witness. |
+| `owner-support` | Native unit/context and process-crash recovery checks and recurrence corpus/delivery grading. |
 | `workspace` | The 16 workspace execution and construction tests. |
 | `workspace-retention` | The three retained-work, wait and delegated-answer tests. |
 | `workspace-history` | The three history, cancellation-read and allocation-failure tests. |
-| `correspondence` | Independent source-oracle agreement, capsule restoration and duplicate-custody rejection. |
+| `correspondence` | Independent source-oracle agreement, capsule restoration, duplicate-custody rejection, and the evaluation driver's sealed capture/SIGKILL/reopen witness. |
 | `native` | Build and package the adaptive product; verify its manifest and protocol/state rejection through the isolated native deployment. |
 | `native-placement` | Execute the same current-run packaged binary through authenticated transfer, reopen, refusal and duplicate-acceptance checks. |
 | `downstream` | Independently acquire, authenticate, package, build, install and execute the public `addNativeSystem` consumer; reject altered Horos and Kosmos inputs. |

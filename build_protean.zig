@@ -1086,7 +1086,7 @@ const BuildGraph = struct {
         check.addFileArg2(s.adaptive_application, .{ .make_absolute = true });
         s.b.step("check-recurrence-driver", "Check sealed capture and external crash recovery")
             .dependOn(&check.step);
-        s.native_owner_support.dependOn(&check.step);
+        s.native_checks.dependOn(&check.step);
         const recurrence = nativeCheckCommand(s.b);
         recurrence.addArgs(&.{
             "node",
