@@ -237,7 +237,7 @@ function supportErrors(answer, request, expected, records) {
   return unique(errors);
 }
 
-function parseReport(raw) {
+export function parseReport(raw) {
   const value = JSON.parse(raw);
   if (!value || typeof value !== 'object' || Array.isArray(value) || !Array.isArray(value.answers)) throw new Error('Expected answer map');
   return value;
@@ -344,7 +344,9 @@ export function compareCampaign(plan, reports = []) {
   const complete = issues.length === 0 && attempts.every(a => a.present && a.grading && a.integrity === true && a.budget.compliant === true && finite(a.cost));
   const economics = complete ? aggregate.treatment.cost < aggregate.ordinary.cost && aggregate.treatment.sound >= aggregate.ordinary.sound && aggregate.treatment.critical === 0 : null;
   const disqualified = attempts.some(a => a.budget.compliant === false || (a.subject.arm === 'treatment' && a.grading?.critical > 0));
-  const milestone = complete && economics && qualifyingTraces > 0 ? true : disqualified || complete && (economics === false || attempts.filter(a => a.subject.arm === 'treatment').every(a => a.mechanism === false)) ? false : null;
+  const noQualifyingTrace = pairs.length === 3 && pairs.every(pair => pair.mechanism === false || pair.cost_positive === false);
+  const milestone = disqualified || economics === false || noQualifyingTrace ? false :
+    complete && economics === true && qualifyingTraces > 0 ? true : null;
   return {attempts, pairs, aggregate, qualifying_traces: qualifyingTraces, campaign_cost_positive: economics, complete_milestone: milestone,
     verdict: milestone === true ? 'cost_positive_improvement' : milestone === false ? 'no_practical_improvement' : 'undetermined',
     issues, additional_attempts: extraReports, earlier_payback_request: null};

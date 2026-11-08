@@ -239,6 +239,34 @@ test('an unfavorable attempt remains in campaign economics despite a positive ex
   assert.equal(result.complete_milestone, false);
 });
 
+test('a failed same-pair conjunction stays false even when other pairs save money', () => {
+  for (const expensive of [1, 2, 3]) {
+    const {plan, reports} = campaign();
+    for (const report of reports.filter(item => item.subject.arm === 'treatment')) {
+      report.cost.total = report.subject.pair === expensive ? 12 : 8;
+      report.reuse.recovered = report.subject.pair === expensive;
+    }
+    const result = compareCampaign(plan, reports);
+    assert.equal(result.campaign_cost_positive, true);
+    assert.equal(result.qualifying_traces, 0);
+    assert.equal(result.complete_milestone, false);
+    reports.find(item => item.subject.id === `${expensive === 1 ? 2 : 1}-treatment`).reuse.recovered = null;
+    assert.equal(compareCampaign(plan, reports).complete_milestone, null);
+  }
+});
+
+test('absent mechanisms disprove the milestone without inventing missing prices', () => {
+  const {plan, reports} = campaign();
+  plan.cost_model = {kind: 'unpriced', currency: 'USD'};
+  for (const report of reports.filter(item => item.subject.arm === 'treatment')) report.reuse.recovered = false;
+  const result = compareCampaign(plan, reports);
+  assert.equal(result.complete_milestone, false);
+  assert.equal(result.campaign_cost_positive, null);
+  assert.equal(result.aggregate.treatment.cost, null);
+  reports.find(item => item.subject.id === '1-treatment').reuse.recovered = null;
+  assert.equal(compareCampaign(plan, reports).complete_milestone, null);
+});
+
 test('missing reports, usage, prices, duplicate attempts and unknown recovery never become zero or success', () => {
   const {plan, reports} = campaign();
   const missing = compareCampaign(plan, reports.slice(1));

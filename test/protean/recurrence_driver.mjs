@@ -6,7 +6,9 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createInterface} from 'node:readline';
 import {readArchive} from './native_archive.mjs';
-import {decodeRecurrenceObservation, prepareRecurrence, evaluateRecurrence} from '../../tools/evaluation/workspace.mjs';
+import {decodeRecurrenceObservation, prepareRecurrence, evaluateRecurrence, RecurrenceTrace} from '../../tools/evaluation/workspace.mjs';
+import {contract} from './adaptive_capture_checks.mjs';
+import {decodeValue, encodeValue} from '../support/values.mjs';
 
 const executable = process.argv[2];
 const root = await realpath(await mkdtemp(join(tmpdir(), 'protean-recurrence-driver-')));
@@ -116,6 +118,43 @@ try {
   assert.deepEqual(await child.exited, [0, null]);
   const config = JSON.parse(await readFile(new URL('../../examples/adaptive/adaptive.example.json', import.meta.url)));
   const applicationPath = process.argv[3], application = JSON.parse(await readFile(applicationPath));
+  const preparedSchema = contract(application, 'AdaptivePrepared'), responseSchema = contract(application, 'CapturedResponse');
+  const visibility = new RecurrenceTrace({packets: [{id: 'initial', bytes: 'initial packet'},
+    {id: 'later', bytes: 'later packet'}]}, application);
+  const observeAttempt = (id, bytes, status, cut) => {
+    const prepared = decodeValue(preparedSchema, Buffer.from(captured.prepared_b64, 'base64'));
+    const response = decodeValue(responseSchema, Buffer.from(captured.response_b64, 'base64'));
+    prepared[2] = Buffer.from(JSON.stringify({input: [{role: 'user', content: bytes}]}));
+    response[0] = status;
+    visibility.dispatched({step: 'dispatched', attempt: id, epoch: cut, capability: 'agent.model.invoke.v13'}, cut);
+    visibility.observeAttempt({...captured, attempt: {...captured.attempt, id, preparation_cut: cut},
+      prepared_b64: Buffer.from(encodeValue(preparedSchema, prepared)).toString('base64'),
+      response_b64: Buffer.from(encodeValue(responseSchema, response)).toString('base64')}, cut, cut);
+  };
+  observeAttempt('initial', 'initial packet', 200, 1);
+  observeAttempt('failed', 'later packet', 503, 3);
+  assert.equal(visibility.visibility.get('later').confirmed, false);
+  observeAttempt('unrelated', 'initial packet', 200, 4);
+  assert.equal(visibility.visibility.get('later').confirmed, false);
+  observeAttempt('retry', 'later packet', 200, 6);
+  const exposed = visibility.visibility.get('later');
+  assert.equal(exposed.confirmed, true);
+  assert.equal(exposed.attempt_id, 'failed');
+  assert.equal(exposed.preparation_cut, 3);
+  assert.equal(exposed.visibility_epoch, 2);
+  observeAttempt('failed-again', 'later packet', 503, 7);
+  assert.equal(exposed.confirmed, true);
+  visibility.uses.push(...[1, 2].map(epoch => ({kind: 'description', artifact_id: 'late-index',
+    attempt_id: `use-${epoch}`, visibility_epoch: epoch, creation_seq: 5, observed_ms: epoch})));
+  assert.equal(visibility.qualifyingBoundary({epoch: 8}, 8), null);
+  const digest = Array(32).fill(1), task = Array(16).fill(2), reference = [digest, 1n];
+  const none = {tag: 0, value: null};
+  const value = [digest, task, reference, [1, reference, reference, reference],
+    [1, [reference], {tag: 1, value: reference}, {tag: 1, value: digest}, none, none, none, none, none, none]];
+  const decoded = decodeRecurrenceObservation({events: [], attempts: [], records: [{kind: 'workspace_value',
+    record_b64: Buffer.from(encodeValue(preflight.schemas.get('workspace_value'), value)).toString('base64')}]}, preflight.schemas);
+  assert.deepEqual(decoded.records[0].value.derivation.program, {digest, bytes: '1'});
+  assert.deepEqual(decoded.records[0].value.derivation.work, digest);
   const plan = await prepareRecurrence({config, directory: join(root, 'campaign'), binary: executable,
     driver: executable, applicationPath, intervalMs: 100,
     limits: {wall_ms: 15000, tokens: 512000, provider_attempts: 128, namespace_bytes: 1073741824, rss_bytes: 4294967296}});

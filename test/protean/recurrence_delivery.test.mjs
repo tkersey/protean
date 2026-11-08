@@ -69,6 +69,33 @@ test('only predeclared facts answer substantive questions', () => {
   assert.match(inherited.unresolved.reason, /No predeclared/);
 });
 
+test('queued input cannot authorize an unknown question or replace a declared fact', () => {
+  for (const throughEnd of [false, true]) {
+    for (const text of ['Which requests are blocked?', 'Model request failed. Retry?', '__proto__']) {
+      const delivery = new RecurrenceDelivery({id: 'attempt'}, {packets}, plan);
+      const next = delivery.next('task', {}, 100);
+      delivery.acknowledge(next, {message_id: 'm1'}, 101);
+      if (throughEnd) {
+        const end = delivery.next('task', {}, 200, ['next']);
+        delivery.acknowledge(end, {message_id: 'm2'}, 201);
+      }
+      assert.equal(delivery.next('task', {question: {...question, prompt: {prompt: text}}}, 250,
+        throughEnd ? ['next'] : []), null);
+      assert.match(delivery.unresolved.reason, /No predeclared/);
+    }
+    const delivery = new RecurrenceDelivery({id: 'attempt'}, {packets}, plan);
+    const next = delivery.next('task', {}, 100);
+    delivery.acknowledge(next, {message_id: 'm1'}, 101);
+    if (throughEnd) {
+      const end = delivery.next('task', {}, 200, ['next']);
+      delivery.acknowledge(end, {message_id: 'm2'}, 201);
+    }
+    const fact = {...question, prompt: {prompt: 'What is a component identity?'}};
+    assert.equal(delivery.next('task', {question: fact}, 250, throughEnd ? ['next'] : []).params.answer.value.message,
+      'Use exact string identities.');
+  }
+});
+
 test('preparation freezes six pairs and isolates all later bytes from snapshots and catalogs', async () => {
   const root = await mkdtemp(join(tmpdir(), 'protean-recurrence-'));
   try {
@@ -131,6 +158,60 @@ test('mechanical reuse preserves the first boundary and rejects equal effective 
   assert.equal(trace.first_boundary, boundary);
 });
 
+function computedDescriptionTrace() {
+  const trace = new RecurrenceTrace({packets: []}, {});
+  const reference = digest => ({digest, bytes: '1'});
+  const records = [
+    {kind: 'workspace_program', value: {id: 'program', artifact: reference('program-artifact'),
+      description: {source_kind: 'source_records'}}},
+    {kind: 'workspace_work', value: {id: 'work', program: 'program', outcome_kind: 'completed', result: reference('result')}},
+    {kind: 'workspace_value', value: {id: 'index', artifact: reference('index-artifact'), description: {value: reference('result')},
+      derivation: {kind: 'computation', sources: {items: []}, program: reference('program-artifact'), work: 'work'}}},
+    {kind: 'workspace_view', value: {id: 'view', artifact: reference('view-artifact'),
+      description: {values: {items: [reference('index-artifact')]}}}},
+  ];
+  for (const record of records) trace.records.set(`${record.kind}:${record.value.id}`,
+    {...record, created_epoch: 1, creation_seq: 1});
+  for (let epoch = 1; epoch <= 3; epoch++) {
+    trace.visibility.set(`packet-${epoch}`, {visibility_epoch: epoch, publication_epoch: epoch + 1, preparation_cut: epoch + 1});
+    trace.attempts.set(`attempt-${epoch}`, {id: `attempt-${epoch}`, selected_view: 'view-artifact',
+      capture: {disposition: 'complete'}, provider_response: true, visibility_epoch: epoch,
+      after_restart: epoch === 3});
+  }
+  return trace;
+}
+
+test('one authored computation can support later retained-description use and recovery', () => {
+  const trace = computedDescriptionTrace();
+  trace.descriptionUses(5, 100);
+  assert.equal(trace.uses.length, 3);
+  assert(trace.uses.every(use => use.kind === 'description' && use.artifact_id === 'index'));
+  assert.equal(trace.qualifyingBoundary({epoch: 5}, 100).artifact_id, 'index');
+  trace.cut = {artifact_id: 'index'};
+  assert.equal(trace.summary().post_restart_uses.length, 1);
+  trace.descriptionUses(6, 110);
+  assert.equal(trace.uses.length, 3);
+});
+
+test('computed description candidates require matching authored-program and completed-result lineage', () => {
+  const mutations = [
+    trace => trace.records.get('workspace_value:index').value.derivation.kind = 'acquisition',
+    trace => trace.records.get('workspace_value:index').value.derivation.program.digest = 'another-program',
+    trace => trace.records.get('workspace_value:index').value.derivation.work = 'missing-work',
+    trace => trace.records.get('workspace_value:index').value.description.value.digest = 'another-result',
+    trace => trace.records.get('workspace_program:program').value.description.source_kind = 'component_recipe',
+    trace => trace.records.get('workspace_work:work').value.outcome_kind = 'failed',
+    trace => trace.records.get('workspace_work:work').value.program = 'another-program',
+    trace => { for (const attempt of trace.attempts.values()) attempt.selected_view = null; },
+  ];
+  for (const mutate of mutations) {
+    const trace = computedDescriptionTrace();
+    mutate(trace);
+    trace.descriptionUses(5, 100);
+    assert.deepEqual(trace.uses, []);
+  }
+});
+
 function reviewFixture() {
   const uses = [
     {kind: 'program', artifact_id: 'p', work_id: 'w1', input_sha256: 'input-1', created_epoch: 2,
@@ -185,6 +266,28 @@ test('availability, late construction and a separate recovery fixture cannot est
   const separate = reviewFixture();
   separate.report.reuse.cut.task_id = 'another-task';
   assert.equal(adjudicateRecurrence(separate.report, separate.corpus, separate.judgment).recovered, false);
+});
+
+test('reuse adjudication keeps valid answer siblings and safely rejects malformed maps', () => {
+  const valid = reviewFixture();
+  const summary = valid.report.result.outcome.value.result.value;
+  const answers = JSON.parse(summary.summary).answers;
+  summary.summary = JSON.stringify({answers: [null, ...answers, {request_id: 'unrecognized'}]});
+  assert.equal(adjudicateRecurrence(valid.report, valid.corpus, valid.judgment).qualified, true);
+  for (const raw of ['broken', 'null', '{}', '{"answers":null}', '{"answers":{}}', '{"answers":[null]}']) {
+    const {report, corpus, judgment} = reviewFixture();
+    report.result.outcome.value.result.value.summary = raw;
+    assert.equal(adjudicateRecurrence(report, corpus, judgment).qualified, false);
+  }
+  for (const malformed of [undefined, null, 'p', {}]) {
+    const {report, corpus, judgment} = reviewFixture();
+    report.result.outcome.value.result.value.summary = JSON.stringify({answers: answers.map(answer =>
+      ({...answer, artifact_refs: malformed}))});
+    assert.equal(adjudicateRecurrence(report, corpus, judgment).qualified, false);
+  }
+  const duplicate = reviewFixture();
+  duplicate.report.result.outcome.value.result.value.summary = JSON.stringify({answers: [...answers, ...answers]});
+  assert.equal(adjudicateRecurrence(duplicate.report, duplicate.corpus, duplicate.judgment).qualified, false);
 });
 
 test('favorable later uses cannot replace an irrelevant first interruption proxy', () => {

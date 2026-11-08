@@ -91,8 +91,14 @@ The first eligible mechanical reuse observation is retained permanently. For
 programs it requires completed work on distinct canonical inputs across visibility
 epochs, with the authored program already present. For descriptions it requires
 the same authored value selected into completed model calls across epochs.
+Computed values can be candidates when their native derivation identifies the
+source-record program and completed work whose result they retain. One execution
+followed by repeated selection of its result can therefore establish description
+reuse; the retained value remains the artifact identity.
 Prepared requests retain packet visibility evidence; successful captures confirm
-delivery. Dispatch and capture observations bound the visibility time rather than
+delivery, including successful retries containing the same packet bytes. Confirmation
+never moves the original exposure or preparation cut forward. Dispatch and capture
+observations bound the visibility time rather than
 pretending to observe the provider's internal clock. The cut seals ordinary owner
 publication, requires no outstanding worker or uncertain acquisition, and stops
 pumping before external SIGKILL. A first eligible return that already dispatched a
@@ -118,7 +124,9 @@ release artifacts. Publish only deliberately selected, reviewed result material.
 Source and trace adjudication remains necessary. `adjudicateRecurrence` binds that
 review to the actual authored artifact hash and supported later answers. Review
 the represented relationship, the observed repeated work, effective inputs, raw
-record provenance, scope/invalidation and actual consumer use. Constant answers,
+record provenance, scope/invalidation and actual consumer use. Bind claimed authored
+source to the model's actual build or materialization action; source format and
+publication alone do not establish model authorship. Constant answers,
 case-ID lookup, unused artifacts and stale scope cannot qualify. Selected context
 establishes availability; supported output references strengthen observed use,
 without proving causal necessity. Review judgments and their evidence stay in the
@@ -145,7 +153,9 @@ and external adjudication are separate costs. The full positive milestone requir
 at least one same-trace discovery/reuse/recovery witness with a cost-positive matched
 comparison, plus lower summed treatment cost, at least as many sound answers and
 zero treatment critical errors across all three pairs. An existence witness does
-not establish reliability. Final answers arrive only at END, so an earlier
+not establish reliability. A known failure of every same-pair conjunction disproves
+the milestone; absent mechanisms do so even when monetary costs remain unknown.
+Final answers arrive only at END, so an earlier
 expenditure crossing cannot identify an earlier break-even request.
 
 Prepare a comparison without making provider calls:

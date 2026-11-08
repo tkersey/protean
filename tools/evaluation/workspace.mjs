@@ -9,7 +9,7 @@ import {ProteanClient} from '../../test/support/stdio-client.mts';
 import {readArchive} from '../../test/protean/native_archive.mjs';
 import {decodeSchema, decodeValue} from '../../test/support/values.mjs';
 import {contract} from '../../test/protean/adaptive_capture_checks.mjs';
-import {createCorpus, gradeReport, compareCampaign} from './recurrence.mjs';
+import {createCorpus, gradeReport, compareCampaign, parseReport} from './recurrence.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const json = value => JSON.stringify(value, (_key, v) => typeof v === 'bigint' ? v.toString() : v, 2);
@@ -457,12 +457,13 @@ export class RecurrenceDelivery {
       const text = question.prompt?.prompt;
       const known = typeof text === 'string' && Object.hasOwn(this.plan.questions, text)
         ? this.plan.questions[text] : undefined;
+      if (!known) { this.unresolved = {question, reason: 'No predeclared factual response.'}; return null; }
       const queued = this.operations.some(operation => operation.method === 'task.message' &&
         operation.acknowledged && !consumedPacketIds.includes(operation.packet_id));
-      if (!queued && !known) { this.unresolved = {question, reason: 'No predeclared factual response.'}; return null; }
-      if (!queued && known.kind === 'wait' && !due) return null;
-      const packet = !queued && known.kind === 'wait' ? due : null;
-      const answer = queued ? this.plan.queued_reminder : packet ? packet.bytes : known.text;
+      const waiting = known.kind === 'wait';
+      if (waiting && !queued && !due) return null;
+      const packet = waiting && !queued ? due : null;
+      const answer = waiting ? queued ? this.plan.queued_reminder : packet.bytes : known.text;
       return this.add('task.respond', {client_operation_id: `${this.subject.id}-question-${question.question_id}-${question.question_revision}`,
         task_id: taskId, question_id: question.question_id, question_revision: question.question_revision,
         request_digest: question.request_digest, answer: {schema_id: question.answer_schema_id, value: {message: answer}}}, packet, elapsed);
@@ -618,7 +619,7 @@ export function decodeRecurrenceObservation(observation, schemas) {
       } else if (row.kind === 'workspace_value') {
         value.description = {schema: reference(raw[3][1]), value: reference(raw[3][2]), provenance: reference(raw[3][3])};
         value.derivation = {kind: ['hypothesis', 'computation', 'acquisition', 'judgment', 'inspection', 'trial'][raw[4][0]],
-          sources: {items: raw[4][1].map(reference)}};
+          sources: {items: raw[4][1].map(reference)}, program: reference(optional(raw[4][2])), work: optional(raw[4][3])};
       } else {
         assert.equal(row.kind, 'workspace_view');
         value.description = {values: {items: raw[3][1].map(reference)}};
@@ -719,11 +720,28 @@ export class RecurrenceTrace {
         try { prior.usage = capturedUsage(raw) ?? null; } catch { prior.usage = null; }
         prior.response_sha256 = hash(Buffer.from(row.response_b64, 'base64'));
         prior.provider_response = raw[0] >= 200 && raw[0] < 300 && raw[7] === 2;
-        for (const visibility of this.visibility.values())
-          if (visibility.attempt_id === id) visibility.confirmed = row.capture.disposition === 'complete' && prior.provider_response;
+        if (row.capture.disposition === 'complete' && prior.provider_response) {
+          for (const packet of this.corpus.packets) {
+            const visibility = this.visibility.get(packet.id);
+            if (visibility && !visibility.confirmed && containsText(prior.body?.input, packet.bytes))
+              Object.assign(visibility, {confirmed: true, confirmation: {attempt_id: id,
+                prepared_sha256: prior.prepared_sha256, response_sha256: prior.response_sha256, observed_ms: elapsed}});
+          }
+        }
       }
     }
     this.attempts.set(id, prior);
+  }
+  descriptionCandidate(record) {
+    const derivation = record.value.derivation;
+    if (['hypothesis', 'judgment'].includes(derivation.kind)) return true;
+    if (derivation.kind !== 'computation' || !derivation.program || !derivation.work) return false;
+    const work = this.records.get(`workspace_work:${digestHex(derivation.work)}`);
+    const program = work && this.records.get(`workspace_program:${digestHex(work.value.program)}`);
+    return work?.value.outcome_kind === 'completed' && work.value.result &&
+      program?.value.description.source_kind === 'source_records' &&
+      referenceHex(program.value.artifact) === referenceHex(derivation.program) &&
+      referenceHex(work.value.result) === referenceHex(record.value.description.value);
   }
   descriptionUses(publicationEpoch, elapsed) {
     for (const attempt of this.attempts.values()) {
@@ -735,7 +753,7 @@ export class RecurrenceTrace {
       for (const reference of view.value.description.values.items) {
         const value = [...this.records.values()].find(record => record.kind === 'workspace_value' &&
           referenceHex(record.value.artifact) === referenceHex(reference));
-        if (!value || !['hypothesis', 'judgment'].includes(value.value.derivation.kind)) continue;
+        if (!value || !this.descriptionCandidate(value)) continue;
         const id = digestHex(value.value.id);
         if (this.uses.some(use => use.kind === 'description' && use.artifact_id === id && use.attempt_id === attempt.id)) continue;
         this.uses.push({kind: 'description', artifact_id: id, view_id: digestHex(view.value.id),
@@ -866,7 +884,7 @@ export function adjudicateRecurrence(report, corpus, judgment) {
   if (judgment.scope_handling_correct !== true) failures.push('Scope or invalidation was not established.');
   const answers = report.result?.outcome?.value?.result;
   let finalAnswers = [];
-  try { if (answers?.tag === 'report') finalAnswers = JSON.parse(answers.value.summary).answers; } catch {}
+  try { if (answers?.tag === 'report') finalAnswers = parseReport(answers.value.summary).answers; } catch {}
   const accepted = [];
   for (const proposed of judgment.uses ?? []) {
     const use = reuse.uses.find(item => item.artifact_id === judgment.artifact_id &&
@@ -874,11 +892,12 @@ export function adjudicateRecurrence(report, corpus, judgment) {
     const packet = corpus.packets.find(item => item.request_ids.includes(proposed.request_id));
     const visible = reuse.visibility.find(item => item.packet_id === packet?.id);
     const scored = report.grading.answers.find(item => item.request_id === proposed.request_id);
-    const answer = finalAnswers.find(item => item.request_id === proposed.request_id);
+    const matching = finalAnswers.filter(item => item?.request_id === proposed.request_id);
+    const answer = matching.length === 1 ? matching[0] : null;
     const boundRefs = use && [use.artifact_id, use.result_sha256, use.work_id, use.view_id].filter(Boolean);
     if (!use || !visible?.confirmed || (packet.offset_ms > 0 && !creationPrecedes(use, visible)) ||
       use.visibility_epoch < visible.visibility_epoch || scored?.sound !== true ||
-      !answer?.artifact_refs.some(ref => boundRefs.includes(ref)) ||
+      !Array.isArray(answer?.artifact_refs) || !answer.artifact_refs.some(ref => boundRefs.includes(ref)) ||
       proposed.effective_input_matches_records !== true || proposed.supports_answer !== true ||
       proposed.scope_valid !== true) {
       failures.push(`Unestablished use: ${proposed.request_id}.`); continue;
