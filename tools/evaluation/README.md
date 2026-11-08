@@ -1,11 +1,16 @@
 # Workspace model-use evaluation
 
-Live efficacy is unmeasured until this opt-in runner is executed with explicit
-inference authorization and its results are adjudicated. Deterministic fixtures
+Live efficacy claims require executing this opt-in runner with explicit inference
+authorization and adjudicating its results. Deterministic fixtures
 establish available choices and runtime behavior; their scripted actions are not
 evidence that a model independently discovered a useful computation or pivot.
 
 ## Recurring release investigations
+
+The [2026-11-07 comparison](results/recurrence-2026-11-07.md) reports measured
+correctness, resource use and unsuccessful discovery on one controlled workload
+and configuration. Its accounting retains the infrastructure-invalid first
+campaign and the separately authorized replacement campaign.
 
 The `recurrence` suite supplies one continuing task with twelve release-readiness
 requests. Three frozen corpus instances each run once with an ordinary persistent
