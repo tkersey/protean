@@ -272,6 +272,8 @@ export function gradeReport(rawSummary, corpus, visibleRequests = null) {
 
 const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 const sumKnown = values => values.every(finite) ? values.reduce((sum, value) => sum + value, 0) : null;
+const paybackQuality = (control, treatment) => [control?.sound, treatment?.sound, treatment?.critical].every(finite) ?
+  treatment.sound >= control.sound && treatment.critical === 0 : null;
 
 function compliance(report, limits) {
   const groups = [report?.metrics?.controller, report?.metrics?.delegated];
@@ -340,14 +342,15 @@ export function compareCampaign(plan, reports = []) {
     const within = [control, enabled].every(a => a.budget.compliant === true);
     const quality = valid && within ? enabled.grading.sound > control.grading.sound && enabled.grading.critical <= control.grading.critical : null;
     const costKnown = finite(control.cost) && finite(enabled.cost);
-    const positive = valid && within && costKnown ? enabled.grading.sound >= control.grading.sound && enabled.grading.critical === 0 && enabled.cost < control.cost : null;
+    const qualityEligible = valid ? paybackQuality(control.grading, enabled.grading) : null;
+    const positive = qualityEligible === false ? false : valid && within && costKnown ? enabled.cost < control.cost : null;
     let verdict = 'undetermined';
     if ([control, enabled].some(a => a.stream_complete === false) ||
       valid && [control, enabled].some(a => a.budget.compliant === false)) verdict = 'no_practical_improvement';
     else if (positive) verdict = 'cost_positive_improvement';
     else if (quality && costKnown && enabled.cost > control.cost) verdict = 'tradeoff';
     else if (quality) verdict = 'quality_improvement_within_common_envelope';
-    else if (valid && within && costKnown) verdict = 'no_practical_improvement';
+    else if (qualityEligible === false || valid && within && costKnown) verdict = 'no_practical_improvement';
     return {pair: id, ordinary: control.subject.id, treatment: enabled.subject.id, verdict, cost_positive: positive,
       quality_improvement: quality, mechanism: enabled.mechanism, cost_difference: costKnown ? enabled.cost - control.cost : null,
       sound_difference: valid ? enabled.grading.sound - control.grading.sound : null};
@@ -360,7 +363,8 @@ export function compareCampaign(plan, reports = []) {
   }));
   const qualifyingTraces = pairs.filter(p => p.cost_positive === true && p.mechanism === true).length;
   const complete = issues.length === 0 && attempts.every(a => a.present && a.grading && a.integrity === true && a.budget.compliant === true && finite(a.cost));
-  const economics = complete ? aggregate.treatment.cost < aggregate.ordinary.cost && aggregate.treatment.sound >= aggregate.ordinary.sound && aggregate.treatment.critical === 0 : null;
+  const qualityEligible = attempts.every(a => a.integrity === true) ? paybackQuality(aggregate.ordinary, aggregate.treatment) : null;
+  const economics = qualityEligible === false ? false : complete && qualityEligible === true ? aggregate.treatment.cost < aggregate.ordinary.cost : null;
   const disqualified = attempts.some(a => a.stream_complete === false || a.budget.compliant === false ||
     (a.subject.arm === 'treatment' && a.grading?.critical > 0));
   const noQualifyingTrace = pairs.length === 3 && pairs.every(pair => pair.mechanism === false || pair.cost_positive === false);

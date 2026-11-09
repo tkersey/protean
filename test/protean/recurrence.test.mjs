@@ -358,6 +358,71 @@ test('absent mechanisms disprove the milestone without inventing missing prices'
   assert.equal(compareCampaign(plan, reports).complete_milestone, null);
 });
 
+test('known quality deficits disprove payback despite unavailable prices', () => {
+  for (const unavailable of ['tariffs', 'charge']) {
+    for (const deficientPairs of [[1], [1, 2, 3]]) {
+      const {plan, reports} = campaign();
+      if (unavailable === 'tariffs') plan.cost_model = {kind: 'unpriced', currency: 'USD'};
+      for (const report of reports) {
+        report.plan_sha256 = campaignIdentity(plan);
+        if (report.subject.arm === 'treatment' && deficientPairs.includes(report.subject.pair)) {
+          report.grading.totals = {requests: 12, sound: 11, critical: 0, unanswered: 1};
+          report.cost = {...report.cost, complete: false, total: null};
+        }
+      }
+      const result = compareCampaign(plan, reports);
+      assert.equal(result.aggregate.ordinary.sound, 36);
+      assert.equal(result.aggregate.treatment.sound, 36 - deficientPairs.length);
+      assert.equal(result.aggregate.treatment.cost, null);
+      assert.equal(result.campaign_cost_positive, false);
+      assert.equal(result.complete_milestone, false);
+      assert.equal(result.verdict, 'no_practical_improvement');
+      for (const pair of result.pairs.filter(pair => deficientPairs.includes(pair.pair))) {
+        assert.equal(pair.cost_positive, false);
+        assert.equal(pair.verdict, 'no_practical_improvement');
+        assert.equal(pair.cost_difference, null);
+      }
+    }
+  }
+});
+
+test('pair quality losses remain separate from compensated campaign quality', () => {
+  const {plan, reports} = campaign();
+  plan.cost_model = {kind: 'unpriced', currency: 'USD'};
+  for (const report of reports) report.plan_sha256 = campaignIdentity(plan);
+  reports.find(report => report.subject.id === '1-treatment').grading.totals = {requests: 12, sound: 11, critical: 0, unanswered: 1};
+  reports.find(report => report.subject.id === '2-ordinary').grading.totals = {requests: 12, sound: 10, critical: 0, unanswered: 2};
+  const result = compareCampaign(plan, reports);
+  assert.equal(result.aggregate.treatment.sound, 35);
+  assert.equal(result.aggregate.ordinary.sound, 34);
+  assert.equal(result.pairs[0].cost_positive, false);
+  assert.equal(result.pairs[1].verdict, 'quality_improvement_within_common_envelope');
+  assert.equal(result.campaign_cost_positive, null);
+  assert.equal(result.complete_milestone, null);
+  for (const report of reports.filter(report => report.subject.arm === 'treatment' && report.subject.pair !== 1)) report.reuse.recovered = false;
+  assert.equal(compareCampaign(plan, reports).complete_milestone, false);
+});
+
+test('unpriced quality evidence must be attributable and sufficient to disprove payback', () => {
+  for (const evidence of ['equal', 'gain', 'missing', 'foreign', 'violated']) {
+    const {plan, reports} = campaign();
+    plan.cost_model = {kind: 'unpriced', currency: 'USD'};
+    for (const report of reports) report.plan_sha256 = campaignIdentity(plan);
+    const treatment = reports.find(report => report.subject.id === '1-treatment');
+    const control = reports.find(report => report.subject.id === '1-ordinary');
+    if (evidence === 'gain') control.grading.totals = {requests: 12, sound: 11, critical: 0, unanswered: 1};
+    if (['missing', 'foreign', 'violated'].includes(evidence)) treatment.grading.totals = {requests: 12, sound: 11, critical: 0, unanswered: 1};
+    if (evidence === 'missing') delete control.grading;
+    if (evidence === 'foreign') treatment.subject = {...treatment.subject, config_sha256: 'foreign'};
+    if (evidence === 'violated') treatment.arm_violations.push('excluded operation');
+    const result = compareCampaign(plan, reports);
+    assert.equal(result.pairs[0].cost_positive, null);
+    assert.equal(result.campaign_cost_positive, null);
+    assert.equal(result.complete_milestone, null);
+    assert.equal(result.aggregate.treatment.cost, null);
+  }
+});
+
 test('missing reports, usage, prices, duplicate attempts and unknown recovery never become zero or success', () => {
   const {plan, reports} = campaign();
   const missing = compareCampaign(plan, reports.slice(1));
