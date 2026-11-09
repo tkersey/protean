@@ -223,6 +223,7 @@ const BuildGraph = struct {
                 s.native_target.result.abi == .musl);
         if (product_supported) {
             s.productBuild();
+            s.recurrenceDriver();
             s.nativeSmoke();
             s.runtimeDiagnostics();
             s.httpsConsumer();
@@ -538,6 +539,7 @@ const BuildGraph = struct {
             "src",
             "runtime/native",
             "tools/native",
+            "tools/evaluation",
             "examples/adaptive",
             "test/protean",
             "test/protean/https_probe.zig",
@@ -1056,6 +1058,43 @@ const BuildGraph = struct {
         adaptive_reference.dependOn(&s.adaptive_product.install.step);
         adaptive_reference.dependOn(s.adaptive_image_step);
         s.native_executable.dependOn(adaptive_reference);
+    }
+
+    fn recurrenceDriver(s: *BuildGraph) void {
+        const root = s.b.allocator.create(std.Build.Module) catch @panic("out of memory");
+        root.init(s.b, .{ .existing = s.adaptive_product.executable.root_module });
+        root.root_source_file = s.b.path("tools/evaluation/recurrence_entry.zig");
+        const executable = s.b.addTest(.{
+            .name = "protean-recurrence-driver",
+            .root_module = root,
+            .test_runner = .{
+                .path = s.b.path("tools/evaluation/recurrence_driver.zig"),
+                .mode = .simple,
+            },
+            .use_llvm = if (linuxX86(s.native_target)) true else null,
+        });
+        const install = s.b.addInstallArtifact(executable, .{});
+        const driver = s.b.step(
+            "recurrence-driver",
+            "Build the private recurrence evaluation driver",
+        );
+        driver.dependOn(&install.step);
+        driver.dependOn(s.adaptive_image_step);
+        const check = nativeCheckCommand(s.b);
+        check.addArgs(&.{ "node", "test/protean/recurrence_driver.mjs" });
+        check.addFileArg2(executable.getEmittedBin(), .{ .make_absolute = true });
+        check.addFileArg2(s.adaptive_application, .{ .make_absolute = true });
+        s.b.step("check-recurrence-driver", "Check sealed capture and external crash recovery")
+            .dependOn(&check.step);
+        s.native_checks.dependOn(&check.step);
+        const recurrence = nativeCheckCommand(s.b);
+        recurrence.addArgs(&.{
+            "node",
+            "--test",
+            "test/protean/recurrence.test.mjs",
+            "test/protean/recurrence_delivery.test.mjs",
+        });
+        s.native_owner_support.dependOn(&recurrence.step);
     }
 
     fn nativeSmoke(s: *BuildGraph) void {

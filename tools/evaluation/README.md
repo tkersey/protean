@@ -1,9 +1,191 @@
 # Workspace model-use evaluation
 
-Live efficacy is unmeasured until this opt-in runner is executed with explicit
-inference authorization and its results are adjudicated. Deterministic fixtures
+Live efficacy claims require executing this opt-in runner with explicit inference
+authorization and adjudicating its results. Deterministic fixtures
 establish available choices and runtime behavior; their scripted actions are not
 evidence that a model independently discovered a useful computation or pivot.
+
+## Recurring release investigations
+
+The [2026-11-07 comparison](results/recurrence-2026-11-07.md) reports measured
+correctness, resource use and unsuccessful discovery on one controlled workload
+and configuration. Its accounting retains the infrastructure-invalid first
+campaign and the separately authorized replacement campaign.
+
+The `recurrence` suite supplies one continuing task with twelve release-readiness
+requests. Three frozen corpus instances each run once with an ordinary persistent
+agent and once with construction and retention enabled. Order is treatment/control,
+control/treatment, treatment/control. Controller reconstruction stays disabled;
+both arms use the packaged application and runtime. Build/run gates disable those
+capabilities in the ordinary arm; its other exclusions remain audited experimental
+conditions, not security boundaries.
+
+Build the private owner driver and run its offline boundary checks:
+
+```sh
+zig build recurrence-driver check-recurrence-driver -Doptimize=safe
+node --test test/protean/recurrence.test.mjs test/protean/recurrence_delivery.test.mjs
+```
+
+The driver uses the actual adaptive environment, task owner, namespace and worker.
+Its private NDJSON channel forwards ordinary task operations and explicitly asks
+for one owner turn. It never pumps immediately after completing a worker. No
+production protocol method or persistent artifact type is added. Both arms use
+the same driver; only treatment requests the interruption.
+
+Prepare the exact six attempts without provider calls:
+
+```sh
+node tools/evaluation/workspace.mjs prepare --suite recurrence \
+  --config /private/operator-approved-adaptive.json \
+  --binary zig-out/bin/protean \
+  --driver zig-out/bin/protean-recurrence-driver \
+  --application zig-out/protean/adaptive/application.json \
+  --cost-model /private/deployment-tariff.json \
+  --out /private/recurrence-campaign
+```
+
+Preparation freezes the realized packet bytes, arrival offsets, membership,
+expected answers, oracle/evaluator source hashes, application/product/driver hashes,
+profile, effort, limits and cost model. It refuses an existing campaign directory.
+Each initial snapshot and task contains only the visible contract and first two
+requests. Later raw documents stay outside snapshots, task inputs and tool input
+catalogs until scheduled delivery. Generated documents are explicitly a controlled
+audit workload, with exact immutable identities rather than production incidents.
+
+The default schedule delivers the next ten requests at 180-second intervals and
+END at 1980 seconds, under the original 2700-second wall deadline. The common
+acceptance ceilings are 512,000 reported input plus output tokens, 128 physical
+provider attempts, 1 GiB retained namespace storage and 4 GiB sampled RSS. The
+wall watchdog stops execution. Other ceilings are assessed afterward; missing
+usage and a sampled RSS observation do not establish hard native quotas.
+
+There is one `task.submit` and one final answer map. A terminal report ends the
+task; remaining requests are unanswered. A pending question can receive only a
+predeclared factual answer or an already-due packet. The exact ordinary wait phrase
+is part of the visible communication contract. Unknown substantive questions leave
+the attempt incomplete. If inputs are already queued, the predefined response asks
+the controller to consume them without duplicating their facts through the answer.
+Operation IDs, chosen channels and complete RPC arguments are retained outside the
+driver before sending; a lost acknowledgment retains the identical replay operation.
+
+Start only with separately authorized inference and its selected source:
+
+```sh
+node tools/evaluation/workspace.mjs run \
+  --plan /private/recurrence-campaign \
+  --binary zig-out/bin/protean \
+  --driver zig-out/bin/protean-recurrence-driver \
+  --application zig-out/protean/adaptive/application.json \
+  --authorize-inference --credential-file /private/credential-file
+```
+
+For ChatGPT plan inference, prepare with the ChatGPT configuration example and
+replace `--credential-file` with `--chatgpt-account personal`. Optional
+`--siwc-bin` and `--siwc-auth-dir` selections are forwarded unchanged on restart.
+The two credential routes are mutually exclusive. SIWC uses the existing native
+adapter; unknown plan or deployment charges remain unknown.
+
+Each attempt gets a fresh namespace and is never overwritten or automatically
+retried. Failures remain in the inclusive result. Restart during the declared cut
+reopens the same namespace and task, retains operation identities, and continues
+the original arrival clock and deadline. It does not submit another task, rebuild
+the retained artifact or reacquire a captured response.
+
+The first eligible mechanical reuse observation is retained permanently. For
+programs it requires completed work on distinct canonical inputs across visibility
+epochs, with the authored program already present. For descriptions it requires
+the same authored value selected into completed model calls across epochs.
+Computed values can be candidates when their native derivation identifies the
+source-record program and completed work whose result they retain. One execution
+followed by repeated selection of its result can therefore establish description
+reuse; the retained value remains the artifact identity.
+Public artifact content IDs are distinct from task custody IDs. Projected views
+credit only the retained values actually rendered by their value, source or
+computed blocks; projection dependencies alone do not establish exposure.
+Prepared requests retain packet visibility evidence; successful captures confirm
+delivery, including successful retries containing the same packet bytes. Confirmation
+never moves the original exposure or preparation cut forward. Dispatch and capture
+observations bound the visibility time rather than
+pretending to observe the provider's internal clock. The cut seals ordinary owner
+publication, requires no outstanding worker or uncertain acquisition, and stops
+pumping before external SIGKILL. A first eligible return that already dispatched a
+later request leaves the cut unestablished; it cannot be replaced with a favorable
+later cut. The offline SIGKILL fixture proves custody, not model discovery.
+Controller and delegated model preparations both retain their actual selected
+views and feed the same description-use observations.
+The supervisor owns every driver process group, including reopened and final-export
+processes, and terminates local helpers on SIGINT, SIGTERM, normal exit, timeout
+and close. This does not cover uncatchable supervisor termination or prove cancellation of inference
+already received by a remote provider.
+
+The independent oracle derives obligations and support from each request's raw
+immutable evidence universe. The final report summary must be a complete JSON
+object with an `answers` array, using the format given in the visible contract.
+Correct status words alone earn no credit. Invalid entries and duplicate request
+IDs lose credit independently; malformed outer JSON is never salvaged. False-ready
+and unsupported-blocker claims are critical errors. Later documents do not resolve
+an earlier request's missing or conflicting premises. Requests that never became
+visible remain unanswered, even if an early report guesses their answers.
+Comparison requires the report's exact frozen subject and plan digest, observed
+END visibility, and terminal completion. Correct answers before END retain their
+grading but cannot establish complete-stream payback. Legacy reports without
+these bindings require explicit evidence review and receive no automatic credit.
+Mismatched or duplicate reports retain their available expenditure separately;
+they cannot establish positive or negative outcomes for the planned attempts.
+
+`report.json` retains raw answers, grading, owner events, selected contexts,
+program/value/work/input/result identities, physical attempts, usage, artifact
+contents, scope-review slots and recovery evidence. `results.json` and `results.md`
+include individual pairs, aggregate counts/costs, failures and cumulative expenditure
+traces. Keep this directory private: captures and prepared requests are not public
+release artifacts. Publish only deliberately selected, reviewed result material.
+Archive totals and expenditure curves share the native occurrence classifier.
+Known not-sent attempts leave provider expenditure when that evidence is observed;
+earlier unknown usage and all preparation and elapsed costs remain visible.
+Finalization retains completed captures before closing the driver and refreshes
+committed attempt records after reopening. Final expenditure uses the archive's
+physical-attempt inventory. Lost dispatch acknowledgments leave timing unknown;
+missing inventory leaves counts unknown with observed lower bounds. Known token
+subtotals above the ceiling establish an overrun even when missing usage leaves
+the exact total unknown.
+
+Source and trace adjudication remains necessary. `adjudicateRecurrence` binds that
+review to the actual authored artifact hash and supported later answers. Review
+the represented relationship, the observed repeated work, effective inputs, raw
+record provenance, scope/invalidation and actual consumer use. Bind claimed authored
+source to the model's actual build or materialization action; source format and
+publication alone do not establish model authorship. Constant answers,
+case-ID lookup, unused artifacts and stale scope cannot qualify. Selected context
+establishes availability; supported output references strengthen observed use,
+without proving causal necessity. Review judgments and their evidence stay in the
+attempt report. A missing cut or post-restart use is a failed mechanism outcome,
+not infrastructure uncertainty. The review must accept the exact two uses that
+triggered the first cut and a distinct supported use after reopening. Favorable
+later uses cannot replace an incidental or invalid original interruption trigger.
+
+For monetary conclusions, a tariff file must contain `kind: "tariff"`, `id`,
+`currency`, `predeclared: true`, `provider_source`, `deployment_source`,
+`input_per_million`, `cached_input_per_million`, `output_per_million`,
+`host_per_second`, `host_includes_attempt_storage: true`,
+`storage_per_byte_second` and `retention_seconds`. Bind actual approved tariffs or
+deployment charges, including any genuinely free components. Host time covers
+startup through finalization and includes storage during execution; separate
+storage pricing covers the declared subsequent retention period. Cache discounts
+need the corresponding usage breakdown. Unknown charges never become zero. Omitting
+the tariff allows preparation but leaves monetary efficacy undetermined.
+
+All discovery, compilation, unsuccessful work, inference, fallback, maintenance,
+interruption and finalization costs remain included. Compiler/publication intervals
+are not added to elapsed time as though disjoint. One-time experiment engineering
+and external adjudication are separate costs. The full positive milestone requires
+at least one same-trace discovery/reuse/recovery witness with a cost-positive matched
+comparison, plus lower summed treatment cost, at least as many sound answers and
+zero treatment critical errors across all three pairs. An existence witness does
+not establish reliability. A known failure of every same-pair conjunction disproves
+the milestone; absent mechanisms do so even when monetary costs remain unknown.
+Final answers arrive only at END, so an earlier
+expenditure crossing cannot identify an earlier break-even request.
 
 Prepare a comparison without making provider calls:
 
