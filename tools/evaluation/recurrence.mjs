@@ -276,12 +276,16 @@ const sumKnown = values => values.every(finite) ? values.reduce((sum, value) => 
 function compliance(report, limits) {
   const groups = [report?.metrics?.controller, report?.metrics?.delegated];
   const tokens = groups.every(g => g && g.missing_usage === 0) ? sumKnown(groups.flatMap(g => [g.input_tokens, g.output_tokens])) : null;
+  const knownTokens = groups.flatMap(g => [g?.input_tokens, g?.output_tokens]).filter(finite);
+  const lowerBounds = {tokens: knownTokens.length ? sumKnown(knownTokens) : null};
   const calls = sumKnown(groups.map(g => g?.calls));
   const measurements = {wall_ms: report?.elapsed_ms, tokens, provider_attempts: calls,
     namespace_bytes: report?.retained_namespace_bytes, rss_bytes: report?.peak_rss_sampled_bytes};
   const checks = Object.fromEntries(Object.entries(measurements).map(([name, value]) => [name,
     finite(value) && finite(limits?.[name]) ? value <= limits[name] : null]));
-  return {measurements, checks, compliant: Object.values(checks).includes(false) ? false : Object.values(checks).includes(null) ? null : true};
+  if (finite(lowerBounds.tokens) && finite(limits?.tokens) && lowerBounds.tokens > limits.tokens) checks.tokens = false;
+  return {measurements, lower_bounds: lowerBounds, checks,
+    compliant: Object.values(checks).includes(false) ? false : Object.values(checks).includes(null) ? null : true};
 }
 
 export function compareCampaign(plan, reports = []) {
@@ -292,13 +296,16 @@ export function compareCampaign(plan, reports = []) {
   const costModelKnown = model && typeof model.id === 'string' && model.id.length > 0 &&
     typeof model.currency === 'string' && model.currency.length > 0 && model.predeclared === true;
   if (!costModelKnown) issues.push('Predeclared cost model unavailable');
+  const unattributedReports = [];
   const attempts = cases.map(subject => {
     const matches = reports.filter(r => r?.subject?.id === subject.id);
-    const report = matches.length === 1 ? matches[0] : null;
-    const identityMatches = !!report && canonical(report.subject) === canonical(subject) &&
-      report.plan_sha256 === campaignIdentity(plan);
-    if (!report) issues.push(`${subject.id}: ${matches.length ? 'duplicate reports' : 'missing report'}`);
-    if (report && !identityMatches) issues.push(`${subject.id}: subject mismatch`);
+    const received = matches.length === 1 ? matches[0] : null;
+    const identityMatches = !!received && canonical(received.subject) === canonical(subject) &&
+      received.plan_sha256 === campaignIdentity(plan);
+    if (!received) issues.push(`${subject.id}: ${matches.length ? 'duplicate reports' : 'missing report'}`);
+    if (received && !identityMatches) issues.push(`${subject.id}: subject mismatch`);
+    if (!identityMatches) unattributedReports.push(...matches);
+    const report = identityMatches ? received : null;
     const totals = report?.grading?.totals;
     const gradingKnown = totals && ['requests', 'sound', 'critical', 'unanswered'].every(k => Number.isSafeInteger(totals[k]) && totals[k] >= 0) &&
       totals.requests === 12 && totals.sound + totals.critical <= totals.requests && totals.sound + totals.unanswered <= totals.requests;
@@ -308,7 +315,7 @@ export function compareCampaign(plan, reports = []) {
       item.packet_id === end.id && item.confirmed === true && finite(item.dispatch_ms) &&
       item.dispatch_ms >= end.offset_ms && item.dispatch_ms <= report.elapsed_ms) : null;
     const streamComplete = endVisible === null || !report?.status ? null : endVisible && report.status.status === 'completed';
-    const integrity = !integrityKnown ? null : !identityMatches || report.arm_violations.length || report.errors.length ||
+    const integrity = received && !identityMatches ? false : !integrityKnown ? null : report.arm_violations.length || report.errors.length ||
       streamComplete === false ? false : streamComplete === true ? true : null;
     const budget = compliance(report, plan.limits);
     const cost = costModelKnown && report?.cost?.complete === true && finite(report.cost.total) &&
@@ -316,7 +323,7 @@ export function compareCampaign(plan, reports = []) {
     const reuse = report?.reuse;
     const mechanism = subject.arm === 'treatment' ? reuse?.qualified === false || reuse?.recovered === false ? false :
       reuse?.qualified === true && reuse?.recovered === true && integrity === true ? true : null : null;
-    return {subject, present: !!report, stream_complete: streamComplete, grading: gradingKnown ? totals : null, integrity, budget, cost,
+    return {subject, present: !!received, stream_complete: streamComplete, grading: gradingKnown ? totals : null, integrity, budget, cost,
       currency: model?.currency ?? null, mechanism, errors: report?.errors ?? null, arm_violations: report?.arm_violations ?? null};
   });
   const extraReports = reports.filter(r => !cases.some(c => c.id === r?.subject?.id));
@@ -361,5 +368,5 @@ export function compareCampaign(plan, reports = []) {
     complete && economics === true && qualifyingTraces > 0 ? true : null;
   return {attempts, pairs, aggregate, qualifying_traces: qualifyingTraces, campaign_cost_positive: economics, complete_milestone: milestone,
     verdict: milestone === true ? 'cost_positive_improvement' : milestone === false ? 'no_practical_improvement' : 'undetermined',
-    issues, additional_attempts: extraReports, earlier_payback_request: null};
+    issues, additional_attempts: extraReports, unattributed_reports: unattributedReports, earlier_payback_request: null};
 }

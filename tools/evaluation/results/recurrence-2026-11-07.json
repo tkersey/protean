@@ -5863,7 +5863,7 @@
   },
   "evidence_revalidation": {
     "basis": "Original immutable plans, reports and native archives; public program content identities corrected and custody identities retained separately. Legacy reports lack the new plan binding field and are not silently upgraded for current automated comparison.",
-    "workspace_source_sha256": "1bdf65e06175d25e7ef3ae35e766ba0730a05263e0b565a2030502785c95f33f",
+    "workspace_source_sha256": "f076cf063898a6cb122bf42257f0c92bc304af6236c5cd4f519520f47c137506",
     "original_report_bytes_unchanged": true
   }
 }

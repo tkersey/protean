@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import {once} from 'node:events';
 import {mkdtemp, mkdir, readFile, rm, realpath, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -7,16 +8,16 @@ import {join} from 'node:path';
 import {createInterface} from 'node:readline';
 import {setTimeout as delay} from 'node:timers/promises';
 import {readArchive} from './native_archive.mjs';
-import {decodeRecurrenceObservation, prepareRecurrence, evaluateRecurrence, presentedValues, RecurrenceTrace} from '../../tools/evaluation/workspace.mjs';
+import {decodeRecurrenceObservation, prepareRecurrence, evaluateRecurrence, presentedValues, RecurrenceTrace, RecurrenceDriver, workspaceMetrics} from '../../tools/evaluation/workspace.mjs';
 import {contract} from './adaptive_capture_checks.mjs';
 import {decodeValue, encodeValue} from '../support/values.mjs';
 
 const executable = process.argv[2];
 const root = await realpath(await mkdtemp(join(tmpdir(), 'protean-recurrence-driver-')));
 const children = [];
-function launch(task, state = 'state') {
+function launch(task, state = 'state', options = []) {
   const child = spawn(executable, ['--offline', '--state-dir', join(root, state),
-    ...(task ? ['--profile-task', task] : [])], {stdio: ['pipe', 'pipe', 'pipe']});
+    ...options, ...(task ? ['--profile-task', task] : [])], {stdio: ['pipe', 'pipe', 'pipe']});
   children.push(child);
   child.exited = once(child, 'exit');
   let sequence = 0, stderr = '';
@@ -158,6 +159,96 @@ try {
   'native preparation and captured response must use the projected view');
   fixtureChild.stdin.end();
   assert.deepEqual(await fixtureChild.exited, [0, null]);
+  const delegatedSnapshot = join(root, 'delegated-snapshot'), delegatedConfigPath = join(root, 'delegated.json');
+  await mkdir(delegatedSnapshot);
+  await writeFile(join(delegatedSnapshot, 'fixture.txt'), 'Native delegated fixture evidence.');
+  await writeFile(delegatedConfigPath, JSON.stringify({...config, adaptive: {...config.adaptive,
+    workspace: 'recurrence-native-fixture', snapshot_root: delegatedSnapshot,
+    endpoint: 'https://127.0.0.1:1/v1/responses', skills: []},
+  tools: {build: true, run: true, reconstruct: false, inputs: []}}));
+  const delegatedOptions = ['--fixture-workspace', '--config', delegatedConfigPath];
+  let delegatedChild = launch(null, 'delegated-state', delegatedOptions);
+  const delegatedProfile = await delegatedChild.call('describe');
+  const delegatedTask = await delegatedChild.call('task.submit', {...submission,
+    profile_id: delegatedProfile.profile.id});
+  const packets = [1, 2, 3].map(number => ({id: `delegated-${number}`, bytes: `Native delegated packet ${number}.`}));
+  const delegatedTrace = new RecurrenceTrace({packets}, application), delegatedObservations = [];
+  let retainedValue;
+  for (const [index, packet] of packets.entries()) {
+    if (index === 2) {
+      delegatedTrace.cut = {artifact_id: retainedValue.id};
+      assert(delegatedChild.kill('SIGKILL'));
+      assert.deepEqual(await delegatedChild.exited, [null, 'SIGKILL']);
+      delegatedChild = launch(delegatedTask.task_id, 'delegated-state', delegatedOptions);
+      const status = await delegatedChild.call('task.status', {task_id: delegatedTask.task_id});
+      const reopened = decodeRecurrenceObservation(await delegatedChild.call('evaluation.observe',
+        {task_id: delegatedTask.task_id}), preflight.schemas);
+      const previous = [...delegatedTrace.attempts.values()].filter(row => row.capability === 'protean.workspace.inference/2');
+      for (const saved of previous) {
+        const restored = reopened.attempts.find(row => hex(row.attempt.id) === saved.id);
+        assert(restored?.capture);
+        assert.equal(createHash('sha256').update(Buffer.from(restored.prepared_b64, 'base64')).digest('hex'), saved.prepared_sha256);
+        assert.equal(createHash('sha256').update(Buffer.from(restored.response_b64, 'base64')).digest('hex'), saved.response_sha256);
+      }
+      delegatedTrace.observe(reopened, index);
+      await delegatedChild.call('task.resume', {client_operation_id: 'delegated-fixture-resume',
+        task_id: delegatedTask.task_id, expected_revision: status.revision});
+    }
+    const result = await delegatedChild.call('evaluation.fixture', {task_id: delegatedTask.task_id,
+      delegated: true, packet: packet.bytes, ...(retainedValue ? {value: retainedValue} : {})});
+    retainedValue ??= result.value;
+    assert.deepEqual(result.value, retainedValue);
+    delegatedTrace.dispatched({step: 'dispatched', attempt: result.attempt,
+      capability: 'protean.workspace.inference/2', epoch: index + 1}, index + 1);
+    let found;
+    for (let page = 0; page < 20; page++) {
+      const observation = decodeRecurrenceObservation(await delegatedChild.call('evaluation.observe',
+        {task_id: delegatedTask.task_id, after: String(delegatedTrace.cursor)}), preflight.schemas);
+      delegatedObservations.push(observation);
+      found ??= observation.attempts.find(row => hex(row.attempt.id) === result.attempt);
+      delegatedTrace.observe(observation, index + 1);
+      if (observation.events.length < 128) break;
+    }
+    assert.equal(found?.capture?.disposition, 'complete');
+    assert.equal(found.prepared_context.selected_view, result.view);
+    assert(Buffer.from(found.prepared_context.body_b64, 'base64').toString().includes(packet.bytes));
+    const attempt = delegatedTrace.attempts.get(result.attempt);
+    assert.equal(attempt.selected_view, result.view);
+    assert.deepEqual(attempt.usage, {input_tokens: 7, output_tokens: 3, total_tokens: 10});
+    assert.equal(delegatedTrace.visibility.get(packet.id).confirmed, true);
+    const uses = delegatedTrace.uses.filter(use => use.kind === 'description');
+    assert.equal(uses.length, index + 1);
+    assert(uses.every(use => use.artifact_id === retainedValue.id));
+  }
+  assert.equal(delegatedTrace.first_boundary.kind, 'description');
+  assert.equal(delegatedTrace.first_boundary.artifact_id, retainedValue.id);
+  assert.equal(delegatedTrace.summary().post_restart_uses.length, 1);
+  const noCapture = new RecurrenceTrace({packets}, application);
+  for (const observation of delegatedObservations) {
+    for (const row of observation.attempts) if (row.prepared_context && !noCapture.attempts.has(hex(row.attempt.id)))
+      noCapture.dispatched({step: 'dispatched', attempt: row.attempt.id,
+        capability: 'protean.workspace.inference/2', epoch: observation.epoch}, observation.epoch);
+    noCapture.observe({...observation, attempts: observation.attempts.map(row =>
+      row.prepared_context ? {...row, capture: undefined, response_b64: undefined} : row)}, observation.epoch);
+  }
+  assert.equal(noCapture.uses.filter(use => use.kind === 'description').length, 0);
+  const sameEpoch = new RecurrenceTrace({packets: [packets[0]]}, application);
+  for (const observation of delegatedObservations) {
+    for (const row of observation.attempts) if (row.prepared_context && !sameEpoch.attempts.has(hex(row.attempt.id)))
+      sameEpoch.dispatched({step: 'dispatched', attempt: row.attempt.id,
+        capability: 'protean.workspace.inference/2', epoch: observation.epoch}, observation.epoch);
+    sameEpoch.observe(observation, observation.epoch);
+  }
+  assert.equal(sameEpoch.first_boundary, null);
+  const delegatedArchivePath = join(root, 'delegated.agnx');
+  await delegatedChild.call('evaluation.export', {task_id: delegatedTask.task_id, path: delegatedArchivePath});
+  const delegatedMetrics = workspaceMetrics(readArchive(await readFile(delegatedArchivePath)), application);
+  assert.equal(delegatedMetrics.delegated.calls, 3);
+  assert.equal(delegatedMetrics.delegated.missing_usage, 0);
+  assert.equal(delegatedMetrics.delegated.input_tokens, 21);
+  assert.equal(delegatedMetrics.delegated.output_tokens, 9);
+  delegatedChild.stdin.end();
+  assert.deepEqual(await delegatedChild.exited, [0, null]);
   const preparedSchema = contract(application, 'AdaptivePrepared'), responseSchema = contract(application, 'CapturedResponse');
   const visibility = new RecurrenceTrace({packets: [{id: 'initial', bytes: 'initial packet'},
     {id: 'later', bytes: 'later packet'}]}, application);
@@ -211,6 +302,90 @@ try {
   assert.equal(observed.metrics.physical_attempts.length,
     observed.metrics.controller.calls + observed.metrics.delegated.calls);
   assert.equal(observed.expenditure_trace.at(-1).physical_attempts, observed.metrics.physical_attempts.length);
+  for (const fault of ['active', 'captured', 'closed', 'unacknowledged']) {
+    const faultOutput = join(root, `finalize-${fault}`), dispatches = [];
+    await mkdir(faultOutput);
+    let faulted = false, originalExposure, targetDispatch, faultDispatchCount;
+    let startedAt, dispatchedAt, observeDispatchTime = false;
+    const now = () => {
+      const current = performance.now();
+      startedAt ??= current;
+      if (observeDispatchTime) { dispatchedAt = current - startedAt; observeDispatchTime = false; }
+      return current;
+    };
+    class FaultDriver extends RecurrenceDriver {
+      async call(method, params = {}) {
+        if (method === 'task.status' && this.pendingFault && !faulted) {
+          faulted = true;
+          faultDispatchCount = dispatches.length;
+          if (fault !== 'active') {
+            let captured = false;
+            for (let turn = 0; turn < 300; turn++) {
+              const drained = await super.call('evaluation.drain');
+              if (drained.step === 'captured') { captured = true; break; }
+              assert.equal(drained.step, 'pending');
+              await delay(10);
+            }
+            assert(captured, 'the fault fixture must commit the actual response before failing');
+          }
+          if (fault === 'closed') { this.kill(); await this.waitClosed(); }
+          throw new Error(`native-finalization-${fault}`);
+        }
+        const result = await super.call(method, params);
+        if (method === 'evaluation.step' && result.step === 'dispatched') {
+          dispatches.push(result);
+          if (result.capability === 'agent.model.invoke.v13' && !faulted) {
+            targetDispatch = result;
+            if (fault === 'unacknowledged') {
+              faulted = true;
+              faultDispatchCount = dispatches.length;
+              throw new Error(`native-finalization-${fault}`);
+            }
+            this.pendingFault = true;
+            observeDispatchTime = true;
+          }
+        }
+        if (method === 'evaluation.observe' && targetDispatch && !faulted)
+          originalExposure ??= decodeRecurrenceObservation(result, preflight.schemas).attempts
+            .find(row => hex(row.attempt.id) === targetDispatch.attempt);
+        return result;
+      }
+    }
+    const report = await evaluateRecurrence({subject, plan, output: faultOutput, driver: executable,
+      application, build: {scripted_fixture: true}, offline: true}, {Client: FaultDriver, now});
+    assert(faulted);
+    assert.equal(dispatches.length, faultDispatchCount, 'finalization must not dispatch new work');
+    assert.equal(dispatches.filter(step => step.capability === 'agent.model.invoke.v13').length, 1);
+    assert(report.errors.some(error => error.stage === 'execution' && error.message === `native-finalization-${fault}`));
+    const traced = report.reuse.attempts.find(attempt => attempt.id === targetDispatch.attempt);
+    assert.equal(traced?.capture?.disposition, 'complete');
+    assert.equal(traced.usage, null);
+    assert.equal(report.metrics.controller.calls, 1);
+    assert.equal(report.metrics.controller.missing_usage, 1);
+    assert.equal(report.metrics.physical_attempts.length, 1);
+    assert.equal(report.expenditure_trace.at(-1).physical_attempts, 1);
+    if (fault === 'unacknowledged') {
+      assert.equal(traced.dispatched_ms, undefined);
+      assert.equal(report.reuse.visibility.length, 0);
+    } else {
+      assert(originalExposure && originalExposure.capture === undefined);
+      assert.equal(traced.dispatched_ms, dispatchedAt);
+      assert.equal(traced.visibility_epoch, 1);
+      assert.equal(traced.prepared_sha256, createHash('sha256')
+        .update(Buffer.from(originalExposure.prepared_b64, 'base64')).digest('hex'));
+      assert.equal(report.reuse.visibility[0].dispatch_ms, dispatchedAt);
+      assert.equal(report.reuse.visibility[0].preparation_cut, Number(originalExposure.attempt.preparation_cut));
+    }
+    const archive = readArchive(await readFile(report.archive));
+    const rawRows = (await readFile(join(faultOutput, 'observations.jsonl'), 'utf8')).trim().split('\n')
+      .flatMap(line => decodeRecurrenceObservation(JSON.parse(line).observation, archive.schemas).attempts);
+    const captured = rawRows.find(row => hex(row.attempt.id) === traced.id && row.capture?.disposition === 'complete');
+    assert(captured, 'raw observations must retain the drained or reopened native capture');
+    const captureEntry = archive.manifest[6].find(([kind, id]) => kind === 4 && hex(id) === traced.id);
+    assert.deepEqual(Buffer.from(captured.capture_b64, 'base64'), archive.object(captureEntry[2]));
+    assert.equal(createHash('sha256').update(Buffer.from(captured.prepared_b64, 'base64')).digest('hex'), traced.prepared_sha256);
+    assert.equal(createHash('sha256').update(Buffer.from(captured.response_b64, 'base64')).digest('hex'), traced.response_sha256);
+  }
   const mismatchedOutput = join(root, 'mismatched');
   await mkdir(mismatchedOutput);
   const mismatch = await evaluateRecurrence({subject, plan: {...plan,
@@ -248,8 +423,55 @@ try {
     });
     if (helperPid && helperAlive(helperPid)) process.kill(helperPid, 'SIGKILL');
   }
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    const signalRoot = join(root, signal), pidPath = join(signalRoot, 'helper.pid');
+    const signalHelper = join(signalRoot, 'siwc'), parameters = join(signalRoot, 'parameters.json');
+    await mkdir(signalRoot);
+    const output = join(signalRoot, 'output');
+    await mkdir(output);
+    const quoted = `'${pidPath.replaceAll("'", "'\\''")}'`;
+    await writeFile(signalHelper, `#!/bin/sh\nprintf '%s %s\\n' "$$" "$PPID" > ${quoted}\nexec /bin/sleep 20\n`, {mode: 0o700});
+    await writeFile(parameters, JSON.stringify({subject: timeoutPlan.cases[0],
+      plan: {...timeoutPlan, limits: {...timeoutPlan.limits, wall_ms: 60000}}, output,
+      driver: executable, chatgptAccount: 'fixture', siwcBin: signalHelper, siwcAuthDir: auth,
+      application, build: {fixture: true}}));
+    const moduleUrl = new URL('../../tools/evaluation/workspace.mjs', import.meta.url).href;
+    const script = `import {readFile} from 'node:fs/promises';
+      import {evaluateRecurrence} from ${JSON.stringify(moduleUrl)};
+      await evaluateRecurrence(JSON.parse(await readFile(process.argv[1], 'utf8')));`;
+    const supervisor = spawn(process.execPath, ['--input-type=module', '-e', script, parameters],
+      {stdio: ['ignore', 'pipe', 'pipe']});
+    children.push(supervisor);
+    supervisor.exited = once(supervisor, 'exit');
+    let diagnostics = '', helperPid, driverPid;
+    supervisor.stderr.setEncoding('utf8').on('data', bytes => diagnostics += bytes);
+    try {
+      for (let attempt = 0; attempt < 500; attempt++) {
+        const ids = await readFile(pidPath, 'utf8').catch(error => {
+          if (error.code === 'ENOENT') return null;
+          throw error;
+        });
+        if (ids) { [helperPid, driverPid] = ids.trim().split(' ').map(Number); break; }
+        assert.equal(supervisor.exitCode, null, diagnostics);
+        await delay(10);
+      }
+      assert([helperPid, driverPid].every(pid => Number.isSafeInteger(pid) && pid > 0), diagnostics);
+      assert(helperAlive(helperPid) && helperAlive(driverPid));
+      assert(supervisor.kill(signal));
+      const exit = await Promise.race([supervisor.exited, delay(6000, null, {ref: false}).then(() => {
+        throw new Error(`Supervisor did not close after ${signal}: ${diagnostics}`);
+      })]);
+      assert.deepEqual(exit, [null, signal]);
+      for (let attempt = 0; attempt < 100 && (helperAlive(helperPid) || helperAlive(driverPid)); attempt++) await delay(10);
+      assert.equal(helperAlive(helperPid), false, `${signal} must terminate the native authentication helper`);
+      assert.equal(helperAlive(driverPid), false, `${signal} must terminate the native driver`);
+    } finally {
+      for (const pid of [helperPid, driverPid]) if (pid && helperAlive(pid)) process.kill(pid, 'SIGKILL');
+    }
+  }
   console.log(JSON.stringify({sealed_capture: true, external_sigkill: true, captured_response_reused: true,
-    native_workspace_lineage: true, native_helper_watchdog: true}));
+    native_workspace_lineage: true, delegated_description_reuse: true, native_finalization: true,
+    native_helper_watchdog: true, native_supervisor_signals: true}));
 } finally {
   for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
   await Promise.all(children.map(child => child.exited));

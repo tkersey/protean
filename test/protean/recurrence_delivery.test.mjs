@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {spawn} from 'node:child_process';
+import {once} from 'node:events';
+import {createInterface} from 'node:readline';
 import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -18,6 +21,8 @@ const question = {question_id: 'q1', question_revision: '3', request_digest: 'di
   answer_schema_id: 'adaptive-agent.answer.v2', prompt: {prompt: 'Please send the next request.'}};
 
 test('driver termination owns helpers and closes inherited pipes', {timeout: 15000}, async () => {
+  const signals = ['SIGINT', 'SIGTERM', 'exit'];
+  const listeners = signals.map(signal => process.listenerCount(signal));
   for (const forced of [true, false]) {
     const program = `
       const {spawn} = require('node:child_process');
@@ -35,6 +40,7 @@ test('driver termination owns helpers and closes inherited pipes', {timeout: 150
       if (forced) assert(driver.kill());
       const exit = forced ? await driver.waitClosed() : await driver.close();
       assert.deepEqual(exit, forced ? {code: null, signal: 'SIGKILL'} : {code: 0, signal: null});
+      assert.equal(driver.kill(), false);
       for (let retry = 0; retry < 100; retry++) {
         try { process.kill(helper, 0); }
         catch (error) { assert.equal(error.code, 'ESRCH'); break; }
@@ -42,6 +48,62 @@ test('driver termination owns helpers and closes inherited pipes', {timeout: 150
         await new Promise(resolve => setTimeout(resolve, 10));
       }
     } finally { driver.kill(); await driver.waitClosed(); }
+  }
+  assert.deepEqual(signals.map(signal => process.listenerCount(signal)), listeners);
+});
+
+test('supervisor exit terminates all currently owned driver groups', {timeout: 15000}, async () => {
+  const module = new URL('../../tools/evaluation/workspace.mjs', import.meta.url).href;
+  const program = `
+    const {spawn} = require('node:child_process');
+    const {createInterface} = require('node:readline');
+    const helper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio: 'inherit'});
+    createInterface({input: process.stdin}).on('line', line => {
+      const {id} = JSON.parse(line);
+      process.stdout.write(JSON.stringify({id, result: {helper: helper.pid}}) + '\\n');
+    }).on('close', () => process.exit(0));
+  `;
+  const supervisorSource = `
+    import {RecurrenceDriver} from ${JSON.stringify(module)};
+    const retired = new RecurrenceDriver(process.execPath, ['-e', ${JSON.stringify(program)}]);
+    await retired.call('ready');
+    await retired.close();
+    const groups = [];
+    for (let index = 0; index < 2; index++) {
+      const driver = new RecurrenceDriver(process.execPath, ['-e', ${JSON.stringify(program)}]);
+      groups.push({driver: driver.child.pid, ...(await driver.call('ready'))});
+    }
+    process.stdin.once('data', () => process.exit(7));
+    console.log(JSON.stringify(groups));
+  `;
+  for (const signal of ['SIGINT', 'SIGTERM', null]) {
+    const supervisor = spawn(process.execPath, ['--input-type=module', '-e', supervisorSource], {stdio: ['pipe', 'pipe', 'pipe']});
+    const exited = once(supervisor, 'exit');
+    const reader = createInterface({input: supervisor.stdout});
+    let groups = [];
+    try {
+      const ready = await Promise.race([once(reader, 'line'), exited.then(exit => { throw new Error(`Supervisor exited before ready: ${exit}`); })]);
+      groups = JSON.parse(ready[0]);
+      if (signal) assert(supervisor.kill(signal));
+      else supervisor.stdin.end('exit');
+      assert.deepEqual(await exited, signal ? [null, signal] : [7, null]);
+      for (const pid of groups.flatMap(group => [group.driver, group.helper])) {
+        for (let retry = 0; retry < 100; retry++) {
+          try { process.kill(pid, 0); }
+          catch (error) { assert.equal(error.code, 'ESRCH'); break; }
+          assert(retry < 99, `owned process ${pid} survived supervisor ${signal ?? 'exit'}`);
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+      }
+    } finally {
+      if (supervisor.exitCode === null && supervisor.signalCode === null) supervisor.kill('SIGKILL');
+      await exited;
+      reader.close();
+      for (const group of groups) {
+        try { process.kill(-group.driver, 'SIGKILL'); }
+        catch (error) { assert.equal(error.code, 'ESRCH'); }
+      }
+    }
   }
 });
 
@@ -424,6 +486,35 @@ test('provider accounting distinguishes not-sent, rearmed, cancelled, and unknow
     assert.equal(final.physical_attempts, possible ? 1 : 0);
     assert.equal(final.input_tokens, possible ? null : 0);
   }
+});
+
+test('lost dispatch acknowledgments retain unknown timing and final archive expenditure', () => {
+  const trace = new RecurrenceTrace({packets: []}, {});
+  trace.observeAttempt({attempt: {id: 'lost-ack', capability: 'agent.model.invoke.v13'},
+    physical_provider_attempt: true}, 1, 30);
+  const report = {elapsed_ms: 100, retained_namespace_bytes: 0, reuse: trace.summary(),
+    metrics: {physical_attempts: [{id: 'lost-ack', usage: {input_tokens: 7, output_tokens: 3}}]},
+    cost: {total: null, complete: false}};
+  const curve = recurrenceExpenditure(report, {kind: 'unpriced'});
+  assert.equal(curve.at(-1).physical_attempts, 1);
+  assert.equal(curve.at(-1).input_tokens, 7);
+  assert.equal(curve.at(-1).output_tokens, 3);
+  assert.equal(curve[0].physical_attempts, null);
+  assert.equal(curve[0].input_tokens, null);
+  assert.equal(curve.find(point => point.elapsed_ms === 30).physical_attempts, 1);
+  assert.equal(curve.find(point => point.elapsed_ms === 30).input_tokens, null);
+  assert.equal(report.reuse.attempts[0].dispatched_ms, undefined);
+  assert.deepEqual(report.reuse.visibility, []);
+  report.metrics.physical_attempts[0].usage.output_tokens = -1;
+  const malformed = recurrenceExpenditure(report, {kind: 'unpriced'}).at(-1);
+  assert.equal(malformed.physical_attempts, 1);
+  assert.equal(malformed.input_tokens, null);
+  assert.equal(malformed.output_tokens, null);
+  report.metrics = null;
+  const unavailable = recurrenceExpenditure(report, {kind: 'unpriced'}).at(-1);
+  assert.equal(unavailable.physical_attempts, null);
+  assert.equal(unavailable.known_physical_attempts, 1);
+  assert.equal(unavailable.input_tokens, null);
 });
 
 test('program reuse joins public content while preserving custody and work identities', () => {

@@ -109,6 +109,8 @@ async function bytesUnder(path) {
   }
   return bytes;
 }
+const validTokenCount = value => Number.isSafeInteger(value) && value >= 0;
+
 function capturedUsage(raw) {
   const bytes = new TextDecoder('utf-8', {fatal: true}).decode(raw[3]);
   if (raw[7] !== 2) return null;
@@ -198,10 +200,9 @@ export function workspaceMetrics(archive, application) {
     let usage;
     try { usage = capturedUsage(raw); } catch { usage = null; }
     physical.usage = usage ?? null;
-    const known = value => Number.isSafeInteger(value) && value >= 0;
-    if (!known(usage?.input_tokens) || !known(usage?.output_tokens)) count.missing_usage++;
-    if (known(usage?.input_tokens)) count.input_tokens += usage.input_tokens;
-    if (known(usage?.output_tokens)) count.output_tokens += usage.output_tokens;
+    if (!validTokenCount(usage?.input_tokens) || !validTokenCount(usage?.output_tokens)) count.missing_usage++;
+    if (validTokenCount(usage?.input_tokens)) count.input_tokens += usage.input_tokens;
+    if (validTokenCount(usage?.output_tokens)) count.output_tokens += usage.output_tokens;
     // Costs come from raw captures; actions come only from the native
     // normalized result that the controller actually received.
     if (role === 'controller' && capture[6].tag === 1) {
@@ -507,8 +508,7 @@ export function recurrenceCost(report, model, usages) {
   if (calls === null || calls !== usages.length) result.missing.push('Complete physical attempt inventory.');
   let inference = 0;
   for (const usage of usages) {
-    if (!usage || !Number.isSafeInteger(usage.input_tokens) || usage.input_tokens < 0 ||
-      !Number.isSafeInteger(usage.output_tokens) || usage.output_tokens < 0) {
+    if (!validTokenCount(usage?.input_tokens) || !validTokenCount(usage?.output_tokens)) {
       result.missing.push('Provider token usage.'); continue;
     }
     let cached = usage.input_tokens_details?.cached_tokens;
@@ -539,21 +539,29 @@ export function recurrenceCost(report, model, usages) {
 export function recurrenceExpenditure(report, model) {
   const attempts = report.reuse.attempts.filter(attempt =>
     ['agent.model.invoke.v13', 'protean.workspace.inference/2'].includes(attempt.capability) &&
-    attempt.dispatched_ms !== undefined);
+    (attempt.dispatched_ms !== undefined || attempt.first_observed_ms !== undefined));
   const excludedAt = attempt => attempt.physical_provider_attempt === false ||
     attempt.capture?.disposition === 'definitely_not_sent' ?
     attempt.not_sent_observed_ms ?? attempt.captured_ms ?? report.elapsed_ms : Infinity;
   const times = [...new Set([0, ...attempts.flatMap(attempt => [attempt.dispatched_ms,
-    attempt.captured_ms, attempt.not_sent_observed_ms]).filter(time => time !== undefined), report.elapsed_ms])].sort((a, b) => a - b);
+    attempt.first_observed_ms, attempt.captured_ms, attempt.not_sent_observed_ms])
+    .filter(time => time !== undefined), report.elapsed_ms])].sort((a, b) => a - b);
   return times.map(elapsed_ms => {
-    const dispatched = attempts.filter(attempt => attempt.dispatched_ms <= elapsed_ms && excludedAt(attempt) > elapsed_ms);
-    const usages = dispatched.map(attempt => attempt.captured_ms <= elapsed_ms ? attempt.usage ?? null : null);
-    const complete = usages.every(usage => Number.isSafeInteger(usage?.input_tokens) &&
-      Number.isSafeInteger(usage?.output_tokens));
     const final = elapsed_ms === report.elapsed_ms;
-    const cost = recurrenceCost({metrics: {controller: {calls: dispatched.length}, delegated: {calls: 0}},
+    const archived = final && Array.isArray(report.metrics?.physical_attempts) ? report.metrics.physical_attempts : null;
+    const observed = attempts.filter(attempt => (attempt.dispatched_ms ?? attempt.first_observed_ms) <= elapsed_ms &&
+      excludedAt(attempt) > elapsed_ms);
+    const unknownCount = report.metrics === null || !archived && attempts.some(attempt =>
+      attempt.dispatched_ms === undefined && attempt.first_observed_ms > elapsed_ms && excludedAt(attempt) > elapsed_ms);
+    const usages = archived ? archived.map(attempt => attempt.usage) :
+      observed.map(attempt => attempt.captured_ms <= elapsed_ms ? attempt.usage ?? null : null);
+    const count = archived?.length ?? observed.length;
+    const complete = !unknownCount && usages.every(usage => validTokenCount(usage?.input_tokens) &&
+      validTokenCount(usage?.output_tokens));
+    const cost = unknownCount ? {total: null, complete: false} :
+      recurrenceCost({metrics: {controller: {calls: count}, delegated: {calls: 0}},
       elapsed_ms, retained_namespace_bytes: final ? report.retained_namespace_bytes : 0}, model, usages);
-    return {elapsed_ms, physical_attempts: dispatched.length,
+    return {elapsed_ms, physical_attempts: unknownCount ? null : count, known_physical_attempts: count,
       input_tokens: complete ? usages.reduce((sum, usage) => sum + usage.input_tokens, 0) : null,
       output_tokens: complete ? usages.reduce((sum, usage) => sum + usage.output_tokens, 0) : null,
       cumulative_cost: final ? report.cost.total : cost.total,
@@ -723,16 +731,25 @@ export class RecurrenceTrace {
   }
   observeAttempt(row, publicationEpoch, elapsed) {
     const id = digestHex(row.attempt.id), prior = this.attempts.get(id) ?? {id};
+    prior.first_observed_ms ??= elapsed;
     const capability = textField(row.attempt.capability);
     Object.assign(prior, {owner: row.attempt, capability, occurrence: row.occurrence,
       physical_provider_attempt: row.physical_provider_attempt});
     if (row.physical_provider_attempt === false) prior.not_sent_observed_ms ??= elapsed;
-    if (row.prepared_b64 && capability === 'agent.model.invoke.v13') {
-      const prepared = decodeValue(contract(this.application, 'AdaptivePrepared'), Buffer.from(row.prepared_b64, 'base64'));
+    if (row.prepared_b64 && ['agent.model.invoke.v13', 'protean.workspace.inference/2'].includes(capability)) {
       prior.prepared_sha256 = hash(Buffer.from(row.prepared_b64, 'base64'));
-      prior.body = JSON.parse(Buffer.from(prepared[2]).toString());
-      prior.selected_view = prepared[3].tag === 1 ? referenceHex(prepared[3].value) : null;
-      prior.watermark = String(prepared[1][3][2]);
+      if (capability === 'agent.model.invoke.v13') {
+        const prepared = decodeValue(contract(this.application, 'AdaptivePrepared'), Buffer.from(row.prepared_b64, 'base64'));
+        prior.body = JSON.parse(Buffer.from(prepared[2]).toString());
+        prior.selected_view = prepared[3].tag === 1 ? referenceHex(prepared[3].value) : null;
+        prior.watermark = String(prepared[1][3][2]);
+      } else {
+        assert.equal(typeof row.prepared_context?.body_b64, 'string', 'Missing native delegated preparation');
+        assert(row.prepared_context.selected_view === null || /^[0-9a-f]{64}$/.test(row.prepared_context.selected_view),
+          'Invalid native delegated selection');
+        prior.body = JSON.parse(Buffer.from(row.prepared_context.body_b64, 'base64').toString());
+        prior.selected_view = row.prepared_context.selected_view;
+      }
       if (prior.dispatched_ms !== undefined && prior.visibility_epoch === undefined) {
         const appeared = this.corpus.packets.filter(packet => !this.visibility.has(packet.id) && containsText(prior.body.input, packet.bytes));
         if (appeared.length) this.epoch++;
@@ -838,9 +855,45 @@ function creationPrecedes(use, visibility) {
   return Number(use.created_epoch) < Number(visibility.publication_epoch);
 }
 
+const recurrenceDrivers = new Set();
+function stopRecurrenceDrivers() {
+  let failure;
+  for (const driver of recurrenceDrivers) {
+    try { driver.kill(); } catch (error) { failure ??= error; }
+  }
+  if (failure) throw failure;
+}
+function interruptRecurrenceDrivers(signal) {
+  const hasOtherListeners = process.listeners(signal).some(listener => listener !== recurrenceSignals[signal]);
+  try { stopRecurrenceDrivers(); }
+  finally {
+    if (!hasOtherListeners) {
+      process.removeListener(signal, recurrenceSignals[signal]);
+      process.kill(process.pid, signal);
+    }
+  }
+}
+const recurrenceSignals = Object.fromEntries(['SIGINT', 'SIGTERM'].map(signal =>
+  [signal, () => interruptRecurrenceDrivers(signal)]));
+function retainRecurrenceDriver(driver) {
+  if (recurrenceDrivers.size === 0) {
+    process.on('exit', stopRecurrenceDrivers);
+    for (const [signal, listener] of Object.entries(recurrenceSignals)) process.prependListener(signal, listener);
+  }
+  recurrenceDrivers.add(driver);
+}
+function releaseRecurrenceDriver(driver) {
+  recurrenceDrivers.delete(driver);
+  if (recurrenceDrivers.size === 0) {
+    process.removeListener('exit', stopRecurrenceDrivers);
+    for (const [signal, listener] of Object.entries(recurrenceSignals)) process.removeListener(signal, listener);
+  }
+}
+
 export class RecurrenceDriver {
   constructor(binary, args) {
     this.child = spawn(binary, args, {detached: true, stdio: ['pipe', 'pipe', 'pipe']});
+    retainRecurrenceDriver(this);
     this.pending = new Map();
     this.serial = 0;
     this.diagnostics = '';
@@ -861,6 +914,7 @@ export class RecurrenceDriver {
     this.child.stdin.on('error', error => this.fail(error));
     this.child.once('exit', () => this.kill());
     this.closed = new Promise(resolve => this.child.once('close', (code, signal) => {
+      releaseRecurrenceDriver(this);
       this.exit = {code, signal};
       this.fail(new Error(`Evaluation driver closed: ${code}/${signal}; ${this.diagnostics}`));
       resolve(this.exit);
@@ -882,7 +936,7 @@ export class RecurrenceDriver {
     });
   }
   kill() {
-    if (!this.child.pid) return false;
+    if (this.exit || !this.child.pid) return false;
     try { process.kill(-this.child.pid, 'SIGKILL'); return true; }
     catch (error) { if (error.code === 'ESRCH') return false; throw error; }
   }
@@ -1070,8 +1124,8 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
     watchdog = setTimeout(() => { timedOut = true; client.kill(); },
       Math.max(1, plan.limits.wall_ms - elapsed()));
   };
-  const observe = async () => {
-    const raw = await client.call('evaluation.observe', {task_id: task.task_id, after: String(trace.cursor)});
+  const observe = async (after = trace.cursor) => {
+    const raw = await client.call('evaluation.observe', {task_id: task.task_id, after: String(after)});
     if (raw.events.length || raw.attempts.length || raw.records?.length)
       await appendFile(join(output, 'observations.jsonl'), JSON.stringify({elapsed_ms: elapsed(), observation: raw}) + '\n');
     const observation = decodeRecurrenceObservation(raw, schemas);
@@ -1185,11 +1239,11 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
   } finally {
     if (client) {
       if (!timedOut && !client.exit && task) try {
-        const remaining = await client.call('evaluation.observe', {task_id: task.task_id, after: String(trace.cursor)});
+        const remaining = await observe();
         if (remaining.worker_active) {
           while (!timedOut) {
             const step = await client.call('evaluation.drain');
-            if (step.step === 'captured') break;
+            if (step.step === 'captured') { await observe(); break; }
             assert.equal(step.step, 'pending', 'Draining must not dispatch new work.');
             await wait(100);
           }
@@ -1215,9 +1269,15 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
         await client.call('evaluation.export', {task_id: task.task_id, path: archivePath});
         const archive = readArchive(await readFile(archivePath));
         schemas ??= archive.schemas;
-        await observe();
         metrics = workspaceMetrics(archive, application);
         artifactEvidence = recurrenceArtifacts(archive);
+        let cursor = 0;
+        for (;;) {
+          const observed = await observe(cursor);
+          if (!observed.events.length) break;
+          assert(Number(observed.cursor) > cursor, 'Final observation did not advance.');
+          cursor = Number(observed.cursor);
+        }
         status = await client.call('task.status', {task_id: task.task_id});
         if (!result) result = await readOutcome(client, task.task_id, await client.call('task.result', {task_id: task.task_id}));
       } finally { clearTimeout(exportTimer); await client.close(); }

@@ -231,6 +231,61 @@ test('comparison rejects measurements from different frozen inputs', () => {
   }
 });
 
+test('unbound reports retain expenditure without deciding any planned outcome', () => {
+  for (const field of ['config_sha256', 'corpus_sha256', 'expected_sha256', 'plan_sha256']) {
+    const {plan, reports} = campaign();
+    const foreign = structuredClone(reports[0]);
+    if (field === 'plan_sha256') foreign.plan_sha256 = 'foreign';
+    else foreign.subject[field] = 'foreign';
+    foreign.elapsed_ms = limits.wall_ms + 1;
+    foreign.metrics.controller.input_tokens = limits.tokens + 1;
+    foreign.grading.totals = {requests: 12, sound: 11, critical: 1, unanswered: 0};
+    foreign.reuse = {qualified: false, recovered: false, visibility: []};
+    const result = compareCampaign(plan, [foreign]);
+    const attempt = result.attempts[0];
+    assert.equal(attempt.present, true);
+    assert.equal(attempt.integrity, false);
+    assert.equal(attempt.stream_complete, null);
+    assert.equal(attempt.grading, null);
+    assert.equal(attempt.budget.compliant, null);
+    assert.equal(attempt.cost, null);
+    assert.equal(attempt.mechanism, null);
+    assert.equal(result.complete_milestone, null);
+    assert.equal(result.verdict, 'undetermined');
+    assert.equal(result.pairs[0].verdict, 'undetermined');
+    assert.deepEqual(result.unattributed_reports, [foreign]);
+    assert.equal(result.unattributed_reports[0].cost.total, foreign.cost.total);
+    assert.equal(result.aggregate.treatment.sound, null);
+  }
+  const {plan, reports} = campaign();
+  const duplicates = compareCampaign(plan, [reports[0], reports[0]]);
+  assert.deepEqual(duplicates.unattributed_reports, [reports[0], reports[0]]);
+  assert.equal(duplicates.complete_milestone, null);
+});
+
+test('known token subtotals can disprove compliance while exact usage stays unknown', () => {
+  for (const missingRole of ['controller', 'delegated']) {
+    for (const tokens of [limits.tokens + 1, limits.tokens, limits.tokens - 1]) {
+      const {plan, reports} = campaign();
+      const report = reports[0];
+      report.metrics.controller.input_tokens = tokens - 10;
+      report.metrics.controller.output_tokens = 5;
+      report.metrics.delegated.input_tokens = 3;
+      report.metrics.delegated.output_tokens = 2;
+      report.metrics[missingRole].missing_usage = 1;
+      report.cost = {...report.cost, complete: false, total: null};
+      const result = compareCampaign(plan, reports);
+      const budget = result.attempts[0].budget;
+      assert.equal(budget.measurements.tokens, null);
+      assert.equal(budget.checks.tokens, tokens > limits.tokens ? false : null);
+      assert.equal(budget.compliant, tokens > limits.tokens ? false : null);
+      assert.equal(result.complete_milestone, tokens > limits.tokens ? false : null);
+      assert.equal(budget.lower_bounds.tokens, tokens);
+      assert.equal(result.aggregate.treatment.cost, null);
+    }
+  }
+});
+
 test('all supported answers before END do not establish complete-stream payback', () => {
   const {plan, reports} = campaign();
   reports[0].elapsed_ms = 1810000;
@@ -293,6 +348,7 @@ test('a failed same-pair conjunction stays false even when other pairs save mone
 test('absent mechanisms disprove the milestone without inventing missing prices', () => {
   const {plan, reports} = campaign();
   plan.cost_model = {kind: 'unpriced', currency: 'USD'};
+  for (const report of reports) report.plan_sha256 = campaignIdentity(plan);
   for (const report of reports.filter(item => item.subject.arm === 'treatment')) report.reuse.recovered = false;
   const result = compareCampaign(plan, reports);
   assert.equal(result.complete_milestone, false);

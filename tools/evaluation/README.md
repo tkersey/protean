@@ -112,8 +112,11 @@ publication, requires no outstanding worker or uncertain acquisition, and stops
 pumping before external SIGKILL. A first eligible return that already dispatched a
 later request leaves the cut unestablished; it cannot be replaced with a favorable
 later cut. The offline SIGKILL fixture proves custody, not model discovery.
-The supervisor owns the driver process group and terminates its local helpers
-on interruption, timeout and close. This does not prove cancellation of inference
+Controller and delegated model preparations both retain their actual selected
+views and feed the same description-use observations.
+The supervisor owns every driver process group, including reopened and final-export
+processes, and terminates local helpers on SIGINT, SIGTERM, normal exit, timeout
+and close. This does not cover uncatchable supervisor termination or prove cancellation of inference
 already received by a remote provider.
 
 The independent oracle derives obligations and support from each request's raw
@@ -128,6 +131,8 @@ Comparison requires the report's exact frozen subject and plan digest, observed
 END visibility, and terminal completion. Correct answers before END retain their
 grading but cannot establish complete-stream payback. Legacy reports without
 these bindings require explicit evidence review and receive no automatic credit.
+Mismatched or duplicate reports retain their available expenditure separately;
+they cannot establish positive or negative outcomes for the planned attempts.
 
 `report.json` retains raw answers, grading, owner events, selected contexts,
 program/value/work/input/result identities, physical attempts, usage, artifact
@@ -138,6 +143,12 @@ release artifacts. Publish only deliberately selected, reviewed result material.
 Archive totals and expenditure curves share the native occurrence classifier.
 Known not-sent attempts leave provider expenditure when that evidence is observed;
 earlier unknown usage and all preparation and elapsed costs remain visible.
+Finalization retains completed captures before closing the driver and refreshes
+committed attempt records after reopening. Final expenditure uses the archive's
+physical-attempt inventory. Lost dispatch acknowledgments leave timing unknown;
+missing inventory leaves counts unknown with observed lower bounds. Known token
+subtotals above the ceiling establish an overrun even when missing usage leaves
+the exact total unknown.
 
 Source and trace adjudication remains necessary. `adjudicateRecurrence` binds that
 review to the actual authored artifact hash and supported later answers. Review

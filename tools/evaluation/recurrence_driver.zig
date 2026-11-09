@@ -16,6 +16,7 @@ const assets: native.discovery.Assets = .{
 const Options = struct {
     state_path: []const u8,
     profile_task: ?[16]u8 = null,
+    fixture_workspace: bool = false,
     configuration: native.configuration.Options = .{ .offline = false },
 
     fn parse(init: std.process.Init) !Options {
@@ -28,6 +29,8 @@ const Options = struct {
         while (args.next()) |arg| {
             if (std.mem.eql(u8, arg, "--offline")) {
                 result.configuration.offline = true;
+            } else if (std.mem.eql(u8, arg, "--fixture-workspace")) {
+                result.fixture_workspace = true;
             } else if (std.mem.eql(u8, arg, "--authorize-inference")) {
                 result.configuration.require_source = true;
             } else {
@@ -50,7 +53,15 @@ const Options = struct {
             }
         }
         if (result.state_path.len == 0) return error.InvalidArguments;
-        if (!result.configuration.offline and !result.configuration.require_source)
+        if (result.fixture_workspace) {
+            if (!result.configuration.offline or result.configuration.config_path == null)
+                return error.OfflineFixtureRequired;
+            result.configuration.offline = false;
+            result.configuration.test_provider = true;
+            result.configuration.trust_root_path = result.configuration.config_path;
+        }
+        if (!result.configuration.offline and !result.configuration.require_source and
+            !result.fixture_workspace)
             return error.InferenceNotAuthorized;
         return result;
     }
@@ -120,11 +131,14 @@ fn configure(
     service.profile.environment = admitted.environment;
     service.profile.semantic_construction = admitted.semantic_construction;
     service.profile.authority.inference = options.configuration.offline or
-        options.configuration.require_source;
+        options.configuration.require_source or options.fixture_workspace;
     const identity = try service.profile.resourceIdentity(a, application.image_identity);
     for (@constCast(service.profile.authority.grants)) |*grant| grant.resource_identity = identity;
     try service.profile.validate();
-    application.execution_mode = if (options.configuration.offline) .offline else .live;
+    application.execution_mode = if (options.configuration.offline or options.fixture_workspace)
+        .offline
+    else
+        .live;
 }
 
 pub fn main(init: std.process.Init) void {
@@ -162,6 +176,7 @@ fn run(init: std.process.Init) !void {
         .service = &service,
         .client = .{ .service = &service },
         .worker = worker,
+        .fixture_workspace = options.fixture_workspace,
     };
     try driver.serve(init.gpa, init.io);
 }
@@ -204,6 +219,7 @@ const Driver = struct {
     service: *Service,
     client: native.client.Client(types),
     worker: *Worker,
+    fixture_workspace: bool = false,
     paused: bool = false,
     completed: ?struct { task: [16]u8, attempt: [32]u8 } = null,
     seen: std.AutoHashMapUnmanaged(RecordIdentity, void) = .empty,
@@ -255,7 +271,13 @@ const Driver = struct {
             if (self.worker.future != null or self.service.work != null)
                 return error.WorkerOutstanding;
             const task = try native.client.identifier(16, try field(params, "task_id"));
-            return @import("recurrence_fixture.zig").run(self.service, self.worker, a, task);
+            return @import("recurrence_fixture.zig").run(
+                self.service,
+                self.worker,
+                a,
+                task,
+                try self.fixtureOptions(a, params),
+            );
         }
         if (std.mem.eql(u8, method, "evaluation.step")) return self.step(a);
         if (std.mem.eql(u8, method, "evaluation.drain")) return self.drain(a);
@@ -274,6 +296,30 @@ const Driver = struct {
         const selected = std.meta.stringToEnum(native.protocol.Method, method) orelse
             return error.MethodNotFound;
         return self.client.call(a, selected, params);
+    }
+
+    fn fixtureOptions(
+        self: *Driver,
+        a: std.mem.Allocator,
+        params: Json.Value,
+    ) !@import("recurrence_fixture.zig").Options {
+        const delegated = if (Json.get(params, "delegated")) |value|
+            try native.values.fromJson(bool, a, value)
+        else
+            false;
+        if (delegated and !self.fixture_workspace) return error.OfflineFixtureRequired;
+        if (Json.get(params, "value") != null and !delegated) return error.InvalidParams;
+        return .{
+            .delegated = delegated,
+            .value = if (Json.get(params, "value")) |value|
+                try native.values.fromJson(C.workspace.Ref, a, value)
+            else
+                null,
+            .packet = if (Json.get(params, "packet")) |value|
+                try Json.text(value)
+            else
+                "Native delegated fixture packet.",
+        };
     }
 
     fn boundary(self: *Driver, a: std.mem.Allocator, name: []const u8) !Json.Value {
@@ -319,6 +365,10 @@ const Driver = struct {
         if (try self.finishWorker(a)) return self.boundary(a, "captured");
         const next = try self.service.pump(a);
         if (next == .work) {
+            if (self.fixture_workspace and next.work.entry.declaration.inference) {
+                try self.service.notSent(a, next.work);
+                return error.ScriptedFixtureOnly;
+            }
             self.worker.start(
                 next.work,
                 self.service.profile.authority,
@@ -355,13 +405,17 @@ const Driver = struct {
             task,
         )) orelse return error.MissingOccurrence;
         try Json.put(a, &result, "occurrence_b64", try base64(a, occurrence_bytes));
-        if (decoded.value.prepared) |reference|
-            try Json.put(
-                a,
-                &result,
-                "prepared_b64",
-                try base64(a, try store.object(a, reference, null)),
+        if (decoded.value.prepared) |reference| {
+            const prepared = try store.object(a, reference, null);
+            try Json.put(a, &result, "prepared_b64", try base64(a, prepared));
+            const delegated = std.mem.eql(
+                u8,
+                decoded.value.capability.bytes,
+                native.workspace_instrument.model_identity,
             );
+            if (delegated)
+                try Json.put(a, &result, "prepared_context", try delegatedContext(a, prepared));
+        }
         if (try store.recordBytes(a, "capture", id, task)) |capture_bytes| {
             const capture = try C.decodeOwned(State.Capture, a, capture_bytes);
             try Json.put(a, &result, "capture_b64", try base64(a, capture_bytes));
@@ -373,6 +427,18 @@ const Driver = struct {
                     try base64(a, try store.object(a, reference, null)),
                 );
         }
+        return result;
+    }
+
+    fn delegatedContext(a: std.mem.Allocator, bytes: []const u8) !Json.Value {
+        var prepared = try C.decodeOwned(native.workspace_instrument.Prepared, a, bytes);
+        defer prepared.deinit();
+        var result = Json.object();
+        try Json.put(a, &result, "body_b64", try base64(a, prepared.value.body.bytes));
+        try Json.put(a, &result, "selected_view", if (prepared.value.selected_view) |view|
+            try hexadecimal(a, view.digest)
+        else
+            .null);
         return result;
     }
 
