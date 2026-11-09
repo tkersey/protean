@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {contract, createCorpus, freezeRecords, oracle, requestRecords, gradeReport, compareCampaign} from '../../tools/evaluation/recurrence.mjs';
+import {contract, createCorpus, freezeRecords, oracle, requestRecords, gradeReport, compareCampaign, campaignIdentity} from '../../tools/evaluation/recurrence.mjs';
 
 const p = (component, revision = '1') => ({component, revision});
 const manifest = (component, requirements = [], extra = {}) => ({kind: 'manifest', id: `m-${component}`, ...p(component), complete: true,
@@ -207,15 +207,50 @@ test('three frozen seeds expose raw documents on the exact schedule and preserve
 
 const limits = {wall_ms: 2700000, tokens: 512000, provider_attempts: 128, namespace_bytes: 1073741824, rss_bytes: 4294967296};
 function campaign() {
-  const cases = [1, 2, 3].flatMap(pair => (pair === 2 ? ['ordinary', 'treatment'] : ['treatment', 'ordinary']).map(arm => ({id: `${pair}-${arm}`, pair, arm})));
+  const cases = [1, 2, 3].flatMap(pair => (pair === 2 ? ['ordinary', 'treatment'] : ['treatment', 'ordinary']).map(arm => ({id: `${pair}-${arm}`, pair, arm,
+    config_sha256: `${pair}-${arm}-config`, corpus_sha256: `${pair}-corpus`, expected_sha256: `${pair}-expected`,
+    end_packet: {id: `${pair}-END`, offset_ms: 1980000}})));
   const plan = {cases, limits, cost_model: {id: 'frozen-cost', currency: 'USD', predeclared: true}};
-  const reports = cases.map(subject => ({subject, grading: {totals: {requests: 12, sound: 12, critical: 0, unanswered: 0}}, elapsed_ms: 2400000,
+  const reports = cases.map(subject => ({subject, plan_sha256: campaignIdentity(plan), grading: {totals: {requests: 12, sound: 12, critical: 0, unanswered: 0}}, elapsed_ms: 2400000,
     peak_rss_sampled_bytes: 1000000, retained_namespace_bytes: 1000000,
     metrics: {controller: {calls: 50, input_tokens: 10000, output_tokens: 10000, missing_usage: 0}, delegated: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0}},
     arm_violations: [], errors: [], cost: {model_id: 'frozen-cost', total: subject.arm === 'ordinary' ? 10 : 8, currency: 'USD', complete: true},
-    reuse: {qualified: true, recovered: true}}));
+    status: {status: 'completed'},
+    reuse: {qualified: true, recovered: true, visibility: [{packet_id: subject.end_packet.id, confirmed: true, dispatch_ms: 1980001}]}}));
   return {plan, reports};
 }
+
+test('comparison rejects measurements from different frozen inputs', () => {
+  for (const field of ['config_sha256', 'corpus_sha256', 'expected_sha256']) {
+    const {plan, reports} = campaign();
+    reports[0] = {...reports[0], subject: {...reports[0].subject, [field]: 'foreign'}};
+    const result = compareCampaign(plan, reports);
+    assert.equal(result.attempts[0].integrity, false);
+    assert.notEqual(result.complete_milestone, true);
+    assert.notEqual(result.pairs[0].cost_positive, true);
+  }
+});
+
+test('all supported answers before END do not establish complete-stream payback', () => {
+  const {plan, reports} = campaign();
+  reports[0].elapsed_ms = 1810000;
+  reports[0].reuse.visibility = [];
+  const result = compareCampaign(plan, reports);
+  assert.equal(result.attempts[0].grading.sound, 12);
+  assert.equal(result.attempts[0].integrity, false);
+  assert.equal(result.complete_milestone, false);
+  assert.notEqual(result.pairs[0].cost_positive, true);
+  assert.equal(result.pairs[0].verdict, 'no_practical_improvement');
+});
+
+test('missing stream evidence stays unknown and changed plan terms reject attribution', () => {
+  const {plan, reports} = campaign();
+  delete reports[0].reuse.visibility;
+  assert.equal(compareCampaign(plan, reports).attempts[0].stream_complete, null);
+  assert.equal(compareCampaign(plan, reports).complete_milestone, null);
+  const changed = {...plan, limits: {...plan.limits, tokens: plan.limits.tokens * 2}};
+  assert(compareCampaign(changed, reports).attempts.every(attempt => attempt.integrity === false));
+});
 
 test('campaign compares actual sums across all six attempts and requires the same-trace conjunction', () => {
   const {plan, reports} = campaign();

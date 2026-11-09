@@ -9,7 +9,7 @@ import {ProteanClient} from '../../test/support/stdio-client.mts';
 import {readArchive} from '../../test/protean/native_archive.mjs';
 import {decodeSchema, decodeValue} from '../../test/support/values.mjs';
 import {contract} from '../../test/protean/adaptive_capture_checks.mjs';
-import {createCorpus, gradeReport, compareCampaign, parseReport} from './recurrence.mjs';
+import {createCorpus, gradeReport, compareCampaign, parseReport, campaignIdentity} from './recurrence.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const json = value => JSON.stringify(value, (_key, v) => typeof v === 'bigint' ? v.toString() : v, 2);
@@ -126,6 +126,15 @@ function capturedUsage(raw) {
   return null;
 }
 
+export function physicalProviderAttempt(id, disposition, state) {
+  if (disposition !== undefined) return disposition !== 1;
+  if (!state) return true;
+  if ([0, 6].includes(state.tag)) return false;
+  if ([1, 2, 3, 4, 7].includes(state.tag)) return digestHex(state.value[0]) === id;
+  if (state.tag === 5) return state.value.tag !== 1 && digestHex(state.value.value[0]) === id;
+  throw new Error('Unknown occurrence state');
+}
+
 export function workspaceMetrics(archive, application) {
   const captured = contract(application, 'CapturedResponse');
   const replySchema = contract(application, 'WorkspaceReply');
@@ -176,19 +185,9 @@ export function workspaceMetrics(archive, application) {
     const capture = captures.get(id);
     const occurrence = occurrences.get(Buffer.from(attempt[2]).toString('hex'));
     const state = occurrence?.[3];
-    let notSent = capture?.[5] === 1;
-    if (!capture && state) {
-      if (state.tag === 0 || state.tag === 6) notSent = true; // ready after rearm, or not_sent
-      else if ([1, 2, 3, 4, 7].includes(state.tag)) {
-        notSent = Buffer.from(state.value[0]).toString('hex') !== id;
-      } else if (state.tag === 5) {
-        // Cancellation cannot consume unknown/dispatching/captured inference.
-        notSent = state.value.tag === 1 || Buffer.from(state.value.value[0]).toString('hex') !== id;
-      }
-    }
     const count = stats[role];
     if (attempt[7].tag === 1) count.prepared_bytes += Number(attempt[7].value[1]);
-    if (notSent) continue;
+    if (!physicalProviderAttempt(id, capture?.[5], state)) continue;
     count.calls++;
     const physical = {id, role, usage: null, capture_disposition: capture?.[5] ?? null};
     stats.physical_attempts.push(physical);
@@ -412,6 +411,7 @@ export async function prepareRecurrence({config, directory, binary, driver, appl
       plan.cases.push({id, pair: pair + 1, arm, config: configPath, config_sha256: hash(configBytes),
         snapshot, evidence, expected: expectedPath, expected_sha256: hash(expectedBytes),
         corpus: corpusPath, corpus_sha256: hash(corpusBytes),
+        end_packet: {id: corpus.packets.at(-1).id, offset_ms: corpus.packets.at(-1).offset_ms},
         prompt: `${corpus.contract}\n\n${corpus.packets[0].bytes}\n\nEvaluation capability condition: ${condition}`});
     }
   }
@@ -539,11 +539,14 @@ export function recurrenceCost(report, model, usages) {
 export function recurrenceExpenditure(report, model) {
   const attempts = report.reuse.attempts.filter(attempt =>
     ['agent.model.invoke.v13', 'protean.workspace.inference/2'].includes(attempt.capability) &&
-    attempt.dispatched_ms !== undefined && attempt.capture?.disposition !== 'definitely_not_sent');
+    attempt.dispatched_ms !== undefined);
+  const excludedAt = attempt => attempt.physical_provider_attempt === false ||
+    attempt.capture?.disposition === 'definitely_not_sent' ?
+    attempt.not_sent_observed_ms ?? attempt.captured_ms ?? report.elapsed_ms : Infinity;
   const times = [...new Set([0, ...attempts.flatMap(attempt => [attempt.dispatched_ms,
-    attempt.captured_ms]).filter(time => time !== undefined), report.elapsed_ms])].sort((a, b) => a - b);
+    attempt.captured_ms, attempt.not_sent_observed_ms]).filter(time => time !== undefined), report.elapsed_ms])].sort((a, b) => a - b);
   return times.map(elapsed_ms => {
-    const dispatched = attempts.filter(attempt => attempt.dispatched_ms <= elapsed_ms);
+    const dispatched = attempts.filter(attempt => attempt.dispatched_ms <= elapsed_ms && excludedAt(attempt) > elapsed_ms);
     const usages = dispatched.map(attempt => attempt.captured_ms <= elapsed_ms ? attempt.usage ?? null : null);
     const complete = usages.every(usage => Number.isSafeInteger(usage?.input_tokens) &&
       Number.isSafeInteger(usage?.output_tokens));
@@ -589,7 +592,8 @@ export function decodeRecurrenceObservation(observation, schemas) {
     const state = occurrence[3];
     const capture = row.capture_b64 ? decode('capture', row.capture_b64) : null;
     if (capture) assert.equal(capture.length, 8);
-    return {...row, attempt: {id: attempt[0], task: attempt[1], occurrence: attempt[2],
+    return {...row, physical_provider_attempt: physicalProviderAttempt(digestHex(attempt[0]), capture?.[5], state),
+      attempt: {id: attempt[0], task: attempt[1], occurrence: attempt[2],
       request: reference(attempt[3]), profile: reference(attempt[4]), capability: attempt[5], inference: attempt[6],
       prepared: reference(optional(attempt[7])), controller_context: optional(attempt[9]),
       preparation_cut: optional(attempt[12])},
@@ -607,7 +611,7 @@ export function decodeRecurrenceObservation(observation, schemas) {
       assert.equal(raw.length, 39); assert.equal(raw[0], 3);
       value = {id: raw[1], task: raw[2], program: raw[8], input: reference(raw[15]),
         outcome_kind: ['progressed', 'yielded', 'requested', 'completed', 'failed', 'cancelled'][raw[19]],
-        result: reference(optional(raw[28]))};
+        result: reference(optional(raw[28])), result_value: reference(optional(raw[29]))};
     } else {
       assert.equal(raw.length, row.kind === 'workspace_value' ? 5 : 4);
       value = {id: raw[0], task: raw[1], artifact: reference(raw[2]), description: {}};
@@ -622,12 +626,37 @@ export function decodeRecurrenceObservation(observation, schemas) {
           sources: {items: raw[4][1].map(reference)}, program: reference(optional(raw[4][2])), work: optional(raw[4][3])};
       } else {
         assert.equal(row.kind, 'workspace_view');
-        value.description = {values: {items: raw[3][1].map(reference)}};
+        const projection = optional(raw[3][3]);
+        value.description = {values: {items: raw[3][1].map(reference)},
+          projection: projection ? {result: reference(projection[0]), work: reference(projection[1]),
+            program: reference(projection[2]), input: reference(projection[3]), observation: reference(projection[4]),
+            values: {items: projection[5].map(reference)}, blocks: row.projection_blocks} : null};
       }
     }
     return {...row, value};
   });
   return {...observation, events, attempts, records};
+}
+
+export function presentedValues(description) {
+  const projection = description.projection;
+  if (!projection) return description.values.items.map(ref => ({kind: 'value', artifact_id: referenceHex(ref)}));
+  assert(Array.isArray(projection.blocks), 'Projected view has no presentation blocks');
+  let index = 0;
+  const presented = [];
+  for (const block of projection.blocks) {
+    if (block.tag === 'computed') presented.push({kind: 'computed', artifact_id: referenceHex(projection.result)});
+    else if (block.tag === 'value' || block.tag === 'source') {
+      const declared = block.tag === 'value' ? block.value : block.value.value;
+      const reference = projection.values.items[index++];
+      assert(reference && declared.kind === 'value' && textField(declared.id) === referenceHex(reference),
+        'Projected value differs from admitted presentation');
+      presented.push({kind: block.tag, artifact_id: referenceHex(reference),
+        ...(block.tag === 'source' ? {offset: block.value.offset, length: block.value.length} : {})});
+    } else assert.equal(block.tag, 'explanation');
+  }
+  assert.equal(index, projection.values.items.length);
+  return presented;
 }
 
 export class RecurrenceTrace {
@@ -673,15 +702,16 @@ export class RecurrenceTrace {
       const prior = this.records.get(identity);
       const next = {...record, first_seen_ms: prior?.first_seen_ms ?? elapsed,
         created_epoch: prior?.created_epoch ?? observation.epoch,
-        creation_seq: prior?.creation_seq ?? this.creationEvents.get(digestHex(record.value.id)) ?? null,
+        creation_seq: prior?.creation_seq ?? this.creationEvents.get(record.value.artifact ? referenceHex(record.value.artifact) : digestHex(record.value.id)) ?? null,
         visibility_epoch: prior?.visibility_epoch ?? this.epoch};
       this.records.set(identity, next);
       if (record.kind === 'workspace_work' && record.value.outcome_kind === 'completed' && record.value.result &&
         !this.uses.some(use => use.kind === 'program' && use.work_id === digestHex(record.value.id))) {
-        const program = this.records.get(`workspace_program:${digestHex(record.value.program)}`);
-        if (program?.value.description.source_kind === 'source_records') this.uses.push({kind: 'program', artifact_id: digestHex(record.value.program),
+        const program = this.artifactRecord('workspace_program', digestHex(record.value.program));
+        if (program?.value.description.source_kind === 'source_records') this.uses.push({kind: 'program', artifact_id: referenceHex(program.value.artifact), custody_id: digestHex(program.value.id),
           work_id: digestHex(record.value.id), input_sha256: referenceHex(record.value.input),
           result_sha256: referenceHex(record.value.result), visibility_epoch: this.epoch,
+          result_artifact_id: record.value.result_value ? referenceHex(record.value.result_value) : null,
           publication_epoch: observation.epoch, observed_ms: elapsed,
           created_epoch: program.created_epoch, creation_seq: program.creation_seq,
           event_seq: this.workPublications.get(digestHex(record.value.id)) ?? null,
@@ -694,7 +724,9 @@ export class RecurrenceTrace {
   observeAttempt(row, publicationEpoch, elapsed) {
     const id = digestHex(row.attempt.id), prior = this.attempts.get(id) ?? {id};
     const capability = textField(row.attempt.capability);
-    Object.assign(prior, {owner: row.attempt, capability, occurrence: row.occurrence});
+    Object.assign(prior, {owner: row.attempt, capability, occurrence: row.occurrence,
+      physical_provider_attempt: row.physical_provider_attempt});
+    if (row.physical_provider_attempt === false) prior.not_sent_observed_ms ??= elapsed;
     if (row.prepared_b64 && capability === 'agent.model.invoke.v13') {
       const prepared = decodeValue(contract(this.application, 'AdaptivePrepared'), Buffer.from(row.prepared_b64, 'base64'));
       prior.prepared_sha256 = hash(Buffer.from(row.prepared_b64, 'base64'));
@@ -732,12 +764,15 @@ export class RecurrenceTrace {
     }
     this.attempts.set(id, prior);
   }
+  artifactRecord(kind, id) {
+    return [...this.records.values()].find(record => record.kind === kind && referenceHex(record.value.artifact) === id);
+  }
   descriptionCandidate(record) {
     const derivation = record.value.derivation;
     if (['hypothesis', 'judgment'].includes(derivation.kind)) return true;
     if (derivation.kind !== 'computation' || !derivation.program || !derivation.work) return false;
     const work = this.records.get(`workspace_work:${digestHex(derivation.work)}`);
-    const program = work && this.records.get(`workspace_program:${digestHex(work.value.program)}`);
+    const program = work && this.artifactRecord('workspace_program', digestHex(work.value.program));
     return work?.value.outcome_kind === 'completed' && work.value.result &&
       program?.value.description.source_kind === 'source_records' &&
       referenceHex(program.value.artifact) === referenceHex(derivation.program) &&
@@ -747,16 +782,15 @@ export class RecurrenceTrace {
     for (const attempt of this.attempts.values()) {
       if (!attempt.selected_view || !attempt.capture || attempt.capture.disposition !== 'complete' ||
         !attempt.provider_response || attempt.visibility_epoch === undefined) continue;
-      const view = [...this.records.values()].find(record => record.kind === 'workspace_view' &&
-        referenceHex(record.value.artifact) === attempt.selected_view);
+      const view = this.artifactRecord('workspace_view', attempt.selected_view);
       if (!view) continue;
-      for (const reference of view.value.description.values.items) {
-        const value = [...this.records.values()].find(record => record.kind === 'workspace_value' &&
-          referenceHex(record.value.artifact) === referenceHex(reference));
+      for (const presented of presentedValues(view.value.description)) {
+        const value = this.artifactRecord('workspace_value', presented.artifact_id);
         if (!value || !this.descriptionCandidate(value)) continue;
-        const id = digestHex(value.value.id);
+        const id = referenceHex(value.value.artifact);
         if (this.uses.some(use => use.kind === 'description' && use.artifact_id === id && use.attempt_id === attempt.id)) continue;
-        this.uses.push({kind: 'description', artifact_id: id, view_id: digestHex(view.value.id),
+        this.uses.push({kind: 'description', artifact_id: id, custody_id: digestHex(value.value.id),
+          view_id: referenceHex(view.value.artifact), presentation: presented,
           attempt_id: attempt.id, prepared_sha256: attempt.prepared_sha256,
           response_sha256: attempt.response_sha256, visibility_epoch: attempt.visibility_epoch,
           publication_epoch: publicationEpoch, observed_ms: elapsed, created_epoch: value.created_epoch,
@@ -806,7 +840,7 @@ function creationPrecedes(use, visibility) {
 
 export class RecurrenceDriver {
   constructor(binary, args) {
-    this.child = spawn(binary, args, {stdio: ['pipe', 'pipe', 'pipe']});
+    this.child = spawn(binary, args, {detached: true, stdio: ['pipe', 'pipe', 'pipe']});
     this.pending = new Map();
     this.serial = 0;
     this.diagnostics = '';
@@ -825,6 +859,7 @@ export class RecurrenceDriver {
     });
     this.child.on('error', error => this.fail(error));
     this.child.stdin.on('error', error => this.fail(error));
+    this.child.once('exit', () => this.kill());
     this.closed = new Promise(resolve => this.child.once('close', (code, signal) => {
       this.exit = {code, signal};
       this.fail(new Error(`Evaluation driver closed: ${code}/${signal}; ${this.diagnostics}`));
@@ -846,10 +881,30 @@ export class RecurrenceDriver {
       });
     });
   }
+  kill() {
+    if (!this.child.pid) return false;
+    try { process.kill(-this.child.pid, 'SIGKILL'); return true; }
+    catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+  }
+  async waitClosed(timeoutMs = 6000) {
+    let timer;
+    try {
+      return await Promise.race([this.closed, new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error('Evaluation process group did not close after termination.');
+          this.fail(error);
+          this.child.stdout.destroy();
+          this.child.stderr.destroy();
+          this.child.stdin.destroy();
+          reject(error);
+        }, timeoutMs);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
   async close() {
     this.child.stdin.end();
-    const timer = setTimeout(() => this.child.kill('SIGKILL'), 6000);
-    try { return await this.closed; } finally { clearTimeout(timer); }
+    const timer = setTimeout(() => this.kill(), 6000);
+    try { return await this.waitClosed(12000); } finally { clearTimeout(timer); }
   }
 }
 
@@ -859,13 +914,13 @@ export function recurrenceArtifacts(archive) {
     if (kind === 8) {
       const record = decodeValue(archive.schemas.get('workspace_program'), archive.object(reference));
       const description = record[3], source = archive.object(description[1]);
-      artifacts.push({kind: 'program', artifact_id: digestHex(id), source_sha256: hash(source),
+      artifacts.push({kind: 'program', artifact_id: referenceHex(record[2]), custody_id: digestHex(id), source_sha256: hash(source),
         source_base64: source.toString('base64'), image_sha256: referenceHex(description[5]),
         source_kind: description[2]});
     } else if (kind === 10) {
       const record = decodeValue(archive.schemas.get('workspace_value'), archive.object(reference));
       const description = record[3], schema = archive.object(description[1]), bytes = archive.object(description[2]);
-      artifacts.push({kind: 'description', artifact_id: digestHex(id), source_sha256: hash(bytes),
+      artifacts.push({kind: 'description', artifact_id: referenceHex(record[2]), custody_id: digestHex(id), source_sha256: hash(bytes),
         schema_sha256: hash(schema), value: decodeValue(decodeSchema(schema), bytes),
         provenance: record[4]});
     }
@@ -894,7 +949,7 @@ export function adjudicateRecurrence(report, corpus, judgment) {
     const scored = report.grading.answers.find(item => item.request_id === proposed.request_id);
     const matching = finalAnswers.filter(item => item?.request_id === proposed.request_id);
     const answer = matching.length === 1 ? matching[0] : null;
-    const boundRefs = use && [use.artifact_id, use.result_sha256, use.work_id, use.view_id].filter(Boolean);
+    const boundRefs = use && [use.artifact_id, use.result_artifact_id, use.result_sha256, use.work_id, use.view_id].filter(Boolean);
     if (!use || !visible?.confirmed || (packet.offset_ms > 0 && !creationPrecedes(use, visible)) ||
       use.visibility_epoch < visible.visibility_epoch || scored?.sound !== true ||
       !Array.isArray(answer?.artifact_refs) || !answer.artifact_refs.some(ref => boundRefs.includes(ref)) ||
@@ -1012,7 +1067,7 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
       ...(task ? ['--profile-task', task.task_id] : [])];
     client = new Client(driver, options);
     clearTimeout(watchdog);
-    watchdog = setTimeout(() => { timedOut = true; client.child.kill('SIGKILL'); },
+    watchdog = setTimeout(() => { timedOut = true; client.kill(); },
       Math.max(1, plan.limits.wall_ms - elapsed()));
   };
   const observe = async () => {
@@ -1098,8 +1153,8 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
           trace.cut = {...boundary, sealed: acknowledged, task_id: task.task_id,
             archive_sha256: hash(await readFile(cutPath)), kill_requested_ms: elapsed()};
           await persist();
-          assert(client.child.kill('SIGKILL'), 'SIGKILL was not delivered.');
-          const exit = await client.closed;
+          assert(client.kill(), 'SIGKILL was not delivered.');
+          const exit = await client.waitClosed();
           assert.equal(exit.signal, 'SIGKILL');
           trace.cut.exit = exit;
           trace.cut.killed_ms = elapsed();
@@ -1141,7 +1196,7 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
         }
       } catch (error) { if (!timedOut) record('drain', error); }
       clearTimeout(watchdog);
-      if (timedOut && !client.exit) client.child.kill('SIGKILL');
+      if (timedOut && !client.exit) client.kill();
       try {
         const exit = await client.close();
         if (!timedOut && (exit.code !== 0 || exit.signal !== null)) record('close', new Error(json(exit)));
@@ -1154,7 +1209,7 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
       client = new Client(driver, ['--state-dir', state,
         ...(offline ? ['--offline'] : ['--config', subject.config, ...inferenceArguments({credential, chatgptAccount, siwcBin, siwcAuthDir})]),
         '--profile-task', task.task_id]);
-      const exportTimer = setTimeout(() => client.child.kill('SIGKILL'), 30000);
+      const exportTimer = setTimeout(() => client.kill(), 30000);
       try {
         archivePath = join(output, 'task.agnx');
         await client.call('evaluation.export', {task_id: task.task_id, path: archivePath});
@@ -1171,13 +1226,16 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
   try { retainedBytes = await bytesUnder(state); } catch (error) { record('namespace', error); }
   const finalResult = result?.outcome?.value?.result;
   const rawSummary = finalResult?.tag === 'report' ? finalResult.value.summary : '';
-  const report = {subject, build, task, elapsed_ms: elapsed(), peak_rss_sampled_bytes: peakRss,
+  const report = {subject, plan_sha256: campaignIdentity(plan), build, task, elapsed_ms: elapsed(), peak_rss_sampled_bytes: peakRss,
     retained_namespace_bytes: retainedBytes, status, result, archive: archivePath, metrics, errors,
     timed_out: timedOut, unresolved_question: delivery.unresolved, operations: delivery.operations,
     resource_samples: samples, grading: gradeReport(rawSummary, corpus, new Set(corpus.packets
       .filter(packet => trace.visibility.get(packet.id)?.confirmed).flatMap(packet => packet.request_ids))),
     reuse: trace.summary(),
     arm_violations: metrics ? armViolations(subject.arm === 'treatment' ? 'recurrence' : 'ordinary', metrics.actions) : null};
+  const end = trace.visibility.get(corpus.packets.at(-1).id);
+  if (status?.status === 'completed' && (!end?.confirmed || end.dispatch_ms < corpus.packets.at(-1).offset_ms))
+    report.arm_violations = [...(report.arm_violations ?? []), {kind: 'premature_completion'}];
   report.reuse.authored_evidence = artifactEvidence;
   if (!report.reuse.first_boundary) report.reuse.qualified = false;
   if (!report.reuse.cut || !report.reuse.post_restart_uses.length) report.reuse.recovered = false;

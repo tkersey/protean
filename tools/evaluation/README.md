@@ -100,6 +100,9 @@ Computed values can be candidates when their native derivation identifies the
 source-record program and completed work whose result they retain. One execution
 followed by repeated selection of its result can therefore establish description
 reuse; the retained value remains the artifact identity.
+Public artifact content IDs are distinct from task custody IDs. Projected views
+credit only the retained values actually rendered by their value, source or
+computed blocks; projection dependencies alone do not establish exposure.
 Prepared requests retain packet visibility evidence; successful captures confirm
 delivery, including successful retries containing the same packet bytes. Confirmation
 never moves the original exposure or preparation cut forward. Dispatch and capture
@@ -109,6 +112,9 @@ publication, requires no outstanding worker or uncertain acquisition, and stops
 pumping before external SIGKILL. A first eligible return that already dispatched a
 later request leaves the cut unestablished; it cannot be replaced with a favorable
 later cut. The offline SIGKILL fixture proves custody, not model discovery.
+The supervisor owns the driver process group and terminates its local helpers
+on interruption, timeout and close. This does not prove cancellation of inference
+already received by a remote provider.
 
 The independent oracle derives obligations and support from each request's raw
 immutable evidence universe. The final report summary must be a complete JSON
@@ -118,6 +124,10 @@ IDs lose credit independently; malformed outer JSON is never salvaged. False-rea
 and unsupported-blocker claims are critical errors. Later documents do not resolve
 an earlier request's missing or conflicting premises. Requests that never became
 visible remain unanswered, even if an early report guesses their answers.
+Comparison requires the report's exact frozen subject and plan digest, observed
+END visibility, and terminal completion. Correct answers before END retain their
+grading but cannot establish complete-stream payback. Legacy reports without
+these bindings require explicit evidence review and receive no automatic credit.
 
 `report.json` retains raw answers, grading, owner events, selected contexts,
 program/value/work/input/result identities, physical attempts, usage, artifact
@@ -125,6 +135,9 @@ contents, scope-review slots and recovery evidence. `results.json` and `results.
 include individual pairs, aggregate counts/costs, failures and cumulative expenditure
 traces. Keep this directory private: captures and prepared requests are not public
 release artifacts. Publish only deliberately selected, reviewed result material.
+Archive totals and expenditure curves share the native occurrence classifier.
+Known not-sent attempts leave provider expenditure when that evidence is observed;
+earlier unknown usage and all preparation and elapsed costs remain visible.
 
 Source and trace adjudication remains necessary. `adjudicateRecurrence` binds that
 review to the actual authored artifact hash and supported later answers. Review

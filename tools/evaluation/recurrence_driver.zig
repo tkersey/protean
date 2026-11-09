@@ -249,6 +249,14 @@ const Driver = struct {
         }
         if (std.mem.eql(u8, method, "evaluation.pause")) return self.pause(a, params);
         if (self.paused) return error.EvaluationPaused;
+        if (std.mem.eql(u8, method, "evaluation.fixture")) {
+            if (self.service.application.execution_mode != .offline)
+                return error.OfflineFixtureRequired;
+            if (self.worker.future != null or self.service.work != null)
+                return error.WorkerOutstanding;
+            const task = try native.client.identifier(16, try field(params, "task_id"));
+            return @import("recurrence_fixture.zig").run(self.service, self.worker, a, task);
+        }
         if (std.mem.eql(u8, method, "evaluation.step")) return self.step(a);
         if (std.mem.eql(u8, method, "evaluation.drain")) return self.drain(a);
         if (std.mem.eql(u8, method, "describe")) return self.service.application.describe(
@@ -428,10 +436,36 @@ const Driver = struct {
             try Json.put(a, &record, "kind", Json.string(kind));
             try Json.put(a, &record, "body", try hexadecimal(a, identity));
             try Json.put(a, &record, "record_b64", try base64(a, bytes));
+            if (key.kind == .workspace_view)
+                try Json.put(a, &record, "projection_blocks", try self.projectionBlocks(a, bytes));
             try records.append(record);
             try self.seen.put(self.service.allocator, key, {});
         }
         return .{ .array = records };
+    }
+
+    fn projectionBlocks(self: *Driver, a: std.mem.Allocator, bytes: []const u8) !Json.Value {
+        var view = try C.decodeOwned(native.workspace.View, a, bytes);
+        defer view.deinit();
+        const projection = view.value.description.projection orelse return .null;
+        const store = &self.service.namespace.store;
+        var result = try C.decodeOwned(
+            native.workspace.ValueArtifact,
+            a,
+            try store.object(a, projection.result, null),
+        );
+        defer result.deinit();
+        var decoded = try native.projection_proposal.decodeResult(
+            a,
+            try store.object(a, result.value.schema, null),
+            try store.object(a, result.value.value, null),
+        );
+        defer decoded.deinit();
+        return native.values.toJson(
+            @TypeOf(decoded.header.blocks),
+            a,
+            decoded.header.blocks,
+        );
     }
 
     fn pause(self: *Driver, a: std.mem.Allocator, params: Json.Value) !Json.Value {

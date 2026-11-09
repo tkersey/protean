@@ -1,6 +1,9 @@
+import {createHash} from 'node:crypto';
+
 const key = value => JSON.stringify([value.component, value.revision]);
 const pair = value => ({component: value.component, revision: value.revision});
 const canonical = value => JSON.stringify(normalize(value));
+export const campaignIdentity = plan => createHash('sha256').update(canonical(plan)).digest('hex');
 function normalize(value) {
   if (Array.isArray(value)) return value.map(normalize);
   if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(k => [k, normalize(value[k])]));
@@ -292,21 +295,28 @@ export function compareCampaign(plan, reports = []) {
   const attempts = cases.map(subject => {
     const matches = reports.filter(r => r?.subject?.id === subject.id);
     const report = matches.length === 1 ? matches[0] : null;
-    const identityMatches = report?.subject?.pair === subject.pair && report?.subject?.arm === subject.arm;
+    const identityMatches = !!report && canonical(report.subject) === canonical(subject) &&
+      report.plan_sha256 === campaignIdentity(plan);
     if (!report) issues.push(`${subject.id}: ${matches.length ? 'duplicate reports' : 'missing report'}`);
     if (report && !identityMatches) issues.push(`${subject.id}: subject mismatch`);
     const totals = report?.grading?.totals;
     const gradingKnown = totals && ['requests', 'sound', 'critical', 'unanswered'].every(k => Number.isSafeInteger(totals[k]) && totals[k] >= 0) &&
       totals.requests === 12 && totals.sound + totals.critical <= totals.requests && totals.sound + totals.unanswered <= totals.requests;
     const integrityKnown = report && Array.isArray(report.arm_violations) && Array.isArray(report.errors);
-    const integrity = !integrityKnown ? null : report.arm_violations.length === 0 && report.errors.length === 0 && identityMatches;
+    const end = subject.end_packet;
+    const endVisible = end && Array.isArray(report?.reuse?.visibility) ? report.reuse.visibility.some(item =>
+      item.packet_id === end.id && item.confirmed === true && finite(item.dispatch_ms) &&
+      item.dispatch_ms >= end.offset_ms && item.dispatch_ms <= report.elapsed_ms) : null;
+    const streamComplete = endVisible === null || !report?.status ? null : endVisible && report.status.status === 'completed';
+    const integrity = !integrityKnown ? null : !identityMatches || report.arm_violations.length || report.errors.length ||
+      streamComplete === false ? false : streamComplete === true ? true : null;
     const budget = compliance(report, plan.limits);
     const cost = costModelKnown && report?.cost?.complete === true && finite(report.cost.total) &&
       report.cost.model_id === model.id && report.cost.currency === model.currency ? report.cost.total : null;
     const reuse = report?.reuse;
     const mechanism = subject.arm === 'treatment' ? reuse?.qualified === false || reuse?.recovered === false ? false :
       reuse?.qualified === true && reuse?.recovered === true && integrity === true ? true : null : null;
-    return {subject, present: !!report, grading: gradingKnown ? totals : null, integrity, budget, cost,
+    return {subject, present: !!report, stream_complete: streamComplete, grading: gradingKnown ? totals : null, integrity, budget, cost,
       currency: model?.currency ?? null, mechanism, errors: report?.errors ?? null, arm_violations: report?.arm_violations ?? null};
   });
   const extraReports = reports.filter(r => !cases.some(c => c.id === r?.subject?.id));
@@ -325,7 +335,8 @@ export function compareCampaign(plan, reports = []) {
     const costKnown = finite(control.cost) && finite(enabled.cost);
     const positive = valid && within && costKnown ? enabled.grading.sound >= control.grading.sound && enabled.grading.critical === 0 && enabled.cost < control.cost : null;
     let verdict = 'undetermined';
-    if (valid && [control, enabled].some(a => a.budget.compliant === false)) verdict = 'no_practical_improvement';
+    if ([control, enabled].some(a => a.stream_complete === false) ||
+      valid && [control, enabled].some(a => a.budget.compliant === false)) verdict = 'no_practical_improvement';
     else if (positive) verdict = 'cost_positive_improvement';
     else if (quality && costKnown && enabled.cost > control.cost) verdict = 'tradeoff';
     else if (quality) verdict = 'quality_improvement_within_common_envelope';
@@ -343,7 +354,8 @@ export function compareCampaign(plan, reports = []) {
   const qualifyingTraces = pairs.filter(p => p.cost_positive === true && p.mechanism === true).length;
   const complete = issues.length === 0 && attempts.every(a => a.present && a.grading && a.integrity === true && a.budget.compliant === true && finite(a.cost));
   const economics = complete ? aggregate.treatment.cost < aggregate.ordinary.cost && aggregate.treatment.sound >= aggregate.ordinary.sound && aggregate.treatment.critical === 0 : null;
-  const disqualified = attempts.some(a => a.budget.compliant === false || (a.subject.arm === 'treatment' && a.grading?.critical > 0));
+  const disqualified = attempts.some(a => a.stream_complete === false || a.budget.compliant === false ||
+    (a.subject.arm === 'treatment' && a.grading?.critical > 0));
   const noQualifyingTrace = pairs.length === 3 && pairs.every(pair => pair.mechanism === false || pair.cost_positive === false);
   const milestone = disqualified || economics === false || noQualifyingTrace ? false :
     complete && economics === true && qualifyingTraces > 0 ? true : null;

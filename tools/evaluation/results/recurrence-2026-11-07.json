@@ -332,7 +332,8 @@
             "preexisting_programs": [
               {
                 "kind": "program",
-                "artifact_id": "d0bc452f38bf33eb6d2311c399c9d7dde4407be9f51481593c29d905811c07b5",
+                "artifact_id": "3ee2453f31dd1e40bd945930b720de9580f8356fd7385e9d00ab4e1c851c1f0b",
+                "custody_id": "d0bc452f38bf33eb6d2311c399c9d7dde4407be9f51481593c29d905811c07b5",
                 "source_sha256": "615de439106af9a6baaa70ba4b2a462adeec8255cb90f28680eafc7abb663fad",
                 "image_sha256": "67fe19a339a13bbe3e2b534252b47e3fdb8f1d28ed025216568da3f0777dc3c4",
                 "source_kind": 0
@@ -643,7 +644,8 @@
             "preexisting_programs": [
               {
                 "kind": "program",
-                "artifact_id": "a62f4b5bb44e022e9c0fa204640887a478fb1781695c7e67204900cfa50e3b4f",
+                "artifact_id": "3ee2453f31dd1e40bd945930b720de9580f8356fd7385e9d00ab4e1c851c1f0b",
+                "custody_id": "a62f4b5bb44e022e9c0fa204640887a478fb1781695c7e67204900cfa50e3b4f",
                 "source_sha256": "615de439106af9a6baaa70ba4b2a462adeec8255cb90f28680eafc7abb663fad",
                 "image_sha256": "67fe19a339a13bbe3e2b534252b47e3fdb8f1d28ed025216568da3f0777dc3c4",
                 "source_kind": 0
@@ -954,7 +956,8 @@
             "preexisting_programs": [
               {
                 "kind": "program",
-                "artifact_id": "d91a684d547ac90ae421dc57197affc8f20a4b2797d433b94da16ee35c8f49b9",
+                "artifact_id": "3ee2453f31dd1e40bd945930b720de9580f8356fd7385e9d00ab4e1c851c1f0b",
+                "custody_id": "d91a684d547ac90ae421dc57197affc8f20a4b2797d433b94da16ee35c8f49b9",
                 "source_sha256": "615de439106af9a6baaa70ba4b2a462adeec8255cb90f28680eafc7abb663fad",
                 "image_sha256": "67fe19a339a13bbe3e2b534252b47e3fdb8f1d28ed025216568da3f0777dc3c4",
                 "source_kind": 0
@@ -1265,7 +1268,8 @@
             "preexisting_programs": [
               {
                 "kind": "program",
-                "artifact_id": "d872cb36265cb4f7b2711e4d5c0c6a0c3b2b32fd12c31240970bfed011e69961",
+                "artifact_id": "3ee2453f31dd1e40bd945930b720de9580f8356fd7385e9d00ab4e1c851c1f0b",
+                "custody_id": "d872cb36265cb4f7b2711e4d5c0c6a0c3b2b32fd12c31240970bfed011e69961",
                 "source_sha256": "615de439106af9a6baaa70ba4b2a462adeec8255cb90f28680eafc7abb663fad",
                 "image_sha256": "67fe19a339a13bbe3e2b534252b47e3fdb8f1d28ed025216568da3f0777dc3c4",
                 "source_kind": 0
@@ -1576,7 +1580,8 @@
             "preexisting_programs": [
               {
                 "kind": "program",
-                "artifact_id": "ad9b69b1a701f9026492420751a858175c1534f7b3fab1aaace214466ea9944c",
+                "artifact_id": "3ee2453f31dd1e40bd945930b720de9580f8356fd7385e9d00ab4e1c851c1f0b",
+                "custody_id": "ad9b69b1a701f9026492420751a858175c1534f7b3fab1aaace214466ea9944c",
                 "source_sha256": "615de439106af9a6baaa70ba4b2a462adeec8255cb90f28680eafc7abb663fad",
                 "image_sha256": "67fe19a339a13bbe3e2b534252b47e3fdb8f1d28ed025216568da3f0777dc3c4",
                 "source_kind": 0
@@ -1907,7 +1912,8 @@
             "preexisting_programs": [
               {
                 "kind": "program",
-                "artifact_id": "25b1a9b5535cb846052fd845c953a0aa29bc49142a883b2174ced3d860d090cc",
+                "artifact_id": "3ee2453f31dd1e40bd945930b720de9580f8356fd7385e9d00ab4e1c851c1f0b",
+                "custody_id": "25b1a9b5535cb846052fd845c953a0aa29bc49142a883b2174ced3d860d090cc",
                 "source_sha256": "615de439106af9a6baaa70ba4b2a462adeec8255cb90f28680eafc7abb663fad",
                 "image_sha256": "67fe19a339a13bbe3e2b534252b47e3fdb8f1d28ed025216568da3f0777dc3c4",
                 "source_kind": 0
@@ -2368,7 +2374,8 @@
             "preexisting_programs": [
               {
                 "kind": "program",
-                "artifact_id": "d6c4e8551d66d73b9a1a87b45d5cd9915678be9d81773252248f38064d37ab67",
+                "artifact_id": "3ee2453f31dd1e40bd945930b720de9580f8356fd7385e9d00ab4e1c851c1f0b",
+                "custody_id": "d6c4e8551d66d73b9a1a87b45d5cd9915678be9d81773252248f38064d37ab67",
                 "source_sha256": "615de439106af9a6baaa70ba4b2a462adeec8255cb90f28680eafc7abb663fad",
                 "image_sha256": "67fe19a339a13bbe3e2b534252b47e3fdb8f1d28ed025216568da3f0777dc3c4",
                 "source_kind": 0
@@ -2683,7 +2690,13 @@
               "retention_charged": true,
               "completed_request_payback": null
             }
-          ]
+          ],
+          "stream_completion": {
+            "end_packet_id": "audit-1/END",
+            "scheduled_ms": 1980000,
+            "first_exposure_ms": 1980503.840791,
+            "terminal_status": "completed"
+          }
         },
         {
           "id": "pair-1-ordinary",
@@ -2913,7 +2926,8 @@
             "preexisting_programs": [
               {
                 "kind": "program",
-                "artifact_id": "f263acf7ed1ea86edd45f7212f88ac0a13a3d401d69fc26850c16ee57955681a",
+                "artifact_id": "3ee2453f31dd1e40bd945930b720de9580f8356fd7385e9d00ab4e1c851c1f0b",
+                "custody_id": "f263acf7ed1ea86edd45f7212f88ac0a13a3d401d69fc26850c16ee57955681a",
                 "source_sha256": "615de439106af9a6baaa70ba4b2a462adeec8255cb90f28680eafc7abb663fad",
                 "image_sha256": "67fe19a339a13bbe3e2b534252b47e3fdb8f1d28ed025216568da3f0777dc3c4",
                 "source_kind": 0
@@ -3308,7 +3322,13 @@
               "retention_charged": true,
               "completed_request_payback": null
             }
-          ]
+          ],
+          "stream_completion": {
+            "end_packet_id": "audit-1/END",
+            "scheduled_ms": 1980000,
+            "first_exposure_ms": 1980524.8700420002,
+            "terminal_status": "completed"
+          }
         },
         {
           "id": "pair-2-ordinary",
@@ -3538,7 +3558,8 @@
             "preexisting_programs": [
               {
                 "kind": "program",
-                "artifact_id": "c807af10fba5f246f3af7d9125c8c6f9a19083278d3cb53fd704387e154014f0",
+                "artifact_id": "3ee2453f31dd1e40bd945930b720de9580f8356fd7385e9d00ab4e1c851c1f0b",
+                "custody_id": "c807af10fba5f246f3af7d9125c8c6f9a19083278d3cb53fd704387e154014f0",
                 "source_sha256": "615de439106af9a6baaa70ba4b2a462adeec8255cb90f28680eafc7abb663fad",
                 "image_sha256": "67fe19a339a13bbe3e2b534252b47e3fdb8f1d28ed025216568da3f0777dc3c4",
                 "source_kind": 0
@@ -3933,7 +3954,13 @@
               "retention_charged": true,
               "completed_request_payback": null
             }
-          ]
+          ],
+          "stream_completion": {
+            "end_packet_id": "audit-2/END",
+            "scheduled_ms": 1980000,
+            "first_exposure_ms": 1980571.4782920005,
+            "terminal_status": "completed"
+          }
         },
         {
           "id": "pair-2-treatment",
@@ -4163,7 +4190,8 @@
             "preexisting_programs": [
               {
                 "kind": "program",
-                "artifact_id": "79259316db1070d667a74be25d3de86c83375a27a722993662b0a5bd5f3ad71e",
+                "artifact_id": "3ee2453f31dd1e40bd945930b720de9580f8356fd7385e9d00ab4e1c851c1f0b",
+                "custody_id": "79259316db1070d667a74be25d3de86c83375a27a722993662b0a5bd5f3ad71e",
                 "source_sha256": "615de439106af9a6baaa70ba4b2a462adeec8255cb90f28680eafc7abb663fad",
                 "image_sha256": "67fe19a339a13bbe3e2b534252b47e3fdb8f1d28ed025216568da3f0777dc3c4",
                 "source_kind": 0
@@ -4558,7 +4586,13 @@
               "retention_charged": true,
               "completed_request_payback": null
             }
-          ]
+          ],
+          "stream_completion": {
+            "end_packet_id": "audit-2/END",
+            "scheduled_ms": 1980000,
+            "first_exposure_ms": 1980568.237125,
+            "terminal_status": "completed"
+          }
         },
         {
           "id": "pair-3-treatment",
@@ -4788,7 +4822,8 @@
             "preexisting_programs": [
               {
                 "kind": "program",
-                "artifact_id": "79cdceec0039c87b792cd406956e78187c9f03201818586e6166ac18e0e48be0",
+                "artifact_id": "3ee2453f31dd1e40bd945930b720de9580f8356fd7385e9d00ab4e1c851c1f0b",
+                "custody_id": "79cdceec0039c87b792cd406956e78187c9f03201818586e6166ac18e0e48be0",
                 "source_sha256": "615de439106af9a6baaa70ba4b2a462adeec8255cb90f28680eafc7abb663fad",
                 "image_sha256": "67fe19a339a13bbe3e2b534252b47e3fdb8f1d28ed025216568da3f0777dc3c4",
                 "source_kind": 0
@@ -5123,7 +5158,13 @@
               "retention_charged": true,
               "completed_request_payback": null
             }
-          ]
+          ],
+          "stream_completion": {
+            "end_packet_id": "audit-3/END",
+            "scheduled_ms": 1980000,
+            "first_exposure_ms": 1980561.3145000003,
+            "terminal_status": "completed"
+          }
         },
         {
           "id": "pair-3-ordinary",
@@ -5353,7 +5394,8 @@
             "preexisting_programs": [
               {
                 "kind": "program",
-                "artifact_id": "5e7ba25d26aa72a4f751058a8b6988392f61cfea3bf57533ec4c610c81c8cebb",
+                "artifact_id": "3ee2453f31dd1e40bd945930b720de9580f8356fd7385e9d00ab4e1c851c1f0b",
+                "custody_id": "5e7ba25d26aa72a4f751058a8b6988392f61cfea3bf57533ec4c610c81c8cebb",
                 "source_sha256": "615de439106af9a6baaa70ba4b2a462adeec8255cb90f28680eafc7abb663fad",
                 "image_sha256": "67fe19a339a13bbe3e2b534252b47e3fdb8f1d28ed025216568da3f0777dc3c4",
                 "source_kind": 0
@@ -5748,7 +5790,13 @@
               "retention_charged": true,
               "completed_request_payback": null
             }
-          ]
+          ],
+          "stream_completion": {
+            "end_packet_id": "audit-3/END",
+            "scheduled_ms": 1980000,
+            "first_exposure_ms": 1980568.1151670013,
+            "terminal_status": "completed"
+          }
         }
       ],
       "totals": {
@@ -5812,5 +5860,10 @@
     "tokens": 5118878,
     "elapsed_sum_ms": 12453384.624709,
     "monetary_total": null
+  },
+  "evidence_revalidation": {
+    "basis": "Original immutable plans, reports and native archives; public program content identities corrected and custody identities retained separately. Legacy reports lack the new plan binding field and are not silently upgraded for current automated comparison.",
+    "workspace_source_sha256": "1bdf65e06175d25e7ef3ae35e766ba0730a05263e0b565a2030502785c95f33f",
+    "original_report_bytes_unchanged": true
   }
 }

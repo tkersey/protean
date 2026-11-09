@@ -1,20 +1,21 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
-import {mkdtemp, mkdir, readFile, rm, realpath} from 'node:fs/promises';
+import {mkdtemp, mkdir, readFile, rm, realpath, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createInterface} from 'node:readline';
+import {setTimeout as delay} from 'node:timers/promises';
 import {readArchive} from './native_archive.mjs';
-import {decodeRecurrenceObservation, prepareRecurrence, evaluateRecurrence, RecurrenceTrace} from '../../tools/evaluation/workspace.mjs';
+import {decodeRecurrenceObservation, prepareRecurrence, evaluateRecurrence, presentedValues, RecurrenceTrace} from '../../tools/evaluation/workspace.mjs';
 import {contract} from './adaptive_capture_checks.mjs';
 import {decodeValue, encodeValue} from '../support/values.mjs';
 
 const executable = process.argv[2];
 const root = await realpath(await mkdtemp(join(tmpdir(), 'protean-recurrence-driver-')));
 const children = [];
-function launch(task) {
-  const child = spawn(executable, ['--offline', '--state-dir', join(root, 'state'),
+function launch(task, state = 'state') {
+  const child = spawn(executable, ['--offline', '--state-dir', join(root, state),
     ...(task ? ['--profile-task', task] : [])], {stdio: ['pipe', 'pipe', 'pipe']});
   children.push(child);
   child.exited = once(child, 'exit');
@@ -26,7 +27,7 @@ function launch(task) {
     assert(call, `unmatched reply ${line}`);
     pending.delete(reply.id);
     clearTimeout(call.timer);
-    if (reply.error) call.reject(new Error(reply.error.message)); else call.resolve(reply.result);
+    if (reply.error) call.reject(new Error(`${reply.error.message}: ${stderr}`)); else call.resolve(reply.result);
   });
   child.once('exit', (code, signal) => {
     for (const call of pending.values()) {
@@ -118,6 +119,45 @@ try {
   assert.deepEqual(await child.exited, [0, null]);
   const config = JSON.parse(await readFile(new URL('../../examples/adaptive/adaptive.example.json', import.meta.url)));
   const applicationPath = process.argv[3], application = JSON.parse(await readFile(applicationPath));
+  const fixtureChild = launch(null, 'fixture-state');
+  const fixtureTask = await fixtureChild.call('task.submit', submission);
+  const fixture = await fixtureChild.call('evaluation.fixture', {task_id: fixtureTask.task_id});
+  const nativeRecords = decodeRecurrenceObservation(
+    await fixtureChild.call('evaluation.observe', {task_id: fixtureTask.task_id}), preflight.schemas);
+  const nativeTrace = new RecurrenceTrace({packets: []}, application);
+  nativeTrace.observe(nativeRecords, 0);
+  const hex = bytes => Buffer.from(bytes).toString('hex');
+  const work = nativeRecords.records.find(row => row.kind === 'workspace_work');
+  const program = nativeRecords.records.find(row => row.kind === 'workspace_program' &&
+    hex(row.value.artifact.digest) === hex(work.value.program));
+  const computed = nativeRecords.records.find(row => row.kind === 'workspace_value' && row.value.derivation.kind === 'computation');
+  const view = nativeRecords.records.find(row => row.kind === 'workspace_view');
+  assert(program && work && computed && view, 'native owner must publish every workspace record');
+  assert.notDeepEqual(program.value.id, program.value.artifact.digest);
+  assert.deepEqual(work.value.program, program.value.artifact.digest);
+  assert.deepEqual(computed.value.derivation.program.digest, program.value.artifact.digest);
+  assert.deepEqual(computed.value.derivation.work, work.value.id);
+  assert.deepEqual(work.value.result.digest, computed.value.description.value.digest);
+  assert.deepEqual(work.value.result_value.digest, computed.value.artifact.digest);
+  assert.equal(nativeTrace.uses.length, 1);
+  assert.equal(nativeTrace.uses[0].artifact_id, hex(program.value.artifact.digest));
+  assert.equal(nativeTrace.uses[0].custody_id, hex(program.value.id));
+  assert.equal(nativeTrace.uses[0].result_artifact_id, hex(computed.value.artifact.digest));
+  assert.equal(typeof nativeTrace.uses[0].creation_seq, 'number');
+  assert.equal(nativeTrace.descriptionCandidate(computed), true);
+  assert.deepEqual(view.value.description.values.items, []);
+  assert.equal(fixture.view.id, hex(view.value.artifact.digest));
+  assert.deepEqual(view.value.description.projection.result.digest, computed.value.artifact.digest);
+  assert.equal(hex(view.value.description.projection.work.digest), work.body);
+  assert.deepEqual(view.value.description.projection.program.digest, program.value.artifact.digest);
+  assert.deepEqual(presentedValues(view.value.description), [
+    {kind: 'computed', artifact_id: hex(computed.value.artifact.digest)},
+  ]);
+  assert([...nativeTrace.attempts.values()].some(attempt =>
+    attempt.selected_view === hex(view.value.artifact.digest) && attempt.provider_response),
+  'native preparation and captured response must use the projected view');
+  fixtureChild.stdin.end();
+  assert.deepEqual(await fixtureChild.exited, [0, null]);
   const preparedSchema = contract(application, 'AdaptivePrepared'), responseSchema = contract(application, 'CapturedResponse');
   const visibility = new RecurrenceTrace({packets: [{id: 'initial', bytes: 'initial packet'},
     {id: 'later', bytes: 'later packet'}]}, application);
@@ -170,6 +210,7 @@ try {
   assert(observed.reuse.visibility.some(item => item.packet_id.endsWith('/packet-0')));
   assert.equal(observed.metrics.physical_attempts.length,
     observed.metrics.controller.calls + observed.metrics.delegated.calls);
+  assert.equal(observed.expenditure_trace.at(-1).physical_attempts, observed.metrics.physical_attempts.length);
   const mismatchedOutput = join(root, 'mismatched');
   await mkdir(mismatchedOutput);
   const mismatch = await evaluateRecurrence({subject, plan: {...plan,
@@ -177,7 +218,38 @@ try {
     driver: executable, application, build: {scripted_fixture: true}, offline: true});
   assert(mismatch.errors.some(item => item.message.includes('Driver and frozen application assets differ')));
   assert.equal(mismatch.metrics.controller.calls, 0);
-  console.log(JSON.stringify({sealed_capture: true, external_sigkill: true, captured_response_reused: true}));
+  const helper = join(root, 'siwc-fixture'), helperPidPath = join(root, 'helper.pid');
+  const auth = join(root, 'auth'), timeoutOutput = join(root, 'timeout');
+  await mkdir(auth);
+  await mkdir(timeoutOutput);
+  const quotedPidPath = `'${helperPidPath.replaceAll("'", "'\\''")}'`;
+  await writeFile(helper, `#!/bin/sh\nprintf '%s\\n' "$$" > ${quotedPidPath}\nexec /bin/sleep 20\n`, {mode: 0o700});
+  const chatgptConfig = JSON.parse(await readFile(new URL('../../examples/adaptive/adaptive.chatgpt.example.json', import.meta.url)));
+  const timeoutPlan = await prepareRecurrence({config: chatgptConfig, directory: join(root, 'timeout-campaign'),
+    binary: executable, driver: executable, applicationPath, intervalMs: 50,
+    limits: {...plan.limits, wall_ms: 1000}});
+  const helperAlive = pid => {
+    try { process.kill(pid, 0); return true; }
+    catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+  };
+  try {
+    const timeout = await evaluateRecurrence({subject: timeoutPlan.cases[0], plan: timeoutPlan,
+      output: timeoutOutput, driver: executable, chatgptAccount: 'fixture', siwcBin: helper,
+      siwcAuthDir: auth, application, build: {fixture: true}});
+    assert.equal(timeout.timed_out, true);
+    const helperPid = Number((await readFile(helperPidPath, 'utf8')).trim());
+    assert(Number.isSafeInteger(helperPid) && helperPid > 0);
+    for (let attempt = 0; attempt < 50 && helperAlive(helperPid); attempt++) await delay(20);
+    assert.equal(helperAlive(helperPid), false, 'wall watchdog must terminate the native authentication helper');
+  } finally {
+    const helperPid = await readFile(helperPidPath, 'utf8').then(text => Number(text.trim()), error => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (helperPid && helperAlive(helperPid)) process.kill(helperPid, 'SIGKILL');
+  }
+  console.log(JSON.stringify({sealed_capture: true, external_sigkill: true, captured_response_reused: true,
+    native_workspace_lineage: true, native_helper_watchdog: true}));
 } finally {
   for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
   await Promise.all(children.map(child => child.exited));

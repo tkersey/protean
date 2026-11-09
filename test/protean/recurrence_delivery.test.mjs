@@ -3,8 +3,8 @@ import test from 'node:test';
 import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {RecurrenceDelivery, RecurrenceTrace, prepareRecurrence, validateRecurrencePlan,
-  recurrenceCost, adjudicateRecurrence, armViolations, inferenceArguments} from '../../tools/evaluation/workspace.mjs';
+import {RecurrenceDelivery, RecurrenceTrace, RecurrenceDriver, prepareRecurrence, validateRecurrencePlan,
+  recurrenceCost, recurrenceExpenditure, physicalProviderAttempt, presentedValues, adjudicateRecurrence, armViolations, inferenceArguments} from '../../tools/evaluation/workspace.mjs';
 
 const packets = [
   {id: 'initial', offset_ms: 0, bytes: 'initial'},
@@ -16,6 +16,34 @@ const plan = {questions: {'Please send the next request.': {kind: 'wait'},
   queued_reminder: 'Consume queued inputs.'};
 const question = {question_id: 'q1', question_revision: '3', request_digest: 'digest',
   answer_schema_id: 'adaptive-agent.answer.v2', prompt: {prompt: 'Please send the next request.'}};
+
+test('driver termination owns helpers and closes inherited pipes', {timeout: 15000}, async () => {
+  for (const forced of [true, false]) {
+    const program = `
+      const {spawn} = require('node:child_process');
+      const {createInterface} = require('node:readline');
+      const helper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio: 'inherit'});
+      createInterface({input: process.stdin}).on('line', line => {
+        const {id} = JSON.parse(line);
+        process.stdout.write(JSON.stringify({id, result: {helper: helper.pid}}) + '\\n');
+      }).on('close', () => process.exit(0));
+    `;
+    const driver = new RecurrenceDriver(process.execPath, ['-e', program]);
+    try {
+      const {helper} = await driver.call('ready');
+      process.kill(helper, 0);
+      if (forced) assert(driver.kill());
+      const exit = forced ? await driver.waitClosed() : await driver.close();
+      assert.deepEqual(exit, forced ? {code: null, signal: 'SIGKILL'} : {code: 0, signal: null});
+      for (let retry = 0; retry < 100; retry++) {
+        try { process.kill(helper, 0); }
+        catch (error) { assert.equal(error.code, 'ESRCH'); break; }
+        assert(retry < 99, 'driver helper remained alive after process-group termination');
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    } finally { driver.kill(); await driver.waitClosed(); }
+  }
+});
 
 test('waiting preserves schedule and uses exactly one channel per packet', () => {
   const delivery = new RecurrenceDelivery({id: 'attempt'}, {packets}, plan);
@@ -164,7 +192,7 @@ function computedDescriptionTrace() {
   const records = [
     {kind: 'workspace_program', value: {id: 'program', artifact: reference('program-artifact'),
       description: {source_kind: 'source_records'}}},
-    {kind: 'workspace_work', value: {id: 'work', program: 'program', outcome_kind: 'completed', result: reference('result')}},
+    {kind: 'workspace_work', value: {id: 'work', program: 'program-artifact', outcome_kind: 'completed', result: reference('result')}},
     {kind: 'workspace_value', value: {id: 'index', artifact: reference('index-artifact'), description: {value: reference('result')},
       derivation: {kind: 'computation', sources: {items: []}, program: reference('program-artifact'), work: 'work'}}},
     {kind: 'workspace_view', value: {id: 'view', artifact: reference('view-artifact'),
@@ -185,9 +213,9 @@ test('one authored computation can support later retained-description use and re
   const trace = computedDescriptionTrace();
   trace.descriptionUses(5, 100);
   assert.equal(trace.uses.length, 3);
-  assert(trace.uses.every(use => use.kind === 'description' && use.artifact_id === 'index'));
-  assert.equal(trace.qualifyingBoundary({epoch: 5}, 100).artifact_id, 'index');
-  trace.cut = {artifact_id: 'index'};
+  assert(trace.uses.every(use => use.kind === 'description' && use.artifact_id === 'index-artifact'));
+  assert.equal(trace.qualifyingBoundary({epoch: 5}, 100).artifact_id, 'index-artifact');
+  trace.cut = {artifact_id: 'index-artifact'};
   assert.equal(trace.summary().post_restart_uses.length, 1);
   trace.descriptionUses(6, 110);
   assert.equal(trace.uses.length, 3);
@@ -254,6 +282,17 @@ test('changed-input supported reuse must survive source and scope review in the 
   assert.equal(adjudicateRecurrence(report, corpus, {...judgment, source_sha256: 'another-source'}).qualified, false);
   report.reuse.uses = [];
   assert.equal(adjudicateRecurrence(report, corpus, judgment).qualified, false);
+});
+
+test('answer references bind public artifacts and results rather than task custody records', () => {
+  for (const reference of ['p', 'result-artifact', 'custody']) {
+    const {report, corpus, judgment} = reviewFixture();
+    report.reuse.authored_evidence[0].custody_id = 'custody';
+    for (const use of report.reuse.uses) Object.assign(use, {custody_id: 'custody', result_artifact_id: 'result-artifact'});
+    report.result.outcome.value.result.value.summary = JSON.stringify({answers:
+      ['r1', 'r2', 'r3'].map(request_id => ({request_id, artifact_refs: [reference]}))});
+    assert.equal(adjudicateRecurrence(report, corpus, judgment).qualified, reference !== 'custody');
+  }
 });
 
 test('availability, late construction and a separate recovery fixture cannot establish discovery', () => {
@@ -325,4 +364,86 @@ test('inference source selection preserves SIWC and excludes mixed billing', () 
   assert.throws(() => inferenceArguments({}));
   assert.throws(() => inferenceArguments({credential: '/private/key', chatgptAccount: 'personal'}));
   assert.throws(() => inferenceArguments({credential: '/private/key', siwcBin: '/bin/siwc'}));
+});
+
+test('projected presentation counts rendered values and computed payloads, not dependencies', () => {
+  const reference = digest => ({digest, bytes: '1'});
+  const projection = {result: reference('index-artifact'), program: reference('program-artifact'),
+    values: {items: [reference('index-artifact'), reference('source-artifact')]}, blocks: [
+      {tag: 'explanation', value: 'An explanation is not a retained description.'},
+      {tag: 'value', value: {kind: 'value', id: 'index-artifact'}},
+      {tag: 'source', value: {value: {kind: 'value', id: 'source-artifact'}, offset: '2', length: '3'}},
+      {tag: 'computed', value: {}},
+    ]};
+  const description = {values: {items: []}, projection};
+  assert.deepEqual(presentedValues(description), [
+    {kind: 'value', artifact_id: 'index-artifact'},
+    {kind: 'source', artifact_id: 'source-artifact', offset: '2', length: '3'},
+    {kind: 'computed', artifact_id: 'index-artifact'},
+  ]);
+  const trace = computedDescriptionTrace();
+  trace.records.get('workspace_view:view').value.description = description;
+  trace.descriptionUses(5, 100);
+  assert.equal(trace.uses.length, 3);
+  assert(trace.uses.every(use => use.artifact_id === 'index-artifact' && use.view_id === 'view-artifact'));
+  projection.values.items = [];
+  projection.blocks = [{tag: 'explanation', value: 'No retained payload.'}];
+  trace.uses = [];
+  trace.descriptionUses(6, 110);
+  assert.deepEqual(trace.uses, []);
+  projection.blocks = [{tag: 'computed', value: {}}];
+  trace.descriptionUses(7, 120);
+  assert.equal(trace.uses.length, 3);
+});
+
+test('provider accounting distinguishes not-sent, rearmed, cancelled, and unknown acquisitions', () => {
+  const id = 'a', other = 'b';
+  const states = [
+    [{tag: 0, value: null}, false],
+    [{tag: 6, value: [id]}, false],
+    ...[1, 2, 3, 4, 7].flatMap(tag => [[{tag, value: [id]}, true], [{tag, value: [other]}, false]]),
+    [{tag: 5, value: {tag: 1, value: null}}, false],
+    [{tag: 5, value: {tag: 0, value: [id]}}, true],
+    [{tag: 5, value: {tag: 0, value: [other]}}, false],
+    [undefined, true],
+  ];
+  for (const [state, possible] of states) {
+    assert.equal(physicalProviderAttempt(id, undefined, state), possible);
+    assert.equal(physicalProviderAttempt(id, 1, state), false);
+    assert.equal(physicalProviderAttempt(id, 0, state), true);
+    assert.equal(physicalProviderAttempt(id, 2, state), true);
+    const trace = new RecurrenceTrace({packets: []}, {});
+    trace.dispatched({step: 'dispatched', attempt: id, capability: 'agent.model.invoke.v13', epoch: 1}, 10);
+    trace.observeAttempt({attempt: {id, capability: 'agent.model.invoke.v13'}, occurrence: {state},
+      physical_provider_attempt: physicalProviderAttempt(id, undefined, state)}, 2, 20);
+    const report = {elapsed_ms: 100, retained_namespace_bytes: 0, reuse: trace.summary(),
+      cost: {total: null, complete: false}};
+    const curve = recurrenceExpenditure(report, {kind: 'unpriced'}), final = curve.at(-1);
+    assert.equal(curve.find(point => point.elapsed_ms === 10).physical_attempts, 1);
+    assert.equal(curve.find(point => point.elapsed_ms === 10).input_tokens, null);
+    assert.equal(final.physical_attempts, possible ? 1 : 0);
+    assert.equal(final.input_tokens, possible ? null : 0);
+  }
+});
+
+test('program reuse joins public content while preserving custody and work identities', () => {
+  const reference = digest => ({digest, bytes: '1'});
+  const trace = new RecurrenceTrace({packets: []}, {});
+  const observe = (records, epoch, events = []) => trace.observe({records, events, attempts: [], epoch}, epoch * 10);
+  observe([{kind: 'workspace_program', value: {id: 'custody', artifact: reference('public'),
+    description: {source_kind: 'source_records'}}}], 1, [{seq: '1', kind: 'workspace', data: JSON.stringify({workspace_id: 'public'})}]);
+  for (let epoch = 1; epoch <= 2; epoch++) {
+    trace.epoch = epoch;
+    trace.visibility.set(`packet-${epoch}`, {visibility_epoch: epoch, publication_epoch: epoch + 2, preparation_cut: 2});
+    observe([{kind: 'workspace_work', value: {id: `work-${epoch}`, program: 'public',
+      input: reference(`input-${epoch}`), outcome_kind: 'completed', result: reference(`result-${epoch}`),
+      result_value: reference(`result-artifact-${epoch}`)}}], epoch + 2);
+  }
+  assert.equal(trace.uses.length, 2);
+  assert(trace.uses.every(use => use.artifact_id === 'public' && use.custody_id === 'custody' && use.creation_seq === 1));
+  assert.deepEqual(trace.uses.map(use => use.result_artifact_id), ['result-artifact-1', 'result-artifact-2']);
+  assert.equal(trace.first_boundary.artifact_id, 'public');
+  const boundary = trace.first_boundary;
+  observe([], 10);
+  assert.equal(trace.first_boundary, boundary);
 });
