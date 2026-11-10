@@ -645,7 +645,7 @@ async function verifyAdaptiveNativeSuite({app, applicationPath, suite, workspace
       client.closed.then(exit => console.error(JSON.stringify({runtime_fixture: scenario, process_exit: exit})));
     }
     const initialized = await client.initialize(versions);
-    assert.equal(initialized.server_info.version, '9.0.0');
+    assert.equal(initialized.server_info.version, '9.1.0');
     assert.equal(initialized.protocol_version, 'agent-host/2.2');
     assert.equal(Object.hasOwn(initialized.capabilities, 'task_reconciliation'), true);
     return client;
