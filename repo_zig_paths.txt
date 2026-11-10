@@ -203,9 +203,11 @@ test/protean/workspace_runtime.zig
 test/protean/workspace_semantics.zig
 test/protean/workspace_sources.zig
 test/protean/workspace_test_support.zig
+tools/evaluation/recurrence_acquisition.zig
 tools/evaluation/recurrence_driver.zig
 tools/evaluation/recurrence_entry.zig
 tools/evaluation/recurrence_fixture.zig
+tools/evaluation/recurrence_presentation.zig
 tools/native/build_entry.zig
 tools/native/dependencies.zig
 tools/native/emit.zig

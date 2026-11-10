@@ -129,6 +129,7 @@ pub fn Client(comptime Types: type) type {
             );
             try json.put(a, &result, "revision", try counter(a, task.revision));
             try json.put(a, &result, "controller_epoch", try counter(a, task.controller_epoch));
+            try json.put(a, &result, "inference_observation", try inferenceObservation(a, task));
             try json.put(
                 a,
                 &result,
@@ -156,6 +157,18 @@ pub fn Client(comptime Types: type) type {
                 if (task.cancellation) |reason| json.string(
                     try a.dupe(u8, reason.bytes),
                 ) else .null,
+            );
+            return result;
+        }
+        fn inferenceObservation(a: std.mem.Allocator, task: state.Task) !json.Value {
+            var result = json.object();
+            try json.put(a, &result, "admitted_attempts", try counter(a, task.inference_attempts));
+            try json.put(a, &result, "request_bytes", try counter(a, task.inference_request_bytes));
+            try json.put(
+                a,
+                &result,
+                "known_output_tokens",
+                try counter(a, task.inference_output_tokens),
             );
             return result;
         }

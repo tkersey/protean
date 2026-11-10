@@ -7,6 +7,8 @@ const State = native.testing.state;
 const Worker = native.testing.Worker;
 const Service = native.tasks.Service(types);
 const Json = native.json;
+const acquisition = @import("recurrence_acquisition.zig");
+const presentation = @import("recurrence_presentation.zig");
 const assets: native.discovery.Assets = .{
     .image = @embedFile("native_image"),
     .application = @embedFile("native_application"),
@@ -215,7 +217,7 @@ fn base64(a: std.mem.Allocator, bytes: []const u8) !Json.Value {
 }
 
 const Driver = struct {
-    const RecordIdentity = struct { kind: State.RecordKind, body: [32]u8 };
+    const RecordIdentity = struct { kind: State.RecordKind, body: [32]u8, acquisition: bool };
     service: *Service,
     client: native.client.Client(types),
     worker: *Worker,
@@ -311,6 +313,10 @@ const Driver = struct {
         if (Json.get(params, "value") != null and !delegated) return error.InvalidParams;
         return .{
             .delegated = delegated,
+            .reject_action = if (Json.get(params, "reject_action")) |value|
+                try native.values.fromJson(bool, a, value)
+            else
+                false,
             .value = if (Json.get(params, "value")) |value|
                 try native.values.fromJson(C.workspace.Ref, a, value)
             else
@@ -445,6 +451,10 @@ const Driver = struct {
     fn observe(self: *Driver, a: std.mem.Allocator, params: Json.Value) !Json.Value {
         const task = try native.client.identifier(16, try field(params, "task_id"));
         const after = if (Json.get(params, "after")) |v| try unsigned(v) else 0;
+        const sources = if (Json.get(params, "acquisition")) |value|
+            try native.values.fromJson(bool, a, value)
+        else
+            false;
         var events: std.array_list.Managed(Json.Value) = .init(a);
         var attempts: std.array_list.Managed(Json.Value) = .init(a);
         var cursor = after;
@@ -471,17 +481,36 @@ const Driver = struct {
         try Json.put(a, &result, "events", .{ .array = events });
         try Json.put(a, &result, "attempts", .{ .array = attempts });
         try Json.put(a, &result, "cursor", try Json.number(a, cursor));
-        try Json.put(a, &result, "records", try self.workspaceRecords(a, task));
+        try Json.put(a, &result, "records", try self.workspaceRecords(a, task, sources));
+        if (sources) {
+            try Json.put(a, &result, "acquisition_records_complete", .{ .bool = true });
+            try Json.put(a, &result, "question_producer", try acquisition.questionProducer(
+                self.service,
+                a,
+                task,
+            ));
+            try Json.put(a, &result, "report_producer", try acquisition.reportProducer(
+                self.service,
+                a,
+                task,
+            ));
+        }
         return result;
     }
 
-    fn workspaceRecords(self: *Driver, a: std.mem.Allocator, task: [16]u8) !Json.Value {
+    fn workspaceRecords(
+        self: *Driver,
+        a: std.mem.Allocator,
+        task: [16]u8,
+        sources: bool,
+    ) !Json.Value {
         const store = &self.service.namespace.store;
         var query = try store.database.prepare(
             "SELECT kind,id,body FROM records WHERE task=? AND kind IN " ++
-                "('workspace_program','workspace_work','workspace_value','workspace_view') " ++
+                "('workspace_program','workspace_work','workspace_value','workspace_view'," ++
+                "'controller_interaction') AND (kind <> 'controller_interaction' OR ?) " ++
                 "ORDER BY kind,id",
-            &.{.{ .blob = &task }},
+            &.{ .{ .blob = &task }, .{ .integer = @intFromBool(sources) } },
         );
         defer query.deinit();
         var records: std.array_list.Managed(Json.Value) = .init(a);
@@ -495,6 +524,7 @@ const Driver = struct {
                 .kind = std.meta.stringToEnum(State.RecordKind, kind) orelse
                     return error.CorruptState,
                 .body = identity,
+                .acquisition = sources,
             };
             if (self.seen.contains(key)) continue;
             const bytes = try store.object(a, try store.objectReference(identity, null), null);
@@ -504,10 +534,39 @@ const Driver = struct {
             try Json.put(a, &record, "record_b64", try base64(a, bytes));
             if (key.kind == .workspace_view)
                 try Json.put(a, &record, "projection_blocks", try self.projectionBlocks(a, bytes));
+            if (sources and key.kind == .workspace_value) {
+                try Json.put(a, &record, "native_derivation", try acquisition.derivation(a, bytes));
+                try Json.put(a, &record, "native_acquisition", try presentation.judgment(
+                    self.service,
+                    a,
+                    bytes,
+                ));
+            }
+            if (key.kind == .controller_interaction)
+                try Json.put(a, &record, "acquisition", try acquisition.interaction(
+                    self.service,
+                    a,
+                    bytes,
+                ));
             try records.append(record);
-            try self.seen.put(self.service.allocator, key, {});
+            if (cacheRecord(record)) try self.seen.put(self.service.allocator, key, {});
         }
         return .{ .array = records };
+    }
+
+    fn cacheRecord(record: Json.Value) bool {
+        if (Json.get(record, "acquisition")) |value| {
+            const exposure = Json.get(value, "exposure") orelse return false;
+            const status = Json.get(exposure, "status") orelse return false;
+            if (status == .string and std.mem.eql(u8, status.string, "unknown")) return false;
+        }
+        if (Json.get(record, "native_acquisition")) |value| {
+            if (value != .null) {
+                const complete = Json.get(value, "complete") orelse return false;
+                if (complete != .bool or !complete.bool) return false;
+            }
+        }
+        return true;
     }
 
     fn projectionBlocks(self: *Driver, a: std.mem.Allocator, bytes: []const u8) !Json.Value {

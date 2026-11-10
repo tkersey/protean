@@ -466,3 +466,128 @@ test('quality gains with more expenditure are a tradeoff and partial outcomes re
   assert.equal(result.pairs[0].quality_improvement, true);
   assert.equal(result.aggregate.ordinary.sound, 32);
 });
+
+function onlineCampaign() {
+  const value = campaign();
+  value.plan.suite = 'recurrence-online';
+  for (const report of value.reports) {
+    report.plan_sha256 = campaignIdentity(value.plan);
+    report.final_grading = structuredClone(report.grading);
+    report.online = {complete: true};
+  }
+  return value;
+}
+
+test('cheaper online attempts cannot claim payback from the same missing or unsupported service', () => {
+  for (const failure of ['incomplete_delivery', 'unanswered', 'unsupported']) {
+    const {plan, reports} = onlineCampaign();
+    for (const report of reports) {
+      if (failure === 'incomplete_delivery') report.online.complete = false;
+      else report.grading.totals = {requests: 12, sound: 11,
+        critical: failure === 'unsupported' ? 1 : 0, unanswered: failure === 'unanswered' ? 1 : 0};
+      assert.equal(report.final_grading.totals.sound, 12);
+    }
+    const result = compareCampaign(plan, reports);
+    assert(result.attempts.every(attempt => attempt.service_complete === false));
+    assert(result.pairs.every(pair => pair.cost_positive === false));
+    assert.equal(result.campaign_cost_positive, false);
+    assert.equal(result.complete_milestone, false);
+    assert.equal(result.verdict, 'no_practical_improvement');
+    assert.equal(result.aggregate.treatment.cost, 24);
+    assert.equal(result.aggregate.ordinary.cost, 30);
+  }
+});
+
+test('missing online evidence remains unknown despite a correct final report and lower cost', () => {
+  const {plan, reports} = onlineCampaign();
+  delete reports[0].online;
+  const result = compareCampaign(plan, reports);
+  assert.equal(result.attempts[0].grading.sound, 12);
+  assert.equal(result.attempts[0].service_complete, null);
+  assert.equal(result.attempts[0].cost, 8);
+  assert.equal(result.pairs[0].cost_positive, null);
+  assert.equal(result.campaign_cost_positive, null);
+  assert.equal(result.complete_milestone, null);
+  assert.equal(result.pairs[0].verdict, 'undetermined');
+});
+
+test('online service preserves independently known failure and genuine uncertainty', () => {
+  for (const delivery of [true, false, null]) {
+    for (const grading of [true, false, null]) {
+      const {plan, reports} = onlineCampaign();
+      if (delivery === null) delete reports[0].online;
+      else reports[0].online.complete = delivery;
+      if (grading === null) delete reports[0].grading;
+      else if (!grading) reports[0].grading.totals = {requests: 12, sound: 11, critical: 0, unanswered: 1};
+      const expected = delivery === false || grading === false ? false :
+        delivery === true && grading === true ? true : null;
+      const result = compareCampaign(plan, reports);
+      assert.equal(result.attempts[0].service_complete, expected, JSON.stringify({delivery, grading}));
+      assert.equal(result.pairs[0].cost_positive, expected);
+      assert.equal(result.pairs[0].verdict, expected === null ? 'undetermined' :
+        expected ? 'cost_positive_improvement' : 'no_practical_improvement');
+      assert.equal(result.campaign_cost_positive, expected);
+      assert.equal(result.complete_milestone, expected);
+    }
+  }
+});
+
+test('unknown online completion is not a measured failure', () => {
+  for (const complete of [undefined, null, 'true', 'false', 0, 1]) {
+    const {plan, reports} = onlineCampaign();
+    reports[0].online = {complete};
+    const result = compareCampaign(plan, reports);
+    assert.equal(result.attempts[0].service_complete, null);
+    assert.equal(result.pairs[0].cost_positive, null);
+    assert.equal(result.pairs[0].verdict, 'undetermined');
+    assert.equal(result.complete_milestone, null);
+  }
+});
+
+test('incomplete online delivery remains failed without grading prices or complete usage', () => {
+  const {plan, reports} = onlineCampaign();
+  reports[0].online.complete = false;
+  delete reports[0].grading;
+  delete reports[0].cost;
+  reports[0].metrics.controller.missing_usage = 1;
+  const result = compareCampaign(plan, reports);
+  assert.equal(result.attempts[0].grading, null);
+  assert.equal(result.attempts[0].cost, null);
+  assert.equal(result.attempts[0].budget.compliant, null);
+  assert.equal(result.attempts[0].service_complete, false);
+  assert.equal(result.pairs[0].cost_positive, false);
+  assert.equal(result.pairs[0].verdict, 'no_practical_improvement');
+  assert.equal(result.campaign_cost_positive, false);
+  assert.equal(result.complete_milestone, false);
+});
+
+test('complete online and final service preserves qualifying cost savings without ordinary construction', () => {
+  const {plan, reports} = onlineCampaign();
+  for (const report of reports.filter(item => item.subject.arm === 'ordinary'))
+    report.reuse = {...report.reuse, qualified: false, recovered: false};
+  const result = compareCampaign(plan, reports);
+  assert(result.attempts.every(attempt => attempt.service_complete === true));
+  assert(result.attempts.filter(attempt => attempt.subject.arm === 'ordinary')
+    .every(attempt => attempt.mechanism === null));
+  assert(result.pairs.every(pair => pair.cost_positive === true));
+  assert.equal(result.qualifying_traces, 3);
+  assert.equal(result.campaign_cost_positive, true);
+  assert.equal(result.complete_milestone, true);
+  for (const report of reports.filter(item => item.subject.arm === 'treatment')) report.reuse.recovered = false;
+  const absentMechanism = compareCampaign(plan, reports);
+  assert(absentMechanism.attempts.every(attempt => attempt.service_complete === true));
+  assert.equal(absentMechanism.campaign_cost_positive, true);
+  assert.equal(absentMechanism.complete_milestone, false);
+});
+
+
+test('known combined answer failure survives unknown acquisition totals and delivery', () => {
+  for (const complete of [false, null]) {
+    const {plan, reports} = onlineCampaign();
+    reports[0].online.complete = null;
+    reports[0].grading = {totals: {requests: 12, sound: null, critical: null, unanswered: 0}, complete};
+    const result = compareCampaign(plan, reports);
+    assert.equal(result.attempts[0].service_complete, complete);
+    assert.equal(result.pairs[0].cost_positive, complete === false ? false : null);
+  }
+});

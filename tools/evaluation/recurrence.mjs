@@ -184,6 +184,7 @@ export function createCorpus(seed = 1) {
 }
 
 export function requestRecords(corpus, requestId) {
+  if (corpus.delivery === 'online') return corpus.records;
   if (!Array.isArray(corpus.packets)) return corpus.records;
   const visible = [];
   for (const packet of corpus.packets) {
@@ -192,6 +193,55 @@ export function requestRecords(corpus, requestId) {
     if (packet.request_ids.includes(requestId)) return freezeRecords(visible);
   }
   return [];
+}
+
+export function createOnlineCorpus(seed = 1) {
+  const original = createCorpus(seed);
+  let source = '';
+  const locations = new Map();
+  for (const record of original.records) {
+    const bytes = JSON.stringify(record) + '\n';
+    locations.set(record.id, {start: Buffer.byteLength(source), length: Buffer.byteLength(bytes)});
+    source += bytes;
+  }
+  const packets = original.packets.map(packet => {
+    if (!packet.request_ids.length) return packet;
+    const requests = original.requests.filter(request => packet.request_ids.includes(request.id));
+    const selected = unique(requests.flatMap(request => [...request.manifest_ids, ...request.receipt_ids]))
+      .map(id => locations.get(id)).filter(Boolean).sort((left, right) => left.start - right.start);
+    const ranges = [];
+    for (const range of selected) {
+      const previous = ranges.at(-1);
+      if (previous && previous.start + previous.length === range.start && previous.length + range.length <= 4096)
+        previous.length += range.length;
+      else ranges.push({path: 'records.jsonl', ...range});
+    }
+    return {...packet, bytes: JSON.stringify({packet_id: packet.id, requests, source_ranges: ranges})};
+  });
+  const onlineContract = contract
+    .replace('Keep the task open until END, then submit one final report covering every request.',
+      'Answer each selected packet before consuming the next selection. Keep the task open until END, then submit one final report covering every request. Preserve supported answers while using time and inference economically; choose your own method and whether any retained computation or representation is useful.')
+    .replace('Every packet has a packet_id, requests, and documents. Each document is one immutable record.',
+      'Every selection packet has a packet_id, requests, and source_ranges. All immutable source records are available from the start in the admitted snapshot file records.jsonl, one JSON record per line. Future request choices are selected only by later packets. Source ranges locate applicable records in that file; they are ordinary snapshot byte ranges, not new authority or proof of coverage. Acquire and cite the actual source records. The source file is complete and immutable, and no new records arrive later.')
+    .replace('Only those explicit record identities apply to that request, including referenced documents delivered previously. Later documents never change an earlier request\'s evidence universe.',
+      'Only those explicit record identities apply to that request. The presence of other records in the snapshot never expands a request\'s evidence universe.')
+    .replace('To wait for more inputs, ask exactly "Please send the next request."',
+      'For each selected packet, call ask with question set to one JSON object as text: {"kind":"recurrence.answers.v1","packet_id":"selected packet identity","answers":[the supported answers to exactly that packet\'s requests]}. Use the same answer fields and support rules as the final report below. This delivers your answers to the consumer and waits for the next scheduled selection. No correctness feedback is provided. Deliver one answer batch per packet; a later correction does not erase an earlier unsupported conclusion. Reading records does not select a request, and guessing a future request earns no credit. If you need more input without delivering an answer, the ordinary wait phrase remains "Please send the next request."')
+    .replace('Documents in task messages are supplied premises, not independently acquired facts.',
+      'Request choices are supplied premises. Source records must be acquired from the admitted snapshot; record identities are not evidence-vector indices.') +
+    '\n\nResource status accompanies existing deliveries. admitted_attempts and request_bytes are owner counters; request_bytes is bytes, not tokens. known_output_tokens is only a known lower bound. Missing values and monetary charges remain unknown. remaining_wall_ms is the external evaluator\'s remaining allowance, not a fresh deadline. No construction, representation, review, or controller replacement is required.';
+  const corpus = {...original, contract: onlineContract, delivery: 'online', packets,
+    sources: {'records.jsonl': source}};
+  return freeze({...corpus, expected: corpus.requests.map(request => oracle(request, requestRecords(corpus, request.id)))});
+}
+
+export function parseOnlineAnswer(raw) {
+  let value;
+  try { value = JSON.parse(raw); } catch { return null; }
+  return value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).sort().join(',') === 'answers,kind,packet_id' &&
+    value.kind === 'recurrence.answers.v1' && typeof value.packet_id === 'string' &&
+    Array.isArray(value.answers) ? value : null;
 }
 
 function proofPath(path, target, endpoint, expected, citations) {
@@ -246,12 +296,15 @@ export function parseReport(raw) {
   return value;
 }
 
-export function gradeReport(rawSummary, corpus, visibleRequests = null) {
+export function gradeReport(rawSummary, corpus, visibleRequests = null, acquisition = undefined) {
   freezeRecords(corpus.records);
   let report;
   try { report = parseReport(rawSummary); } catch { report = null; }
   const known = new Set(corpus.requests.map(r => r.id));
   const reportErrors = report ? report.answers.filter(a => !a || typeof a !== 'object' || !known.has(a.request_id)).map(() => 'unknown_request') : ['malformed_report'];
+  const boundAcquisition = acquisition && typeof rawSummary === 'string' &&
+    acquisition.summary_sha256 === createHash('sha256').update(rawSummary).digest('hex') &&
+    typeof acquisition.result_sha256 === 'string' && acquisition.result_sha256.length > 0 ? acquisition : null;
   const answers = corpus.requests.map(request => {
     const available = requestRecords(corpus, request.id);
     const records = new Map(available.map(r => [r.id, r]));
@@ -263,15 +316,125 @@ export function gradeReport(rawSummary, corpus, visibleRequests = null) {
       !['ready', 'blocked', 'incomplete'].includes(answer.status) ? ['invalid_status'] :
         [...(answer.status === expected.status ? [] : ['incorrect_status']), ...supportErrors(answer, request, expected, records)];
     const sound = errors.length === 0;
+    const acquired = acquiredRecords(boundAcquisition, answer);
     return {request_id: request.id, expected: expected.status, status: answer?.status ?? null, sound,
+      ...(acquisition !== undefined ? {acquired} : {}),
       critical: !sound && matching.some(a => ['ready', 'blocked'].includes(a.status)), unanswered: matching.length === 0, errors};
   });
   return {answers, errors: unique(reportErrors), totals: {requests: answers.length, sound: answers.filter(a => a.sound).length,
     critical: answers.filter(a => a.critical).length, unanswered: answers.filter(a => a.unanswered).length}};
 }
 
+const eventSequence = value => typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value) ? BigInt(value) :
+  Number.isSafeInteger(value) && value >= 0 ? BigInt(value) : null;
+const gradeTotals = answers => ({requests: answers.length,
+  sound: answers.some(answer => answer.sound === null) ? null : answers.filter(answer => answer.sound === true).length,
+  critical: answers.some(answer => answer.critical === null) ? null : answers.filter(answer => answer.critical === true).length,
+  unanswered: answers.filter(answer => answer.unanswered).length});
+const disjunction = facts => facts.includes(true) ? true : facts.every(fact => fact === false) ? false : null;
+
+function acquiredRecords(acquisition, answer) {
+  if (!acquisition || typeof acquisition.attempt_id !== 'string' || !acquisition.attempt_id ||
+    !Array.isArray(acquisition.record_ids) || !Array.isArray(answer?.records)) return null;
+  if (answer.records.every(id => acquisition.record_ids.includes(id))) return true;
+  return acquisition.complete === true ? false : null;
+}
+
+function acquiredSupport(event, answer) {
+  const acquisition = event?.acquisition;
+  return acquisition && ['question_id', 'question_revision', 'request_digest'].every(field =>
+    acquisition[field] === event[field]) ? acquiredRecords(acquisition, answer) : null;
+}
+
+const acquisitionCritical = (status, acquired) => ['ready', 'blocked'].includes(status) ?
+  acquired === true ? false : acquired === false ? true : null : false;
+
+export function gradeOnlineAnswers(corpus, answerEvents = [], visibility = []) {
+  const errors = [], seen = new Map(), sequences = new Map(), deliveries = [];
+  for (const event of answerEvents) {
+    const sequence = eventSequence(event.event_seq), envelope = parseOnlineAnswer(event.raw);
+    const identity = [event.event_seq, event.question_id, event.question_revision, event.request_digest];
+    const binding = identity.map(value => String(value)).join('/');
+    if (seen.get(binding) === event.raw) continue;
+    const conflicting = seen.has(binding) || sequences.has(String(event.event_seq)) && sequences.get(String(event.event_seq)) !== binding;
+    seen.set(binding, event.raw);
+    sequences.set(String(event.event_seq), binding);
+    const bound = sequence !== null && ['question_id', 'request_digest'].every(field =>
+      typeof event[field] === 'string' && event[field].length > 0) && eventSequence(event.question_revision) !== null;
+    const position = envelope ? corpus.packets.findIndex(packet => packet.id === envelope.packet_id && packet.request_ids.length) : -1;
+    const packet = corpus.packets[position], next = corpus.packets[position + 1];
+    const selected = visibility.find(item => item.packet_id === packet?.id && item.confirmed === true);
+    const later = visibility.find(item => item.packet_id === next?.id);
+    const selectedCut = eventSequence(selected && Object.hasOwn(selected, 'confirmed_preparation_cut') ?
+      selected.confirmed_preparation_cut : selected?.preparation_cut);
+    const laterCut = eventSequence(later && Object.hasOwn(later, 'possible_preparation_cut') ?
+      later.possible_preparation_cut : later?.preparation_cut);
+    const selectedBefore = bound && selectedCut !== null && selectedCut < sequence;
+    const beforeNext = !later || later.possible_preparation_cut === null ||
+      laterCut !== null && sequence !== null && sequence <= laterCut;
+    const supplied = envelope?.answers ?? [];
+    const scoped = !!packet && supplied.every(answer => packet.request_ids.includes(answer?.request_id));
+    const grading = gradeReport(JSON.stringify({answers: supplied}), corpus,
+      new Set(selectedBefore ? packet.request_ids : []));
+    const faults = [!bound && 'unbound_answer_event', !envelope && 'malformed_answer_envelope',
+      !packet && 'unknown_answer_packet', !selectedBefore && 'request_not_selected',
+      !beforeNext && 'answer_after_next_selection', conflicting && 'conflicting_answer_replay',
+      !scoped && 'answer_outside_packet'].filter(Boolean);
+    deliveries.push({...event, envelope, timely: selectedBefore && beforeNext, errors: faults, grading});
+    errors.push(...faults);
+  }
+  deliveries.sort((left, right) => {
+    const a = eventSequence(left.event_seq), b = eventSequence(right.event_seq);
+    return a === null ? 1 : b === null ? -1 : a < b ? -1 : a > b ? 1 : 0;
+  });
+  const answers = corpus.requests.map(request => {
+    const packet = corpus.packets.find(item => item.request_ids.includes(request.id));
+    const matching = deliveries.filter(delivery => delivery.envelope?.packet_id === packet?.id ||
+      delivery.envelope?.answers.some(answer => answer?.request_id === request.id));
+    const first = matching[0], row = first?.grading.answers.find(answer => answer.request_id === request.id);
+    const supplied = first?.envelope?.answers.filter(answer => answer?.request_id === request.id) ?? [];
+    const acquired = supplied.length === 1 ? acquiredSupport(first, supplied[0]) : null;
+    const critical = disjunction(matching.map(delivery => {
+      const grade = delivery.grading.answers.find(answer => answer.request_id === request.id);
+      const claims = delivery.envelope?.answers.filter(answer => answer?.request_id === request.id) ?? [];
+      return disjunction([grade?.critical ?? false, ...claims.map(claim =>
+        (!delivery.timely || delivery.errors.length) && ['ready', 'blocked'].includes(claim?.status) ? true :
+          acquisitionCritical(claim?.status, acquiredSupport(delivery, claim)))]);
+    }));
+    return {request_id: request.id, expected: row?.expected ?? oracle(request, requestRecords(corpus, request.id)).status,
+      status: row?.status ?? null, sound: conjunction([matching.length === 1 && first.timely && first.errors.length === 0 && row.sound &&
+        first.grading.errors.length === 0, acquired]), acquired, critical, unanswered: !first || row.unanswered,
+      errors: unique([...(row?.errors ?? ['unanswered']), ...(first?.errors ?? []),
+        ...(first?.grading.errors ?? []), ...(matching.length > 1 ? ['duplicate_answer_delivery'] : []),
+        ...(acquired === false ? ['unacquired_support'] : [])]),
+      answer: supplied.length === 1 ? supplied[0] : null,
+      event_seq: first?.event_seq ?? null, question_id: first?.question_id ?? null,
+      question_revision: first?.question_revision ?? null, request_digest: first?.request_digest ?? null,
+      observed_ms: first?.observed_ms ?? null};
+  });
+  const complete = conjunction([errors.length === 0 && answers.every(answer => answer.event_seq !== null && !answer.unanswered &&
+    !answer.errors.includes('duplicate_answer_delivery')), ...answers.map(answer => answer.sound)]);
+  return {deliveries, answers, errors: unique(errors), totals: gradeTotals(answers), complete};
+}
+
+export function combineOnlineGrading(finalGrading, onlineGrading) {
+  const answers = finalGrading.answers.map(answer => {
+    const delivered = onlineGrading.answers.find(item => item.request_id === answer.request_id);
+    const acquired = answer.acquired ?? null;
+    return {...answer, sound: conjunction([answer.sound, acquired, delivered ? delivered.sound : false]),
+      critical: disjunction([answer.critical, acquisitionCritical(answer.status, acquired), delivered ? delivered.critical : false]),
+      unanswered: answer.unanswered || !delivered || delivered.unanswered,
+      errors: unique([...answer.errors, ...(acquired === false ? ['unacquired_support'] : []),
+        ...(delivered?.errors ?? ['missing_online_answer']).map(error => `online:${error}`)])};
+  });
+  const errors = unique([...finalGrading.errors, ...onlineGrading.errors.map(error => `online:${error}`)]);
+  return {answers, errors, totals: gradeTotals(answers),
+    complete: conjunction([errors.length === 0, ...answers.map(answer => answer.sound)])};
+}
+
 const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 const sumKnown = values => values.every(finite) ? values.reduce((sum, value) => sum + value, 0) : null;
+const conjunction = facts => facts.includes(false) ? false : facts.every(fact => fact === true) ? true : null;
 const paybackQuality = (control, treatment) => [control?.sound, treatment?.sound, treatment?.critical].every(finite) ?
   treatment.sound >= control.sound && treatment.critical === 0 : null;
 
@@ -317,6 +480,11 @@ export function compareCampaign(plan, reports = []) {
       item.packet_id === end.id && item.confirmed === true && finite(item.dispatch_ms) &&
       item.dispatch_ms >= end.offset_ms && item.dispatch_ms <= report.elapsed_ms) : null;
     const streamComplete = endVisible === null || !report?.status ? null : endVisible && report.status.status === 'completed';
+    const serviceComplete = plan.suite !== 'recurrence-online' ? true : conjunction([
+      typeof report?.online?.complete === 'boolean' ? report.online.complete : null,
+      gradingKnown ? totals.sound === totals.requests && totals.critical === 0 && totals.unanswered === 0 : null,
+      report?.grading?.complete === false ? false : true,
+    ]);
     const integrity = received && !identityMatches ? false : !integrityKnown ? null : report.arm_violations.length || report.errors.length ||
       streamComplete === false ? false : streamComplete === true ? true : null;
     const budget = compliance(report, plan.limits);
@@ -325,7 +493,9 @@ export function compareCampaign(plan, reports = []) {
     const reuse = report?.reuse;
     const mechanism = subject.arm === 'treatment' ? reuse?.qualified === false || reuse?.recovered === false ? false :
       reuse?.qualified === true && reuse?.recovered === true && integrity === true ? true : null : null;
-    return {subject, present: !!received, stream_complete: streamComplete, grading: gradingKnown ? totals : null, integrity, budget, cost,
+    return {subject, present: !!received, stream_complete: streamComplete,
+      ...(plan.suite === 'recurrence-online' ? {service_complete: serviceComplete} : {}),
+      grading: gradingKnown ? totals : null, integrity, budget, cost,
       currency: model?.currency ?? null, mechanism, errors: report?.errors ?? null, arm_violations: report?.arm_violations ?? null};
   });
   const extraReports = reports.filter(r => !cases.some(c => c.id === r?.subject?.id));
@@ -340,17 +510,19 @@ export function compareCampaign(plan, reports = []) {
     const [control] = ordinary, [enabled] = treatment;
     const valid = [control, enabled].every(a => a.present && a.grading && a.integrity === true);
     const within = [control, enabled].every(a => a.budget.compliant === true);
-    const quality = valid && within ? enabled.grading.sound > control.grading.sound && enabled.grading.critical <= control.grading.critical : null;
+    const served = plan.suite !== 'recurrence-online' || [control, enabled].every(a => a.service_complete === true);
+    const quality = valid && within && served ? enabled.grading.sound > control.grading.sound && enabled.grading.critical <= control.grading.critical : null;
     const costKnown = finite(control.cost) && finite(enabled.cost);
     const qualityEligible = valid ? paybackQuality(control.grading, enabled.grading) : null;
-    const positive = qualityEligible === false ? false : valid && within && costKnown ? enabled.cost < control.cost : null;
+    const positive = qualityEligible === false || [control, enabled].some(a => a.service_complete === false) ? false :
+      valid && within && served && costKnown ? enabled.cost < control.cost : null;
     let verdict = 'undetermined';
-    if ([control, enabled].some(a => a.stream_complete === false) ||
+    if ([control, enabled].some(a => a.stream_complete === false || a.service_complete === false) ||
       valid && [control, enabled].some(a => a.budget.compliant === false)) verdict = 'no_practical_improvement';
     else if (positive) verdict = 'cost_positive_improvement';
     else if (quality && costKnown && enabled.cost > control.cost) verdict = 'tradeoff';
     else if (quality) verdict = 'quality_improvement_within_common_envelope';
-    else if (qualityEligible === false || valid && within && costKnown) verdict = 'no_practical_improvement';
+    else if (positive === false) verdict = 'no_practical_improvement';
     return {pair: id, ordinary: control.subject.id, treatment: enabled.subject.id, verdict, cost_positive: positive,
       quality_improvement: quality, mechanism: enabled.mechanism, cost_difference: costKnown ? enabled.cost - control.cost : null,
       sound_difference: valid ? enabled.grading.sound - control.grading.sound : null};
@@ -362,10 +534,12 @@ export function compareCampaign(plan, reports = []) {
       critical: selected.length === 3 ? sumKnown(selected.map(a => a.grading?.critical)) : null}];
   }));
   const qualifyingTraces = pairs.filter(p => p.cost_positive === true && p.mechanism === true).length;
-  const complete = issues.length === 0 && attempts.every(a => a.present && a.grading && a.integrity === true && a.budget.compliant === true && finite(a.cost));
+  const complete = issues.length === 0 && attempts.every(a => a.present && a.grading && a.integrity === true &&
+    a.budget.compliant === true && finite(a.cost) && (plan.suite !== 'recurrence-online' || a.service_complete === true));
   const qualityEligible = attempts.every(a => a.integrity === true) ? paybackQuality(aggregate.ordinary, aggregate.treatment) : null;
-  const economics = qualityEligible === false ? false : complete && qualityEligible === true ? aggregate.treatment.cost < aggregate.ordinary.cost : null;
-  const disqualified = attempts.some(a => a.stream_complete === false || a.budget.compliant === false ||
+  const economics = qualityEligible === false || attempts.some(attempt => attempt.service_complete === false) ? false :
+    complete && qualityEligible === true ? aggregate.treatment.cost < aggregate.ordinary.cost : null;
+  const disqualified = attempts.some(a => a.stream_complete === false || a.service_complete === false || a.budget.compliant === false ||
     (a.subject.arm === 'treatment' && a.grading?.critical > 0));
   const noQualifyingTrace = pairs.length === 3 && pairs.every(pair => pair.mechanism === false || pair.cost_positive === false);
   const milestone = disqualified || economics === false || noQualifyingTrace ? false :

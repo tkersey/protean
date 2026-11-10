@@ -61,8 +61,8 @@ try {
   assert.equal(idleDrain.step, 'idle');
   assert.equal(idleDrain.worker_active, false);
   assert.deepEqual(idleDrain.head, preflightReceipt.head);
-  const observe = async () => decodeRecurrenceObservation(
-    await child.call('evaluation.observe', {task_id: accepted.task_id}), preflight.schemas);
+  const observe = async (acquisition = false) => decodeRecurrenceObservation(
+    await child.call('evaluation.observe', {task_id: accepted.task_id, acquisition}), preflight.schemas);
   let observation, captured, priorEpoch;
   for (let turn = 0; turn < 1000; turn++) {
     const step = await child.call('evaluation.step');
@@ -116,15 +116,98 @@ try {
   assert.deepEqual(after.task.runtime_identity, before.task.runtime_identity);
   assert.deepEqual(after.task.profile, before.task.profile);
   assert.equal(after.task.inference_attempts, before.task.inference_attempts);
+  let producerObservation;
+  for (let turn = 0; turn < 1500; turn++) {
+    await child.call('evaluation.step');
+    if ((await child.call('task.status', {task_id: accepted.task_id})).question) {
+      producerObservation = await observe(true);
+      break;
+    }
+  }
+  const producer = producerObservation.question_producer;
+  assert(producer, 'native ask must bind its exact admitted producer');
+  assert.equal(producerObservation.report_producer, null);
+  let input = producerObservation.events.find(event => event.kind === 'input_required');
+  let page = producerObservation;
+  while (!input && page.events.length) {
+    page = decodeRecurrenceObservation(await child.call('evaluation.observe', {task_id: accepted.task_id,
+      after: page.cursor, acquisition: true}), preflight.schemas);
+    input = page.events.find(event => event.kind === 'input_required');
+  }
+  assert(input, 'input-required event remains available beyond the first event page');
+  const question = JSON.parse(input.data.bytes);
+  assert.equal(producer.question_id, question.question_id);
+  assert.equal(producer.question_revision, question.question_revision);
+  assert.equal(producer.request_digest, question.request_digest);
+  const emptyPage = await child.call('evaluation.observe', {task_id: accepted.task_id, after: page.cursor, acquisition: true});
+  assert.equal(emptyPage.events.length, 0);
+  assert.deepEqual(emptyPage.question_producer, producer);
+  const legacyPage = await child.call('evaluation.observe', {task_id: accepted.task_id, after: page.cursor});
+  assert.equal(Object.hasOwn(legacyPage, 'question_producer'), false);
+  assert.equal(Object.hasOwn(legacyPage, 'report_producer'), false);
+  assert.equal(Object.hasOwn(legacyPage, 'acquisition_records_complete'), false);
+  assert(legacyPage.records.every(row => row.kind !== 'controller_interaction' && !Object.hasOwn(row, 'native_derivation')));
+  assert(child.kill('SIGKILL'));
+  assert.deepEqual(await child.exited, [null, 'SIGKILL']);
+  child = launch(accepted.task_id);
+  const questionReopened = await observe(true);
+  assert.deepEqual(questionReopened.question_producer, producer);
+  const carry = questionReopened.records.find(row => row.kind === 'controller_interaction' &&
+    row.acquisition.interaction_id === producer.interaction_id).acquisition;
+  assert(carry.source_artifacts.length > 0, 'direct acquisition survives later model turns and reopening');
+  assert(carry.source_artifacts.every(row => row.task_id === accepted.task_id && row.evidence.content.length > 0));
+  await child.call('task.respond', {client_operation_id: 'producer-binding-answer', task_id: accepted.task_id,
+    question_id: question.question_id, question_revision: question.question_revision,
+    request_digest: question.request_digest, answer: {schema_id: question.answer_schema_id,
+      value: {message: 'Yes, focus on observable behavior.'}}});
+  const answeredObservation = await observe(true);
+  assert.equal(answeredObservation.question_producer, null);
+  assert.equal(answeredObservation.report_producer, null);
+  let terminalStatus;
+  for (let turn = 0; turn < 200; turn++) {
+    await child.call('evaluation.step');
+    terminalStatus = await child.call('task.status', {task_id: accepted.task_id});
+    if (terminalStatus.status === 'completed') break;
+  }
+  assert.equal(terminalStatus.status, 'completed');
+  const terminalObservation = await observe(true), reportProducer = terminalObservation.report_producer;
+  assert(reportProducer, 'completed report must bind its exact admitted producer');
+  assert.equal(terminalObservation.question_producer, null);
+  assert.equal(reportProducer.task_id, accepted.task_id);
+  assert.notEqual(reportProducer.interaction_id, producer.interaction_id);
+  assert.notEqual(reportProducer.attempt_id, producer.attempt_id);
+  const terminalResult = await child.call('task.result', {task_id: accepted.task_id});
+  assert.equal(terminalResult.outcome.value.result.tag, 'report');
+  assert.equal(reportProducer.summary_sha256, createHash('sha256')
+    .update(terminalResult.outcome.value.result.value.summary, 'utf8').digest('hex'));
+  const terminalArchivePath = join(root, 'completed.agnx');
+  await child.call('evaluation.export', {task_id: accepted.task_id, path: terminalArchivePath});
+  const terminalArchive = readArchive(await readFile(terminalArchivePath));
+  assert.equal(terminalArchive.task.result.tag, 1);
+  assert.equal(reportProducer.result_sha256, Buffer.from(terminalArchive.task.result.value[0]).toString('hex'));
+  assert.equal(reportProducer.interaction_id, Buffer.from(terminalArchive.task.controller_interaction.value).toString('hex'));
+  const terminalPage = await child.call('evaluation.observe', {task_id: accepted.task_id,
+    after: terminalArchive.task.event_high.toString(), acquisition: true});
+  assert.equal(terminalPage.events.length, 0);
+  assert.deepEqual(terminalPage.report_producer, reportProducer);
+  const terminalLegacyPage = await child.call('evaluation.observe', {task_id: accepted.task_id,
+    after: terminalArchive.task.event_high.toString(), acquisition: false});
+  assert.equal(Object.hasOwn(terminalLegacyPage, 'report_producer'), false);
+  assert(child.kill('SIGKILL'));
+  assert.deepEqual(await child.exited, [null, 'SIGKILL']);
+  child = launch(accepted.task_id);
+  assert.equal((await child.call('task.status', {task_id: accepted.task_id})).status, 'completed');
+  assert.deepEqual((await observe(true)).report_producer, reportProducer);
+  assert.deepEqual(await child.call('task.result', {task_id: accepted.task_id}), terminalResult);
   child.stdin.end();
   assert.deepEqual(await child.exited, [0, null]);
   const config = JSON.parse(await readFile(new URL('../../examples/adaptive/adaptive.example.json', import.meta.url)));
   const applicationPath = process.argv[3], application = JSON.parse(await readFile(applicationPath));
   const fixtureChild = launch(null, 'fixture-state');
   const fixtureTask = await fixtureChild.call('task.submit', submission);
-  const fixture = await fixtureChild.call('evaluation.fixture', {task_id: fixtureTask.task_id});
+  const fixture = await fixtureChild.call('evaluation.fixture', {task_id: fixtureTask.task_id, reject_action: true});
   const nativeRecords = decodeRecurrenceObservation(
-    await fixtureChild.call('evaluation.observe', {task_id: fixtureTask.task_id}), preflight.schemas);
+    await fixtureChild.call('evaluation.observe', {task_id: fixtureTask.task_id, acquisition: true}), preflight.schemas);
   const nativeTrace = new RecurrenceTrace({packets: []}, application);
   nativeTrace.observe(nativeRecords, 0);
   const hex = bytes => Buffer.from(bytes).toString('hex');
@@ -157,6 +240,22 @@ try {
   assert([...nativeTrace.attempts.values()].some(attempt =>
     attempt.selected_view === hex(view.value.artifact.digest) && attempt.provider_response),
   'native preparation and captured response must use the projected view');
+  const selectedInteractions = nativeRecords.records.filter(row => row.kind === 'controller_interaction' &&
+    row.acquisition.selected_view?.id === fixture.view.id);
+  const pendingExposure = selectedInteractions.find(row => row.acquisition.exposure.status === 'unknown');
+  assert(pendingExposure, 'an unconsumed capture cannot certify historical exposure');
+  let completedExposure;
+  for (let turn = 0; turn < 100; turn++) {
+    await fixtureChild.call('evaluation.step');
+    const current = decodeRecurrenceObservation(await fixtureChild.call('evaluation.observe',
+      {task_id: fixtureTask.task_id, acquisition: true}), preflight.schemas);
+    completedExposure = current.records.find(row => row.kind === 'controller_interaction' &&
+      row.acquisition.interaction_id === pendingExposure.acquisition.interaction_id &&
+      row.acquisition.exposure.status === 'exposed');
+    if (completedExposure) break;
+  }
+  assert.equal(completedExposure?.acquisition.exposure.selected_view.id, fixture.view.id,
+    'consumed interactions retain actual exposure after the returned action is rejected');
   fixtureChild.stdin.end();
   assert.deepEqual(await fixtureChild.exited, [0, null]);
   const delegatedSnapshot = join(root, 'delegated-snapshot'), delegatedConfigPath = join(root, 'delegated.json');
@@ -203,7 +302,7 @@ try {
     let found;
     for (let page = 0; page < 20; page++) {
       const observation = decodeRecurrenceObservation(await delegatedChild.call('evaluation.observe',
-        {task_id: delegatedTask.task_id, after: String(delegatedTrace.cursor)}), preflight.schemas);
+        {task_id: delegatedTask.task_id, after: String(delegatedTrace.cursor), acquisition: true}), preflight.schemas);
       delegatedObservations.push(observation);
       found ??= observation.attempts.find(row => hex(row.attempt.id) === result.attempt);
       delegatedTrace.observe(observation, index + 1);
@@ -223,6 +322,24 @@ try {
   assert.equal(delegatedTrace.first_boundary.kind, 'description');
   assert.equal(delegatedTrace.first_boundary.artifact_id, retainedValue.id);
   assert.equal(delegatedTrace.summary().post_restart_uses.length, 1);
+  const judgments = new Map(delegatedObservations.flatMap(observation => observation.records)
+    .filter(row => row.kind === 'workspace_value' && row.value.derivation.kind === 'judgment')
+    .map(row => [hex(row.value.artifact.digest), row]));
+  assert(judgments.size >= 2, 'later fixture invocations must consume earlier delegated answers');
+  for (const judgment of judgments.values()) {
+    assert.equal(judgment.native_acquisition?.complete, true);
+    assert.deepEqual(judgment.native_acquisition.inputs, []);
+    assert.equal(judgment.native_acquisition.selected_view.kind, 'view');
+    assert.equal(judgment.native_acquisition.port_inputs.length, 1,
+      'the frozen target input is retained independently of selected context');
+    assert.equal(judgment.native_acquisition.port_inputs[0].kind, 'value');
+    assert.notEqual(judgment.native_acquisition.port_inputs[0].id, hex(judgment.value.artifact.digest),
+      'the later delegated answer cannot enter its own historical input set');
+    const producer = delegatedObservations.flatMap(observation => observation.attempts).find(row =>
+      hex(row.capture?.response?.digest ?? []) === hex(judgment.native_derivation.capture.digest));
+    assert.equal(judgment.native_acquisition.selected_view.id, producer?.prepared_context.selected_view,
+      'judgment presentation is bound to its own completed instrument preparation');
+  }
   const noCapture = new RecurrenceTrace({packets}, application);
   for (const observation of delegatedObservations) {
     for (const row of observation.attempts) if (row.prepared_context && !noCapture.attempts.has(hex(row.attempt.id)))

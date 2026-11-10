@@ -1093,6 +1093,8 @@ const BuildGraph = struct {
             "--test",
             "test/protean/recurrence.test.mjs",
             "test/protean/recurrence_delivery.test.mjs",
+            "test/protean/recurrence_online.test.mjs",
+            "test/protean/request_profile.test.mjs",
         });
         s.native_owner_support.dependOn(&recurrence.step);
     }
