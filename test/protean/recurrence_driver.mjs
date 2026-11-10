@@ -62,7 +62,7 @@ try {
   assert.equal(idleDrain.worker_active, false);
   assert.deepEqual(idleDrain.head, preflightReceipt.head);
   const observe = async () => decodeRecurrenceObservation(
-    await child.call('evaluation.observe', {task_id: accepted.task_id}), preflight.schemas);
+    await child.call('evaluation.observe', {task_id: accepted.task_id, acquisition: true}), preflight.schemas);
   let observation, captured, priorEpoch;
   for (let turn = 0; turn < 1000; turn++) {
     const step = await child.call('evaluation.step');
@@ -116,6 +116,47 @@ try {
   assert.deepEqual(after.task.runtime_identity, before.task.runtime_identity);
   assert.deepEqual(after.task.profile, before.task.profile);
   assert.equal(after.task.inference_attempts, before.task.inference_attempts);
+  let producerObservation;
+  for (let turn = 0; turn < 1500; turn++) {
+    await child.call('evaluation.step');
+    producerObservation = await observe();
+    if (producerObservation.question_producer || (await child.call('task.status', {task_id: accepted.task_id})).question) break;
+  }
+  const producer = producerObservation.question_producer;
+  assert(producer, 'native ask must bind its exact admitted producer');
+  let input = producerObservation.events.find(event => event.kind === 'input_required');
+  let page = producerObservation;
+  while (!input && page.events.length) {
+    page = decodeRecurrenceObservation(await child.call('evaluation.observe', {task_id: accepted.task_id,
+      after: page.cursor, acquisition: true}), preflight.schemas);
+    input = page.events.find(event => event.kind === 'input_required');
+  }
+  assert(input, 'input-required event remains available beyond the first event page');
+  const question = JSON.parse(input.data.bytes);
+  assert.equal(producer.question_id, question.question_id);
+  assert.equal(producer.question_revision, question.question_revision);
+  assert.equal(producer.request_digest, question.request_digest);
+  const emptyPage = await child.call('evaluation.observe', {task_id: accepted.task_id, after: page.cursor, acquisition: true});
+  assert.equal(emptyPage.events.length, 0);
+  assert.deepEqual(emptyPage.question_producer, producer);
+  const legacyPage = await child.call('evaluation.observe', {task_id: accepted.task_id, after: page.cursor});
+  assert.equal(Object.hasOwn(legacyPage, 'question_producer'), false);
+  assert.equal(Object.hasOwn(legacyPage, 'acquisition_records_complete'), false);
+  assert(legacyPage.records.every(row => row.kind !== 'controller_interaction' && !Object.hasOwn(row, 'native_derivation')));
+  assert(child.kill('SIGKILL'));
+  assert.deepEqual(await child.exited, [null, 'SIGKILL']);
+  child = launch(accepted.task_id);
+  const questionReopened = await observe();
+  assert.deepEqual(questionReopened.question_producer, producer);
+  const carry = questionReopened.records.find(row => row.kind === 'controller_interaction' &&
+    row.acquisition.interaction_id === producer.interaction_id).acquisition;
+  assert(carry.source_artifacts.length > 0, 'direct acquisition survives later model turns and reopening');
+  assert(carry.source_artifacts.every(row => row.task_id === accepted.task_id && row.evidence.content.length > 0));
+  await child.call('task.respond', {client_operation_id: 'producer-binding-answer', task_id: accepted.task_id,
+    question_id: question.question_id, question_revision: question.question_revision,
+    request_digest: question.request_digest, answer: {schema_id: question.answer_schema_id,
+      value: {message: 'Yes, focus on observable behavior.'}}});
+  assert.equal((await observe()).question_producer, null);
   child.stdin.end();
   assert.deepEqual(await child.exited, [0, null]);
   const config = JSON.parse(await readFile(new URL('../../examples/adaptive/adaptive.example.json', import.meta.url)));

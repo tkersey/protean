@@ -579,3 +579,15 @@ test('complete online and final service preserves qualifying cost savings withou
   assert.equal(absentMechanism.campaign_cost_positive, true);
   assert.equal(absentMechanism.complete_milestone, false);
 });
+
+
+test('known combined answer failure survives unknown acquisition totals and delivery', () => {
+  for (const complete of [false, null]) {
+    const {plan, reports} = onlineCampaign();
+    reports[0].online.complete = null;
+    reports[0].grading = {totals: {requests: 12, sound: null, critical: null, unanswered: 0}, complete};
+    const result = compareCampaign(plan, reports);
+    assert.equal(result.attempts[0].service_complete, complete);
+    assert.equal(result.pairs[0].cost_positive, complete === false ? false : null);
+  }
+});

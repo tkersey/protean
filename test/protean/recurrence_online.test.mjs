@@ -8,7 +8,7 @@ import {encodeSchema, encodeValue} from '../support/values.mjs';
 import {createCorpus, createOnlineCorpus, parseOnlineAnswer, gradeReport, gradeOnlineAnswers,
   combineOnlineGrading, oracle} from '../../tools/evaluation/recurrence.mjs';
 import {RecurrenceDelivery, RecurrenceTrace, prepareRecurrence, validateRecurrencePlan, recurrenceStatus,
-  resolveQuestion} from '../../tools/evaluation/workspace.mjs';
+  resolveQuestion, sourceAcquisition} from '../../tools/evaluation/workspace.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const envelope = (packetId, answers) => JSON.stringify({kind: 'recurrence.answers.v1',
@@ -34,12 +34,16 @@ function example() {
     {request_id: 'q1', status: 'blocked', records: ['m1', 'r1'], artifact_refs: [],
       support: {blocker: targets[1], path: [targets[1]]}},
   ];
-  const corpus = {delivery: 'online', records, requests, packets};
+  const corpus = {delivery: 'online', records, requests, packets,
+    sources: {'records.jsonl': records.map(record => JSON.stringify(record) + '\n').join('')}};
   const visibility = packets.map((packet, index) => ({packet_id: packet.id, confirmed: true,
     preparation_cut: String((index + 1) * 10)}));
   const events = answers.map((answer, index) => ({event_seq: String(index * 10 + 15),
     question_id: `question-${index}`, question_revision: '1', request_digest: `digest-${index}`,
     raw: envelope(packets[index].id, [answer]), observed_ms: index * 100 + 50}));
+  for (const event of events) event.acquisition = {question_id: event.question_id,
+    question_revision: event.question_revision, request_digest: event.request_digest,
+    attempt_id: 'native-attempt', complete: true, record_ids: records.map(record => record.id)};
   return {corpus, answers, visibility, events};
 }
 
@@ -563,4 +567,160 @@ test('out-of-order captures retain the earliest confirmed admitted exposure', ()
   assert.equal(BigInt(visible.possible_preparation_cut), 2n);
   assert.equal(visible.attempt_id, 'earlier');
   assert.equal(visible.confirmation.attempt_id, 'earlier');
+});
+
+
+test('selection identities cannot substitute for acquired support', () => {
+  const value = example();
+  value.events[0].acquisition.record_ids = [];
+  const result = grading(value);
+  assert.equal(row(result).sound, false);
+  assert.equal(row(result).critical, true);
+  assert(row(result).errors.includes('unacquired_support'));
+  assert.equal(result.complete, false);
+  assert.equal(finalGrade(value).totals.sound, 2);
+});
+
+test('missing acquisition remains unknown and known errors still decide failure', () => {
+  for (const change of [event => { delete event.acquisition; },
+    event => { event.acquisition.question_id = 'another-question'; },
+    event => { event.acquisition.attempt_id = ''; },
+    event => { event.acquisition.complete = false; event.acquisition.record_ids = []; }]) {
+    const value = example();
+    change(value.events[0]);
+    const result = grading(value);
+    assert.equal(row(result).sound, null);
+    assert.equal(row(result).critical, null);
+    assert.equal(result.complete, null);
+    const combined = combineOnlineGrading(finalGrade(value), result);
+    assert.equal(combined.totals.sound, null);
+    value.answers[1].status = 'ready';
+    const failedFinal = combineOnlineGrading(finalGrade(value), result);
+    assert.equal(failedFinal.complete, false);
+    assert.equal(failedFinal.answers.find(answer => answer.request_id === 'q1').sound, false);
+    value.answers[0].status = 'blocked';
+    value.events[0].raw = envelope('p0', [value.answers[0]]);
+    assert.equal(row(grading(value)).sound, false);
+    assert.equal(row(grading(value)).critical, true);
+    assert.equal(grading(value).complete, false);
+  }
+});
+
+function acquisitionFixture() {
+  const {corpus} = example(), source = Buffer.from(corpus.sources['records.jsonl']);
+  const producer = {question_id: 'question', question_revision: '1', request_digest: 'request',
+    task_id: '01'.repeat(16), controller_id: '02'.repeat(32), controller_epoch: '0',
+    interaction_id: '03'.repeat(32), event_cut: '30', attempt_id: '04'.repeat(32)};
+  const origin = {snapshot: {digest: '05'.repeat(32), bytes: '1000'}, path: 'records.jsonl',
+    file_digest: hash(source), start: '0', end: String(source.length), file_bytes: String(source.length)};
+  const interaction = {...producer, evidence: [], results: [], result_actions: [], source_artifacts: []};
+  const value = (id, derivation) => ({kind: 'workspace_value', native_derivation: derivation,
+    value: {id, task: producer.task_id, artifact: {digest: id, bytes: '1'},
+      description: {provenance: {digest: id + '-source', bytes: '1'}}}});
+  return {corpus, source, producer, origin, interaction, value};
+}
+
+test('source coverage follows consumed native computations and retained collect or wait results', () => {
+  for (const command of ['collect', 'wait', 'inspect']) {
+    const f = acquisitionFixture();
+    const records = [f.value('acquired', {kind: 'acquisition', acquisition: f.origin}),
+      f.value('computed', {kind: 'computation', sources: [{digest: 'acquired', bytes: '1'}]})];
+    const observed = {result: {kind: 'value', id: 'computed'}};
+    const earlier = {...f.interaction, interaction_id: 'earlier', event_cut: '20',
+      results: [{call_id: 'call', output: {tag: 'workspace', value: {reply: {disposition: 'observed',
+        observation_json: JSON.stringify(command === 'collect' ? [observed] : command === 'wait' ? {works: [observed]} : observed)}}}}],
+      result_actions: [{call_id: 'call', action: {tag: 'work', value: {command: {tag: command, value: {}}}}}]};
+    const result = sourceAcquisition(f.corpus, f.producer, [earlier, f.interaction], records, true);
+    assert.equal(result.complete, true);
+    assert.deepEqual(result.record_ids, f.corpus.records.map(record => record.id));
+    earlier.result_actions[0].action = {tag: 'placement', value: {command: {tag: 'control',
+      value: {operation: 'owned-operation', command: {tag: command, value: {}}}}}};
+    assert.deepEqual(sourceAcquisition(f.corpus, f.producer, [earlier, f.interaction], records, true).record_ids,
+      result.record_ids);
+    assert.deepEqual(sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true).record_ids, []);
+    earlier.event_cut = '31';
+    assert.deepEqual(sourceAcquisition(f.corpus, f.producer, [earlier, f.interaction], records, true).record_ids, []);
+  }
+});
+
+test('direct acquisitions require exact source bytes and combine adjacent consumed ranges', () => {
+  const f = acquisitionFixture(), boundary = f.source.indexOf(10) + 1;
+  const direct = (start, end) => ({tag: 'source', value: {object: {digest: `${start}:${end}`, bytes: '1'}}});
+  const evidence = [direct(0, boundary - 2), direct(boundary - 2, boundary)];
+  f.interaction.evidence = evidence;
+  f.interaction.source_artifacts = evidence.map((entry, index) => {
+    const start = index ? boundary - 2 : 0, end = index ? boundary : boundary - 2;
+    return {object: entry.value.object, task_id: f.producer.task_id,
+      evidence: {...f.origin, sha256: hash(f.source), start, end, content: f.source.subarray(start, end).toString()}};
+  });
+  const result = () => sourceAcquisition(f.corpus, f.producer, [f.interaction], [], true);
+  assert.deepEqual(result().record_ids, ['m0']);
+  f.interaction.source_artifacts[1].evidence.content = 'invented';
+  assert.deepEqual(result().record_ids, []);
+  assert.equal(result().complete, false);
+  f.interaction.source_artifacts[1].evidence.content = f.source.subarray(boundary - 2, boundary).toString();
+  f.interaction.source_artifacts[0].task_id = 'other-task';
+  assert.deepEqual(result().record_ids, []);
+  assert.equal(result().complete, false);
+});
+
+test('source expansion uses native source identity and actual returned page', () => {
+  const f = acquisitionFixture();
+  f.interaction.results = [{call_id: 'call', output: {tag: 'workspace', value: {reply: {disposition: 'observed',
+    observation_json: JSON.stringify({text: f.source.toString(), offset: 0, next_offset: f.source.length})}}}}];
+  f.interaction.result_actions = [{call_id: 'call', action: {tag: 'context', value: {command: {tag: 'expand',
+    value: {reference: {kind: 'source', id: 'acquired-source'}}}}}}];
+  const records = [f.value('acquired', {kind: 'acquisition', acquisition: {...f.origin, end: '1'}})];
+  assert.deepEqual(sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true).record_ids,
+    f.corpus.records.map(record => record.id));
+  f.interaction.result_actions[0].call_id = 'unrelated-call';
+  const missing = sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true);
+  assert.deepEqual(missing.record_ids, []);
+  assert.equal(missing.complete, false);
+});
+
+test('unconsumed work, hypotheses, forged lineage and other producer scopes receive no acquisition credit', () => {
+  const f = acquisitionFixture();
+  const records = [f.value('acquired', {kind: 'acquisition', acquisition: f.origin}),
+    f.value('assertion', {kind: 'judgment', sources: [{digest: 'acquired', bytes: '1'}]})];
+  f.interaction.evidence = [{tag: 'workspace', value: {kind: 'value', id: 'assertion'}}];
+  assert.deepEqual(sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true).record_ids, []);
+  f.interaction.controller_id = 'another-controller';
+  const missing = sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true);
+  assert.equal(missing.complete, false);
+  assert.equal(sourceAcquisition(f.corpus, null, [f.interaction], records, true), null);
+});
+
+test('native delegated judgments and trial inputs retain acquisition without trusting authored judgments', () => {
+  for (const kind of ['computation', 'trial']) {
+    const f = acquisitionFixture();
+    const records = [f.value('acquired', {kind: 'acquisition', acquisition: f.origin}),
+      f.value('model', {kind: 'judgment', sources: [{digest: 'acquired', bytes: '1'}],
+        work: 'child', delegation: {digest: 'delegation'}, capture: {digest: 'capture'}}),
+      f.value('result', {kind, sources: [{digest: 'model', bytes: '1'}]})];
+    f.interaction.evidence = [{tag: 'workspace', value: {kind: 'value', id: 'result'}}];
+    assert.deepEqual(sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true).record_ids,
+      f.corpus.records.map(record => record.id));
+    delete records[1].native_derivation.capture;
+    assert.deepEqual(sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true).record_ids, []);
+  }
+});
+
+test('question producer is retained before its paged event and cannot be replaced by a later producer', () => {
+  const f = acquisitionFixture(), value = example();
+  f.corpus.packets = [];
+  const trace = new RecurrenceTrace(f.corpus, {});
+  const record = {kind: 'controller_interaction', value: {id: f.producer.interaction_id, task: f.producer.task_id},
+    acquisition: f.interaction};
+  trace.observe({epoch: 1, events: [], attempts: [], records: [record], question_producer: f.producer,
+    acquisition_records_complete: true}, 1);
+  const event = {seq: '1', kind: 'input_required', data: {bytes: JSON.stringify({...f.producer,
+    prompt: {prompt: value.events[0].raw}})}};
+  trace.observe({epoch: 2, events: [event], attempts: [], records: [], question_producer: null}, 2);
+  trace.acquisitionEvidence();
+  assert.equal(trace.answer_events[0].acquisition.attempt_id, f.producer.attempt_id);
+  assert.equal(trace.answer_events[0].acquisition.complete, true);
+  assert.deepEqual(trace.answer_events[0].acquisition.record_ids, []);
+  assert.throws(() => trace.observe({epoch: 3, events: [], attempts: [], records: [],
+    question_producer: {...f.producer, attempt_id: 'another-attempt'}}, 3), /Question producer changed/);
 });

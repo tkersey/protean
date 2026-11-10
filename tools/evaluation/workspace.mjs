@@ -643,11 +643,15 @@ export function decodeRecurrenceObservation(observation, schemas) {
   const records = (observation.records ?? []).map(row => {
     const raw = decode(row.kind, row.record_b64);
     let value;
-    if (row.kind === 'workspace_work') {
+    if (row.kind === 'controller_interaction') {
+      assert.equal(raw.length, 13);
+      value = {id: raw[0], task: raw[1]};
+    } else if (row.kind === 'workspace_work') {
       assert.equal(raw.length, 39); assert.equal(raw[0], 3);
       value = {id: raw[1], task: raw[2], program: raw[8], input: reference(raw[15]),
         outcome_kind: ['progressed', 'yielded', 'requested', 'completed', 'failed', 'cancelled'][raw[19]],
-        result: reference(optional(raw[28])), result_value: reference(optional(raw[29]))};
+        result: reference(optional(raw[28])), result_value: reference(optional(raw[29])),
+        observer_inputs: optional(raw[35]) ? [reference(optional(raw[35])[3]), reference(optional(raw[35])[6])] : []};
     } else {
       assert.equal(raw.length, row.kind === 'workspace_value' ? 5 : 4);
       value = {id: raw[0], task: raw[1], artifact: reference(raw[2]), description: {}};
@@ -695,6 +699,115 @@ export function presentedValues(description) {
   return presented;
 }
 
+const questionBinding = value => ['question_id', 'question_revision', 'request_digest'].map(key => value[key]).join('/');
+const workspaceReference = value => value?.kind === 'value' && typeof value.id === 'string' ? value.id : null;
+const sourceInteger = value => {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value)) return null;
+  const integer = BigInt(value);
+  return integer <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(integer) : null;
+};
+
+export function sourceAcquisition(corpus, producer, interactions, records, enumerated = false) {
+  if (!producer) return null;
+  const values = new Map(records.filter(row => row.kind === 'workspace_value').map(row => [referenceHex(row.value.artifact), row]));
+  const works = new Map(records.filter(row => row.kind === 'workspace_work').map(row => [digestHex(row.value.id), row.value]));
+  const views = new Map(records.filter(row => row.kind === 'workspace_view').map(row => [referenceHex(row.value.artifact), row]));
+  const source = typeof corpus.sources?.['records.jsonl'] === 'string' ? Buffer.from(corpus.sources['records.jsonl']) : null;
+  const sourceDigest = source && hash(source);
+  const ranges = [], roots = [], visited = new Set();
+  let complete = enumerated && source !== null;
+  const range = origin => {
+    if (!source || !origin) { complete = false; return; }
+    const path = textField(origin.path), digest = origin.sha256 ?? (origin.file_digest && digestHex(origin.file_digest));
+    const start = sourceInteger(origin.start), end = sourceInteger(origin.end), size = sourceInteger(origin.file_bytes);
+    if (path !== 'records.jsonl') return;
+    if (digest !== sourceDigest || size !== source.length || start === null || end === null || end < start || end > size) {
+      complete = false; return;
+    }
+    if (origin.content !== undefined && !Buffer.from(textField(origin.content)).equals(source.subarray(start, end))) {
+      complete = false; return;
+    }
+    ranges.push([start, end]);
+  };
+  const root = reference => { const id = workspaceReference(reference); if (id) roots.push(id); };
+  const view = reference => {
+    if (!reference) return;
+    const row = views.get(typeof reference === 'string' ? reference : reference.id);
+    if (!row) { complete = false; return; }
+    for (const item of presentedValues(row.value.description)) roots.push(item.artifact_id);
+  };
+  const prior = interactions.filter(row => row.task_id === producer.task_id && row.controller_id === producer.controller_id &&
+    row.controller_epoch === producer.controller_epoch && BigInt(row.event_cut) <= BigInt(producer.event_cut));
+  if (!prior.some(row => row.interaction_id === producer.interaction_id)) complete = false;
+  for (const interaction of prior) {
+    for (const evidence of interaction.evidence ?? []) {
+      if (evidence.tag === 'workspace') root(evidence.value);
+      else if (evidence.tag === 'source') {
+        const artifact = interaction.source_artifacts?.find(row => referenceHex(row.object) === referenceHex(evidence.value.object));
+        if (!artifact || artifact.task_id !== producer.task_id) complete = false;
+        else range(artifact.evidence);
+      }
+    }
+    view(interaction.selected_view);
+    for (const result of interaction.results ?? []) {
+      if (result.output?.tag !== 'workspace') continue;
+      const reply = result.output.value.reply;
+      if (reply.disposition !== 'observed') continue;
+      root(reply.evidence);
+      const action = interaction.result_actions?.find(row => row.call_id === result.call_id)?.action;
+      let observed;
+      try { observed = JSON.parse(reply.observation_json); } catch { complete = false; continue; }
+      if (!action) { complete = false; continue; }
+      const {name, command} = workspaceAction({name: action.tag, arguments: action.value});
+      if (name === 'work') {
+        const rows = command?.tag === 'collect' ? observed : command?.tag === 'wait' ? observed.works : [observed];
+        if (Array.isArray(rows)) for (const row of rows) root(row?.result);
+      }
+      if (command?.tag === 'expand') root(command.value.reference);
+      if (command?.tag === 'expand' && command.value.reference?.kind === 'source') {
+        const id = command.value.reference.id;
+        const origin = [...values.values()].find(row => referenceHex(row.value.description.provenance) === id)?.native_derivation?.acquisition;
+        if (origin && typeof observed?.text === 'string') range({...origin, start: observed.offset,
+          end: observed.next_offset, content: observed.text});
+        else if (!origin) complete = false;
+      }
+    }
+  }
+  for (let index = 0; index < roots.length; index++) {
+    const id = roots[index];
+    if (visited.has(id)) continue;
+    visited.add(id);
+    const row = values.get(id), derivation = row?.native_derivation;
+    if (!row || digestHex(row.value.task) !== producer.task_id || !derivation) { complete = false; continue; }
+    if (derivation.kind === 'acquisition' && derivation.acquisition) range(derivation.acquisition);
+    const computed = ['computation', 'trial'].includes(derivation.kind);
+    if (computed || derivation.kind === 'judgment' && derivation.work && derivation.delegation && derivation.capture)
+      for (const source of derivation.sources) roots.push(referenceHex(source));
+    if (computed && derivation.work) {
+      const work = works.get(digestHex(derivation.work));
+      if (work?.result_value && referenceHex(work.result_value) === id)
+        for (const source of work.observer_inputs ?? []) roots.push(referenceHex(source));
+    }
+  }
+  ranges.sort((left, right) => left[0] - right[0]);
+  const merged = [];
+  for (const range of ranges) {
+    const last = merged.at(-1);
+    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+    else merged.push([...range]);
+  }
+  let offset = 0;
+  const recordIds = [];
+  if (source) for (const line of source.toString().split('\n')) {
+    if (!line) continue;
+    const end = offset + Buffer.byteLength(line);
+    if (merged.some(([start, stop]) => start <= offset && stop >= end)) recordIds.push(JSON.parse(line).id);
+    offset = end + 1;
+  }
+  return {...producer, complete, record_ids: recordIds, ranges: merged};
+}
+
 export class RecurrenceTrace {
   constructor(corpus, application, deliveryOperations = []) {
     this.corpus = corpus;
@@ -711,6 +824,8 @@ export class RecurrenceTrace {
     this.first_boundary = null;
     this.cut = null;
     this.answer_events = [];
+    this.question_producers = new Map();
+    this.acquisition_records_complete = false;
     this.delivery_operations = deliveryOperations;
   }
   dispatched(step, elapsed) {
@@ -723,6 +838,13 @@ export class RecurrenceTrace {
     this.attempts.set(id, prior);
   }
   observe(observation, elapsed) {
+    if (observation.question_producer) {
+      const producer = observation.question_producer, key = questionBinding(producer);
+      const previous = this.question_producers.get(key);
+      if (previous) assert.deepEqual(previous, producer, 'Question producer changed.');
+      this.question_producers.set(key, producer);
+    }
+    this.acquisition_records_complete ||= observation.acquisition_records_complete === true;
     for (const event of observation.events) {
       if (Number(event.seq) <= this.cursor) continue;
       assert.equal(Number(event.seq), this.cursor + 1, 'Missing owner event.');
@@ -933,11 +1055,19 @@ export class RecurrenceTrace {
     return operations.filter(item => item.method === 'task.respond' || consumed.has(item.result?.message_id))
       .map(item => item.packet_id).filter(Boolean);
   }
+  acquisitionEvidence() {
+    if (this.corpus.delivery === 'online') {
+      const records = [...this.records.values()];
+      const interactions = records.filter(row => row.kind === 'controller_interaction').map(row => row.acquisition).filter(Boolean);
+      for (const answer of this.answer_events) answer.acquisition = sourceAcquisition(this.corpus,
+        this.question_producers.get(questionBinding(answer)), interactions, records, this.acquisition_records_complete);
+    }
+  }
   summary() {
     return {visibility: [...this.visibility.values()], uses: this.uses,
       ...(this.corpus.delivery === 'online' ? {answer_events: this.answer_events} : {}),
       first_boundary: this.first_boundary, cut: this.cut,
-      artifacts: [...this.records.values()].filter(item => item.kind !== 'workspace_work'),
+      artifacts: [...this.records.values()].filter(item => ['workspace_program', 'workspace_value', 'workspace_view'].includes(item.kind)),
       attempts: [...this.attempts.values()].map(({body, ...attempt}) => attempt),
       post_restart_uses: this.cut ? this.uses.filter(use => use.after_restart && use.artifact_id === this.cut.artifact_id) : [],
       qualified: null, recovered: null,
@@ -1263,7 +1393,8 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
       Math.max(1, plan.limits.wall_ms - elapsed()));
   };
   const observe = async (after = trace.cursor) => {
-    const raw = await client.call('evaluation.observe', {task_id: task.task_id, after: String(after)});
+    const raw = await client.call('evaluation.observe', {task_id: task.task_id, after: String(after),
+      acquisition: corpus.delivery === 'online'});
     const observation = decodeRecurrenceObservation(raw, schemas);
     try {
       if (corpus.delivery === 'online') for (const [index, event] of observation.events.entries()) {
@@ -1275,7 +1406,7 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
         raw.events[index].prompt_b64 = resolved.prompt_b64;
       }
     } finally {
-      if (raw.events.length || raw.attempts.length || raw.records?.length)
+      if (raw.events.length || raw.attempts.length || raw.records?.length || raw.question_producer)
         await appendFile(join(output, 'observations.jsonl'), JSON.stringify({elapsed_ms: elapsed(), observation: raw}) + '\n');
     }
     trace.observe(observation, elapsed());
@@ -1435,6 +1566,7 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
     } catch (error) { record('measurements', error); }
   }
   try { retainedBytes = await bytesUnder(state); } catch (error) { record('namespace', error); }
+  trace.acquisitionEvidence();
   const finalResult = result?.outcome?.value?.result;
   const rawSummary = finalResult?.tag === 'report' ? finalResult.value.summary : '';
   const report = {subject, plan_sha256: campaignIdentity(plan), build, task, elapsed_ms: elapsed(), peak_rss_sampled_bytes: peakRss,

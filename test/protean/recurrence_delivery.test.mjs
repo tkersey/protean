@@ -369,6 +369,9 @@ function onlineReviewFixture(kind) {
         packet_id: corpus.packets[index].id, answers: [answer]})});
     return answer;
   });
+  for (const event of report.reuse.answer_events) event.acquisition = {question_id: event.question_id,
+    question_revision: event.question_revision, request_digest: event.request_digest,
+    attempt_id: 'native-attempt', complete: true, record_ids: corpus.records.map(record => record.id)};
   report.result.outcome.value.result.value.summary = JSON.stringify({answers});
   return value;
 }

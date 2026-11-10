@@ -322,8 +322,20 @@ export function gradeReport(rawSummary, corpus, visibleRequests = null) {
 
 const eventSequence = value => typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value) ? BigInt(value) :
   Number.isSafeInteger(value) && value >= 0 ? BigInt(value) : null;
-const gradeTotals = answers => ({requests: answers.length, sound: answers.filter(answer => answer.sound).length,
-  critical: answers.filter(answer => answer.critical).length, unanswered: answers.filter(answer => answer.unanswered).length});
+const gradeTotals = answers => ({requests: answers.length,
+  sound: answers.some(answer => answer.sound === null) ? null : answers.filter(answer => answer.sound === true).length,
+  critical: answers.some(answer => answer.critical === null) ? null : answers.filter(answer => answer.critical === true).length,
+  unanswered: answers.filter(answer => answer.unanswered).length});
+const disjunction = facts => facts.includes(true) ? true : facts.every(fact => fact === false) ? false : null;
+
+function acquiredSupport(event, answer) {
+  const acquisition = event?.acquisition;
+  if (!acquisition || !['question_id', 'question_revision', 'request_digest'].every(field =>
+    acquisition[field] === event[field]) || typeof acquisition.attempt_id !== 'string' || !acquisition.attempt_id ||
+    !Array.isArray(acquisition.record_ids) || !Array.isArray(answer?.records)) return null;
+  if (answer.records.every(id => acquisition.record_ids.includes(id))) return true;
+  return acquisition.complete === true ? false : null;
+}
 
 export function gradeOnlineAnswers(corpus, answerEvents = [], visibility = []) {
   const errors = [], seen = new Map(), sequences = new Map(), deliveries = [];
@@ -369,36 +381,42 @@ export function gradeOnlineAnswers(corpus, answerEvents = [], visibility = []) {
       delivery.envelope?.answers.some(answer => answer?.request_id === request.id));
     const first = matching[0], row = first?.grading.answers.find(answer => answer.request_id === request.id);
     const supplied = first?.envelope?.answers.filter(answer => answer?.request_id === request.id) ?? [];
-    const critical = matching.some(delivery => {
+    const acquired = supplied.length === 1 ? acquiredSupport(first, supplied[0]) : null;
+    const critical = disjunction(matching.map(delivery => {
       const grade = delivery.grading.answers.find(answer => answer.request_id === request.id);
-      return grade?.critical || (!delivery.timely || delivery.errors.length) &&
-        delivery.envelope?.answers.some(answer => answer?.request_id === request.id && ['ready', 'blocked'].includes(answer.status));
-    });
+      const claim = delivery.envelope?.answers.find(answer => answer?.request_id === request.id);
+      if (grade?.critical || (!delivery.timely || delivery.errors.length) &&
+        ['ready', 'blocked'].includes(claim?.status)) return true;
+      return ['ready', 'blocked'].includes(claim?.status) ?
+        acquiredSupport(delivery, claim) === true ? false : acquiredSupport(delivery, claim) === false ? true : null : false;
+    }));
     return {request_id: request.id, expected: row?.expected ?? oracle(request, requestRecords(corpus, request.id)).status,
-      status: row?.status ?? null, sound: matching.length === 1 && first.timely && first.errors.length === 0 && row.sound &&
-        first.grading.errors.length === 0, critical, unanswered: !first || row.unanswered,
+      status: row?.status ?? null, sound: conjunction([matching.length === 1 && first.timely && first.errors.length === 0 && row.sound &&
+        first.grading.errors.length === 0, acquired]), acquired, critical, unanswered: !first || row.unanswered,
       errors: unique([...(row?.errors ?? ['unanswered']), ...(first?.errors ?? []),
-        ...(first?.grading.errors ?? []), ...(matching.length > 1 ? ['duplicate_answer_delivery'] : [])]),
+        ...(first?.grading.errors ?? []), ...(matching.length > 1 ? ['duplicate_answer_delivery'] : []),
+        ...(acquired === false ? ['unacquired_support'] : [])]),
       answer: supplied.length === 1 ? supplied[0] : null,
       event_seq: first?.event_seq ?? null, question_id: first?.question_id ?? null,
       question_revision: first?.question_revision ?? null, request_digest: first?.request_digest ?? null,
       observed_ms: first?.observed_ms ?? null};
   });
-  const complete = errors.length === 0 && answers.every(answer => answer.event_seq !== null && !answer.unanswered &&
-    !answer.errors.includes('duplicate_answer_delivery'));
+  const complete = conjunction([errors.length === 0 && answers.every(answer => answer.event_seq !== null && !answer.unanswered &&
+    !answer.errors.includes('duplicate_answer_delivery')), ...answers.map(answer => answer.sound)]);
   return {deliveries, answers, errors: unique(errors), totals: gradeTotals(answers), complete};
 }
 
 export function combineOnlineGrading(finalGrading, onlineGrading) {
   const answers = finalGrading.answers.map(answer => {
     const delivered = onlineGrading.answers.find(item => item.request_id === answer.request_id);
-    return {...answer, sound: answer.sound && delivered?.sound === true,
-      critical: answer.critical || delivered?.critical === true,
+    return {...answer, sound: conjunction([answer.sound, delivered ? delivered.sound : false]),
+      critical: disjunction([answer.critical, delivered ? delivered.critical : false]),
       unanswered: answer.unanswered || !delivered || delivered.unanswered,
       errors: unique([...answer.errors, ...(delivered?.errors ?? ['missing_online_answer']).map(error => `online:${error}`)])};
   });
-  return {answers, errors: unique([...finalGrading.errors, ...onlineGrading.errors.map(error => `online:${error}`)]),
-    totals: gradeTotals(answers)};
+  const errors = unique([...finalGrading.errors, ...onlineGrading.errors.map(error => `online:${error}`)]);
+  return {answers, errors, totals: gradeTotals(answers),
+    complete: conjunction([errors.length === 0, ...answers.map(answer => answer.sound)])};
 }
 
 const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
@@ -452,6 +470,7 @@ export function compareCampaign(plan, reports = []) {
     const serviceComplete = plan.suite !== 'recurrence-online' ? true : conjunction([
       typeof report?.online?.complete === 'boolean' ? report.online.complete : null,
       gradingKnown ? totals.sound === totals.requests && totals.critical === 0 && totals.unanswered === 0 : null,
+      report?.grading?.complete === false ? false : true,
     ]);
     const integrity = received && !identityMatches ? false : !integrityKnown ? null : report.arm_violations.length || report.errors.length ||
       streamComplete === false ? false : streamComplete === true ? true : null;
