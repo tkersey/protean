@@ -22,11 +22,11 @@ fn record(
     comptime kind: []const u8,
     id: [32]u8,
     task: [16]u8,
-) !C.Decoded(T) {
+) !?C.Decoded(T) {
     const bytes = (try service.namespace.store.recordBytes(a, kind, id, task)) orelse
-        return error.MissingAcquisitionRecord;
+        return null;
     defer a.free(bytes);
-    return C.decodeOwned(T, a, bytes);
+    return try C.decodeOwned(T, a, bytes);
 }
 
 fn object(service: *Service, a: std.mem.Allocator, ref: anytype) ![]u8 {
@@ -70,41 +70,45 @@ fn acceptedCall(result: t.P.AdaptiveResult, request: t.P.AdaptiveRequest) ?t.P.F
     return null;
 }
 
-pub fn questionProducer(service: *Service, a: std.mem.Allocator, task_id: [16]u8) !Json.Value {
-    var question = (try service.pendingQuestion(a, task_id)) orelse return .null;
-    defer question.deinit();
-    if (question.value.retired or question.value.answer != null) return .null;
-    var task = try service.task(a, task_id);
-    defer task.deinit();
-    const id = task.value.controller_interaction orelse return .null;
-    var offered = try record(
+const Producer = struct {
+    projection: Json.Value,
+    normalized: C.Decoded(t.P.AdaptiveResult),
+    action: t.Action,
+};
+
+fn modelProducer(service: *Service, a: std.mem.Allocator, task: State.Task) !?Producer {
+    const id = task.controller_interaction orelse return null;
+    var offered = (try record(
         service,
         State.ControllerInteraction,
         a,
         "controller_interaction",
         id,
-        task_id,
-    );
+        task.id,
+    )) orelse return null;
     defer offered.deinit();
-    if (!std.meta.eql(offered.value.task, task_id) or
-        !std.meta.eql(task.value.controller, offered.value.controller) or
-        task.value.controller_epoch != offered.value.epoch) return .null;
-    const model = offered.value.model orelse return .null;
-    var occurrence = try record(service, Occurrence, a, "occurrence", model, task_id);
+    if (!std.meta.eql(offered.value.task, task.id) or
+        !std.meta.eql(task.controller, offered.value.controller) or
+        task.controller_epoch != offered.value.epoch) return null;
+    const model = offered.value.model orelse return null;
+    var occurrence = (try record(service, Occurrence, a, "occurrence", model, task.id)) orelse
+        return null;
     defer occurrence.deinit();
     if (occurrence.value.work != null or occurrence.value.state != .admitted or
-        occurrence.value.state.admitted != .reply) return .null;
+        occurrence.value.state.admitted != .reply) return null;
     const reply = occurrence.value.state.admitted.reply;
-    var attempt = try record(service, State.Attempt, a, "attempt", reply.attempt, task_id);
+    var attempt = (try record(service, State.Attempt, a, "attempt", reply.attempt, task.id)) orelse
+        return null;
     defer attempt.deinit();
-    var capture = try record(service, State.Capture, a, "capture", reply.attempt, task_id);
+    var capture = (try record(service, State.Capture, a, "capture", reply.attempt, task.id)) orelse
+        return null;
     defer capture.deinit();
-    if (!producerCapture(task_id, occurrence.value, attempt.value, capture.value, reply.reply))
-        return .null;
-    const context = attempt.value.controller_context orelse return .null;
+    if (!producerCapture(task.id, occurrence.value, attempt.value, capture.value, reply.reply))
+        return null;
+    const context = attempt.value.controller_context orelse return null;
     if (context.epoch != offered.value.epoch or context.event_cut != offered.value.event_cut or
-        !std.meta.eql(context.overlay, offered.value.overlay)) return .null;
-    const prepared_ref = attempt.value.prepared orelse return .null;
+        !std.meta.eql(context.overlay, offered.value.overlay)) return null;
+    const prepared_ref = attempt.value.prepared orelse return null;
     var prepared = try C.decodeOwned(t.P.AdaptivePrepared, a, try object(service, a, prepared_ref));
     defer prepared.deinit();
     var result = try normalized(
@@ -112,26 +116,81 @@ pub fn questionProducer(service: *Service, a: std.mem.Allocator, task_id: [16]u8
         try object(service, a, capture.value.projection.?.reply),
         occurrence.value.request,
     );
-    defer result.deinit();
-    const call = acceptedCall(result.value, prepared.value.request) orelse return .null;
-    if (call.decoded_action.decoded != .ask) return .null;
-    const prompt_bytes = try object(service, a, question.value.prompt);
-    const prompt = try Json.parseAsset(a, prompt_bytes, prompt_bytes.len);
-    const text = Json.get(prompt.value, "prompt") orelse return .null;
-    if (!std.mem.eql(u8, try Json.text(text), call.decoded_action.decoded.ask.question.bytes))
-        return .null;
-    var output = try interactionIdentity(a, offered.value);
-    try Json.put(a, &output, "question_id", try hex(a, question.value.id));
-    try Json.put(a, &output, "question_revision", try decimal(a, question.value.revision));
-    try Json.put(a, &output, "request_digest", try hex(a, question.value.request_digest));
-    try Json.put(a, &output, "attempt_id", try hex(a, attempt.value.id));
-    try Json.put(a, &output, "prepared_sha256", try hex(a, prepared_ref.digest));
+    errdefer result.deinit();
+    const call = acceptedCall(result.value, prepared.value.request) orelse {
+        result.deinit();
+        return null;
+    };
+    return .{
+        .projection = try producerIdentity(a, offered.value, attempt.value, capture.value),
+        .normalized = result,
+        .action = call.decoded_action.decoded,
+    };
+}
+
+fn producerIdentity(
+    a: std.mem.Allocator,
+    offered: State.ControllerInteraction,
+    attempt: State.Attempt,
+    capture: State.Capture,
+) !Json.Value {
+    var output = try interactionIdentity(a, offered);
+    try Json.put(a, &output, "attempt_id", try hex(a, attempt.id));
+    try Json.put(a, &output, "prepared_sha256", try hex(a, attempt.prepared.?.digest));
     try Json.put(
         a,
         &output,
         "capture_projection_sha256",
-        try hex(a, capture.value.projection.?.reply.digest),
+        try hex(a, capture.projection.?.reply.digest),
     );
+    return output;
+}
+
+pub fn questionProducer(service: *Service, a: std.mem.Allocator, task_id: [16]u8) !Json.Value {
+    var question = (try service.pendingQuestion(a, task_id)) orelse return .null;
+    defer question.deinit();
+    if (question.value.retired or question.value.answer != null) return .null;
+    var task = try service.task(a, task_id);
+    defer task.deinit();
+    var producer = (try modelProducer(service, a, task.value)) orelse return .null;
+    defer producer.normalized.deinit();
+    if (producer.action != .ask) return .null;
+    const prompt_bytes = try object(service, a, question.value.prompt);
+    const prompt = try Json.parseAsset(a, prompt_bytes, prompt_bytes.len);
+    const text = Json.get(prompt.value, "prompt") orelse return .null;
+    if (!std.mem.eql(u8, try Json.text(text), producer.action.ask.question.bytes)) return .null;
+    var output = producer.projection;
+    try Json.put(a, &output, "question_id", try hex(a, question.value.id));
+    try Json.put(a, &output, "question_revision", try decimal(a, question.value.revision));
+    try Json.put(a, &output, "request_digest", try hex(a, question.value.request_digest));
+    return output;
+}
+
+pub fn reportProducer(service: *Service, a: std.mem.Allocator, task_id: [16]u8) !Json.Value {
+    var task = try service.task(a, task_id);
+    defer task.deinit();
+    if (task.value.outcome_kind != .completed) return .null;
+    const result_ref = task.value.result orelse return .null;
+    var result = try C.decodeOwned(t.Output, a, try object(service, a, result_ref));
+    defer result.deinit();
+    if (result.value.result != .report) return .null;
+    var producer = (try modelProducer(service, a, task.value)) orelse return .null;
+    defer producer.normalized.deinit();
+    if (producer.action != .report) return .null;
+    const proposed = try C.encodeOwned(t.Report, a, producer.action.report);
+    defer a.free(proposed);
+    const completed = try C.encodeOwned(t.Report, a, result.value.result.report);
+    defer a.free(completed);
+    if (!std.mem.eql(u8, proposed, completed)) return .null;
+    var summary_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(
+        result.value.result.report.summary.bytes,
+        &summary_digest,
+        .{},
+    );
+    var output = producer.projection;
+    try Json.put(a, &output, "result_sha256", try hex(a, result_ref.digest));
+    try Json.put(a, &output, "summary_sha256", try hex(a, summary_digest));
     return output;
 }
 

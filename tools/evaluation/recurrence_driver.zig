@@ -484,6 +484,11 @@ const Driver = struct {
                 a,
                 task,
             ));
+            try Json.put(a, &result, "report_producer", try acquisition.reportProducer(
+                self.service,
+                a,
+                task,
+            ));
         }
         return result;
     }

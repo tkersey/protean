@@ -53,12 +53,17 @@ actual prompt, question identity, revision, request digest and event sequence.
 Large question prompts use the ordinary task-scoped `artifact.read` route.
 Repeated observation or an identical replay does not create another answer.
 
-The private driver binds each pending question to its admitted controller model
-attempt and retains that binding across observation pages and restart. Source
+The private driver binds each pending question and accepted final report to its
+own admitted controller model attempt and retains those bindings across
+observation pages and restart. Source
 coverage follows the producer's saved evidence and consumed workspace results,
 including earlier `collect` and `wait` results and actual computation inputs.
 Whole cited records must lie within acquired ranges of the exact frozen source
-file. Available but unconsumed work and asserted provenance do not establish
+file. Source presentations retain their byte bounds; expanded values count only
+source bytes recoverable from their observed JSON pages. The final report's own
+citations require acquisition before its producer, including records acquired
+after the online answer when its final support changes.
+Available but unconsumed work and asserted provenance do not establish
 acquisition. Missing producer or acquisition observations remain unknown; they
 cannot establish supported service or turn an independently known failure into
 an unknown result.

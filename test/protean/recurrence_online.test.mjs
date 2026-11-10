@@ -49,7 +49,12 @@ function example() {
 
 const grading = value => gradeOnlineAnswers(value.corpus, value.events, value.visibility);
 const row = (grade, id = 'q0') => grade.answers.find(answer => answer.request_id === id);
-const finalGrade = value => gradeReport(JSON.stringify({answers: value.answers}), value.corpus);
+const finalGrade = (value, acquired = value.corpus.records.map(record => record.id)) => {
+  const raw = JSON.stringify({answers: value.answers});
+  return gradeReport(raw, value.corpus, null, acquired === null ? null : {
+    summary_sha256: hash(raw), result_sha256: 'native-result', attempt_id: 'native-final-attempt',
+    complete: true, record_ids: acquired});
+};
 
 test('legacy final-only corpora retain their frozen bytes', () => {
   const identities = [
@@ -723,4 +728,192 @@ test('question producer is retained before its paged event and cannot be replace
   assert.deepEqual(trace.answer_events[0].acquisition.record_ids, []);
   assert.throws(() => trace.observe({epoch: 3, events: [], attempts: [], records: [],
     question_producer: {...f.producer, attempt_id: 'another-attempt'}}, 3), /Question producer changed/);
+});
+
+const selectedSource = (f, records, slices) => {
+  const references = slices.map(({id}) => ({digest: id, bytes: '1'}));
+  records.push({kind: 'workspace_view', value: {artifact: {digest: 'view', bytes: '1'},
+    description: {values: {items: []}, projection: {result: {digest: 'projection', bytes: '1'},
+      values: {items: references}, blocks: slices.map(({id, offset, length}) => ({tag: 'source',
+        value: {value: {kind: 'value', id}, offset, length}}))}}}});
+  f.interaction.selected_view = {kind: 'view', id: 'view'};
+};
+
+const expandedValue = (f, id, text, offset, nextOffset, index = 0) => {
+  const callId = `expand-${index}`;
+  f.interaction.results.push({call_id: callId, output: {tag: 'workspace', value: {reply: {
+    disposition: 'observed', observation_json: JSON.stringify({text, offset, next_offset: nextOffset})}}}});
+  f.interaction.result_actions.push({call_id: callId, action: {tag: 'context', value: {
+    command: {tag: 'expand', value: {reference: {kind: 'value', id}}}}}});
+};
+
+test('source presentations preserve relative extents and independent whole acquisition roots', () => {
+  const f = acquisitionFixture(), end = f.source.indexOf(10);
+  const records = [f.value('acquired', {kind: 'acquisition', acquisition: f.origin})];
+  const result = () => sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true);
+  selectedSource(f, records, [{id: 'acquired', offset: 0, length: 1}]);
+  assert.equal(result().complete, true);
+  assert.deepEqual(result().record_ids, []);
+  records.pop();
+  selectedSource(f, records, [{id: 'acquired', offset: end - 1, length: 1},
+    {id: 'acquired', offset: 0, length: end - 1}]);
+  assert.deepEqual(result().record_ids, ['m0']);
+  records.pop();
+  selectedSource(f, records, [{id: 'acquired', offset: 0, length: 1}]);
+  f.interaction.evidence = [{tag: 'workspace', value: {kind: 'value', id: 'acquired'}}];
+  assert.deepEqual(result().record_ids, f.corpus.records.map(record => record.id));
+  f.interaction.evidence = [];
+  const start = end + 1, stop = f.source.indexOf(10, start);
+  records[0].native_derivation.acquisition = {...f.origin, start: String(start)};
+  records.pop();
+  selectedSource(f, records, [{id: 'acquired', offset: 0, length: stop - start}]);
+  assert.deepEqual(result().record_ids, ['r0']);
+});
+
+test('expanded acquisition pages count complete JSON representations rather than the whole value', () => {
+  const f = acquisitionFixture(), end = f.source.indexOf(10);
+  const records = [f.value('acquired', {kind: 'acquisition', acquisition: f.origin})];
+  const payload = Buffer.from(JSON.stringify(f.source.toString()));
+  const result = () => sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true);
+  expandedValue(f, 'acquired', payload.subarray(0, 3).toString(), 0, 3);
+  assert.equal(result().complete, true);
+  assert.deepEqual(result().record_ids, []);
+  const firstEnd = Buffer.byteLength(JSON.stringify(f.source.subarray(0, end).toString())) - 1;
+  expandedValue(f, 'acquired', payload.subarray(3, firstEnd).toString(), 3, firstEnd, 1);
+  assert.deepEqual(result().record_ids, ['m0']);
+  expandedValue(f, 'acquired', 'invented', firstEnd, firstEnd + 8, 2);
+  assert.equal(result().complete, false);
+  assert.deepEqual(result().record_ids, ['m0']);
+});
+
+test('known program sources cannot erase a fully observed acquisition failure', () => {
+  const f = acquisitionFixture(), value = example();
+  const records = [{kind: 'workspace_program', value: {task: f.producer.task_id,
+    artifact: {digest: 'program', bytes: '1'}, description: {source: {digest: 'program-source', bytes: '1'}}}}];
+  f.interaction.results = [{call_id: 'source', output: {tag: 'workspace', value: {reply: {
+    disposition: 'observed', observation_json: JSON.stringify({text: '{}', offset: 0, next_offset: 2})}}}}];
+  f.interaction.result_actions = [{call_id: 'source', action: {tag: 'context', value: {command: {
+    tag: 'expand', value: {reference: {kind: 'source', id: 'program-source'}}}}}}];
+  const result = () => sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true);
+  assert.equal(result().complete, true);
+  value.events[0].acquisition = {...result(), question_id: value.events[0].question_id,
+    question_revision: value.events[0].question_revision, request_digest: value.events[0].request_digest};
+  assert.equal(row(grading(value)).sound, false);
+  assert.equal(row(grading(value)).critical, true);
+  records[0].value.description.source.digest = 'different-source';
+  assert.equal(result().complete, false);
+});
+
+test('all early or out-of-packet claims contribute critical errors regardless of duplicate order', () => {
+  for (const status of ['ready', 'blocked']) for (const beforeSelection of [true, false]) {
+    for (const reversed of [true, false]) {
+      const value = example(), definitive = {...value.answers[1], status},
+        uncertain = {...definitive, status: 'incomplete'};
+      const claims = reversed ? [definitive, uncertain] : [uncertain, definitive];
+      const early = {...value.events[0], raw: envelope(beforeSelection ? 'p1' : 'p0', claims)};
+      value.events.unshift(early);
+      const online = grading(value);
+      assert.equal(row(online, 'q1').critical, true);
+      assert.equal(row(combineOnlineGrading(finalGrade(value), online), 'q1').critical, true);
+    }
+  }
+});
+
+test('final support has its own acquired records and cannot inherit online support by request identity', () => {
+  const value = example(), online = grading(value);
+  const original = value.corpus.records.find(record => record.id === 'r0');
+  value.corpus.records = [...value.corpus.records, {...original, id: 'r0-later'}];
+  value.corpus.requests[0] = {...value.corpus.requests[0], receipt_ids: ['r0', 'r0-later']};
+  value.answers[0] = {...value.answers[0], records: ['m0', 'r0-later'],
+    support: {coverage: [{component: 'A', revision: '1', receipts: ['r0-later']}]}};
+  const unacquired = combineOnlineGrading(finalGrade(value, ['m0', 'r0', 'm1', 'r1']), online);
+  assert.equal(row(unacquired).sound, false);
+  assert.equal(row(unacquired).critical, true);
+  assert.equal(unacquired.complete, false);
+  assert.equal(combineOnlineGrading(finalGrade(value), online).complete, true);
+  const unknown = combineOnlineGrading(finalGrade(value, null), online);
+  assert.equal(row(unknown).sound, null);
+  assert.equal(row(unknown).critical, null);
+  assert.equal(unknown.complete, null);
+  value.answers[0].status = 'blocked';
+  const failed = combineOnlineGrading(finalGrade(value, null), online);
+  assert.equal(row(failed).sound, false);
+  assert.equal(row(failed).critical, true);
+  assert.equal(failed.complete, false);
+});
+
+test('escaped and multibyte acquired payloads preserve page boundaries and union split representations', () => {
+  const f = acquisitionFixture();
+  const line = JSON.stringify({id: 'unicode', text: 'é雪🙂"\\\t'});
+  f.corpus.sources['records.jsonl'] = line + '\n';
+  f.source = Buffer.from(f.corpus.sources['records.jsonl']);
+  f.origin = {...f.origin, file_digest: hash(f.source), end: String(f.source.length), file_bytes: String(f.source.length)};
+  const records = [f.value('acquired', {kind: 'acquisition', acquisition: f.origin})];
+  const payload = Buffer.from(JSON.stringify(f.source.toString())), stop = payload.length - 3;
+  for (let split = 1; split < stop; split++) {
+    if ((payload[split] & 0xc0) === 0x80) continue;
+    f.interaction.results = []; f.interaction.result_actions = [];
+    expandedValue(f, 'acquired', payload.subarray(0, split).toString(), 0, split);
+    const before = sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true);
+    assert.equal(before.complete, true);
+    assert.deepEqual(before.record_ids, []);
+    expandedValue(f, 'acquired', payload.subarray(split, stop).toString(), split, stop, 1);
+    assert.deepEqual(sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true).record_ids, ['unicode']);
+  }
+});
+
+test('invalid UTF8 acquisition subranges use exact base64 symbol coverage', () => {
+  const f = acquisitionFixture(), line = JSON.stringify({id: 'unicode', text: 'é'});
+  f.corpus.sources['records.jsonl'] = line + '\n';
+  f.source = Buffer.from(f.corpus.sources['records.jsonl']);
+  f.origin = {...f.origin, file_digest: hash(f.source), end: String(f.source.length), file_bytes: String(f.source.length)};
+  const split = f.source.indexOf(Buffer.from('é')) + 1;
+  const records = [f.value('left', {kind: 'acquisition', acquisition: {...f.origin, end: String(split)}}),
+    f.value('right', {kind: 'acquisition', acquisition: {...f.origin, start: String(split), end: String(f.source.length - 1)}})];
+  const left = Buffer.from(JSON.stringify(f.source.subarray(0, split).toString('base64url')));
+  const right = Buffer.from(JSON.stringify(f.source.subarray(split, -1).toString('base64url')));
+  for (let cut = 2; cut < right.length - 1; cut++) {
+    f.interaction.results = []; f.interaction.result_actions = [];
+    expandedValue(f, 'left', left.toString(), 0, left.length);
+    expandedValue(f, 'right', right.subarray(0, cut).toString(), 0, cut, 1);
+    const before = sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true);
+    assert.equal(before.complete, true);
+    assert.deepEqual(before.record_ids, []);
+    expandedValue(f, 'right', right.subarray(cut).toString(), cut, right.length, 2);
+    assert.deepEqual(sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true).record_ids, ['unicode']);
+  }
+});
+
+test('final acquisition is bound to exact summary bytes and missing proof cannot qualify a comparison', () => {
+  const value = example(), raw = JSON.stringify({answers: value.answers}), online = grading(value);
+  const proof = {summary_sha256: hash(raw), result_sha256: 'result', attempt_id: 'attempt',
+    complete: true, record_ids: value.corpus.records.map(record => record.id)};
+  for (const changed of [null, {...proof, summary_sha256: hash(raw + ' ')}, {...proof, result_sha256: ''},
+    {...proof, attempt_id: ''}, {...proof, complete: false, record_ids: []}]) {
+    const combined = combineOnlineGrading(gradeReport(raw, value.corpus, null, changed), online);
+    assert.equal(combined.complete, null);
+    assert.equal(row(combined).sound, null);
+  }
+  assert.equal(combineOnlineGrading(gradeReport(raw, value.corpus), online).complete, null);
+});
+
+test('terminal acquisition uses its own producer cut and remains stable across repeated observations', () => {
+  const f = acquisitionFixture(), trace = new RecurrenceTrace({...f.corpus, packets: []}, {});
+  const acquired = f.value('acquired', {kind: 'acquisition', acquisition: f.origin});
+  const interaction = {...f.interaction, event_cut: '40', interaction_id: 'terminal',
+    evidence: [{tag: 'workspace', value: {kind: 'value', id: 'acquired'}}]};
+  const reportProducer = {...f.producer, event_cut: '40', interaction_id: 'terminal',
+    result_sha256: 'result', summary_sha256: 'summary'};
+  trace.observe({epoch: 1, events: [], attempts: [], records: [acquired,
+    {kind: 'controller_interaction', value: {id: f.producer.interaction_id, task: f.producer.task_id}, acquisition: f.interaction},
+    {kind: 'controller_interaction', value: {id: 'terminal', task: f.producer.task_id}, acquisition: interaction}],
+  report_producer: reportProducer, acquisition_records_complete: true}, 1);
+  trace.acquisitionEvidence();
+  assert.deepEqual(sourceAcquisition(f.corpus, f.producer, [f.interaction, interaction], [acquired], true).record_ids, []);
+  assert.deepEqual(trace.final_acquisition.record_ids, f.corpus.records.map(record => record.id));
+  trace.observe({epoch: 2, events: [], attempts: [], records: [], report_producer: reportProducer}, 2);
+  assert.throws(() => trace.observe({epoch: 3, events: [], attempts: [], records: [],
+    report_producer: {...reportProducer, result_sha256: 'other-result'}}, 3), /Report producer changed/);
+  interaction.event_cut = '41';
+  assert.equal(sourceAcquisition(f.corpus, reportProducer, [f.interaction, interaction], [acquired], true).complete, false);
 });

@@ -126,6 +126,7 @@ try {
   }
   const producer = producerObservation.question_producer;
   assert(producer, 'native ask must bind its exact admitted producer');
+  assert.equal(producerObservation.report_producer, null);
   let input = producerObservation.events.find(event => event.kind === 'input_required');
   let page = producerObservation;
   while (!input && page.events.length) {
@@ -143,6 +144,7 @@ try {
   assert.deepEqual(emptyPage.question_producer, producer);
   const legacyPage = await child.call('evaluation.observe', {task_id: accepted.task_id, after: page.cursor});
   assert.equal(Object.hasOwn(legacyPage, 'question_producer'), false);
+  assert.equal(Object.hasOwn(legacyPage, 'report_producer'), false);
   assert.equal(Object.hasOwn(legacyPage, 'acquisition_records_complete'), false);
   assert(legacyPage.records.every(row => row.kind !== 'controller_interaction' && !Object.hasOwn(row, 'native_derivation')));
   assert(child.kill('SIGKILL'));
@@ -158,7 +160,45 @@ try {
     question_id: question.question_id, question_revision: question.question_revision,
     request_digest: question.request_digest, answer: {schema_id: question.answer_schema_id,
       value: {message: 'Yes, focus on observable behavior.'}}});
-  assert.equal((await observe(true)).question_producer, null);
+  const answeredObservation = await observe(true);
+  assert.equal(answeredObservation.question_producer, null);
+  assert.equal(answeredObservation.report_producer, null);
+  let terminalStatus;
+  for (let turn = 0; turn < 200; turn++) {
+    await child.call('evaluation.step');
+    terminalStatus = await child.call('task.status', {task_id: accepted.task_id});
+    if (terminalStatus.status === 'completed') break;
+  }
+  assert.equal(terminalStatus.status, 'completed');
+  const terminalObservation = await observe(true), reportProducer = terminalObservation.report_producer;
+  assert(reportProducer, 'completed report must bind its exact admitted producer');
+  assert.equal(terminalObservation.question_producer, null);
+  assert.equal(reportProducer.task_id, accepted.task_id);
+  assert.notEqual(reportProducer.interaction_id, producer.interaction_id);
+  assert.notEqual(reportProducer.attempt_id, producer.attempt_id);
+  const terminalResult = await child.call('task.result', {task_id: accepted.task_id});
+  assert.equal(terminalResult.outcome.value.result.tag, 'report');
+  assert.equal(reportProducer.summary_sha256, createHash('sha256')
+    .update(terminalResult.outcome.value.result.value.summary, 'utf8').digest('hex'));
+  const terminalArchivePath = join(root, 'completed.agnx');
+  await child.call('evaluation.export', {task_id: accepted.task_id, path: terminalArchivePath});
+  const terminalArchive = readArchive(await readFile(terminalArchivePath));
+  assert.equal(terminalArchive.task.result.tag, 1);
+  assert.equal(reportProducer.result_sha256, Buffer.from(terminalArchive.task.result.value[0]).toString('hex'));
+  assert.equal(reportProducer.interaction_id, Buffer.from(terminalArchive.task.controller_interaction.value).toString('hex'));
+  const terminalPage = await child.call('evaluation.observe', {task_id: accepted.task_id,
+    after: terminalArchive.task.event_high.toString(), acquisition: true});
+  assert.equal(terminalPage.events.length, 0);
+  assert.deepEqual(terminalPage.report_producer, reportProducer);
+  const terminalLegacyPage = await child.call('evaluation.observe', {task_id: accepted.task_id,
+    after: terminalArchive.task.event_high.toString(), acquisition: false});
+  assert.equal(Object.hasOwn(terminalLegacyPage, 'report_producer'), false);
+  assert(child.kill('SIGKILL'));
+  assert.deepEqual(await child.exited, [null, 'SIGKILL']);
+  child = launch(accepted.task_id);
+  assert.equal((await child.call('task.status', {task_id: accepted.task_id})).status, 'completed');
+  assert.deepEqual((await observe(true)).report_producer, reportProducer);
+  assert.deepEqual(await child.call('task.result', {task_id: accepted.task_id}), terminalResult);
   child.stdin.end();
   assert.deepEqual(await child.exited, [0, null]);
   const config = JSON.parse(await readFile(new URL('../../examples/adaptive/adaptive.example.json', import.meta.url)));

@@ -296,12 +296,15 @@ export function parseReport(raw) {
   return value;
 }
 
-export function gradeReport(rawSummary, corpus, visibleRequests = null) {
+export function gradeReport(rawSummary, corpus, visibleRequests = null, acquisition = undefined) {
   freezeRecords(corpus.records);
   let report;
   try { report = parseReport(rawSummary); } catch { report = null; }
   const known = new Set(corpus.requests.map(r => r.id));
   const reportErrors = report ? report.answers.filter(a => !a || typeof a !== 'object' || !known.has(a.request_id)).map(() => 'unknown_request') : ['malformed_report'];
+  const boundAcquisition = acquisition && typeof rawSummary === 'string' &&
+    acquisition.summary_sha256 === createHash('sha256').update(rawSummary).digest('hex') &&
+    typeof acquisition.result_sha256 === 'string' && acquisition.result_sha256.length > 0 ? acquisition : null;
   const answers = corpus.requests.map(request => {
     const available = requestRecords(corpus, request.id);
     const records = new Map(available.map(r => [r.id, r]));
@@ -313,7 +316,9 @@ export function gradeReport(rawSummary, corpus, visibleRequests = null) {
       !['ready', 'blocked', 'incomplete'].includes(answer.status) ? ['invalid_status'] :
         [...(answer.status === expected.status ? [] : ['incorrect_status']), ...supportErrors(answer, request, expected, records)];
     const sound = errors.length === 0;
+    const acquired = acquiredRecords(boundAcquisition, answer);
     return {request_id: request.id, expected: expected.status, status: answer?.status ?? null, sound,
+      ...(acquisition !== undefined ? {acquired} : {}),
       critical: !sound && matching.some(a => ['ready', 'blocked'].includes(a.status)), unanswered: matching.length === 0, errors};
   });
   return {answers, errors: unique(reportErrors), totals: {requests: answers.length, sound: answers.filter(a => a.sound).length,
@@ -328,14 +333,21 @@ const gradeTotals = answers => ({requests: answers.length,
   unanswered: answers.filter(answer => answer.unanswered).length});
 const disjunction = facts => facts.includes(true) ? true : facts.every(fact => fact === false) ? false : null;
 
-function acquiredSupport(event, answer) {
-  const acquisition = event?.acquisition;
-  if (!acquisition || !['question_id', 'question_revision', 'request_digest'].every(field =>
-    acquisition[field] === event[field]) || typeof acquisition.attempt_id !== 'string' || !acquisition.attempt_id ||
+function acquiredRecords(acquisition, answer) {
+  if (!acquisition || typeof acquisition.attempt_id !== 'string' || !acquisition.attempt_id ||
     !Array.isArray(acquisition.record_ids) || !Array.isArray(answer?.records)) return null;
   if (answer.records.every(id => acquisition.record_ids.includes(id))) return true;
   return acquisition.complete === true ? false : null;
 }
+
+function acquiredSupport(event, answer) {
+  const acquisition = event?.acquisition;
+  return acquisition && ['question_id', 'question_revision', 'request_digest'].every(field =>
+    acquisition[field] === event[field]) ? acquiredRecords(acquisition, answer) : null;
+}
+
+const acquisitionCritical = (status, acquired) => ['ready', 'blocked'].includes(status) ?
+  acquired === true ? false : acquired === false ? true : null : false;
 
 export function gradeOnlineAnswers(corpus, answerEvents = [], visibility = []) {
   const errors = [], seen = new Map(), sequences = new Map(), deliveries = [];
@@ -384,11 +396,10 @@ export function gradeOnlineAnswers(corpus, answerEvents = [], visibility = []) {
     const acquired = supplied.length === 1 ? acquiredSupport(first, supplied[0]) : null;
     const critical = disjunction(matching.map(delivery => {
       const grade = delivery.grading.answers.find(answer => answer.request_id === request.id);
-      const claim = delivery.envelope?.answers.find(answer => answer?.request_id === request.id);
-      if (grade?.critical || (!delivery.timely || delivery.errors.length) &&
-        ['ready', 'blocked'].includes(claim?.status)) return true;
-      return ['ready', 'blocked'].includes(claim?.status) ?
-        acquiredSupport(delivery, claim) === true ? false : acquiredSupport(delivery, claim) === false ? true : null : false;
+      const claims = delivery.envelope?.answers.filter(answer => answer?.request_id === request.id) ?? [];
+      return disjunction([grade?.critical ?? false, ...claims.map(claim =>
+        (!delivery.timely || delivery.errors.length) && ['ready', 'blocked'].includes(claim?.status) ? true :
+          acquisitionCritical(claim?.status, acquiredSupport(delivery, claim)))]);
     }));
     return {request_id: request.id, expected: row?.expected ?? oracle(request, requestRecords(corpus, request.id)).status,
       status: row?.status ?? null, sound: conjunction([matching.length === 1 && first.timely && first.errors.length === 0 && row.sound &&
@@ -409,10 +420,12 @@ export function gradeOnlineAnswers(corpus, answerEvents = [], visibility = []) {
 export function combineOnlineGrading(finalGrading, onlineGrading) {
   const answers = finalGrading.answers.map(answer => {
     const delivered = onlineGrading.answers.find(item => item.request_id === answer.request_id);
-    return {...answer, sound: conjunction([answer.sound, delivered ? delivered.sound : false]),
-      critical: disjunction([answer.critical, delivered ? delivered.critical : false]),
+    const acquired = answer.acquired ?? null;
+    return {...answer, sound: conjunction([answer.sound, acquired, delivered ? delivered.sound : false]),
+      critical: disjunction([answer.critical, acquisitionCritical(answer.status, acquired), delivered ? delivered.critical : false]),
       unanswered: answer.unanswered || !delivered || delivered.unanswered,
-      errors: unique([...answer.errors, ...(delivered?.errors ?? ['missing_online_answer']).map(error => `online:${error}`)])};
+      errors: unique([...answer.errors, ...(acquired === false ? ['unacquired_support'] : []),
+        ...(delivered?.errors ?? ['missing_online_answer']).map(error => `online:${error}`)])};
   });
   const errors = unique([...finalGrading.errors, ...onlineGrading.errors.map(error => `online:${error}`)]);
   return {answers, errors, totals: gradeTotals(answers),

@@ -5,6 +5,7 @@ import {resolve, join, dirname} from 'node:path';
 import {spawn, spawnSync} from 'node:child_process';
 import {createInterface} from 'node:readline';
 import {createHash} from 'node:crypto';
+import {isUtf8} from 'node:buffer';
 import {ProteanClient} from '../../test/support/stdio-client.mts';
 import {readArchive} from '../../test/protean/native_archive.mjs';
 import {decodeSchema, decodeValue} from '../../test/support/values.mjs';
@@ -708,16 +709,46 @@ const sourceInteger = value => {
   return integer <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(integer) : null;
 };
 
+function mergeRanges(ranges) {
+  const merged = [];
+  for (const range of [...ranges].sort((left, right) => left[0] - right[0])) {
+    const last = merged.at(-1);
+    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+    else merged.push([...range]);
+  }
+  return merged;
+}
+
+function acquiredPageRanges(bytes, utf8, pages) {
+  const spans = mergeRanges(pages), ranges = [];
+  let span = 0, encoded = 1;
+  for (let index = 0; index < bytes.length; index++) {
+    const start = utf8 ? encoded : 1 + Math.floor(index * 8 / 6);
+    const end = utf8 ? start + (bytes[index] < 128 ? JSON.stringify(String.fromCharCode(bytes[index])).length - 2 : 1) :
+      1 + Math.ceil((index + 1) * 8 / 6);
+    encoded = end;
+    while (span < spans.length && spans[span][1] < end) span++;
+    if (span < spans.length && spans[span][0] <= start && spans[span][1] >= end) {
+      const last = ranges.at(-1);
+      if (last?.[1] === index) last[1]++;
+      else ranges.push([index, index + 1]);
+    }
+  }
+  return ranges;
+}
+
 export function sourceAcquisition(corpus, producer, interactions, records, enumerated = false) {
   if (!producer) return null;
   const values = new Map(records.filter(row => row.kind === 'workspace_value').map(row => [referenceHex(row.value.artifact), row]));
   const works = new Map(records.filter(row => row.kind === 'workspace_work').map(row => [digestHex(row.value.id), row.value]));
   const views = new Map(records.filter(row => row.kind === 'workspace_view').map(row => [referenceHex(row.value.artifact), row]));
+  const programSources = new Set(records.filter(row => row.kind === 'workspace_program' &&
+    digestHex(row.value.task) === producer.task_id).map(row => referenceHex(row.value.description.source)));
   const source = typeof corpus.sources?.['records.jsonl'] === 'string' ? Buffer.from(corpus.sources['records.jsonl']) : null;
   const sourceDigest = source && hash(source);
-  const ranges = [], roots = [], visited = new Set();
+  const ranges = [], roots = [], visited = new Set(), pages = new Map();
   let complete = enumerated && source !== null;
-  const range = origin => {
+  const acquiredRange = origin => {
     if (!source || !origin) { complete = false; return; }
     const path = textField(origin.path), digest = origin.sha256 ?? (origin.file_digest && digestHex(origin.file_digest));
     const start = sourceInteger(origin.start), end = sourceInteger(origin.end), size = sourceInteger(origin.file_bytes);
@@ -728,14 +759,61 @@ export function sourceAcquisition(corpus, producer, interactions, records, enume
     if (origin.content !== undefined && !Buffer.from(textField(origin.content)).equals(source.subarray(start, end))) {
       complete = false; return;
     }
-    ranges.push([start, end]);
+    return {start, end, bytes: source.subarray(start, end)};
+  };
+  const range = origin => {
+    const acquired = acquiredRange(origin);
+    if (acquired) ranges.push([acquired.start, acquired.end]);
   };
   const root = reference => { const id = workspaceReference(reference); if (id) roots.push(id); };
+  const ownedValue = id => {
+    const row = values.get(id);
+    if (!row || digestHex(row.value.task) !== producer.task_id || !row.native_derivation) {
+      complete = false; return null;
+    }
+    return row;
+  };
+  const slice = item => {
+    const row = ownedValue(item.artifact_id);
+    if (!row) return;
+    const acquired = acquiredRange(row.native_derivation.acquisition);
+    if (!acquired) return;
+    const offset = sourceInteger(item.offset), length = sourceInteger(item.length);
+    if (row.native_derivation.kind !== 'acquisition' || !isUtf8(acquired.bytes) ||
+        offset === null || length === null || offset > acquired.bytes.length || length > acquired.bytes.length - offset ||
+        !isUtf8(acquired.bytes.subarray(offset, offset + length))) { complete = false; return; }
+    ranges.push([acquired.start + offset, acquired.start + offset + length]);
+  };
+  const page = (reference, observed) => {
+    const id = workspaceReference(reference), row = id && ownedValue(id);
+    if (!row) return;
+    if (row.native_derivation.kind !== 'acquisition') { roots.push(id); return; }
+    let value = pages.get(id);
+    if (!value) {
+      const acquired = acquiredRange(row.native_derivation.acquisition);
+      if (!acquired) return;
+      const utf8 = isUtf8(acquired.bytes);
+      value = {...acquired, utf8, payload: Buffer.from(JSON.stringify(acquired.bytes.toString(utf8 ? 'utf8' : 'base64url'))), spans: []};
+      pages.set(id, value);
+    }
+    const start = sourceInteger(observed?.offset), end = sourceInteger(observed?.next_offset);
+    if (start === null || end === null || end < start || end > value.payload.length ||
+        typeof observed?.text !== 'string' || !isUtf8(value.payload.subarray(start, end)) ||
+        !Buffer.from(observed.text).equals(value.payload.subarray(start, end)) ||
+        (start !== value.payload.length && start === end) ||
+        (observed.total_bytes !== undefined && sourceInteger(observed.total_bytes) !== value.payload.length)) {
+      complete = false; return;
+    }
+    value.spans.push([start, end]);
+  };
   const view = reference => {
     if (!reference) return;
     const row = views.get(typeof reference === 'string' ? reference : reference.id);
     if (!row) { complete = false; return; }
-    for (const item of presentedValues(row.value.description)) roots.push(item.artifact_id);
+    for (const item of presentedValues(row.value.description)) {
+      if (item.kind === 'source') slice(item);
+      else roots.push(item.artifact_id);
+    }
   };
   const prior = interactions.filter(row => row.task_id === producer.task_id && row.controller_id === producer.controller_id &&
     row.controller_epoch === producer.controller_epoch && BigInt(row.event_cut) <= BigInt(producer.event_cut));
@@ -764,13 +842,16 @@ export function sourceAcquisition(corpus, producer, interactions, records, enume
         const rows = command?.tag === 'collect' ? observed : command?.tag === 'wait' ? observed.works : [observed];
         if (Array.isArray(rows)) for (const row of rows) root(row?.result);
       }
-      if (command?.tag === 'expand') root(command.value.reference);
+      if (command?.tag === 'expand' && command.value.reference?.kind === 'value') page(command.value.reference, observed);
       if (command?.tag === 'expand' && command.value.reference?.kind === 'source') {
         const id = command.value.reference.id;
-        const origin = [...values.values()].find(row => referenceHex(row.value.description.provenance) === id)?.native_derivation?.acquisition;
+        const row = [...values.values()].find(row => referenceHex(row.value.description.provenance) === id);
+        const owned = row && ownedValue(referenceHex(row.value.artifact)), origin = owned?.native_derivation.acquisition;
         if (origin && typeof observed?.text === 'string') range({...origin, start: observed.offset,
           end: observed.next_offset, content: observed.text});
-        else if (!origin) complete = false;
+        else if (owned?.native_derivation.frozen_input || owned?.native_derivation.semantic_source)
+          roots.push(referenceHex(owned.value.artifact));
+        else if (!programSources.has(id)) complete = false;
       }
     }
   }
@@ -778,8 +859,8 @@ export function sourceAcquisition(corpus, producer, interactions, records, enume
     const id = roots[index];
     if (visited.has(id)) continue;
     visited.add(id);
-    const row = values.get(id), derivation = row?.native_derivation;
-    if (!row || digestHex(row.value.task) !== producer.task_id || !derivation) { complete = false; continue; }
+    const row = ownedValue(id), derivation = row?.native_derivation;
+    if (!row) continue;
     if (derivation.kind === 'acquisition' && derivation.acquisition) range(derivation.acquisition);
     const computed = ['computation', 'trial'].includes(derivation.kind);
     if (computed || derivation.kind === 'judgment' && derivation.work && derivation.delegation && derivation.capture)
@@ -790,13 +871,9 @@ export function sourceAcquisition(corpus, producer, interactions, records, enume
         for (const source of work.observer_inputs ?? []) roots.push(referenceHex(source));
     }
   }
-  ranges.sort((left, right) => left[0] - right[0]);
-  const merged = [];
-  for (const range of ranges) {
-    const last = merged.at(-1);
-    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
-    else merged.push([...range]);
-  }
+  for (const value of pages.values()) for (const [start, end] of acquiredPageRanges(value.bytes, value.utf8, value.spans))
+    ranges.push([value.start + start, value.start + end]);
+  const merged = mergeRanges(ranges);
   let offset = 0;
   const recordIds = [];
   if (source) for (const line of source.toString().split('\n')) {
@@ -825,6 +902,8 @@ export class RecurrenceTrace {
     this.cut = null;
     this.answer_events = [];
     this.question_producers = new Map();
+    this.report_producer = null;
+    this.final_acquisition = null;
     this.acquisition_records_complete = false;
     this.delivery_operations = deliveryOperations;
   }
@@ -838,6 +917,10 @@ export class RecurrenceTrace {
     this.attempts.set(id, prior);
   }
   observe(observation, elapsed) {
+    if (observation.report_producer) {
+      if (this.report_producer) assert.deepEqual(this.report_producer, observation.report_producer, 'Report producer changed.');
+      this.report_producer = observation.report_producer;
+    }
     if (observation.question_producer) {
       const producer = observation.question_producer, key = questionBinding(producer);
       const previous = this.question_producers.get(key);
@@ -1061,6 +1144,7 @@ export class RecurrenceTrace {
       const interactions = records.filter(row => row.kind === 'controller_interaction').map(row => row.acquisition).filter(Boolean);
       for (const answer of this.answer_events) answer.acquisition = sourceAcquisition(this.corpus,
         this.question_producers.get(questionBinding(answer)), interactions, records, this.acquisition_records_complete);
+      this.final_acquisition = sourceAcquisition(this.corpus, this.report_producer, interactions, records, this.acquisition_records_complete);
     }
   }
   summary() {
@@ -1573,10 +1657,12 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
     retained_namespace_bytes: retainedBytes, status, result, archive: archivePath, metrics, errors,
     timed_out: timedOut, unresolved_question: delivery.unresolved, operations: delivery.operations,
     resource_samples: samples, grading: gradeReport(rawSummary, corpus, new Set(corpus.packets
-      .filter(packet => trace.visibility.get(packet.id)?.confirmed).flatMap(packet => packet.request_ids))),
+      .filter(packet => trace.visibility.get(packet.id)?.confirmed).flatMap(packet => packet.request_ids)),
+      corpus.delivery === 'online' ? trace.final_acquisition : undefined),
     reuse: trace.summary(),
     arm_violations: metrics ? armViolations(subject.arm === 'treatment' ? 'recurrence' : 'ordinary', metrics.actions) : null};
   if (corpus.delivery === 'online') {
+    report.final_acquisition = trace.final_acquisition;
     report.final_grading = report.grading;
     report.online = gradeOnlineAnswers(corpus, trace.answer_events, report.reuse.visibility);
     report.grading = combineOnlineGrading(report.final_grading, report.online);
