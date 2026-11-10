@@ -250,11 +250,12 @@ try {
     const current = decodeRecurrenceObservation(await fixtureChild.call('evaluation.observe',
       {task_id: fixtureTask.task_id, acquisition: true}), preflight.schemas);
     completedExposure = current.records.find(row => row.kind === 'controller_interaction' &&
-      row.body === pendingExposure.body && row.acquisition.exposure.status === 'exposed');
+      row.acquisition.interaction_id === pendingExposure.acquisition.interaction_id &&
+      row.acquisition.exposure.status === 'exposed');
     if (completedExposure) break;
   }
   assert.equal(completedExposure?.acquisition.exposure.selected_view.id, fixture.view.id,
-    'unchanged interaction bodies refresh and retain actual exposure after the returned action is rejected');
+    'consumed interactions retain actual exposure after the returned action is rejected');
   fixtureChild.stdin.end();
   assert.deepEqual(await fixtureChild.exited, [0, null]);
   const delegatedSnapshot = join(root, 'delegated-snapshot'), delegatedConfigPath = join(root, 'delegated.json');
