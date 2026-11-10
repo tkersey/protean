@@ -460,6 +460,11 @@ fn snapshotSchema(ctx: SchemaContext) !json.Value {
         .{ "profile_digest", digest },
         .{ "status", try enumSchema(state.Status, a) },
         .{ "revision", count },
+        .{ "inference_observation", try shape(a, &.{
+            .{ "admitted_attempts", count },
+            .{ "request_bytes", count },
+            .{ "known_output_tokens", count },
+        }, &.{}) },
         .{ "result_available", boolean },
         .{ "earliest_available_seq", count },
         .{ "high_water_seq", count },

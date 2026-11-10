@@ -79,6 +79,45 @@ test('absent arrays and direct string input retain exact byte measurements', () 
   assert.equal(JSON.stringify(profile).includes('private'), false);
 });
 
+test('ChatGPT tool declarations refine their original input-item byte partitions', () => {
+  const tool = String.raw`{"type":"function","name":"read","description":"secret é😀\\\"","parameters":{"minimum":-0.000e+12}}`;
+  const embedded = `[\n  ${tool},\t${tool} \n]`;
+  const first = `{ "type":"additional_tools", "role":"developer", "\\u0074ools" : ${embedded} }`;
+  const empty = '{"type":"additional_tools","tools":[]}';
+  const last = `{"type":"additional_tools","role":"developer","tools":[${tool}]}`;
+  const raw = ` { "tools" : [${tool}], "input":[${first},${empty},${last}] } `;
+  const profile = profilePreparedRequest(raw);
+  const measuredTool = index => ({index, serialized_bytes: bytes(tool), name: 'read'});
+  assert.deepEqual(profile.tools.items, [measuredTool(0)]);
+  assert.deepEqual(profile.input.items, [
+    {index: 0, serialized_bytes: bytes(first), role: 'developer', type: 'additional_tools',
+      tools: {serialized_bytes: bytes(embedded), array_overhead_bytes: bytes(embedded) - 2 * bytes(tool),
+        items: [measuredTool(0), measuredTool(1)]}},
+    {index: 1, serialized_bytes: bytes(empty), role: 'unassigned', type: 'additional_tools',
+      tools: {serialized_bytes: 2, array_overhead_bytes: 2, items: []}},
+    {index: 2, serialized_bytes: bytes(last), role: 'developer', type: 'additional_tools',
+      tools: {serialized_bytes: bytes(tool) + 2, array_overhead_bytes: 2, items: [measuredTool(0)]}},
+  ]);
+  assert.equal(profile.serialized_bytes, bytes(raw));
+  assert.equal(profile.envelope_bytes + profile.fields.reduce((sum, field) => sum + field.serialized_bytes, 0), bytes(raw));
+  assert.deepEqual(profile.input.roles, [
+    {role: 'developer', items: 2, serialized_bytes: bytes(first) + bytes(last)},
+    {role: 'unassigned', items: 1, serialized_bytes: bytes(empty)},
+  ]);
+  const chatgpt = profilePreparedRequest(`{"input":[${first}]}`);
+  assert.equal(chatgpt.tools, undefined);
+  assert.deepEqual(chatgpt.input.items[0].tools, profile.input.items[0].tools);
+  for (const secret of ['secret', 'é', '😀', '-0.000e+12']) assert(!JSON.stringify(profile).includes(secret));
+});
+
+test('invalid embedded tools fail without exposing their contents', () => {
+  for (const fields of ['"tools":"secret"', '"tools":{},"description":"secret"',
+    '"tools":[],"\\u0074ools":[],"description":"secret"']) {
+    assert.throws(() => profilePreparedRequest(`{"input":[{"type":"additional_tools",${fields}}]}`),
+      error => !error.message.includes('secret'));
+  }
+});
+
 test('invalid requests fail without quoting private input or accepting duplicate fields', () => {
   for (const raw of ['{"input":"secret', 'null', '[]', '{"tools":false}', '{"input":{}}',
     '{"input":[],"input":[]}', String.raw`{"input":[],"\u0069nput":[]}`, '\ud800']) {

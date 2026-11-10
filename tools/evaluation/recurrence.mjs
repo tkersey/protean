@@ -403,6 +403,7 @@ export function combineOnlineGrading(finalGrading, onlineGrading) {
 
 const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 const sumKnown = values => values.every(finite) ? values.reduce((sum, value) => sum + value, 0) : null;
+const conjunction = facts => facts.includes(false) ? false : facts.every(fact => fact === true) ? true : null;
 const paybackQuality = (control, treatment) => [control?.sound, treatment?.sound, treatment?.critical].every(finite) ?
   treatment.sound >= control.sound && treatment.critical === 0 : null;
 
@@ -448,8 +449,10 @@ export function compareCampaign(plan, reports = []) {
       item.packet_id === end.id && item.confirmed === true && finite(item.dispatch_ms) &&
       item.dispatch_ms >= end.offset_ms && item.dispatch_ms <= report.elapsed_ms) : null;
     const streamComplete = endVisible === null || !report?.status ? null : endVisible && report.status.status === 'completed';
-    const serviceComplete = plan.suite !== 'recurrence-online' ? true : !report?.online || !gradingKnown ? null :
-      report.online.complete === true && totals.sound === totals.requests && totals.critical === 0 && totals.unanswered === 0;
+    const serviceComplete = plan.suite !== 'recurrence-online' ? true : conjunction([
+      typeof report?.online?.complete === 'boolean' ? report.online.complete : null,
+      gradingKnown ? totals.sound === totals.requests && totals.critical === 0 && totals.unanswered === 0 : null,
+    ]);
     const integrity = received && !identityMatches ? false : !integrityKnown ? null : report.arm_violations.length || report.errors.length ||
       streamComplete === false ? false : streamComplete === true ? true : null;
     const budget = compliance(report, plan.limits);
@@ -487,7 +490,7 @@ export function compareCampaign(plan, reports = []) {
     else if (positive) verdict = 'cost_positive_improvement';
     else if (quality && costKnown && enabled.cost > control.cost) verdict = 'tradeoff';
     else if (quality) verdict = 'quality_improvement_within_common_envelope';
-    else if (qualityEligible === false || valid && within && costKnown) verdict = 'no_practical_improvement';
+    else if (positive === false) verdict = 'no_practical_improvement';
     return {pair: id, ordinary: control.subject.id, treatment: enabled.subject.id, verdict, cost_positive: positive,
       quality_improvement: quality, mechanism: enabled.mechanism, cost_difference: costKnown ? enabled.cost - control.cost : null,
       sound_difference: valid ? enabled.grading.sound - control.grading.sound : null};

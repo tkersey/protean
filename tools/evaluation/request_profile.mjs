@@ -40,9 +40,9 @@ function valueEnd(text, start) {
   throw new Error('Invalid prepared request JSON.');
 }
 
-function fields(text) {
+function fields(text, start = 0) {
   const result = [], names = new Set();
-  let index = skipWhitespace(text, skipWhitespace(text, 0) + 1);
+  let index = skipWhitespace(text, skipWhitespace(text, start) + 1);
   while (text[index] !== '}') {
     const start = index, keyEnd = stringEnd(text, start);
     const name = JSON.parse(text.slice(start, keyEnd));
@@ -71,7 +71,7 @@ function elements(text, field) {
 
 function arrayProfile(text, field, values, metadata) {
   const items = elements(text, field).map((span, index) => ({index,
-    serialized_bytes: byteLength(text.slice(span.start, span.end)), ...metadata(values[index])}));
+    serialized_bytes: byteLength(text.slice(span.start, span.end)), ...metadata(values[index], span)}));
   const serialized_bytes = byteLength(text.slice(field.valueStart, field.end));
   return {serialized_bytes,
     array_overhead_bytes: serialized_bytes - items.reduce((sum, item) => sum + item.serialized_bytes, 0), items};
@@ -82,9 +82,17 @@ function toolMetadata(value) {
   return typeof name === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(name) ? {name} : {};
 }
 
-function inputMetadata(value) {
-  return {role: roles.has(value?.role) ? value.role : 'unassigned',
+function inputMetadata(text, value, span) {
+  const result = {role: roles.has(value?.role) ? value.role : 'unassigned',
     type: itemTypes.has(value?.type) ? value.type : value?.type === undefined ? 'unspecified' : 'other'};
+  if (value?.type === 'additional_tools') {
+    const tools = fields(text, span.start).find(field => field.name === 'tools');
+    if (tools) {
+      if (!Array.isArray(value.tools)) throw new Error('Prepared request tools must be an array.');
+      result.tools = arrayProfile(text, tools, value.tools, toolMetadata);
+    }
+  }
+  return result;
 }
 
 export function profilePreparedRequest(text) {
@@ -114,7 +122,7 @@ export function profilePreparedRequest(text) {
   const input = spans.find(field => field.name === 'input');
   if (input) {
     if (Array.isArray(body.input)) {
-      result.input = arrayProfile(text, input, body.input, inputMetadata);
+      result.input = arrayProfile(text, input, body.input, (value, span) => inputMetadata(text, value, span));
       const groups = new Map();
       for (const item of result.input.items) {
         const group = groups.get(item.role) ?? {role: item.role, items: 0, serialized_bytes: 0};

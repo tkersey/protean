@@ -92,8 +92,10 @@ succeed without a retained artifact.
 
 The `ask` channel retains control history, including intermediate answers. That
 input cost is included for both arms. Online reports retain exact prepared-request
-byte profiles by field, tool and input item, using `request_profile.mjs`. Those
-profiles do not disclose payload text and do not estimate tokenization, caching or
+byte profiles by field, tool and input item, using `request_profile.mjs`. Tools in
+ChatGPT `additional_tools` input items have nested `tools` profiles; these refine
+their enclosing item totals and are not additional top-level bytes. Those profiles
+do not disclose payload text and do not estimate tokenization, caching or
 monetary cost. The owner's request-byte counter measures admitted preparation
 wrappers; the profiler separately measures the exact serialized provider body.
 Preparation and offline fixtures establish mechanics only; live
