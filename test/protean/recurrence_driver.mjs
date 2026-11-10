@@ -205,9 +205,9 @@ try {
   const applicationPath = process.argv[3], application = JSON.parse(await readFile(applicationPath));
   const fixtureChild = launch(null, 'fixture-state');
   const fixtureTask = await fixtureChild.call('task.submit', submission);
-  const fixture = await fixtureChild.call('evaluation.fixture', {task_id: fixtureTask.task_id});
+  const fixture = await fixtureChild.call('evaluation.fixture', {task_id: fixtureTask.task_id, reject_action: true});
   const nativeRecords = decodeRecurrenceObservation(
-    await fixtureChild.call('evaluation.observe', {task_id: fixtureTask.task_id}), preflight.schemas);
+    await fixtureChild.call('evaluation.observe', {task_id: fixtureTask.task_id, acquisition: true}), preflight.schemas);
   const nativeTrace = new RecurrenceTrace({packets: []}, application);
   nativeTrace.observe(nativeRecords, 0);
   const hex = bytes => Buffer.from(bytes).toString('hex');
@@ -240,6 +240,21 @@ try {
   assert([...nativeTrace.attempts.values()].some(attempt =>
     attempt.selected_view === hex(view.value.artifact.digest) && attempt.provider_response),
   'native preparation and captured response must use the projected view');
+  const selectedInteractions = nativeRecords.records.filter(row => row.kind === 'controller_interaction' &&
+    row.acquisition.selected_view?.id === fixture.view.id);
+  const pendingExposure = selectedInteractions.find(row => row.acquisition.exposure.status === 'unknown');
+  assert(pendingExposure, 'an unconsumed capture cannot certify historical exposure');
+  let completedExposure;
+  for (let turn = 0; turn < 100; turn++) {
+    await fixtureChild.call('evaluation.step');
+    const current = decodeRecurrenceObservation(await fixtureChild.call('evaluation.observe',
+      {task_id: fixtureTask.task_id, acquisition: true}), preflight.schemas);
+    completedExposure = current.records.find(row => row.kind === 'controller_interaction' &&
+      row.body === pendingExposure.body && row.acquisition.exposure.status === 'exposed');
+    if (completedExposure) break;
+  }
+  assert.equal(completedExposure?.acquisition.exposure.selected_view.id, fixture.view.id,
+    'unchanged interaction bodies refresh and retain actual exposure after the returned action is rejected');
   fixtureChild.stdin.end();
   assert.deepEqual(await fixtureChild.exited, [0, null]);
   const delegatedSnapshot = join(root, 'delegated-snapshot'), delegatedConfigPath = join(root, 'delegated.json');
@@ -286,7 +301,7 @@ try {
     let found;
     for (let page = 0; page < 20; page++) {
       const observation = decodeRecurrenceObservation(await delegatedChild.call('evaluation.observe',
-        {task_id: delegatedTask.task_id, after: String(delegatedTrace.cursor)}), preflight.schemas);
+        {task_id: delegatedTask.task_id, after: String(delegatedTrace.cursor), acquisition: true}), preflight.schemas);
       delegatedObservations.push(observation);
       found ??= observation.attempts.find(row => hex(row.attempt.id) === result.attempt);
       delegatedTrace.observe(observation, index + 1);
@@ -306,6 +321,24 @@ try {
   assert.equal(delegatedTrace.first_boundary.kind, 'description');
   assert.equal(delegatedTrace.first_boundary.artifact_id, retainedValue.id);
   assert.equal(delegatedTrace.summary().post_restart_uses.length, 1);
+  const judgments = new Map(delegatedObservations.flatMap(observation => observation.records)
+    .filter(row => row.kind === 'workspace_value' && row.value.derivation.kind === 'judgment')
+    .map(row => [hex(row.value.artifact.digest), row]));
+  assert(judgments.size >= 2, 'later fixture invocations must consume earlier delegated answers');
+  for (const judgment of judgments.values()) {
+    assert.equal(judgment.native_acquisition?.complete, true);
+    assert.deepEqual(judgment.native_acquisition.inputs, []);
+    assert.equal(judgment.native_acquisition.selected_view.kind, 'view');
+    assert.equal(judgment.native_acquisition.port_inputs.length, 1,
+      'the frozen target input is retained independently of selected context');
+    assert.equal(judgment.native_acquisition.port_inputs[0].kind, 'value');
+    assert.notEqual(judgment.native_acquisition.port_inputs[0].id, hex(judgment.value.artifact.digest),
+      'the later delegated answer cannot enter its own historical input set');
+    const producer = delegatedObservations.flatMap(observation => observation.attempts).find(row =>
+      hex(row.capture?.response?.digest ?? []) === hex(judgment.native_derivation.capture.digest));
+    assert.equal(judgment.native_acquisition.selected_view.id, producer?.prepared_context.selected_view,
+      'judgment presentation is bound to its own completed instrument preparation');
+  }
   const noCapture = new RecurrenceTrace({packets}, application);
   for (const observation of delegatedObservations) {
     for (const row of observation.attempts) if (row.prepared_context && !noCapture.attempts.has(hex(row.attempt.id)))

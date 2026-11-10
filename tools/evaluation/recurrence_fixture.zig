@@ -7,6 +7,7 @@ const types = @import("application_types");
 const Service = native.tasks.Service(types);
 pub const Options = struct {
     delegated: bool = false,
+    reject_action: bool = false,
     value: ?wc.Ref = null,
     packet: []const u8 = "Native delegated fixture packet.",
 };
@@ -371,6 +372,6 @@ pub fn run(
     if (options.delegated)
         return delegated(service, worker, a, task, pending, result, options.packet);
     const stop = "{\"reason\":\"Native recurrence fixture complete.\"}";
-    try acquire(service, a, pending, "stop", stop);
+    try acquire(service, a, pending, "stop", if (options.reject_action) "{}" else stop);
     return selected;
 }

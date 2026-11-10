@@ -827,7 +827,8 @@ export function sourceAcquisition(corpus, producer, interactions, records, enume
         else range(artifact.evidence);
       }
     }
-    view(interaction.selected_view);
+    if (interaction.exposure?.status === 'exposed') view(interaction.exposure.selected_view);
+    else if (interaction.selected_view && interaction.exposure?.status !== 'unexposed') complete = false;
     for (const result of interaction.results ?? []) {
       if (result.output?.tag !== 'workspace') continue;
       const reply = result.output.value.reply;
@@ -863,8 +864,17 @@ export function sourceAcquisition(corpus, producer, interactions, records, enume
     if (!row) continue;
     if (derivation.kind === 'acquisition' && derivation.acquisition) range(derivation.acquisition);
     const computed = ['computation', 'trial'].includes(derivation.kind);
-    if (computed || derivation.kind === 'judgment' && derivation.work && derivation.delegation && derivation.capture)
+    if (computed)
       for (const source of derivation.sources) roots.push(referenceHex(source));
+    if (derivation.kind === 'judgment' && derivation.work && derivation.delegation && derivation.capture) {
+      const acquisition = row.native_acquisition;
+      if (!acquisition || acquisition.complete !== true) complete = false;
+      if (acquisition) {
+        if (acquisition.selected_view) view(acquisition.selected_view);
+        else for (const input of acquisition.inputs ?? []) root(input);
+        for (const input of acquisition.port_inputs ?? []) root(input);
+      }
+    }
     if (computed && derivation.work) {
       const work = works.get(digestHex(derivation.work));
       if (work?.result_value && referenceHex(work.result_value) === id)

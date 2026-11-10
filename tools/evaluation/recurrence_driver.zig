@@ -8,6 +8,7 @@ const Worker = native.testing.Worker;
 const Service = native.tasks.Service(types);
 const Json = native.json;
 const acquisition = @import("recurrence_acquisition.zig");
+const presentation = @import("recurrence_presentation.zig");
 const assets: native.discovery.Assets = .{
     .image = @embedFile("native_image"),
     .application = @embedFile("native_application"),
@@ -312,6 +313,10 @@ const Driver = struct {
         if (Json.get(params, "value") != null and !delegated) return error.InvalidParams;
         return .{
             .delegated = delegated,
+            .reject_action = if (Json.get(params, "reject_action")) |value|
+                try native.values.fromJson(bool, a, value)
+            else
+                false,
             .value = if (Json.get(params, "value")) |value|
                 try native.values.fromJson(C.workspace.Ref, a, value)
             else
@@ -529,8 +534,14 @@ const Driver = struct {
             try Json.put(a, &record, "record_b64", try base64(a, bytes));
             if (key.kind == .workspace_view)
                 try Json.put(a, &record, "projection_blocks", try self.projectionBlocks(a, bytes));
-            if (sources and key.kind == .workspace_value)
+            if (sources and key.kind == .workspace_value) {
                 try Json.put(a, &record, "native_derivation", try acquisition.derivation(a, bytes));
+                try Json.put(a, &record, "native_acquisition", try presentation.judgment(
+                    self.service,
+                    a,
+                    bytes,
+                ));
+            }
             if (key.kind == .controller_interaction)
                 try Json.put(a, &record, "acquisition", try acquisition.interaction(
                     self.service,
@@ -538,9 +549,24 @@ const Driver = struct {
                     bytes,
                 ));
             try records.append(record);
-            try self.seen.put(self.service.allocator, key, {});
+            if (cacheRecord(record)) try self.seen.put(self.service.allocator, key, {});
         }
         return .{ .array = records };
+    }
+
+    fn cacheRecord(record: Json.Value) bool {
+        if (Json.get(record, "acquisition")) |value| {
+            const exposure = Json.get(value, "exposure") orelse return false;
+            const status = Json.get(exposure, "status") orelse return false;
+            if (status == .string and std.mem.eql(u8, status.string, "unknown")) return false;
+        }
+        if (Json.get(record, "native_acquisition")) |value| {
+            if (value != .null) {
+                const complete = Json.get(value, "complete") orelse return false;
+                if (complete != .bool or !complete.bool) return false;
+            }
+        }
+        return true;
     }
 
     fn projectionBlocks(self: *Driver, a: std.mem.Allocator, bytes: []const u8) !Json.Value {

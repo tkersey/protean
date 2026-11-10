@@ -703,6 +703,8 @@ test('native delegated judgments and trial inputs retain acquisition without tru
       f.value('model', {kind: 'judgment', sources: [{digest: 'acquired', bytes: '1'}],
         work: 'child', delegation: {digest: 'delegation'}, capture: {digest: 'capture'}}),
       f.value('result', {kind, sources: [{digest: 'model', bytes: '1'}]})];
+    records[1].native_acquisition = {complete: true, inputs: [{kind: 'value', id: 'acquired'}],
+      selected_view: null, port_inputs: []};
     f.interaction.evidence = [{tag: 'workspace', value: {kind: 'value', id: 'result'}}];
     assert.deepEqual(sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true).record_ids,
       f.corpus.records.map(record => record.id));
@@ -737,6 +739,7 @@ const selectedSource = (f, records, slices) => {
       values: {items: references}, blocks: slices.map(({id, offset, length}) => ({tag: 'source',
         value: {value: {kind: 'value', id}, offset, length}}))}}}});
   f.interaction.selected_view = {kind: 'view', id: 'view'};
+  f.interaction.exposure = {status: 'exposed', selected_view: f.interaction.selected_view};
 };
 
 const expandedValue = (f, id, text, offset, nextOffset, index = 0) => {
@@ -768,6 +771,106 @@ test('source presentations preserve relative extents and independent whole acqui
   records.pop();
   selectedSource(f, records, [{id: 'acquired', offset: 0, length: stop - start}]);
   assert.deepEqual(result().record_ids, ['r0']);
+});
+
+test('historical selections require actual exposure and retain earlier successful presentations', () => {
+  const f = acquisitionFixture();
+  const records = [f.value('acquired', {kind: 'acquisition', acquisition: f.origin})];
+  selectedSource(f, records, [{id: 'acquired', offset: 0, length: f.source.length}]);
+  const earlier = {...f.interaction, interaction_id: 'earlier', event_cut: '20'};
+  delete f.interaction.selected_view;
+  delete f.interaction.exposure;
+  const result = () => sourceAcquisition(f.corpus, f.producer, [earlier, f.interaction], records, true);
+  earlier.exposure = {status: 'unexposed', selected_view: null};
+  assert.deepEqual(result().record_ids, []);
+  assert.equal(result().complete, true);
+  for (const exposure of [undefined, {status: 'unknown', selected_view: null}]) {
+    earlier.exposure = exposure;
+    assert.deepEqual(result().record_ids, []);
+    assert.equal(result().complete, false);
+  }
+  earlier.exposure = {status: 'exposed', selected_view: null};
+  assert.deepEqual(result().record_ids, []);
+  earlier.exposure.selected_view = earlier.selected_view;
+  assert.deepEqual(result().record_ids, f.corpus.records.map(record => record.id));
+  f.interaction.selected_view = earlier.selected_view;
+  f.interaction.exposure = {status: 'unexposed', selected_view: null};
+  assert.deepEqual(result().record_ids, f.corpus.records.map(record => record.id));
+  earlier.event_cut = '31';
+  assert.deepEqual(result().record_ids, []);
+});
+
+test('delegated presentations preserve slices through nested computations and union independent inputs', () => {
+  const f = acquisitionFixture(), end = f.source.indexOf(10);
+  const records = [f.value('acquired', {kind: 'acquisition', acquisition: f.origin}),
+    f.value('model', {kind: 'judgment', sources: [{digest: 'acquired', bytes: '1'}],
+      work: 'child', delegation: {digest: 'delegation'}, capture: {digest: 'capture'}}),
+    f.value('result', {kind: 'computation', sources: [{digest: 'model', bytes: '1'}]})];
+  selectedSource(f, records, [{id: 'acquired', offset: 0, length: 1}]);
+  records[1].native_acquisition = {complete: true, inputs: [],
+    selected_view: f.interaction.selected_view, port_inputs: []};
+  delete f.interaction.selected_view;
+  delete f.interaction.exposure;
+  f.interaction.evidence = [{tag: 'workspace', value: {kind: 'value', id: 'result'}}];
+  const result = () => sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true);
+  assert.equal(result().complete, true);
+  assert.deepEqual(result().ranges, [[0, 1]]);
+  assert.deepEqual(result().record_ids, []);
+  records.at(-1).value.description.projection.blocks[0].value.length = end;
+  assert.deepEqual(result().record_ids, ['m0']);
+  records[1].native_acquisition.port_inputs = [{kind: 'value', id: 'acquired'}];
+  assert.deepEqual(result().record_ids, f.corpus.records.map(record => record.id));
+  records[1].native_acquisition.port_inputs = [];
+  records[1].native_acquisition.selected_view = null;
+  records[1].native_acquisition.inputs = [{kind: 'value', id: 'acquired'}];
+  assert.deepEqual(result().record_ids, f.corpus.records.map(record => record.id));
+  delete records[1].native_acquisition;
+  assert.deepEqual(result().record_ids, []);
+  assert.equal(result().complete, false);
+});
+
+test('delegated port observations follow frozen computation inputs without trusting hypotheses', () => {
+  const f = acquisitionFixture();
+  const records = [f.value('acquired', {kind: 'acquisition', acquisition: f.origin}),
+    f.value('guess', {kind: 'hypothesis', sources: [{digest: 'acquired', bytes: '1'}]}),
+    f.value('model', {kind: 'judgment', sources: [], work: 'instrument',
+      delegation: {digest: 'delegation'}, capture: {digest: 'capture'}}),
+    {kind: 'workspace_work', value: {id: 'target', outcome_kind: 'running',
+      observer_inputs: [{digest: 'acquired', bytes: '1'}]}}];
+  const acquisition = {complete: true, inputs: [], selected_view: null,
+    port_inputs: [{kind: 'value', id: 'acquired'}]};
+  records[2].native_acquisition = acquisition;
+  f.interaction.evidence = [{tag: 'workspace', value: {kind: 'value', id: 'model'}}];
+  const result = () => sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true);
+  assert.deepEqual(result().record_ids, f.corpus.records.map(record => record.id));
+  acquisition.port_inputs = [{kind: 'value', id: 'guess'}];
+  assert.deepEqual(result().record_ids, []);
+  assert.equal(result().complete, true);
+  acquisition.port_inputs = [];
+  assert.deepEqual(result().record_ids, []);
+  acquisition.complete = false;
+  assert.equal(result().complete, false);
+});
+
+test('delegated projection ancestry requires a presented computed block', () => {
+  const f = acquisitionFixture();
+  const records = [f.value('acquired', {kind: 'acquisition', acquisition: f.origin}),
+    f.value('projection', {kind: 'computation', sources: [{digest: 'acquired', bytes: '1'}]}),
+    f.value('model', {kind: 'judgment', sources: [{digest: 'projection', bytes: '1'}],
+      work: 'child', delegation: {digest: 'delegation'}, capture: {digest: 'capture'}})];
+  selectedSource(f, records, []);
+  const projection = records.at(-1).value.description.projection;
+  projection.blocks = [{tag: 'explanation', value: 'A summary without a presented computation.'}];
+  records[2].native_acquisition = {complete: true, inputs: [],
+    selected_view: f.interaction.selected_view, port_inputs: []};
+  delete f.interaction.selected_view;
+  delete f.interaction.exposure;
+  f.interaction.evidence = [{tag: 'workspace', value: {kind: 'value', id: 'model'}}];
+  const result = () => sourceAcquisition(f.corpus, f.producer, [f.interaction], records, true);
+  assert.equal(result().complete, true);
+  assert.deepEqual(result().record_ids, []);
+  projection.blocks = [{tag: 'computed', value: null}];
+  assert.deepEqual(result().record_ids, f.corpus.records.map(record => record.id));
 });
 
 test('expanded acquisition pages count complete JSON representations rather than the whole value', () => {

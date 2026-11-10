@@ -15,7 +15,7 @@ fn decimal(a: std.mem.Allocator, value: u64) !Json.Value {
     return Json.string(try std.fmt.allocPrint(a, "{d}", .{value}));
 }
 
-fn record(
+pub fn record(
     service: *Service,
     comptime T: type,
     a: std.mem.Allocator,
@@ -29,8 +29,16 @@ fn record(
     return try C.decodeOwned(T, a, bytes);
 }
 
-fn object(service: *Service, a: std.mem.Allocator, ref: anytype) ![]u8 {
+pub fn object(service: *Service, a: std.mem.Allocator, ref: anytype) ![]u8 {
     return service.namespace.store.object(a, .{ .digest = ref.digest, .bytes = ref.bytes }, null);
+}
+
+pub fn valueEqual(comptime T: type, a: std.mem.Allocator, left: T, right: T) !bool {
+    const left_bytes = try C.encodeOwned(T, a, left);
+    defer a.free(left_bytes);
+    const right_bytes = try C.encodeOwned(T, a, right);
+    defer a.free(right_bytes);
+    return std.mem.eql(u8, left_bytes, right_bytes);
 }
 
 fn normalized(
@@ -76,6 +84,70 @@ const Producer = struct {
     action: t.Action,
 };
 
+const ModelObservation = struct {
+    projection: Json.Value,
+    normalized: C.Decoded(t.P.AdaptiveResult),
+    prepared: C.Decoded(t.P.AdaptivePrepared),
+    prepared_ref: State.Reference,
+    capture_ref: State.Reference,
+};
+
+fn consumedModel(
+    service: *Service,
+    a: std.mem.Allocator,
+    offered: State.ControllerInteraction,
+) !?ModelObservation {
+    const model = offered.model orelse return null;
+    var occurrence = (try record(service, Occurrence, a, "occurrence", model, offered.task)) orelse
+        return null;
+    defer occurrence.deinit();
+    if (occurrence.value.work != null or occurrence.value.residual != null or
+        occurrence.value.state != .admitted or occurrence.value.state.admitted != .reply)
+        return null;
+    const reply = occurrence.value.state.admitted.reply;
+    var attempt = (try record(
+        service,
+        State.Attempt,
+        a,
+        "attempt",
+        reply.attempt,
+        offered.task,
+    )) orelse return null;
+    defer attempt.deinit();
+    var capture = (try record(
+        service,
+        State.Capture,
+        a,
+        "capture",
+        reply.attempt,
+        offered.task,
+    )) orelse return null;
+    defer capture.deinit();
+    if (!producerCapture(offered.task, occurrence.value, attempt.value, capture.value, reply.reply))
+        return null;
+    const context = attempt.value.controller_context orelse return null;
+    if (context.epoch != offered.epoch or context.event_cut != offered.event_cut or
+        context.next_message != offered.next_message or
+        !std.meta.eql(context.overlay, offered.overlay)) return null;
+    const prepared_ref = attempt.value.prepared orelse return null;
+    const capture_ref = capture.value.response orelse return null;
+    var prepared = try C.decodeOwned(t.P.AdaptivePrepared, a, try object(service, a, prepared_ref));
+    errdefer prepared.deinit();
+    var result = try normalized(
+        a,
+        try object(service, a, capture.value.projection.?.reply),
+        occurrence.value.request,
+    );
+    errdefer result.deinit();
+    return .{
+        .projection = try producerIdentity(a, offered, attempt.value, capture.value),
+        .normalized = result,
+        .prepared = prepared,
+        .prepared_ref = prepared_ref,
+        .capture_ref = capture_ref,
+    };
+}
+
 fn modelProducer(service: *Service, a: std.mem.Allocator, task: State.Task) !?Producer {
     const id = task.controller_interaction orelse return null;
     var offered = (try record(
@@ -90,42 +162,91 @@ fn modelProducer(service: *Service, a: std.mem.Allocator, task: State.Task) !?Pr
     if (!std.meta.eql(offered.value.task, task.id) or
         !std.meta.eql(task.controller, offered.value.controller) or
         task.controller_epoch != offered.value.epoch) return null;
-    const model = offered.value.model orelse return null;
-    var occurrence = (try record(service, Occurrence, a, "occurrence", model, task.id)) orelse
-        return null;
-    defer occurrence.deinit();
-    if (occurrence.value.work != null or occurrence.value.state != .admitted or
-        occurrence.value.state.admitted != .reply) return null;
-    const reply = occurrence.value.state.admitted.reply;
-    var attempt = (try record(service, State.Attempt, a, "attempt", reply.attempt, task.id)) orelse
-        return null;
-    defer attempt.deinit();
-    var capture = (try record(service, State.Capture, a, "capture", reply.attempt, task.id)) orelse
-        return null;
-    defer capture.deinit();
-    if (!producerCapture(task.id, occurrence.value, attempt.value, capture.value, reply.reply))
-        return null;
-    const context = attempt.value.controller_context orelse return null;
-    if (context.epoch != offered.value.epoch or context.event_cut != offered.value.event_cut or
-        !std.meta.eql(context.overlay, offered.value.overlay)) return null;
-    const prepared_ref = attempt.value.prepared orelse return null;
-    var prepared = try C.decodeOwned(t.P.AdaptivePrepared, a, try object(service, a, prepared_ref));
-    defer prepared.deinit();
-    var result = try normalized(
-        a,
-        try object(service, a, capture.value.projection.?.reply),
-        occurrence.value.request,
-    );
-    errdefer result.deinit();
-    const call = acceptedCall(result.value, prepared.value.request) orelse {
-        result.deinit();
+    var observation = (try consumedModel(service, a, offered.value)) orelse return null;
+    defer observation.prepared.deinit();
+    errdefer observation.normalized.deinit();
+    const call = acceptedCall(
+        observation.normalized.value,
+        observation.prepared.value.request,
+    ) orelse {
+        observation.normalized.deinit();
         return null;
     };
     return .{
-        .projection = try producerIdentity(a, offered.value, attempt.value, capture.value),
-        .normalized = result,
+        .projection = observation.projection,
+        .normalized = observation.normalized,
         .action = call.decoded_action.decoded,
     };
+}
+
+fn exposureResult(
+    a: std.mem.Allocator,
+    status: []const u8,
+    selected: ?State.Reference,
+) !Json.Value {
+    var result = Json.object();
+    try Json.put(a, &result, "status", Json.string(status));
+    try Json.put(a, &result, "selected_view", if (selected) |reference|
+        try native.values.toJson(C.workspace.Ref, a, .{
+            .kind = .view,
+            .id = .{ .bytes = try a.dupe(u8, &std.fmt.bytesToHex(reference.digest, .lower)) },
+        })
+    else
+        .null);
+    return result;
+}
+
+fn preparationRejected(
+    service: *Service,
+    a: std.mem.Allocator,
+    offered: State.ControllerInteraction,
+) !bool {
+    const model = offered.model orelse return false;
+    var occurrence = (try record(service, Occurrence, a, "occurrence", model, offered.task)) orelse
+        return false;
+    defer occurrence.deinit();
+    if (occurrence.value.state != .admitted or occurrence.value.state.admitted != .reply)
+        return false;
+    const ref = try service.namespace.store.objectReference(
+        occurrence.value.state.admitted.reply.reply,
+        null,
+    );
+    var result = try normalized(a, try object(service, a, ref), occurrence.value.request);
+    defer result.deinit();
+    return result.value.result == .preparation_rejected;
+}
+
+fn exposure(
+    service: *Service,
+    a: std.mem.Allocator,
+    offered: State.ControllerInteraction,
+) !Json.Value {
+    var observed = (try consumedModel(service, a, offered)) orelse return exposureResult(
+        a,
+        if (try preparationRejected(service, a, offered)) "unexposed" else "unknown",
+        null,
+    );
+    defer observed.prepared.deinit();
+    defer observed.normalized.deinit();
+    const replay = observed.normalized.value.replay orelse
+        return exposureResult(a, "unknown", null);
+    if (observed.normalized.value.replay_status != .complete)
+        return exposureResult(a, "unknown", null);
+    var context = try C.decodeOwned(t.P.AdaptiveContext, a, try object(service, a, replay.object));
+    defer context.deinit();
+    if (!std.meta.eql(context.value.task, offered.task) or
+        !std.meta.eql(replay.task, offered.task) or
+        !std.meta.eql(context.value.source_request.digest, observed.prepared_ref.digest) or
+        context.value.source_request.bytes != observed.prepared_ref.bytes or
+        !std.meta.eql(context.value.source_capture.digest, observed.capture_ref.digest) or
+        context.value.source_capture.bytes != observed.capture_ref.bytes or
+        !std.meta.eql(context.value.policy, observed.prepared.value.request.policy))
+        return exposureResult(a, "unknown", null);
+    const selected = observed.prepared.value.selected_view;
+    return exposureResult(a, "exposed", if (selected) |ref|
+        .{ .digest = ref.digest, .bytes = ref.bytes }
+    else
+        null);
 }
 
 fn producerIdentity(
@@ -229,6 +350,7 @@ pub fn interaction(service: *Service, a: std.mem.Allocator, bytes: []const u8) !
     defer carry.deinit();
     var output = try interactionIdentity(a, saved.value);
     try Json.put(a, &output, "carry_sha256", try hex(a, saved.value.carry.digest));
+    try Json.put(a, &output, "exposure", try exposure(service, a, saved.value));
     try Json.put(a, &output, "evidence", try native.values.toJson(
         t.EvidenceList,
         a,

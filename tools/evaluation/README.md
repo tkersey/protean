@@ -60,7 +60,10 @@ coverage follows the producer's saved evidence and consumed workspace results,
 including earlier `collect` and `wait` results and actual computation inputs.
 Whole cited records must lie within acquired ranges of the exact frozen source
 file. Source presentations retain their byte bounds; expanded values count only
-source bytes recoverable from their observed JSON pages. The final report's own
+source bytes recoverable from their observed JSON pages. Selected views count
+only after native evidence establishes successful model exposure. Delegated
+answers retain their actual input presentations and the source inputs at the
+delegated port's historical computation cut. The final report's own
 citations require acquisition before its producer, including records acquired
 after the online answer when its final support changes.
 Available but unconsumed work and asserted provenance do not establish
