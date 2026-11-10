@@ -1,6 +1,6 @@
 .{
     .name = .protean,
-    .version = "9.0.0",
+    .version = "9.1.0",
     .dependencies = .{
         .horos = .{
             .url = "git+https://github.com/tkersey/horos#1f5320038f45ae00050450edbc08afbb8a97a030",
