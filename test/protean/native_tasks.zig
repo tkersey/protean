@@ -6190,13 +6190,17 @@ test "receipt lookup retains exclusive admission and verifies evidence through i
     try h.prepareRegistry();
     try h.prepareOwner();
     const original = try h.admitOriginal();
+    try h.expectInferenceObservation(original.work.task, .{ 1, 4, 0 });
     try h.exclusiveAdmission(original);
     try h.runHeldLookup(original);
     try h.settleOriginal(original);
+    try h.expectInferenceObservation(original.work.task, .{ 1, 4, 7 });
     const interrupted = try h.exportInterrupted(original);
     try h.checkArchives(original, interrupted);
+    try h.expectInferenceObservation(original.work.task, .{ 1, 4, 7 });
     try h.interruptedLookup(interrupted);
     try h.proveNotSent(interrupted);
+    try h.expectInferenceObservation(interrupted.interrupted.work.task, .{ 1, 4, 0 });
     try h.rejectedLookups();
     try h.verificationFailures();
     try h.fencedLookup();
@@ -6246,6 +6250,33 @@ const ReceiptLookupHarness = struct {
     service_live: bool = false,
     worker: ?*native.testing.Worker = null,
     original_work: native.tasks.Work = undefined,
+
+    fn expectInferenceObservation(
+        h: *ReceiptLookupHarness,
+        task_id: LookupState.TaskId,
+        expected: [3]u64,
+    ) !void {
+        var client: native.client.Client(FairTypes) = .{ .service = &h.service };
+        var params = native.json.object();
+        try native.json.put(h.frame, &params, "task_id", native.json.string(
+            try h.frame.dupe(u8, &std.fmt.bytesToHex(task_id, .lower)),
+        ));
+        const head = h.namespace.store.head;
+        for (0..2) |_| {
+            const status = try client.call(h.frame, .@"task.status", params);
+            const observed = status.object.get("inference_observation").?.object;
+            try std.testing.expectEqual(3, observed.count());
+            for ([_][]const u8{
+                "admitted_attempts",
+                "request_bytes",
+                "known_output_tokens",
+            }, expected) |field, value| try std.testing.expectEqualStrings(
+                try std.fmt.allocPrint(h.frame, "{d}", .{value}),
+                observed.get(field).?.string,
+            );
+        }
+        try std.testing.expectEqualDeep(head, h.namespace.store.head);
+    }
 
     fn deinit(h: *ReceiptLookupHarness) void {
         if (h.worker) |worker| {

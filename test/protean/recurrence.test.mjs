@@ -466,3 +466,65 @@ test('quality gains with more expenditure are a tradeoff and partial outcomes re
   assert.equal(result.pairs[0].quality_improvement, true);
   assert.equal(result.aggregate.ordinary.sound, 32);
 });
+
+function onlineCampaign() {
+  const value = campaign();
+  value.plan.suite = 'recurrence-online';
+  for (const report of value.reports) {
+    report.plan_sha256 = campaignIdentity(value.plan);
+    report.final_grading = structuredClone(report.grading);
+    report.online = {complete: true};
+  }
+  return value;
+}
+
+test('cheaper online attempts cannot claim payback from the same missing or unsupported service', () => {
+  for (const failure of ['incomplete_delivery', 'unanswered', 'unsupported']) {
+    const {plan, reports} = onlineCampaign();
+    for (const report of reports) {
+      if (failure === 'incomplete_delivery') report.online.complete = false;
+      else report.grading.totals = {requests: 12, sound: 11,
+        critical: failure === 'unsupported' ? 1 : 0, unanswered: failure === 'unanswered' ? 1 : 0};
+      assert.equal(report.final_grading.totals.sound, 12);
+    }
+    const result = compareCampaign(plan, reports);
+    assert(result.attempts.every(attempt => attempt.service_complete === false));
+    assert(result.pairs.every(pair => pair.cost_positive === false));
+    assert.equal(result.campaign_cost_positive, false);
+    assert.equal(result.complete_milestone, false);
+    assert.equal(result.verdict, 'no_practical_improvement');
+    assert.equal(result.aggregate.treatment.cost, 24);
+    assert.equal(result.aggregate.ordinary.cost, 30);
+  }
+});
+
+test('missing online evidence remains unknown despite a correct final report and lower cost', () => {
+  const {plan, reports} = onlineCampaign();
+  delete reports[0].online;
+  const result = compareCampaign(plan, reports);
+  assert.equal(result.attempts[0].grading.sound, 12);
+  assert.equal(result.attempts[0].service_complete, null);
+  assert.equal(result.attempts[0].cost, 8);
+  assert.equal(result.pairs[0].cost_positive, null);
+  assert.equal(result.campaign_cost_positive, null);
+  assert.equal(result.complete_milestone, null);
+});
+
+test('complete online and final service preserves qualifying cost savings without ordinary construction', () => {
+  const {plan, reports} = onlineCampaign();
+  for (const report of reports.filter(item => item.subject.arm === 'ordinary'))
+    report.reuse = {...report.reuse, qualified: false, recovered: false};
+  const result = compareCampaign(plan, reports);
+  assert(result.attempts.every(attempt => attempt.service_complete === true));
+  assert(result.attempts.filter(attempt => attempt.subject.arm === 'ordinary')
+    .every(attempt => attempt.mechanism === null));
+  assert(result.pairs.every(pair => pair.cost_positive === true));
+  assert.equal(result.qualifying_traces, 3);
+  assert.equal(result.campaign_cost_positive, true);
+  assert.equal(result.complete_milestone, true);
+  for (const report of reports.filter(item => item.subject.arm === 'treatment')) report.reuse.recovered = false;
+  const absentMechanism = compareCampaign(plan, reports);
+  assert(absentMechanism.attempts.every(attempt => attempt.service_complete === true));
+  assert.equal(absentMechanism.campaign_cost_positive, true);
+  assert.equal(absentMechanism.complete_milestone, false);
+});

@@ -12,6 +12,96 @@ correctness, resource use and unsuccessful discovery on one controlled workload
 and configuration. Its accounting retains the infrastructure-invalid first
 campaign and the separately authorized replacement campaign.
 
+### Online answers from frozen sources
+
+The separate `recurrence-online` suite makes intermediate answers useful before
+the next selected request reaches the model. It retains the existing task owner,
+question/answer protocol, workspace, grading oracle, interruption and accounting.
+The original `recurrence` suite and its published final-only campaign keep their
+original meaning.
+
+```sh
+node tools/evaluation/workspace.mjs prepare --suite recurrence-online \
+  --config /private/operator-approved-adaptive.json \
+  --binary zig-out/bin/protean \
+  --driver zig-out/bin/protean-recurrence-driver \
+  --application zig-out/protean/adaptive/application.json \
+  --cost-model /private/deployment-tariff.json \
+  --out /private/online-recurrence-campaign
+```
+
+Every immutable source record is present initially in the admitted snapshot's
+`records.jsonl`. Later packets select requests by their exact target, revision,
+scope, flags and record identities. Those future request descriptions are not
+included in the initial snapshot or prompt. Packets provide source byte ranges
+equally to both arms; the model still acquires those records through ordinary
+snapshot access. These locations make this a computation and representation
+comparison after lookup, not a test of finding documents. No future-document
+withholding is claimed.
+
+Both arms deliver each packet's supported answers through the existing `ask`
+action, with this JSON object encoded as its `question` string:
+
+```json
+{"kind":"recurrence.answers.v1","packet_id":"selected packet identity","answers":[]}
+```
+
+The answer entries use the same fields and support rules as the final report.
+The supervisor responds with the next due selection, or the existing queued-input
+reminder, without revealing correctness. Native `input_required` events bind the
+actual prompt, question identity, revision, request digest and event sequence.
+Large question prompts use the ordinary task-scoped `artifact.read` route.
+Repeated observation or an identical replay does not create another answer.
+
+The first answer must follow a successfully confirmed exposure of its own selection
+and precede the earliest preparation that may have exposed the next selection.
+The latter bound moves only when native evidence proves that an attempt was not
+sent; a successful retry cannot erase an earlier uncertain delivery. Reports retain
+separate exact decimal cuts for confirmed and possible exposure. Native event cuts
+decide ordering; elapsed observations remain separate measurements. Merely guessing
+selection bytes in model-produced text cannot create exposure: the selection must
+also have its scheduled evaluator delivery and matching native admission event.
+Duplicate or conflicting deliveries cannot replace an earlier answer. An earlier
+unsupported ready or blocked conclusion remains critical after later correction.
+All twelve answers must be sound online and in the final report before a positive
+comparison can qualify. A final-only answer map does not satisfy this mode.
+
+Existing deliveries also carry the remaining external wall allowance and the
+task owner's `inference_observation`: `admitted_attempts`, `request_bytes` and
+`known_output_tokens`. Decimal counters preserve their exact values. Request
+bytes are not input tokens or prices; known output tokens are a lower bound, and
+missing observations remain unknown. These additions create no separate model
+turn. An unacknowledged delivery replays its original arguments and original
+resource observation, rather than silently refreshing its message.
+
+The treatment may construct and retain ordinary computation or descriptions.
+The ordinary arm keeps continuing history and the same source access. Both use
+the packaged controller; controller reconstruction and runtime replacement stay
+disabled. Construction, a representation, or any specific solving method is never
+required. This first online comparison does not test recursive controller
+improvement.
+
+An artifact reference in the final report cannot retroactively establish online
+use. It must appear in the supported first online answer, and actual work or
+selected-context use must follow the confirmed selection and precede that answer.
+An artifact must already exist before the earliest possible later selection.
+The original first eligible reuse
+boundary, source/scope adjudication, SIGKILL, same-task reopen and later distinct
+supported use remain required for a recovery claim. Ordinary direct answers can
+succeed without a retained artifact.
+
+The `ask` channel retains control history, including intermediate answers. That
+input cost is included for both arms. Online reports retain exact prepared-request
+byte profiles by field, tool and input item, using `request_profile.mjs`. Those
+profiles do not disclose payload text and do not estimate tokenization, caching or
+monetary cost. The owner's request-byte counter measures admitted preparation
+wrappers; the profiler separately measures the exact serialized provider body.
+Preparation and offline fixtures establish mechanics only; live
+efficacy requires separately authorized inference and adjudication. Use the same
+`run` command below with the prepared online campaign directory.
+
+### Original final-only delivery
+
 The `recurrence` suite supplies one continuing task with twelve release-readiness
 requests. Three frozen corpus instances each run once with an ordinary persistent
 agent and once with construction and retention enabled. Order is treatment/control,

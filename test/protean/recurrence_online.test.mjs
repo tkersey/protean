@@ -1,0 +1,566 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {createHash} from 'node:crypto';
+import {mkdtemp, readFile, readdir, rm, writeFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {encodeSchema, encodeValue} from '../support/values.mjs';
+import {createCorpus, createOnlineCorpus, parseOnlineAnswer, gradeReport, gradeOnlineAnswers,
+  combineOnlineGrading, oracle} from '../../tools/evaluation/recurrence.mjs';
+import {RecurrenceDelivery, RecurrenceTrace, prepareRecurrence, validateRecurrencePlan, recurrenceStatus,
+  resolveQuestion} from '../../tools/evaluation/workspace.mjs';
+
+const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+const envelope = (packetId, answers) => JSON.stringify({kind: 'recurrence.answers.v1',
+  packet_id: packetId, answers});
+
+function example() {
+  const targets = [{component: 'A', revision: '1'}, {component: 'B', revision: '1'}];
+  const records = targets.flatMap((target, index) => [
+    {kind: 'manifest', id: `m${index}`, ...target, complete: true, requirements: []},
+    {kind: 'receipt', id: `r${index}`, ...target, scope: 'release', available: true,
+      result: index === 0 ? 'pass' : 'fail'},
+  ]);
+  const requests = targets.map((target, index) => ({id: `q${index}`, target, scope: 'release',
+    flags: {}, manifest_ids: [`m${index}`], receipt_ids: [`r${index}`]}));
+  const packets = requests.map((request, index) => ({id: `p${index}`, offset_ms: index * 100,
+    request_ids: [request.id], bytes: JSON.stringify({packet_id: `p${index}`,
+      requests: [request], source_ranges: []})}));
+  packets.push({id: 'end', offset_ms: 200, request_ids: [],
+    bytes: JSON.stringify({packet_id: 'end', event: 'END'})});
+  const answers = [
+    {request_id: 'q0', status: 'ready', records: ['m0', 'r0'], artifact_refs: [],
+      support: {coverage: [{...targets[0], receipts: ['r0']}]}},
+    {request_id: 'q1', status: 'blocked', records: ['m1', 'r1'], artifact_refs: [],
+      support: {blocker: targets[1], path: [targets[1]]}},
+  ];
+  const corpus = {delivery: 'online', records, requests, packets};
+  const visibility = packets.map((packet, index) => ({packet_id: packet.id, confirmed: true,
+    preparation_cut: String((index + 1) * 10)}));
+  const events = answers.map((answer, index) => ({event_seq: String(index * 10 + 15),
+    question_id: `question-${index}`, question_revision: '1', request_digest: `digest-${index}`,
+    raw: envelope(packets[index].id, [answer]), observed_ms: index * 100 + 50}));
+  return {corpus, answers, visibility, events};
+}
+
+const grading = value => gradeOnlineAnswers(value.corpus, value.events, value.visibility);
+const row = (grade, id = 'q0') => grade.answers.find(answer => answer.request_id === id);
+const finalGrade = value => gradeReport(JSON.stringify({answers: value.answers}), value.corpus);
+
+test('legacy final-only corpora retain their frozen bytes', () => {
+  const identities = [
+    '9b2337bbbfe409bffd818f18ed10ed0b6e64d4b1098984d5ef6d939194971548',
+    '8e2f954e6d3f09351c2b42cc2cc86de8c5067586d1510345e65d2e5e55dadaf6',
+    'b065bd8f6132ae093b486e9e6a2ab7cafc5c4e779c14cdff157b70cf9cae8ec4',
+  ];
+  identities.forEach((identity, index) => assert.equal(hash(JSON.stringify(createCorpus(index + 1))), identity));
+});
+
+test('online snapshots contain immutable records without future request selections', () => {
+  for (const seed of [1, 2, 3]) {
+    const corpus = createOnlineCorpus(seed), source = Buffer.from(corpus.sources['records.jsonl']);
+    assert.deepEqual(Object.keys(corpus.sources), ['records.jsonl']);
+    assert.deepEqual(source.toString().trimEnd().split('\n').map(JSON.parse), corpus.records);
+    const initial = corpus.contract + corpus.packets[0].bytes + source.toString();
+    for (const request of corpus.requests.filter(item => !corpus.packets[0].request_ids.includes(item.id))) {
+      assert.equal(initial.includes(JSON.stringify(request.id)), false);
+      assert.equal(initial.includes(JSON.stringify(request)), false);
+    }
+    const known = new Set(corpus.records.map(record => record.id));
+    for (const packet of corpus.packets.filter(item => item.request_ids.length)) {
+      const contents = JSON.parse(packet.bytes), located = [];
+      assert.equal(Object.hasOwn(contents, 'documents'), false);
+      assert.deepEqual(contents.requests.map(request => request.id), packet.request_ids);
+      for (const range of contents.source_ranges) {
+        assert.equal(range.path, 'records.jsonl');
+        assert(Number.isSafeInteger(range.start) && range.start >= 0);
+        assert(Number.isSafeInteger(range.length) && range.length > 0 && range.length <= 4096);
+        assert(range.start + range.length <= source.length);
+        const bytes = source.subarray(range.start, range.start + range.length);
+        assert.equal(bytes.at(-1), 10);
+        located.push(...bytes.toString().trimEnd().split('\n').map(line => JSON.parse(line).id));
+      }
+      const required = new Set(contents.requests.flatMap(request =>
+        [...request.manifest_ids, ...request.receipt_ids]).filter(id => known.has(id)));
+      assert.deepEqual([...located].sort(), [...required].sort());
+    }
+  }
+});
+
+test('strict answer envelopes reject wrappers, extra fields and wrong structural types', () => {
+  const {events} = example(), valid = events[0].raw;
+  assert.deepEqual(parseOnlineAnswer(valid), JSON.parse(valid));
+  const value = JSON.parse(valid);
+  for (const raw of [`Here is the answer: ${valid}`, `${valid} trailing`, 'null', '[]', '{}',
+    JSON.stringify({...value, extra: true}), JSON.stringify({...value, kind: 'answers'}),
+    JSON.stringify({...value, packet_id: 1}), JSON.stringify({...value, answers: {}})]) {
+    assert.equal(parseOnlineAnswer(raw), null, raw);
+  }
+});
+
+test('ordinary supported answers earn complete success without retained construction', () => {
+  const value = example();
+  assert.deepEqual(value.corpus.requests.map(request => oracle(request, value.corpus.records).status),
+    ['ready', 'blocked']);
+  const online = grading(value);
+  assert.equal(online.complete, true);
+  assert.deepEqual(online.totals, {requests: 2, sound: 2, critical: 0, unanswered: 0});
+  assert.deepEqual(combineOnlineGrading(finalGrade(value), online).totals, online.totals);
+  assert(value.answers.every(answer => answer.artifact_refs.length === 0));
+});
+
+test('a perfect final report cannot replace missing online deliveries', () => {
+  const value = example();
+  const final = finalGrade(value);
+  assert.equal(final.totals.sound, 2);
+  value.events = [];
+  assert.deepEqual(combineOnlineGrading(final, grading(value)).totals,
+    {requests: 2, sound: 0, critical: 0, unanswered: 2});
+});
+
+test('answers require selection exposure before publication and precede the next exposure', () => {
+  for (const [sequence, sound] of [['9', false], ['10', false], ['11', true], ['20', true], ['21', false]]) {
+    const value = example();
+    value.events[0].event_seq = sequence;
+    assert.equal(row(grading(value)).sound, sound, `answer event ${sequence}`);
+  }
+  const value = example();
+  value.events[0].observed_ms = 1000;
+  assert.equal(row(grading(value)).sound, true);
+});
+
+test('large decimal event sequences retain exact exposure boundaries', () => {
+  for (const [sequence, sound] of [['9007199254740992', false], ['9007199254740993', true],
+    ['9007199254740994', true], ['9007199254740995', false]]) {
+    const value = example();
+    value.visibility[0].preparation_cut = '9007199254740992';
+    value.visibility[1].preparation_cut = '9007199254740994';
+    value.visibility[2].preparation_cut = '9007199254740998';
+    value.events[0].event_seq = sequence;
+    value.events[1].event_seq = '9007199254740996';
+    assert.equal(row(grading(value)).sound, sound, sequence);
+  }
+});
+
+test('unknown or unconfirmed source cuts never confer timely credit', () => {
+  const changes = [
+    value => { value.visibility[0].confirmed = false; },
+    value => { delete value.visibility[0].preparation_cut; },
+    value => { value.visibility[0].preparation_cut = 'bad'; },
+    value => { value.visibility[0].preparation_cut = 9007199254740992; },
+    value => { value.visibility[1].preparation_cut = null; },
+  ];
+  for (const change of changes) {
+    const value = example();
+    change(value);
+    assert.equal(row(grading(value)).sound, false);
+  }
+});
+
+test('missing native question bindings and malformed event sequences earn no credit', () => {
+  const changes = [
+    ['question_id', undefined], ['question_id', ''], ['request_digest', undefined],
+    ['request_digest', ''], ['question_revision', undefined], ['question_revision', '-1'],
+    ['event_seq', undefined], ['event_seq', ''], ['event_seq', '-1'], ['event_seq', '1.5'],
+    ['event_seq', 9007199254740992],
+  ];
+  for (const [field, invalid] of changes) {
+    const value = example();
+    value.events[0][field] = invalid;
+    assert.equal(row(grading(value)).sound, false, `${field}: ${invalid}`);
+  }
+});
+
+test('future guesses cannot be bundled into the current packet or repaired later', () => {
+  const value = example();
+  value.events[0].raw = envelope('p0', value.answers);
+  assert.equal(grading(value).totals.sound, 0);
+  const guessed = example();
+  guessed.events.unshift({...guessed.events[1], event_seq: '12', question_id: 'early'});
+  assert.equal(row(grading(guessed), 'q1').sound, false);
+  const unknown = example();
+  unknown.events[0].raw = envelope('invented-packet', [unknown.answers[0]]);
+  assert.equal(row(grading(unknown)).sound, false);
+});
+
+test('duplicate batches and duplicate answers cannot earn additional or restored credit', () => {
+  const value = example();
+  value.events.splice(1, 0, {...value.events[0], event_seq: '16', question_revision: '2'});
+  assert.equal(row(grading(value)).sound, false);
+  assert.equal(grading(value).complete, false);
+  const repeated = example();
+  repeated.events[0].raw = envelope('p0', [repeated.answers[0], repeated.answers[0]]);
+  assert.equal(row(grading(repeated)).sound, false);
+  assert.equal(row(grading(repeated)).critical, true);
+});
+
+test('identical replay deduplicates while conflicting replay invalidates its credit', () => {
+  const value = example();
+  value.events.push(structuredClone(value.events[0]));
+  const replayed = grading(value);
+  assert.equal(replayed.deliveries.length, 2);
+  assert.deepEqual(replayed.totals, {requests: 2, sound: 2, critical: 0, unanswered: 0});
+  const conflict = example();
+  const unsupported = {...conflict.answers[0], status: 'blocked', support: {
+    blocker: conflict.corpus.requests[0].target, path: [conflict.corpus.requests[0].target]}};
+  conflict.events.push({...conflict.events[0], raw: envelope('p0', [unsupported])});
+  assert.equal(row(grading(conflict)).sound, false);
+  assert.equal(row(grading(conflict)).critical, true);
+  const rebound = example();
+  rebound.events.push({...rebound.events[0], question_id: 'another-question'});
+  assert.equal(row(grading(rebound)).sound, false);
+});
+
+test('an earlier unsupported conclusion remains critical after online and final corrections', () => {
+  const value = example();
+  const correction = {...value.events[0], event_seq: '16', question_revision: '2'};
+  value.events[0].raw = envelope('p0', [{...value.answers[0], records: [], support: {coverage: []}}]);
+  value.events.splice(1, 0, correction);
+  const correctedFinal = finalGrade(value);
+  assert.equal(correctedFinal.totals.sound, 2);
+  const combined = combineOnlineGrading(correctedFinal, grading(value));
+  assert.equal(row(combined).critical, true);
+  assert.equal(row(combined).sound, false);
+  assert.equal(combined.totals.critical, 1);
+  assert.equal(combined.totals.sound, 1);
+});
+
+test('valid online work cannot hide an unsupported final conclusion', () => {
+  const value = example(), online = grading(value);
+  value.answers[0].records = [];
+  const combined = combineOnlineGrading(finalGrade(value), online);
+  assert.equal(row(combined).critical, true);
+  assert.equal(row(combined).sound, false);
+});
+
+test('resource observations preserve counter precision and missing usage stays unknown', () => {
+  const counters = {admitted_attempts: '18446744073709551615', request_bytes: '9007199254740993',
+    known_output_tokens: '0'};
+  const status = {inference_observation: counters};
+  assert.deepEqual(recurrenceStatus(status, 25, {wall_ms: 100}),
+    {remaining_wall_ms: 75, inference_observation: counters});
+  assert.deepEqual(recurrenceStatus({}, 25, {wall_ms: 100}), {remaining_wall_ms: 75,
+    inference_observation: {admitted_attempts: null, request_bytes: null, known_output_tokens: null}});
+  assert.equal(recurrenceStatus(status, 101, {wall_ms: 100}).remaining_wall_ms, 0);
+  assert.deepEqual(status.inference_observation, counters);
+});
+
+test('online replies carry frozen resource status and replay the original question binding', () => {
+  const value = example();
+  const plan = {suite: 'recurrence-online', limits: {wall_ms: 1000}, questions: {
+    'Please send the next request.': {kind: 'wait'}}, queued_reminder: 'Consume queued inputs.'};
+  const question = {question_id: 'native-question', question_revision: '3', request_digest: 'native-digest',
+    answer_schema_id: 'adaptive-agent.answer.v2', prompt: {prompt: value.events[0].raw}};
+  const status = {question, inference_observation: {admitted_attempts: '4', request_bytes: '12000',
+    known_output_tokens: '500'}};
+  const before = new RecurrenceDelivery({id: 'attempt'}, value.corpus, plan);
+  assert.equal(before.next('task', status, 99), null);
+  const operation = before.next('task', status, 100);
+  assert.equal(operation.method, 'task.respond');
+  assert.equal(operation.packet_id, 'p1');
+  assert.equal(operation.params.question_id, question.question_id);
+  assert.equal(operation.params.request_digest, question.request_digest);
+  assert.equal(operation.params.answer.value.message, value.corpus.packets[1].bytes + '\n\n' +
+    JSON.stringify({evaluation_status: recurrenceStatus(status, 100, plan.limits)}));
+  const after = new RecurrenceDelivery({id: 'attempt'}, value.corpus, plan,
+    JSON.parse(JSON.stringify(before.operations)));
+  const replay = after.next('task', {inference_observation: {admitted_attempts: '99'}}, 900);
+  assert.deepEqual(replay, operation);
+  assert.equal(replay.params.question_revision, '3');
+});
+
+test('online acknowledgments provide no correctness feedback or oracle-derived response', () => {
+  const value = example();
+  const plan = {suite: 'recurrence-online', limits: {wall_ms: 1000}, questions: {},
+    queued_reminder: 'Consume queued inputs.'};
+  const deliver = raw => {
+    const question = {question_id: 'same-question', question_revision: '1', request_digest: 'same-digest',
+      answer_schema_id: 'adaptive-agent.answer.v2', prompt: {prompt: raw}};
+    return new RecurrenceDelivery({id: 'attempt'}, value.corpus, plan).next('task', {question}, 100);
+  };
+  const correct = deliver(value.events[0].raw);
+  const incorrect = deliver(envelope('p0', [{...value.answers[0], status: 'blocked'}]));
+  assert.deepEqual(incorrect, correct);
+});
+
+test('online plan snapshots expose source records while withholding future selections', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'protean-online-plan-'));
+  try {
+    const binary = join(root, 'product'), driver = join(root, 'driver'), applicationPath = join(root, 'application.json');
+    await writeFile(binary, 'product');
+    await writeFile(driver, 'driver');
+    await writeFile(applicationPath, '{}');
+    const config = JSON.parse(await readFile(new URL('../../examples/adaptive/adaptive.example.json', import.meta.url)));
+    const directory = join(root, 'plan');
+    const plan = await prepareRecurrence({config, directory, binary, driver, applicationPath,
+      suite: 'recurrence-online'});
+    assert.equal(plan.format, 'protean-recurrence-evaluation/2');
+    assert.equal(plan.suite, 'recurrence-online');
+    for (const subject of plan.cases) {
+      const corpus = JSON.parse(await readFile(subject.corpus));
+      const files = await readdir(subject.snapshot);
+      assert.deepEqual(files.sort(), ['contract.txt', 'initial.txt', 'records.jsonl']);
+      const source = await readFile(join(subject.snapshot, 'records.jsonl'), 'utf8');
+      assert.equal(source, corpus.sources['records.jsonl']);
+      const initial = await readFile(join(subject.snapshot, 'initial.txt'), 'utf8');
+      assert.equal(initial, corpus.packets[0].bytes);
+      for (const request of corpus.requests.filter(item => !corpus.packets[0].request_ids.includes(item.id)))
+        assert.equal((source + initial + subject.prompt).includes(JSON.stringify(request.id)), false);
+      const selected = JSON.parse(await readFile(subject.config));
+      assert.deepEqual(selected.tools.inputs, []);
+    }
+    await validateRecurrencePlan(directory, {binary, driver, applicationPath});
+    await writeFile(join(plan.cases[0].snapshot, 'records.jsonl'), 'changed');
+    await assert.rejects(validateRecurrencePlan(directory, {binary, driver, applicationPath}), /Frozen evidence/);
+  } finally { await rm(root, {recursive: true, force: true}); }
+});
+
+test('artifact-backed questions retain exact bytes and native question scope across chunks', async () => {
+  const prompt = {prompt: 'Request evidence ' + '\u{1f642}'.repeat(9000)};
+  const bytes = Buffer.from(JSON.stringify(prompt)), digest = hash(bytes), calls = [];
+  const question = {question_id: 'native-question', question_revision: '5', request_digest: 'native-digest',
+    answer_schema_id: 'adaptive-agent.answer.v2', prompt_ref: {artifact_id: digest, sha256: digest,
+      bytes: String(bytes.length), question_id: 'native-question'}};
+  const original = structuredClone(question);
+  const client = {async call(method, params) {
+    calls.push({method, params});
+    const start = Number(params.offset), end = Math.min(start + 32768, bytes.length);
+    return {sha256: digest, data: bytes.subarray(start, end).toString('base64url'),
+      next_offset: String(end), eof: end === bytes.length};
+  }};
+  const resolved = await resolveQuestion(client, 'task', question);
+  assert.deepEqual(resolved.prompt, prompt);
+  assert.deepEqual(Buffer.from(resolved.prompt_b64, 'base64url'), bytes);
+  assert.deepEqual(question, original);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map(call => call.params.offset), ['0', '32768']);
+  for (const call of calls) {
+    assert.equal(call.method, 'artifact.read');
+    assert.equal(call.params.task_id, 'task');
+    assert.equal(call.params.question_id, question.question_id);
+    assert.equal(call.params.artifact_id, digest);
+  }
+});
+
+test('artifact-backed questions reject changed digest and incomplete byte length', async () => {
+  const bytes = Buffer.from(JSON.stringify({prompt: 'question'})), digest = hash(bytes);
+  const reference = {artifact_id: digest, sha256: digest, bytes: String(bytes.length), question_id: 'q'};
+  for (const change of [{sha256: '0'.repeat(64)}, {bytes: String(bytes.length + 1)}]) {
+    const question = {question_id: 'q', prompt_ref: {...reference, ...change}};
+    const client = {async call() { return {sha256: digest, data: bytes.toString('base64url'),
+      next_offset: String(bytes.length), eof: true}; }};
+    await assert.rejects(resolveQuestion(client, 'task', question));
+  }
+});
+
+const ownerEvent = (sequence, kind, data = {}, revision = sequence) => ({
+  seq: String(sequence), revision: String(revision), kind, data: JSON.stringify(data),
+});
+
+function exposureTrace(corpus, operations, events) {
+  const trace = new RecurrenceTrace(corpus, {}, operations);
+  trace.observe({events, attempts: [], records: [], epoch: 1}, 0);
+  return trace;
+}
+
+function exposePacket(trace, packet, options = {}) {
+  const id = options.id ?? 'prepared-attempt';
+  const capability = 'protean.workspace.inference/2';
+  if (options.dispatched !== false) trace.dispatched({step: 'dispatched', attempt: id,
+    capability, epoch: 2}, options.elapsed ?? packet.offset_ms);
+  const body = JSON.stringify({input: [{role: 'assistant', content: packet.bytes}]});
+  trace.observeAttempt({attempt: {id, capability, preparation_cut: options.cut ?? '2'},
+    physical_provider_attempt: options.physical ?? options.dispatched !== false,
+    prepared_b64: Buffer.from('prepared-native-envelope').toString('base64'),
+    prepared_context: {body_b64: Buffer.from(body).toString('base64'), selected_view: null}},
+  3, Math.max(300, options.elapsed ?? packet.offset_ms));
+  return trace.visibility.get(packet.id);
+}
+
+function completeModel(trace, id) {
+  const schema = {root: 0, types: [{product: [1, 2, 3, 3, 4, 4, 4, 4]},
+    'u16', 'boolean', 'bytes', 'u8']};
+  const wire = Buffer.from(encodeSchema(schema));
+  trace.application = {support: {CapturedResponse: {wire_base64url: wire.toString('base64url'),
+    wire_sha256: hash(wire)}}};
+  const response = Buffer.from(encodeValue(schema, [200, true, [],
+    Buffer.from('{"usage":{"input_tokens":1,"output_tokens":1}}'), 0, 0, 0, 2])).toString('base64');
+  trace.observeAttempt({attempt: trace.attempts.get(id).owner, physical_provider_attempt: true,
+    capture: {disposition: 'complete'}, response_b64: response}, 4, 400);
+}
+
+test('initial selection requires admitted input before an actual model dispatch', () => {
+  const {corpus} = example(), packet = corpus.packets[0];
+  const absent = exposureTrace(corpus, [], []);
+  assert.equal(exposePacket(absent, packet), undefined);
+  for (const options of [{cut: '0'}, {dispatched: false}]) {
+    const trace = exposureTrace(corpus, [], [ownerEvent(1, 'accepted')]);
+    assert.equal(exposePacket(trace, packet, options), undefined);
+  }
+  const trace = exposureTrace(corpus, [], [ownerEvent(1, 'accepted')]);
+  const visible = exposePacket(trace, packet, {cut: '1'});
+  assert.equal(visible.packet_id, packet.id);
+  assert.equal(visible.confirmed, false);
+  assert.equal(trace.attempts.get('prepared-attempt').request_profile.serialized_bytes,
+    Buffer.byteLength(JSON.stringify({input: [{role: 'assistant', content: packet.bytes}]})));
+});
+
+test('agent-created packet text cannot replace a scheduled admitted message', () => {
+  const {corpus} = example(), packet = corpus.packets[1];
+  const events = [ownerEvent(1, 'accepted'), ownerEvent(2, 'message_queued', {message_id: 'native-message'})];
+  const admitted = {packet_id: packet.id, method: 'task.message', acknowledged: true,
+    params: {message: {value: {message: packet.bytes}}},
+    result: {message_id: 'native-message', receipt_revision: '2'}};
+  const cases = [
+    {operations: []},
+    {operations: [{...admitted, acknowledged: false}]},
+    {operations: [{...admitted, params: {message: {value: {message: 'unrelated message'}}}}]},
+    {operations: [{...admitted, result: {message_id: 'other-message', receipt_revision: '2'}}]},
+    {operations: [admitted], options: {cut: '1'}},
+    {operations: [admitted], options: {elapsed: packet.offset_ms - 1}},
+  ];
+  for (const item of cases) {
+    const trace = exposureTrace(corpus, item.operations, events);
+    assert.equal(exposePacket(trace, packet, item.options), undefined);
+  }
+  const trace = exposureTrace(corpus, [admitted], events);
+  assert.equal(exposePacket(trace, packet).packet_id, packet.id);
+});
+
+test('answer-carried selections require the exact admitted answer revision', () => {
+  const {corpus} = example(), packet = corpus.packets[1];
+  const events = [ownerEvent(1, 'accepted'), ownerEvent(2, 'input_accepted', {}, 7)];
+  const admitted = {packet_id: packet.id, method: 'task.respond', acknowledged: true,
+    params: {answer: {value: {message: packet.bytes}}},
+    result: {receipt_revision: '7'}};
+  for (const change of [{acknowledged: false}, {result: {receipt_revision: '6'}}, {result: {}},
+    {params: {answer: {value: {message: 'unrelated answer'}}}}]) {
+    const trace = exposureTrace(corpus, [{...admitted, ...change}], events);
+    assert.equal(exposePacket(trace, packet), undefined);
+  }
+  const trace = exposureTrace(corpus, [admitted], events);
+  const visible = exposePacket(trace, packet);
+  assert.equal(visible.packet_id, packet.id);
+  assert.equal(BigInt(visible.preparation_cut), 2n);
+});
+
+test('lost delivery acknowledgments replay the original admission before exposure', () => {
+  const {corpus} = example(), packet = corpus.packets[1];
+  const plan = {suite: 'recurrence-online', limits: {wall_ms: 1000}, questions: {},
+    queued_reminder: 'Consume queued inputs.'};
+  const before = new RecurrenceDelivery({id: 'attempt'}, corpus, plan);
+  const operation = before.next('task', {}, packet.offset_ms);
+  const reopened = new RecurrenceDelivery({id: 'attempt'}, corpus, plan,
+    JSON.parse(JSON.stringify(before.operations)));
+  const replayed = reopened.next('task', {}, 175);
+  assert.deepEqual(replayed, operation);
+  const events = [ownerEvent(1, 'accepted'), ownerEvent(2, 'message_queued', {message_id: 'original-message'})];
+  const unacknowledged = exposureTrace(corpus, reopened.operations, events);
+  assert.equal(exposePacket(unacknowledged, packet, {elapsed: 175}), undefined);
+  reopened.acknowledge(replayed, {message_id: 'original-message', receipt_revision: '2', replayed: true}, 175);
+  const trace = exposureTrace(corpus, reopened.operations, events);
+  const original = exposePacket(trace, packet, {id: 'first-dispatch', elapsed: 176});
+  exposePacket(trace, packet, {id: 'later-dispatch', elapsed: 190});
+  assert.equal(trace.visibility.size, 1);
+  assert.equal(trace.visibility.get(packet.id), original);
+  assert.equal(original.attempt_id, 'first-dispatch');
+});
+
+test('replayed speculative captures cannot confirm a later admitted selection', () => {
+  const {corpus} = example(), packet = corpus.packets[1], operations = [];
+  const trace = exposureTrace(corpus, operations, [ownerEvent(1, 'accepted')]);
+  assert.equal(exposePacket(trace, packet, {id: 'speculative', cut: '1'}), undefined);
+  operations.push({packet_id: packet.id, method: 'task.message', acknowledged: true,
+    params: {message: {value: {message: packet.bytes}}}, result: {message_id: 'native-message'}});
+  trace.observe({events: [ownerEvent(2, 'message_queued', {message_id: 'native-message'})],
+    attempts: [], records: [], epoch: 2}, 305);
+  const visible = exposePacket(trace, packet, {id: 'admitted', cut: '2', elapsed: 310});
+  completeModel(trace, 'speculative');
+  assert.equal(visible.confirmed, false);
+  completeModel(trace, 'admitted');
+  assert.equal(visible.confirmed, true);
+  assert.equal(visible.confirmation.attempt_id, 'admitted');
+});
+
+test('successful exposure cannot certify an earlier request that was never sent', () => {
+  const {corpus} = example(), packet = corpus.packets[1];
+  const operations = [{packet_id: packet.id, method: 'task.message', acknowledged: true,
+    params: {message: {value: {message: packet.bytes}}}, result: {message_id: 'native-message'}}];
+  const trace = exposureTrace(corpus, operations,
+    [ownerEvent(1, 'accepted'), ownerEvent(2, 'message_queued', {message_id: 'native-message'})]);
+  exposePacket(trace, packet, {id: 'not-sent', cut: '2', elapsed: 100});
+  trace.observeAttempt({attempt: trace.attempts.get('not-sent').owner, physical_provider_attempt: false,
+    capture: {disposition: 'definitely_not_sent'}}, 3, 301);
+  exposePacket(trace, packet, {id: 'successful', cut: '5', elapsed: 310});
+  completeModel(trace, 'successful');
+  const visible = trace.visibility.get(packet.id);
+  assert.equal(visible.confirmed, true);
+  assert.equal(visible.attempt_id, 'successful');
+  assert.equal(BigInt(visible.preparation_cut), 5n);
+  assert.equal(visible.dispatch_ms, 310);
+  assert.equal(visible.prepared_sha256, trace.attempts.get('successful').prepared_sha256);
+});
+
+test('unknown dispatch timing cannot confirm another prepared request', () => {
+  const {corpus} = example(), packet = corpus.packets[1];
+  const operations = [{packet_id: packet.id, method: 'task.message', acknowledged: true,
+    params: {message: {value: {message: packet.bytes}}}, result: {message_id: 'native-message'}}];
+  const trace = exposureTrace(corpus, operations,
+    [ownerEvent(1, 'accepted'), ownerEvent(2, 'message_queued', {message_id: 'native-message'})]);
+  const candidate = exposePacket(trace, packet, {id: 'known-dispatch'});
+  exposePacket(trace, packet, {id: 'unknown-dispatch', dispatched: false});
+  completeModel(trace, 'unknown-dispatch');
+  assert.equal(candidate.confirmed, false);
+  completeModel(trace, 'known-dispatch');
+  assert.equal(candidate.confirmed, true);
+  assert.equal(candidate.confirmation.attempt_id, 'known-dispatch');
+});
+
+test('possibly sent selections constrain deadlines until non-delivery is established', () => {
+  const value = example(), {corpus} = value, packet = corpus.packets[1];
+  const operations = [{packet_id: packet.id, method: 'task.message', acknowledged: true,
+    params: {message: {value: {message: packet.bytes}}}, result: {message_id: 'native-message'}}];
+  const trace = exposureTrace(corpus, operations,
+    [ownerEvent(1, 'accepted'), ownerEvent(2, 'message_queued', {message_id: 'native-message'})]);
+  exposePacket(trace, packet, {id: 'unknown-dispatch', dispatched: false, physical: true, cut: '2'});
+  exposePacket(trace, packet, {id: 'successful', cut: '5', elapsed: 310});
+  completeModel(trace, 'successful');
+  let visible = trace.visibility.get(packet.id);
+  assert.equal(BigInt(visible.confirmed_preparation_cut), 5n);
+  assert.equal(BigInt(visible.possible_preparation_cut), 2n);
+  value.visibility[0].preparation_cut = '1';
+  value.visibility[1] = visible;
+  value.visibility[2].preparation_cut = '10';
+  value.events[0].event_seq = '3';
+  value.events[1].event_seq = '4';
+  const uncertain = grading(value);
+  assert.equal(row(uncertain).sound, false);
+  assert(row(uncertain).errors.includes('answer_after_next_selection'));
+  assert.equal(row(uncertain, 'q1').sound, false);
+  assert(row(uncertain, 'q1').errors.includes('request_not_selected'));
+  trace.observeAttempt({attempt: trace.attempts.get('unknown-dispatch').owner,
+    physical_provider_attempt: false, capture: {disposition: 'definitely_not_sent'}}, 5, 410);
+  visible = trace.visibility.get(packet.id);
+  assert.equal(BigInt(visible.possible_preparation_cut), 5n);
+  value.visibility[1] = visible;
+  assert.equal(row(grading(value)).sound, true);
+  assert.equal(row(grading(value), 'q1').sound, false);
+});
+
+test('out-of-order captures retain the earliest confirmed admitted exposure', () => {
+  const {corpus} = example(), packet = corpus.packets[1];
+  const operations = [{packet_id: packet.id, method: 'task.message', acknowledged: true,
+    params: {message: {value: {message: packet.bytes}}}, result: {message_id: 'native-message'}}];
+  const trace = exposureTrace(corpus, operations,
+    [ownerEvent(1, 'accepted'), ownerEvent(2, 'message_queued', {message_id: 'native-message'})]);
+  exposePacket(trace, packet, {id: 'earlier', cut: '2', elapsed: 100});
+  exposePacket(trace, packet, {id: 'later', cut: '5', elapsed: 310});
+  completeModel(trace, 'later');
+  assert.equal(BigInt(trace.visibility.get(packet.id).confirmed_preparation_cut), 5n);
+  completeModel(trace, 'earlier');
+  const visible = trace.visibility.get(packet.id);
+  assert.equal(BigInt(visible.confirmed_preparation_cut), 2n);
+  assert.equal(BigInt(visible.possible_preparation_cut), 2n);
+  assert.equal(visible.attempt_id, 'earlier');
+  assert.equal(visible.confirmation.attempt_id, 'earlier');
+});

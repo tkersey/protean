@@ -235,6 +235,18 @@ bounded `pending_messages` view with `pending_messages_truncated`; `task.events`
 provides the complete message history in pages. The inbox itself retains every
 accepted message until its authored consumption or terminal disposition.
 
+`task.status` also returns `inference_observation` with three decimal-string
+counters from the task owner. `admitted_attempts` counts admitted inference
+acquisitions, including attempts later established as definitely not sent.
+`request_bytes` sums their prepared request lengths, or encoded request lengths
+when no preparation exists; it does not measure input tokens or transport bytes.
+`known_output_tokens` sums available output-token observations from interpreted
+captures. Missing or uninterpreted usage is excluded, so this is a lower bound:
+zero does not establish zero consumption. These observations survive restart
+and replay with the task's retained accounting. Reading them does not dispatch
+work or enforce a spending limit, and they do not report prices or a complete
+bill for remote execution.
+
 Orderly shutdown discloses every owned recovery task in order through bounded
 `server.recovery` notifications followed by one `server.closed` notification.
 Each carries `mode`, `disposition`, and a `recovery_tasks` page; concatenate the

@@ -334,6 +334,77 @@ function reviewFixture() {
   return {report, corpus, judgment};
 }
 
+function onlineReviewFixture(kind) {
+  const value = reviewFixture(), {report, corpus, judgment} = value;
+  corpus.delivery = 'online';
+  corpus.records = [];
+  corpus.requests = [];
+  report.reuse.answer_events = [];
+  report.reuse.attempts = [];
+  report.reuse.authored_evidence[0].kind = kind;
+  const answers = report.reuse.uses.map((use, index) => {
+    const target = {component: `component-${index}`, revision: '1'};
+    const manifest = `manifest-${index}`, receipt = `receipt-${index}`;
+    corpus.records.push({kind: 'manifest', id: manifest, ...target, complete: true, requirements: []},
+      {kind: 'receipt', id: receipt, ...target, scope: 'release', available: true,
+        result: index === 1 ? 'fail' : 'pass'});
+    corpus.requests.push({id: `r${index + 1}`, target, scope: 'release', flags: {},
+      manifest_ids: [manifest], receipt_ids: [receipt]});
+    const answer = {request_id: `r${index + 1}`, status: index === 1 ? 'blocked' : 'ready',
+      records: [manifest, receipt], artifact_refs: ['p'], support: index === 1 ?
+        {blocker: target, path: [target]} : {coverage: [{...target, receipts: [receipt]}]}};
+    const selected = String(index * 10 + 12);
+    Object.assign(report.reuse.visibility[index], {preparation_cut: selected,
+      confirmed_preparation_cut: selected, possible_preparation_cut: String(index * 10 + 10)});
+    Object.assign(use, {kind, creation_seq: '2', event_seq: String(index * 10 + 14)});
+    if (kind === 'description') {
+      delete use.work_id;
+      use.attempt_id = `attempt-${index}`;
+      report.reuse.attempts.push({id: use.attempt_id, owner: {preparation_cut: selected}});
+      judgment.uses[index].use_id = use.attempt_id;
+    }
+    report.reuse.answer_events.push({event_seq: String(index * 10 + 15),
+      question_id: `question-${index}`, question_revision: '1', request_digest: `digest-${index}`,
+      observed_ms: use.observed_ms + 5, raw: JSON.stringify({kind: 'recurrence.answers.v1',
+        packet_id: corpus.packets[index].id, answers: [answer]})});
+    return answer;
+  });
+  report.result.outcome.value.result.value.summary = JSON.stringify({answers});
+  return value;
+}
+
+test('online artifact credit requires first-answer references and use within the selected request', () => {
+  for (const kind of ['program', 'description']) {
+    const valid = onlineReviewFixture(kind);
+    const supported = adjudicateRecurrence(valid.report, valid.corpus, valid.judgment);
+    assert.equal(supported.qualified, true, kind);
+    assert.equal(supported.recovered, true, kind);
+    const changes = [
+      value => {
+        const event = value.report.reuse.answer_events[1], envelope = JSON.parse(event.raw);
+        envelope.answers[0].artifact_refs = [];
+        event.raw = JSON.stringify(envelope);
+      },
+      value => { value.report.reuse.uses[1].creation_seq = '21'; },
+      ...(kind === 'program' ? ['21', '22', '25', '26'].map(sequence => value => {
+        value.report.reuse.uses[1].event_seq = sequence;
+      }) : ['21', '25', '26'].map(cut => value => {
+        value.report.reuse.attempts[1].owner.preparation_cut = cut;
+      })),
+      ...(kind === 'description' ? [35, 36].map(elapsed => value => {
+        value.report.reuse.uses[1].observed_ms = elapsed;
+      }) : []),
+    ];
+    for (const change of changes) {
+      const value = onlineReviewFixture(kind);
+      change(value);
+      const result = adjudicateRecurrence(value.report, value.corpus, value.judgment);
+      assert.equal(result.qualified, false, kind);
+      assert.equal(result.recovered, false, kind);
+    }
+  }
+});
+
 test('changed-input supported reuse must survive source and scope review in the same interrupted trace', () => {
   const {report, corpus, judgment} = reviewFixture();
   const result = adjudicateRecurrence(report, corpus, judgment);

@@ -9,7 +9,9 @@ import {ProteanClient} from '../../test/support/stdio-client.mts';
 import {readArchive} from '../../test/protean/native_archive.mjs';
 import {decodeSchema, decodeValue} from '../../test/support/values.mjs';
 import {contract} from '../../test/protean/adaptive_capture_checks.mjs';
-import {createCorpus, gradeReport, compareCampaign, parseReport, campaignIdentity} from './recurrence.mjs';
+import {createCorpus, createOnlineCorpus, gradeReport, gradeOnlineAnswers, combineOnlineGrading,
+  parseOnlineAnswer, compareCampaign, parseReport, campaignIdentity} from './recurrence.mjs';
+import {profilePreparedRequest} from './request_profile.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const json = value => JSON.stringify(value, (_key, v) => typeof v === 'bigint' ? v.toString() : v, 2);
@@ -35,7 +37,7 @@ const semanticArms = {
 const option = (args, name, fallback) => { const i = args.indexOf(name); return i < 0 ? fallback : args[i + 1]; };
 const [mode, ...args] = process.argv.slice(2);
 if (import.meta.main && !['prepare', 'run'].includes(mode)) {
-  console.log('prepare --config CONFIG --out DIRECTORY [--suite workspace|runtime|reconstruction|semantic|recurrence] [--repetitions 1] [--seconds 600]\nrecurrence preparation also requires --binary BINARY --driver DRIVER --application APPLICATION_JSON [--cost-model JSON]\nrun --plan DIRECTORY --binary BINARY --application APPLICATION_JSON [--driver DRIVER] --authorize-inference (--credential-file PRIVATE_FILE | --chatgpt-account ACCOUNT)');
+  console.log('prepare --config CONFIG --out DIRECTORY [--suite workspace|runtime|reconstruction|semantic|recurrence|recurrence-online] [--repetitions 1] [--seconds 600]\nrecurrence preparation also requires --binary BINARY --driver DRIVER --application APPLICATION_JSON [--cost-model JSON]\nrun --plan DIRECTORY --binary BINARY --application APPLICATION_JSON [--driver DRIVER] --authorize-inference (--credential-file PRIVATE_FILE | --chatgpt-account ACCOUNT)');
   process.exit(mode === '--help' || !mode ? 0 : 2);
 }
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -369,7 +371,9 @@ const recurrenceQuestions = Object.freeze({'Please send the next request.': {kin
 
 export async function prepareRecurrence({config, directory, binary, driver, applicationPath,
   costModel = {kind: 'unpriced', currency: 'USD'}, intervalMs = 180000,
-  limits = recurrenceLimits, questions = recurrenceQuestions}) {
+  limits = recurrenceLimits, questions = recurrenceQuestions, suite = 'recurrence'}) {
+  assert(['recurrence', 'recurrence-online'].includes(suite));
+  const online = suite === 'recurrence-online';
   assert.equal(config.schema, 'adaptive-agent.configuration.v3');
   assert(Number.isSafeInteger(intervalMs) && intervalMs > 0 && intervalMs * 11 < limits.wall_ms);
   for (const limit of Object.values(limits)) assert(Number.isSafeInteger(limit) && limit > 0);
@@ -383,14 +387,15 @@ export async function prepareRecurrence({config, directory, binary, driver, appl
     driver_sha256: hash(await readFile(driver)), application_sha256: hash(await readFile(applicationPath)),
     oracle_sha256: hash(await readFile(new URL('./recurrence.mjs', import.meta.url))),
     evaluator_sha256: hash(await readFile(new URL('./workspace.mjs', import.meta.url)))};
+  if (online) identities.request_profile_sha256 = hash(await readFile(new URL('./request_profile.mjs', import.meta.url)));
   await mkdir(directory);
   directory = await realpath(directory);
-  const plan = {format: 'protean-recurrence-evaluation/1', suite: 'recurrence',
+  const plan = {format: online ? 'protean-recurrence-evaluation/2' : 'protean-recurrence-evaluation/1', suite,
     identities, limits, cost_model: costModel, questions, queued_reminder: queuedReminder,
     profile: frozen.adaptive.profiles[0], initial_effort: frozen.adaptive.initial_effort,
     efficacy: 'unmeasured', cases: []};
   for (let pair = 0; pair < 3; pair++) {
-    const corpus = structuredClone(createCorpus(pair + 1));
+    const corpus = structuredClone((online ? createOnlineCorpus : createCorpus)(pair + 1));
     for (let i = 0; i < corpus.packets.length; i++) corpus.packets[i].offset_ms = i * intervalMs;
     const pairRoot = join(directory, `pair-${pair + 1}`), snapshot = join(pairRoot, 'snapshot');
     await mkdir(snapshot, {recursive: true});
@@ -398,7 +403,7 @@ export async function prepareRecurrence({config, directory, binary, driver, appl
     const expectedPath = join(pairRoot, 'expected.json'), expectedBytes = json(corpus.expected);
     await writeFile(corpusPath, corpusBytes, {flag: 'wx'});
     await writeFile(expectedPath, expectedBytes, {flag: 'wx'});
-    const initial = {'contract.txt': corpus.contract, 'initial.txt': corpus.packets[0].bytes};
+    const initial = {'contract.txt': corpus.contract, 'initial.txt': corpus.packets[0].bytes, ...(corpus.sources ?? {})};
     for (const [name, bytes] of Object.entries(initial)) await writeFile(join(snapshot, name), bytes, {flag: 'wx'});
     const evidence = Object.entries(initial).map(([path, bytes]) => ({path, sha256: hash(bytes)}));
     for (const arm of pair === 1 ? ['ordinary', 'treatment'] : ['treatment', 'ordinary']) {
@@ -413,7 +418,8 @@ export async function prepareRecurrence({config, directory, binary, driver, appl
         snapshot, evidence, expected: expectedPath, expected_sha256: hash(expectedBytes),
         corpus: corpusPath, corpus_sha256: hash(corpusBytes),
         end_packet: {id: corpus.packets.at(-1).id, offset_ms: corpus.packets.at(-1).offset_ms},
-        prompt: `${corpus.contract}\n\n${corpus.packets[0].bytes}\n\nEvaluation capability condition: ${condition}`});
+        prompt: `${corpus.contract}\n\n${corpus.packets[0].bytes}\n\nEvaluation capability condition: ${condition}` +
+          (online ? `\n\nDeclared common acceptance limits: ${JSON.stringify(limits)}.\n${JSON.stringify({evaluation_status: recurrenceStatus({}, 0, limits)})}` : '')});
     }
   }
   await writeFile(join(directory, 'plan.json'), json(plan), {flag: 'wx'});
@@ -425,18 +431,30 @@ export async function validateRecurrencePlan(directory, {binary, driver, applica
   const bytes = await readFile(join(directory, 'plan.json'));
   assert.equal(hash(bytes), (await readFile(join(directory, 'plan.sha256'), 'utf8')).trim(), 'Frozen plan changed.');
   const plan = JSON.parse(bytes);
-  assert.equal(plan.format, 'protean-recurrence-evaluation/1');
+  assert(plan.format === 'protean-recurrence-evaluation/1' && plan.suite === 'recurrence' ||
+    plan.format === 'protean-recurrence-evaluation/2' && plan.suite === 'recurrence-online', 'Unknown recurrence plan.');
   assert.deepEqual(plan.cases.map(item => [item.pair, item.arm]),
     [[1, 'treatment'], [1, 'ordinary'], [2, 'ordinary'], [2, 'treatment'], [3, 'treatment'], [3, 'ordinary']]);
   for (const [name, path] of Object.entries({binary_sha256: binary, driver_sha256: driver,
     application_sha256: applicationPath, oracle_sha256: new URL('./recurrence.mjs', import.meta.url),
-    evaluator_sha256: new URL('./workspace.mjs', import.meta.url)}))
+    evaluator_sha256: new URL('./workspace.mjs', import.meta.url),
+    ...(plan.suite === 'recurrence-online' ? {request_profile_sha256: new URL('./request_profile.mjs', import.meta.url)} : {})}))
     assert.equal(hash(await readFile(path)), plan.identities[name], `${name} changed; prepare a new campaign.`);
   for (const subject of plan.cases) {
     await validatePreparedCase(subject);
     assert.equal(hash(await readFile(subject.corpus)), subject.corpus_sha256, 'Frozen corpus changed.');
+    const corpus = JSON.parse(await readFile(subject.corpus));
+    assert.equal(corpus.delivery === 'online', plan.suite === 'recurrence-online', 'Corpus and plan delivery differ.');
   }
   return plan;
+}
+
+export function recurrenceStatus(status, elapsed, limits) {
+  const source = status.inference_observation;
+  const counter = name => typeof source?.[name] === 'string' && /^(0|[1-9][0-9]*)$/.test(source[name]) ? source[name] : null;
+  return {remaining_wall_ms: Math.max(0, limits.wall_ms - Math.ceil(elapsed)),
+    inference_observation: {admitted_attempts: counter('admitted_attempts'), request_bytes: counter('request_bytes'),
+      known_output_tokens: counter('known_output_tokens')}};
 }
 
 export class RecurrenceDelivery {
@@ -457,21 +475,25 @@ export class RecurrenceDelivery {
     if (question) {
       const text = question.prompt?.prompt;
       const known = typeof text === 'string' && Object.hasOwn(this.plan.questions, text)
-        ? this.plan.questions[text] : undefined;
+        ? this.plan.questions[text] : this.plan.suite === 'recurrence-online' && parseOnlineAnswer(text) ? {kind: 'wait'} : undefined;
       if (!known) { this.unresolved = {question, reason: 'No predeclared factual response.'}; return null; }
       const queued = this.operations.some(operation => operation.method === 'task.message' &&
         operation.acknowledged && !consumedPacketIds.includes(operation.packet_id));
       const waiting = known.kind === 'wait';
       if (waiting && !queued && !due) return null;
       const packet = waiting && !queued ? due : null;
-      const answer = waiting ? queued ? this.plan.queued_reminder : packet.bytes : known.text;
+      const answer = this.message(waiting ? queued ? this.plan.queued_reminder : packet.bytes : known.text, status, elapsed);
       return this.add('task.respond', {client_operation_id: `${this.subject.id}-question-${question.question_id}-${question.question_revision}`,
         task_id: taskId, question_id: question.question_id, question_revision: question.question_revision,
         request_digest: question.request_digest, answer: {schema_id: question.answer_schema_id, value: {message: answer}}}, packet, elapsed);
     }
     if (!due) return null;
     return this.add('task.message', {client_operation_id: `${this.subject.id}-packet-${due.id}`, task_id: taskId,
-      message: {schema_id: 'adaptive-agent.message.v2', value: {message: due.bytes}}}, due, elapsed);
+      message: {schema_id: 'adaptive-agent.message.v2', value: {message: this.message(due.bytes, status, elapsed)}}}, due, elapsed);
+  }
+  message(text, status, elapsed) {
+    return this.plan.suite === 'recurrence-online' ?
+      `${text}\n\n${JSON.stringify({evaluation_status: recurrenceStatus(status, elapsed, this.plan.limits)})}` : text;
   }
   add(method, params, packet, elapsed) {
     const operation = {ordinal: this.operations.length + 1, method, params,
@@ -588,10 +610,16 @@ export function decodeRecurrenceObservation(observation, schemas) {
     const event = decode('event', row.record_b64);
     assert.equal(event.length, 12);
     assert(eventKinds[event[3]]);
+    const prompt = row.prompt_b64 ? Buffer.from(row.prompt_b64, 'base64') : null;
+    if (prompt) {
+      const reference = JSON.parse(Buffer.from(event[4]).toString()).prompt_ref;
+      assert.equal(hash(prompt), reference.sha256);
+      assert.equal(BigInt(prompt.length), BigInt(reference.bytes));
+    }
     return {task: event[0], seq: String(event[1]), revision: String(event[2]), kind: eventKinds[event[3]],
       data: {bytes: Buffer.from(event[4]).toString()},
       workspace_publications: event[5].map(publication => ({work: publication[0]})),
-      record_b64: row.record_b64};
+      record_b64: row.record_b64, ...(prompt ? {question_prompt: JSON.parse(prompt.toString())} : {})};
   });
   const attempts = observation.attempts.map(row => {
     const attempt = decode('attempt', row.attempt_b64), occurrence = decode('occurrence', row.occurrence_b64);
@@ -668,7 +696,7 @@ export function presentedValues(description) {
 }
 
 export class RecurrenceTrace {
-  constructor(corpus, application) {
+  constructor(corpus, application, deliveryOperations = []) {
     this.corpus = corpus;
     this.application = application;
     this.attempts = new Map();
@@ -682,6 +710,8 @@ export class RecurrenceTrace {
     this.cursor = 0;
     this.first_boundary = null;
     this.cut = null;
+    this.answer_events = [];
+    this.delivery_operations = deliveryOperations;
   }
   dispatched(step, elapsed) {
     if (step.step !== 'dispatched') return;
@@ -699,12 +729,18 @@ export class RecurrenceTrace {
       this.cursor = Number(event.seq);
       this.events.push({event, observed_ms: elapsed, publication_epoch: observation.epoch});
       const data = JSON.parse(textField(event.data));
+      const question = event.question_prompt ?? data.prompt;
+      if (this.corpus.delivery === 'online' && event.kind === 'input_required' && parseOnlineAnswer(question?.prompt))
+        this.answer_events.push({event_seq: event.seq, question_id: data.question_id,
+          question_revision: data.question_revision, request_digest: data.request_digest,
+          raw: question.prompt, observed_ms: elapsed, publication_epoch: observation.epoch});
       if (event.kind === 'workspace' && data.workspace_id && !this.creationEvents.has(data.workspace_id))
-        this.creationEvents.set(data.workspace_id, Number(event.seq));
+        this.creationEvents.set(data.workspace_id, this.corpus.delivery === 'online' ? String(event.seq) : Number(event.seq));
       for (const publication of event.workspace_publications ?? [])
-        this.workPublications.set(digestHex(publication.work), Number(event.seq));
+        this.workPublications.set(digestHex(publication.work), this.corpus.delivery === 'online' ? String(event.seq) : Number(event.seq));
     }
-    for (const row of observation.attempts) this.observeAttempt(row, observation.epoch, elapsed);
+    for (const row of observation.attempts) this.observeAttempt(row, observation.epoch, elapsed, false);
+    if (this.corpus.delivery === 'online' && observation.attempts.length) this.onlineVisibility(observation.epoch, elapsed);
     for (const record of observation.records ?? []) {
       const identity = `${record.kind}:${digestHex(record.value.id)}`;
       const prior = this.records.get(identity);
@@ -729,7 +765,7 @@ export class RecurrenceTrace {
     this.descriptionUses(observation.epoch, elapsed);
     if (!this.first_boundary) this.first_boundary = this.qualifyingBoundary(observation, elapsed);
   }
-  observeAttempt(row, publicationEpoch, elapsed) {
+  observeAttempt(row, publicationEpoch, elapsed, refreshVisibility = true) {
     const id = digestHex(row.attempt.id), prior = this.attempts.get(id) ?? {id};
     prior.first_observed_ms ??= elapsed;
     const capability = textField(row.attempt.capability);
@@ -740,24 +776,34 @@ export class RecurrenceTrace {
       prior.prepared_sha256 = hash(Buffer.from(row.prepared_b64, 'base64'));
       if (capability === 'agent.model.invoke.v13') {
         const prepared = decodeValue(contract(this.application, 'AdaptivePrepared'), Buffer.from(row.prepared_b64, 'base64'));
-        prior.body = JSON.parse(Buffer.from(prepared[2]).toString());
+        const body = this.corpus.delivery === 'online' ?
+          new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(Buffer.from(prepared[2])) : Buffer.from(prepared[2]).toString();
+        prior.body = JSON.parse(body);
+        if (this.corpus.delivery === 'online') prior.request_profile = profilePreparedRequest(body);
         prior.selected_view = prepared[3].tag === 1 ? referenceHex(prepared[3].value) : null;
         prior.watermark = String(prepared[1][3][2]);
       } else {
         assert.equal(typeof row.prepared_context?.body_b64, 'string', 'Missing native delegated preparation');
         assert(row.prepared_context.selected_view === null || /^[0-9a-f]{64}$/.test(row.prepared_context.selected_view),
           'Invalid native delegated selection');
-        prior.body = JSON.parse(Buffer.from(row.prepared_context.body_b64, 'base64').toString());
+        const bytes = Buffer.from(row.prepared_context.body_b64, 'base64');
+        const body = this.corpus.delivery === 'online' ?
+          new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes) : bytes.toString();
+        prior.body = JSON.parse(body);
+        if (this.corpus.delivery === 'online') prior.request_profile = profilePreparedRequest(body);
         prior.selected_view = row.prepared_context.selected_view;
       }
       if (prior.dispatched_ms !== undefined && prior.visibility_epoch === undefined) {
-        const appeared = this.corpus.packets.filter(packet => !this.visibility.has(packet.id) && containsText(prior.body.input, packet.bytes));
+        const appeared = this.corpus.packets.filter(packet => (!this.visibility.has(packet.id) ||
+          this.corpus.delivery === 'online' && this.visibility.get(packet.id).visibility_epoch === null) &&
+          (this.corpus.delivery !== 'online' || this.admittedPacket(packet, prior)) && containsText(prior.body.input, packet.bytes));
         if (appeared.length) this.epoch++;
         prior.visibility_epoch = this.epoch;
         for (const packet of appeared) this.visibility.set(packet.id, {packet_id: packet.id,
           attempt_id: id, dispatch_ms: prior.dispatched_ms, observed_ms: elapsed,
           publication_epoch: publicationEpoch, visibility_epoch: this.epoch,
-          preparation_cut: prior.owner.preparation_cut === null ? null : Number(prior.owner.preparation_cut),
+          preparation_cut: prior.owner.preparation_cut == null ? null : this.corpus.delivery === 'online' ?
+            String(prior.owner.preparation_cut) : Number(prior.owner.preparation_cut),
           confirmed: false, prepared_sha256: prior.prepared_sha256});
       }
     }
@@ -769,20 +815,69 @@ export class RecurrenceTrace {
         try { prior.usage = capturedUsage(raw) ?? null; } catch { prior.usage = null; }
         prior.response_sha256 = hash(Buffer.from(row.response_b64, 'base64'));
         prior.provider_response = raw[0] >= 200 && raw[0] < 300 && raw[7] === 2;
-        if (row.capture.disposition === 'complete' && prior.provider_response) {
+        if (this.corpus.delivery !== 'online' && row.capture.disposition === 'complete' && prior.provider_response) {
           for (const packet of this.corpus.packets) {
             const visibility = this.visibility.get(packet.id);
-            if (visibility && !visibility.confirmed && containsText(prior.body?.input, packet.bytes))
+            if (visibility && !visibility.confirmed && containsText(prior.body?.input, packet.bytes)) {
               Object.assign(visibility, {confirmed: true, confirmation: {attempt_id: id,
                 prepared_sha256: prior.prepared_sha256, response_sha256: prior.response_sha256, observed_ms: elapsed}});
+            }
           }
         }
       }
     }
     this.attempts.set(id, prior);
+    if (this.corpus.delivery === 'online' && refreshVisibility) this.onlineVisibility(publicationEpoch, elapsed);
   }
   artifactRecord(kind, id) {
     return [...this.records.values()].find(record => record.kind === kind && referenceHex(record.value.artifact) === id);
+  }
+  admittedPacket(packet, attempt, possible = false) {
+    if ((!possible && !Number.isFinite(attempt.dispatched_ms)) || attempt.dispatched_ms < packet.offset_ms ||
+      attempt.owner?.preparation_cut == null) return false;
+    let admitted;
+    if (packet === this.corpus.packets[0]) admitted = this.events.find(item => item.event.kind === 'accepted');
+    else {
+      const operation = this.delivery_operations.find(item => item.packet_id === packet.id && item.acknowledged);
+      if (!operation) return false;
+      const bytes = operation.method === 'task.message' ? operation.params?.message?.value?.message : operation.params?.answer?.value?.message;
+      if (typeof bytes !== 'string' || !bytes.startsWith(packet.bytes)) return false;
+      admitted = this.events.find(item => operation.method === 'task.message' ? item.event.kind === 'message_queued' &&
+        JSON.parse(textField(item.event.data)).message_id === operation.result?.message_id :
+        operation.method === 'task.respond' && item.event.kind === 'input_accepted' &&
+        item.event.revision === operation.result?.receipt_revision);
+    }
+    return !!admitted && BigInt(admitted.event.seq) <= BigInt(attempt.owner.preparation_cut);
+  }
+  onlineVisibility(publicationEpoch, elapsed) {
+    for (const packet of this.corpus.packets) {
+      const possible = [...this.attempts.values()].filter(attempt => attempt.physical_provider_attempt !== false &&
+        attempt.capture?.disposition !== 'definitely_not_sent' && this.admittedPacket(packet, attempt, true) &&
+        containsText(attempt.body?.input, packet.bytes)).sort((left, right) =>
+        BigInt(left.owner.preparation_cut) < BigInt(right.owner.preparation_cut) ? -1 :
+          BigInt(left.owner.preparation_cut) > BigInt(right.owner.preparation_cut) ? 1 : 0);
+      let visibility = this.visibility.get(packet.id);
+      if (!visibility && possible.length) {
+        visibility = {packet_id: packet.id, attempt_id: null, dispatch_ms: null, observed_ms: elapsed,
+          publication_epoch: publicationEpoch, visibility_epoch: null, preparation_cut: null,
+          confirmed: false, prepared_sha256: null};
+        this.visibility.set(packet.id, visibility);
+      }
+      if (!visibility) continue;
+      visibility.possible_preparation_cut = possible.length ? String(possible[0].owner.preparation_cut) : null;
+      visibility.confirmed_preparation_cut ??= null;
+      const successful = possible.find(attempt => this.admittedPacket(packet, attempt) &&
+        attempt.capture?.disposition === 'complete' && attempt.provider_response);
+      if (!successful || visibility.confirmed && visibility.confirmed_preparation_cut !== null &&
+        BigInt(successful.owner.preparation_cut) >= BigInt(visibility.confirmed_preparation_cut)) continue;
+      Object.assign(visibility, {attempt_id: successful.id, dispatch_ms: successful.dispatched_ms,
+        observed_ms: elapsed, publication_epoch: publicationEpoch,
+        preparation_cut: String(successful.owner.preparation_cut),
+        confirmed_preparation_cut: String(successful.owner.preparation_cut),
+        prepared_sha256: successful.prepared_sha256, confirmed: true,
+        confirmation: {attempt_id: successful.id, prepared_sha256: successful.prepared_sha256,
+          response_sha256: successful.response_sha256, observed_ms: elapsed}});
+    }
   }
   descriptionCandidate(record) {
     const derivation = record.value.derivation;
@@ -840,6 +935,7 @@ export class RecurrenceTrace {
   }
   summary() {
     return {visibility: [...this.visibility.values()], uses: this.uses,
+      ...(this.corpus.delivery === 'online' ? {answer_events: this.answer_events} : {}),
       first_boundary: this.first_boundary, cut: this.cut,
       artifacts: [...this.records.values()].filter(item => item.kind !== 'workspace_work'),
       attempts: [...this.attempts.values()].map(({body, ...attempt}) => attempt),
@@ -850,6 +946,9 @@ export class RecurrenceTrace {
 }
 
 function creationPrecedes(use, visibility) {
+  if (Object.hasOwn(visibility, 'possible_preparation_cut'))
+    return use.creation_seq != null && visibility.possible_preparation_cut != null &&
+      BigInt(use.creation_seq) <= BigInt(visibility.possible_preparation_cut);
   if (use.creation_seq != null && visibility.preparation_cut != null)
     return Number(use.creation_seq) <= Number(visibility.preparation_cut);
   return Number(use.created_epoch) < Number(visibility.publication_epoch);
@@ -994,6 +1093,7 @@ export function adjudicateRecurrence(report, corpus, judgment) {
   const answers = report.result?.outcome?.value?.result;
   let finalAnswers = [];
   try { if (answers?.tag === 'report') finalAnswers = parseReport(answers.value.summary).answers; } catch {}
+  const online = corpus.delivery === 'online' ? gradeOnlineAnswers(corpus, reuse.answer_events, reuse.visibility) : null;
   const accepted = [];
   for (const proposed of judgment.uses ?? []) {
     const use = reuse.uses.find(item => item.artifact_id === judgment.artifact_id &&
@@ -1002,10 +1102,12 @@ export function adjudicateRecurrence(report, corpus, judgment) {
     const visible = reuse.visibility.find(item => item.packet_id === packet?.id);
     const scored = report.grading.answers.find(item => item.request_id === proposed.request_id);
     const matching = finalAnswers.filter(item => item?.request_id === proposed.request_id);
-    const answer = matching.length === 1 ? matching[0] : null;
+    const delivered = online?.answers.find(item => item.request_id === proposed.request_id);
+    const answer = online ? delivered?.answer : matching.length === 1 ? matching[0] : null;
     const boundRefs = use && [use.artifact_id, use.result_artifact_id, use.result_sha256, use.work_id, use.view_id].filter(Boolean);
     if (!use || !visible?.confirmed || (packet.offset_ms > 0 && !creationPrecedes(use, visible)) ||
       use.visibility_epoch < visible.visibility_epoch || scored?.sound !== true ||
+      online && (delivered?.sound !== true || !useAfterSelection(use, visible, reuse) || !useBeforeAnswer(use, delivered, reuse)) ||
       !Array.isArray(answer?.artifact_refs) || !answer.artifact_refs.some(ref => boundRefs.includes(ref)) ||
       proposed.effective_input_matches_records !== true || proposed.supports_answer !== true ||
       proposed.scope_valid !== true) {
@@ -1038,19 +1140,38 @@ export function adjudicateRecurrence(report, corpus, judgment) {
   return reuse;
 }
 
+function useAfterSelection(use, visible, reuse) {
+  const cut = Object.hasOwn(visible, 'confirmed_preparation_cut') ? visible.confirmed_preparation_cut : visible.preparation_cut;
+  if (cut == null) return false;
+  if (use?.kind === 'program') return use.event_seq != null && BigInt(use.event_seq) > BigInt(cut);
+  const attempt = reuse.attempts?.find(item => item.id === use?.attempt_id);
+  return attempt?.owner?.preparation_cut != null && BigInt(attempt.owner.preparation_cut) >= BigInt(cut);
+}
+
+function useBeforeAnswer(use, answer, reuse) {
+  if (answer?.event_seq == null) return false;
+  if (use?.kind === 'program') return use.event_seq != null && BigInt(use.event_seq) < BigInt(answer.event_seq);
+  const attempt = reuse.attempts?.find(item => item.id === use?.attempt_id);
+  return attempt?.owner?.preparation_cut != null && BigInt(attempt.owner.preparation_cut) < BigInt(answer.event_seq) &&
+    Number.isFinite(use?.observed_ms) && Number.isFinite(answer.observed_ms) && use.observed_ms < answer.observed_ms;
+}
+
 export function recurrenceResults(plan, reports) {
   const comparison = compareCampaign(plan, reports);
-  const lines = ['# Recurring release investigations', '',
+  const online = plan.suite === 'recurrence-online';
+  const lines = [online ? '# Online recurring release investigations' : '# Recurring release investigations', '',
     `Verdict: **${comparison.verdict}**. Qualified treatment traces: ${comparison.qualifying_traces}/3.`, '',
     'This controlled workload compares construction and retention with recovery against an uninterrupted ordinary agent with continuing context. It does not establish broad superiority or private reasoning.', '',
     '## Bound inputs', '', '```json', json({identities: plan.identities, profile: plan.profile,
       initial_effort: plan.initial_effort, limits: plan.limits, cost_model: plan.cost_model,
-      workload: 'Twelve immutable release-readiness requests per attempt; three frozen matched pairs.',
+      workload: online ? 'All source records available initially; twelve later-selected requests, online answers and a final report per attempt; three frozen matched pairs.' :
+        'Twelve immutable release-readiness requests per attempt; three frozen matched pairs.',
       cases: plan.cases.map(item => ({id: item.id, corpus_sha256: item.corpus_sha256,
         expected_sha256: item.expected_sha256, config_sha256: item.config_sha256}))}), '```', '',
     '## Inclusive outcomes', '', '| Attempt | Sound / 12 | Critical | Total cost | Budget | Mechanism |',
     '| --- | ---: | ---: | ---: | --- | --- |'];
   for (const attempt of comparison.attempts) lines.push(`| ${attempt.subject.id} | ${attempt.grading?.sound ?? 'unknown'} | ${attempt.grading?.critical ?? 'unknown'} | ${attempt.cost ?? 'unknown'} ${attempt.currency ?? ''} | ${attempt.budget.compliant ?? 'unknown'} | ${attempt.mechanism ?? 'unreviewed'} |`);
+  if (online) lines.push('', 'Online soundness requires the first answer batch to follow its own selected input and precede the next selection\'s exposure. Positive credit requires every selected request to be sound online and in the final report. Earlier critical outputs remain failures after correction. The evaluator supplies source locations equally to both arms; this comparison studies computation and representation after lookup. It does not establish document-discovery performance or recursive controller improvement.', '');
   lines.push('', '## Matched and aggregate comparison', '', '```json', json({pairs: comparison.pairs,
     aggregate: comparison.aggregate, campaign_cost_positive: comparison.campaign_cost_positive,
     complete_milestone: comparison.complete_milestone, issues: comparison.issues}), '```', '',
@@ -1059,6 +1180,8 @@ export function recurrenceResults(plan, reports) {
     lines.push(`## ${report.subject.id}`, '',
       `[Full attempt, authored values/source, scope review and capture identities](${report.subject.id}/report.json).`, '',
       '```json', json({status: report.status?.status ?? null, grading: report.grading,
+        ...(online ? {final_grading: report.final_grading, online: report.online,
+          request_profiles: report.reuse.attempts.map(attempt => ({id: attempt.id, profile: attempt.request_profile ?? null}))} : {}),
         observed_inadequacy: report.reuse.adjudication?.judgment.observed_inadequacy ?? null,
         scope: report.reuse.adjudication?.judgment.scope ?? null,
         relationship: report.reuse.adjudication?.judgment.relationship ?? null,
@@ -1074,21 +1197,36 @@ export function recurrenceResults(plan, reports) {
   return lines.join('\n');
 }
 
-async function readOutcome(client, taskId, result) {
-  if (!result.outcome?.value_ref) return result;
-  const ref = result.outcome.value_ref, chunks = [];
+async function readArtifact(client, taskId, ref, extra = {}) {
+  const chunks = [];
   let offset = '0';
   for (;;) {
     const chunk = await client.call('artifact.read', {task_id: taskId,
-      artifact_id: ref.artifact_id, offset, length: '32768'});
+      artifact_id: ref.artifact_id, offset, length: '32768', ...extra});
     assert.equal(chunk.sha256, ref.sha256);
     chunks.push(Buffer.from(chunk.data, 'base64url'));
+    assert(chunk.eof || BigInt(chunk.next_offset) > BigInt(offset), 'Artifact read did not advance.');
     offset = chunk.next_offset;
     if (chunk.eof) break;
   }
   const bytes = Buffer.concat(chunks);
   assert.equal(hash(bytes), ref.sha256);
   assert.equal(BigInt(bytes.length), BigInt(ref.bytes));
+  return bytes;
+}
+
+export async function resolveQuestion(client, taskId, question) {
+  if (!question?.prompt_ref) return question;
+  const ref = question.prompt_ref;
+  assert.equal(ref.question_id, question.question_id, 'Question prompt reference belongs to another question.');
+  const bytes = await readArtifact(client, taskId, ref, {question_id: ref.question_id});
+  return {...question, prompt: JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes)),
+    prompt_b64: bytes.toString('base64')};
+}
+
+async function readOutcome(client, taskId, result) {
+  if (!result.outcome?.value_ref) return result;
+  const bytes = await readArtifact(client, taskId, result.outcome.value_ref);
   result.outcome.value = JSON.parse(bytes.toString());
   return result;
 }
@@ -1107,7 +1245,7 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
   const started = now();
   output = await realpath(output);
   const state = join(output, 'state'), corpus = JSON.parse(await readFile(subject.corpus));
-  const delivery = new RecurrenceDelivery(subject, corpus, plan), trace = new RecurrenceTrace(corpus, application);
+  const delivery = new RecurrenceDelivery(subject, corpus, plan), trace = new RecurrenceTrace(corpus, application, delivery.operations);
   const errors = [], samples = [], elapsed = () => now() - started;
   const record = (stage, error) => errors.push({stage, name: error.name, message: error.message});
   let client, watchdog, task = null, status = null, result = null, archivePath = null,
@@ -1126,9 +1264,20 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
   };
   const observe = async (after = trace.cursor) => {
     const raw = await client.call('evaluation.observe', {task_id: task.task_id, after: String(after)});
-    if (raw.events.length || raw.attempts.length || raw.records?.length)
-      await appendFile(join(output, 'observations.jsonl'), JSON.stringify({elapsed_ms: elapsed(), observation: raw}) + '\n');
     const observation = decodeRecurrenceObservation(raw, schemas);
+    try {
+      if (corpus.delivery === 'online') for (const [index, event] of observation.events.entries()) {
+        if (event.kind !== 'input_required') continue;
+        const question = JSON.parse(textField(event.data));
+        if (!question.prompt_ref) continue;
+        const resolved = await resolveQuestion(client, task.task_id, question);
+        event.question_prompt = resolved.prompt;
+        raw.events[index].prompt_b64 = resolved.prompt_b64;
+      }
+    } finally {
+      if (raw.events.length || raw.attempts.length || raw.records?.length)
+        await appendFile(join(output, 'observations.jsonl'), JSON.stringify({elapsed_ms: elapsed(), observation: raw}) + '\n');
+    }
     trace.observe(observation, elapsed());
     return observation;
   };
@@ -1159,6 +1308,8 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
     for (;;) {
       if (elapsed() >= plan.limits.wall_ms) { timedOut = true; break; }
       status = await client.call('task.status', {task_id: task.task_id});
+      if (corpus.delivery === 'online' && status.question?.prompt_ref)
+        status = {...status, question: await resolveQuestion(client, task.task_id, status.question)};
       if (elapsed() - sampledAt >= 1000) { sample(); sampledAt = elapsed(); }
       if (['completed', 'failed', 'cancelled', 'unknown', 'blocked'].includes(status.status)) break;
       const operation = delivery.next(task.task_id, status, elapsed(), trace.consumedPackets(delivery.operations));
@@ -1293,6 +1444,11 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
       .filter(packet => trace.visibility.get(packet.id)?.confirmed).flatMap(packet => packet.request_ids))),
     reuse: trace.summary(),
     arm_violations: metrics ? armViolations(subject.arm === 'treatment' ? 'recurrence' : 'ordinary', metrics.actions) : null};
+  if (corpus.delivery === 'online') {
+    report.final_grading = report.grading;
+    report.online = gradeOnlineAnswers(corpus, trace.answer_events, report.reuse.visibility);
+    report.grading = combineOnlineGrading(report.final_grading, report.online);
+  }
   const end = trace.visibility.get(corpus.packets.at(-1).id);
   if (status?.status === 'completed' && (!end?.confirmed || end.dispatch_ms < corpus.packets.at(-1).offset_ms))
     report.arm_violations = [...(report.arm_violations ?? []), {kind: 'premature_completion'}];
@@ -1329,12 +1485,12 @@ async function runRecurrence(directory, options) {
 }
 
 if (import.meta.main) {
-if (mode === 'prepare' && option(args, '--suite') === 'recurrence') {
+if (mode === 'prepare' && ['recurrence', 'recurrence-online'].includes(option(args, '--suite'))) {
   const directory = resolve(option(args, '--out', ''));
   const costPath = option(args, '--cost-model');
   const plan = await prepareRecurrence({config: JSON.parse(await readFile(resolve(option(args, '--config', '')), 'utf8')),
     directory, binary: resolve(option(args, '--binary', '')), driver: resolve(option(args, '--driver', '')),
-    applicationPath: resolve(option(args, '--application', '')),
+    applicationPath: resolve(option(args, '--application', '')), suite: option(args, '--suite'),
     ...(costPath ? {costModel: JSON.parse(await readFile(resolve(costPath), 'utf8'))} : {})});
   console.log(json({plan: join(directory, 'plan.json'), cases: plan.cases.length, live_calls: 0, efficacy: 'unmeasured'}));
 } else if (mode === 'prepare') {
@@ -1395,7 +1551,7 @@ if (mode === 'prepare' && option(args, '--suite') === 'recurrence') {
   inferenceArguments({credential, chatgptAccount, siwcBin, siwcAuthDir});
   const directory = resolve(option(args,'--plan','')), binary = resolve(option(args,'--binary','')), application = JSON.parse(await readFile(resolve(option(args,'--application','')),'utf8'));
   const plan = JSON.parse(await readFile(join(directory,'plan.json'),'utf8'));
-  if (plan.format === 'protean-recurrence-evaluation/1') {
+  if (['protean-recurrence-evaluation/1', 'protean-recurrence-evaluation/2'].includes(plan.format)) {
     console.log(json(await runRecurrence(directory, {binary, driver: resolve(option(args, '--driver', '')),
       applicationPath: resolve(option(args, '--application', '')), credential, chatgptAccount, siwcBin, siwcAuthDir})));
   } else {
