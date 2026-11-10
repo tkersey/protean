@@ -61,8 +61,8 @@ try {
   assert.equal(idleDrain.step, 'idle');
   assert.equal(idleDrain.worker_active, false);
   assert.deepEqual(idleDrain.head, preflightReceipt.head);
-  const observe = async () => decodeRecurrenceObservation(
-    await child.call('evaluation.observe', {task_id: accepted.task_id, acquisition: true}), preflight.schemas);
+  const observe = async (acquisition = false) => decodeRecurrenceObservation(
+    await child.call('evaluation.observe', {task_id: accepted.task_id, acquisition}), preflight.schemas);
   let observation, captured, priorEpoch;
   for (let turn = 0; turn < 1000; turn++) {
     const step = await child.call('evaluation.step');
@@ -119,8 +119,10 @@ try {
   let producerObservation;
   for (let turn = 0; turn < 1500; turn++) {
     await child.call('evaluation.step');
-    producerObservation = await observe();
-    if (producerObservation.question_producer || (await child.call('task.status', {task_id: accepted.task_id})).question) break;
+    if ((await child.call('task.status', {task_id: accepted.task_id})).question) {
+      producerObservation = await observe(true);
+      break;
+    }
   }
   const producer = producerObservation.question_producer;
   assert(producer, 'native ask must bind its exact admitted producer');
@@ -146,7 +148,7 @@ try {
   assert(child.kill('SIGKILL'));
   assert.deepEqual(await child.exited, [null, 'SIGKILL']);
   child = launch(accepted.task_id);
-  const questionReopened = await observe();
+  const questionReopened = await observe(true);
   assert.deepEqual(questionReopened.question_producer, producer);
   const carry = questionReopened.records.find(row => row.kind === 'controller_interaction' &&
     row.acquisition.interaction_id === producer.interaction_id).acquisition;
@@ -156,7 +158,7 @@ try {
     question_id: question.question_id, question_revision: question.question_revision,
     request_digest: question.request_digest, answer: {schema_id: question.answer_schema_id,
       value: {message: 'Yes, focus on observable behavior.'}}});
-  assert.equal((await observe()).question_producer, null);
+  assert.equal((await observe(true)).question_producer, null);
   child.stdin.end();
   assert.deepEqual(await child.exited, [0, null]);
   const config = JSON.parse(await readFile(new URL('../../examples/adaptive/adaptive.example.json', import.meta.url)));
